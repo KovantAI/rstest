@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/rstest-cli"]
+# corpus clones may build rust sdists (pydantic-core); keep them out
+exclude = ["corpus/work"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"

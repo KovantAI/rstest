@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rstest"
+version = "0.1.0"
+description = "A fast, pytest-compatible test runner: parallel by design, with built-in suite diagnostics"
+readme = "README.md"
+license = { text = "MIT" }
+maintainers = [{ name = "Kovant AB" }]
+requires-python = ">=3.10"
+dependencies = [
+    # worker protocol
+    "msgpack>=1.0",
+    # runtime deps of the vendored pytest core (python/VENDOR.md)
+    "pluggy>=1.5,<2",
+    "iniconfig",
+    "packaging",
+    "pygments>=2.7.2",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+]
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/rstest-cli/Cargo.toml"
+python-source = "python"
+module-name = "rstest_worker"

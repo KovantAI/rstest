@@ -1,0 +1,67 @@
+name: pytest upgrade watch
+
+# Opens a tracking issue whenever PyPI ships a pytest release newer than the
+# version vendored under python/rstest_worker/_vendor. See python/VENDOR.md for
+# the (manual, verbatim) re-extract procedure the issue links to.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily 07:00 UTC
+  workflow_dispatch: {} # allow manual runs
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Compare vendored pytest against PyPI
+        id: cmp
+        run: python .github/scripts/pytest_upgrade_watch.py
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Open upgrade issue
+        if: steps.cmp.outputs.outdated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.cmp.outputs.latest }}
+          VENDORED: ${{ steps.cmp.outputs.vendored }}
+        run: |
+          title="Upgrade vendored pytest to ${LATEST}"
+          # Ensure the label exists (gh issue create fails on an unknown label).
+          gh label create pytest-upgrade --color BFD4F2 \
+            --description "Vendored pytest is behind the latest PyPI release" 2>/dev/null || true
+          # Dedup against any issue with this exact title (open or closed) so a
+          # declined/closed bump is not reopened every morning.
+          existing=$(gh issue list --search "\"${title}\" in:title" --state all --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")] | length")
+          if [ "${existing}" != "0" ]; then
+            echo "Issue already exists for ${LATEST}; nothing to do."
+            exit 0
+          fi
+          gh issue create \
+            --title "${title}" \
+            --label "pytest-upgrade" \
+            --body "$(cat <<EOF
+          A new pytest release is available on PyPI.
+
+          - Vendored: \`${VENDORED}\`
+          - Latest on PyPI: \`${LATEST}\`
+
+          rstest pins a complete, unmodified copy of pytest under
+          \`python/rstest_worker/_vendor/\`. To upgrade, re-extract the new wheel
+          verbatim per \`python/VENDOR.md\`, then run the full e2e gate
+          (\`python tests/gate.py\`) before merging.
+
+          _Filed automatically by \`.github/workflows/pytest-upgrade-watch.yml\`._
+          EOF
+          )"

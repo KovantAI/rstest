@@ -1,0 +1,13 @@
+# Guides
+
+Task-oriented how-tos:
+
+- [Migrating from pytest](migrate-from-pytest.md) — the drop-in story
+- [Migrating from pytest-xdist](migrate-from-xdist.md) — flag map and differences
+- [Parallel safety](parallel-safety.md) — rails for tests that can't parallelize
+- [Suite diagnostics](doctor.md) — reading `--doctor`
+- [Watch mode](watch-mode.md) — the edit loop
+- [Monorepos](monorepo.md) — one command across a multi-package repo
+- [CI quickstart](ci-quickstart.md) — GitHub Actions, junit, caching
+- [Plugins](plugins.md) — how plugin loading works, what's verified
+- [Coverage](coverage.md) — pytest-cov under parallel workers

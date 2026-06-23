@@ -1,0 +1,210 @@
+# Compatibility corpus: well-known public pytest suites.
+# Reproduce: python3 corpus/run.py  (see --help; SHAs lock to corpus/lock.json)
+#
+# install: pip-install steps run inside the suite venv, in order, from the
+# repo root. If omitted, an extras chain is tried: -e .[test] / [tests] /
+# [testing] / [dev] / bare.
+# args: forwarded to both runners. env: set for both runs.
+
+[rich]
+repo = "https://github.com/Textualize/rich"
+# No ipywidgets: tests never import it, and its IPython dependency
+# registers a pygments plugin lexer that makes Syntax.guess_lexer
+# tie-break nondeterministically (test_syntax flakes under ANY runner).
+# Even without it, test_syntax.py lexer-guess tests flake under plain
+# sequential pytest (~1 in 5 full-suite runs) — upstream test pollution;
+# both runners are affected equally.
+install = ["-e .", "pytest", "attrs"]
+
+[django-allauth]
+repo = "https://github.com/pennersr/django-allauth"
+install = ["-e .[mfa,socialaccount,saml,openid,steam]", "django", "psycopg2-binary", "django-ninja", "fido2", "djangorestframework", "pytest-asyncio", "pytest-django"]
+# time-sensitive tests flake at high worker counts (rate-limit windows)
+rstest_args = ["-n", "4"]
+
+[aiohttp]
+repo = "https://github.com/aio-libs/aiohttp"
+submodules = true
+install = ["-r requirements/test.in", "-e ."]
+env = { AIOHTTP_NO_EXTENSIONS = "1" }
+
+[pandas]
+mode = "pyargs"
+package = "pandas"
+install = ["pandas", "hypothesis", "pytest-xdist"]
+args = ["-m", "not slow and not network and not db"]
+
+[flask]
+repo = "https://github.com/pallets/flask"
+install = ["--group tests", "-e ."]
+
+[click]
+repo = "https://github.com/pallets/click"
+install = ["--group tests", "-e ."]
+
+[jinja2]
+repo = "https://github.com/pallets/jinja"
+install = ["--group tests", "-e ."]
+
+[werkzeug]
+repo = "https://github.com/pallets/werkzeug"
+install = ["--group tests", "-e ."]
+# unix-socket server test races at high worker counts
+rstest_args = ["-n", "4"]
+
+[itsdangerous]
+repo = "https://github.com/pallets/itsdangerous"
+install = ["--group tests", "-e ."]
+
+[markupsafe]
+repo = "https://github.com/pallets/markupsafe"
+install = ["--group tests", "-e ."]
+
+[fastapi]
+repo = "https://github.com/fastapi/fastapi"
+install = ["--group tests", "-e .[all]"]
+
+[starlette]
+repo = "https://github.com/Kludex/starlette"
+install = ["-e .", "httpx", "httpx2", "trio", "wsproto", "websockets", "python-multipart", "itsdangerous", "pyyaml", "jinja2", "typing_extensions"]
+
+[httpx]
+repo = "https://github.com/encode/httpx"
+install = ["-r requirements.txt"]
+# session-scoped uvicorn on a fixed port: parallel-unsafe by construction
+rstest_args = ["-n", "0"]
+
+[urllib3]
+repo = "https://github.com/urllib3/urllib3"
+install = ["--group dev", "-e ."]
+# socket-timeout/EINTR tests are load-sensitive
+rstest_args = ["-n", "4"]
+
+[requests]
+repo = "https://github.com/psf/requests"
+install = ["-r requirements-dev.txt", "-e ."]
+# Permanent 1-test diff: a test parametrizes on pytest.__file__, which
+# resolves to the vendored core inside workers (by design, D7).
+
+[attrs]
+repo = "https://github.com/python-attrs/attrs"
+install = ["-e .", "--group tests"]
+
+[pluggy]
+repo = "https://github.com/pytest-dev/pluggy"
+
+[packaging]
+repo = "https://github.com/pypa/packaging"
+install = ["--group test", "-e ."]
+
+[more-itertools]
+repo = "https://github.com/more-itertools/more-itertools"
+install = ["-e .", "pytest"]
+
+[python-dateutil]
+repo = "https://github.com/dateutil/dateutil"
+install = ["-e .", "pytest-cov", "hypothesis", "freezegun", "six"]
+
+[jsonschema]
+repo = "https://github.com/python-jsonschema/jsonschema"
+install = ["-e .[format]", "pytest", "jsonpath-ng", "referencing"]
+
+[marshmallow]
+repo = "https://github.com/marshmallow-code/marshmallow"
+install = ["-e .", "pytest", "simplejson"]
+# Parallel at -n auto. A few parametrize IDs embed now(), but each worker's
+# full collection evaluates them at the same position, so the cross-worker
+# hashes match (no bail) and they pair 1:1 against the baseline -> 100%.
+# (Don't use --collect lazy here: its file-affine reorder breaks the
+# positional now()-ID pairing -> 99.66%. Full collect preserves order.)
+
+[structlog]
+repo = "https://github.com/hynek/structlog"
+install = ["-e .", "--group tests"]
+# Uses pytest-randomly. rstest syncs the randomly seed across workers (its
+# emulated workerinput), so every worker collects the same shuffled order:
+# no collection-hash mismatch, 100% parity at -n auto with no policy.
+
+[tenacity]
+repo = "https://github.com/jd/tenacity"
+install = ["-e .", "pytest", "tornado", "typeguard"]
+
+[freezegun]
+repo = "https://github.com/spulec/freezegun"
+install = ["-e .", "pytest"]
+
+[typer]
+repo = "https://github.com/fastapi/typer"
+# progressbar timing tests are load-sensitive
+rstest_args = ["-n", "4"]
+
+[sqlalchemy]
+repo = "https://github.com/sqlalchemy/sqlalchemy"
+install = ["-e .", "pytest", "greenlet", "typing-extensions"]
+# Parallel at -n auto (10x: 533s->53s). xdist is installed, so sqlalchemy
+# registers its XDistHooks (gated on hasplugin("xdist")); rstest's
+# pytest_plugin_registered fires their pytest_configure_node, so every worker
+# self-assigns follower_ident=uuid4() and provisions its own follower DB.
+# 99.97%: 7 IMV/RETURNING tests skip in the canonical SERIAL baseline (full-
+# suite order-dependent) but pass under any parallel runner (verified: real
+# xdist -n 2 and rstest both pass them). Serial-vs-parallel artifact, not a
+# follower bug — same class as requests/pydantic D7 diffs.
+
+[pydantic]
+repo = "https://github.com/pydantic/pydantic"
+install = ["--group dev", "-e .", "hypothesis", "email-validator", "inline-snapshot"]
+# Permanent 1-test diff: a test parametrizes on sys.path, which inside
+# workers contains the vendored-core entry (by design, D7).
+# parametrize IDs derived from now(): collections differ across workers.
+# lazy collection errors here (rc=4) -> keep -n 0.
+rstest_args = ["-n", "0"]
+
+[arrow]
+repo = "https://github.com/arrow-py/arrow"
+install = ["-e .[test]", "pytest-cov", "pytest-mock"]
+# parametrize IDs derived from now() differ across worker collections under
+# full collect (forced -n 0). lazy collection (one worker per file) avoids
+# the cross-worker compare and keeps 100% parity at -n auto. Was: -n 0.
+rstest_args = ["--collect", "lazy"]
+
+[trio]
+repo = "https://github.com/python-trio/trio"
+install = ["-r test-requirements.txt", "-e ."]
+
+[anyio]
+repo = "https://github.com/agronholm/anyio"
+install = ["--group test", "-e .[trio]"]
+# subprocess-cancellation tests are load-sensitive
+rstest_args = ["-n", "4"]
+
+[langgraph]
+# Monorepo: 8 Python libs/* each with its own pytest config — pytest cannot
+# run from the root, so the baseline is N serial pytest invocations and the
+# candidate is one rstest run at the root. `projects` pins the measured
+# subset: the six DB-free libs (checkpoint-postgres and checkpoint-conformance
+# need a live postgres service under any runner). Listed in dependency order
+# so editable sibling installs resolve locally. The langgraph package's own
+# service-dependent tests fail/error identically under both runners.
+mode = "mono"
+repo = "https://github.com/langchain-ai/langgraph"
+projects = [
+    "libs/checkpoint",
+    "libs/sdk-py",
+    "libs/checkpoint-sqlite",
+    "libs/langgraph",
+    "libs/prebuilt",
+    "libs/cli",
+]
+# checkpoint-sqlite uses pytest-retry, whose master branch
+# (has_plugin("xdist") and getoption("numprocesses")) starts a ReportServer and
+# stashes its port for workers via workerinput["server_port"]. This used to be
+# an rstest gap: rstest nulled numprocesses, so the master branch never ran and
+# the worker branch KeyError'd on the missing port — hence the old
+# serial=[checkpoint-sqlite] + disable_plugins=[pytest-retry] workarounds.
+# Fixed: rstest now keeps numprocesses visible (xdist stays inert via dist="no")
+# and defers/retries configure_node, so each worker self-provisions its own
+# ephemeral ReportServer. Verified standalone: checkpoint-sqlite runs at -n auto
+# (108 passed, ~2x vs -n 0) with pytest-retry active. No pin needed.
+# NOTE: a clean full-mono parity re-run is still pending — libs/langgraph's
+# live-app/service tests hang the plain-pytest baseline in a service-less env
+# (unrelated to rstest), which blocks the mono harness here.

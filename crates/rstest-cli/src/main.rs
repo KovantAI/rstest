@@ -1,0 +1,1467 @@
+#[allow(dead_code)]
+mod collect; // D5: single-point collection
+mod color;
+#[allow(dead_code)]
+mod config;
+mod discover;
+mod doctor;
+mod durations;
+mod junit;
+mod lazy;
+mod migrate;
+mod mono;
+mod pool;
+mod progress;
+mod proto;
+mod report;
+mod select;
+mod status;
+mod watch;
+mod worker;
+
+use std::io::IsTerminal;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use anyhow::Result;
+use clap::Parser;
+
+/// rstest: a fast, pytest-compatible test runner.
+///
+/// Unrecognized flags forward to the test session verbatim, so the whole
+/// pytest flag surface (-k, -m, -x, -v, --lf, ...) works unchanged. We
+/// pre-scan argv ourselves: clap would reject unknown flags, and pytest's
+/// surface is too large (and plugin-extensible) to mirror.
+#[derive(Parser, Debug, Clone)]
+#[command(name = "rstest", version, disable_help_flag = false)]
+pub struct Cli {
+    /// Number of worker processes (logical cores) — rstest is parallel by
+    /// design. Use 0 (or 1) for single-worker mode: one pytest session,
+    /// byte-exact pytest semantics. Configurable via
+    /// `[tool.rstest] numprocesses` in pyproject.toml. [default: auto]
+    #[arg(short = 'n', long = "numprocesses")]
+    numprocesses: Option<String>,
+
+    /// Python interpreter to run workers with: a path, or a version request
+    /// (`3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t`). Defaults to the active
+    /// venv / a discovered `.venv` / `.python-version` / PATH.
+    #[arg(long)]
+    python: Option<String>,
+
+    /// Write a per-test outcome snapshot (compat-harness recorder shape).
+    #[arg(long)]
+    report_json: Option<PathBuf>,
+
+    /// Diagnose the suite after running: wait-bound tests, parallel
+    /// floor, fixture hotspots, slowest files.
+    #[arg(long)]
+    doctor: bool,
+
+    /// Write the doctor analysis as JSON (stable, versioned schema) for
+    /// CI trending. Implies doctor instrumentation; combine with
+    /// --doctor for the human report too.
+    #[arg(long)]
+    doctor_json: Option<PathBuf>,
+
+    /// Parallel-readiness preflight: collect the suite twice and report tests
+    /// whose ids are unstable (memory addresses / uuids / timestamps in
+    /// parametrize ids) — the class that forces a suite to -n 0 — then run
+    /// -n auto and classify any parallel-only failure (with the polluter
+    /// bisected). Prints each finding's upstream fix. Exits non-zero if any
+    /// per-process-unstable id or parallelism-specific failure is found.
+    #[arg(long)]
+    migrate_check: bool,
+
+    /// Write the migrate-check findings as JSON (stable, versioned schema) for
+    /// CI gating. Implies --migrate-check.
+    #[arg(long)]
+    migrate_check_json: Option<PathBuf>,
+
+    /// Substring of a nodeid/site to accept as a known migrate-check finding
+    /// (repeatable): it is still reported (marked "allowed") but does not fail
+    /// the exit code — so CI can gate on NEW issues while tolerating known ones.
+    #[arg(long = "migrate-allow")]
+    migrate_allow: Vec<String>,
+
+    /// Zero-config proof: run the suite under plain pytest and under rstest
+    /// (-n auto), then report whether outcomes are identical and how much
+    /// faster rstest is. The 30-second "should I switch?" answer.
+    #[arg(long = "try")]
+    r#try: bool,
+
+    /// Distribution mode: "load" (dynamic, duration-aware), "loadfile"
+    /// (file affinity, in-file order preserved), "loadscope" (class/module
+    /// affinity), "loadgroup" (xdist_group marker affinity), or "each"
+    /// (every test on every worker). [default: load]
+    #[arg(long)]
+    dist: Option<String>,
+
+    /// Write merged results as junit XML (intercepted: per-worker sessions
+    /// would clobber a shared file).
+    #[arg(long)]
+    junitxml: Option<PathBuf>,
+
+    /// Watch the project and rerun on change: only-test-file changes rerun
+    /// just those files; any other .py change reruns the tests that import
+    /// the changed module (import-graph selection).
+    #[arg(long)]
+    watch: bool,
+
+    /// Rerun failed tests up to N times; tests that then pass are
+    /// reported flaky (run stays green). Crash-aware: a test that killed
+    /// its worker gets retried on the replacement, within this budget.
+    #[arg(long)]
+    reruns: Option<u32>,
+
+    /// With reruns active, retry only failures whose error text matches
+    /// this regex (repeatable). pytest-rerunfailures' --only-rerun.
+    #[arg(long = "only-rerun", value_name = "REGEX")]
+    only_rerun: Vec<String>,
+
+    /// Kill a worker stuck on ONE test longer than this many seconds
+    /// (hang backstop; the test is reported failed, the worker replaced).
+    /// Off by default — use pytest-timeout for per-test limits; this
+    /// catches what in-process timeouts can't (blocked C extensions).
+    #[arg(long, value_name = "SECS")]
+    worker_timeout: Option<u64>,
+
+    /// Run only tests affected by changed files (import-graph selection).
+    /// Without a value: working tree + untracked vs HEAD. With a value:
+    /// vs that git rev (e.g. --changed=origin/main in CI).
+    #[arg(long, num_args = 0..=1, default_missing_value = "HEAD", value_name = "REV")]
+    changed: Option<String>,
+
+    /// Strict --changed for gating CI: a changed source file the import
+    /// graph cannot connect to any test forces a FULL run (no silent
+    /// skip), undeclared cross-project imports count as dependency
+    /// edges in monorepos, and "nothing affected" exits 5 instead of 0.
+    /// Implies --changed (vs HEAD) when --changed is not given.
+    #[arg(long)]
+    changed_strict: bool,
+
+    /// Collection strategy: "full" (every worker collects the whole suite,
+    /// verified by hash) or "lazy" (D5: the orchestrator walks test files,
+    /// each file is collected by exactly one worker on demand — no
+    /// per-worker full-collection cost, file-affine scheduling).
+    /// Configurable via `[tool.rstest] collect`. [default: full]
+    #[arg(long, value_name = "MODE")]
+    collect: Option<String>,
+
+    /// Terminal output style: "dots" (pytest's per-test chars), "verbose"
+    /// (one line per test, like -v), or "bar" (pytest-sugar-style: a
+    /// per-test result line, inline failures, and a live progress bar).
+    /// Configurable via `[tool.rstest] output`. Default: "bar" on an
+    /// interactive tty (or "verbose" with -v), "dots" off-tty (CI, pipes)
+    /// for byte-stable logs.
+    #[arg(long, value_name = "STYLE")]
+    output: Option<String>,
+}
+
+/// -x / --maxfail=N from the session args (also forwarded: each worker
+/// session stops itself; the orchestrator does the global coordination).
+fn parse_maxfail(args: &[String]) -> Option<u64> {
+    let mut limit = None;
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-x" | "--exitfirst" => limit = Some(1),
+            "--maxfail" => {
+                if let Some(v) = it.peek().and_then(|v| v.parse().ok()) {
+                    limit = Some(v);
+                }
+            }
+            _ => {
+                if let Some(v) = a.strip_prefix("--maxfail=").and_then(|v| v.parse().ok()) {
+                    limit = Some(v);
+                }
+            }
+        }
+    }
+    limit.filter(|&v| v > 0)
+}
+
+/// --durations=N / --durations-min=X from the session args. Workers also
+/// receive them (harmless — their terminals are nulled); the orchestrator
+/// owns the rendered block. Returns (N, min_secs); N == 0 means all.
+fn parse_durations(args: &[String]) -> Option<(usize, f64)> {
+    let mut n: Option<usize> = None;
+    let mut min = 0.005;
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--durations" => {
+                if let Some(v) = it.peek().and_then(|v| v.parse().ok()) {
+                    n = Some(v);
+                }
+            }
+            "--durations-min" => {
+                if let Some(v) = it.peek().and_then(|v| v.parse().ok()) {
+                    min = v;
+                }
+            }
+            _ => {
+                if let Some(v) = a.strip_prefix("--durations=").and_then(|v| v.parse().ok()) {
+                    n = Some(v);
+                }
+                if let Some(v) = a
+                    .strip_prefix("--durations-min=")
+                    .and_then(|v| v.parse().ok())
+                {
+                    min = v;
+                }
+            }
+        }
+    }
+    n.map(|n| (n, min))
+}
+
+/// Session flags that need pytest's own terminal (or stdin): run a single
+/// worker with inherited stdio and let the vendored core render.
+///
+/// Stepwise (`--sw` and friends) is here by necessity, not for IO: it is
+/// inherently sequential — stop at the first failure, resume from it next
+/// run — and its resume cursor is a single nodeid indexed into one global
+/// collection order, which parallel dispatch (duration-ordered, split
+/// across workers) does not produce. A single-session run hands the whole
+/// flow to the vendored stepwise plugin, which writes/reads `cache/stepwise`
+/// correctly because this path spawns the worker with no `RSTEST_WORKER_ID`
+/// (so neither rstest's cache guard nor pytest's own xdist-worker guard
+/// fires). Same constraint xdist has: stepwise wants `-n 0`.
+fn needs_passthrough_io(session_args: &[String]) -> bool {
+    session_args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--collect-only"
+                | "--co"
+                | "-s"
+                | "--capture=no"
+                | "--pdb"
+                | "--trace"
+                | "--sw"
+                | "--stepwise"
+                | "--sw-skip"
+                | "--stepwise-skip"
+                | "--sw-reset"
+                | "--stepwise-reset"
+        ) || a.starts_with("--capture=")
+    })
+}
+
+fn is_collect_only(session_args: &[String]) -> bool {
+    session_args
+        .iter()
+        .any(|a| a == "--collect-only" || a == "--co")
+}
+
+/// Strip Windows `\\?\` verbatim prefix that `canonicalize` adds. Editor
+/// URIs and path-prefix checks choke on it; no-op on non-Windows paths.
+fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest.to_string())
+    } else {
+        p
+    }
+}
+
+/// Run a single collect-only session and write a structured discovery doc:
+/// `{ meta, tests: [{nodeid, file (abs), lineno (0-based), markers}],
+/// collect_errors }`. Bypasses passthrough so collection rides the wire
+/// (RSTEST_SEND_IDS) instead of printing pytest's text tree. Returns the
+/// session exit status.
+fn run_collect_discovery(
+    python: &std::path::Path,
+    args: &[String],
+    out: &std::path::Path,
+) -> Result<i32> {
+    // Workers inherit the environment; this flips on the full id+location
+    // payload from `pytest_collection_finish` (single session, so no
+    // per-worker designate needed).
+    std::env::set_var("RSTEST_SEND_IDS", "1");
+    let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null)?;
+    // Item-dispatch session: its `pytest_collection_finish` emits the
+    // id+location payload, and on --collect-only its runtestloop returns
+    // early (no RunItems batches needed). The plain run_tests session has
+    // no collection_finish, so it cannot feed discovery.
+    w.send(&proto::Command::RunItemsSession {
+        args: args.to_vec(),
+    })?;
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut locations: Vec<(String, Option<u64>)> = Vec::new();
+    let mut marks: Vec<Vec<String>> = Vec::new();
+    let mut collect_errors: Vec<(String, String)> = Vec::new();
+    let exitstatus = loop {
+        match w.recv()? {
+            proto::Event::CollectionDone {
+                ids: i,
+                locations: l,
+                marks: m,
+                ..
+            } => {
+                if let Some(i) = i {
+                    ids = i;
+                }
+                if let Some(l) = l {
+                    locations = l;
+                }
+                if let Some(m) = m {
+                    marks = m;
+                }
+            }
+            proto::Event::CollectError { path, longrepr } => collect_errors.push((path, longrepr)),
+            proto::Event::Done { exitstatus } => break exitstatus,
+            _ => {}
+        }
+    };
+    w.shutdown()?;
+
+    // Absolute rootdir so `file` resolves to an editor-usable URI.
+    let cwd = std::env::current_dir()?;
+    let rootdir = config::discover(&cwd).rootdir;
+    let rootdir = if rootdir.is_absolute() {
+        rootdir
+    } else {
+        cwd.join(rootdir)
+    };
+    let rootdir = strip_verbatim(std::fs::canonicalize(&rootdir).unwrap_or(rootdir));
+    let tests: Vec<serde_json::Value> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, nodeid)| {
+            let (file_rel, lineno) = locations.get(i).cloned().unwrap_or_default();
+            // Absolute path for editor URIs; empty rel means pytest gave none.
+            let file = if file_rel.is_empty() {
+                String::new()
+            } else {
+                let rel = file_rel.strip_prefix("./").unwrap_or(&file_rel);
+                rootdir.join(rel).to_string_lossy().into_owned()
+            };
+            // All pytest marker names on the item (own + inherited); empty
+            // when the worker is older / sent none.
+            let markers = marks.get(i).cloned().unwrap_or_default();
+            serde_json::json!({
+                "nodeid": nodeid,
+                "file": file,
+                "lineno": lineno,
+                "markers": markers,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "meta": {
+            "runner": "rstest",
+            "kind": "discovery",
+            "schema": 1,
+            "count": ids.len(),
+            "rootdir": rootdir.to_string_lossy(),
+        },
+        "tests": tests,
+        "collect_errors": collect_errors
+            .iter()
+            .map(|(p, l)| serde_json::json!({"path": p, "longrepr": l}))
+            .collect::<Vec<_>>(),
+    });
+    std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
+    Ok(exitstatus)
+}
+
+/// Split argv into rstest-owned args (fed to clap) and session args
+/// (paths + pytest flags, forwarded verbatim).
+fn split_argv() -> (Vec<String>, Vec<String>) {
+    split_args(std::env::args().skip(1))
+}
+
+fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
+    let mut own = vec!["rstest".to_string()];
+    let mut session = Vec::new();
+    let mut argv = argv.into_iter().peekable();
+    while let Some(arg) = argv.next() {
+        match arg.as_str() {
+            "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
+            "--migrate-check-json" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--migrate-check-json=") => own.push(arg),
+            "--migrate-allow" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--migrate-allow=") => own.push(arg),
+            "--changed" | "--changed-strict" => own.push(arg),
+            _ if arg.starts_with("--changed=") => own.push(arg),
+            "--only-rerun" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--only-rerun=") => own.push(arg),
+            "--worker-timeout" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--worker-timeout=") => own.push(arg),
+            "--reruns" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--reruns=") => own.push(arg),
+            "--doctor-json" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--doctor-json=") => own.push(arg),
+            "--junitxml" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--junitxml=") => own.push(arg),
+            "--dist" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--dist=") => own.push(arg),
+            // Exact "--collect" only: --collect-only/--co stay session args.
+            "--collect" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--collect=") => own.push(arg),
+            "-n" | "--numprocesses" | "--python" | "--report-json" | "--output" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--numprocesses=")
+                || arg.starts_with("--python=")
+                || arg.starts_with("--report-json=")
+                || arg.starts_with("--output=")
+                || arg.starts_with("-n=") =>
+            {
+                own.push(arg);
+            }
+            "-h" | "--help" | "-V" | "--version" => own.push(arg),
+            "--" => session.extend(argv.by_ref()),
+            _ => session.push(arg),
+        }
+    }
+    (own, session)
+}
+
+fn main() -> Result<()> {
+    let (own_args, args) = split_argv();
+    let cli = Cli::parse_from(&own_args);
+    if cli.watch {
+        return watch::watch_loop(&cli, &args);
+    }
+    let status = execute(&cli, &args)?;
+    std::process::exit(status);
+}
+
+pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
+    let args = args.to_vec();
+    let start = Instant::now();
+    let started_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // One uid per test run, shared by every worker (xdist's testrun_uid
+    // contract). Monorepo children inherit the root's: one run.
+    if std::env::var_os("RSTEST_RUN_UID").is_none() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::set_var(
+            "RSTEST_RUN_UID",
+            format!("{nanos:x}{:x}", std::process::id()),
+        );
+    }
+    // CLI > [tool.rstest] > built-in defaults.
+    let settings = config::rstest_settings(&std::env::current_dir()?);
+
+    // Monorepo: cwd has no pytest config of its own, subdirectories do.
+    // Each subproject runs as its own full session group (cwd switched —
+    // rootdir/ini/conftest semantics are exactly pytest-in-that-dir).
+    // Explicit path args mean the user targeted something; stay single.
+    if std::env::var_os("RSTEST_MONO_PROJECT").is_none() {
+        let cwd = std::env::current_dir()?;
+        let path_args = args
+            .iter()
+            .any(|a| !a.starts_with('-') && std::path::Path::new(a).exists());
+        if !path_args && !config::has_pytest_config(&cwd) {
+            let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
+            let threshold = if settings.projects.is_some() { 1 } else { 2 };
+            if projects.len() >= threshold {
+                return execute_monorepo(cli, &args, &cwd, projects);
+            }
+        }
+    }
+    let numprocesses = cli
+        .numprocesses
+        .clone()
+        .or_else(|| settings.numprocesses.clone())
+        .unwrap_or_else(|| "auto".into());
+    let dist_name = cli
+        .dist
+        .clone()
+        .or_else(|| settings.dist.clone())
+        .unwrap_or_else(|| "load".into());
+    // Validate once, up front: every run path (byte-exact, lazy, pool) shares
+    // this name, so an invalid value must error the same way regardless of
+    // suite size — not slip through the lazy/small-suite path silently.
+    if !matches!(
+        dist_name.as_str(),
+        "load" | "loadfile" | "loadscope" | "loadgroup" | "each"
+    ) {
+        anyhow::bail!(
+            "unknown --dist mode: {dist_name} (use load|loadfile|loadscope|loadgroup|each)"
+        );
+    }
+    let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
+    let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
+    let n = parse_numprocesses(&numprocesses)?;
+    let passthrough = needs_passthrough_io(&args);
+    let palette = color::Palette::detect(&args);
+    let verbose = args
+        .iter()
+        .any(|a| a == "--verbose" || (a.starts_with("-v") && a.chars().skip(1).all(|c| c == 'v')));
+    // -vv (or more): pytest shows ALL durations, no hidden-cutoff note.
+    let very_verbose = args.iter().filter(|a| *a == "--verbose").count() >= 2
+        || args
+            .iter()
+            .any(|a| a.starts_with("-vv") && a.chars().skip(1).all(|c| c == 'v'));
+    // Output style: --output > [tool.rstest] output > (-v ? verbose
+    // : tty ? bar : dots). With nothing specified we auto-promote to the
+    // sugar-style bar on an interactive terminal, but stay on plain dots
+    // off-tty (CI, pipes) so logs remain byte-stable — the live footer
+    // (status.rs) self-disables there too.
+    let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
+        Some("bar") => progress::Mode::Bar,
+        Some("verbose") => progress::Mode::Verbose,
+        Some("dots") => progress::Mode::Dots,
+        Some("github") => progress::Mode::Github,
+        Some("json") => progress::Mode::Json,
+        Some(other) => {
+            eprintln!(
+                "rstest: unknown --output '{other}' \
+                 (use dots|verbose|bar|github|json); using dots"
+            );
+            progress::Mode::Dots
+        }
+        None if verbose => progress::Mode::Verbose,
+        None if std::io::stdout().is_terminal() => progress::Mode::Bar,
+        None => progress::Mode::Dots,
+    };
+    let durations = parse_durations(&args);
+    if cli.doctor || cli.doctor_json.is_some() {
+        // Workers inherit the environment; this flips on cpu/fixture
+        // instrumentation in the shim plugin.
+        std::env::set_var("RSTEST_DOCTOR", "1");
+    }
+
+    // Session args forward verbatim — the vendored core owns ini semantics
+    // (python_files, testpaths, rootdir) and collection, so session
+    // behavior is exactly pytest's.
+    let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let python = discover::resolve(&scope, cli.python.as_deref())?;
+    // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
+    if cli.r#try {
+        return migrate::run_try(&python, &args);
+    }
+    // Parallel-readiness preflight: its own collect-twice path, not a run.
+    if cli.migrate_check || cli.migrate_check_json.is_some() {
+        return migrate::run_migrate_check(
+            &python,
+            &args,
+            cli.migrate_check_json.as_deref(),
+            &cli.migrate_allow,
+        );
+    }
+    // `--collect-only --report-json <p>` writes a structured discovery doc
+    // (nodeid + abs file + 0-based line + markers) instead of pytest's text
+    // tree — the machine-readable surface editors/CI consume. Distinct from
+    // the run snapshot; takes its own single-session path (NOT passthrough).
+    if is_collect_only(&args) {
+        if let Some(out) = &cli.report_json {
+            let code = run_collect_discovery(&python, &args, out)?;
+            std::process::exit(code);
+        }
+    }
+    // Json mode keeps stdout pure NDJSON — no banner.
+    if !passthrough && mode != progress::Mode::Json {
+        let worker_desc = if n <= 1 {
+            "single worker (pytest-exact mode)".to_string()
+        } else {
+            format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
+        };
+        println!("rstest {} — {worker_desc}", env!("CARGO_PKG_VERSION"));
+    }
+    let mut args = args;
+    let effective_changed = cli
+        .changed
+        .clone()
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+    if let Some(rev) = &effective_changed {
+        let rev = if rev == "HEAD" {
+            None
+        } else {
+            Some(rev.as_str())
+        };
+        let cwd = std::env::current_dir()?;
+        let project = config::discover(&cwd);
+        let changed = select::changed_files_from_git(rev)?;
+        match select::affected_tests(&project.rootdir, &project, &changed, cli.changed_strict)? {
+            select::Selection::FullRun(reason) => {
+                eprintln!("rstest: --changed falling back to full run ({reason})");
+            }
+            select::Selection::Tests(tests) if tests.is_empty() => {
+                println!(
+                    "rstest: no tests affected by {} changed file(s)",
+                    changed.len()
+                );
+                // Strict gating needs to DISTINGUISH "ran nothing" from
+                // "everything passed": pytest's nothing-collected code.
+                std::process::exit(if cli.changed_strict { 5 } else { 0 });
+            }
+            select::Selection::Tests(tests) => {
+                eprintln!(
+                    "rstest: {} changed file(s) -> {} affected test file(s)",
+                    changed.len(),
+                    tests.len()
+                );
+                let mut selected: Vec<String> =
+                    tests.iter().map(|t| t.display().to_string()).collect();
+                // Keep the user's flags; drop any explicit path args in
+                // favor of the selection.
+                selected.extend(
+                    args.iter()
+                        .filter(|a| a.starts_with('-') || !std::path::Path::new(a).exists())
+                        .cloned(),
+                );
+                args = selected;
+            }
+        }
+    }
+    if reruns > 0 && (n <= 1 || passthrough) {
+        eprintln!("rstest: --reruns requires parallel mode (-n >= 2); ignoring");
+    }
+    let mut outcome = if n <= 1 || passthrough {
+        let io = if passthrough {
+            worker::Stdio::Inherit
+        } else {
+            worker::Stdio::Null
+        };
+        let mut w = worker::Worker::spawn_with_io(&python, None, io)?;
+        w.send(&proto::Command::RunTests { args: args.clone() })?;
+        let mut run = report::Run::default();
+        run.track_phase_durations = durations.is_some();
+        let mut prog = progress::Progress::default();
+        prog.set_palette(palette);
+        prog.set_mode(mode);
+        let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
+        let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+        let exitstatus = loop {
+            match w.recv()? {
+                proto::Event::Report(r) => {
+                    if !passthrough {
+                        prog.on_report(None, &r);
+                    }
+                    run.record(None, r);
+                }
+                proto::Event::CollectError { path, longrepr } => run.collect_error(path, longrepr),
+                proto::Event::CollectSkip { .. } => run.collect_skips += 1,
+                proto::Event::DoctorFixtures { fixtures: fx } => fixtures.extend(fx),
+                proto::Event::Warnings { entries } => warnings.extend(entries),
+                proto::Event::CollectionDone { .. }
+                | proto::Event::NodeInput { .. }
+                | proto::Event::ItemStart { .. }
+                | proto::Event::ItemDone { .. }
+                | proto::Event::Stopped { .. }
+                | proto::Event::LazyReady { .. }
+                | proto::Event::FileCollected { .. }
+                | proto::Event::ItemStartId { .. }
+                | proto::Event::ItemDoneId { .. }
+                | proto::Event::StoppedIds { .. } => {}
+                proto::Event::Done { exitstatus } => break exitstatus,
+            }
+        };
+        w.shutdown()?;
+        pool::PoolOutcome {
+            run,
+            prog,
+            fixtures,
+            warnings,
+            cache_dir: None,
+            exitstatus,
+        }
+    } else if collect_lazy(cli, &settings, &dist_name, &args)? {
+        let cwd = std::env::current_dir()?;
+        let project = config::discover(&cwd);
+        let paths: Vec<PathBuf> = args
+            .iter()
+            .filter(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
+            .map(PathBuf::from)
+            .collect();
+        let files = collect::collect_test_files(&paths, &project)?;
+        lazy::run_lazy_pool(
+            &python,
+            n.min(files.len().max(1)),
+            &args,
+            files,
+            mode,
+            palette,
+            // Steal (split files across workers for balance) only on an
+            // EXPLICIT --dist load: lazy defaults to strict file
+            // affinity — stealing changes execution composition more
+            // than full-mode chunking and exposes cross-file/in-file
+            // order dependence (trio, rich) that file affinity doesn't.
+            cli.dist.as_deref() == Some("load") || settings.dist.as_deref() == Some("load"),
+            parse_maxfail(&args),
+            reruns,
+            &cli.only_rerun
+                .iter()
+                .map(|p| regex::Regex::new(p))
+                .collect::<Result<Vec<_>, _>>()?,
+            worker_timeout.map(std::time::Duration::from_secs),
+        )?
+    } else {
+        let dist = match dist_name.as_str() {
+            "load" => pool::Dist::Load,
+            "loadfile" => pool::Dist::Loadfile,
+            "loadscope" => pool::Dist::Loadscope,
+            "loadgroup" => pool::Dist::Loadgroup,
+            "each" => pool::Dist::Each,
+            other => {
+                anyhow::bail!(
+                    "unknown --dist mode: {other} (use load|loadfile|loadscope|loadgroup|each)"
+                )
+            }
+        };
+        if dist == pool::Dist::Each && reruns > 0 {
+            anyhow::bail!(
+                "--reruns is not supported with --dist each (every worker runs the \
+                 full suite; rerun-on-another-worker semantics do not apply)"
+            );
+        }
+        pool::run_pool(
+            &python,
+            n,
+            &args,
+            mode,
+            durations.is_some(),
+            palette,
+            dist,
+            parse_maxfail(&args),
+            reruns,
+            &cli.only_rerun
+                .iter()
+                .map(|p| regex::Regex::new(p))
+                .collect::<Result<Vec<_>, _>>()?,
+            worker_timeout.map(std::time::Duration::from_secs),
+        )?
+    };
+
+    if !passthrough && mode == progress::Mode::Json {
+        // Pure NDJSON: close the stream with a session-finish envelope
+        // (counts + duration + exit status). No human summary/failures.
+        outcome.prog.finish();
+        let envelope = serde_json::json!({
+            "event": "sessionfinish",
+            "exitstatus": outcome.exitstatus,
+            "duration": (start.elapsed().as_secs_f64() * 100.0).round() / 100.0,
+            "counts": outcome.run.counts(),
+        });
+        println!("{envelope}");
+    } else if !passthrough {
+        outcome.prog.finish();
+        // Bar mode already inlines each failure as it happens; re-printing
+        // the batched block would duplicate it.
+        if mode != progress::Mode::Bar {
+            outcome.run.print_failures(&palette);
+        }
+        outcome.run.print_flaky(&palette);
+        print_warnings_summary(&outcome.warnings, &palette);
+        if let Some((dn, dmin)) = durations {
+            outcome
+                .run
+                .print_durations(dn, dmin, very_verbose, &palette);
+        }
+        let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
+        let warn_part = if warn_total > 0 {
+            format!(", {warn_total} warnings")
+        } else {
+            String::new()
+        };
+        let elapsed = start.elapsed().as_secs_f64();
+        // Bar mode closes with pytest-sugar's segmented results bar above
+        // the stable summary line (which tooling/CI greps — keep it intact).
+        // The bar gives its own visual break; other modes get a blank line.
+        if mode == progress::Mode::Bar && std::io::stdout().is_terminal() {
+            let c = outcome.run.counts();
+            let g = c["passed"];
+            let r = c["failed"] + c["errors"] + c["collect_errors"];
+            let y = c["skipped"] + c["xfailed"] + c["xpassed"];
+            let n = g + r + y;
+            println!(
+                "\nResults ({elapsed:.2}s):\n  {} {n}/{n}",
+                status::summary_bar(g as usize, r as usize, y as usize, &palette),
+            );
+        } else {
+            println!();
+        }
+        let summary = format!("{}{warn_part} in {elapsed:.2}s", outcome.run.summary_line());
+        let summary = if outcome.run.all_passed() {
+            palette.green(&summary)
+        } else {
+            palette.red(&summary)
+        };
+        println!("{summary}");
+        if mode == progress::Mode::Github {
+            print_github_annotations(&outcome.run);
+        }
+    }
+
+    if (cli.doctor || cli.doctor_json.is_some()) && !passthrough {
+        let report = doctor::analyze(
+            &outcome.run,
+            &merge_fixtures(outcome.fixtures),
+            start.elapsed().as_secs_f64(),
+            n,
+        );
+        // In json mode stdout is a pure NDJSON stream — the doctor's human
+        // report would corrupt it; --doctor-json still writes to its file.
+        if cli.doctor && mode != progress::Mode::Json {
+            doctor::render(&report);
+        }
+        if let Some(path) = &cli.doctor_json {
+            doctor::write_json(path, &report)?;
+        }
+    }
+    if let Some(path) = &cli.junitxml {
+        junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
+    }
+    // Merged lastfailed: workers' own writes are blocked in pool mode
+    // (each knows only its failures); write the union into pytest's cache
+    // so a follow-up `--lf` behaves exactly as after a serial run.
+    if let Some(cache_dir) = &outcome.cache_dir {
+        // Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the
+        // plain nodeids (deduped — a test may fail on several workers).
+        let failed: std::collections::BTreeMap<String, bool> = outcome
+            .run
+            .failed_nodeids()
+            .map(|id| {
+                let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
+                (plain.to_string(), true)
+            })
+            .collect();
+        let dir = std::path::Path::new(cache_dir).join("v/cache");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(
+                dir.join("lastfailed"),
+                serde_json::to_vec(&failed).unwrap_or_default(),
+            );
+        }
+    }
+    // Each-mode ids carry the [gwN] suffix and every test ran N times —
+    // they would poison the duration cache used for LPT scheduling.
+    if dist_name != "each" {
+        durations::save(&outcome.run);
+    }
+    if let Some(path) = &cli.report_json {
+        outcome.run.write_snapshot(
+            path,
+            &report::RunMeta {
+                exitstatus: outcome.exitstatus,
+                duration_seconds: start.elapsed().as_secs_f64(),
+                started_at_epoch: started_epoch,
+                workers: n,
+                argv: std::env::args().collect(),
+            },
+        )?;
+    }
+
+    // Coverage: workers save suffixed data files (pytest-cov worker mode);
+    // the orchestrator plays the xdist-master role — combine and report.
+    let mut exitstatus = outcome.exitstatus;
+    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
+        println!();
+        let status = std::process::Command::new(&python)
+            .args(["-m", "rstest_worker.covtool"])
+            .args(&args)
+            .env("PYTHONPATH", worker::worker_pythonpath())
+            .status();
+        match status {
+            Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
+            Ok(_) => {}
+            Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
+        }
+    }
+    Ok(exitstatus)
+}
+
+/// Sequential session groups, one per subproject (monorepo P0).
+fn execute_monorepo(
+    cli: &Cli,
+    args: &[String],
+    root: &std::path::Path,
+    projects: Vec<PathBuf>,
+) -> Result<i32> {
+    if needs_passthrough_io(args) {
+        anyhow::bail!(
+            "--pdb/-s/--co need a single pytest session; run inside one project \
+             of this monorepo (for --collect-only --report-json discovery, run \
+             it once per project)"
+        );
+    }
+    if cli.watch {
+        anyhow::bail!("--watch at a monorepo root is not supported yet; run inside a project");
+    }
+    // The monorepo orchestrator prints per-project banners and a summary
+    // around captured child output, so a single clean NDJSON stream is not
+    // possible here. The merged --report-json document is the machine-
+    // readable monorepo surface instead.
+    if cli.output.as_deref() == Some("json") {
+        anyhow::bail!(
+            "--output json streams live per-session results and can't be merged \
+             across a monorepo's projects; use --report-json <path> for one merged \
+             machine-readable document, or run --output json inside a single project"
+        );
+    }
+    let rels: Vec<String> = projects
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                // Stable, OS-independent project keys: forward slashes on
+                // Windows too, so summary/meta/merged-report keys match the
+                // `libs/b` form the gate and report contract expect.
+                .replace('\\', "/")
+        })
+        .collect();
+    // Worker budget: the user's -n (or auto = cores), split across
+    // projects by their last-known suite time (duration caches). Each
+    // project runs as a CHILD rstest process — cwd-isolated, output
+    // captured and printed whole on completion.
+    let budget = parse_numprocesses(
+        &cli.numprocesses
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
+    )
+    .unwrap_or(4)
+    .max(1);
+    // --changed at a monorepo root: classify projects ONCE against the
+    // repo-wide changed set. Directly-changed projects keep --changed
+    // (child-local narrowing); dependents (via pyproject dependency
+    // names, transitively) run their FULL suite; the rest are skipped.
+    let mono_changed = cli
+        .changed
+        .clone()
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+    let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
+        Some(rev) => {
+            let rev = if rev == "HEAD" {
+                None
+            } else {
+                Some(rev.as_str())
+            };
+            let changed = select::changed_files_from_git(rev)?;
+            let impacts = mono::classify_changes(root, &projects, &changed, cli.changed_strict);
+            let skipped = impacts
+                .iter()
+                .filter(|i| **i == mono::ChangeImpact::Unaffected)
+                .count();
+            eprintln!(
+                "rstest: --changed: {} changed file(s) -> {} of {} projects affected",
+                changed.len(),
+                projects.len() - skipped,
+                projects.len()
+            );
+            Some(impacts)
+        }
+        None => None,
+    };
+    let costs: Vec<Option<f64>> = projects.iter().map(|p| mono::project_cost(p)).collect();
+    // A project pinning its own numprocesses (e.g. 0 for an
+    // order-sensitive suite that needs pytest-exact mode) keeps it.
+    let fixed: Vec<Option<usize>> = projects.iter().map(|p| mono::project_fixed_n(p)).collect();
+    let shares = mono::plan_shares_with_fixed(&costs, &fixed, budget);
+    println!(
+        "rstest {} — monorepo: {} projects, {budget} workers ({})",
+        env!("CARGO_PKG_VERSION"),
+        projects.len(),
+        rels.iter()
+            .zip(&shares)
+            .map(|(r, s)| format!("{r}:-n{s}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let start = Instant::now();
+    let exe = std::env::current_exe()?;
+
+    // Launch every project concurrently; the shares cap total worker
+    // count at the budget. Output prints in COMPLETION order.
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, String, i32)>();
+    let mut launched = 0usize;
+    let mut skipped_projects: Vec<usize> = Vec::new();
+    for (i, (project, rel)) in projects.iter().zip(&rels).enumerate() {
+        let impact = impacts
+            .as_ref()
+            .map(|v| v[i])
+            .unwrap_or(mono::ChangeImpact::Direct);
+        if impact == mono::ChangeImpact::Unaffected {
+            skipped_projects.push(i);
+            continue;
+        }
+        let slug = mono::slug(root, project);
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.current_dir(project)
+            .env("RSTEST_MONO_PROJECT", rel)
+            .arg("-n")
+            .arg(shares[i].to_string())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // Own flags that must travel to the child; output paths get the
+        // project slug and anchor at the INVOCATION root.
+        match (&cli.python, mono::project_python(project)) {
+            (Some(p), _) => {
+                cmd.arg("--python").arg(p);
+            }
+            // A project-local venv beats the inherited environment.
+            (None, Some(p)) => {
+                cmd.arg("--python").arg(p);
+            }
+            (None, None) => {}
+        }
+        if let Some(d) = &cli.dist {
+            cmd.arg("--dist").arg(d);
+        }
+        // Per-project output style. Children write to a captured pipe (not a
+        // tty), so bar/verbose render their per-test lines and github emits
+        // its `::error` annotations — all reprinted under the project header.
+        // (json is refused at the root above.)
+        if let Some(o) = &cli.output {
+            cmd.arg("--output").arg(o);
+        }
+        if let Some(r) = &cli.reruns {
+            cmd.arg("--reruns").arg(r.to_string());
+        }
+        for pat in &cli.only_rerun {
+            cmd.arg("--only-rerun").arg(pat);
+        }
+        if let Some(t) = &cli.worker_timeout {
+            cmd.arg("--worker-timeout").arg(t.to_string());
+        }
+        if cli.doctor {
+            cmd.arg("--doctor");
+        }
+        if let Some(rev) = &mono_changed {
+            // Only directly-changed projects narrow further; a dependent
+            // runs full (its own files didn't change).
+            if impact == mono::ChangeImpact::Direct {
+                cmd.arg(format!("--changed={rev}"));
+                if cli.changed_strict {
+                    cmd.arg("--changed-strict");
+                }
+            }
+        }
+        if let Some(p) = &cli.junitxml {
+            cmd.arg("--junitxml")
+                .arg(root.join(mono::suffixed(p, &slug)));
+        }
+        if cli.report_json.is_some() {
+            // Children write to temp parts; the orchestrator merges them
+            // into ONE document at the requested path after the run.
+            cmd.arg("--report-json").arg(report_part_path(&slug));
+        }
+        if let Some(p) = &cli.doctor_json {
+            cmd.arg("--doctor-json")
+                .arg(root.join(mono::suffixed(p, &slug)));
+        }
+        cmd.args(args);
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("rstest: failed to launch project {rel}: {e}");
+                let _ = tx.send((i, format!("launch failed: {e}\n"), 3));
+                continue;
+            }
+        };
+        launched += 1;
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let (out, status) = match child.wait_with_output() {
+                Ok(o) => {
+                    let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                    text.push_str(&String::from_utf8_lossy(&o.stderr));
+                    (text, o.status.code().unwrap_or(3))
+                }
+                Err(e) => (format!("wait failed: {e}\n"), 3),
+            };
+            let _ = tx.send((i, out, status));
+        });
+    }
+    drop(tx);
+
+    let mut results: Vec<Option<i32>> = vec![None; projects.len()];
+    for (i, output, status) in rx {
+        println!("\n=============== project: {} ===============", rels[i]);
+        print!("{output}");
+        results[i] = Some(status);
+    }
+    let _ = launched;
+
+    println!("\n=============== monorepo summary ===============");
+    let mut report_parts: Vec<(String, Option<PathBuf>, Option<i32>, bool)> = Vec::new();
+    let mut statuses = Vec::new();
+    for (i, (rel, status)) in rels.iter().zip(&results).enumerate() {
+        if skipped_projects.contains(&i) {
+            println!("  {rel:<40} skipped (no changes)");
+            report_parts.push((rel.clone(), None, None, true));
+            continue;
+        }
+        let status = status.unwrap_or(3);
+        let slug = mono::slug(root, &projects[i]);
+        report_parts.push((
+            rel.clone(),
+            Some(report_part_path(&slug)),
+            Some(status),
+            false,
+        ));
+        statuses.push(status);
+        let verdict = match status {
+            0 => "ok".to_string(),
+            5 => "no tests".to_string(),
+            s => format!("FAILED (exit {s})"),
+        };
+        println!("  {rel:<40} {verdict}");
+    }
+    if statuses.is_empty() {
+        println!("no projects affected by the change set");
+        // Strict gating distinguishes "ran nothing" from "all passed".
+        statuses.push(if cli.changed_strict { 5 } else { 0 });
+    }
+    let merged = pool::merge_statuses(&statuses);
+    if let Some(out) = &cli.report_json {
+        let out = if out.is_absolute() {
+            out.clone()
+        } else {
+            root.join(out)
+        };
+        let run_meta = report::RunMeta {
+            exitstatus: merged,
+            duration_seconds: start.elapsed().as_secs_f64(),
+            started_at_epoch: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs().saturating_sub(start.elapsed().as_secs()))
+                .unwrap_or(0),
+            workers: budget,
+            argv: std::env::args().collect(),
+        };
+        if let Err(e) = mono::merge_reports(&report_parts, &run_meta, &out) {
+            eprintln!("rstest: failed to write merged report: {e}");
+        }
+        for (_, part, _, _) in &report_parts {
+            if let Some(p) = part {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    println!(
+        "{} projects in {:.2}s (exit {merged})",
+        statuses.len(),
+        start.elapsed().as_secs_f64()
+    );
+    Ok(merged)
+}
+
+/// Temp location for one project's report part during a monorepo run.
+fn report_part_path(slug: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "rstest-mono-{}-{slug}.json",
+        std::env::var("RSTEST_RUN_UID").unwrap_or_default()
+    ))
+}
+
+/// Resolve the collection strategy (CLI > [tool.rstest] > "full") and
+/// validate lazy-mode constraints.
+fn collect_lazy(
+    cli: &Cli,
+    settings: &config::RstestSettings,
+    dist_name: &str,
+    args: &[String],
+) -> Result<bool> {
+    let mode = cli
+        .collect
+        .clone()
+        .or_else(|| settings.collect.clone())
+        .unwrap_or_else(|| "full".into());
+    match mode.as_str() {
+        "full" => Ok(false),
+        "lazy" => {
+            if !matches!(dist_name, "load" | "loadfile") {
+                anyhow::bail!(
+                    "--collect lazy is file-affine and cannot honor --dist {dist_name} \
+                     (loadscope/loadgroup need a global id list; use --collect full)"
+                );
+            }
+            // Single-test selection by nodeid wants exact-item dispatch;
+            // --pyargs selects by import path, which the file walk can't
+            // see. Both fall back to full collection.
+            if args.iter().any(|a| a.contains("::") || a == "--pyargs") {
+                eprintln!(
+                    "rstest: nodeid/--pyargs arguments given; --collect lazy falls back \
+                     to full collection"
+                );
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        other => anyhow::bail!("unknown --collect mode: {other} (use full|lazy)"),
+    }
+}
+
+fn parse_numprocesses(value: &str) -> Result<usize> {
+    if value == "auto" {
+        return Ok(auto_workers());
+    }
+    Ok(value.parse()?)
+}
+
+/// `auto` = logical cores, capped by what the suite can use. Worker startup
+/// and teardown cost real time (interpreter + pytest core + plugins per
+/// worker); a 3-file suite gains nothing from 14 workers and pays 14x the
+/// overhead. Two cheap signals, both best-effort:
+/// - test-file count from an ini-aware walk (a worker per file is already
+///   more than the collection phase can use)
+/// - the duration cache: if the whole suite ran in a few seconds last
+///   time, two workers saturate it
+fn auto_workers() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    let mut n = cores;
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let project = config::discover(&cwd);
+        if let Ok(files) = collect::collect_test_files(&[], &project) {
+            if !files.is_empty() {
+                n = n.min(files.len());
+            }
+        }
+    }
+
+    let cache = durations::load();
+    if !cache.is_empty() {
+        let total: f64 = cache.values().sum();
+        // ~2s of test time per worker is plenty to amortize startup.
+        let by_time = (total / 2.0).ceil() as usize;
+        n = n.min(by_time.max(1));
+    }
+
+    n.max(1)
+}
+
+/// Sum identical fixtures reported by multiple workers.
+fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
+    use std::collections::BTreeMap;
+    let mut merged: BTreeMap<(String, String), proto::FixtureStat> = BTreeMap::new();
+    for f in all {
+        merged
+            .entry((f.name.clone(), f.scope.clone()))
+            .and_modify(|m| {
+                m.count += f.count;
+                m.total += f.total;
+            })
+            .or_insert(f);
+    }
+    merged.into_values().collect()
+}
+
+/// pytest-style warnings summary: grouped by location, deduped, counted.
+fn print_warnings_summary(warnings: &[proto::WarningEntry], palette: &color::Palette) {
+    if warnings.is_empty() {
+        return;
+    }
+    use std::collections::BTreeMap;
+    let mut merged: BTreeMap<(&str, u64, &str, &str), u64> = BTreeMap::new();
+    for w in warnings {
+        *merged
+            .entry((&w.filename, w.lineno, &w.category, &w.message))
+            .or_default() += w.count;
+    }
+    println!(
+        "\n{}",
+        palette.yellow("=========== warnings summary ===========")
+    );
+    for ((filename, lineno, category, message), count) in &merged {
+        let times = if *count > 1 {
+            format!("  ({count} occurrences)")
+        } else {
+            String::new()
+        };
+        println!("{filename}:{lineno}: {category}{times}");
+        for line in message.lines().take(3) {
+            println!("  {line}");
+        }
+    }
+    println!(
+        "{}",
+        palette.yellow("-- use -W error::... to turn warnings into errors --")
+    );
+}
+
+/// Emit a GitHub Actions `::error` workflow command per failed test, read
+/// from the run aggregate (deduped — one per nodeid). GitHub surfaces these
+/// as inline annotations on the PR diff. `file` comes from the nodeid path,
+/// `line` from pytest's 0-based report location (+1 → editor 1-based).
+fn print_github_annotations(run: &report::Run) {
+    // Under a monorepo the parent runs us with cwd=project, so nodeid paths
+    // are project-relative; GitHub resolves annotation `file` from the repo
+    // root, so prefix the project's root-relative path (set by the parent).
+    let prefix = std::env::var("RSTEST_MONO_PROJECT")
+        .ok()
+        .filter(|p| !p.is_empty());
+    for (nodeid, entry) in run.tests() {
+        let failed = entry.call.as_deref() == Some("failed")
+            || entry.setup.as_deref() == Some("failed")
+            || entry.teardown.as_deref() == Some("failed");
+        if !failed {
+            continue;
+        }
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        let file = match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        };
+        let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(",line={}", l + 1));
+        }
+        let msg = entry.longrepr.as_deref().unwrap_or("test failed");
+        println!("::error {props}::{}", gh_data(msg));
+    }
+}
+
+/// Escape a GitHub workflow-command message (the part after `::`).
+fn gh_data(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// Escape a workflow-command property value (stricter: `:` and `,` too).
+fn gh_prop(s: &str) -> String {
+    gh_data(s).replace(':', "%3A").replace(',', "%2C")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn gh_escaping_covers_command_metacharacters() {
+        // message (data): only % \r \n are special
+        assert_eq!(gh_data("a%b\nc\rd"), "a%25b%0Ac%0Dd");
+        // property: also : and , so the key=value list can't be broken
+        assert_eq!(gh_prop("pkg::test[a,b]"), "pkg%3A%3Atest[a%2Cb]");
+        // % must escape first, or the other escapes' %XX would double-encode
+        assert_eq!(gh_data("100%"), "100%25");
+    }
+
+    #[test]
+    fn durations_forms() {
+        assert_eq!(parse_durations(&v(&[])), None);
+        assert_eq!(parse_durations(&v(&["--durations=10"])), Some((10, 0.005)));
+        assert_eq!(parse_durations(&v(&["--durations", "3"])), Some((3, 0.005)));
+        assert_eq!(parse_durations(&v(&["--durations=0"])), Some((0, 0.005)));
+        assert_eq!(
+            parse_durations(&v(&["--durations=5", "--durations-min=0.1"])),
+            Some((5, 0.1))
+        );
+        // min alone does nothing (pytest needs --durations to render)
+        assert_eq!(parse_durations(&v(&["--durations-min=0.1"])), None);
+    }
+
+    #[test]
+    fn maxfail_forms() {
+        assert_eq!(parse_maxfail(&v(&["-x"])), Some(1));
+        assert_eq!(parse_maxfail(&v(&["--exitfirst"])), Some(1));
+        assert_eq!(parse_maxfail(&v(&["--maxfail", "3"])), Some(3));
+        assert_eq!(parse_maxfail(&v(&["--maxfail=7"])), Some(7));
+        // maxfail=0 means "no limit" in pytest.
+        assert_eq!(parse_maxfail(&v(&["--maxfail=0"])), None);
+        assert_eq!(parse_maxfail(&v(&["-k", "x"])), None);
+    }
+
+    #[test]
+    fn passthrough_flags() {
+        assert!(needs_passthrough_io(&v(&["--co"])));
+        assert!(needs_passthrough_io(&v(&["-s"])));
+        assert!(needs_passthrough_io(&v(&["--pdb"])));
+        assert!(needs_passthrough_io(&v(&["--capture=tee-sys"])));
+        // Stepwise is sequential: route it to the single-session path so the
+        // vendored stepwise plugin owns resume/stop and its cache round-trips.
+        assert!(needs_passthrough_io(&v(&["--sw"])));
+        assert!(needs_passthrough_io(&v(&["--stepwise"])));
+        assert!(needs_passthrough_io(&v(&["--sw-skip"])));
+        assert!(needs_passthrough_io(&v(&["--stepwise-skip"])));
+        assert!(needs_passthrough_io(&v(&["--sw-reset"])));
+        assert!(needs_passthrough_io(&v(&["--stepwise-reset"])));
+        assert!(!needs_passthrough_io(&v(&["-k", "x", "-v"])));
+    }
+
+    #[test]
+    fn split_owns_rstest_flags_and_forwards_the_rest() {
+        let (own, session) = split_args(v(&[
+            "-n", "4", "--dist", "loadfile", "tests/", "-k", "smoke", "-x",
+        ]));
+        assert_eq!(own, v(&["rstest", "-n", "4", "--dist", "loadfile"]));
+        assert_eq!(session, v(&["tests/", "-k", "smoke", "-x"]));
+    }
+
+    #[test]
+    fn split_forwards_pytest_collect_flags() {
+        let (own, session) = split_args(v(&["--collect-only", "--co"]));
+        assert_eq!(own, v(&["rstest"]));
+        assert_eq!(session, v(&["--collect-only", "--co"]));
+    }
+
+    #[test]
+    fn split_double_dash_forwards_everything() {
+        let (own, session) = split_args(v(&["--", "-n", "9", "--doctor"]));
+        assert_eq!(own, v(&["rstest"]));
+        assert_eq!(session, v(&["-n", "9", "--doctor"]));
+    }
+
+    #[test]
+    fn split_equals_forms() {
+        let (own, session) = split_args(v(&["--reruns=2", "--junitxml=o.xml", "-v"]));
+        assert_eq!(own, v(&["rstest", "--reruns=2", "--junitxml=o.xml"]));
+        assert_eq!(session, v(&["-v"]));
+    }
+}

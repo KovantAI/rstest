@@ -1,0 +1,70 @@
+# Troubleshooting
+
+## `rstest worker requires the 'msgpack' package`
+
+The worker runs in *your project's* environment and needs its runtime
+deps there. Installing the rstest wheel into that environment brings them
+automatically; if you're running a source checkout, add `msgpack pluggy
+iniconfig packaging pygments` to the environment.
+
+## `ImportError: cannot import name 'TypeAlias'` (or similar) at startup
+
+Your project's interpreter is older than Python 3.10. The vendored pytest
+core requires 3.10+, which matches the supported CPython line (3.9 is
+end-of-life as of October 2025). Upgrade the environment's Python.
+
+## Tests pass under pytest, fail under `rstest` — only in parallel
+
+Work through the three-run diagnosis in
+[Parallel safety](../guides/parallel-safety.md#diagnosing-a-parallel-only-failure):
+`-n 0` (is it the test?), `--dist loadfile` (is it ordering?), `-n 2`
+(is it load?). The fix is usually a `@pytest.mark.serial` mark, `--dist
+loadfile`, or a clock mock.
+
+## `workers collected different test sets; cannot dispatch safely`
+
+Your collection is nondeterministic — typically a randomizing plugin
+(pytest-randomly without a fixed seed) or test parametrization built from
+an unordered source (set iteration, directory listing). rstest refuses to
+dispatch rather than misassign tests. Fix the nondeterminism (seed it, sort
+it) or run `-n 0`.
+
+## My plugin's terminal output doesn't appear
+
+At `-n ≥ 2` rstest renders the terminal; plugin-drawn UIs (progress bars,
+custom reporters) don't paint. The plugin still *runs* — hooks fire, data
+flows. Use `-n 0` when you specifically want a plugin's own rendering.
+
+## Where did my `tmp_path` go?
+
+Each worker uses a disjoint temp root (`$TMPDIR/rstest-<pid>/gwN/...`),
+like pytest-xdist. A user-provided `--basetemp` wins and is left alone.
+
+## `rstest` runs the wrong Python / can't find my venv
+
+Worker interpreter discovery order: `--python` flag, `$VIRTUAL_ENV`,
+`./.venv`, `python3` on PATH. Activate your environment or pass
+`--python` explicitly.
+
+## A test hangs forever and the run never finishes
+
+Add `--worker-timeout 300` (or a limit suiting your slowest test): a
+worker stuck on one test past the limit is killed, the test reported
+failed with a timeout message, and the run completes. For per-test limits
+with in-test tracebacks, use pytest-timeout; the watchdog is the backstop
+for hangs pytest-timeout can't interrupt. Caveat: the watchdog covers
+hangs on a TEST (any phase); a hang during collection or session config
+is outside it — wrap the invocation in an external timeout if your
+environment can hang before tests start.
+
+## A worker crashed — what happened to its tests?
+
+The test that killed it is reported FAILED with a "crashed while running"
+message. By default it is *not* retried — segfault loops are worse. With
+[`--reruns`](cli.md#-reruns-n) (or `@pytest.mark.flaky`) it does get
+another attempt on the replacement worker while budget remains, bounded by
+both the rerun and restart budgets so a repeatable crash can't loop. Its
+remaining tests redistributed to other workers automatically. If you see
+`worker terminated unexpectedly` instead, the restart budget was
+exhausted: something is killing workers repeatedly, and the longrepr of
+the first crash is the lead.

@@ -1,0 +1,18 @@
+target/
+__pycache__/
+*.pyc
+.venv/
+.rstest_cache/
+.gate-venv/
+site/
+uv.lock
+corpus/work/
+corpus/lock.json
+corpus/results.json
+.claude/*
+# Ship the migrate-to-rstest skill as part of the source; keep the rest of
+# .claude (local settings) and the eval scratch workspace ignored.
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/migrate-to-rstest/
+.cursor

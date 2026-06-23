@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --release -- -D warnings
+
+      - name: build
+        run: cargo build --release
+
+      - name: cargo test
+        run: cargo test --release
+
+      - name: test gate
+        run: python tests/gate.py
+
+  wheel:
+    name: wheel builds (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          args: --release
+      - name: smoke test wheel (unix)
+        if: runner.os != 'Windows'
+        run: |
+          python3 -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install -q target/wheels/rstest-*.whl
+          mkdir -p /tmp/wheel-smoke && cd /tmp/wheel-smoke
+          cat > test_smoke.py <<'EOF'
+          def test_ok():
+              assert True
+          EOF
+          VIRTUAL_ENV=/tmp/wheel-venv /tmp/wheel-venv/bin/rstest test_smoke.py -n 2
+      - name: smoke test wheel (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m venv C:\wheel-venv
+          C:\wheel-venv\Scripts\pip install -q (Get-Item target\wheels\rstest-*.whl).FullName
+          New-Item -ItemType Directory -Force C:\wheel-smoke | Out-Null
+          Set-Location C:\wheel-smoke
+          Set-Content test_smoke.py "def test_ok():`n    assert True`n`ndef test_two():`n    assert 1 + 1 == 2"
+          $env:VIRTUAL_ENV = "C:\wheel-venv"
+          C:\wheel-venv\Scripts\rstest.exe test_smoke.py -n 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ matrix.os }}
+          path: target/wheels/*.whl
+
+  docs:
+    name: docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: install docs toolchain
+        run: pip install -r docs/requirements.txt
+      - name: build (strict)
+        run: mkdocs build --strict

@@ -1,0 +1,26 @@
+{
+  "skill_name": "migrate-to-rstest",
+  "evals": [
+    {
+      "id": 0,
+      "name": "full-migration",
+      "prompt": "I want to switch this project's test suite from pytest to rstest so it runs in parallel and faster. Can you migrate it and make sure it still passes?",
+      "expected_output": "Detects the project, runs rstest -n 0 (contract), runs --migrate-check, finds the uuid-based unstable parametrize id in tests/test_params.py, fixes it with a stable ids=, gets to a green -n auto run, and reports the result. Should NOT just leave the suite on -n 0.",
+      "files": ["fixture-repo"]
+    },
+    {
+      "id": 1,
+      "name": "why-fails-parallel",
+      "prompt": "My pytest tests all pass, but when I try rstest it complains about the test set and won't run in parallel. What's wrong and can you fix it?",
+      "expected_output": "Identifies the unstable nodeid (uuid in the parametrize id of tests/test_params.py) as the cause of the dispatch bail, explains it forces -n 0, fixes it with stable ids=, and confirms parallel now works.",
+      "files": ["fixture-repo"]
+    },
+    {
+      "id": 2,
+      "name": "is-it-ready",
+      "prompt": "Is this test suite ready to run in parallel? I'd like to know before I commit to switching runners.",
+      "expected_output": "Runs rstest --migrate-check (the preflight), reports that the suite is NOT ready due to the uuid unstable id, names the offending parametrize site and the fix (stable ids=). Diagnosis-first; may offer to apply the fix but the core is an accurate readiness report.",
+      "files": ["fixture-repo"]
+    }
+  ]
+}
