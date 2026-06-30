@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
+requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
@@ -7,7 +7,8 @@ name = "rstest"
 version = "0.1.0"
 description = "A fast, pytest-compatible test runner: parallel by design, with built-in suite diagnostics"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
 maintainers = [{ name = "Kovant AB" }]
 requires-python = ">=3.10"
 dependencies = [
