@@ -6,6 +6,7 @@ mod config;
 mod discover;
 mod doctor;
 mod durations;
+mod flakes;
 mod junit;
 mod lazy;
 mod migrate;
@@ -112,6 +113,15 @@ pub struct Cli {
     /// its worker gets retried on the replacement, within this budget.
     #[arg(long)]
     reruns: Option<u32>,
+
+    /// Quarantine list: a file of nodeids or glob patterns (one per
+    /// line, # comments). Failures of matching tests are demoted to a
+    /// non-fatal "quarantined" outcome — reported in their own section,
+    /// flagged in junit/report-json, never the exit code. Failures
+    /// OUTSIDE the list still fail the run. Candidates come from the
+    /// flake history (.rstest_cache/flakes.json) every run records.
+    #[arg(long, value_name = "FILE")]
+    quarantine: Option<PathBuf>,
 
     /// With reruns active, retry only failures whose error text matches
     /// this regex (repeatable). pytest-rerunfailures' --only-rerun.
@@ -423,6 +433,13 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--doctor-json=") => own.push(arg),
+            "--quarantine" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--quarantine=") => own.push(arg),
             "--junitxml" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -781,6 +798,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         )?
     };
 
+    // Quarantine BEFORE any output or exit-code consumer: classification,
+    // counts, junit, report-json, and the sessionfinish envelope must all
+    // see the demoted outcomes consistently.
+    if let Some(qpath) = &cli.quarantine {
+        if passthrough {
+            eprintln!("rstest: --quarantine has no effect in passthrough mode; ignoring");
+        } else {
+            let matcher = quarantine_matcher(qpath)?;
+            let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
+            // pytest exit 1 = tests failed; if every failure was
+            // quarantined the run is green by policy. Exit codes 2+
+            // (usage/internal errors) are never touched.
+            if !demoted.is_empty() && outcome.exitstatus == 1 && outcome.run.all_passed() {
+                outcome.exitstatus = 0;
+            }
+        }
+    }
+    // Loaded before this run's events are recorded below — the history
+    // annotations must say "before this run".
+    let flake_history = flakes::load();
+
     if !passthrough && mode == progress::Mode::Json {
         // Pure NDJSON: close the stream with a session-finish envelope
         // (counts + duration + exit status). No human summary/failures.
@@ -799,7 +837,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         if mode != progress::Mode::Bar {
             outcome.run.print_failures(&palette);
         }
-        outcome.run.print_flaky(&palette);
+        outcome.run.print_quarantined(&palette, &flake_history);
+        outcome.run.print_flaky(&palette, &flake_history);
         print_warnings_summary(&outcome.warnings, &palette);
         if let Some((dn, dmin)) = durations {
             outcome
@@ -886,6 +925,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
         durations::save(&outcome.run);
+        // Flake history rides the same cadence (and the same [gwN]-key
+        // poisoning concern rules out each-mode).
+        flakes::record(&outcome.run);
     }
     if let Some(path) = &cli.report_json {
         outcome.run.write_snapshot(
@@ -1065,6 +1107,12 @@ fn execute_monorepo(
         }
         if let Some(r) = &cli.reruns {
             cmd.arg("--reruns").arg(r.to_string());
+        }
+        if let Some(q) = &cli.quarantine {
+            // Children run with cwd=project — hand them an absolute path.
+            // Patterns match each child's project-relative nodeids.
+            cmd.arg("--quarantine")
+                .arg(std::fs::canonicalize(q).unwrap_or_else(|_| q.clone()));
         }
         for pat in &cli.only_rerun {
             cmd.arg("--only-rerun").arg(pat);
@@ -1335,6 +1383,31 @@ fn print_warnings_summary(warnings: &[proto::WarningEntry], palette: &color::Pal
 /// from the run aggregate (deduped — one per nodeid). GitHub surfaces these
 /// as inline annotations on the PR diff. `file` comes from the nodeid path,
 /// `line` from pytest's 0-based report location (+1 → editor 1-based).
+/// Compile the --quarantine file into one matcher: exact nodeids or `*`
+/// globs, one per line, `#` comments and blanks skipped.
+fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
+    let patterns: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            format!(
+                "^{}$",
+                l.split('*')
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join(".*")
+            )
+        })
+        .collect();
+    if patterns.is_empty() {
+        eprintln!("rstest: --quarantine: {} lists no patterns", path.display());
+    }
+    Ok(regex::RegexSet::new(patterns)?)
+}
+
 fn print_github_annotations(run: &report::Run) {
     // Under a monorepo the parent runs us with cwd=project, so nodeid paths
     // are project-relative; GitHub resolves annotation `file` from the repo

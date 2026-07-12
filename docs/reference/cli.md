@@ -307,6 +307,33 @@ retried (see [crash handling](troubleshooting.md#a-worker-crashed-what-happened-
 pytest-rerunfailures is neutralized inside workers, so nothing
 double-reruns.
 
+### `--quarantine <FILE>`
+
+Ring-fence known-flaky tests without hiding them. `FILE` lists nodeids
+or `*` glob patterns (one per line, `#` comments):
+
+```
+# tracked in JIRA-1234, remove when fixed
+tests/test_api.py::test_poll_eventually
+tests/test_ws.py::*
+```
+
+A failure matching the list is demoted to a **quarantined** outcome:
+counted separately in the summary (`N quarantined`), printed with its
+traceback in its own section, flagged as a `quarantined` testcase
+property in junit (no `<failure>` element — junit-gating CI stays
+green) and in `--report-json` (schema 5), and never fatal — a run whose
+only failures are quarantined exits 0. **Failures outside the list
+still fail the run**, and a listed test that passes is a plain pass.
+
+Candidates come from the **flake history** every run records to
+`.rstest_cache/flakes.json`: per-test counts of flaky passes
+(`--reruns` rescues) and hard failures, with a last-seen timestamp.
+The flaky and quarantined sections annotate each test with its history
+(`flaked 3x before, failed 1x`). Difference from `--reruns`: reruns
+paper over a flake within one run; quarantine is cross-run policy for
+tests a team has explicitly decided to tolerate while fixing.
+
 ### `--doctor-json <path>`
 
 Write the doctor analysis as JSON (stable, versioned schema — currently
