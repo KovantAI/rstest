@@ -134,6 +134,24 @@ the compatibility trade. Configurable via `[tool.rstest] collect`.
 With `--collect lazy`, `--dist loadscope|loadgroup` are rejected, and
 nodeid/`--pyargs` arguments fall back to full collection.
 
+### `--shuffle[=SEED]`
+
+Run tests in a seeded random order (the pytest-randomly idea, applied to
+the orchestrator's dispatch queue). Order dependence is the central
+parallel-readiness hazard; a shuffled run flushes it out on demand —
+in CI or before enabling more workers — instead of waiting for a
+scheduling change to bite. Without a value the seed is chosen per run
+and printed; reproduce a failing order with `--shuffle=SEED` (add
+`-n 2 --dist loadfile` to keep the repro stable).
+
+Affinity modes (`loadfile`/`loadscope`/`loadgroup`) shuffle the group
+order and keep in-group order intact — in-group order is the affinity
+contract. In `load` mode the shuffle replaces duration-aware
+sequencing for that run. Requires the parallel pool with full
+collection: single-worker mode, `--collect lazy`, and `--dist each`
+are refused (not silently ignored — a run probing for order
+dependence must not quietly run ordered).
+
 ### `--doctor`
 
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),

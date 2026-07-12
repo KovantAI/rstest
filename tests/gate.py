@@ -1019,6 +1019,31 @@ def main():
     )
     (sp / "tests" / "test_new.py").unlink()
 
+    print("== shuffle ==")
+    for i in range(6):
+        g.write(f"shuf/test_s{i}.py", f"def test_s{i}(): assert True\n")
+    r = g.run("shuf", "-n", "2", "--shuffle=42")
+    check(
+        "shuffle: explicit seed echoed, run green",
+        r.returncode == 0
+        and "shuffle seed 42" in r.stderr
+        and "--shuffle=42" in r.stderr
+        and "6 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-100:],
+    )
+    r = g.run("shuf", "-n", "2", "--shuffle")
+    check(
+        "shuffle: random seed printed with reproduce hint",
+        r.returncode == 0 and "reproduce with --shuffle=" in r.stderr,
+        r.stderr[-200:],
+    )
+    r = g.run("shuf", "-n", "0", "--shuffle")
+    check(
+        "shuffle: refused in single-worker mode",
+        r.returncode != 0 and "parallel pool" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)

@@ -147,6 +147,15 @@ pub struct Cli {
     #[arg(long, value_name = "MODE")]
     collect: Option<String>,
 
+    /// Run tests in a seeded random order (pytest-randomly-style) to
+    /// flush order dependencies on demand. Without a value the seed is
+    /// chosen per run and printed; pass --shuffle=SEED to reproduce a
+    /// failing order. Affinity modes (loadfile/loadscope/loadgroup)
+    /// shuffle group order and keep in-group order intact. Parallel
+    /// pool with full collection only.
+    #[arg(long, num_args = 0..=1, default_missing_value = "random", value_name = "SEED")]
+    shuffle: Option<String>,
+
     /// Terminal output style: "dots" (pytest's per-test chars), "verbose"
     /// (one line per test, like -v), or "bar" (pytest-sugar-style: a
     /// per-test result line, inline failures, and a live progress bar).
@@ -393,8 +402,9 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--migrate-allow=") => own.push(arg),
-            "--changed" | "--changed-strict" => own.push(arg),
+            "--changed" | "--changed-strict" | "--shuffle" => own.push(arg),
             _ if arg.starts_with("--changed=") => own.push(arg),
+            _ if arg.starts_with("--shuffle=") => own.push(arg),
             "--only-rerun" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -665,6 +675,42 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     if reruns > 0 && (n <= 1 || passthrough) {
         eprintln!("rstest: --reruns requires parallel mode (-n >= 2); ignoring");
     }
+    // --shuffle reorders the orchestrator's dispatch queue, so it needs
+    // the full-collection pool. Refusing (not ignoring) matters: a user
+    // probing for order dependence must not get a silently ordered run.
+    let shuffle_seed: Option<u64> = match cli.shuffle.as_deref() {
+        None => None,
+        Some(v) => {
+            if n <= 1 || passthrough {
+                anyhow::bail!(
+                    "--shuffle needs the parallel pool (-n >= 2); in single-worker \
+                     mode the session owns its own order (use pytest-randomly there)"
+                );
+            }
+            if collect_lazy(cli, &settings, &dist_name, &args)? {
+                anyhow::bail!("--shuffle is not supported with --collect lazy");
+            }
+            if dist_name == "each" {
+                anyhow::bail!(
+                    "--shuffle is not supported with --dist each (workers run the \
+                     full suite in session order)"
+                );
+            }
+            let seed = if v == "random" {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0)
+                    ^ u64::from(std::process::id())
+            } else {
+                v.parse().map_err(|_| {
+                    anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'")
+                })?
+            };
+            eprintln!("rstest: shuffle seed {seed} (reproduce with --shuffle={seed})");
+            Some(seed)
+        }
+    };
     let mut outcome = if n <= 1 || passthrough {
         let io = if passthrough {
             worker::Stdio::Inherit
@@ -778,6 +824,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 .map(|p| regex::Regex::new(p))
                 .collect::<Result<Vec<_>, _>>()?,
             worker_timeout.map(std::time::Duration::from_secs),
+            shuffle_seed,
         )?
     };
 

@@ -5,6 +5,13 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--shuffle[=SEED]`: run tests in a seeded random order to flush out
+  order dependencies on demand (pytest-randomly for the dispatch
+  queue). The seed is printed for reproduction; affinity modes shuffle
+  group order and keep in-group order intact. Single-worker mode,
+  `--collect lazy`, and `--dist each` are refused rather than silently
+  ignored.
+
 - `--output github`: tests that passed only after reruns now emit a
   `::warning` annotation (`flaky: passed only after N reruns`) — the
   run stays green, but the flake shows up inline on the PR.
