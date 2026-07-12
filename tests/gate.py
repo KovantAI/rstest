@@ -85,6 +85,10 @@ class Gate:
             RSTEST_WORKER_PATH=str(REPO / "python"),
         )
         env.pop("PYTEST_ADDOPTS", None)
+        # Bare --changed auto-targets the PR base when GITHUB_BASE_REF is
+        # set; the gate's fixture repos have no origin, so a PR CI run
+        # would break every --changed check. Tests opt in via env_extra.
+        env.pop("GITHUB_BASE_REF", None)
         if env_extra:
             env.update(env_extra)
         return subprocess.run(
@@ -1067,6 +1071,53 @@ def main():
         r.stdout[-200:],
     )
     (sp / "tests" / "test_new.py").unlink()
+
+    # PR-aware --changed: with GITHUB_BASE_REF set, bare --changed diffs vs
+    # the merge-base with origin/<base> — a clean checkout of a PR commit
+    # still selects the PR's files (vs HEAD it would select nothing).
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=sp, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/mainline", base_sha], cwd=sp, check=True
+    )
+    with open(sp / "pkg" / "a.py", "a") as f:
+        f.write("# pr change\n")
+    subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pr"],
+        cwd=sp, check=True,
+    )
+    r = g.run(
+        "--changed", "-v", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
+    )
+    check(
+        "selection: GITHUB_BASE_REF auto-targets PR base",
+        "auto-targets PR base origin/mainline" in r.stderr
+        and "2 affected test file(s)" in r.stderr
+        and "test_alpha" in r.stdout
+        and "test_beta" not in r.stdout,
+        r.stderr[-300:],
+    )
+    r = g.run(
+        "--changed", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "nosuchbranch"},
+    )
+    check(
+        "selection: missing PR base ref errors, no silent skip",
+        r.returncode != 0 and "fetch the base branch" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run(
+        "--changed=HEAD~1", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
+    )
+    check(
+        "selection: explicit rev wins over GITHUB_BASE_REF",
+        "auto-targets" not in r.stderr and "2 affected test file(s)" in r.stderr,
+        r.stderr[-300:],
+    )
 
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
