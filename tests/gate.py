@@ -1072,6 +1072,22 @@ def main():
         'property name="flaky"' in fx.read_text(encoding="utf-8"),
         fx.read_text(encoding="utf-8")[-300:],
     )
+    # --output github: a flaky-passed test surfaces as a ::warning
+    # annotation (the run is green, the flake is visible on the PR).
+    marker.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "2", "--reruns", "2", "--output", "github",
+              cwd=fdir, env_extra={"FLAKY_MARKER": str(marker)})
+    warns = [ln for ln in r.stdout.splitlines() if ln.startswith("::warning ")]
+    check(
+        "github: flaky-passed emits ::warning",
+        r.returncode == 0
+        and len(warns) == 1
+        and "flaky" in warns[0]
+        and "rerun" in warns[0]
+        and "test_flaky.py" in warns[0]
+        and not any(ln.startswith("::error ") for ln in r.stdout.splitlines()),
+        r.stdout[-300:],
+    )
 
     print("== loadscope / loadgroup ==")
     g.write("scopes/test_sc_a.py", SCOPE_A)

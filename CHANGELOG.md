@@ -5,6 +5,10 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--output github`: tests that passed only after reruns now emit a
+  `::warning` annotation (`flaky: passed only after N reruns`) — the
+  run stays green, but the flake shows up inline on the PR.
+
 ## 0.1.0 — 2026-06-23
 
 - Vendored pytest upgraded 9.0.3 → 9.1.1 (re-extracted verbatim from the

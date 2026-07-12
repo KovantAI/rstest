@@ -1361,6 +1361,27 @@ fn print_github_annotations(run: &report::Run) {
         let msg = entry.longrepr.as_deref().unwrap_or("test failed");
         println!("::error {props}::{}", gh_data(msg));
     }
+    // Flaky-passed tests (green only after reruns) surface as warnings:
+    // the run is green, but the flake is visible on the PR without
+    // opening the junit/log.
+    for (nodeid, attempts) in &run.flaky {
+        let Some(entry) = run.tests().get(nodeid) else {
+            continue;
+        };
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        let file = match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        };
+        let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(",line={}", l + 1));
+        }
+        println!(
+            "::warning {props}::flaky: passed only after {attempts} rerun{}",
+            if *attempts > 1 { "s" } else { "" }
+        );
+    }
 }
 
 /// Escape a GitHub workflow-command message (the part after `::`).

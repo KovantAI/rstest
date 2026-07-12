@@ -100,6 +100,11 @@ diff:
 location, omitted when none is available. The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
 
+Tests that passed only after reruns (`--reruns` /
+`@pytest.mark.flaky`) additionally emit a `::warning` annotation
+(`flaky: passed only after N reruns`) — the run stays green, but the
+flake is visible on the PR without opening the log.
+
 `json` makes stdout a pure **newline-delimited JSON** stream — one
 `testreport` object per phase as each test finishes, closed by a
 `sessionfinish` envelope. No banner, footer, or human summary is printed,
