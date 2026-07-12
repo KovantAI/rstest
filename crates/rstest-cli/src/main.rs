@@ -561,10 +561,14 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         Some("dots") => progress::Mode::Dots,
         Some("github") => progress::Mode::Github,
         Some("json") => progress::Mode::Json,
+        Some("tap") => progress::Mode::Tap,
+        Some("teamcity") => progress::Mode::Teamcity,
+        Some("gitlab") => progress::Mode::Gitlab,
+        Some("buildkite") => progress::Mode::Buildkite,
         Some(other) => {
             eprintln!(
                 "rstest: unknown --output '{other}' \
-                 (use dots|verbose|bar|github|json); using dots"
+                 (use dots|verbose|bar|github|gitlab|buildkite|teamcity|tap|json); using dots"
             );
             progress::Mode::Dots
         }
@@ -607,8 +611,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             std::process::exit(code);
         }
     }
-    // Json mode keeps stdout pure NDJSON — no banner.
-    if !passthrough && mode != progress::Mode::Json {
+    // Json/Tap modes keep stdout a pure machine stream — no banner
+    // (TAP gets its version header instead).
+    if !passthrough && mode == progress::Mode::Tap {
+        println!("TAP version 13");
+    }
+    if !passthrough && mode != progress::Mode::Json && mode != progress::Mode::Tap {
         let worker_desc = if n <= 1 {
             "single worker (pytest-exact mode)".to_string()
         } else {
@@ -792,12 +800,22 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             "counts": outcome.run.counts(),
         });
         println!("{envelope}");
+    } else if !passthrough && mode == progress::Mode::Tap {
+        // Pure TAP: close the stream with the trailing plan. Failure text
+        // already rode along as `#` diagnostics; no human summary.
+        outcome.prog.finish();
+        outcome.prog.tap_plan();
     } else if !passthrough {
         outcome.prog.finish();
         // Bar mode already inlines each failure as it happens; re-printing
         // the batched block would duplicate it.
         if mode != progress::Mode::Bar {
-            outcome.run.print_failures(&palette);
+            let wrap = match mode {
+                progress::Mode::Gitlab => report::FailureWrap::GitlabSection,
+                progress::Mode::Buildkite => report::FailureWrap::BuildkiteGroup,
+                _ => report::FailureWrap::Plain,
+            };
+            outcome.run.print_failures(&palette, wrap);
         }
         outcome.run.print_flaky(&palette);
         print_warnings_summary(&outcome.warnings, &palette);
@@ -945,6 +963,15 @@ fn execute_monorepo(
             "--output json streams live per-session results and can't be merged \
              across a monorepo's projects; use --report-json <path> for one merged \
              machine-readable document, or run --output json inside a single project"
+        );
+    }
+    // Same problem for TAP: each child would emit its own version header,
+    // numbering, and plan — concatenated, that is not one valid stream.
+    if cli.output.as_deref() == Some("tap") {
+        anyhow::bail!(
+            "--output tap can't be merged across a monorepo's projects; use \
+             --junitxml for per-project machine-readable results, or run \
+             --output tap inside a single project"
         );
     }
     let rels: Vec<String> = projects

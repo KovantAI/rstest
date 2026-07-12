@@ -5,6 +5,14 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- Four new CI `--output` styles beyond `github`: `gitlab` (failures
+  folded in collapsible job-log sections), `buildkite` (failures under
+  auto-expanded `+++` groups), `teamcity` (service messages per test,
+  grouped so parallel results never interleave), and `tap` (a pure TAP
+  version 13 stream with a trailing plan — no human chrome). Like
+  `--output json`, `tap` is refused at a monorepo root (concatenated
+  child streams would not be one valid TAP document).
+
 ## 0.1.0 — 2026-06-23
 
 - Vendored pytest upgraded 9.0.3 → 9.1.1 (re-extracted verbatim from the

@@ -56,6 +56,24 @@ pub struct RunMeta {
 /// A recorded failure: (nodeid, longrepr, sections of (header, body)).
 type Failure = (Option<usize>, String, String, Vec<(String, String)>);
 
+/// How the failures block wraps each failure — CI log UIs fold on
+/// vendor-specific markers.
+#[derive(Clone, Copy, PartialEq)]
+pub enum FailureWrap {
+    Plain,
+    /// GitLab `section_start`/`section_end`, collapsed by default.
+    GitlabSection,
+    /// Buildkite `+++` group header, expanded by default.
+    BuildkiteGroup,
+}
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Default)]
 pub struct Run {
     tests: BTreeMap<String, TestEntry>,
@@ -200,13 +218,44 @@ impl Run {
             .filter_map(|(id, e)| e.duration.map(|d| (id, d)))
     }
 
-    pub fn print_failures(&self, palette: &crate::color::Palette) {
+    /// The failures block, with each failure optionally wrapped in a CI
+    /// log-folding construct so the job UI collapses tracebacks per test.
+    pub fn print_failures(&self, palette: &crate::color::Palette, wrap: FailureWrap) {
+        let open = |header: &str, idx: usize| match wrap {
+            FailureWrap::Plain => {
+                println!(
+                    "\n{}",
+                    palette.bold_red(&format!("--- FAILED {header} ---"))
+                );
+            }
+            FailureWrap::GitlabSection => {
+                // Section ids must be unique within the job log; the
+                // pid keeps concurrent monorepo children (whose output
+                // the parent reprints) from colliding.
+                let id = format!("rstest_fail_{}_{idx}", std::process::id());
+                println!(
+                    "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{}",
+                    epoch_secs(),
+                    palette.bold_red(&format!("--- FAILED {header} ---"))
+                );
+            }
+            // The `+++` group header IS the headline in the Buildkite log
+            // UI — no extra dashes.
+            FailureWrap::BuildkiteGroup => {
+                println!("\n+++ {}", palette.bold_red(&format!("FAILED {header}")));
+            }
+        };
+        let close = |idx: usize| {
+            if wrap == FailureWrap::GitlabSection {
+                let id = format!("rstest_fail_{}_{idx}", std::process::id());
+                println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
+            }
+        };
+        let mut idx = 0usize;
         for (worker, nodeid, longrepr, sections) in &self.failures {
             let attribution = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-            println!(
-                "\n{}\n{longrepr}",
-                palette.bold_red(&format!("--- FAILED {attribution}{nodeid} ---"))
-            );
+            open(&format!("{attribution}{nodeid}"), idx);
+            println!("{longrepr}");
             for (name, content) in sections {
                 println!(
                     "{}\n{}",
@@ -214,12 +263,14 @@ impl Run {
                     content.trim_end()
                 );
             }
+            close(idx);
+            idx += 1;
         }
         for (nodeid, longrepr) in &self.collect_errors {
-            println!(
-                "\n{}\n{longrepr}",
-                palette.bold_red(&format!("--- FAILED {nodeid} ---"))
-            );
+            open(nodeid, idx);
+            println!("{longrepr}");
+            close(idx);
+            idx += 1;
         }
     }
 

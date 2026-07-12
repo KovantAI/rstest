@@ -270,6 +270,55 @@ def main():
         r.stdout[-300:],
     )
 
+    # --output tap: pure TAP stream — version header, one point per test,
+    # failure text as `#` diagnostics, trailing plan matching the count.
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "tap")
+    lines = [ln for ln in r.stdout.splitlines() if ln]
+    oks = [ln for ln in lines if ln.startswith("ok ")]
+    notoks = [ln for ln in lines if ln.startswith("not ok ")]
+    tap_ok = (
+        lines
+        and lines[0] == "TAP version 13"
+        and len(oks) == 2
+        and len(notoks) == 2
+        and lines[-1] == "1..4"
+        and any(ln.startswith("# ") for ln in lines)  # failure diagnostics
+        and "passed in" not in r.stdout  # no human chrome
+    )
+    check("output tap: pure stream + trailing plan", tap_ok, r.stdout[-400:])
+
+    # --output teamcity: a service-message group per test; failures carry
+    # escaped details. Human summary stays (TeamCity ignores plain lines).
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "teamcity")
+    tc = [ln for ln in r.stdout.splitlines() if ln.startswith("##teamcity[")]
+    tc_ok = (
+        sum("testStarted" in ln for ln in tc) == 4
+        and sum("testFinished" in ln for ln in tc) == 4
+        and sum("testFailed" in ln for ln in tc) == 2
+        and any("|n" in ln for ln in tc if "testFailed" in ln)  # escaping
+        and "2 passed" in r.stdout
+    )
+    check("output teamcity: service messages + summary", tc_ok, r.stdout[-400:])
+
+    # --output gitlab: dots log; each failure folded in a collapsed section.
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "gitlab")
+    gl_ok = (
+        r.stdout.count("section_start:") == 2
+        and r.stdout.count("section_end:") == 2
+        and "[collapsed=true]" in r.stdout
+        and "2 passed" in r.stdout
+    )
+    check("output gitlab: failures in collapsed sections", gl_ok, r.stdout[-400:])
+
+    # --output buildkite: each failure under an auto-expanded +++ group.
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "buildkite")
+    bk = [ln for ln in r.stdout.splitlines() if ln.startswith("+++ ")]
+    check(
+        "output buildkite: failures under +++ groups",
+        len(bk) == 2 and "2 passed" in r.stdout,
+        r.stdout[-400:],
+    )
+
     print("== multiprocessing-spawn children ==")
     # spawn-mode children re-import the worker's __main__ as __mp_main__
     # (runpy, no package context): the worker entry must import absolutely,

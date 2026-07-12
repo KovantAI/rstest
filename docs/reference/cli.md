@@ -53,7 +53,7 @@ workers). `--durations=0` shows everything; entries under
 `-vv`. Phase granularity matches pytest: setup, call, and teardown each
 get a line.
 
-### `--output <dots|verbose|bar|github|json>`
+### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|tap|json>`
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
@@ -99,6 +99,32 @@ diff:
 `file` comes from the nodeid path; `line` (1-based) from pytest's report
 location, omitted when none is available. The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
+
+`gitlab` renders the normal `dots` log; each failure in the end-of-run
+failures block is wrapped in a [GitLab CI collapsible
+section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
+(`section_start`/`section_end`, collapsed by default), so the job log
+folds tracebacks per test.
+
+`buildkite` renders the normal `dots` log; each failure is emitted under
+an auto-expanded [`+++` group
+header](https://buildkite.com/docs/pipelines/configure/managing-log-output),
+so failing tests open as their own groups in the Buildkite log UI.
+
+`teamcity` emits [TeamCity service
+messages](https://www.jetbrains.com/help/teamcity/service-messages.html)
+as each test finishes — a `testStarted`/`testFinished` pair per test,
+plus `testFailed` (with the escaped traceback as `details`) or
+`testIgnored` for skips/xfails. Each test's messages are emitted as one
+group, so parallel results never interleave. The banner and summary
+stay: TeamCity ignores non-service lines.
+
+`tap` makes stdout a pure [Test Anything Protocol](https://testanything.org)
+version 13 stream: one `ok N - nodeid` / `not ok N - nodeid` point per
+test as it finishes, failure text as `#` diagnostic lines, skips as
+`# SKIP <reason>`, xfail/xpass as `# TODO`, closed by the trailing
+`1..N` plan. No banner or human summary. For TAP harnesses (`prove`,
+Jenkins TAP plugin, etc.).
 
 `json` makes stdout a pure **newline-delimited JSON** stream — one
 `testreport` object per phase as each test finishes, closed by a
