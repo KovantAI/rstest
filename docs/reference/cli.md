@@ -307,6 +307,10 @@ retried (see [crash handling](troubleshooting.md#a-worker-crashed-what-happened-
 pytest-rerunfailures is neutralized inside workers, so nothing
 double-reruns.
 
+Reruns rescue a flake within one run; the flake history and
+[`--quarantine`](#-quarantine-file) manage it across runs — see
+[Flaky tests](../guides/flaky-tests.md).
+
 ### `--quarantine <FILE>`
 
 Ring-fence known-flaky tests without hiding them. `FILE` lists nodeids
@@ -332,7 +336,9 @@ Candidates come from the **flake history** every run records to
 The flaky and quarantined sections annotate each test with its history
 (`flaked 3x before, failed 1x`). Difference from `--reruns`: reruns
 paper over a flake within one run; quarantine is cross-run policy for
-tests a team has explicitly decided to tolerate while fixing.
+tests a team has explicitly decided to tolerate while fixing. Workflow,
+file format, and CI surfaces:
+[Flaky tests](../guides/flaky-tests.md).
 
 ### `--doctor-json <path>`
 
