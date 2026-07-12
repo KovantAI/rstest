@@ -1044,6 +1044,42 @@ def main():
         f"rc={r.returncode} " + r.stderr[-200:],
     )
 
+    print("== duration regression gate ==")
+    g.write(
+        "dreg/test_d.py",
+        "import os, time\n\n"
+        "def test_variable():\n"
+        "    time.sleep(float(os.environ.get('DREG_SLEEP', '0.1')))\n\n"
+        "def test_stable():\n"
+        "    time.sleep(0.05)\n",
+    )
+    ddir = g.tmp / "dreg"
+    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
+              env_extra={"DREG_SLEEP": "0.1"})
+    check(
+        "durations-regress: cold baseline skips, run green",
+        r.returncode == 0 and "no duration baseline yet" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
+              env_extra={"DREG_SLEEP": "0.1"})
+    check(
+        "durations-regress: warm baseline, no regressions",
+        r.returncode == 0 and "no regressions" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
+              env_extra={"DREG_SLEEP": "1.2"})
+    check(
+        "durations-regress: regression flagged, exit 1, stable test quiet",
+        r.returncode == 1
+        and "duration regressions" in r.stdout
+        and "test_variable" in r.stdout
+        and "test_stable" not in r.stdout.split("duration regressions")[1]
+        and "1 duration regression" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-150:],
+    )
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)

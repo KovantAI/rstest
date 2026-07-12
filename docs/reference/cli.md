@@ -134,6 +134,25 @@ the compatibility trade. Configurable via `[tool.rstest] collect`.
 With `--collect lazy`, `--dist loadscope|loadgroup` are rejected, and
 nodeid/`--pyargs` arguments fall back to full collection.
 
+### `--durations-regress <RATIO>`
+
+Gate CI on per-test duration regressions. After the run, each test's
+wall time is compared against the duration cache
+(`.rstest_cache/durations.json` — the same file LPT scheduling uses;
+restore it from your CI cache). Any test that grew past `RATIO` × its
+baseline is listed and the run exits 1:
+
+```
+=========== duration regressions (>= 2x baseline) ===========
+     0.10s ->    1.21s  tests/test_api.py::test_poll
+```
+
+Jitter-floored so CI noise can't flag: baselines under 50ms and
+absolute growth under 0.5s never count, and tests absent from the
+baseline (new or renamed) are skipped. A missing baseline file skips
+the comparison entirely (first run / cold cache). The comparison runs
+before the cache is refreshed with this run's times.
+
 ### `--shuffle[=SEED]`
 
 Run tests in a seeded random order (the pytest-randomly idea, applied to

@@ -5,6 +5,12 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--durations-regress <RATIO>`: gate CI on per-test duration
+  regressions vs the duration cache the scheduler already maintains.
+  Tests grown past RATIO x baseline are listed and the run exits 1;
+  jitter floors (50ms baseline, 0.5s absolute growth) keep CI noise
+  from flagging. Cold cache skips the comparison.
+
 - `--shuffle[=SEED]`: run tests in a seeded random order to flush out
   order dependencies on demand (pytest-randomly for the dispatch
   queue). The seed is printed for reproduction; affinity modes shuffle
