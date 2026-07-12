@@ -348,6 +348,17 @@ Write the doctor analysis as JSON (stable, versioned schema — currently
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
 
+### `--doctor-md <path>`
+
+Write the doctor analysis as GitHub-flavored markdown — the same signals
+as the terminal report, rendered as job-summary tables. Implies doctor
+instrumentation.
+
+Under GitHub Actions you rarely need the flag: any doctor run
+(`--doctor`, `--doctor-json`, or `--doctor-md`) automatically appends
+this markdown to `$GITHUB_STEP_SUMMARY`, so the report shows up on the
+run page with zero extra steps.
+
 ### `--watch`
 
 Watch the project and rerun on change. A change set consisting only of

@@ -18,6 +18,10 @@ between 0.0.x releases and are listed here.
   PR commit selects exactly the PR's files. An unfetched base ref is an
   error (fetch-depth: 0), never a silent full skip; an explicit rev
   disables the auto-targeting.
+- `--doctor-md <path>`: the doctor analysis as GitHub-flavored markdown
+  (job-summary tables). Under GitHub Actions any doctor run now appends
+  this markdown to `$GITHUB_STEP_SUMMARY` automatically, so the report
+  shows up on the run page without a post-processing step.
 
 ## 0.1.0 — 2026-06-23
 
