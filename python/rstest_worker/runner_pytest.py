@@ -5,6 +5,7 @@ semantics — fixtures, parametrize, classes, marks, conftest, plugin loading.
 rstest owns what happens around the session: scheduling, output, exit codes.
 """
 
+import inspect
 import os
 import sys
 
@@ -34,6 +35,27 @@ def _is_dist_internal(plugin):
     worker hits controller state that only exists on a real master."""
     mod = getattr(plugin, "__name__", None) or type(plugin).__module__
     return str(mod).split(".", 1)[0] in ("xdist", "pytest_cov")
+
+
+def _call_node_impl(impl, node, **kwargs):
+    """Invoke an xdist node hook (pytest_testnodeready / _testnodedown),
+    passing only the keyword args the impl actually declares.
+
+    xdist's hookspec for pytest_testnodedown is ``(node, error)``, but
+    real-world hooks often use the one-arg form ``(node)`` (e.g. pytest-html
+    via pytest-metadata). Passing ``error=`` unconditionally raises
+    ``TypeError: unexpected keyword argument 'error'``. Introspect the
+    signature and drop kwargs the impl won't accept; a ``**kwargs`` param
+    means accept everything."""
+    try:
+        params = inspect.signature(impl).parameters
+    except (ValueError, TypeError):
+        # Builtins / C hooks with no introspectable signature — best effort.
+        return impl(node=node, **kwargs)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return impl(node=node, **kwargs)
+    accepted = {k: v for k, v in kwargs.items() if k in params}
+    return impl(node=node, **accepted)
 
 
 class _XdistGatewayShim:
@@ -231,7 +253,7 @@ class StreamPlugin:
             impl = getattr(plugin, "pytest_testnodedown", None)
             if impl is not None:
                 try:
-                    impl(node=shim, error=payload.get("error"))
+                    _call_node_impl(impl, shim, error=payload.get("error"))
                 except Exception:
                     # Cleanup for a dead sibling must never poison THIS
                     # worker's session.
@@ -245,7 +267,12 @@ class StreamPlugin:
                 continue
             impl = getattr(plugin, name, None)
             if impl is not None:
-                impl(node=self._xdist_node, **kwargs)
+                try:
+                    _call_node_impl(impl, self._xdist_node, **kwargs)
+                except Exception:
+                    # A plugin's node hook must never poison this worker's
+                    # session — align with the crash-cleanup path.
+                    pass
 
     def pytest_sessionstart(self, session):
         # Retry any configure_node hooks deferred during configure (state they
