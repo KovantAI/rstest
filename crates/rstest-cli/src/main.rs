@@ -64,9 +64,10 @@ pub struct Cli {
     doctor_json: Option<PathBuf>,
 
     /// Write the doctor analysis as GitHub-flavored markdown (job-summary
-    /// ready). Implies doctor instrumentation. Under GitHub Actions any
-    /// doctor run already appends this to $GITHUB_STEP_SUMMARY
-    /// automatically; the flag is for a custom path.
+    /// ready). Implies doctor instrumentation. In CI any doctor run already
+    /// publishes this to the job summary automatically ($GITHUB_STEP_SUMMARY
+    /// on GitHub, `buildkite-agent annotate` on Buildkite); the flag is for
+    /// a custom path (and the way to surface it on GitLab/TeamCity).
     #[arg(long)]
     doctor_md: Option<PathBuf>,
 
@@ -893,7 +894,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         if let Some(path) = &cli.doctor_md {
             doctor::write_markdown(path, &report)?;
         }
-        doctor::append_github_summary(&report)?;
+        doctor::append_ci_summary(&report)?;
     }
     if let Some(path) = &cli.junitxml {
         junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;

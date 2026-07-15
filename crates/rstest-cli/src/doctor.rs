@@ -287,22 +287,64 @@ pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::
     Ok(())
 }
 
-/// Under GitHub Actions, append the markdown report to the job summary —
-/// zero-config: any doctor run on a runner shows up on the run page.
-pub fn append_github_summary(report: &DoctorReport) -> anyhow::Result<()> {
-    let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") else {
-        return Ok(());
-    };
-    if path.is_empty() {
+/// Publish the markdown report to the CI's job-summary surface, if any —
+/// zero-config: any doctor run on a supported runner shows up on the run
+/// page. GitHub Actions appends to `$GITHUB_STEP_SUMMARY`; Buildkite pipes
+/// it to `buildkite-agent annotate`. (GitLab and TeamCity have no native
+/// markdown job-summary surface — use `--doctor-md` and publish the file
+/// as an artifact there.)
+pub fn append_ci_summary(report: &DoctorReport) -> anyhow::Result<()> {
+    // GitHub Actions: append to the step-summary file (hard error on write
+    // failure — the path came from the runner, so a failure is real).
+    if let Some(path) = std::env::var("GITHUB_STEP_SUMMARY")
+        .ok()
+        .filter(|p| !p.is_empty())
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)?;
+        f.write_all(render_markdown(report).as_bytes())?;
         return Ok(());
     }
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    f.write_all(render_markdown(report).as_bytes())?;
+    // Buildkite: pipe the markdown to the agent as an info annotation.
+    // Best-effort — a missing/failing agent must not fail the test run
+    // (the annotation is cosmetic, unlike GitHub's guaranteed file path).
+    if std::env::var("BUILDKITE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some()
+    {
+        buildkite_annotate(&render_markdown(report));
+    }
     Ok(())
+}
+
+/// Feed markdown to `buildkite-agent annotate` over stdin. Swallows all
+/// errors (logging to stderr) — see `append_ci_summary`.
+fn buildkite_annotate(md: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let child = Command::new("buildkite-agent")
+        .args(["annotate", "--style", "info", "--context", "rstest-doctor"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rstest: skipping Buildkite annotation (buildkite-agent: {e})");
+            return;
+        }
+    };
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        let _ = stdin.write_all(md.as_bytes());
+    }
+    if let Err(e) = child.wait() {
+        eprintln!("rstest: buildkite-agent annotate failed: {e}");
+    }
 }
 
 pub fn render(r: &DoctorReport) {

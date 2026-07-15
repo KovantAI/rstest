@@ -85,13 +85,21 @@ class Gate:
             RSTEST_WORKER_PATH=str(REPO / "python"),
         )
         env.pop("PYTEST_ADDOPTS", None)
-        # Doctor runs auto-append to the job summary under GitHub Actions;
-        # keep the gate's fixture-suite reports out of the real run page.
+        # Doctor runs auto-publish to the CI job summary (GitHub step
+        # summary / Buildkite annotation); keep the gate's fixture-suite
+        # reports off the real run page.
         env.pop("GITHUB_STEP_SUMMARY", None)
-        # Bare --changed auto-targets the PR base when GITHUB_BASE_REF is
-        # set; the gate's fixture repos have no origin, so a PR CI run
-        # would break every --changed check. Tests opt in via env_extra.
-        env.pop("GITHUB_BASE_REF", None)
+        env.pop("BUILDKITE", None)
+        # Bare --changed auto-targets the PR/MR base when a CI exposes it;
+        # the gate's fixture repos have no origin, so a real PR CI run would
+        # break every --changed check. Tests opt in via env_extra.
+        for k in (
+            "GITHUB_BASE_REF",
+            "CI_MERGE_REQUEST_DIFF_BASE_SHA",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+            "BUILDKITE_PULL_REQUEST_BASE_BRANCH",
+        ):
+            env.pop(k, None)
         if env_extra:
             env.update(env_extra)
         return subprocess.run(
@@ -1139,6 +1147,36 @@ def main():
         "selection: explicit rev wins over GITHUB_BASE_REF",
         "auto-targets" not in r.stderr and "2 affected test file(s)" in r.stderr,
         r.stderr[-300:],
+    )
+    # Buildkite exposes the base as a branch name, resolved the same way.
+    r = g.run(
+        "--changed", "-v", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "mainline"},
+    )
+    check(
+        "selection: Buildkite base branch auto-targets PR base",
+        "auto-targets PR base origin/mainline" in r.stderr and "test_alpha" in r.stdout,
+        r.stderr[-300:],
+    )
+    # GitLab provides the exact diff-base SHA — used directly, no merge-base.
+    r = g.run(
+        "--changed", "-v", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": base_sha},
+    )
+    check(
+        "selection: GitLab diff-base SHA auto-targets MR base",
+        "auto-targets MR base" in r.stderr and "test_alpha" in r.stdout,
+        r.stderr[-300:],
+    )
+    # An unresolvable GitLab base SHA errors — never a silent full skip.
+    r = g.run(
+        "--changed", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": "0" * 40},
+    )
+    check(
+        "selection: missing GitLab base SHA errors, no silent skip",
+        r.returncode != 0 and "not in the local clone" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
     )
 
     print("== [tool.rstest] config ==")
