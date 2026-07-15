@@ -173,7 +173,7 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     // imbalance without needing any new timeline data from the workers.
     let parallel_efficiency = (workers > 1 && test_time > 0.0).then(|| {
         let mut by_worker: BTreeMap<&str, (f64, usize)> = BTreeMap::new();
-        for (_, e) in tests.iter() {
+        for e in tests.values() {
             if let Some(d) = e.duration {
                 let w = e.worker.as_deref().unwrap_or("serial");
                 let slot = by_worker.entry(w).or_default();
