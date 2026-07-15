@@ -301,7 +301,7 @@ def main():
     rj = g.tmp / "contract.json"
     g.run("basic/test_basic.py", "-n", "2", "--report-json", str(rj))
     doc = json.loads(rj.read_text(encoding="utf-8"))
-    check("report-json schema version", doc["meta"].get("schema") == 4, str(doc["meta"])[:200])
+    check("report-json schema version", doc["meta"].get("schema") == 5, str(doc["meta"])[:200])
     # schema 4: per-test source line (0-based, pytest report.location). BASIC
     # has a leading newline, so `test_passes` def sits on 0-based line 1.
     lines = {k.split("::")[-1]: v.get("lineno") for k, v in doc["tests"].items()}
@@ -1144,6 +1144,51 @@ def main():
         "flaky flagged in junit property",
         'property name="flaky"' in fx.read_text(encoding="utf-8"),
         fx.read_text(encoding="utf-8")[-300:],
+    )
+
+    print("== quarantine ==")
+    g.write(
+        "quar/test_q.py",
+        "def test_ok(): assert True\n\n"
+        "def test_known_flake(): assert False, 'known flake'\n\n"
+        "def test_real_bug(): assert 1 == 2\n",
+    )
+    qdir = g.tmp / "quar"
+    g.write("quar/quarantine.txt", "# known flakes\ntest_q.py::test_known_flake\n")
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", cwd=qdir)
+    check(
+        "quarantine: listed failure demoted, unlisted still fails",
+        r.returncode == 1
+        and "1 failed, 1 passed, 1 quarantined" in r.stdout
+        and "QUARANTINED test_q.py::test_known_flake" in r.stdout
+        and "FAILED" in r.stdout
+        and "QUARANTINED test_q.py::test_real_bug" not in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-400:],
+    )
+    g.write("quar/quarantine.txt", "test_q.py::*\n")
+    qx = g.tmp / "quar_junit.xml"
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt",
+              "--junitxml", str(qx), cwd=qdir)
+    jx = qx.read_text(encoding="utf-8")
+    check(
+        "quarantine: glob demotes all -> exit 0, junit green + flagged",
+        r.returncode == 0
+        and "2 quarantined" in r.stdout
+        and 'failures="0"' in jx
+        and jx.count('property name="quarantined"') == 2,
+        f"rc={r.returncode} " + r.stdout[-200:],
+    )
+    flog = json.loads((qdir / ".rstest_cache" / "flakes.json").read_text(encoding="utf-8"))
+    check(
+        "flake history: failures recorded across runs",
+        flog.get("test_q.py::test_real_bug", {}).get("failed", 0) >= 2,
+        str(flog)[:300],
+    )
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", cwd=qdir)
+    check(
+        "quarantine: history annotation in section",
+        "failed 2x before" in r.stdout or "failed 3x before" in r.stdout,
+        r.stdout[-400:],
     )
 
     print("== loadscope / loadgroup ==")

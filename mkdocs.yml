@@ -96,6 +96,7 @@ nav:
       - Migrating from pytest-xdist: guides/migrate-from-xdist.md
       - Parallel safety: guides/parallel-safety.md
       - Suite diagnostics: guides/doctor.md
+      - Flaky tests: guides/flaky-tests.md
       - Watch mode: guides/watch-mode.md
       - Monorepos: guides/monorepo.md
       - CI quickstart: guides/ci-quickstart.md

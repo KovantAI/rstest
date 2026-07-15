@@ -5,6 +5,14 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- Flake history + `--quarantine <file>`: every run records per-test
+  flaky/failed counts to `.rstest_cache/flakes.json` (sparse — only
+  tests with events). `--quarantine` demotes failures matching a list
+  of nodeids/globs to a non-fatal "quarantined" outcome: own summary
+  count and section (with history annotations), junit/report-json
+  property (report-json schema 5 adds the flag and counts key), exit 0
+  when every failure is quarantined. New failures outside the list
+  still fail the run.
 - `--doctor-md <path>`: the doctor analysis as GitHub-flavored markdown
   (job-summary tables). Under GitHub Actions any doctor run now appends
   this markdown to `$GITHUB_STEP_SUMMARY` automatically, so the report
