@@ -100,6 +100,7 @@ nav:
       - Watch mode: guides/watch-mode.md
       - Monorepos: guides/monorepo.md
       - CI quickstart: guides/ci-quickstart.md
+      - Sharding across CI jobs: guides/sharding.md
       - Plugins: guides/plugins.md
       - Coverage: guides/coverage.md
   - Concepts:

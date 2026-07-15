@@ -5,6 +5,18 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--shard <K/N>`: split one suite across `N` independent CI jobs and run
+  only shard `K` (1-based). Buckets are balanced by the duration cache
+  (longest-processing-time-first bin-packing; even count split on a cold
+  cache), disjoint, and cover the whole suite, so merging the per-job
+  JUnit reconstructs the full run. Orthogonal to `-n`; shards at file
+  granularity under `--collect lazy`; composes with `--changed`. Under an
+  affinity `--dist` mode (`loadfile`/`loadscope`/`loadgroup`) it partitions
+  at whole-group granularity, so a file/scope/xdist_group never splits
+  across shards (the run-together / in-order contract those modes provide).
+  Requires `-n >= 2`; refused with `--shuffle` and `--dist each`. See the
+  Sharding guide.
+
 - `--output azure`: Azure Pipelines style — the normal `dots` log plus a
   `##vso[task.logissue type=error;sourcepath=;linenumber=]` command per
   failure (inline issue on the PR file), and `type=warning` for
@@ -23,6 +35,7 @@ between 0.0.x releases and are listed here.
   version 13 stream with a trailing plan — no human chrome). Like
   `--output json`, `tap` is refused at a monorepo root (concatenated
   child streams would not be one valid TAP document).
+
 - `--durations-regress <RATIO>`: gate CI on per-test duration
   regressions vs the duration cache the scheduler already maintains.
   Tests grown past RATIO x baseline are listed and the run exits 1;
