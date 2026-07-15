@@ -48,4 +48,13 @@ def test_uses_shared_pool():
 
 Under [`--dist loadgroup`](cli.md#-dist-loadloadfileloadscopeloadgroupeach),
 all tests sharing a group name run on the same worker — across files.
-pytest-xdist-compatible; registered automatically.
+pytest-xdist-compatible.
+
+rstest registers the marker automatically, so `--strict-markers` never
+complains about it under rstest — even when pytest-xdist is not installed.
+Portability caveat: under **plain pytest**, `xdist_group` is xdist's own
+marker, registered only when pytest-xdist is installed; a plain-pytest run
+with `--strict-markers` and no xdist installed will reject it. Migrating off
+xdist, you keep the marker either way — rstest honors it and plain pytest
+treats it as inert (a no-op) as long as `--strict-markers` isn't forcing the
+issue.

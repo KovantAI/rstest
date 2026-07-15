@@ -23,7 +23,9 @@ in parallel modes (and crash-aware — a test that kills its worker
 retries on the replacement). The plugin itself is neutralized inside
 pool workers so nothing double-reruns; at `-n 0` the plugin keeps its
 native behavior and handles reruns itself. Two scope notes: rstest's
-`--reruns` requires `-n ≥ 2`, and is rejected under `--dist each`.
+`--reruns` requires `-n ≥ 2`, and is rejected under `--dist each` (that
+mode exists to expose per-worker outcome differences, so retrying failures
+would defeat it — see [`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
 
 ## What your plugins see
 

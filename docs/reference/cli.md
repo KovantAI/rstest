@@ -42,7 +42,10 @@ Distribution mode. Default `load`.
   files; unmarked tests distribute individually.
 - `each` — every worker runs the FULL suite. Counts are per-worker
   totals and outcomes are keyed `nodeid [gwN]`; `--reruns` is
-  rejected; the duration cache is not updated. Honest scope note:
+  rejected (the mode exists to *expose* per-worker outcome
+  differences, and rerunning failures would mask exactly the
+  flakiness `each` is there to surface); the duration cache is not
+  updated. Honest scope note:
   every worker uses the same interpreter, so this validates isolation
   and shakes out flakiness — xdist's heterogeneous-environment use
   (`--tx` gateways) has no rstest equivalent.
@@ -584,6 +587,11 @@ with inherited stdio, and pytest renders its own output:
 ```
 --collect-only / --co     -s / --capture=...     --pdb     --trace
 ```
+
+This **overrides any `-n` value or `[tool.rstest]` worker count without
+error** — e.g. `rstest -n 8 --pdb` runs one session, not eight. `--reruns`
+is likewise inert on this path (like `-n 0/1`). Drop the passthrough flag to
+get the pool back.
 
 The stepwise flags also force single-worker mode, but for sequencing rather
 than IO: stepwise resumes from a single nodeid cursor into one global

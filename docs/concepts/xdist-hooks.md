@@ -66,6 +66,29 @@ finish — after the run-test loop has torn down all fixtures (session scope
 included), the same ordering xdist's controller observes. Database drops in
 that hook run after your session fixtures have finalized.
 
+## conftest hooks run per-worker
+
+The master-side node hooks above are the special case. **Every other
+conftest hook** — `pytest_configure`, `pytest_collection_modifyitems`,
+`pytest_sessionstart`/`pytest_sessionfinish`, `pytest_runtest_*`, and your
+own — runs inside each worker, because each worker is a full pytest session.
+So at `-n 8` a `pytest_configure` fires eight times, once per process; this
+is the same model as xdist, where each worker also runs its own
+`pytest_configure`. Consequences:
+
+- A hook that mutates shared external state (writes a file, seeds a DB,
+  increments a counter) runs N times concurrently — make it idempotent or
+  key it on `RSTEST_WORKER_ID` / `workerinput["workerid"]`.
+- In the default (`--collect full`) mode each worker performs a **full**
+  collection — `pytest_collection_modifyitems` sees the *entire* suite on
+  every worker, exactly as under xdist; the orchestrator then dispatches only
+  that worker's share to run. Under [`--collect lazy`](../reference/cli.md#-collect-fulllazy)
+  the orchestrator assigns files and each worker collects only its assigned
+  files on demand, so the hook sees a partial item set — run at `-n 0` (or
+  `--collect full`) if a hook must see the whole suite.
+- Hooks assuming single-process semantics (a module-level global that
+  accumulates across the run) will not see other workers' contributions.
+
 ## Crash cleanup
 
 Crash cleanup is best-effort and **weaker than xdist's**: xdist's master is a

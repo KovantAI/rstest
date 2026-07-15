@@ -54,6 +54,26 @@ to xdist semantics. Two consequences:
 `rstest --doctor` prints a warning for every session fixture that ran more
 than once, with this exact caveat.
 
+### Teardown timing and `--setup-show` / `--setup-plan`
+
+Each worker finalizes its own fixtures at **its own** session end — a
+session-scoped fixture's teardown runs once that worker has finished its
+last test, not when the whole run ends. Ordering within a worker is
+pytest's usual reverse-of-setup; there is no cross-worker teardown
+ordering, since workers finish independently. (Cleanup that must run after
+*every* worker — dropping a shared DB — belongs in a
+[`pytest_testnodedown`-style hook](../concepts/xdist-hooks.md), not a
+session fixture.)
+
+`--setup-show` and `--setup-plan` are **not** passthrough-IO flags, so they
+run in the parallel pool: each worker prints its own setup/teardown trace,
+so the output is duplicated and interleaved across workers. For a single
+clean fixture plan, run them at `-n 0`:
+
+```console
+$ rstest -n 0 --setup-plan        # one worker, one readable plan
+```
+
 ## Worker identity
 
 Tests and fixtures can read the worker they run on:
