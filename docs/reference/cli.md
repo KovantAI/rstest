@@ -469,7 +469,7 @@ file format, and CI surfaces:
 ### `--doctor-json <path>`
 
 Write the doctor analysis as JSON (stable, versioned schema — currently
-`1`) for CI trending. Implies doctor instrumentation; combine with
+`2`) for CI trending. Implies doctor instrumentation; combine with
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
 

@@ -1043,7 +1043,7 @@ def main():
     d = json.loads(dj.read_text(encoding="utf-8"))
     check(
         "doctor json schema",
-        d.get("schema") == 1
+        d.get("schema") == 2
         and d.get("wait_bound")
         and any("test_sleepy" in t["nodeid"] for t in d["wait_bound"]["tests"]),
         str(d)[:200],

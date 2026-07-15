@@ -17,7 +17,7 @@ use crate::proto::FixtureStat;
 use crate::report::Run;
 
 /// Bump when the JSON shape changes incompatibly.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 pub struct DoctorReport {
@@ -31,6 +31,7 @@ pub struct DoctorReport {
     cpu_time_seconds: f64,
     wait_bound: Option<WaitBound>,
     parallel_floor: Option<ParallelFloor>,
+    parallel_efficiency: Option<ParallelEfficiency>,
     fixtures: Vec<FixtureEntry>,
     slowest_files: Vec<FileEntry>,
 }
@@ -60,6 +61,36 @@ struct ParallelFloor {
 struct GateTest {
     nodeid: String,
     duration: f64,
+}
+
+/// Realized parallel speedup measured from an actual run: how much of the
+/// worker budget the run actually converted into wall-clock savings, plus
+/// the per-worker load balance that caps it. Unlike `ParallelFloor` (a
+/// static pre-run estimate), this is the after-the-fact answer to "why
+/// isn't `-n auto` faster?". Only emitted for multi-worker pool runs.
+#[derive(Serialize)]
+struct ParallelEfficiency {
+    /// test_time / wall. May exceed `ideal_speedup` for wait-bound suites,
+    /// where overlapping sleeps/IO run more tests at once than there are
+    /// cores.
+    realized_speedup: f64,
+    /// Worker count (`-n`) — the ceiling for a purely CPU-bound suite.
+    ideal_speedup: usize,
+    /// 100 * realized / ideal. >100% signals wait-bound overlap.
+    efficiency_pct: f64,
+    /// Busy time summed per worker, descending — the load-balance picture.
+    workers_busy: Vec<WorkerLoad>,
+    /// 100 * (busiest - idlest) / busiest. High = uneven distribution.
+    imbalance_pct: f64,
+    /// Slowest single test: the hard floor no worker count beats.
+    long_pole_seconds: f64,
+}
+
+#[derive(Serialize)]
+struct WorkerLoad {
+    worker: String,
+    busy_seconds: f64,
+    tests: usize,
 }
 
 #[derive(Serialize)]
@@ -136,6 +167,56 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
         })
     });
 
+    // -- Parallel efficiency (realized speedup + worker load balance) ------
+    // Only meaningful for multi-worker pool runs. Groups the per-test
+    // durations already collected by their recorded worker to expose load
+    // imbalance without needing any new timeline data from the workers.
+    let parallel_efficiency = (workers > 1 && test_time > 0.0).then(|| {
+        let mut by_worker: BTreeMap<&str, (f64, usize)> = BTreeMap::new();
+        for e in tests.values() {
+            if let Some(d) = e.duration {
+                let w = e.worker.as_deref().unwrap_or("serial");
+                let slot = by_worker.entry(w).or_default();
+                slot.0 += d;
+                slot.1 += 1;
+            }
+        }
+        let mut workers_busy: Vec<WorkerLoad> = by_worker
+            .into_iter()
+            .map(|(worker, (busy, n))| WorkerLoad {
+                worker: worker.to_string(),
+                busy_seconds: busy,
+                tests: n,
+            })
+            .collect();
+        workers_busy.sort_by(|a, b| b.busy_seconds.total_cmp(&a.busy_seconds));
+        let max_busy = workers_busy.first().map_or(0.0, |w| w.busy_seconds);
+        // Workers that ran no test are absent from `by_worker` but still part
+        // of the pool: their busy time is 0. Treating min as the smallest
+        // *observed* load hides the worst imbalance (all work on one worker
+        // reads as 0% instead of ~100%). Seed idle workers at 0.
+        let min_busy = if workers_busy.len() < workers {
+            0.0
+        } else {
+            workers_busy.last().map_or(0.0, |w| w.busy_seconds)
+        };
+        let imbalance_pct = if max_busy > 0.0 {
+            100.0 * (max_busy - min_busy) / max_busy
+        } else {
+            0.0
+        };
+        let realized = test_time / wall.max(f64::EPSILON);
+        ParallelEfficiency {
+            realized_speedup: realized,
+            ideal_speedup: workers,
+            efficiency_pct: 100.0 * realized / workers as f64,
+            workers_busy,
+            imbalance_pct,
+            // durations was sorted descending by the parallel-floor block.
+            long_pole_seconds: durations.first().map_or(0.0, |(_, d, _)| *d),
+        }
+    });
+
     // -- Fixtures ----------------------------------------------------------
     let mut fx: Vec<FixtureEntry> = fixtures
         .iter()
@@ -176,6 +257,7 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
         cpu_time_seconds: cpu_time,
         wait_bound,
         parallel_floor,
+        parallel_efficiency,
         fixtures: fx,
         slowest_files: files,
     }
@@ -238,6 +320,34 @@ pub fn render_markdown(r: &DoctorReport) -> String {
             md.push_str("| Duration | Gate test |\n|---:|---|\n");
             for t in p.gate_tests.iter().take(5) {
                 let _ = writeln!(md, "| {:.2}s | `{}` |", t.duration, t.nodeid);
+            }
+            md.push('\n');
+        }
+    }
+
+    if let Some(pe) = &r.parallel_efficiency {
+        let _ = writeln!(
+            md,
+            "**Parallel efficiency:** {:.1}× realized of {}× possible ({:.0}%). \
+             Long pole {:.1}s; {:.0}% load imbalance between busiest and idlest \
+             worker.\n",
+            pe.realized_speedup,
+            pe.ideal_speedup,
+            pe.efficiency_pct,
+            pe.long_pole_seconds,
+            pe.imbalance_pct
+        );
+        if pe.efficiency_pct > 105.0 {
+            md.push_str("> Over 100% means tests overlap beyond core count (wait-bound).\n\n");
+        }
+        if !pe.workers_busy.is_empty() {
+            md.push_str("| Worker | Busy | Tests |\n|---|---:|---:|\n");
+            for w in pe.workers_busy.iter().take(8) {
+                let _ = writeln!(
+                    md,
+                    "| `{}` | {:.2}s | {} |",
+                    w.worker, w.busy_seconds, w.tests
+                );
             }
             md.push('\n');
         }
@@ -387,6 +497,37 @@ pub fn render(r: &DoctorReport) {
         }
     }
 
+    if let Some(pe) = &r.parallel_efficiency {
+        println!(
+            "\nPARALLEL EFFICIENCY: {:.1}x realized of {}x possible ({:.0}%).",
+            pe.realized_speedup, pe.ideal_speedup, pe.efficiency_pct
+        );
+        if pe.efficiency_pct > 105.0 {
+            println!(
+                "  over 100%: tests overlap beyond core count \
+                 (wait-bound; see WAIT-BOUND above)."
+            );
+        }
+        println!(
+            "  long pole: {:.1}s (no worker count finishes faster)",
+            pe.long_pole_seconds
+        );
+        println!("  worker load (busy time):");
+        for w in pe.workers_busy.iter().take(8) {
+            println!(
+                "    {:<8} {:7.2}s ({} tests)",
+                w.worker, w.busy_seconds, w.tests
+            );
+        }
+        if pe.workers_busy.len() > 8 {
+            println!("    ... and {} more", pe.workers_busy.len() - 8);
+        }
+        println!(
+            "  imbalance: {:.0}% between busiest and idlest worker",
+            pe.imbalance_pct
+        );
+    }
+
     let interesting: Vec<&FixtureEntry> = r
         .fixtures
         .iter()
@@ -447,6 +588,25 @@ mod tests {
                     duration: 8.4,
                 }],
             }),
+            parallel_efficiency: Some(ParallelEfficiency {
+                realized_speedup: 3.3,
+                ideal_speedup: 4,
+                efficiency_pct: 82.5,
+                workers_busy: vec![
+                    WorkerLoad {
+                        worker: "gw0".into(),
+                        busy_seconds: 16.0,
+                        tests: 6,
+                    },
+                    WorkerLoad {
+                        worker: "gw1".into(),
+                        busy_seconds: 14.0,
+                        tests: 6,
+                    },
+                ],
+                imbalance_pct: 12.5,
+                long_pole_seconds: 8.4,
+            }),
             fixtures: vec![FixtureEntry {
                 name: "db".into(),
                 scope: "session".into(),
@@ -470,6 +630,8 @@ mod tests {
         assert!(md.contains("| 5.00s | 5.10s | `tests/test_a.py::test_sleepy` |"));
         assert!(md.contains("**Parallel floor:**"));
         assert!(md.contains("| 8.40s | `tests/test_a.py::test_long` |"));
+        assert!(md.contains("**Parallel efficiency:** 3.3× realized of 4× possible (82%)"));
+        assert!(md.contains("| `gw0` | 16.00s | 6 |"));
         assert!(md.contains("### Fixture hotspots"));
         assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
         assert!(md.contains("### Slowest files"));
@@ -481,5 +643,85 @@ mod tests {
         let md = render_markdown(&report(0));
         assert!(md.contains("No timing data collected."));
         assert!(!md.contains("Wait-bound"));
+    }
+
+    /// Record one completed test (setup/call/teardown) on `worker` with the
+    /// given call duration, mirroring what the pool feeds `Run::record`.
+    fn record_test(run: &mut Run, nodeid: &str, worker: usize, dur: f64) {
+        let r = |when: &str, duration: f64| crate::proto::Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: "passed".into(),
+            duration,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+        };
+        run.record(Some(worker), r("setup", 0.0));
+        run.record(Some(worker), r("call", dur));
+        run.record(Some(worker), r("teardown", 0.0));
+    }
+
+    #[test]
+    fn all_work_on_one_worker_reports_max_imbalance() {
+        // -n 8 but every test lands on gw0: the seven idle workers are
+        // absent from the per-worker map, yet imbalance must read ~100%,
+        // not 0%.
+        let mut run = Run::default();
+        for i in 0..4 {
+            record_test(&mut run, &format!("t.py::t{i}"), 0, 2.0);
+        }
+        let pe = analyze(&run, &[], 8.0, 8)
+            .parallel_efficiency
+            .expect("multi-worker run has efficiency");
+        assert_eq!(pe.workers_busy.len(), 1);
+        assert!(
+            (pe.imbalance_pct - 100.0).abs() < 1e-6,
+            "imbalance {} should be ~100%",
+            pe.imbalance_pct
+        );
+        // test_time 8.0 over wall 8.0 => 1× realized of 8× possible.
+        assert!((pe.realized_speedup - 1.0).abs() < 1e-6);
+        assert_eq!(pe.ideal_speedup, 8);
+        assert!((pe.efficiency_pct - 12.5).abs() < 1e-6);
+        assert!((pe.long_pole_seconds - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn balanced_workers_report_low_imbalance() {
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::a", 0, 10.0);
+        record_test(&mut run, "t.py::b", 1, 10.0);
+        let pe = analyze(&run, &[], 10.0, 2)
+            .parallel_efficiency
+            .expect("multi-worker run has efficiency");
+        assert_eq!(pe.workers_busy.len(), 2);
+        assert!(
+            pe.imbalance_pct.abs() < 1e-6,
+            "imbalance {} should be 0%",
+            pe.imbalance_pct
+        );
+        // 20.0s test time over 10.0s wall => 2× of 2× possible.
+        assert!((pe.realized_speedup - 2.0).abs() < 1e-6);
+        assert!((pe.efficiency_pct - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn some_idle_workers_still_counted() {
+        // 4 workers configured, 3 active, one loaded heavier: min must be
+        // the idle 0, so imbalance reflects the heaviest vs idle gap.
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::a", 0, 8.0);
+        record_test(&mut run, "t.py::b", 1, 4.0);
+        record_test(&mut run, "t.py::c", 2, 4.0);
+        let pe = analyze(&run, &[], 9.0, 4)
+            .parallel_efficiency
+            .expect("multi-worker run has efficiency");
+        assert_eq!(pe.workers_busy.len(), 3);
+        // max 8.0, min 0.0 (idle gw3) => 100%.
+        assert!((pe.imbalance_pct - 100.0).abs() < 1e-6);
     }
 }

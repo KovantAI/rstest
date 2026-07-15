@@ -5,6 +5,13 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--doctor` PARALLEL EFFICIENCY section: the realized parallel speedup
+  measured from the run just finished (`test time / wall` vs worker
+  count), the per-worker busy-time load balance, and the long pole that
+  caps it — the after-the-fact answer to "why isn't `-n auto` faster?".
+  Emitted for multi-worker runs in the terminal report, `--doctor-md`,
+  and `--doctor-json`; the doctor JSON schema is bumped `1` → `2`
+  (adds `parallel_efficiency`).
 - `--shard <K/N>`: split one suite across `N` independent CI jobs and run
   only shard `K` (1-based). Buckets are balanced by the duration cache
   (longest-processing-time-first bin-packing; even count split on a cold
