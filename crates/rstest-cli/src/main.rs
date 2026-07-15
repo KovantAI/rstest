@@ -64,6 +64,13 @@ pub struct Cli {
     #[arg(long)]
     doctor_json: Option<PathBuf>,
 
+    /// Write the doctor analysis as GitHub-flavored markdown (job-summary
+    /// ready). Implies doctor instrumentation. Under GitHub Actions any
+    /// doctor run already appends this to $GITHUB_STEP_SUMMARY
+    /// automatically; the flag is for a custom path.
+    #[arg(long)]
+    doctor_md: Option<PathBuf>,
+
     /// Parallel-readiness preflight: collect the suite twice and report tests
     /// whose ids are unstable (memory addresses / uuids / timestamps in
     /// parametrize ids) — the class that forces a suite to -n 0 — then run
@@ -440,6 +447,13 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--quarantine=") => own.push(arg),
+            "--doctor-md" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--doctor-md=") => own.push(arg),
             "--junitxml" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -590,7 +604,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         None => progress::Mode::Dots,
     };
     let durations = parse_durations(&args);
-    if cli.doctor || cli.doctor_json.is_some() {
+    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() {
         // Workers inherit the environment; this flips on cpu/fixture
         // instrumentation in the shim plugin.
         std::env::set_var("RSTEST_DOCTOR", "1");
@@ -637,7 +651,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let effective_changed = cli
         .changed
         .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
+        .map(|rev| select::resolve_base_rev(&rev))
+        .transpose()?;
     if let Some(rev) = &effective_changed {
         let rev = if rev == "HEAD" {
             None
@@ -880,7 +896,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         }
     }
 
-    if (cli.doctor || cli.doctor_json.is_some()) && !passthrough {
+    if (cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some()) && !passthrough {
         let report = doctor::analyze(
             &outcome.run,
             &merge_fixtures(outcome.fixtures),
@@ -895,6 +911,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         if let Some(path) = &cli.doctor_json {
             doctor::write_json(path, &report)?;
         }
+        if let Some(path) = &cli.doctor_md {
+            doctor::write_markdown(path, &report)?;
+        }
+        doctor::append_github_summary(&report)?;
     }
     if let Some(path) = &cli.junitxml {
         junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
@@ -1016,10 +1036,14 @@ fn execute_monorepo(
     // repo-wide changed set. Directly-changed projects keep --changed
     // (child-local narrowing); dependents (via pyproject dependency
     // names, transitively) run their FULL suite; the rest are skipped.
+    // Resolved once here; children receive the explicit rev (line below,
+    // --changed={rev}) so they never re-resolve.
     let mono_changed = cli
         .changed
         .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
+        .map(|rev| select::resolve_base_rev(&rev))
+        .transpose()?;
     let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
         Some(rev) => {
             let rev = if rev == "HEAD" {
@@ -1144,6 +1168,10 @@ fn execute_monorepo(
         }
         if let Some(p) = &cli.doctor_json {
             cmd.arg("--doctor-json")
+                .arg(root.join(mono::suffixed(p, &slug)));
+        }
+        if let Some(p) = &cli.doctor_md {
+            cmd.arg("--doctor-md")
                 .arg(root.join(mono::suffixed(p, &slug)));
         }
         cmd.args(args);
@@ -1535,6 +1563,16 @@ mod tests {
     fn split_equals_forms() {
         let (own, session) = split_args(v(&["--reruns=2", "--junitxml=o.xml", "-v"]));
         assert_eq!(own, v(&["rstest", "--reruns=2", "--junitxml=o.xml"]));
+        assert_eq!(session, v(&["-v"]));
+    }
+
+    #[test]
+    fn split_owns_doctor_md() {
+        let (own, session) = split_args(v(&["--doctor-md", "d.md", "--doctor-md=e.md", "-v"]));
+        assert_eq!(
+            own,
+            v(&["rstest", "--doctor-md", "d.md", "--doctor-md=e.md"])
+        );
         assert_eq!(session, v(&["-v"]));
     }
 }
