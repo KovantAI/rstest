@@ -10,9 +10,12 @@ between 0.0.x releases and are listed here.
   (longest-processing-time-first bin-packing; even count split on a cold
   cache), disjoint, and cover the whole suite, so merging the per-job
   JUnit reconstructs the full run. Orthogonal to `-n`; shards at file
-  granularity under `--collect lazy`; composes with `--changed`. Requires
-  `-n >= 2`; refused with `--shuffle` and `--dist each`. See the Sharding
-  guide.
+  granularity under `--collect lazy`; composes with `--changed`. Under an
+  affinity `--dist` mode (`loadfile`/`loadscope`/`loadgroup`) it partitions
+  at whole-group granularity, so a file/scope/xdist_group never splits
+  across shards (the run-together / in-order contract those modes provide).
+  Requires `-n >= 2`; refused with `--shuffle` and `--dist each`. See the
+  Sharding guide.
 
 - `--output azure`: Azure Pipelines style — the normal `dots` log plus a
   `##vso[task.logissue type=error;sourcepath=;linenumber=]` command per

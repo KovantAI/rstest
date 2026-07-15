@@ -46,6 +46,11 @@ per-shard JUnit reconstructs the full run.
       identical-partition guarantee) or `--dist each`.
     - Works with `--collect lazy` too, where it shards at **file**
       granularity (coarser balance).
+    - Under an affinity `--dist` mode (`loadfile` / `loadscope` /
+      `loadgroup`) it partitions at **whole-group** granularity: a
+      file / scope / `xdist_group` moves as one unit and never splits
+      across shards, preserving the run-together / in-order contract
+      those modes exist to provide.
     - Composes with `--changed`: selection narrows the file set first,
       then the shard partitions the survivors.
 

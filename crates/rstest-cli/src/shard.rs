@@ -88,6 +88,54 @@ pub fn shard_indices(ids: &[String], cache: &HashMap<String, f64>, k: usize, n: 
     out
 }
 
+/// Indices of `ids` assigned to shard `k` of `n`, partitioning at GROUP
+/// granularity: every index sharing a `Some(key)` moves as one unit, so an
+/// affinity group (file / scope / xdist_group) is never split across shards
+/// — the run-together / in-order contract the `--dist` affinity modes exist
+/// to provide. `keys[i] == None` makes index `i` its own singleton group.
+/// A group weighs the sum of its members' cached durations; groups are LPT
+/// bin-packed exactly like individual tests. Kept members come back in
+/// collection order. `n <= 1` keeps everything.
+pub fn shard_groups(
+    ids: &[String],
+    keys: &[Option<String>],
+    cache: &HashMap<String, f64>,
+    k: usize,
+    n: usize,
+) -> Vec<u64> {
+    if n <= 1 {
+        return (0..ids.len() as u64).collect();
+    }
+    let weights = weights_from(ids, cache);
+    // Collect groups in first-seen order; each keyless index is its own group.
+    let mut order: Vec<String> = Vec::new();
+    let mut members: HashMap<String, Vec<u64>> = HashMap::new();
+    for (i, key) in keys.iter().enumerate() {
+        let g = match key {
+            Some(k) => k.clone(),
+            None => format!("\0singleton\0{i}"),
+        };
+        members.entry(g.clone()).or_insert_with(|| {
+            order.push(g.clone());
+            Vec::new()
+        });
+        members.get_mut(&g).unwrap().push(i as u64);
+    }
+    let group_weights: Vec<f64> = order
+        .iter()
+        .map(|g| members[g].iter().map(|&i| weights[i as usize]).sum())
+        .collect();
+    let assign = lpt_assign(&group_weights, n);
+    let mut out: Vec<u64> = order
+        .iter()
+        .zip(&assign)
+        .filter(|(_, &b)| b == k - 1)
+        .flat_map(|(g, _)| members[g].iter().copied())
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 /// Files assigned to shard `k` of `n` (k 1-based). Each file weighs the sum
 /// of its tests' cached durations (the lazy pool shards at file grain).
 /// Preserves the incoming file order within the kept bucket.
@@ -217,5 +265,58 @@ mod tests {
     fn single_shard_keeps_all() {
         let names = ids(&["a", "b", "c"]);
         assert_eq!(shard_indices(&names, &HashMap::new(), 1, 1), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn groups_never_split_and_partition() {
+        // Two files, several tests each. No test of a file may land in a
+        // different shard than its siblings; union == full set; disjoint.
+        let names = ids(&[
+            "a.py::t0", "a.py::t1", "a.py::t2", "b.py::t0", "b.py::t1", "c.py::t0",
+        ]);
+        let keys: Vec<Option<String>> = names
+            .iter()
+            .map(|id| Some(id.split("::").next().unwrap().to_string()))
+            .collect();
+        let cache: HashMap<String, f64> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i as f64))
+            .collect();
+        let n = 3;
+        let mut seen = Vec::new();
+        for k in 1..=n {
+            let bucket = shard_groups(&names, &keys, &cache, k, n);
+            // Every file present in this bucket is present in full.
+            for &window in &["a.py", "b.py", "c.py"] {
+                let in_bucket: Vec<u64> = bucket
+                    .iter()
+                    .copied()
+                    .filter(|&i| names[i as usize].starts_with(window))
+                    .collect();
+                let total: Vec<u64> = (0..names.len() as u64)
+                    .filter(|&i| names[i as usize].starts_with(window))
+                    .collect();
+                assert!(
+                    in_bucket.is_empty() || in_bucket == total,
+                    "file {window} split across shards: {in_bucket:?} vs {total:?}"
+                );
+            }
+            seen.extend(bucket);
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (0..names.len() as u64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn keyless_indices_are_singletons() {
+        // None keys behave like independent tests (load mode parity).
+        let names = ids(&["t0", "t1", "t2", "t3"]);
+        let keys = vec![None, None, None, None];
+        let empty = HashMap::new();
+        let sizes: Vec<usize> = (1..=2)
+            .map(|k| shard_groups(&names, &keys, &empty, k, 2).len())
+            .collect();
+        assert_eq!(sizes, vec![2, 2]);
     }
 }

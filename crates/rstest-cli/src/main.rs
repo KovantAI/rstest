@@ -200,7 +200,9 @@ pub struct Cli {
     /// job) and runs its bucket; a cold cache falls back to an even
     /// count split. Buckets are disjoint and cover the whole suite, so
     /// merging the per-job JUnit reconstructs the full run. Orthogonal to
-    /// -n: each shard still runs its slice across local workers.
+    /// -n: each shard still runs its slice across local workers. Under an
+    /// affinity --dist mode (loadfile/loadscope/loadgroup) it partitions at
+    /// whole-group grain so a file/scope/group never splits across shards.
     #[arg(long, value_name = "K/N")]
     shard: Option<String>,
 }

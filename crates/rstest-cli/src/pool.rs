@@ -393,9 +393,54 @@ pub fn run_pool(
                     if dispatch.is_none() && dist != Dist::Each {
                         // --shard: keep only bucket K's node-ids; the rest are
                         // deselected (never dispatched). Balanced by the same
-                        // duration cache the dispatch order uses.
+                        // duration cache the dispatch order uses. Under an
+                        // affinity dist mode we partition at group granularity
+                        // (whole file / scope / xdist_group per shard) so a
+                        // group is never split across CI jobs — splitting it
+                        // would break the run-together / in-order contract the
+                        // affinity mode exists to provide.
                         let keep = shard.map(|(k, total)| {
-                            let idx = crate::shard::shard_indices(&ids, &duration_cache, k, total);
+                            let idx = match dist {
+                                Dist::Loadfile | Dist::Loadscope => {
+                                    let keys: Vec<Option<String>> = ids
+                                        .iter()
+                                        .map(|id| {
+                                            Some(match dist {
+                                                Dist::Loadfile => {
+                                                    id.split("::").next().unwrap_or(id).to_string()
+                                                }
+                                                _ => id
+                                                    .rsplit_once("::")
+                                                    .map(|(head, _)| head)
+                                                    .unwrap_or(id)
+                                                    .to_string(),
+                                            })
+                                        })
+                                        .collect();
+                                    crate::shard::shard_groups(
+                                        &ids,
+                                        &keys,
+                                        &duration_cache,
+                                        k,
+                                        total,
+                                    )
+                                }
+                                Dist::Loadgroup => {
+                                    let g = groups.as_ref();
+                                    let keys: Vec<Option<String>> = (0..ids.len())
+                                        .map(|i| g.and_then(|m| m.get(&i.to_string()).cloned()))
+                                        .collect();
+                                    crate::shard::shard_groups(
+                                        &ids,
+                                        &keys,
+                                        &duration_cache,
+                                        k,
+                                        total,
+                                    )
+                                }
+                                // Load has no affinity: per-test split is fine.
+                                _ => crate::shard::shard_indices(&ids, &duration_cache, k, total),
+                            };
                             eprintln!(
                                 "rstest: shard {k}/{total} -> {} of {} test(s)",
                                 idx.len(),
