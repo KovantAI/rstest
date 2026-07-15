@@ -42,9 +42,13 @@ pub struct TestEntry {
     /// for editor mapping. None when pytest reports no location.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lineno: Option<u64>,
+    /// Failed, but matched the --quarantine list: reported distinctly,
+    /// never fatal to the run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub quarantined: bool,
 }
 
-/// Run-level metadata for the report-json envelope (schema 4).
+/// Run-level metadata for the report-json envelope (schema 5).
 pub struct RunMeta {
     pub exitstatus: i32,
     pub duration_seconds: f64,
@@ -140,7 +144,11 @@ impl Run {
         self.flaky.push((nodeid, attempts));
     }
 
-    pub fn print_flaky(&self, palette: &crate::color::Palette) {
+    pub fn print_flaky(
+        &self,
+        palette: &crate::color::Palette,
+        history: &std::collections::HashMap<String, crate::flakes::FlakeStats>,
+    ) {
         if self.flaky.is_empty() {
             return;
         }
@@ -149,10 +157,47 @@ impl Run {
             palette.yellow("=========== flaky tests (passed after rerun) ===========")
         );
         for (nodeid, attempts) in &self.flaky {
+            let past = history
+                .get(nodeid)
+                .filter(|h| h.flaky + h.failed > 0)
+                .map(|h| format!("; flaked {}x before, failed {}x", h.flaky, h.failed))
+                .unwrap_or_default();
             println!(
-                "  {nodeid}  ({attempts} rerun{})",
+                "  {nodeid}  ({attempts} rerun{}{past})",
                 if *attempts > 1 { "s" } else { "" }
             );
+        }
+    }
+
+    /// The quarantined-failures section: visible (with tracebacks — a
+    /// quarantined test still needs fixing), never fatal.
+    pub fn print_quarantined(
+        &self,
+        palette: &crate::color::Palette,
+        history: &std::collections::HashMap<String, crate::flakes::FlakeStats>,
+    ) {
+        let quarantined: Vec<(&String, &TestEntry)> =
+            self.tests.iter().filter(|(_, e)| e.quarantined).collect();
+        if quarantined.is_empty() {
+            return;
+        }
+        println!(
+            "\n{}",
+            palette.yellow("=========== quarantined failures (known-flaky, non-fatal) ===========")
+        );
+        for (nodeid, entry) in quarantined {
+            let past = history
+                .get(nodeid)
+                .filter(|h| h.flaky + h.failed > 0)
+                .map(|h| format!("  (flaked {}x, failed {}x before)", h.flaky, h.failed))
+                .unwrap_or_default();
+            println!(
+                "\n{}{past}",
+                palette.yellow(&format!("--- QUARANTINED {nodeid} ---"))
+            );
+            if let Some(repr) = &entry.longrepr {
+                println!("{repr}");
+            }
         }
     }
 
@@ -202,6 +247,10 @@ impl Run {
 
     pub fn print_failures(&self, palette: &crate::color::Palette) {
         for (worker, nodeid, longrepr, sections) in &self.failures {
+            // Quarantined failures print in their own section instead.
+            if self.tests.get(nodeid).is_some_and(|e| e.quarantined) {
+                continue;
+            }
             let attribution = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
             println!(
                 "\n{}\n{longrepr}",
@@ -244,10 +293,30 @@ impl Run {
     pub fn all_passed(&self) -> bool {
         self.collect_errors.is_empty()
             && self.tests.values().all(|e| {
-                e.setup.as_deref() != Some("failed")
-                    && e.call.as_deref() != Some("failed")
-                    && e.teardown.as_deref() != Some("failed")
+                e.quarantined
+                    || (e.setup.as_deref() != Some("failed")
+                        && e.call.as_deref() != Some("failed")
+                        && e.teardown.as_deref() != Some("failed"))
             })
+    }
+
+    /// Demote failures matching the --quarantine list: they classify and
+    /// count as "quarantined", never fail the run, and print in their own
+    /// section. Returns the demoted nodeids (empty = nothing matched).
+    /// Only actual failures are touched — a quarantined test that passes
+    /// stays a plain pass.
+    pub fn quarantine(&mut self, matches: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut demoted = Vec::new();
+        for (nodeid, e) in &mut self.tests {
+            let failed = e.setup.as_deref() == Some("failed")
+                || e.call.as_deref() == Some("failed")
+                || e.teardown.as_deref() == Some("failed");
+            if failed && matches(nodeid) {
+                e.quarantined = true;
+                demoted.push(nodeid.clone());
+            }
+        }
+        demoted
     }
 
     /// pytest-style "N passed, N failed, ..." counts derived from phases:
@@ -275,6 +344,7 @@ impl Run {
             ("xfailed", 0),
             ("xpassed", 0),
             ("flaky", 0),
+            ("quarantined", 0),
             ("collect_errors", 0),
         ]
         .into();
@@ -299,8 +369,9 @@ impl Run {
         // Version history: 1 unversioned original; 2 added
         // longrepr/crashed + the version field; 3 added the envelope
         // (counts, duration_seconds, started_at_epoch, workers, argv);
-        // 4 added per-test lineno (0-based, from pytest report.location).
-        meta.insert("schema", 4.into());
+        // 4 added per-test lineno (0-based, from pytest report.location);
+        // 5 added quarantined (per-test flag + counts key).
+        meta.insert("schema", 5.into());
         meta.insert("exitstatus", run_meta.exitstatus.into());
         meta.insert(
             "counts",
@@ -327,6 +398,9 @@ impl Run {
 }
 
 fn classify(e: &TestEntry) -> &'static str {
+    if e.quarantined {
+        return "quarantined";
+    }
     let setup = e.setup.as_deref();
     if setup == Some("failed") || e.teardown.as_deref() == Some("failed") {
         return "errors";
@@ -370,6 +444,27 @@ mod tests {
         run.record(None, report(nodeid, "setup", "passed"));
         run.record(None, report(nodeid, "call", outcome));
         run.record(None, report(nodeid, "teardown", "passed"));
+    }
+
+    #[test]
+    fn quarantine_demotes_only_matching_failures() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::known_flake", "failed");
+        full(&mut run, "a.py::real_bug", "failed");
+        full(&mut run, "a.py::listed_but_green", "passed");
+        let demoted =
+            run.quarantine(|id| id == "a.py::known_flake" || id == "a.py::listed_but_green");
+        assert_eq!(demoted, vec!["a.py::known_flake"]);
+        let counts = run.counts();
+        assert_eq!(counts["quarantined"], 1);
+        assert_eq!(counts["failed"], 1);
+        assert_eq!(counts["passed"], 1); // green listed test stays a pass
+        assert!(!run.all_passed()); // the real bug still fails the run
+        run.quarantine(|_| true);
+        assert!(run.all_passed()); // everything quarantined -> green
+        assert!(run.summary_line().contains("2 quarantined"));
+        // lastfailed still remembers quarantined failures (--lf must rerun them)
+        assert_eq!(run.failed_nodeids().count(), 2);
     }
 
     #[test]

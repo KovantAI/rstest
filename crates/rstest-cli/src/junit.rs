@@ -29,7 +29,14 @@ pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
         let setup_failed = entry.setup.as_deref() == Some("failed");
         let teardown_failed = entry.teardown.as_deref() == Some("failed");
         let call = entry.call.as_deref();
-        if setup_failed || teardown_failed {
+        if entry.quarantined {
+            // No <failure>/<error> element — junit-gating CI must stay
+            // green — but flagged the property way (like flaky) so
+            // dashboards can track the quarantine set.
+            body.push_str(
+                "><properties><property name=\"quarantined\" value=\"true\"/></properties></testcase>",
+            );
+        } else if setup_failed || teardown_failed {
             errors += 1;
             let text = run.failure_text(nodeid).unwrap_or("error");
             let _ = write!(

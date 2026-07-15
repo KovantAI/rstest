@@ -85,6 +85,13 @@ class Gate:
             RSTEST_WORKER_PATH=str(REPO / "python"),
         )
         env.pop("PYTEST_ADDOPTS", None)
+        # Doctor runs auto-append to the job summary under GitHub Actions;
+        # keep the gate's fixture-suite reports out of the real run page.
+        env.pop("GITHUB_STEP_SUMMARY", None)
+        # Bare --changed auto-targets the PR base when GITHUB_BASE_REF is
+        # set; the gate's fixture repos have no origin, so a PR CI run
+        # would break every --changed check. Tests opt in via env_extra.
+        env.pop("GITHUB_BASE_REF", None)
         if env_extra:
             env.update(env_extra)
         return subprocess.run(
@@ -294,7 +301,7 @@ def main():
     rj = g.tmp / "contract.json"
     g.run("basic/test_basic.py", "-n", "2", "--report-json", str(rj))
     doc = json.loads(rj.read_text(encoding="utf-8"))
-    check("report-json schema version", doc["meta"].get("schema") == 4, str(doc["meta"])[:200])
+    check("report-json schema version", doc["meta"].get("schema") == 5, str(doc["meta"])[:200])
     # schema 4: per-test source line (0-based, pytest report.location). BASIC
     # has a leading newline, so `test_passes` def sits on 0-based line 1.
     lines = {k.split("::")[-1]: v.get("lineno") for k, v in doc["tests"].items()}
@@ -935,6 +942,25 @@ def main():
         and any("test_sleepy" in t["nodeid"] for t in d["wait_bound"]["tests"]),
         str(d)[:200],
     )
+    dm = g.tmp / "doctor.md"
+    summ = g.tmp / "summary.md"
+    g.run(
+        "doc", "-n", "2", "--doctor-md", str(dm),
+        env_extra={"GITHUB_STEP_SUMMARY": str(summ)},
+    )
+    md = dm.read_text(encoding="utf-8")
+    check(
+        "doctor markdown",
+        md.startswith("## rstest doctor")
+        and "**Wait-bound:**" in md
+        and "### Slowest files" in md
+        and "test_sleepy" in md,
+        md[:300],
+    )
+    check(
+        "doctor auto-appends job summary",
+        summ.exists() and "## rstest doctor" in summ.read_text(encoding="utf-8"),
+    )
 
     print("== auto worker capping ==")
     for i in range(6):
@@ -1080,6 +1106,53 @@ def main():
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-150:],
     )
 
+    # PR-aware --changed: with GITHUB_BASE_REF set, bare --changed diffs vs
+    # the merge-base with origin/<base> — a clean checkout of a PR commit
+    # still selects the PR's files (vs HEAD it would select nothing).
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=sp, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/mainline", base_sha], cwd=sp, check=True
+    )
+    with open(sp / "pkg" / "a.py", "a") as f:
+        f.write("# pr change\n")
+    subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pr"],
+        cwd=sp, check=True,
+    )
+    r = g.run(
+        "--changed", "-v", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
+    )
+    check(
+        "selection: GITHUB_BASE_REF auto-targets PR base",
+        "auto-targets PR base origin/mainline" in r.stderr
+        and "2 affected test file(s)" in r.stderr
+        and "test_alpha" in r.stdout
+        and "test_beta" not in r.stdout,
+        r.stderr[-300:],
+    )
+    r = g.run(
+        "--changed", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "nosuchbranch"},
+    )
+    check(
+        "selection: missing PR base ref errors, no silent skip",
+        r.returncode != 0 and "fetch the base branch" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run(
+        "--changed=HEAD~1", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
+    )
+    check(
+        "selection: explicit rev wins over GITHUB_BASE_REF",
+        "auto-targets" not in r.stderr and "2 affected test file(s)" in r.stderr,
+        r.stderr[-300:],
+    )
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)
@@ -1148,6 +1221,51 @@ def main():
         and "test_flaky.py" in warns[0]
         and not any(ln.startswith("::error ") for ln in r.stdout.splitlines()),
         r.stdout[-300:],
+    )
+
+    print("== quarantine ==")
+    g.write(
+        "quar/test_q.py",
+        "def test_ok(): assert True\n\n"
+        "def test_known_flake(): assert False, 'known flake'\n\n"
+        "def test_real_bug(): assert 1 == 2\n",
+    )
+    qdir = g.tmp / "quar"
+    g.write("quar/quarantine.txt", "# known flakes\ntest_q.py::test_known_flake\n")
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", cwd=qdir)
+    check(
+        "quarantine: listed failure demoted, unlisted still fails",
+        r.returncode == 1
+        and "1 failed, 1 passed, 1 quarantined" in r.stdout
+        and "QUARANTINED test_q.py::test_known_flake" in r.stdout
+        and "FAILED" in r.stdout
+        and "QUARANTINED test_q.py::test_real_bug" not in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-400:],
+    )
+    g.write("quar/quarantine.txt", "test_q.py::*\n")
+    qx = g.tmp / "quar_junit.xml"
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt",
+              "--junitxml", str(qx), cwd=qdir)
+    jx = qx.read_text(encoding="utf-8")
+    check(
+        "quarantine: glob demotes all -> exit 0, junit green + flagged",
+        r.returncode == 0
+        and "2 quarantined" in r.stdout
+        and 'failures="0"' in jx
+        and jx.count('property name="quarantined"') == 2,
+        f"rc={r.returncode} " + r.stdout[-200:],
+    )
+    flog = json.loads((qdir / ".rstest_cache" / "flakes.json").read_text(encoding="utf-8"))
+    check(
+        "flake history: failures recorded across runs",
+        flog.get("test_q.py::test_real_bug", {}).get("failed", 0) >= 2,
+        str(flog)[:300],
+    )
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", cwd=qdir)
+    check(
+        "quarantine: history annotation in section",
+        "failed 2x before" in r.stdout or "failed 3x before" in r.stdout,
+        r.stdout[-400:],
     )
 
     print("== loadscope / loadgroup ==")

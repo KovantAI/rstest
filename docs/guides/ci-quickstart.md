@@ -65,6 +65,10 @@ PR's report against the main branch's — no extra tooling required, the
 document already contains totals, wait-bound tests, parallel-floor gate
 tests, and fixture costs by name.
 
+Any doctor run under GitHub Actions also appends the report as markdown
+to the job summary automatically (`$GITHUB_STEP_SUMMARY`) — the current
+run's analysis is on the run page with no post-processing step.
+
 The baseline travels via the actions cache: pushes to main save it, PR
 jobs restore it (GitHub lets PRs read the base branch's cache entries):
 

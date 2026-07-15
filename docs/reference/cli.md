@@ -304,6 +304,14 @@ edges — for correctness-critical runs, use `--changed-strict` below.
 With nothing affected, the run prints
 `no tests affected by N changed file(s)` and exits 0 without running.
 
+PR-aware in CI: on a GitHub Actions pull_request job (`GITHUB_BASE_REF`
+set), bare `--changed` diffs against the merge-base with the PR base
+branch instead of `HEAD` — a clean checkout of the PR commit still
+selects exactly the PR's files. Requires the base branch to be fetched
+(`actions/checkout` with `fetch-depth: 0`); an unfetched base is an
+error, never a silent full skip. An explicit `REV` disables the
+auto-targeting.
+
 ### `--changed-strict`
 
 `--changed` hardened for gating CI (merge queues). Implies `--changed`
@@ -349,12 +357,56 @@ retried (see [crash handling](troubleshooting.md#a-worker-crashed-what-happened-
 pytest-rerunfailures is neutralized inside workers, so nothing
 double-reruns.
 
+Reruns rescue a flake within one run; the flake history and
+[`--quarantine`](#-quarantine-file) manage it across runs — see
+[Flaky tests](../guides/flaky-tests.md).
+
+### `--quarantine <FILE>`
+
+Ring-fence known-flaky tests without hiding them. `FILE` lists nodeids
+or `*` glob patterns (one per line, `#` comments):
+
+```
+# tracked in JIRA-1234, remove when fixed
+tests/test_api.py::test_poll_eventually
+tests/test_ws.py::*
+```
+
+A failure matching the list is demoted to a **quarantined** outcome:
+counted separately in the summary (`N quarantined`), printed with its
+traceback in its own section, flagged as a `quarantined` testcase
+property in junit (no `<failure>` element — junit-gating CI stays
+green) and in `--report-json` (schema 5), and never fatal — a run whose
+only failures are quarantined exits 0. **Failures outside the list
+still fail the run**, and a listed test that passes is a plain pass.
+
+Candidates come from the **flake history** every run records to
+`.rstest_cache/flakes.json`: per-test counts of flaky passes
+(`--reruns` rescues) and hard failures, with a last-seen timestamp.
+The flaky and quarantined sections annotate each test with its history
+(`flaked 3x before, failed 1x`). Difference from `--reruns`: reruns
+paper over a flake within one run; quarantine is cross-run policy for
+tests a team has explicitly decided to tolerate while fixing. Workflow,
+file format, and CI surfaces:
+[Flaky tests](../guides/flaky-tests.md).
+
 ### `--doctor-json <path>`
 
 Write the doctor analysis as JSON (stable, versioned schema — currently
 `1`) for CI trending. Implies doctor instrumentation; combine with
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
+
+### `--doctor-md <path>`
+
+Write the doctor analysis as GitHub-flavored markdown — the same signals
+as the terminal report, rendered as job-summary tables. Implies doctor
+instrumentation.
+
+Under GitHub Actions you rarely need the flag: any doctor run
+(`--doctor`, `--doctor-json`, or `--doctor-md`) automatically appends
+this markdown to `$GITHUB_STEP_SUMMARY`, so the report shows up on the
+run page with zero extra steps.
 
 ### `--watch`
 

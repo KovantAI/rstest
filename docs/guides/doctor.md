@@ -103,3 +103,14 @@ diff two reports to see what a PR added — new long-poles, fixture cost
 growth, wait-time regressions. A ready-made GitHub Actions recipe
 (baseline via the actions cache, jq comparison into the job summary)
 is in [CI quickstart](ci-quickstart.md#suite-health-trending-with-doctor).
+
+## Markdown output and GitHub job summaries
+
+Under GitHub Actions, any doctor run appends the report to
+`$GITHUB_STEP_SUMMARY` automatically — `rstest --doctor-json doctor.json`
+in a workflow puts the analysis on the run page with no extra step. To
+write the markdown to a custom path instead (or outside Actions):
+
+```console
+$ rstest --doctor-md doctor.md
+```

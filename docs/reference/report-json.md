@@ -12,9 +12,10 @@ intended for tooling (dashboards, flake tracking, result diffing).
 ```json
 {
   "meta": {
-    "runner": "rstest", "schema": 4, "exitstatus": 0,
+    "runner": "rstest", "schema": 5, "exitstatus": 0,
     "counts": { "passed": 12, "failed": 0, "errors": 0, "skipped": 1,
-                "xfailed": 0, "xpassed": 0, "flaky": 0, "collect_errors": 0 },
+                "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0,
+                "collect_errors": 0 },
     "duration_seconds": 4.21, "started_at_epoch": 1765500000,
     "workers": 8, "argv": ["rstest", "-n", "8"]
   },
@@ -46,19 +47,21 @@ Per-test fields (absent when not applicable):
 | `wasxfail` | `true` | the test was an expected failure (xfail/xpass) |
 | `skip_reason` | string | first 200 chars |
 | `flaky` | `true` | passed only after [`--reruns`](cli.md#-reruns-n) retries |
+| `quarantined` | `true` | failed, but matched the [`--quarantine`](cli.md#-quarantine-file) list — non-fatal |
 | `longrepr` | string | failure text (assertion repr / traceback), failures only, capped at 20k chars |
 | `crashed` | `true` | the failure was fabricated by the orchestrator — worker crash or `--worker-timeout` kill; pytest never reported it. `longrepr` says which |
 | `worker` | `"gw2"` | worker that produced the final outcome (pool runs only) |
 
-`meta.schema` is the document version, currently `4`. History: `1` was
+`meta.schema` is the document version, currently `5`. History: `1` was
 the unversioned original (phases, `duration`, `wasxfail`,
 `skip_reason`, `flaky`, `worker`); `2` added `longrepr` and `crashed`
 plus the version field itself; `3` added the envelope — `counts`
 (pytest-accounting outcome totals, all keys always present, identical
 to the terminal summary line's numbers: never re-derive them by
 walking `tests`), `duration_seconds`, `started_at_epoch`, `workers`,
-and `argv`; `4` added per-test `lineno`. Parse it — incompatible
-changes will bump it.
+and `argv`; `4` added per-test `lineno`; `5` added per-test
+`quarantined` and the `quarantined` counts key. Parse it —
+incompatible changes will bump it.
 
 `collect_errors` lists the file paths of collectors that failed outright.
 

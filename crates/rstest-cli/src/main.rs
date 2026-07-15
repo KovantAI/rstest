@@ -6,6 +6,7 @@ mod config;
 mod discover;
 mod doctor;
 mod durations;
+mod flakes;
 mod junit;
 mod lazy;
 mod migrate;
@@ -63,6 +64,13 @@ pub struct Cli {
     #[arg(long)]
     doctor_json: Option<PathBuf>,
 
+    /// Write the doctor analysis as GitHub-flavored markdown (job-summary
+    /// ready). Implies doctor instrumentation. Under GitHub Actions any
+    /// doctor run already appends this to $GITHUB_STEP_SUMMARY
+    /// automatically; the flag is for a custom path.
+    #[arg(long)]
+    doctor_md: Option<PathBuf>,
+
     /// Parallel-readiness preflight: collect the suite twice and report tests
     /// whose ids are unstable (memory addresses / uuids / timestamps in
     /// parametrize ids) — the class that forces a suite to -n 0 — then run
@@ -112,6 +120,15 @@ pub struct Cli {
     /// its worker gets retried on the replacement, within this budget.
     #[arg(long)]
     reruns: Option<u32>,
+
+    /// Quarantine list: a file of nodeids or glob patterns (one per
+    /// line, # comments). Failures of matching tests are demoted to a
+    /// non-fatal "quarantined" outcome — reported in their own section,
+    /// flagged in junit/report-json, never the exit code. Failures
+    /// OUTSIDE the list still fail the run. Candidates come from the
+    /// flake history (.rstest_cache/flakes.json) every run records.
+    #[arg(long, value_name = "FILE")]
+    quarantine: Option<PathBuf>,
 
     /// With reruns active, retry only failures whose error text matches
     /// this regex (repeatable). pytest-rerunfailures' --only-rerun.
@@ -450,6 +467,20 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--doctor-json=") => own.push(arg),
+            "--quarantine" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--quarantine=") => own.push(arg),
+            "--doctor-md" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--doctor-md=") => own.push(arg),
             "--junitxml" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -600,7 +631,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         None => progress::Mode::Dots,
     };
     let durations = parse_durations(&args);
-    if cli.doctor || cli.doctor_json.is_some() {
+    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() {
         // Workers inherit the environment; this flips on cpu/fixture
         // instrumentation in the shim plugin.
         std::env::set_var("RSTEST_DOCTOR", "1");
@@ -647,7 +678,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let effective_changed = cli
         .changed
         .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
+        .map(|rev| select::resolve_base_rev(&rev))
+        .transpose()?;
     if let Some(rev) = &effective_changed {
         let rev = if rev == "HEAD" {
             None
@@ -845,6 +878,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         )?
     };
 
+    // Quarantine BEFORE any output or exit-code consumer: classification,
+    // counts, junit, report-json, and the sessionfinish envelope must all
+    // see the demoted outcomes consistently.
+    if let Some(qpath) = &cli.quarantine {
+        if passthrough {
+            eprintln!("rstest: --quarantine has no effect in passthrough mode; ignoring");
+        } else {
+            let matcher = quarantine_matcher(qpath)?;
+            let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
+            // pytest exit 1 = tests failed; if every failure was
+            // quarantined the run is green by policy. Exit codes 2+
+            // (usage/internal errors) are never touched.
+            if !demoted.is_empty() && outcome.exitstatus == 1 && outcome.run.all_passed() {
+                outcome.exitstatus = 0;
+            }
+        }
+    }
+    // Loaded before this run's events are recorded below — the history
+    // annotations must say "before this run".
+    let flake_history = flakes::load();
+
     if !passthrough && mode == progress::Mode::Json {
         // Pure NDJSON: close the stream with a session-finish envelope
         // (counts + duration + exit status). No human summary/failures.
@@ -863,7 +917,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         if mode != progress::Mode::Bar {
             outcome.run.print_failures(&palette);
         }
-        outcome.run.print_flaky(&palette);
+        outcome.run.print_quarantined(&palette, &flake_history);
+        outcome.run.print_flaky(&palette, &flake_history);
         print_warnings_summary(&outcome.warnings, &palette);
         if let Some((dn, dmin)) = durations {
             outcome
@@ -905,7 +960,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         }
     }
 
-    if (cli.doctor || cli.doctor_json.is_some()) && !passthrough {
+    if (cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some()) && !passthrough {
         let report = doctor::analyze(
             &outcome.run,
             &merge_fixtures(outcome.fixtures),
@@ -920,6 +975,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         if let Some(path) = &cli.doctor_json {
             doctor::write_json(path, &report)?;
         }
+        if let Some(path) = &cli.doctor_md {
+            doctor::write_markdown(path, &report)?;
+        }
+        doctor::append_github_summary(&report)?;
     }
     if let Some(path) = &cli.junitxml {
         junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
@@ -981,6 +1040,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
         durations::save(&outcome.run);
+        // Flake history rides the same cadence (and the same [gwN]-key
+        // poisoning concern rules out each-mode).
+        flakes::record(&outcome.run);
     }
     if let Some(path) = &cli.report_json {
         outcome.run.write_snapshot(
@@ -1078,10 +1140,14 @@ fn execute_monorepo(
     // repo-wide changed set. Directly-changed projects keep --changed
     // (child-local narrowing); dependents (via pyproject dependency
     // names, transitively) run their FULL suite; the rest are skipped.
+    // Resolved once here; children receive the explicit rev (line below,
+    // --changed={rev}) so they never re-resolve.
     let mono_changed = cli
         .changed
         .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
+        .map(|rev| select::resolve_base_rev(&rev))
+        .transpose()?;
     let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
         Some(rev) => {
             let rev = if rev == "HEAD" {
@@ -1170,6 +1236,12 @@ fn execute_monorepo(
         if let Some(r) = &cli.reruns {
             cmd.arg("--reruns").arg(r.to_string());
         }
+        if let Some(q) = &cli.quarantine {
+            // Children run with cwd=project — hand them an absolute path.
+            // Patterns match each child's project-relative nodeids.
+            cmd.arg("--quarantine")
+                .arg(std::fs::canonicalize(q).unwrap_or_else(|_| q.clone()));
+        }
         for pat in &cli.only_rerun {
             cmd.arg("--only-rerun").arg(pat);
         }
@@ -1200,6 +1272,10 @@ fn execute_monorepo(
         }
         if let Some(p) = &cli.doctor_json {
             cmd.arg("--doctor-json")
+                .arg(root.join(mono::suffixed(p, &slug)));
+        }
+        if let Some(p) = &cli.doctor_md {
+            cmd.arg("--doctor-md")
                 .arg(root.join(mono::suffixed(p, &slug)));
         }
         cmd.args(args);
@@ -1439,6 +1515,31 @@ fn print_warnings_summary(warnings: &[proto::WarningEntry], palette: &color::Pal
 /// from the run aggregate (deduped — one per nodeid). GitHub surfaces these
 /// as inline annotations on the PR diff. `file` comes from the nodeid path,
 /// `line` from pytest's 0-based report location (+1 → editor 1-based).
+/// Compile the --quarantine file into one matcher: exact nodeids or `*`
+/// globs, one per line, `#` comments and blanks skipped.
+fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
+    let patterns: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            format!(
+                "^{}$",
+                l.split('*')
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join(".*")
+            )
+        })
+        .collect();
+    if patterns.is_empty() {
+        eprintln!("rstest: --quarantine: {} lists no patterns", path.display());
+    }
+    Ok(regex::RegexSet::new(patterns)?)
+}
+
 fn print_github_annotations(run: &report::Run) {
     // Under a monorepo the parent runs us with cwd=project, so nodeid paths
     // are project-relative; GitHub resolves annotation `file` from the repo
@@ -1587,6 +1688,16 @@ mod tests {
     fn split_equals_forms() {
         let (own, session) = split_args(v(&["--reruns=2", "--junitxml=o.xml", "-v"]));
         assert_eq!(own, v(&["rstest", "--reruns=2", "--junitxml=o.xml"]));
+        assert_eq!(session, v(&["-v"]));
+    }
+
+    #[test]
+    fn split_owns_doctor_md() {
+        let (own, session) = split_args(v(&["--doctor-md", "d.md", "--doctor-md=e.md", "-v"]));
+        assert_eq!(
+            own,
+            v(&["rstest", "--doctor-md", "d.md", "--doctor-md=e.md"])
+        );
         assert_eq!(session, v(&["-v"]));
     }
 }
