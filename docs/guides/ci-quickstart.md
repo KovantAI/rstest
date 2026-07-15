@@ -298,13 +298,18 @@ Two hook ids are provided:
 - `rstest-changed` — runs only tests affected by the working-tree changes
   (`rstest --changed`), for a fast per-commit gate.
 
-Both default to the `pre-push` stage (a full suite is heavy for every
-commit). Move a hook to each commit with `stages: [pre-commit]`, or pass
-extra flags with `args`:
+`rstest` defaults to the `pre-push` stage (a full suite is heavy for every
+commit); move it to each commit with `stages: [pre-commit]`.
+
+`rstest-changed` defaults to `pre-commit`, because `--changed` diffs the
+working tree against HEAD — at pre-push everything is already committed, so
+it would select zero tests and pass silently. On CI, set `GITHUB_BASE_REF`
+or `CI_MERGE_REQUEST_*` and `--changed` diffs against the PR base instead.
+
+Pass extra flags with `args`:
 
 ```yaml
       - id: rstest-changed
-        stages: [pre-commit]
         args: ["-q", "--maxfail=1"]
 ```
 

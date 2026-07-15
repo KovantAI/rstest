@@ -33,4 +33,9 @@
   pass_filenames: false
   types: [python]
   require_serial: true
-  stages: [pre-push]
+  # `--changed` diffs the working tree vs HEAD, so it only sees changes not
+  # yet committed. Default to pre-commit (staged changes exist there); at
+  # pre-push everything is already committed and this would select zero tests
+  # and pass silently. For a push-time gate use the `rstest` hook, or set
+  # GITHUB_BASE_REF / CI_MERGE_REQUEST_* so --changed diffs vs the PR base.
+  stages: [pre-commit]
