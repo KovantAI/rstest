@@ -26,6 +26,46 @@ pub enum Selection {
     FullRun(String),
 }
 
+/// Resolve the `--changed` base rev, PR-aware.
+///
+/// Bare `--changed` diffs vs HEAD — on a clean CI checkout of a PR that
+/// selects NOTHING (silent full skip). GitHub Actions sets
+/// `GITHUB_BASE_REF` on pull_request jobs; when it's set and no explicit
+/// rev was given, diff vs the merge-base with the PR base branch instead:
+/// exactly the PR's files, not post-branch commits on the base.
+///
+/// An unresolvable base ref is an error, not a fallback — the default
+/// checkout is shallow (fetch-depth: 1) and falling back to HEAD would
+/// skip every test while looking green.
+pub fn resolve_base_rev(rev: &str) -> Result<String> {
+    if rev != "HEAD" {
+        return Ok(rev.to_string());
+    }
+    let base = match std::env::var("GITHUB_BASE_REF") {
+        Ok(b) if !b.is_empty() => b,
+        _ => return Ok(rev.to_string()),
+    };
+    let remote = format!("origin/{base}");
+    let out = std::process::Command::new("git")
+        .args(["merge-base", &remote, "HEAD"])
+        .output()
+        .context("running git merge-base")?;
+    if !out.status.success() {
+        bail!(
+            "--changed: GITHUB_BASE_REF is '{base}' but `git merge-base {remote} HEAD` \
+             failed — fetch the base branch first (actions/checkout: `fetch-depth: 0`, \
+             or `git fetch origin {base}`): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    eprintln!(
+        "rstest: --changed auto-targets PR base {remote} (merge-base {})",
+        &sha[..sha.len().min(12)]
+    );
+    Ok(sha)
+}
+
 pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
     let diff_base = rev.unwrap_or("HEAD");

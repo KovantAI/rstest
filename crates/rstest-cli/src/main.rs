@@ -634,7 +634,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let effective_changed = cli
         .changed
         .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
+        .map(|rev| select::resolve_base_rev(&rev))
+        .transpose()?;
     if let Some(rev) = &effective_changed {
         let rev = if rev == "HEAD" {
             None
@@ -992,10 +994,14 @@ fn execute_monorepo(
     // repo-wide changed set. Directly-changed projects keep --changed
     // (child-local narrowing); dependents (via pyproject dependency
     // names, transitively) run their FULL suite; the rest are skipped.
+    // Resolved once here; children receive the explicit rev (line below,
+    // --changed={rev}) so they never re-resolve.
     let mono_changed = cli
         .changed
         .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()));
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
+        .map(|rev| select::resolve_base_rev(&rev))
+        .transpose()?;
     let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
         Some(rev) => {
             let rev = if rev == "HEAD" {
