@@ -546,6 +546,55 @@ def main():
         str(dict(ts.attrib) if ts is not None else None),
     )
 
+    print("== --shard K/N ==")
+    g.write("shardsuite/test_a.py", "".join(f"def test_a{i}(): assert True\n" for i in range(4)))
+    g.write("shardsuite/test_b.py", "".join(f"def test_b{i}(): assert True\n" for i in range(4)))
+
+    # Sibling shards MUST partition from an identical duration cache (in CI
+    # each job restores the same snapshot). Run every shard in an isolated
+    # cwd and wipe its cache first so all shards see the same cold cache --
+    # otherwise shard 1 writes timings that shard 2 reads, and the partition
+    # is no longer disjoint/covering.
+    shard_cwd = g.tmp / "shardsuite"
+
+    def shard_ids(k, n, *extra):
+        shutil.rmtree(shard_cwd / ".rstest_cache", ignore_errors=True)
+        tag = "_".join([str(k), str(n), *extra]).replace("/", "").replace("-", "")
+        xp = g.tmp / f"shard_{tag}.xml"
+        g.run(".", "-n", "2", "--shard", f"{k}/{n}", "--junitxml", str(xp), *extra, cwd=str(shard_cwd))
+        root = ET.parse(xp).getroot()
+        return {(tc.get("classname"), tc.get("name")) for tc in root.iter("testcase")}
+
+    s1, s2 = shard_ids(1, 2), shard_ids(2, 2)
+    check("shard: buckets disjoint", s1.isdisjoint(s2), f"overlap={s1 & s2}")
+    check("shard: buckets cover the suite", len(s1 | s2) == 8, f"union={len(s1 | s2)}")
+    check("shard: no empty bucket", bool(s1) and bool(s2), f"sizes={len(s1)},{len(s2)}")
+    r = g.run("shardsuite", "-n", "2", "--shard", "5/4")
+    check("shard: K>N rejected", r.returncode != 0 and "1..=4" in r.stderr, r.stderr[-160:])
+    r = g.run("shardsuite", "-n", "2", "--shard", "1/2", "--shuffle")
+    check("shard: +shuffle rejected", r.returncode != 0 and "not supported with --shuffle" in r.stderr, r.stderr[-160:])
+    r = g.run("shardsuite", "-n", "2", "--shard", "1/1")
+    check("shard: 1/1 runs whole suite", "8 passed" in r.stdout, r.stdout[-160:])
+
+    # Lazy-collect shards at file granularity via shard_files.
+    l1, l2 = shard_ids(1, 2, "--collect", "lazy"), shard_ids(2, 2, "--collect", "lazy")
+    check("shard lazy: buckets disjoint", l1.isdisjoint(l2), f"overlap={l1 & l2}")
+    check("shard lazy: buckets cover the suite", len(l1 | l2) == 8, f"union={len(l1 | l2)}")
+
+    # Affinity mode (loadfile): a file's tests must never split across shards.
+    def by_file(ids):
+        files = {}
+        for cls, name in ids:
+            files.setdefault(cls, set()).add(name)
+        return files
+
+    f1 = by_file(shard_ids(1, 2, "--dist", "loadfile"))
+    f2 = by_file(shard_ids(2, 2, "--dist", "loadfile"))
+    split = [cls for cls in set(f1) & set(f2)]
+    check("shard loadfile: no file split across shards", not split, f"split files={split}")
+    all_files = set(f1) | set(f2)
+    check("shard loadfile: buckets cover both files", len(all_files) == 2, f"files={all_files}")
+
     print("== --dist each ==")
     r = g.run("basic/test_basic.py", "-n", "2", "--dist", "each")
     check("each: counts are per-worker", "4 failed, 4 passed" in r.stdout, r.stdout[-200:])

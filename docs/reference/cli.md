@@ -217,6 +217,25 @@ collection: single-worker mode, `--collect lazy`, and `--dist each`
 are refused (not silently ignored — a run probing for order
 dependence must not quietly run ordered).
 
+### `--shard <K/N>`
+
+Split the suite across `N` independent CI jobs and run only shard `K`
+(1-based: `1/4` … `4/4`). Each job partitions the collected tests into
+`N` buckets balanced by the duration cache
+(`.rstest_cache/durations.json`, longest-processing-time-first) and runs
+its bucket; a cold cache falls back to an even count split. Buckets are
+disjoint and cover the whole suite, so merging the per-job JUnit
+reconstructs the full run.
+
+Orthogonal to `-n`: each shard still runs its slice across local
+workers. Requires the parallel pool (`-n >= 2`); rejected with
+`--shuffle` (a per-run shuffle breaks the identical-partition guarantee
+that lets jobs agree without coordinating) and `--dist each`. Under
+`--collect lazy` it shards at file granularity. Composes with
+`--changed` (selection first, then partition). Restore the **same**
+duration cache on every job so their partitions match — see the
+[Sharding guide](../guides/sharding.md).
+
 ### `--doctor`
 
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),

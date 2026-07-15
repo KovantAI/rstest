@@ -45,6 +45,9 @@ jobs:
       - name: test
         run: rstest -n auto --junitxml junit.xml
 
+      # Long pole? Fan the suite across a runner matrix with --shard K/N —
+      # see the Sharding guide.
+
       # Monorepo roots: caches live in EACH project (.rstest_cache per
       # package — widen the cache path to **/.rstest_cache), and junit
       # files are written per project as junit.<slug>.xml — glob them
