@@ -26,13 +26,73 @@ pub enum Selection {
     FullRun(String),
 }
 
+/// How a CI exposes the PR/MR base for the current job.
+enum CiBase {
+    /// A base branch NAME (GitHub/GitLab/Buildkite). Resolved against
+    /// `origin/<name>` via merge-base — the PR fork point, not the base
+    /// branch's post-fork commits.
+    Branch { name: String, env: &'static str },
+    /// An exact base SHA the CI already computed (GitLab's
+    /// `CI_MERGE_REQUEST_DIFF_BASE_SHA` is the MR's diff base). Used
+    /// directly — no merge-base call, and it survives a shallow clone.
+    Sha { sha: String, env: &'static str },
+}
+
+/// Detect the PR/MR base from the CI environment, if any. Probed in a
+/// fixed order; the first CI whose variable is set wins. Returns `None`
+/// off-CI or outside a PR job (bare `--changed` keeps diffing vs HEAD).
+fn detect_ci_base() -> Option<CiBase> {
+    // GitHub Actions: pull_request jobs set the base branch name.
+    if let Some(name) = nonempty("GITHUB_BASE_REF") {
+        return Some(CiBase::Branch {
+            name,
+            env: "GITHUB_BASE_REF",
+        });
+    }
+    // GitLab CI merge-request pipelines: prefer the exact diff-base SHA
+    // GitLab already resolved (no merge-base call, shallow-clone safe),
+    // falling back to the target branch name.
+    if let Some(sha) = nonempty("CI_MERGE_REQUEST_DIFF_BASE_SHA") {
+        return Some(CiBase::Sha {
+            sha,
+            env: "CI_MERGE_REQUEST_DIFF_BASE_SHA",
+        });
+    }
+    if let Some(name) = nonempty("CI_MERGE_REQUEST_TARGET_BRANCH_NAME") {
+        return Some(CiBase::Branch {
+            name,
+            env: "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+        });
+    }
+    // Buildkite: set only on PR builds; literal "false" when not a PR.
+    if let Some(name) = nonempty("BUILDKITE_PULL_REQUEST_BASE_BRANCH") {
+        return Some(CiBase::Branch {
+            name,
+            env: "BUILDKITE_PULL_REQUEST_BASE_BRANCH",
+        });
+    }
+    None
+}
+
+/// A non-empty, non-`"false"` env var value (Buildkite writes the literal
+/// `false` rather than clearing the variable off PR builds).
+fn nonempty(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() && v != "false" => Some(v),
+        _ => None,
+    }
+}
+
 /// Resolve the `--changed` base rev, PR-aware.
 ///
 /// Bare `--changed` diffs vs HEAD — on a clean CI checkout of a PR that
-/// selects NOTHING (silent full skip). GitHub Actions sets
-/// `GITHUB_BASE_REF` on pull_request jobs; when it's set and no explicit
-/// rev was given, diff vs the merge-base with the PR base branch instead:
-/// exactly the PR's files, not post-branch commits on the base.
+/// selects NOTHING (silent full skip). Every supported CI exposes the
+/// PR/MR base branch on its pull-request jobs (GitHub `GITHUB_BASE_REF`,
+/// GitLab `CI_MERGE_REQUEST_*`, Buildkite `BUILDKITE_PULL_REQUEST_BASE_BRANCH`);
+/// when one is set and no explicit rev was given, diff vs the merge-base
+/// with that base instead: exactly the PR's files, not post-branch commits
+/// on the base. (TeamCity has no standard env var for the target branch —
+/// expose one as a build parameter to opt in.)
 ///
 /// An unresolvable base ref is an error, not a fallback — the default
 /// checkout is shallow (fetch-depth: 1) and falling back to HEAD would
@@ -41,20 +101,45 @@ pub fn resolve_base_rev(rev: &str) -> Result<String> {
     if rev != "HEAD" {
         return Ok(rev.to_string());
     }
-    let base = match std::env::var("GITHUB_BASE_REF") {
-        Ok(b) if !b.is_empty() => b,
-        _ => return Ok(rev.to_string()),
+    let (target, env) = match detect_ci_base() {
+        // A CI-provided exact SHA is used verbatim; verify it's present so
+        // a shallow clone fails loudly rather than skipping the whole suite.
+        Some(CiBase::Sha { sha, env }) => {
+            let out = std::process::Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{sha}^{{commit}}"),
+                ])
+                .output()
+                .context("running git rev-parse")?;
+            if !out.status.success() {
+                bail!(
+                    "--changed: {env} is '{sha}' but that commit is not in the local \
+                     clone — fetch it first (`git fetch origin {sha}`, or check out with \
+                     full history)"
+                );
+            }
+            eprintln!(
+                "rstest: --changed auto-targets MR base {} ({env})",
+                &sha[..sha.len().min(12)]
+            );
+            return Ok(sha);
+        }
+        Some(CiBase::Branch { name, env }) => (name, env),
+        None => return Ok(rev.to_string()),
     };
-    let remote = format!("origin/{base}");
+    let remote = format!("origin/{target}");
     let out = std::process::Command::new("git")
         .args(["merge-base", &remote, "HEAD"])
         .output()
         .context("running git merge-base")?;
     if !out.status.success() {
         bail!(
-            "--changed: GITHUB_BASE_REF is '{base}' but `git merge-base {remote} HEAD` \
+            "--changed: {env} is '{target}' but `git merge-base {remote} HEAD` \
              failed — fetch the base branch first (actions/checkout: `fetch-depth: 0`, \
-             or `git fetch origin {base}`): {}",
+             or `git fetch origin {target}`): {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }

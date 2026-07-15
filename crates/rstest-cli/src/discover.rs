@@ -7,9 +7,10 @@
 //! everything tried and why each was rejected.
 //!
 //! Candidates include uv-managed interpreters (newest first, as a fallback for
-//! version requests the venv/PATH can't satisfy), and successful probes of
-//! stable absolute paths are cached on disk keyed by mtime so repeated runs
-//! skip the subprocess. `py -3.x` on Windows and the version-request grammar's
+//! version requests the venv/PATH can't satisfy) and, on Windows, python.org
+//! installs enumerated by the `py` launcher (`py --list-paths`) that aren't on
+//! `PATH`. Successful probes of stable absolute paths are cached on disk keyed
+//! by mtime so repeated runs skip the subprocess. The version-request grammar's
 //! more exotic corners remain follow-up work.
 
 use std::collections::HashMap;
@@ -371,6 +372,13 @@ fn discovery_candidates(scope: &Path) -> Vec<PathBuf> {
         push(PathBuf::from(name));
     }
 
+    // 3b. python.org installs reachable only through the Windows `py` launcher
+    //     (not on PATH). No-op off Windows. Placed after PATH so an on-PATH
+    //     interpreter still wins, but before uv-managed as a system source.
+    for p in py_launcher_candidates() {
+        push(p);
+    }
+
     // 4. uv-managed interpreters, newest first — a fallback for version
     //    requests the venv/PATH can't satisfy. Placed last so a normal run
     //    still prefers the active environment (least surprise).
@@ -493,6 +501,61 @@ fn path_python_names() -> Vec<String> {
         v.push("pypy".into());
         v
     }
+}
+
+/// Interpreters reported by the Windows Python Launcher (`py --list-paths`) —
+/// python.org installs that typically aren't on `PATH`. Empty (and never
+/// spawns) off Windows, or when `py` is absent / reports nothing.
+fn py_launcher_candidates() -> Vec<PathBuf> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let out = Command::new("py").arg("--list-paths").output().ok();
+    match out {
+        Some(o) if o.status.success() => parse_py_list_paths(&String::from_utf8_lossy(&o.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse `py --list-paths` output into absolute interpreter paths. Each line is
+/// a tag (`-V:3.12`, `-3.10-64`, ...), an interpreter path (which may itself
+/// contain spaces), and an active-`*` marker for the default install. The
+/// marker's side depends on launcher version — legacy `py --list-paths` trails
+/// it, newer `py list` leads it — so we peel the tag off the front and strip a
+/// `*` from either end of the remainder:
+///
+/// ```text
+///  -3.13-64         C:\Program Files\Python313\python.exe
+///  -3.12-64         C:\Users\me\AppData\Local\Programs\Python\Python312\python.exe *
+///  -V:3.11 *        C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe
+/// ```
+///
+/// Lines without a leading `-` tag (headers, blanks) are skipped. Pure — no
+/// process spawn — so it is unit-testable on every platform.
+fn parse_py_list_paths(output: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        // Every interpreter line starts with the launcher's `-` tag.
+        if !line.starts_with('-') {
+            continue;
+        }
+        // Peel the tag (first whitespace-delimited token).
+        let Some((_tag, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        // An active install carries a `*` marker — trailing (legacy
+        // `py --list-paths`: `-3.9-64  C:\...\python.exe *`) or leading (newer
+        // `py list`: `-V:3.12 *  C:\...`). Strip whichever side it lands on so
+        // the default interpreter's path doesn't keep a spurious ` *` suffix.
+        let path = rest.trim();
+        let path = path.strip_prefix('*').unwrap_or(path).trim();
+        let path = path.strip_suffix('*').unwrap_or(path).trim();
+        if !path.is_empty() {
+            out.push(PathBuf::from(path));
+        }
+    }
+    out
 }
 
 /// Script run inside a candidate to report its identity and shim-importability.
@@ -1027,6 +1090,74 @@ mod tests {
         })
         .unwrap();
         assert_eq!(chosen, PathBuf::from("/usr/bin/python3.10"));
+    }
+
+    // ---- py launcher (`py --list-paths`) ----
+
+    #[test]
+    fn parses_py_list_paths_legacy_trailing_active_marker() {
+        // Real legacy `py --list-paths`: `-N.M-64` tags, default marked by a
+        // *trailing* `*`. Regression guard — the default install must not keep
+        // a ` *` suffix (which would fail its later `exists()` check).
+        let out = "\
+ -3.13-64         C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe *
+ -3.12-64         C:\\Program Files\\Python312\\python.exe
+ -3.9-32          C:\\Python39-32\\python.exe";
+        let got = parse_py_list_paths(out);
+        assert_eq!(
+            got,
+            vec![
+                // Trailing `*` stripped, not folded into the path.
+                PathBuf::from(
+                    "C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"
+                ),
+                // A path containing a space survives intact.
+                PathBuf::from("C:\\Program Files\\Python312\\python.exe"),
+                PathBuf::from("C:\\Python39-32\\python.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_py_list_paths_newer_leading_active_marker() {
+        // Newer `py list`: `-V:` tags, default marked by a *leading* `*`.
+        let out = "\
+ -V:3.13          C:\\Program Files\\Python313\\python.exe
+ -V:3.12 *        C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe";
+        let got = parse_py_list_paths(out);
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("C:\\Program Files\\Python313\\python.exe"),
+                // Leading `*` stripped, not folded into the path.
+                PathBuf::from(
+                    "C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_py_list_paths_skips_non_tag_lines() {
+        // Headers / blank lines (no leading `-`) are ignored.
+        let out =
+            "Installed Pythons found by py Launcher\n\n -3.10-64  C:\\Python310\\python.exe\n";
+        assert_eq!(
+            parse_py_list_paths(out),
+            vec![PathBuf::from("C:\\Python310\\python.exe")]
+        );
+    }
+
+    #[test]
+    fn parses_py_list_paths_empty_when_no_installs() {
+        assert!(parse_py_list_paths("").is_empty());
+        assert!(parse_py_list_paths("No installed Pythons found!\n").is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn py_launcher_is_noop_off_windows() {
+        assert!(py_launcher_candidates().is_empty());
     }
 
     /// End-to-end probe-script + JSON shape, exercised against whatever

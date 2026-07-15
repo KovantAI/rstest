@@ -27,6 +27,27 @@ pub enum Mode {
     /// `{"event":"sessionfinish",...}` envelope (emitted in main). stdout is
     /// pure NDJSON — no banner, footer, or summary. For editors/tooling.
     Json,
+    /// Test Anything Protocol (version 13): `ok N - nodeid` per test as it
+    /// finishes, failure text as `#` diagnostics, trailing `1..N` plan
+    /// (emitted in main). stdout is a pure TAP stream — no banner or
+    /// summary. For TAP harnesses (Jenkins TAP plugin, prove, etc.).
+    Tap,
+    /// TeamCity service messages: a `testStarted`/`testFinished` pair per
+    /// test (plus `testFailed`/`testIgnored`) as each finishes. The normal
+    /// banner and summary stay — TeamCity ignores non-service lines.
+    Teamcity,
+    /// GitLab CI: renders dots for the human-readable log; each failure is
+    /// wrapped in a collapsed `section_start`/`section_end` block at
+    /// end-of-run, so the job log folds tracebacks per test.
+    Gitlab,
+    /// Buildkite: renders dots for the human-readable log; each failure is
+    /// emitted under an auto-expanded `+++` group header at end-of-run.
+    Buildkite,
+    /// Azure Pipelines: renders dots for the human-readable log, plus
+    /// `##vso[task.logissue type=error;sourcepath=;linenumber=]` logging
+    /// commands per failure (and `type=warning` for flaky-passed tests),
+    /// emitted at end-of-run — surfaced inline on the PR file view.
+    Azure,
 }
 
 #[derive(Default)]
@@ -110,14 +131,21 @@ impl Progress {
         if self.mode == Mode::Json {
             return Self::on_report_json(worker, r);
         }
+        if self.mode == Mode::Tap {
+            return self.on_report_tap(r);
+        }
+        if self.mode == Mode::Teamcity {
+            return self.on_report_teamcity(r);
+        }
         if self.mode == Mode::Verbose {
             return self.on_report_verbose(worker, r);
         }
         if self.mode == Mode::Bar {
             return self.on_report_bar(worker, r);
         }
-        // Github shares the dots char stream below (the human-readable log);
-        // its annotations are emitted from the aggregate at end-of-run.
+        // Github/Gitlab/Buildkite share the dots char stream below (the
+        // human-readable log); their annotations / fold markers are emitted
+        // from the aggregate at end-of-run.
         let ch = match (r.when.as_str(), r.outcome.as_str()) {
             ("call", "passed") => {
                 if r.wasxfail {
@@ -257,6 +285,45 @@ impl Progress {
         }
     }
 
+    /// One TAP test point per test as it finishes; failure text follows as
+    /// `#` diagnostic lines. The trailing plan comes from [`tap_plan`] so
+    /// the count always matches the points emitted.
+    fn on_report_tap(&mut self, r: &Report) {
+        let Some(line) = tap_result_line(self.done + 1, r) else {
+            return;
+        };
+        self.done += 1;
+        println!("{line}");
+        if r.outcome == "failed" {
+            if let Some(repr) = &r.longrepr {
+                for l in repr.trim_end().lines() {
+                    println!("# {l}");
+                }
+            }
+        }
+    }
+
+    /// Close a TAP stream: the trailing `1..N` plan (valid TAP when the
+    /// plan comes last), N = test points actually emitted.
+    pub fn tap_plan(&self) {
+        println!("1..{}", self.done);
+    }
+
+    /// One TeamCity service-message group per test as it finishes.
+    /// Retroactive `testStarted`/`testFinished` pairs are fine — TeamCity
+    /// takes the duration from the attribute, not wall-clock between
+    /// messages — and emitting the whole group at once keeps parallel
+    /// results from interleaving.
+    fn on_report_teamcity(&mut self, r: &Report) {
+        let Some(messages) = teamcity_messages(r) else {
+            return;
+        };
+        if r.when != "teardown" {
+            self.done += 1;
+        }
+        println!("{messages}");
+    }
+
     /// One NDJSON object per phase report — the live event stream. Printed
     /// straight to stdout (no footer in Json mode), so consumers get a
     /// parseable line the moment each phase finishes. `longrepr` rides only
@@ -289,7 +356,10 @@ impl Progress {
         if let Some(f) = &mut self.footer {
             f.finish();
         }
-        if self.mode == Mode::Verbose || self.mode == Mode::Bar {
+        if matches!(
+            self.mode,
+            Mode::Verbose | Mode::Bar | Mode::Tap | Mode::Teamcity
+        ) {
             return;
         }
         if self.col > 0 {
@@ -298,5 +368,207 @@ impl Progress {
                 _ => println!(),
             }
         }
+    }
+}
+
+/// The TAP test point for a phase report, or None when this phase emits
+/// nothing (passed setup/teardown, in-progress phases). Mapping follows
+/// TAP semantics: xfail = `not ok # TODO` (the harness expects it to
+/// fail), xpass = `ok # TODO` (a bonus the harness flags), skip =
+/// `ok # SKIP`. A failed teardown gets its own numbered point — the test
+/// already reported at call time, and the plan must match points emitted.
+fn tap_result_line(n: usize, r: &Report) -> Option<String> {
+    let directive = |kind: &str, reason: Option<&str>| match reason {
+        Some(why) if !why.is_empty() => format!(" # {kind} {}", why.replace(['\n', '\r'], " ")),
+        _ => format!(" # {kind}"),
+    };
+    let line = match (r.when.as_str(), r.outcome.as_str()) {
+        ("call", "passed") if r.wasxfail => {
+            format!(
+                "ok {n} - {}{}",
+                r.nodeid,
+                directive("TODO", Some("unexpectedly passed"))
+            )
+        }
+        ("call", "passed") => format!("ok {n} - {}", r.nodeid),
+        ("call", "failed") => format!("not ok {n} - {}", r.nodeid),
+        ("call", "skipped") | ("setup", "skipped") if r.wasxfail => {
+            format!(
+                "not ok {n} - {}{}",
+                r.nodeid,
+                directive("TODO", Some("expected failure"))
+            )
+        }
+        ("call", "skipped") | ("setup", "skipped") => {
+            format!(
+                "ok {n} - {}{}",
+                r.nodeid,
+                directive("SKIP", r.skip_reason.as_deref())
+            )
+        }
+        ("setup", "failed") => format!("not ok {n} - {} # setup error", r.nodeid),
+        ("teardown", "failed") => format!("not ok {n} - {} # teardown error", r.nodeid),
+        _ => return None,
+    };
+    Some(line)
+}
+
+/// The TeamCity service-message group for a phase report, or None when
+/// this phase emits nothing. `testStarted` precedes every result so
+/// TeamCity attributes output correctly; duration rides on
+/// `testFinished` in milliseconds.
+fn teamcity_messages(r: &Report) -> Option<String> {
+    let name = tc_escape(&r.nodeid);
+    let started = format!("##teamcity[testStarted name='{name}']");
+    let finished = format!(
+        "##teamcity[testFinished name='{name}' duration='{}']",
+        (r.duration * 1000.0).round() as u64
+    );
+    let middle = match (r.when.as_str(), r.outcome.as_str()) {
+        ("call", "passed") => None,
+        ("call", "failed") | ("setup", "failed") | ("teardown", "failed") => {
+            let details = r.longrepr.as_deref().unwrap_or("");
+            Some(format!(
+                "##teamcity[testFailed name='{name}' message='{} failed' details='{}']",
+                r.when,
+                tc_escape(details)
+            ))
+        }
+        ("call", "skipped") | ("setup", "skipped") => {
+            let why = if r.wasxfail {
+                "expected failure (xfail)".to_string()
+            } else {
+                r.skip_reason.clone().unwrap_or_else(|| "skipped".into())
+            };
+            Some(format!(
+                "##teamcity[testIgnored name='{name}' message='{}']",
+                tc_escape(&why)
+            ))
+        }
+        _ => return None,
+    };
+    Some(match middle {
+        Some(m) => format!("{started}\n{m}\n{finished}"),
+        None => format!("{started}\n{finished}"),
+    })
+}
+
+/// TeamCity WARNING build messages for tests that passed only after reruns
+/// (`--reruns`). The run stays green — these surface as build-log warnings so
+/// the flake is visible without opening the junit. Empty when nothing flaked.
+pub fn teamcity_flaky_messages(flaky: &[(String, u32)]) -> String {
+    flaky
+        .iter()
+        .map(|(nodeid, attempts)| {
+            format!(
+                "##teamcity[message text='flaky: {} passed only after {attempts} rerun{}' status='WARNING']",
+                tc_escape(nodeid),
+                if *attempts > 1 { "s" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// TeamCity service-message value escaping.
+fn tc_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '|' => out.push_str("||"),
+            '\'' => out.push_str("|'"),
+            '\n' => out.push_str("|n"),
+            '\r' => out.push_str("|r"),
+            '[' => out.push_str("|["),
+            ']' => out.push_str("|]"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(when: &str, outcome: &str) -> Report {
+        Report {
+            nodeid: "tests/test_a.py::test_x".into(),
+            when: when.into(),
+            outcome: outcome.into(),
+            duration: 1.234,
+            longrepr: (outcome == "failed").then(|| "assert 1 == 2\nline two".into()),
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+        }
+    }
+
+    #[test]
+    fn tap_lines() {
+        let ok = tap_result_line(1, &report("call", "passed")).unwrap();
+        assert_eq!(ok, "ok 1 - tests/test_a.py::test_x");
+        let fail = tap_result_line(2, &report("call", "failed")).unwrap();
+        assert_eq!(fail, "not ok 2 - tests/test_a.py::test_x");
+        let mut skip = report("call", "skipped");
+        skip.skip_reason = Some("not on linux".into());
+        assert_eq!(
+            tap_result_line(3, &skip).unwrap(),
+            "ok 3 - tests/test_a.py::test_x # SKIP not on linux"
+        );
+        let mut xfail = report("call", "skipped");
+        xfail.wasxfail = true;
+        assert_eq!(
+            tap_result_line(4, &xfail).unwrap(),
+            "not ok 4 - tests/test_a.py::test_x # TODO expected failure"
+        );
+        let mut xpass = report("call", "passed");
+        xpass.wasxfail = true;
+        assert_eq!(
+            tap_result_line(5, &xpass).unwrap(),
+            "ok 5 - tests/test_a.py::test_x # TODO unexpectedly passed"
+        );
+        assert!(tap_result_line(6, &report("setup", "passed")).is_none());
+        assert!(tap_result_line(6, &report("teardown", "passed")).is_none());
+    }
+
+    #[test]
+    fn teamcity_triplet_and_escaping() {
+        let mut fail = report("call", "failed");
+        fail.nodeid = "tests/test_a.py::test_x[a'b]".into();
+        let msgs = teamcity_messages(&fail).unwrap();
+        let lines: Vec<&str> = msgs.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            "##teamcity[testStarted name='tests/test_a.py::test_x|[a|'b|]']"
+        );
+        assert!(lines[1].starts_with("##teamcity[testFailed "));
+        assert!(lines[1].contains("details='assert 1 == 2|nline two'"));
+        assert_eq!(
+            lines[2],
+            "##teamcity[testFinished name='tests/test_a.py::test_x|[a|'b|]' duration='1234']"
+        );
+        let pass = teamcity_messages(&report("call", "passed")).unwrap();
+        assert_eq!(pass.lines().count(), 2);
+        assert!(teamcity_messages(&report("setup", "passed")).is_none());
+    }
+
+    #[test]
+    fn teamcity_flaky_warns_per_test() {
+        assert_eq!(teamcity_flaky_messages(&[]), "");
+        let flaky = vec![
+            ("tests/test_a.py::test_x[a]".to_string(), 1u32),
+            ("tests/test_b.py::test_y".to_string(), 3u32),
+        ];
+        let msgs = teamcity_flaky_messages(&flaky);
+        let lines: Vec<&str> = msgs.lines().collect();
+        assert_eq!(
+            lines[0],
+            "##teamcity[message text='flaky: tests/test_a.py::test_x|[a|] passed only after 1 rerun' status='WARNING']"
+        );
+        assert!(lines[1].contains("passed only after 3 reruns' status='WARNING'"));
     }
 }
