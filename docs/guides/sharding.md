@@ -199,6 +199,17 @@ suite and saves the fresh cache:
           paths: [".rstest_cache"]
 ```
 
+Wire both jobs into a workflow — CircleCI runs nothing without a
+`workflows:` block:
+
+```yaml
+workflows:
+  test-and-cache:
+    jobs:
+      - test
+      - durations
+```
+
 CircleCI keys are immutable once written, so the `{{ .Revision }}` suffix
 makes each run save a fresh key that the shards' branch-prefix
 `restore_cache` then picks up on the next push. CircleCI aggregates

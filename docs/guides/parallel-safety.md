@@ -25,7 +25,7 @@ databases released. The marker is registered automatically (no
 Use it for: tests binding fixed ports, tests asserting on global process
 state, tests measuring wall-clock timing tightly.
 
-Serial tests run in the **designate worker's own session**, not a fresh one:
+Serial tests run in the **designated worker's own session**, not a fresh one:
 they reuse whatever session/module-scoped fixtures that worker already built
 during its parallel phase (one instance, on that worker — not a merge of all
 workers' fixtures). So a serial test depending on a session fixture gets a
