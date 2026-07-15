@@ -49,7 +49,7 @@ dominated by one package finishes in roughly that package's wall time:
 $ rstest          # langgraph monorepo, 14-core machine
 rstest 0.2.1 — monorepo: 6 projects, 14 workers (libs/langgraph:-n9, libs/checkpoint:-n1, libs/cli:-n1, libs/sdk:-n1, libs/prebuilt:-n1, libs/checkpoint-sqlite:-n1)
 ...
-6 projects in 245.7s   # cold run; six serial pytest invocations: 880s (3.6×)
+6 projects in 245.7s   # cold run; six serial pytest invocations: 880.4s (3.6×)
 ```
 
 The 245.7s figure is the measured cold (first) run. A warm run — planned

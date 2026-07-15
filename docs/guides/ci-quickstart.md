@@ -8,11 +8,10 @@ On top of that, rstest adds two things worth wiring up in CI: worker
 parallelism with no extra plugin, and a duration cache that makes scheduling
 smarter when persisted between runs.
 
-!!! warning "Pre-release"
-    rstest is not yet on PyPI; in CI, install from a wheel you host (or
-    build with maturin in a setup job). The recipe below shows the
-    intended shape once published — substitute your wheel URL for
-    `pip install rstest` until then.
+!!! tip "Pin for reproducible CI"
+    The recipes use a bare `pip install rstest`. For reproducible builds,
+    pin a version (`pip install rstest==0.2.1` or `rstest~=0.2`) or install
+    from your lockfile.
 
 ## GitHub Actions
 
@@ -78,7 +77,7 @@ phases:
   install:
     commands:
       - pip install -r requirements.txt
-      - pip install rstest          # pre-release: install from your hosted wheel
+      - pip install rstest
   build:
     commands:
       # The `cache` block below persists .rstest_cache across builds, so
@@ -126,7 +125,7 @@ steps:
       - -c
       - |
         pip install -r requirements.txt
-        pip install rstest        # pre-release: install from your hosted wheel
+        pip install rstest
         rstest -n auto --junitxml junit.xml
 
 # Upload the JUnit (and doctor JSON, if produced) to Cloud Storage.
@@ -163,7 +162,7 @@ test:
       - .rstest_cache/
   before_script:
     - pip install -r requirements.txt
-    - pip install rstest        # pre-release: install from your hosted wheel
+    - pip install rstest
   script:
     - rstest -n auto --output gitlab --junitxml junit.xml
   artifacts:
@@ -206,7 +205,7 @@ steps:
 
   - script: |
       pip install -r requirements.txt
-      pip install rstest        # pre-release: install from your hosted wheel
+      pip install rstest
       rstest -n auto --output azure --junitxml junit.xml
     displayName: test
 
@@ -239,7 +238,7 @@ jobs:
             - rstest-{{ .Branch }}
             - rstest-
       - run: pip install -r requirements.txt
-      - run: pip install rstest       # pre-release: install from your hosted wheel
+      - run: pip install rstest
       - run: rstest -n auto --junitxml test-results/junit.xml
       - store_test_results:
           path: test-results
@@ -272,7 +271,7 @@ pipeline {
       steps {
         sh '''
           pip install -r requirements.txt
-          pip install rstest        # pre-release: install from your hosted wheel
+          pip install rstest
           rstest -n auto --junitxml junit.xml
         '''
       }
@@ -325,11 +324,6 @@ Pass extra flags with `args`:
         args: ["-q", "--maxfail=1"]
 ```
 
-!!! note "Pre-release build"
-    Until rstest is on PyPI, pre-commit builds it from source when it
-    creates the hook environment, which needs a Rust toolchain on the
-    developer's machine. Once wheels are published, pre-commit installs
-    the prebuilt wheel and no toolchain is required.
 
 ## Suite-health trending with doctor
 

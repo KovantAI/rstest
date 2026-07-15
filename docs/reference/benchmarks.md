@@ -6,16 +6,18 @@ outcome diffing against the pytest baseline.
 
 ## Environment
 
-Apple Silicon (M-series), CPython 3.13, pytest 9.0.3, pytest-xdist 3.8.
-Background load was present during measurement (numbers are comparative,
-not lab-grade). Wall times are single runs, warm caches noted.
+Apple Silicon (M-series), CPython 3.13, pytest-xdist 3.8. Runs were done
+against both vendored-pytest versions (9.0.3 and the current 9.1.1); the
+figures below are stable across the two. Background load was present during
+measurement (numbers are comparative, not lab-grade). Wall times are single
+runs, warm caches noted.
 
 ## Results
 
 <!-- --8<-- [start:suite-table] -->
 | Suite | Tests | pytest serial | xdist | rstest | Outcome parity |
 |---|---|---|---|---|---|
-| pandas | 193,627 | 182s | 61s (`-n 8`) | **63s** (`-n 8`) | 100% |
+| pandas | 193,627 | 182s | 61s (`-n 8`) | 63s (`-n 8`, parity) | 100% |
 | aiohttp | 4,469 | 197s | 160s (`-n 8`) | **68s** (`-n 8`, warm cache; 151s cold) | 100% |
 | django-allauth | 2,050 | 22s | 8s (`-n 8`) | **8s** (`-n 4`) | 100%[^parity] |
 | rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) | 100%[^parity] |
