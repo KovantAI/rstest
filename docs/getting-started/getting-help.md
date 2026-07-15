@@ -16,12 +16,12 @@
 rstest is **alpha** software under active development. What that means
 honestly:
 
-- Versions are 0.0.x; CLI flags and the report-json schema aim for
+- Versions are 0.x (pre-1.0); CLI flags and the report-json schema aim for
   stability but may change until 1.0 — every change is listed in the
   repository's `CHANGELOG.md`.
 - The vendored pytest core carries a maintenance commitment: upstream
-  pytest **security fixes are re-vendored and released within two weeks**
-  ([policy](../concepts/compatibility.md#vendored-pytest-version)).
+  pytest security fixes **aim to be re-vendored and released within two
+  weeks** ([policy](../concepts/compatibility.md#vendored-pytest-version)).
 - Maintained by **Kovant AB**.
 - Security reports: use GitHub's private vulnerability reporting on the
   repository — not a public issue.

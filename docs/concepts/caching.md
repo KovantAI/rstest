@@ -7,6 +7,10 @@
   [long-pole-first scheduling](scheduling.md#dispatch-order) and the
   suite-size heuristic behind `-n auto`. Safe to delete at any time; the
   next run rebuilds it (and is scheduled in collection order).
+- `flakes.json` — sparse record of tests that have passed only on rerun
+  ([`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`), used to
+  surface repeat offenders. Auto-written, safe to delete, persisted the same
+  way as `durations.json`.
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
 duration-aware scheduling from the second run onward. In the repository,
@@ -27,7 +31,8 @@ cache writes pass through untouched.
 
 ## Worker temp directories
 
-Each worker gets a disjoint `tmp_path` root under
-`$TMPDIR/rstest-<pid>/gwN/` (pytest-xdist's `popen-gwN` pattern), preventing
-numbered-directory cleanup races between sibling workers. A user-provided
-`--basetemp` is honored and left alone.
+Each worker gets a disjoint `tmp_path` root under `$TMPDIR/rstest-<pid>/gwN/`
+(one subdirectory per worker id — the same per-worker isolation xdist gets
+from its `popen-gwN` roots), preventing numbered-directory cleanup races
+between sibling workers. A user-provided `--basetemp` is honored and left
+alone.

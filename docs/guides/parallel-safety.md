@@ -25,6 +25,13 @@ databases released. The marker is registered automatically (no
 Use it for: tests binding fixed ports, tests asserting on global process
 state, tests measuring wall-clock timing tightly.
 
+Serial tests run in the **designated worker's own session**, not a fresh one:
+they reuse whatever session/module-scoped fixtures that worker already built
+during its parallel phase (one instance, on that worker — not a merge of all
+workers' fixtures). So a serial test depending on a session fixture gets a
+normally-constructed one; just don't expect it to see state another worker's
+copy of that fixture accumulated.
+
 ## File affinity
 
 ```console
@@ -54,6 +61,26 @@ to xdist semantics. Two consequences:
 `rstest --doctor` prints a warning for every session fixture that ran more
 than once, with this exact caveat.
 
+### Teardown timing and `--setup-show` / `--setup-plan`
+
+Each worker finalizes its own fixtures at **its own** session end — a
+session-scoped fixture's teardown runs once that worker has finished its
+last test, not when the whole run ends. Ordering within a worker is
+pytest's usual reverse-of-setup; there is no cross-worker teardown
+ordering, since workers finish independently. (Cleanup that must run after
+*every* worker — dropping a shared DB — belongs in a
+[`pytest_testnodedown`-style hook](../concepts/xdist-hooks.md), not a
+session fixture.)
+
+`--setup-show` and `--setup-plan` are **not** passthrough-IO flags, so they
+run in the parallel pool: each worker prints its own setup/teardown trace,
+so the output is duplicated and interleaved across workers. For a single
+clean fixture plan, run them at `-n 0`:
+
+```console
+$ rstest -n 0 --setup-plan        # one worker, one readable plan
+```
+
 ## Worker identity
 
 Tests and fixtures can read the worker they run on:
@@ -78,7 +105,7 @@ Containment options, in order of preference:
 1. Fix the test (mock the clock; widen the window).
 2. Mark it `@pytest.mark.serial`.
 3. Cap concurrency for the suite: `rstest -n 4`.
-4. As a stopgap, `--reruns 2` (needs `-n >= 2`; ignored at `-n 0/1`):
+4. As a stopgap, `--reruns 2` (needs `-n ≥ 2`; ignored at `-n 0/1`):
    failures that pass on retry are reported flaky (visible, counted, but
    not red). Prefer fixing — reruns hide real intermittent bugs as easily
    as test smells.

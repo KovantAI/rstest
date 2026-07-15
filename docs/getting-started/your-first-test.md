@@ -4,6 +4,10 @@ This is the five-minute path from nothing to a green run — no existing suite
 required. If you already have a pytest project, skip to
 [First steps](first-steps.md): rstest runs it as-is.
 
+**You need:** Python 3.10+ and a terminal. That's it — no config, no prior
+pytest knowledge. New to the terms below (worker, byte-exact, `-n`)? The
+[glossary](../concepts/glossary.md) defines them.
+
 ## 1. Set up a folder
 
 ```console
@@ -13,7 +17,7 @@ $ pip install rstest    # see Installation for the pre-release wheel
 ```
 
 rstest discovers the interpreter from the active virtualenv, so activating
-`.venv` is all the configuration this needs. (Windows: `\.venv\Scripts\activate`.)
+`.venv` is all the configuration this needs. (Windows: `.venv\Scripts\activate`)
 
 ## 2. Write a test
 
@@ -38,7 +42,7 @@ def test_add_negative():
 
 ```console
 $ rstest
-rstest 0.1.0 — single worker (pytest-exact mode)
+rstest 0.2.0 — single worker (pytest-exact mode)
 ..
 
 2 passed in 0.11s
@@ -63,7 +67,7 @@ def test_add_wrong():
 
 ```console
 $ rstest
-rstest 0.1.0 — single worker (pytest-exact mode)
+rstest 0.2.0 — single worker (pytest-exact mode)
 ..F
 
 --- FAILED test_first.py::test_add_wrong ---
@@ -85,6 +89,37 @@ Rerun just the failure while you fix it:
 ```console
 $ rstest --lf          # --last-failed: only the tests that failed last run
 ```
+
+## 5. Watch it go parallel
+
+Two tests stayed single-worker — there's nothing to parallelize. Give rstest
+real work and it fans out across your cores. Drop this in `test_slow.py`:
+
+```python
+# test_slow.py
+import time
+import pytest
+
+
+@pytest.mark.parametrize("i", range(12))
+def test_sleepy(i):
+    time.sleep(1)      # pretend each test does real work
+```
+
+Run it. Twelve one-second tests finish in about `12 / cores` seconds, not 12:
+
+```console
+$ rstest test_slow.py
+rstest 0.2.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
+............
+
+12 passed in 1.68s
+```
+
+That's the whole point: the same `rstest` command that ran two tests serially
+just spread twelve across every core, no flags changed. `rstest -v` prefixes
+each line with the `[gwN]` worker that ran it, and `rstest --doctor` will tell
+you where a real suite's time goes.
 
 ## Where to next
 

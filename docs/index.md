@@ -7,7 +7,7 @@ with built-in suite diagnostics (`--doctor`).
 ```console
 $ pip install rstest   # pre-release: install from a built wheel for now, see Installation
 $ rstest
-rstest 0.1.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.2.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 34%]
 ........................................................................ [ 69%]
 ......................................................                   [100%]
@@ -70,3 +70,4 @@ across runs or expect cold-run timing.
 - [Your first test](getting-started/your-first-test.md) — no suite yet? from empty folder to green run
 - [First steps](getting-started/first-steps.md) — already have a pytest suite? run it from your project root
 - [Migrating from pytest](guides/migrate-from-pytest.md)
+- [Glossary](concepts/glossary.md) — worker, byte-exact, long-pole, and the rest

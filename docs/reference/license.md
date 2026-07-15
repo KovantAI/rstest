@@ -1,6 +1,9 @@
 # License
 
-rstest is distributed under the **MIT license**, maintained by Kovant AB.
+rstest is dual-licensed under **Apache License 2.0** or the **MIT license**,
+at your option, maintained by Kovant AB. See
+[`LICENSE-APACHE`](https://github.com/KovantAI/rstest/blob/main/LICENSE-APACHE)
+and [`LICENSE-MIT`](https://github.com/KovantAI/rstest/blob/main/LICENSE-MIT).
 
 ## Vendored software
 

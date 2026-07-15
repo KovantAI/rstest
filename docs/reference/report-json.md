@@ -154,7 +154,7 @@ Two event kinds, discriminated by `event`:
 
 ```json
 {"event": "testreport", "nodeid": "tests/test_api.py::test_get", "when": "call", "outcome": "passed", "duration": 0.0123, "wasxfail": false, "lineno": 41, "worker": "gw2"}
-{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "collect_errors": 0}}
+{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0, "collect_errors": 0}}
 ```
 
 One `testreport` is emitted **per phase** (`setup`, `call`, `teardown`), so
@@ -204,7 +204,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 2,
-  "rstest_version": "0.1.0",
+  "rstest_version": "0.2.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "tests": 2048,
@@ -293,6 +293,10 @@ this run — `null` for single-worker runs):
 scope, setup count, summed setup time. `slowest_files[]`:
 `{file, total_seconds, pct}` — `pct` is the file's share of
 `test_time_seconds`.
+
+`schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
+`cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
+`slowest_files`); `2` added the `parallel_efficiency` object.
 
 `schema` aside, all times are raw seconds (no rounding) — round in your
 consumer. Increment-only: incompatible changes bump `schema`.

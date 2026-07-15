@@ -15,7 +15,7 @@ $ rstest -n auto --reruns 2
 
 A test that fails and then passes on retry is **flaky**: the run stays
 green, the test is counted (`1 flaky`), listed in its own section, and
-flagged in junit (`flaky` property) and `--report-json`. See
+flagged in JUnit (`flaky` property) and `--report-json`. See
 [`--reruns`](../reference/cli.md#-reruns-n) for per-test budgets
 (`@pytest.mark.flaky`) and crash-aware retry semantics.
 
@@ -103,9 +103,9 @@ The exact semantics:
 
 - **Terminal / summary line**: a separate `N quarantined` count; the
   run summary is green when nothing outside the list failed.
-- **junit** (`--junitxml`): the testcase carries a
+- **JUnit** (`--junitxml`): the testcase carries a
   `quarantined="true"` property and **no `<failure>` element**, so
-  junit-gating CI (and dashboards that count failures) stays green
+  JUnit-gating CI (and dashboards that count failures) stays green
   while still being able to track the quarantine set.
 - **`--report-json`** (schema 5): per-test `"quarantined": true` plus
   a `quarantined` key in `meta.counts`. See

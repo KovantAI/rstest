@@ -1,10 +1,12 @@
 # CI quickstart
 
-rstest behaves like pytest in CI: exit code discipline, JUnit XML for
-your test-report integration, `--report-json` for tooling — and quiet
-human output (machine consumers should parse the files, not stdout). It adds two things worth wiring up: worker
-parallelism with no extra plugin, and a duration cache that makes
-scheduling smarter when persisted between runs.
+rstest behaves like pytest in CI: exit-code discipline, JUnit XML for your
+test-report integration, and `--report-json` for tooling, with quiet human
+output (machine consumers should parse the files, not stdout).
+
+On top of that, rstest adds two things worth wiring up in CI: worker
+parallelism with no extra plugin, and a duration cache that makes scheduling
+smarter when persisted between runs.
 
 !!! warning "Pre-release"
     rstest is not yet on PyPI; in CI, install from a wheel you host (or
@@ -99,6 +101,13 @@ cache:
 parallelism you want. For a monorepo root, widen the report `files` glob
 to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
 and the cache to `**/.rstest_cache/**/*`.
+
+This single-job recipe re-saves `.rstest_cache` every build, which is
+correct here — one full run owns the authoritative cache. If you **shard**
+across CodeBuild batch jobs, don't let each shard save: follow the
+[sharding guide](sharding.md)'s discipline (shards restore a stable cache
+read-only; one separate full job saves the fresh one), or the shards will
+race to write divergent duration caches and their partitions will drift.
 
 ## Google Cloud Build
 
@@ -290,7 +299,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.1.0             # pin a released tag
+    rev: v0.2.0             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```
@@ -427,8 +436,10 @@ and just run `rstest`.
   PR diff — see [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
 - **Crash safety matters most in CI**: a segfaulting test costs one FAILED
   entry instead of an aborted job with partial results.
-- **Worker count**: `-n auto` uses the runner's logical cores. CI runners
-  are small (2–4 cores) and not oversubscribed, so `auto` is the right
-  default there.
+- **Worker count**: `-n auto` uses the runner's available logical cores —
+  on Linux it honors the CPU affinity mask and cgroup CPU quota, so a
+  CPU-limited container gets its allocation, not the host's core count. CI
+  runners are small (2–4 cores) and not oversubscribed, so `auto` is the
+  right default there; pin `-n <k>` only if you need a fixed count.
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` if your CI renders ANSI.

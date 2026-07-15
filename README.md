@@ -14,7 +14,7 @@ marked `@pytest.mark.serial` (they run exclusively, after the parallel
 phase), order-dependent suites can use `--dist loadfile`, and `rstest -n 0`
 gives a single pytest session with byte-exact pytest semantics.
 
-The compat contract: at `-n 0`, outcomes are pytest-exact. In parallel
+The compat contract: at `-n 0`, outcomes are byte-exact. In parallel
 modes, outcomes are preserved for parallel-safe tests; tests with hidden
 time/ordering/shared-state assumptions can flake under high concurrency —
 exactly as under pytest-xdist. `rstest --doctor` and lower `-n` values help
