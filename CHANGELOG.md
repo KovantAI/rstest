@@ -5,6 +5,14 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--doctor` PARALLEL EFFICIENCY section: the realized parallel speedup
+  measured from the run just finished (`test time / wall` vs worker
+  count), the per-worker busy-time load balance, and the long pole that
+  caps it — the after-the-fact answer to "why isn't `-n auto` faster?".
+  Emitted for multi-worker runs in the terminal report, `--doctor-md`,
+  and `--doctor-json`; the doctor JSON schema is bumped `1` → `2`
+  (adds `parallel_efficiency`).
+
 - `--durations-regress <RATIO>`: gate CI on per-test duration
   regressions vs the duration cache the scheduler already maintains.
   Tests grown past RATIO x baseline are listed and the run exits 1;

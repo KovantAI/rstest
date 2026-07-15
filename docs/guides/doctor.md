@@ -60,6 +60,26 @@ No worker count can finish faster than the longest single test. If your
 longest test exceeds the ideal per-worker share, the report names the gate
 tests — splitting or shrinking them raises your parallel ceiling.
 
+### PARALLEL EFFICIENCY
+
+Where PARALLEL FLOOR is a static ceiling, this is the *realized* speedup
+measured from the run just finished: `test time / wall`, compared against
+the worker count. "1.5× realized of 4× possible (39%)" means the run
+converted only 39% of its worker budget into wall-clock savings — the
+direct answer to "why isn't `-n auto` faster?".
+
+Two things cap it, both named in the section:
+
+- **long pole** — the slowest single test (same floor as PARALLEL FLOOR).
+- **worker load** — busy time summed per worker, plus the imbalance
+  between the busiest and idlest worker. A high imbalance means the
+  scheduler couldn't spread the work evenly (usually a few long tests
+  pinned to one worker); consider splitting them or `--dist load`.
+
+Efficiency **over 100%** is normal for wait-bound suites: overlapping
+sleeps/IO run more tests at once than there are cores, so the report flags
+it and points back at WAIT-BOUND. Only emitted for multi-worker runs.
+
 ### FIXTURE HOTSPOTS
 
 Total setup time per fixture, with two pieces of advice:
@@ -91,9 +111,10 @@ $ rstest -n 4 --doctor     # diagnosing parallel scaling
 $ rstest --doctor-json doctor.json
 ```
 
-writes the same analysis as a versioned JSON document (`"schema": 1`):
+writes the same analysis as a versioned JSON document (`"schema": 2`):
 totals (tests, test time, CPU time, wall, workers), the wait-bound test
-list, parallel-floor gate tests, fixture timings, and slowest files.
+list, parallel-floor gate tests, parallel-efficiency (realized speedup and
+per-worker load), fixture timings, and slowest files.
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.
