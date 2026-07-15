@@ -1,0 +1,36 @@
+# Hook definitions for DOWNSTREAM consumers of rstest.
+# (The repo's own hooks live in .pre-commit-config.yaml.)
+#
+# Use in your project's .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/KovantAI/rstest
+#       rev: v0.1.0            # pin a released tag
+#       hooks:
+#         - id: rstest        # runs the whole suite on push
+#
+# See docs/guides/ci-quickstart.md#pre-commit for options and the
+# --changed variant.
+- id: rstest
+  name: rstest
+  description: Run the test suite with rstest (fast, parallel, pytest-compatible).
+  entry: rstest
+  language: python
+  # A test runner needs the whole tree, not the staged file list.
+  pass_filenames: false
+  types: [python]
+  # rstest fans out its own workers; don't let pre-commit run copies in parallel.
+  require_serial: true
+  # Full suites are slow for every commit — default to pre-push. Override with
+  # `stages: [pre-commit]` in your config if you want it on each commit.
+  stages: [pre-push]
+
+- id: rstest-changed
+  name: rstest (changed only)
+  description: Run only tests affected by the working-tree changes.
+  entry: rstest --changed
+  language: python
+  pass_filenames: false
+  types: [python]
+  require_serial: true
+  stages: [pre-push]
