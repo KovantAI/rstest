@@ -12,16 +12,41 @@ between 0.0.x releases and are listed here.
   version 13 stream with a trailing plan — no human chrome). Like
   `--output json`, `tap` is refused at a monorepo root (concatenated
   child streams would not be one valid TAP document).
+- `--durations-regress <RATIO>`: gate CI on per-test duration
+  regressions vs the duration cache the scheduler already maintains.
+  Tests grown past RATIO x baseline are listed and the run exits 1;
+  jitter floors (50ms baseline, 0.5s absolute growth) keep CI noise
+  from flagging. Cold cache skips the comparison.
+
+- `--shuffle[=SEED]`: run tests in a seeded random order to flush out
+  order dependencies on demand (pytest-randomly for the dispatch
+  queue). The seed is printed for reproduction; affinity modes shuffle
+  group order and keep in-group order intact. Single-worker mode,
+  `--collect lazy`, and `--dist each` are refused rather than silently
+  ignored.
+
+- `--output github`: tests that passed only after reruns now emit a
+  `::warning` annotation (`flaky: passed only after N reruns`) — the
+  run stays green, but the flake shows up inline on the PR.
+
+- Flake history + `--quarantine <file>`: every run records per-test
+  flaky/failed counts to `.rstest_cache/flakes.json` (sparse — only
+  tests with events). `--quarantine` demotes failures matching a list
+  of nodeids/globs to a non-fatal "quarantined" outcome: own summary
+  count and section (with history annotations), junit/report-json
+  property (report-json schema 5 adds the flag and counts key), exit 0
+  when every failure is quarantined. New failures outside the list
+  still fail the run.
+- `--doctor-md <path>`: the doctor analysis as GitHub-flavored markdown
+  (job-summary tables). Under GitHub Actions any doctor run now appends
+  this markdown to `$GITHUB_STEP_SUMMARY` automatically, so the report
+  shows up on the run page without a post-processing step.
 - `--changed` is PR-aware in CI: on a GitHub Actions pull_request job
   (`GITHUB_BASE_REF` set), bare `--changed` diffs against the merge-base
   with the PR base branch instead of `HEAD`, so a clean checkout of the
   PR commit selects exactly the PR's files. An unfetched base ref is an
   error (fetch-depth: 0), never a silent full skip; an explicit rev
   disables the auto-targeting.
-- `--doctor-md <path>`: the doctor analysis as GitHub-flavored markdown
-  (job-summary tables). Under GitHub Actions any doctor run now appends
-  this markdown to `$GITHUB_STEP_SUMMARY` automatically, so the report
-  shows up on the run page without a post-processing step.
 
 ## 0.1.0 — 2026-06-23
 

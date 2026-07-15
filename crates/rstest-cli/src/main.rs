@@ -6,6 +6,7 @@ mod config;
 mod discover;
 mod doctor;
 mod durations;
+mod flakes;
 mod junit;
 mod lazy;
 mod migrate;
@@ -121,6 +122,15 @@ pub struct Cli {
     #[arg(long)]
     reruns: Option<u32>,
 
+    /// Quarantine list: a file of nodeids or glob patterns (one per
+    /// line, # comments). Failures of matching tests are demoted to a
+    /// non-fatal "quarantined" outcome — reported in their own section,
+    /// flagged in junit/report-json, never the exit code. Failures
+    /// OUTSIDE the list still fail the run. Candidates come from the
+    /// flake history (.rstest_cache/flakes.json) every run records.
+    #[arg(long, value_name = "FILE")]
+    quarantine: Option<PathBuf>,
+
     /// With reruns active, retry only failures whose error text matches
     /// this regex (repeatable). pytest-rerunfailures' --only-rerun.
     #[arg(long = "only-rerun", value_name = "REGEX")]
@@ -154,6 +164,24 @@ pub struct Cli {
     /// Configurable via `[tool.rstest] collect`. [default: full]
     #[arg(long, value_name = "MODE")]
     collect: Option<String>,
+
+    /// Gate CI on per-test duration regressions: after the run, compare
+    /// each test's wall time against the duration cache
+    /// (.rstest_cache/durations.json — restore it from your CI cache)
+    /// and exit non-zero when any test grew past RATIO x its baseline
+    /// (e.g. 2.0). Jitter-floored: baselines under 50ms and growth
+    /// under 0.5s never flag.
+    #[arg(long, value_name = "RATIO")]
+    durations_regress: Option<f64>,
+
+    /// Run tests in a seeded random order (pytest-randomly-style) to
+    /// flush order dependencies on demand. Without a value the seed is
+    /// chosen per run and printed; pass --shuffle=SEED to reproduce a
+    /// failing order. Affinity modes (loadfile/loadscope/loadgroup)
+    /// shuffle group order and keep in-group order intact. Parallel
+    /// pool with full collection only.
+    #[arg(long, num_args = 0..=1, default_missing_value = "random", value_name = "SEED")]
+    shuffle: Option<String>,
 
     /// Terminal output style: "dots" (pytest's per-test chars), "verbose"
     /// (one line per test, like -v), or "bar" (pytest-sugar-style: a
@@ -401,8 +429,17 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--migrate-allow=") => own.push(arg),
-            "--changed" | "--changed-strict" => own.push(arg),
+            "--changed" | "--changed-strict" | "--shuffle" => own.push(arg),
             _ if arg.starts_with("--changed=") => own.push(arg),
+            _ if arg.starts_with("--shuffle=") => own.push(arg),
+            // Exact match only: --durations / --durations-min stay session args.
+            "--durations-regress" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--durations-regress=") => own.push(arg),
             "--only-rerun" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -431,6 +468,13 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--doctor-json=") => own.push(arg),
+            "--quarantine" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--quarantine=") => own.push(arg),
             "--doctor-md" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -690,6 +734,42 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     if reruns > 0 && (n <= 1 || passthrough) {
         eprintln!("rstest: --reruns requires parallel mode (-n >= 2); ignoring");
     }
+    // --shuffle reorders the orchestrator's dispatch queue, so it needs
+    // the full-collection pool. Refusing (not ignoring) matters: a user
+    // probing for order dependence must not get a silently ordered run.
+    let shuffle_seed: Option<u64> = match cli.shuffle.as_deref() {
+        None => None,
+        Some(v) => {
+            if n <= 1 || passthrough {
+                anyhow::bail!(
+                    "--shuffle needs the parallel pool (-n >= 2); in single-worker \
+                     mode the session owns its own order (use pytest-randomly there)"
+                );
+            }
+            if collect_lazy(cli, &settings, &dist_name, &args)? {
+                anyhow::bail!("--shuffle is not supported with --collect lazy");
+            }
+            if dist_name == "each" {
+                anyhow::bail!(
+                    "--shuffle is not supported with --dist each (workers run the \
+                     full suite in session order)"
+                );
+            }
+            let seed = if v == "random" {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0)
+                    ^ u64::from(std::process::id())
+            } else {
+                v.parse().map_err(|_| {
+                    anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'")
+                })?
+            };
+            eprintln!("rstest: shuffle seed {seed} (reproduce with --shuffle={seed})");
+            Some(seed)
+        }
+    };
     let mut outcome = if n <= 1 || passthrough {
         let io = if passthrough {
             worker::Stdio::Inherit
@@ -803,8 +883,30 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 .map(|p| regex::Regex::new(p))
                 .collect::<Result<Vec<_>, _>>()?,
             worker_timeout.map(std::time::Duration::from_secs),
+            shuffle_seed,
         )?
     };
+
+    // Quarantine BEFORE any output or exit-code consumer: classification,
+    // counts, junit, report-json, and the sessionfinish envelope must all
+    // see the demoted outcomes consistently.
+    if let Some(qpath) = &cli.quarantine {
+        if passthrough {
+            eprintln!("rstest: --quarantine has no effect in passthrough mode; ignoring");
+        } else {
+            let matcher = quarantine_matcher(qpath)?;
+            let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
+            // pytest exit 1 = tests failed; if every failure was
+            // quarantined the run is green by policy. Exit codes 2+
+            // (usage/internal errors) are never touched.
+            if !demoted.is_empty() && outcome.exitstatus == 1 && outcome.run.all_passed() {
+                outcome.exitstatus = 0;
+            }
+        }
+    }
+    // Loaded before this run's events are recorded below — the history
+    // annotations must say "before this run".
+    let flake_history = flakes::load();
 
     if !passthrough && mode == progress::Mode::Json {
         // Pure NDJSON: close the stream with a session-finish envelope
@@ -834,7 +936,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             };
             outcome.run.print_failures(&palette, wrap);
         }
-        outcome.run.print_flaky(&palette);
+        outcome.run.print_quarantined(&palette, &flake_history);
+        outcome.run.print_flaky(&palette, &flake_history);
         print_warnings_summary(&outcome.warnings, &palette);
         if let Some((dn, dmin)) = durations {
             outcome
@@ -921,10 +1024,44 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             );
         }
     }
+    // Duration regression gate: must compare BEFORE durations::save
+    // overwrites the baseline with this run's times.
+    let mut duration_regressions = 0usize;
+    if let Some(ratio) = cli.durations_regress {
+        if ratio <= 1.0 {
+            anyhow::bail!("--durations-regress ratio must be > 1.0, got {ratio}");
+        }
+        let baseline = durations::load();
+        if baseline.is_empty() {
+            eprintln!(
+                "rstest: --durations-regress: no duration baseline yet \
+                 (.rstest_cache/durations.json); comparison skipped"
+            );
+        } else {
+            let rows = durations::regressions(&outcome.run, &baseline, ratio);
+            if rows.is_empty() {
+                eprintln!("rstest: --durations-regress: no regressions (>= {ratio}x baseline)");
+            } else {
+                println!(
+                    "\n{}",
+                    palette.bold_red(&format!(
+                        "=========== duration regressions (>= {ratio}x baseline) ==========="
+                    ))
+                );
+                for (nodeid, old, new) in &rows {
+                    println!("  {old:7.2}s -> {new:7.2}s  {nodeid}");
+                }
+                duration_regressions = rows.len();
+            }
+        }
+    }
     // Each-mode ids carry the [gwN] suffix and every test ran N times —
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
         durations::save(&outcome.run);
+        // Flake history rides the same cadence (and the same [gwN]-key
+        // poisoning concern rules out each-mode).
+        flakes::record(&outcome.run);
     }
     if let Some(path) = &cli.report_json {
         outcome.run.write_snapshot(
@@ -953,6 +1090,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
             Ok(_) => {}
             Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
+        }
+    }
+    if duration_regressions > 0 {
+        eprintln!(
+            "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
+            if duration_regressions > 1 { "s" } else { "" }
+        );
+        if exitstatus == 0 {
+            exitstatus = 1;
         }
     }
     Ok(exitstatus)
@@ -1117,6 +1263,12 @@ fn execute_monorepo(
         }
         if let Some(r) = &cli.reruns {
             cmd.arg("--reruns").arg(r.to_string());
+        }
+        if let Some(q) = &cli.quarantine {
+            // Children run with cwd=project — hand them an absolute path.
+            // Patterns match each child's project-relative nodeids.
+            cmd.arg("--quarantine")
+                .arg(std::fs::canonicalize(q).unwrap_or_else(|_| q.clone()));
         }
         for pat in &cli.only_rerun {
             cmd.arg("--only-rerun").arg(pat);
@@ -1391,6 +1543,31 @@ fn print_warnings_summary(warnings: &[proto::WarningEntry], palette: &color::Pal
 /// from the run aggregate (deduped — one per nodeid). GitHub surfaces these
 /// as inline annotations on the PR diff. `file` comes from the nodeid path,
 /// `line` from pytest's 0-based report location (+1 → editor 1-based).
+/// Compile the --quarantine file into one matcher: exact nodeids or `*`
+/// globs, one per line, `#` comments and blanks skipped.
+fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
+    let patterns: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            format!(
+                "^{}$",
+                l.split('*')
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join(".*")
+            )
+        })
+        .collect();
+    if patterns.is_empty() {
+        eprintln!("rstest: --quarantine: {} lists no patterns", path.display());
+    }
+    Ok(regex::RegexSet::new(patterns)?)
+}
+
 fn print_github_annotations(run: &report::Run) {
     // Under a monorepo the parent runs us with cwd=project, so nodeid paths
     // are project-relative; GitHub resolves annotation `file` from the repo
@@ -1416,6 +1593,27 @@ fn print_github_annotations(run: &report::Run) {
         }
         let msg = entry.longrepr.as_deref().unwrap_or("test failed");
         println!("::error {props}::{}", gh_data(msg));
+    }
+    // Flaky-passed tests (green only after reruns) surface as warnings:
+    // the run is green, but the flake is visible on the PR without
+    // opening the junit/log.
+    for (nodeid, attempts) in &run.flaky {
+        let Some(entry) = run.tests().get(nodeid) else {
+            continue;
+        };
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        let file = match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        };
+        let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(",line={}", l + 1));
+        }
+        println!(
+            "::warning {props}::flaky: passed only after {attempts} rerun{}",
+            if *attempts > 1 { "s" } else { "" }
+        );
     }
 }
 

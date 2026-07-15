@@ -100,6 +100,11 @@ diff:
 location, omitted when none is available. The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
 
+Tests that passed only after reruns (`--reruns` /
+`@pytest.mark.flaky`) additionally emit a `::warning` annotation
+(`flaky: passed only after N reruns`) — the run stays green, but the
+flake is visible on the PR without opening the log.
+
 `gitlab` renders the normal `dots` log; each failure in the end-of-run
 failures block is wrapped in a [GitLab CI collapsible
 section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
@@ -154,6 +159,43 @@ the compatibility trade. Configurable via `[tool.rstest] collect`.
 
 With `--collect lazy`, `--dist loadscope|loadgroup` are rejected, and
 nodeid/`--pyargs` arguments fall back to full collection.
+
+### `--durations-regress <RATIO>`
+
+Gate CI on per-test duration regressions. After the run, each test's
+wall time is compared against the duration cache
+(`.rstest_cache/durations.json` — the same file LPT scheduling uses;
+restore it from your CI cache). Any test that grew past `RATIO` × its
+baseline is listed and the run exits 1:
+
+```
+=========== duration regressions (>= 2x baseline) ===========
+     0.10s ->    1.21s  tests/test_api.py::test_poll
+```
+
+Jitter-floored so CI noise can't flag: baselines under 50ms and
+absolute growth under 0.5s never count, and tests absent from the
+baseline (new or renamed) are skipped. A missing baseline file skips
+the comparison entirely (first run / cold cache). The comparison runs
+before the cache is refreshed with this run's times.
+
+### `--shuffle[=SEED]`
+
+Run tests in a seeded random order (the pytest-randomly idea, applied to
+the orchestrator's dispatch queue). Order dependence is the central
+parallel-readiness hazard; a shuffled run flushes it out on demand —
+in CI or before enabling more workers — instead of waiting for a
+scheduling change to bite. Without a value the seed is chosen per run
+and printed; reproduce a failing order with `--shuffle=SEED` (add
+`-n 2 --dist loadfile` to keep the repro stable).
+
+Affinity modes (`loadfile`/`loadscope`/`loadgroup`) shuffle the group
+order and keep in-group order intact — in-group order is the affinity
+contract. In `load` mode the shuffle replaces duration-aware
+sequencing for that run. Requires the parallel pool with full
+collection: single-worker mode, `--collect lazy`, and `--dist each`
+are refused (not silently ignored — a run probing for order
+dependence must not quietly run ordered).
 
 ### `--doctor`
 
@@ -351,6 +393,39 @@ no reruns configured at all, the crashed test is reported FAILED and not
 retried (see [crash handling](troubleshooting.md#a-worker-crashed-what-happened-to-its-tests)). The flag is intercepted by rstest and an installed
 pytest-rerunfailures is neutralized inside workers, so nothing
 double-reruns.
+
+Reruns rescue a flake within one run; the flake history and
+[`--quarantine`](#-quarantine-file) manage it across runs — see
+[Flaky tests](../guides/flaky-tests.md).
+
+### `--quarantine <FILE>`
+
+Ring-fence known-flaky tests without hiding them. `FILE` lists nodeids
+or `*` glob patterns (one per line, `#` comments):
+
+```
+# tracked in JIRA-1234, remove when fixed
+tests/test_api.py::test_poll_eventually
+tests/test_ws.py::*
+```
+
+A failure matching the list is demoted to a **quarantined** outcome:
+counted separately in the summary (`N quarantined`), printed with its
+traceback in its own section, flagged as a `quarantined` testcase
+property in junit (no `<failure>` element — junit-gating CI stays
+green) and in `--report-json` (schema 5), and never fatal — a run whose
+only failures are quarantined exits 0. **Failures outside the list
+still fail the run**, and a listed test that passes is a plain pass.
+
+Candidates come from the **flake history** every run records to
+`.rstest_cache/flakes.json`: per-test counts of flaky passes
+(`--reruns` rescues) and hard failures, with a last-seen timestamp.
+The flaky and quarantined sections annotate each test with its history
+(`flaked 3x before, failed 1x`). Difference from `--reruns`: reruns
+paper over a flake within one run; quarantine is cross-run policy for
+tests a team has explicitly decided to tolerate while fixing. Workflow,
+file format, and CI surfaces:
+[Flaky tests](../guides/flaky-tests.md).
 
 ### `--doctor-json <path>`
 
