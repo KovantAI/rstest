@@ -13,12 +13,12 @@ not lab-grade). Wall times are single runs, warm caches noted.
 ## Results
 
 <!-- --8<-- [start:suite-table] -->
-| Suite | Tests | pytest serial | xdist `-n 8` | rstest `-n 8` | Outcome parity |
+| Suite | Tests | pytest serial | xdist | rstest | Outcome parity |
 |---|---|---|---|---|---|
-| pandas | 193,627 | 182s | 61s | **63s** | 100% |
-| aiohttp | 4,469 | 197s | 160s | **68s** (warm cache; 151s cold) | 100% |
-| django-allauth | 2,050 | 22s | 8s (`-n 8`) | **8s** (`-n 4`) | 100% |
-| rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) | 100% |
+| pandas | 193,627 | 182s | 61s (`-n 8`) | **63s** (`-n 8`) | 100% |
+| aiohttp | 4,469 | 197s | 160s (`-n 8`) | **68s** (`-n 8`, warm cache; 151s cold) | 100% |
+| django-allauth | 2,050 | 22s | 8s (`-n 8`) | **8s** (`-n 4`) | 100%[^parity] |
+| rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) | 100%[^parity] |
 <!-- --8<-- [end:suite-table] -->
 
 !!! note "Numbers single-sourced"
@@ -39,21 +39,26 @@ langgraph`.
 | | wall | outcome parity |
 |---|---|---|
 | pytest, 6 serial invocations | 880.4s | — (baseline) |
-| rstest at the root, cold (first run) | 245.7s (3.6x) | 100% |
-| rstest at the root, warm (planned) | **121–133s** (6.6–7.3x) | 100% |
+| rstest at the root, cold (first run) | 245.7s (3.6×) | 100% (measured) |
+| rstest at the root, warm | **121–133s** (6.6–7.3×) | — (projected) |
 
-Per-lib outcomes matched to the digit — every one of the 4,284 tests'
-setup/call/teardown agreed, including the dominant package's
-service-dependent fail/error signature (those tests fail identically
-under vanilla pytest, hence the non-zero exit). The warm run plans each
-package's worker share from its duration cache, so the dominant package
-gets the workers and the rest ride along on single workers.
+The cold run is measured; the **warm figure is a projection**, not a
+measured run — the cold run's per-project duration caches predict where the
+planner lands once warm, but that run hasn't been recorded here, so it
+carries no parity number.
 
-Two effects compound in the warm speedup: parallelism inside the
+On the measured (cold) run, per-lib outcomes matched to the digit — every
+one of the 4,284 tests' setup/call/teardown agreed, including the dominant
+package's service-dependent fail/error signature (those tests fail
+identically under vanilla pytest, hence the non-zero exit). The warm run
+plans each package's worker share from its duration cache, so the dominant
+package gets the workers and the rest ride along on single workers.
+
+Two effects compound in the projected warm speedup: parallelism inside the
 dominant package and concurrency across packages. The first run is
 cold — shares are planned from per-project duration caches that don't
-exist yet, so it lands at 3.6x; the second run, planned from those
-caches, reaches 6.6–7.3x and the planner keeps self-correcting toward
+exist yet, so it lands at 3.6×; a warm run, planned from those
+caches, is projected to reach 6.6–7.3× as the planner self-corrects toward
 the next bottleneck.
 
 **Policy.** `checkpoint-sqlite` runs at `-n 0`: it pulls in pytest-retry,
@@ -85,8 +90,11 @@ per-test parity exact.
   is `--watch`, `--changed`, and `--doctor`, not raw speed. The win grows
   with suite size and is largest for wait-heavy suites.
 - **Parity is the real claim.** 100% means every test's
-  setup/call/teardown outcome matched the pytest baseline exactly, with
-  each suite's real plugins active.
+  setup/call/teardown outcome matched the pytest baseline exactly on the
+  measured run, with each suite's real plugins active. A few tests are
+  intermittently flaky *under plain pytest itself* (not rstest) — those
+  cases and their ~99.x% run-to-run rates are catalogued in
+  [Parity divergences](parity-divergences.md).
 
 ## What's *not* claimed
 
@@ -96,6 +104,13 @@ per-test parity exact.
 - Parallel speedups depend on suite shape: wait-bound suites gain most;
   CPU-bound suites gain up to core count; suites gated by one long test
   gain nothing beyond that test (run `--doctor`; it names the floor).
+
+[^parity]: On the measured run, outcomes matched pytest exactly. Both
+    suites contain tests that are intermittently flaky *under plain pytest*
+    (rich has a lexer-guess test that flakes ~1 in 5 sequential pytest runs;
+    django-allauth has wall-clock rate-limit windows), so on some runs the
+    pytest baseline and rstest can disagree (~99.8–99.9%). Per-case detail:
+    [Parity divergences](parity-divergences.md).
 
 [^pandas]: Yes, really — measured, not estimated: pandas' default
     suite on Apple Silicon is dominated by sub-millisecond asserts, and

@@ -68,7 +68,8 @@ tests (and to pytest itself under `-s`/`--pdb`).
 
 ## Single-worker mode
 
-`-n 0` skips the scheduling layer entirely: one worker, one session,
-`pytest.main()` over your args. This mode is the compatibility anchor —
+`-n 0` skips the scheduling layer entirely: one in-process pytest session
+(no separate worker process, no `[gwN]` identity), `pytest.main()` over your
+args. This mode is the compatibility anchor —
 byte-exact pytest behavior — and the automatic fallback for flags that
 need pytest's own terminal.

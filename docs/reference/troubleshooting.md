@@ -35,6 +35,16 @@ At `-n ≥ 2` rstest renders the terminal; plugin-drawn UIs (progress bars,
 custom reporters) don't paint. The plugin still *runs* — hooks fire, data
 flows. Use `-n 0` when you specifically want a plugin's own rendering.
 
+## A plugin crashes at `-n ≥ 2` with `KeyError` (`randomly_seed`, `sock_port`, `server_port`)
+
+The plugin reads a `workerinput` key that pytest-xdist's *master* process
+injects, which rstest has no controller to set (it runs a worker-shaped
+`workerinput` only). Known cases: **pytest-randomly** (`randomly_seed`),
+**pytest-rerunfailures** with pytest-xdist installed (`sock_port`),
+pytest-retry (`server_port`). Run that plugin at `-n 0`, or use rstest's
+native equivalent (`--shuffle`, `--reruns`) — full per-plugin table in
+[Plugins](../guides/plugins.md#tested-compatibility).
+
 ## Where did my `tmp_path` go?
 
 Each worker uses a disjoint temp root (`$TMPDIR/rstest-<pid>/gwN/...`),

@@ -7,6 +7,11 @@ reports to the orchestrator.
 **Orchestrator** — the `rstest` binary: spawns workers, dispatches tests,
 merges results, renders output.
 
+**Master / controller** — pytest-xdist's term for its central coordinating
+process. rstest has no such process — the Rust **orchestrator** plays that
+role — so "master-side" xdist hooks are *emulated* per worker. See
+[xdist hook emulation](xdist-hooks.md).
+
 **Vendored core** — the unmodified copy of pytest shipped inside
 `rstest_worker._vendor`; provides all test semantics. Never conflicts with
 an installed pytest.

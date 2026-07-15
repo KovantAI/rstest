@@ -9,6 +9,6 @@ Task-oriented how-tos:
 - [Flaky tests](flaky-tests.md) — reruns, flake history, quarantine
 - [Watch mode](watch-mode.md) — the edit loop
 - [Monorepos](monorepo.md) — one command across a multi-package repo
-- [CI quickstart](ci-quickstart.md) — GitHub, GitLab, Azure, CircleCI, Jenkins, cloud builders, junit, caching, pre-commit
+- [CI quickstart](ci-quickstart.md) — GitHub, GitLab, Azure, CircleCI, Jenkins, cloud builders, JUnit, caching, pre-commit
 - [Plugins](plugins.md) — how plugin loading works, what's verified
 - [Coverage](coverage.md) — pytest-cov under parallel workers

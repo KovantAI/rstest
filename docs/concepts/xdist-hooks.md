@@ -86,6 +86,13 @@ is the same model as xdist, where each worker also runs its own
   the orchestrator assigns files and each worker collects only its assigned
   files on demand, so the hook sees a partial item set — run at `-n 0` (or
   `--collect full`) if a hook must see the whole suite.
+- **`pytest_collection_modifyitems` reordering does not control parallel run
+  order.** Deselection is honored (a deselected item won't run), but the
+  *order* you impose is ignored at `-n ≥ 2`: the orchestrator dispatches by
+  index into the verified collection, duration-first. Run order is governed
+  only by `--dist` mode, `@pytest.mark.serial`, and `xdist_group` — not by a
+  reordering hook. A suite relying on such a hook for ordering needs `-n 0`
+  or an affinity `--dist` mode.
 - Hooks assuming single-process semantics (a module-level global that
   accumulates across the run) will not see other workers' contributions.
 

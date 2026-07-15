@@ -1,10 +1,12 @@
 # CI quickstart
 
-rstest behaves like pytest in CI: exit code discipline, JUnit XML for
-your test-report integration, `--report-json` for tooling — and quiet
-human output (machine consumers should parse the files, not stdout). It adds two things worth wiring up: worker
-parallelism with no extra plugin, and a duration cache that makes
-scheduling smarter when persisted between runs.
+rstest behaves like pytest in CI: exit-code discipline, JUnit XML for your
+test-report integration, and `--report-json` for tooling, with quiet human
+output (machine consumers should parse the files, not stdout).
+
+On top of that, rstest adds two things worth wiring up in CI: worker
+parallelism with no extra plugin, and a duration cache that makes scheduling
+smarter when persisted between runs.
 
 !!! warning "Pre-release"
     rstest is not yet on PyPI; in CI, install from a wheel you host (or
@@ -99,6 +101,13 @@ cache:
 parallelism you want. For a monorepo root, widen the report `files` glob
 to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
 and the cache to `**/.rstest_cache/**/*`.
+
+This single-job recipe re-saves `.rstest_cache` every build, which is
+correct here — one full run owns the authoritative cache. If you **shard**
+across CodeBuild batch jobs, don't let each shard save: follow the
+[sharding guide](sharding.md)'s discipline (shards restore a stable cache
+read-only; one separate full job saves the fresh one), or the shards will
+race to write divergent duration caches and their partitions will drift.
 
 ## Google Cloud Build
 

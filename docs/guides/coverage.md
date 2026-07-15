@@ -45,11 +45,21 @@ Multiple `--cov-report` values compose, as under pytest-cov.
   combines the per-worker data and renders the report, as xdist's master
   would.)
 - **With `--shard`, each shard measures only the tests it ran.** For a
-  suite-wide number, have every shard write its data (e.g. `--cov-report=`
-  to skip per-shard rendering), upload the `.coverage.*` files as artifacts,
-  then `coverage combine` + `coverage report` in a final merge job.
-  `--cov-fail-under` is per-shard — enforce the global threshold in that
-  merge step, not on individual shards.
+  suite-wide number: on each shard skip rendering (`--cov-report=`), then
+  **rename its data file uniquely before uploading** — every shard writes a
+  file named `.coverage`, so they collide on a shared artifact. Give each a
+  distinct suffix (coverage treats `.coverage.<anything>` as a combinable
+  data file):
+
+  ```console
+  $ rstest -n auto --shard $K/$N --cov=mypkg --cov-report=
+  $ mv .coverage .coverage.shard-$K      # unique per shard before upload
+  ```
+
+  In a final merge job, download all `.coverage.shard-*` files, then
+  `coverage combine && coverage report`. `--cov-fail-under` is per-shard —
+  enforce the global threshold in that merge step (`coverage report
+  --fail-under=N`), not on individual shards.
 - Branch coverage (`--cov-branch`) and context options forward like any
   other flag.
 - Worker data files live in the invocation directory during the run and

@@ -25,6 +25,13 @@ databases released. The marker is registered automatically (no
 Use it for: tests binding fixed ports, tests asserting on global process
 state, tests measuring wall-clock timing tightly.
 
+Serial tests run in the **designate worker's own session**, not a fresh one:
+they reuse whatever session/module-scoped fixtures that worker already built
+during its parallel phase (one instance, on that worker — not a merge of all
+workers' fixtures). So a serial test depending on a session fixture gets a
+normally-constructed one; just don't expect it to see state another worker's
+copy of that fixture accumulated.
+
 ## File affinity
 
 ```console
@@ -98,7 +105,7 @@ Containment options, in order of preference:
 1. Fix the test (mock the clock; widen the window).
 2. Mark it `@pytest.mark.serial`.
 3. Cap concurrency for the suite: `rstest -n 4`.
-4. As a stopgap, `--reruns 2` (needs `-n >= 2`; ignored at `-n 0/1`):
+4. As a stopgap, `--reruns 2` (needs `-n ≥ 2`; ignored at `-n 0/1`):
    failures that pass on retry are reported flaky (visible, counted, but
    not red). Prefer fixing — reruns hide real intermittent bugs as easily
    as test smells.

@@ -16,12 +16,14 @@
 Compatibility is measured, not asserted: rstest's battery runs four real
 suites — pandas (193,627 tests), aiohttp, django-allauth, rich — under
 pytest and under rstest, and diffs **per-test outcomes** (every phase,
-every skip reason class, xfail flags). All four sit at 100% parity —
-measured per run at the worker counts in
-[benchmarks](../reference/benchmarks.md) (`-n 8` for the big suites,
-`-n 4` for the small ones) and re-run on every release — with
+every skip reason class, xfail flags). All four measure 100% parity per run
+at the worker counts in [benchmarks](../reference/benchmarks.md) (`-n 8` for
+the big suites, `-n 4` for the small ones), re-run on every release, with
 their real plugins loaded: pytest-django, pytest-asyncio, pytest-aiohttp,
-hypothesis, pytest-mock, pytest-cov installed.
+hypothesis, pytest-mock, pytest-cov installed. (Two suites contain tests
+that flake *under plain pytest itself* — rich, django-allauth — so on some
+runs the baseline and rstest disagree at ~99.x%; every such case is
+catalogued in [Parity divergences](../reference/parity-divergences.md).)
 
 Summary-line accounting (passed/failed/skipped/xfailed/warnings counts)
 matches pytest's numbers on the same suites.
@@ -108,5 +110,6 @@ Honest list, maintained as things close:
 | xdist master-side hooks (`pytest_configure_node` and friends) | emulated for hooks that are per-node-stateless (read `gateway.id`, fill `node.workerinput` — SQLAlchemy's pattern, measured). Structural divergences from a single xdist controller: the hooks run N times concurrently in N processes (controller-side shared state needs rework), and crashed-node `pytest_testnodedown` runs on a survivor without the dead node's configure-time state. Details: [xdist hook emulation](xdist-hooks.md). |
 | Plugins needing a controller-side service the worker connects to (e.g. pytest-retry's report server: workers read `workerinput["server_port"]`) | not emulated — rstest fills `workerinput` but runs no central controller process, so the key is absent and the plugin raises at configure under `-n ≥ 2`. Same root as the master-side-hook gap. Run such a project at `-n 0` (the plugin takes its non-xdist path); measured on langgraph's `checkpoint-sqlite`, see [Benchmarks](../reference/benchmarks.md#monorepo). |
 | Time-derived parametrize IDs (`now()` in `@pytest.mark.parametrize`) | collection runs once per worker, so time-dependent IDs differ between workers; rstest detects the mismatch and refuses to dispatch rather than misattribute results — use stable IDs or `-n 0` (same constraint as xdist) |
+| Plugins that crash at `-n ≥ 2` (pytest-randomly, pytest-rerunfailures with xdist installed, pytest-html) | they read xdist-master-injected `workerinput` keys rstest doesn't set — run those at `-n 0` or use rstest's native equivalents; full per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility) |
 
 Found a difference not listed here? That's a bug report we want.

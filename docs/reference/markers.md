@@ -36,7 +36,9 @@ Reruns are coordinated by the orchestrator, so the mark only takes effect
 at `-n ≥ 2` (like `--reruns`). A
 pass-after-retry reports as flaky exactly like global reruns.
 pytest-rerunfailures-compatible; the plugin itself is neutralized inside
-rstest workers to prevent double reruns. Registered automatically.
+rstest workers to prevent double reruns. At `-n 0/1` the orchestrated
+reruns are off, so an installed pytest-rerunfailures handles the mark
+natively (its normal single-process behavior). Registered automatically.
 
 ## `@pytest.mark.xdist_group`
 
@@ -49,6 +51,16 @@ def test_uses_shared_pool():
 Under [`--dist loadgroup`](cli.md#-dist-loadloadfileloadscopeloadgroupeach),
 all tests sharing a group name run on the same worker — across files.
 pytest-xdist-compatible.
+
+## A note on `@pytest.mark.parametrize` IDs
+
+Not a marker rstest owns, but the one that most often blocks parallelism:
+parametrize **IDs must be stable across collections**. rstest collects on
+each worker and refuses to dispatch if the id sets disagree, so an id built
+from a memory address (`repr()` fallback), a uuid, or `now()` forces the
+suite to `-n 0`. Give such a parametrize an explicit stable `ids=` (e.g.
+`ids=[c.name for c in cases]`). [`rstest --migrate-check`](cli.md#-migrate-check)
+finds these before your first run and names the exact site.
 
 rstest registers the marker automatically, so `--strict-markers` never
 complains about it under rstest — even when pytest-xdist is not installed.

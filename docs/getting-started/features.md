@@ -16,10 +16,10 @@ Everything pytest does (via a vendored pytest core), plus:
 | Broadcast mode | `--dist each` | every worker runs the full suite (xdist `--dist=each`) for multi-environment validation; outcomes keyed `[gwN]` |
 | Serial escape hatch | `@pytest.mark.serial` | exclusive, after the parallel phase |
 | Crash recovery | automatic | crashed test reported failed; worker respawns; run completes |
-| Flaky handling | `--reruns N`, `@pytest.mark.flaky`, `--only-rerun` | failed-then-passed = flaky (green run, counted, listed); crash-aware. `--reruns` needs `-n >= 2` — ignored under `-n 0/1` |
+| Flaky handling | `--reruns N`, `@pytest.mark.flaky`, `--only-rerun` | failed-then-passed = flaky (green run, counted, listed); crash-aware. `--reruns` needs `-n ≥ 2` — ignored under `-n 0/1` |
 | Suite diagnostics | `--doctor`, `--doctor-json` | wait-bound tests, parallel floor, fixture hotspots, slowest files |
 | Live status footer | automatic on a terminal | per-worker current test + elapsed, progress + ETA |
-| Output styles | `--output dots/verbose/bar/github/json` | `bar` (the TTY default) = pytest-sugar-style per-test lines, inline failures, progress bar — works under the parallel pool. `github` emits CI annotations; `json` is a live NDJSON event stream |
+| Output styles | `--output dots/verbose/bar/github/json` (+ `gitlab/buildkite/teamcity/azure/tap` — see [CLI](../reference/cli.md#-output-dotsverbosebargithubjson)) | `bar` (the TTY default) = pytest-sugar-style per-test lines, inline failures, progress bar — works under the parallel pool. `github` emits CI annotations; `json` is a live NDJSON event stream |
 | Watch mode | `--watch` | targeted reruns on save via the import graph |
 | Smart selection | `--changed[=REV]` | run only tests affected by changed files |
 | Coverage | `--cov`, `--cov-report`, `--cov-fail-under` | pytest-cov, combined across workers |

@@ -141,8 +141,8 @@ def _clean_warnings():
 ```
 
 **rstest side:** `-n 4` lowers the co-location odds (→ ~99.93%, intermittent),
-but only the upstream reset removes it. `rstest --doctor` (isolation mode, see
-the design note) is intended to name the polluting sibling automatically.
+but only the upstream reset removes it. `rstest --doctor` (a planned
+isolation mode) is intended to name the polluting sibling automatically.
 
 ---
 

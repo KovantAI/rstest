@@ -154,7 +154,7 @@ Two event kinds, discriminated by `event`:
 
 ```json
 {"event": "testreport", "nodeid": "tests/test_api.py::test_get", "when": "call", "outcome": "passed", "duration": 0.0123, "wasxfail": false, "lineno": 41, "worker": "gw2"}
-{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "collect_errors": 0}}
+{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0, "collect_errors": 0}}
 ```
 
 One `testreport` is emitted **per phase** (`setup`, `call`, `teardown`), so

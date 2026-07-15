@@ -40,7 +40,7 @@ Buckets are always **disjoint and cover the whole suite**, so merging the
 per-shard JUnit reconstructs the full run.
 
 !!! note "Requirements & limits"
-    - Needs the parallel pool: `-n >= 2` (or `-n auto`). Single-worker /
+    - Needs the parallel pool: `-n ≥ 2` (or `-n auto`). Single-worker /
       `-n 0` runs the session's own full suite with no dispatch filter.
     - Not combinable with `--shuffle` (a per-run shuffle would break the
       identical-partition guarantee) or `--dist each`.
@@ -178,9 +178,32 @@ jobs:
       - checkout
       - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
       - run: pip install -r requirements.txt && pip install rstest
-      - run: rstest -n auto --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml junit.xml
-      - store_test_results: { path: junit.xml }
+      - run: rstest -n auto --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml test-results/junit.xml
+      - store_test_results: { path: test-results }   # a directory, not a file
 ```
+
+As with GitHub and GitLab, the shards restore that cache read-only —
+**something must write it**, or every run partitions cold (even split, no
+wall-time balancing). Add a separate non-parallel job that runs the full
+suite and saves the fresh cache:
+
+```yaml
+  durations:
+    steps:
+      - checkout
+      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
+      - run: pip install -r requirements.txt && pip install rstest
+      - run: rstest -n auto -q
+      - save_cache:
+          key: rstest-durations-{{ .Branch }}-{{ .Revision }}
+          paths: [".rstest_cache"]
+```
+
+CircleCI keys are immutable once written, so the `{{ .Revision }}` suffix
+makes each run save a fresh key that the shards' branch-prefix
+`restore_cache` then picks up on the next push. CircleCI aggregates
+per-container results in its Tests tab; for a single merged `junit.xml`
+artifact, add a downstream collect/merge step as in the GitHub recipe.
 
 ## Any other CI (generic)
 

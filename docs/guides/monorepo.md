@@ -47,17 +47,21 @@ dominated by one package finishes in roughly that package's wall time:
 
 ```console
 $ rstest          # langgraph monorepo, 14-core machine
-rstest 0.2.0 — monorepo: 6 projects, 14 workers (libs/checkpoint:-n1, libs/cli:-n1, libs/langgraph:-n9, ...)
+rstest 0.2.0 — monorepo: 6 projects, 14 workers (libs/langgraph:-n9, libs/checkpoint:-n1, libs/cli:-n1, libs/sdk:-n1, libs/prebuilt:-n1, libs/checkpoint-sqlite:-n1)
 ...
-6 projects in 121.06s   # six serial pytest invocations: 880s (warm: 6.6–7.3x)
+6 projects in 245.7s   # cold run; six serial pytest invocations: 880s (3.6×)
 ```
+
+The 245.7s figure is the measured cold (first) run. A warm run — planned
+from the duration caches the first run writes — is projected at 121–133s
+(6.6–7.3×); see [Benchmarks](../reference/benchmarks.md#monorepo).
 
 A project can pin its own `[tool.rstest]` (`numprocesses = 0` for byte-exact
 mode, its own `dist`/`reruns`/`worker-timeout`); root command-line flags
 override everywhere. Results merge into one exit code and one
-`--report-json`; junit/coverage are written per project. `--changed` is
+`--report-json`; JUnit/coverage are written per project. `--changed` is
 monorepo-aware — it skips packages no change can reach. For the exact
-per-flag behavior (exit merge, report-json shape, junit slug rules,
+per-flag behavior (exit merge, report-json shape, JUnit slug rules,
 `--changed` dependency edges, `--output json` refusal), see
 [Monorepo mode](../concepts/monorepo.md).
 

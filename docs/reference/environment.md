@@ -19,6 +19,8 @@ Plugins that read pytest-xdist's `workerinput` get the same information via
 
 `RSTEST_BASETEMP`, `RSTEST_SEND_IDS`, `RSTEST_DOCTOR`, `RSTEST_WORKER_PATH`
 coordinate workers and may change between versions. Don't depend on them.
+The orchestrator sets them fresh on every run, so any value you pre-set in
+the environment is overwritten — no need to scrub them for a hermetic run.
 
 ## Honored from the environment
 

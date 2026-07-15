@@ -93,7 +93,7 @@ closing results bar self-disable; the per-test lines plus the stable
 `verbose` unless `--output` says otherwise. Pin any style explicitly with
 `--output` or `[tool.rstest] output` to override the TTY auto-default.
 
-#### Machine-readable styles
+#### Machine-readable styles { #machine-readable-styles }
 
 `github` renders the normal `dots` log and additionally emits a
 [GitHub Actions](https://docs.github.com/actions) `::error` workflow command
@@ -238,7 +238,7 @@ disjoint and cover the whole suite, so merging the per-job JUnit
 reconstructs the full run.
 
 Orthogonal to `-n`: each shard still runs its slice across local
-workers. Requires the parallel pool (`-n >= 2`); rejected with
+workers. Requires the parallel pool (`-n ≥ 2`); rejected with
 `--shuffle` (a per-run shuffle breaks the identical-partition guarantee
 that lets jobs agree without coordinating) and `--dist each`. Under
 `--collect lazy` it shards at file granularity. Composes with
@@ -266,7 +266,7 @@ rough CI-time saving. No flags, no config.
 $ rstest --try
 ================= rstest --try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
-  ⚡ speed:   pytest 4.5s  →  rstest 2.9s   (1.5× at -n auto)
+  ⚡ speed:   pytest 96s  →  rstest 21s   (4.6× at -n auto)
 ================================================
   → drop-in ready: `rstest` is `pytest`, in parallel.
 ```
@@ -276,6 +276,12 @@ Exit 0 when outcomes are identical, 1 when they differ (it then points you at
 id or a parallel-only failure), 2 when it couldn't run pytest or rstest refused
 to dispatch. A pre-existing red pytest run is reported as such, not blamed on
 rstest.
+
+`--try` is the one command that needs **pytest installed on its own** (it runs
+your suite under plain `pytest` for the baseline). rstest itself vendors its
+core and doesn't otherwise require an external pytest; if `pytest` isn't on
+PATH, `--try` exits 2. `--migrate-check` and normal runs have no such
+requirement.
 
 ### `--migrate-check`
 
@@ -341,8 +347,7 @@ JSON — but excluded from the non-zero gate. This lets CI gate on **new**
 parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
 findings, and the build only goes red when a fresh one appears.
 
-The first slice of a broader migration assistant (see the project's
-`DESIGN-migrate-check.md`).
+The first slice of a broader migration assistant.
 
 ### `--only-rerun <REGEX>`
 
@@ -435,12 +440,19 @@ works with or without the global flag — but, like `--reruns`, the retry
 machinery is orchestrator-side, so it too only takes effect at `-n ≥ 2`
 (see [Markers](markers.md#pytestmarkflaky)).
 
+Migration footgun: a `reruns` in `[tool.rstest]` (or `--reruns` on the
+command line) is **silently inert** whenever the run drops to single-worker
+— `-n 0`/`-n 1` or a passthrough-IO flag (`--pdb`, `-s`, …). At `-n 0/1`,
+though, an installed pytest-rerunfailures takes over and honors `--reruns`
+natively (rstest only neutralizes it inside the pool), so leave the plugin
+installed if you rely on reruns in single-worker runs.
+
 Crash-aware: **while `--reruns` (or `@pytest.mark.flaky`) budget remains**,
 a test that killed its worker is retried on the replacement worker, bounded
 by both the rerun and restart budgets (the segfault-loop guard) — something
 in-process rerun plugins cannot do. Once that budget is exhausted, or with
 no reruns configured at all, the crashed test is reported FAILED and not
-retried (see [crash handling](troubleshooting.md#a-worker-crashed-what-happened-to-its-tests)). The flag is intercepted by rstest and an installed
+retried (see [crash handling](../concepts/crash-handling.md)). The flag is intercepted by rstest and an installed
 pytest-rerunfailures is neutralized inside workers, so nothing
 double-reruns.
 
@@ -553,7 +565,7 @@ dist = "loadfile"
 reruns = 2
 worker-timeout = 300
 collect = "full"        # or "lazy"
-output = "bar"          # dots | verbose | bar | github | json (default: bar on a TTY, dots off-TTY)
+output = "bar"          # dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json (default: bar on a TTY, dots off-TTY)
 ```
 
 Precedence: command line > `[tool.rstest]` > built-in defaults. pytest's

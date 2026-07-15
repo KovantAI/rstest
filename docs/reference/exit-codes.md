@@ -20,8 +20,8 @@ Flags that gate CI have exit semantics beyond the table above:
 
 | Flag | Exit codes |
 |---|---|
-| [`--try`](cli.md#-try) | `0` worth adopting, `1` marginal, `2` not worth it |
-| [`--migrate-check`](cli.md#-migrate-check) / `--migrate-check-json` | `0` clean, `1` parallel-only failures found |
+| [`--try`](cli.md#-try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest or rstest refused to dispatch |
+| [`--migrate-check`](cli.md#-migrate-check) / `--migrate-check-json` | non-zero (`0` clean) when any WILL-bail unstable id **or** parallel-only failure is found |
 | [`--durations-regress`](cli.md#-durations-regress-ratio) | `1` on a duration regression over the threshold |
 | [`--cov-fail-under`](../guides/coverage.md) | `1` when coverage falls below the target |
 | [`--changed-strict`](cli.md#-changed-strict) | `5` when nothing is affected (instead of `0`) |

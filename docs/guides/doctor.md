@@ -37,6 +37,13 @@ SLOWEST FILES:
 (That's [aiohttp]'s real suite. One file is 81% of total test time, almost
 all of it waiting on 10-second proxy timeouts.)
 
+The `4442 tests` count is tests with a **recorded call duration**, which is
+what doctor analyzes — slightly fewer than the 4,469 the suite *collects*
+([benchmarks](../reference/benchmarks.md)), because skips and zero-duration
+tests contribute no timing. This suite is heavily wait-bound, so its
+**PARALLEL EFFICIENCY** section (see below) reports over 100% and is omitted
+from the sample for brevity; it appears in any `-n > 1` run.
+
 [aiohttp]: https://github.com/aio-libs/aiohttp
 
 ## Reading each section
@@ -64,8 +71,8 @@ tests — splitting or shrinking them raises your parallel ceiling.
 
 Where PARALLEL FLOOR is a static ceiling, this is the *realized* speedup
 measured from the run just finished: `test time / wall`, compared against
-the worker count. "1.5× realized of 4× possible (39%)" means the run
-converted only 39% of its worker budget into wall-clock savings — the
+the worker count. "1.5× realized of 4× possible (38%)" means the run
+converted only 38% of its worker budget into wall-clock savings — the
 direct answer to "why isn't `-n auto` faster?".
 
 Two things cap it, both named in the section:
