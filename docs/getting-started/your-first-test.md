@@ -38,7 +38,7 @@ def test_add_negative():
 
 ```console
 $ rstest
-rstest 0.1.0 — single worker (pytest-exact mode)
+rstest 0.2.0 — single worker (pytest-exact mode)
 ..
 
 2 passed in 0.11s
@@ -63,7 +63,7 @@ def test_add_wrong():
 
 ```console
 $ rstest
-rstest 0.1.0 — single worker (pytest-exact mode)
+rstest 0.2.0 — single worker (pytest-exact mode)
 ..F
 
 --- FAILED test_first.py::test_add_wrong ---

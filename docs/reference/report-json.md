@@ -204,7 +204,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 2,
-  "rstest_version": "0.1.0",
+  "rstest_version": "0.2.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "tests": 2048,

@@ -4,7 +4,7 @@ Run rstest from your project root, exactly where you would run pytest:
 
 ```console
 $ rstest
-rstest 0.1.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.2.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 48%]
 .....................................................s.................. [ 97%]
 ....                                                                     [100%]
