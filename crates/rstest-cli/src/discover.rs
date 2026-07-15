@@ -518,13 +518,16 @@ fn py_launcher_candidates() -> Vec<PathBuf> {
 }
 
 /// Parse `py --list-paths` output into absolute interpreter paths. Each line is
-/// a tag (`-V:3.12`, `-3.10-64`, ...), an optional active-marker `*`, then the
-/// interpreter path — which may itself contain spaces, so we peel the tag and
-/// marker off the front and treat the remainder as the path:
+/// a tag (`-V:3.12`, `-3.10-64`, ...), an interpreter path (which may itself
+/// contain spaces), and an active-`*` marker for the default install. The
+/// marker's side depends on launcher version — legacy `py --list-paths` trails
+/// it, newer `py list` leads it — so we peel the tag off the front and strip a
+/// `*` from either end of the remainder:
 ///
 /// ```text
-///  -V:3.13          C:\Users\me\AppData\Local\Programs\Python\Python313\python.exe
-///  -V:3.12 *        C:\Users\me\AppData\Local\Programs\Python\Python312\python.exe
+///  -3.13-64         C:\Program Files\Python313\python.exe
+///  -3.12-64         C:\Users\me\AppData\Local\Programs\Python\Python312\python.exe *
+///  -V:3.11 *        C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe
 /// ```
 ///
 /// Lines without a leading `-` tag (headers, blanks) are skipped. Pure — no
@@ -541,9 +544,13 @@ fn parse_py_list_paths(output: &str) -> Vec<PathBuf> {
         let Some((_tag, rest)) = line.split_once(char::is_whitespace) else {
             continue;
         };
-        let rest = rest.trim_start();
-        // An active install carries a `*` marker between tag and path.
-        let path = rest.strip_prefix('*').map(str::trim_start).unwrap_or(rest);
+        // An active install carries a `*` marker — trailing (legacy
+        // `py --list-paths`: `-3.9-64  C:\...\python.exe *`) or leading (newer
+        // `py list`: `-V:3.12 *  C:\...`). Strip whichever side it lands on so
+        // the default interpreter's path doesn't keep a spurious ` *` suffix.
+        let path = rest.trim();
+        let path = path.strip_prefix('*').unwrap_or(path).trim();
+        let path = path.strip_suffix('*').unwrap_or(path).trim();
         if !path.is_empty() {
             out.push(PathBuf::from(path));
         }
@@ -1088,24 +1095,44 @@ mod tests {
     // ---- py launcher (`py --list-paths`) ----
 
     #[test]
-    fn parses_py_list_paths_with_tags_and_active_marker() {
+    fn parses_py_list_paths_legacy_trailing_active_marker() {
+        // Real legacy `py --list-paths`: `-N.M-64` tags, default marked by a
+        // *trailing* `*`. Regression guard — the default install must not keep
+        // a ` *` suffix (which would fail its later `exists()` check).
         let out = "\
- -V:3.13          C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe
- -V:3.12 *        C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe
- -V:3.11          C:\\Program Files\\Python311\\python.exe";
+ -3.13-64         C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe *
+ -3.12-64         C:\\Program Files\\Python312\\python.exe
+ -3.9-32          C:\\Python39-32\\python.exe";
         let got = parse_py_list_paths(out);
         assert_eq!(
             got,
             vec![
+                // Trailing `*` stripped, not folded into the path.
                 PathBuf::from(
                     "C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"
                 ),
-                // The active `*` marker is stripped, not folded into the path.
+                // A path containing a space survives intact.
+                PathBuf::from("C:\\Program Files\\Python312\\python.exe"),
+                PathBuf::from("C:\\Python39-32\\python.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_py_list_paths_newer_leading_active_marker() {
+        // Newer `py list`: `-V:` tags, default marked by a *leading* `*`.
+        let out = "\
+ -V:3.13          C:\\Program Files\\Python313\\python.exe
+ -V:3.12 *        C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe";
+        let got = parse_py_list_paths(out);
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("C:\\Program Files\\Python313\\python.exe"),
+                // Leading `*` stripped, not folded into the path.
                 PathBuf::from(
                     "C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe"
                 ),
-                // A path containing a space survives intact.
-                PathBuf::from("C:\\Program Files\\Python311\\python.exe"),
             ]
         );
     }
