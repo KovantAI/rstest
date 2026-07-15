@@ -5,6 +5,13 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--changed` is PR-aware in CI: on a GitHub Actions pull_request job
+  (`GITHUB_BASE_REF` set), bare `--changed` diffs against the merge-base
+  with the PR base branch instead of `HEAD`, so a clean checkout of the
+  PR commit selects exactly the PR's files. An unfetched base ref is an
+  error (fetch-depth: 0), never a silent full skip; an explicit rev
+  disables the auto-targeting.
+
 ## 0.1.0 — 2026-06-23
 
 - Vendored pytest upgraded 9.0.3 → 9.1.1 (re-extracted verbatim from the
