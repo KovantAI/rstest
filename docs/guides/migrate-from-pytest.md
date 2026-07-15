@@ -8,7 +8,7 @@ differs, and how to fall back.
 
 **Your test code.** Nothing changes: fixtures, conftest hierarchies,
 parametrize, marks, `pytest.raises`, assertion introspection — all of it
-runs through a vendored pytest core (currently pytest 9.0.3), not a
+runs through a vendored pytest core (currently pytest 9.1.1), not a
 reimplementation.
 
 **Your plugins.** Plugins installed in the environment load through the

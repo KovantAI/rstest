@@ -1,8 +1,24 @@
 # Installation
 
-!!! warning "Pre-release"
-    rstest is alpha software and not yet published to PyPI. Install from a
-    built wheel or from source.
+```console
+$ pip install rstest
+```
+
+or into a uv-managed project (installs alongside your test deps):
+
+```console
+$ uv add --dev rstest
+```
+
+or as a standalone tool:
+
+```console
+$ uv tool install rstest      # or run ad hoc: uvx rstest --version
+```
+
+Install rstest into the **same environment as your test dependencies** —
+workers run your tests in that interpreter (see
+[Which Python does rstest use?](#which-python-does-rstest-use) for the tool-vs-project split).
 
 ## Requirements
 
@@ -28,32 +44,30 @@ First run erroring? See [Troubleshooting](../reference/troubleshooting.md) —
 it covers the common install/first-run failures (missing `msgpack`, wrong
 interpreter, import errors).
 
-## From a wheel
-
-```console
-$ pip install rstest-*.whl
-```
-
-or into a uv-managed environment:
-
-```console
-$ uv pip install rstest-*.whl
-```
-
 The wheel ships a single `rstest` binary (the Rust orchestrator), the
 `rstest_worker` Python package, and the vendored pytest core.
 
-## With uv
+## Binary vs worker runtime (for tool-scoped installs)
 
-rstest is not on PyPI yet, so there is no `uv add rstest` from the index.
-Until then, the uv-native paths point at a built wheel or the git repo.
+A tool-scoped install (`uv tool install rstest`, `uvx rstest`) still runs
+your project's tests — rstest discovers the project interpreter at runtime
+(see [Which Python does rstest use?](#which-python-does-rstest-use)), so the
+tool env and the test env stay separate. Two things therefore live in two
+places: the `rstest` BINARY can live anywhere (tool env, `~/bin`), but the
+WORKER runtime — the `rstest_worker` package and its `msgpack` dependency —
+must be importable by the *project* interpreter, because workers run your
+tests in your environment. `pip install rstest` / `uv add --dev rstest` into
+the project venv provides both at once; a tool-only install needs rstest in
+the project venv too.
 
-As a project dev-dependency (writes to `pyproject.toml` + lockfile), so it
-installs into the same environment as your tests:
+## From a wheel (offline / air-gapped)
+
+To install without index access, point pip or uv at a downloaded release
+wheel:
 
 ```console
-$ uv add --dev ./rstest-*.whl
-$ uv run rstest                     # runs in the project venv
+$ pip install rstest-*.whl
+$ uv pip install rstest-*.whl          # or: uv add --dev ./rstest-*.whl
 ```
 
 Or pull straight from git:
@@ -61,26 +75,6 @@ Or pull straight from git:
 ```console
 $ uv add --dev "rstest @ git+https://github.com/KovantAI/rstest"
 ```
-
-As a standalone tool (not in any project), use `uv tool` / `uvx`:
-
-```console
-$ uv tool install ./rstest-*.whl
-$ uvx --from ./rstest-*.whl rstest --version
-```
-
-A tool-scoped install still runs your project's tests — rstest discovers the
-project interpreter at runtime (see *Which Python does rstest use?* below),
-so the tool env and the test env stay separate. Two things therefore live
-in two places: the `rstest` BINARY can live anywhere (tool env, ~/bin),
-but the WORKER runtime — the `rstest_worker` package and its `msgpack`
-dependency — must be importable by the *project* interpreter, because
-workers run your tests in your environment. `pip install rstest` into the
-project venv provides both at once; a tool-only install needs the wheel
-in the project venv too.
-
-Once rstest is published, `uv add --dev rstest` and `uvx rstest` will work
-against the index directly.
 
 ## Verifying a downloaded wheel
 

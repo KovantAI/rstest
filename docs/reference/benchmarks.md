@@ -6,9 +6,11 @@ outcome diffing against the pytest baseline.
 
 ## Environment
 
-Apple Silicon (M-series), CPython 3.13, pytest 9.0.3, pytest-xdist 3.8.
-Background load was present during measurement (numbers are comparative,
-not lab-grade). Wall times are single runs, warm caches noted.
+Apple Silicon (M-series), CPython 3.13, pytest-xdist 3.8. Runs were done
+against both vendored-pytest versions (9.0.3 and the current 9.1.1); the
+figures below are stable across the two. Background load was present during
+measurement (numbers are comparative, not lab-grade). Wall times are single
+runs, warm caches noted.
 
 ## Results
 
