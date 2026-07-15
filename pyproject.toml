@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rstest"
-version = "0.2.0"
+version = "0.2.1"
 description = "A fast, pytest-compatible test runner: parallel by design, with built-in suite diagnostics"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
