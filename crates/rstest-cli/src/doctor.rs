@@ -191,7 +191,15 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
             .collect();
         workers_busy.sort_by(|a, b| b.busy_seconds.total_cmp(&a.busy_seconds));
         let max_busy = workers_busy.first().map_or(0.0, |w| w.busy_seconds);
-        let min_busy = workers_busy.last().map_or(0.0, |w| w.busy_seconds);
+        // Workers that ran no test are absent from `by_worker` but still part
+        // of the pool: their busy time is 0. Treating min as the smallest
+        // *observed* load hides the worst imbalance (all work on one worker
+        // reads as 0% instead of ~100%). Seed idle workers at 0.
+        let min_busy = if workers_busy.len() < workers {
+            0.0
+        } else {
+            workers_busy.last().map_or(0.0, |w| w.busy_seconds)
+        };
         let imbalance_pct = if max_busy > 0.0 {
             100.0 * (max_busy - min_busy) / max_busy
         } else {
@@ -635,5 +643,85 @@ mod tests {
         let md = render_markdown(&report(0));
         assert!(md.contains("No timing data collected."));
         assert!(!md.contains("Wait-bound"));
+    }
+
+    /// Record one completed test (setup/call/teardown) on `worker` with the
+    /// given call duration, mirroring what the pool feeds `Run::record`.
+    fn record_test(run: &mut Run, nodeid: &str, worker: usize, dur: f64) {
+        let r = |when: &str, duration: f64| crate::proto::Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: "passed".into(),
+            duration,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+        };
+        run.record(Some(worker), r("setup", 0.0));
+        run.record(Some(worker), r("call", dur));
+        run.record(Some(worker), r("teardown", 0.0));
+    }
+
+    #[test]
+    fn all_work_on_one_worker_reports_max_imbalance() {
+        // -n 8 but every test lands on gw0: the seven idle workers are
+        // absent from the per-worker map, yet imbalance must read ~100%,
+        // not 0%.
+        let mut run = Run::default();
+        for i in 0..4 {
+            record_test(&mut run, &format!("t.py::t{i}"), 0, 2.0);
+        }
+        let pe = analyze(&run, &[], 8.0, 8)
+            .parallel_efficiency
+            .expect("multi-worker run has efficiency");
+        assert_eq!(pe.workers_busy.len(), 1);
+        assert!(
+            (pe.imbalance_pct - 100.0).abs() < 1e-6,
+            "imbalance {} should be ~100%",
+            pe.imbalance_pct
+        );
+        // test_time 8.0 over wall 8.0 => 1× realized of 8× possible.
+        assert!((pe.realized_speedup - 1.0).abs() < 1e-6);
+        assert_eq!(pe.ideal_speedup, 8);
+        assert!((pe.efficiency_pct - 12.5).abs() < 1e-6);
+        assert!((pe.long_pole_seconds - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn balanced_workers_report_low_imbalance() {
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::a", 0, 10.0);
+        record_test(&mut run, "t.py::b", 1, 10.0);
+        let pe = analyze(&run, &[], 10.0, 2)
+            .parallel_efficiency
+            .expect("multi-worker run has efficiency");
+        assert_eq!(pe.workers_busy.len(), 2);
+        assert!(
+            pe.imbalance_pct.abs() < 1e-6,
+            "imbalance {} should be 0%",
+            pe.imbalance_pct
+        );
+        // 20.0s test time over 10.0s wall => 2× of 2× possible.
+        assert!((pe.realized_speedup - 2.0).abs() < 1e-6);
+        assert!((pe.efficiency_pct - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn some_idle_workers_still_counted() {
+        // 4 workers configured, 3 active, one loaded heavier: min must be
+        // the idle 0, so imbalance reflects the heaviest vs idle gap.
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::a", 0, 8.0);
+        record_test(&mut run, "t.py::b", 1, 4.0);
+        record_test(&mut run, "t.py::c", 2, 4.0);
+        let pe = analyze(&run, &[], 9.0, 4)
+            .parallel_efficiency
+            .expect("multi-worker run has efficiency");
+        assert_eq!(pe.workers_busy.len(), 3);
+        // max 8.0, min 0.0 (idle gw3) => 100%.
+        assert!((pe.imbalance_pct - 100.0).abs() < 1e-6);
     }
 }
