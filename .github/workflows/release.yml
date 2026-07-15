@@ -12,12 +12,21 @@ permissions:
 
 jobs:
   build:
-    name: build + attest (${{ matrix.os }})
+    name: build + attest (${{ matrix.build.id }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        build:
+          - { id: linux-x86_64, os: ubuntu-latest }
+          - { id: linux-aarch64, os: ubuntu-24.04-arm }
+          - { id: macos-arm64, os: macos-latest } # Apple silicon
+          - { id: macos-x86_64, os: macos-13 } # Intel
+          - { id: windows-x86_64, os: windows-latest }
+          - { id: windows-arm64, os: windows-11-arm }
+          # musllinux wheels for Alpine (musl libc, built in a musl container)
+          - { id: musllinux-x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2 }
+          - { id: musllinux-aarch64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2 }
+    runs-on: ${{ matrix.build.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -31,6 +40,8 @@ jobs:
         with:
           command: build
           args: --release
+          target: ${{ matrix.build.target }}
+          manylinux: ${{ matrix.build.manylinux }}
 
       # Signed build provenance (SLSA), stored in GitHub's attestation
       # store and bundled alongside the artifact. Verify any downloaded
@@ -43,7 +54,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-wheel-${{ matrix.os }}
+          name: release-wheel-${{ matrix.build.id }}
           path: target/wheels/*.whl
           if-no-files-found: error
 
