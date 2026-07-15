@@ -65,9 +65,10 @@ pub struct Cli {
     doctor_json: Option<PathBuf>,
 
     /// Write the doctor analysis as GitHub-flavored markdown (job-summary
-    /// ready). Implies doctor instrumentation. Under GitHub Actions any
-    /// doctor run already appends this to $GITHUB_STEP_SUMMARY
-    /// automatically; the flag is for a custom path.
+    /// ready). Implies doctor instrumentation. In CI any doctor run already
+    /// publishes this to the job summary automatically ($GITHUB_STEP_SUMMARY
+    /// on GitHub, `buildkite-agent annotate` on Buildkite); the flag is for
+    /// a custom path (and the way to surface it on GitLab/TeamCity).
     #[arg(long)]
     doctor_md: Option<PathBuf>,
 
@@ -619,10 +620,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         Some("dots") => progress::Mode::Dots,
         Some("github") => progress::Mode::Github,
         Some("json") => progress::Mode::Json,
+        Some("tap") => progress::Mode::Tap,
+        Some("teamcity") => progress::Mode::Teamcity,
+        Some("gitlab") => progress::Mode::Gitlab,
+        Some("buildkite") => progress::Mode::Buildkite,
+        Some("azure") => progress::Mode::Azure,
         Some(other) => {
             eprintln!(
                 "rstest: unknown --output '{other}' \
-                 (use dots|verbose|bar|github|json); using dots"
+                 (use dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json); using dots"
             );
             progress::Mode::Dots
         }
@@ -665,8 +671,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             std::process::exit(code);
         }
     }
-    // Json mode keeps stdout pure NDJSON — no banner.
-    if !passthrough && mode != progress::Mode::Json {
+    // Json/Tap modes keep stdout a pure machine stream — no banner
+    // (TAP gets its version header instead).
+    if !passthrough && mode == progress::Mode::Tap {
+        println!("TAP version 13");
+    }
+    if !passthrough && mode != progress::Mode::Json && mode != progress::Mode::Tap {
         let worker_desc = if n <= 1 {
             "single worker (pytest-exact mode)".to_string()
         } else {
@@ -910,15 +920,25 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             "counts": outcome.run.counts(),
         });
         println!("{envelope}");
+    } else if !passthrough && mode == progress::Mode::Tap {
+        // Pure TAP: close the stream with the trailing plan. Failure text
+        // already rode along as `#` diagnostics; no human summary.
+        outcome.prog.finish();
+        outcome.prog.tap_plan();
     } else if !passthrough {
         outcome.prog.finish();
+        let wrap = match mode {
+            progress::Mode::Gitlab => report::FailureWrap::GitlabSection,
+            progress::Mode::Buildkite => report::FailureWrap::BuildkiteGroup,
+            _ => report::FailureWrap::Plain,
+        };
         // Bar mode already inlines each failure as it happens; re-printing
         // the batched block would duplicate it.
         if mode != progress::Mode::Bar {
-            outcome.run.print_failures(&palette);
+            outcome.run.print_failures(&palette, wrap);
         }
         outcome.run.print_quarantined(&palette, &flake_history);
-        outcome.run.print_flaky(&palette, &flake_history);
+        outcome.run.print_flaky(&palette, &flake_history, wrap);
         print_warnings_summary(&outcome.warnings, &palette);
         if let Some((dn, dmin)) = durations {
             outcome
@@ -955,8 +975,21 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             palette.red(&summary)
         };
         println!("{summary}");
-        if mode == progress::Mode::Github {
-            print_github_annotations(&outcome.run);
+        // CI-native surfaces emitted from the aggregate at end-of-run. Failures
+        // already rode along above (GitHub/Azure annotations here; GitLab folds
+        // and Buildkite groups via print_failures; TeamCity as live service
+        // messages), so these add each platform's flake signal.
+        match mode {
+            progress::Mode::Github => print_github_annotations(&outcome.run),
+            progress::Mode::Azure => print_azure_annotations(&outcome.run),
+            progress::Mode::Buildkite => buildkite_flaky_annotate(&outcome.run),
+            progress::Mode::Teamcity => {
+                let msgs = progress::teamcity_flaky_messages(&outcome.run.flaky);
+                if !msgs.is_empty() {
+                    println!("{msgs}");
+                }
+            }
+            _ => {}
         }
     }
 
@@ -978,7 +1011,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         if let Some(path) = &cli.doctor_md {
             doctor::write_markdown(path, &report)?;
         }
-        doctor::append_github_summary(&report)?;
+        doctor::append_ci_summary(&report)?;
     }
     if let Some(path) = &cli.junitxml {
         junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
@@ -1111,6 +1144,15 @@ fn execute_monorepo(
             "--output json streams live per-session results and can't be merged \
              across a monorepo's projects; use --report-json <path> for one merged \
              machine-readable document, or run --output json inside a single project"
+        );
+    }
+    // Same problem for TAP: each child would emit its own version header,
+    // numbering, and plan — concatenated, that is not one valid stream.
+    if cli.output.as_deref() == Some("tap") {
+        anyhow::bail!(
+            "--output tap can't be merged across a monorepo's projects; use \
+             --junitxml for per-project machine-readable results, or run \
+             --output tap inside a single project"
         );
     }
     let rels: Vec<String> = projects
@@ -1589,6 +1631,111 @@ fn print_github_annotations(run: &report::Run) {
     }
 }
 
+/// Emit Azure Pipelines logging commands per failed test — `##vso[task.logissue
+/// type=error;sourcepath=;linenumber=]` — which Azure renders as an inline issue
+/// on the file in the PR (same nodeid→path/line mapping as the GitHub path).
+/// Flaky-passed tests follow as `type=warning`: the run is green, the flake is
+/// still visible. logissue is one line, so messages are collapsed to their
+/// first line.
+fn print_azure_annotations(run: &report::Run) {
+    let prefix = std::env::var("RSTEST_MONO_PROJECT")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let source = |nodeid: &str| -> String {
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        }
+    };
+    for (nodeid, entry) in run.tests() {
+        let failed = entry.call.as_deref() == Some("failed")
+            || entry.setup.as_deref() == Some("failed")
+            || entry.teardown.as_deref() == Some("failed");
+        if !failed {
+            continue;
+        }
+        let mut props = format!("type=error;sourcepath={}", az_prop(&source(nodeid)));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(";linenumber={}", l + 1));
+        }
+        let msg = entry.longrepr.as_deref().unwrap_or("test failed");
+        println!("##vso[task.logissue {props}]{}: {}", nodeid, az_line(msg));
+    }
+    for (nodeid, attempts) in &run.flaky {
+        let Some(entry) = run.tests().get(nodeid) else {
+            continue;
+        };
+        let mut props = format!("type=warning;sourcepath={}", az_prop(&source(nodeid)));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(";linenumber={}", l + 1));
+        }
+        println!(
+            "##vso[task.logissue {props}]{nodeid}: flaky, passed only after {attempts} rerun{}",
+            if *attempts > 1 { "s" } else { "" }
+        );
+    }
+}
+
+/// Azure logissue property value: `;` and `]` would end the property list /
+/// command, newlines would split the log line.
+fn az_prop(s: &str) -> String {
+    az_line(s).replace(';', "%3B").replace(']', "%5D")
+}
+
+/// Collapse to the first line for a single-line Azure log message.
+fn az_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// Buildkite: surface flaky-passed tests as a `warning` annotation on the build
+/// page (the native equivalent of GitHub's `::warning`), best-effort — a
+/// missing/failing `buildkite-agent` must not fail the run. No-op off Buildkite
+/// or when nothing flaked.
+fn buildkite_flaky_annotate(run: &report::Run) {
+    if run.flaky.is_empty()
+        || std::env::var("BUILDKITE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_none()
+    {
+        return;
+    }
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut md = String::from("**Flaky tests** (passed only after reruns):\n\n");
+    for (nodeid, attempts) in &run.flaky {
+        md.push_str(&format!(
+            "- `{nodeid}` — {attempts} rerun{}\n",
+            if *attempts > 1 { "s" } else { "" }
+        ));
+    }
+    let child = Command::new("buildkite-agent")
+        .args([
+            "annotate",
+            "--style",
+            "warning",
+            "--context",
+            "rstest-flaky",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rstest: skipping Buildkite flaky annotation (buildkite-agent: {e})");
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(md.as_bytes());
+    }
+    if let Err(e) = child.wait() {
+        eprintln!("rstest: buildkite-agent annotate failed: {e}");
+    }
+}
+
 /// Escape a GitHub workflow-command message (the part after `::`).
 fn gh_data(s: &str) -> String {
     s.replace('%', "%25")
@@ -1617,6 +1764,15 @@ mod tests {
         assert_eq!(gh_prop("pkg::test[a,b]"), "pkg%3A%3Atest[a%2Cb]");
         // % must escape first, or the other escapes' %XX would double-encode
         assert_eq!(gh_data("100%"), "100%25");
+    }
+
+    #[test]
+    fn azure_logissue_escaping() {
+        // property value: ; and ] would break the command; newlines collapse
+        assert_eq!(az_prop("a;b]c"), "a%3Bb%5Dc");
+        // message keeps only the first line, trimmed
+        assert_eq!(az_line("  first line  \nsecond\nthird"), "first line");
+        assert_eq!(az_line(""), "");
     }
 
     #[test]

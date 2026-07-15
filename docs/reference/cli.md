@@ -53,7 +53,7 @@ workers). `--durations=0` shows everything; entries under
 `-vv`. Phase granularity matches pytest: setup, call, and teardown each
 get a line.
 
-### `--output <dots|verbose|bar|github|json>`
+### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>`
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
@@ -104,6 +104,52 @@ Tests that passed only after reruns (`--reruns` /
 `@pytest.mark.flaky`) additionally emit a `::warning` annotation
 (`flaky: passed only after N reruns`) — the run stays green, but the
 flake is visible on the PR without opening the log.
+
+`azure` renders the normal `dots` log and additionally emits an [Azure
+Pipelines logging
+command](https://learn.microsoft.com/azure/devops/pipelines/scripts/logging-commands)
+per failing test, surfaced as an inline issue on the file in the PR:
+
+```
+##vso[task.logissue type=error;sourcepath=<path>;linenumber=<n>]<nodeid>: <message>
+```
+
+`sourcepath` comes from the nodeid path; `linenumber` (1-based) from
+pytest's report location, omitted when none is available. The message is
+collapsed to one line (logissue is single-line). Flaky-passed tests
+(`--reruns`) additionally emit a `type=warning` logissue — green run,
+visible flake.
+
+`gitlab` renders the normal `dots` log; each failure in the end-of-run
+failures block is wrapped in a [GitLab CI collapsible
+section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
+(`section_start`/`section_end`, collapsed by default), so the job log
+folds tracebacks per test. GitLab has no per-line warning command, so the
+flaky-tests block folds into its own collapsed section under this style.
+
+`buildkite` renders the normal `dots` log; each failure is emitted under
+an auto-expanded [`+++` group
+header](https://buildkite.com/docs/pipelines/configure/managing-log-output),
+so failing tests open as their own groups in the Buildkite log UI. Flaky
+tests are published as a `warning`
+[annotation](https://buildkite.com/docs/agent/v3/cli-annotate) on the
+build page (best-effort via `buildkite-agent`).
+
+`teamcity` emits [TeamCity service
+messages](https://www.jetbrains.com/help/teamcity/service-messages.html)
+as each test finishes — a `testStarted`/`testFinished` pair per test,
+plus `testFailed` (with the escaped traceback as `details`) or
+`testIgnored` for skips/xfails. Each test's messages are emitted as one
+group, so parallel results never interleave. Flaky tests emit a
+`WARNING`-status build message. The banner and summary stay: TeamCity
+ignores non-service lines.
+
+`tap` makes stdout a pure [Test Anything Protocol](https://testanything.org)
+version 13 stream: one `ok N - nodeid` / `not ok N - nodeid` point per
+test as it finishes, failure text as `#` diagnostic lines, skips as
+`# SKIP <reason>`, xfail/xpass as `# TODO`, closed by the trailing
+`1..N` plan. No banner or human summary. For TAP harnesses (`prove`,
+Jenkins TAP plugin, etc.).
 
 `json` makes stdout a pure **newline-delimited JSON** stream — one
 `testreport` object per phase as each test finishes, closed by a
@@ -304,13 +350,24 @@ edges — for correctness-critical runs, use `--changed-strict` below.
 With nothing affected, the run prints
 `no tests affected by N changed file(s)` and exits 0 without running.
 
-PR-aware in CI: on a GitHub Actions pull_request job (`GITHUB_BASE_REF`
-set), bare `--changed` diffs against the merge-base with the PR base
-branch instead of `HEAD` — a clean checkout of the PR commit still
-selects exactly the PR's files. Requires the base branch to be fetched
-(`actions/checkout` with `fetch-depth: 0`); an unfetched base is an
-error, never a silent full skip. An explicit `REV` disables the
-auto-targeting.
+PR-aware in CI: on a pull-request / merge-request job, bare `--changed`
+diffs against the merge-base with the PR base branch instead of `HEAD` —
+a clean checkout of the PR commit still selects exactly the PR's files.
+The base is auto-detected from the CI environment:
+
+| CI | Variable | Base |
+| --- | --- | --- |
+| GitHub Actions | `GITHUB_BASE_REF` | base branch → `git merge-base origin/<branch> HEAD` |
+| GitLab CI | `CI_MERGE_REQUEST_DIFF_BASE_SHA` | exact MR diff-base SHA (used directly) |
+| GitLab CI | `CI_MERGE_REQUEST_TARGET_BRANCH_NAME` | target branch (fallback when the SHA is unset) |
+| Buildkite | `BUILDKITE_PULL_REQUEST_BASE_BRANCH` | base branch → merge-base |
+
+Variables are probed in that order; the first set wins. Requires the
+base to be present in the clone (`actions/checkout` with `fetch-depth: 0`,
+GitLab's default MR fetch, or `git fetch origin <branch>`); an
+unresolvable base is an error, never a silent full skip. An explicit
+`REV` disables the auto-targeting. TeamCity has no standard base-branch
+variable — pass one explicitly or expose a build parameter as env.
 
 ### `--changed-strict`
 
@@ -403,10 +460,13 @@ Write the doctor analysis as GitHub-flavored markdown — the same signals
 as the terminal report, rendered as job-summary tables. Implies doctor
 instrumentation.
 
-Under GitHub Actions you rarely need the flag: any doctor run
-(`--doctor`, `--doctor-json`, or `--doctor-md`) automatically appends
-this markdown to `$GITHUB_STEP_SUMMARY`, so the report shows up on the
-run page with zero extra steps.
+On GitHub Actions and Buildkite you rarely need the flag: any doctor run
+(`--doctor`, `--doctor-json`, or `--doctor-md`) automatically publishes
+this markdown to the job summary — appended to `$GITHUB_STEP_SUMMARY` on
+GitHub, piped to `buildkite-agent annotate` (info style) on Buildkite —
+so the report shows up on the run page with zero extra steps. GitLab and
+TeamCity have no native markdown job-summary surface; use `--doctor-md`
+and publish the file as an artifact.
 
 ### `--watch`
 
