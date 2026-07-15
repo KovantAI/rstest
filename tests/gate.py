@@ -489,6 +489,27 @@ def main():
         str(dict(ts.attrib) if ts is not None else None),
     )
 
+    print("== --shard K/N ==")
+    g.write("shardsuite/test_a.py", "".join(f"def test_a{i}(): assert True\n" for i in range(4)))
+    g.write("shardsuite/test_b.py", "".join(f"def test_b{i}(): assert True\n" for i in range(4)))
+
+    def shard_ids(k, n):
+        xp = g.tmp / f"shard_{k}_{n}.xml"
+        g.run("shardsuite", "-n", "2", "--shard", f"{k}/{n}", "--junitxml", str(xp))
+        root = ET.parse(xp).getroot()
+        return {(tc.get("classname"), tc.get("name")) for tc in root.iter("testcase")}
+
+    s1, s2 = shard_ids(1, 2), shard_ids(2, 2)
+    check("shard: buckets disjoint", s1.isdisjoint(s2), f"overlap={s1 & s2}")
+    check("shard: buckets cover the suite", len(s1 | s2) == 8, f"union={len(s1 | s2)}")
+    check("shard: no empty bucket", bool(s1) and bool(s2), f"sizes={len(s1)},{len(s2)}")
+    r = g.run("shardsuite", "-n", "2", "--shard", "5/4")
+    check("shard: K>N rejected", r.returncode != 0 and "1..=4" in r.stderr, r.stderr[-160:])
+    r = g.run("shardsuite", "-n", "2", "--shard", "1/2", "--shuffle")
+    check("shard: +shuffle rejected", r.returncode != 0 and "not supported with --shuffle" in r.stderr, r.stderr[-160:])
+    r = g.run("shardsuite", "-n", "2", "--shard", "1/1")
+    check("shard: 1/1 runs whole suite", "8 passed" in r.stdout, r.stdout[-160:])
+
     print("== --dist each ==")
     r = g.run("basic/test_basic.py", "-n", "2", "--dist", "each")
     check("each: counts are per-worker", "4 failed, 4 passed" in r.stdout, r.stdout[-200:])

@@ -16,6 +16,7 @@ mod progress;
 mod proto;
 mod report;
 mod select;
+mod shard;
 mod status;
 mod watch;
 mod worker;
@@ -190,6 +191,17 @@ pub struct Cli {
     /// for byte-stable logs.
     #[arg(long, value_name = "STYLE")]
     output: Option<String>,
+
+    /// Split the suite across N independent CI jobs and run only shard K
+    /// (`--shard K/N`, K is 1-based). Each job partitions the collected
+    /// tests into N buckets balanced by the duration cache
+    /// (.rstest_cache/durations.json — restore the SAME cache on every
+    /// job) and runs its bucket; a cold cache falls back to an even
+    /// count split. Buckets are disjoint and cover the whole suite, so
+    /// merging the per-job JUnit reconstructs the full run. Orthogonal to
+    /// -n: each shard still runs its slice across local workers.
+    #[arg(long, value_name = "K/N")]
+    shard: Option<String>,
 }
 
 /// -x / --maxfail=N from the session args (also forwarded: each worker
@@ -495,6 +507,13 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--dist=") => own.push(arg),
+            "--shard" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--shard=") => own.push(arg),
             // Exact "--collect" only: --collect-only/--co stay session args.
             "--collect" => {
                 own.push(arg);
@@ -761,6 +780,38 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             Some(seed)
         }
     };
+    // --shard K/N: partition the suite and keep bucket K. Purely an
+    // orchestrator-side node-id (or, in lazy mode, file) filter.
+    let shard: Option<(usize, usize)> = match cli.shard.as_deref() {
+        None => None,
+        Some(spec) => {
+            let (k, total) = shard::parse_shard(spec)?;
+            if total == 1 {
+                None // 1/1 is the whole suite: no-op.
+            } else {
+                if n <= 1 || passthrough {
+                    anyhow::bail!(
+                        "--shard needs the parallel pool (-n >= 2); the single-worker \
+                         path runs the session's own full suite with no dispatch filter"
+                    );
+                }
+                if shuffle_seed.is_some() {
+                    anyhow::bail!(
+                        "--shard is not supported with --shuffle: shards must partition \
+                         the suite identically on every machine, which a per-run shuffle \
+                         defeats (shuffle within a shard is fine to add later)"
+                    );
+                }
+                if dist_name == "each" {
+                    anyhow::bail!(
+                        "--shard is not supported with --dist each (every worker runs the \
+                         full suite; there is no dispatch queue to partition)"
+                    );
+                }
+                Some((k, total))
+            }
+        }
+    };
     let mut outcome = if n <= 1 || passthrough {
         let io = if passthrough {
             worker::Stdio::Inherit
@@ -818,7 +869,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             .filter(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
             .map(PathBuf::from)
             .collect();
-        let files = collect::collect_test_files(&paths, &project)?;
+        let mut files = collect::collect_test_files(&paths, &project)?;
+        if let Some((k, total)) = shard {
+            let before = files.len();
+            files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
+            eprintln!(
+                "rstest: shard {k}/{total} -> {} of {before} test file(s)",
+                files.len()
+            );
+        }
         lazy::run_lazy_pool(
             &python,
             n.min(files.len().max(1)),
@@ -875,6 +934,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 .collect::<Result<Vec<_>, _>>()?,
             worker_timeout.map(std::time::Duration::from_secs),
             shuffle_seed,
+            shard,
         )?
     };
 

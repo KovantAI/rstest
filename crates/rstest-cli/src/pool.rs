@@ -203,6 +203,7 @@ pub fn run_pool(
     only_rerun: &[regex::Regex],
     worker_timeout: Option<std::time::Duration>,
     shuffle: Option<u64>,
+    shard: Option<(usize, usize)>,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
@@ -390,6 +391,18 @@ pub fn run_pool(
                 }
                 if let Some(ids) = ids {
                     if dispatch.is_none() && dist != Dist::Each {
+                        // --shard: keep only bucket K's node-ids; the rest are
+                        // deselected (never dispatched). Balanced by the same
+                        // duration cache the dispatch order uses.
+                        let keep = shard.map(|(k, total)| {
+                            let idx = crate::shard::shard_indices(&ids, &duration_cache, k, total);
+                            eprintln!(
+                                "rstest: shard {k}/{total} -> {} of {} test(s)",
+                                idx.len(),
+                                ids.len()
+                            );
+                            idx.into_iter().collect::<HashSet<u64>>()
+                        });
                         dispatch = Some(build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
@@ -397,6 +410,7 @@ pub fn run_pool(
                             &duration_cache,
                             dist,
                             shuffle,
+                            keep.as_ref(),
                         ));
                     }
                     ids_store.get_or_insert(ids);
@@ -873,9 +887,14 @@ fn build_dispatch(
     cache: &std::collections::HashMap<String, f64>,
     dist: Dist,
     shuffle: Option<u64>,
+    keep: Option<&HashSet<u64>>,
 ) -> Dispatch {
+    // --shard filter: an index not in `keep` is deselected everywhere
+    // (parallel order, serial phase, groups). None keeps everything.
+    let kept = |i: &u64| keep.is_none_or(|k| k.contains(i));
+    let serial: Vec<u64> = serial.into_iter().filter(|i| kept(i)).collect();
     let serial_set: HashSet<u64> = serial.iter().copied().collect();
-    let parallel = || (0..ids.len() as u64).filter(|i| !serial_set.contains(i));
+    let parallel = || (0..ids.len() as u64).filter(|i| !serial_set.contains(i) && kept(i));
 
     let (order, slow_count, group_ends) = match dist {
         // Each mode never builds a dispatch queue (each worker is seeded
@@ -885,7 +904,7 @@ fn build_dispatch(
             let full = crate::durations::dispatch_order(ids, cache);
             let order: Vec<u64> = full
                 .into_iter()
-                .filter(|i| !serial_set.contains(i))
+                .filter(|i| !serial_set.contains(i) && kept(i))
                 .collect();
             let slow_count = order
                 .iter()
@@ -1125,7 +1144,15 @@ mod tests {
         let names = ids(&["t/a.py::t1", "t/a.py::t2", "t/b.py::t3", "t/b.py::t4"]);
         let mut cache = HashMap::new();
         cache.insert("t/b.py::t3".to_string(), 5.0); // long pole
-        let d = build_dispatch(&names, vec![1], HashMap::new(), &cache, Dist::Load, None);
+        let d = build_dispatch(
+            &names,
+            vec![1],
+            HashMap::new(),
+            &cache,
+            Dist::Load,
+            None,
+            None,
+        );
         // slow item first, serial index 1 absent, rest in collection order
         assert_eq!(d.order, vec![2, 0, 3]);
         assert_eq!(d.slow_count, 1);
@@ -1137,8 +1164,24 @@ mod tests {
         let names = ids(&["t/a.py::t1", "t/a.py::t2", "t/b.py::t3", "t/b.py::t4"]);
         let mut cache = HashMap::new();
         cache.insert("t/b.py::t3".to_string(), 5.0);
-        let a = build_dispatch(&names, vec![], HashMap::new(), &cache, Dist::Load, Some(7));
-        let b = build_dispatch(&names, vec![], HashMap::new(), &cache, Dist::Load, Some(7));
+        let a = build_dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &cache,
+            Dist::Load,
+            Some(7),
+            None,
+        );
+        let b = build_dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &cache,
+            Dist::Load,
+            Some(7),
+            None,
+        );
         assert_eq!(a.order, b.order); // same seed, same order
         assert_eq!(a.slow_count, 0); // shuffle defeats long-pole-first
         let mut seen = a.order.clone();
@@ -1146,7 +1189,16 @@ mod tests {
         assert_eq!(seen, vec![0, 1, 2, 3]); // a permutation, nothing lost
                                             // Some seed must produce a different order than seed 7.
         assert!((0..20u64).any(|s| {
-            build_dispatch(&names, vec![], HashMap::new(), &cache, Dist::Load, Some(s)).order
+            build_dispatch(
+                &names,
+                vec![],
+                HashMap::new(),
+                &cache,
+                Dist::Load,
+                Some(s),
+                None,
+            )
+            .order
                 != a.order
         }));
     }
@@ -1168,6 +1220,7 @@ mod tests {
                 &HashMap::new(),
                 Dist::Loadfile,
                 Some(seed),
+                None,
             );
             let batches = drain(&mut d, 1, false);
             // Whole files, in-file order intact — only group ORDER varies.
@@ -1195,6 +1248,7 @@ mod tests {
             &HashMap::new(),
             Dist::Loadfile,
             None,
+            None,
         );
         // want=1 but whole groups must come out regardless
         let batches = drain(&mut d, 1, false);
@@ -1215,6 +1269,7 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             Dist::Loadscope,
+            None,
             None,
         );
         let batches = drain(&mut d, 1, false);
@@ -1240,6 +1295,7 @@ mod tests {
             &HashMap::new(),
             Dist::Loadgroup,
             None,
+            None,
         );
         let batches = drain(&mut d, 1, false);
         // marked group lands at its first member's position, cross-file;
@@ -1256,6 +1312,7 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             Dist::Load,
+            None,
             None,
         );
         d.requeued.push_back(2);
@@ -1274,6 +1331,7 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             Dist::Load,
+            None,
             None,
         );
         // parallel queue is empty (all serial); inactive phase = exhausted
