@@ -17,8 +17,8 @@ jobs:
       fail-fast: false
       matrix:
         build:
-          - { id: linux-x86_64, os: ubuntu-latest }
-          - { id: linux-aarch64, os: ubuntu-24.04-arm }
+          - { id: linux-x86_64, os: ubuntu-latest, manylinux: auto }
+          - { id: linux-aarch64, os: ubuntu-24.04-arm, manylinux: auto }
           - { id: macos-arm64, os: macos-latest } # Apple silicon
           - { id: macos-x86_64, os: macos-13 } # Intel
           - { id: windows-x86_64, os: windows-latest }
