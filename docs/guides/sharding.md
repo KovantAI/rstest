@@ -78,11 +78,16 @@ jobs:
 
       # Restore a SHARED cache so every shard partitions identically.
       # read-only: shards must not race to save divergent caches.
+      # The `durations` job below saves `...-<ref>-<run_id>`, so this exact
+      # `key` never hits — the match happens via the `restore-keys` prefix,
+      # pulling the newest cache for this ref. That's intended.
       - uses: actions/cache/restore@v4
         with:
           path: .rstest_cache
           key: rstest-durations-${{ github.ref_name }}
-          restore-keys: rstest-durations-
+          restore-keys: |
+            rstest-durations-${{ github.ref_name }}-
+            rstest-durations-
 
       - name: test shard ${{ matrix.shard }}
         run: rstest -n auto --shard ${{ matrix.shard }}/4 --junitxml junit.${{ matrix.shard }}.xml

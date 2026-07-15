@@ -16,7 +16,7 @@
 rstest is **alpha** software under active development. What that means
 honestly:
 
-- Versions are 0.0.x; CLI flags and the report-json schema aim for
+- Versions are 0.x (pre-1.0); CLI flags and the report-json schema aim for
   stability but may change until 1.0 — every change is listed in the
   repository's `CHANGELOG.md`.
 - The vendored pytest core carries a maintenance commitment: upstream

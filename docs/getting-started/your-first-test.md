@@ -4,6 +4,10 @@ This is the five-minute path from nothing to a green run — no existing suite
 required. If you already have a pytest project, skip to
 [First steps](first-steps.md): rstest runs it as-is.
 
+**You need:** Python 3.10+ and a terminal. That's it — no config, no prior
+pytest knowledge. New to the terms below (worker, byte-exact, `-n`)? The
+[glossary](../concepts/glossary.md) defines them.
+
 ## 1. Set up a folder
 
 ```console

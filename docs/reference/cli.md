@@ -14,7 +14,12 @@ added by your plugins — works without translation.
 
 Worker count. Default `auto` (logical cores).
 
-- `-n auto` — one worker per logical core
+- `-n auto` — one worker per available logical core, then capped by what the
+  suite can use (test-file count and cached total runtime). On Linux the core
+  count honors the process CPU affinity mask and cgroup CPU quota, so a
+  CPU-limited container (`docker run --cpus=2`, a constrained CI runner) sees
+  its allocation, not the host's core count — no over-subscription. Pin `-n
+  <k>` if you want a fixed count regardless.
 - `-n 4` — four workers
 - `-n 0` or `-n 1` — **single-worker mode**: one pytest session, byte-exact
   pytest semantics; identical to each other, with no worker identity below
@@ -53,7 +58,7 @@ workers). `--durations=0` shows everything; entries under
 `-vv`. Phase granularity matches pytest: setup, call, and teardown each
 get a line.
 
-### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>`
+### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>` { #-output-dotsverbosebargithubjson }
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
@@ -96,8 +101,9 @@ diff:
 ::error file=<path>,title=<nodeid>,line=<n>::<traceback>
 ```
 
-`file` comes from the nodeid path; `line` (1-based) from pytest's report
-location, omitted when none is available. The traceback is escaped per the
+`file` comes from the nodeid path; `line` (1-based — the annotator adds 1 to
+pytest's 0-based `report.location`, matching the `lineno` in the JSON reports)
+from pytest's report location, omitted when none is available. The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
 
 Tests that passed only after reruns (`--reruns` /
@@ -114,8 +120,9 @@ per failing test, surfaced as an inline issue on the file in the PR:
 ##vso[task.logissue type=error;sourcepath=<path>;linenumber=<n>]<nodeid>: <message>
 ```
 
-`sourcepath` comes from the nodeid path; `linenumber` (1-based) from
-pytest's report location, omitted when none is available. The message is
+`sourcepath` comes from the nodeid path; `linenumber` (1-based — the 0-based
+`report.location` plus 1, as in the GitHub annotator) from pytest's report
+location, omitted when none is available. The message is
 collapsed to one line (logissue is single-line). Flaky-passed tests
 (`--reruns`) additionally emit a `type=warning` logissue — green run,
 visible flake.
@@ -239,9 +246,10 @@ duration cache on every job so their partitions match — see the
 ### `--doctor`
 
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),
-parallel-floor analysis (the tests that cap any `-n`), fixture hotspots
-(with scope advice), and slowest files. Adds two cheap measurements to the
-run; outcomes are unaffected.
+parallel-floor analysis (the tests that cap any `-n`), parallel efficiency
+(realized speedup and per-worker load imbalance, `-n > 1` only), fixture
+hotspots (with scope advice), and slowest files. Adds two cheap measurements
+to the run; outcomes are unaffected.
 
 ### `--try`
 

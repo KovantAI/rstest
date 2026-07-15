@@ -427,8 +427,10 @@ and just run `rstest`.
   PR diff — see [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
 - **Crash safety matters most in CI**: a segfaulting test costs one FAILED
   entry instead of an aborted job with partial results.
-- **Worker count**: `-n auto` uses the runner's logical cores. CI runners
-  are small (2–4 cores) and not oversubscribed, so `auto` is the right
-  default there.
+- **Worker count**: `-n auto` uses the runner's available logical cores —
+  on Linux it honors the CPU affinity mask and cgroup CPU quota, so a
+  CPU-limited container gets its allocation, not the host's core count. CI
+  runners are small (2–4 cores) and not oversubscribed, so `auto` is the
+  right default there; pin `-n <k>` only if you need a fixed count.
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` if your CI renders ANSI.

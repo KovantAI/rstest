@@ -67,12 +67,6 @@ libs too; they don't use the marker, so the corpus disables it there
 (`-p no:pytest-retry`, on both the baseline and rstest runs) to keep
 per-test parity exact.
 
-[^pandas]: Yes, really — measured, not estimated: pandas' default
-    suite on Apple Silicon is dominated by sub-millisecond asserts, and
-    the collected count includes its thousands of environment-dependent
-    skips. The same pinned-pytest baseline command is in the corpus
-    runner; reproduce it before doubting it.
-
 ## Reading the numbers honestly
 
 - **aiohttp is the headline** and deserves its asterisk: the suite is
@@ -102,3 +96,9 @@ per-test parity exact.
 - Parallel speedups depend on suite shape: wait-bound suites gain most;
   CPU-bound suites gain up to core count; suites gated by one long test
   gain nothing beyond that test (run `--doctor`; it names the floor).
+
+[^pandas]: Yes, really — measured, not estimated: pandas' default
+    suite on Apple Silicon is dominated by sub-millisecond asserts, and
+    the collected count includes its thousands of environment-dependent
+    skips. The same pinned-pytest baseline command is in the corpus
+    runner; reproduce it before doubting it.

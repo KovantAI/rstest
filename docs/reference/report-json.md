@@ -294,6 +294,10 @@ scope, setup count, summed setup time. `slowest_files[]`:
 `{file, total_seconds, pct}` — `pct` is the file's share of
 `test_time_seconds`.
 
+`schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
+`cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
+`slowest_files`); `2` added the `parallel_efficiency` object.
+
 `schema` aside, all times are raw seconds (no rounding) — round in your
 consumer. Increment-only: incompatible changes bump `schema`.
 

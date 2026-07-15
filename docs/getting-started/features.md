@@ -2,9 +2,15 @@
 
 Everything pytest does (via a vendored pytest core), plus:
 
+!!! tip "New here? Start with three"
+    `rstest` (parallel by default), `rstest --doctor` (why the suite is slow),
+    and `rstest --watch` (instant reruns on save). Evaluating a switch from
+    pytest? `rstest --try` gives a 30-second verdict. The full surface:
+
 | Feature | Flag / API | Notes |
 |---|---|---|
 | Parallel by default | `-n auto` (default) | suite-aware worker count; `-n 0` = byte-exact pytest session |
+| Migration check | `--try`, `--migrate-check` | `--try` runs pytest vs `rstest -n auto` and prints the "should I switch?" verdict; `--migrate-check` classifies parallel-only failures |
 | Test-granular scheduling | `--dist load` (default) | duration cache runs slowest tests first; module locality preserved |
 | Affinity modes | `--dist loadfile/loadscope/loadgroup` | file, fixture-scope, or `xdist_group` affinity (xdist-compatible) |
 | Broadcast mode | `--dist each` | every worker runs the full suite (xdist `--dist=each`) for multi-environment validation; outcomes keyed `[gwN]` |
