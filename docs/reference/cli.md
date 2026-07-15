@@ -53,7 +53,7 @@ workers). `--durations=0` shows everything; entries under
 `-vv`. Phase granularity matches pytest: setup, call, and teardown each
 get a line.
 
-### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|tap|json>`
+### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>`
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
@@ -105,24 +105,44 @@ Tests that passed only after reruns (`--reruns` /
 (`flaky: passed only after N reruns`) — the run stays green, but the
 flake is visible on the PR without opening the log.
 
+`azure` renders the normal `dots` log and additionally emits an [Azure
+Pipelines logging
+command](https://learn.microsoft.com/azure/devops/pipelines/scripts/logging-commands)
+per failing test, surfaced as an inline issue on the file in the PR:
+
+```
+##vso[task.logissue type=error;sourcepath=<path>;linenumber=<n>]<nodeid>: <message>
+```
+
+`sourcepath` comes from the nodeid path; `linenumber` (1-based) from
+pytest's report location, omitted when none is available. The message is
+collapsed to one line (logissue is single-line). Flaky-passed tests
+(`--reruns`) additionally emit a `type=warning` logissue — green run,
+visible flake.
+
 `gitlab` renders the normal `dots` log; each failure in the end-of-run
 failures block is wrapped in a [GitLab CI collapsible
 section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
 (`section_start`/`section_end`, collapsed by default), so the job log
-folds tracebacks per test.
+folds tracebacks per test. GitLab has no per-line warning command, so the
+flaky-tests block folds into its own collapsed section under this style.
 
 `buildkite` renders the normal `dots` log; each failure is emitted under
 an auto-expanded [`+++` group
 header](https://buildkite.com/docs/pipelines/configure/managing-log-output),
-so failing tests open as their own groups in the Buildkite log UI.
+so failing tests open as their own groups in the Buildkite log UI. Flaky
+tests are published as a `warning`
+[annotation](https://buildkite.com/docs/agent/v3/cli-annotate) on the
+build page (best-effort via `buildkite-agent`).
 
 `teamcity` emits [TeamCity service
 messages](https://www.jetbrains.com/help/teamcity/service-messages.html)
 as each test finishes — a `testStarted`/`testFinished` pair per test,
 plus `testFailed` (with the escaped traceback as `details`) or
 `testIgnored` for skips/xfails. Each test's messages are emitted as one
-group, so parallel results never interleave. The banner and summary
-stay: TeamCity ignores non-service lines.
+group, so parallel results never interleave. Flaky tests emit a
+`WARNING`-status build message. The banner and summary stay: TeamCity
+ignores non-service lines.
 
 `tap` makes stdout a pure [Test Anything Protocol](https://testanything.org)
 version 13 stream: one `ok N - nodeid` / `not ok N - nodeid` point per

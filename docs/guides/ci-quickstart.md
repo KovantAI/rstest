@@ -57,6 +57,81 @@ jobs:
           path: junit.xml
 ```
 
+## AWS CodeBuild
+
+CodeBuild has no log-side annotation command (no equivalent of GitHub's
+`::error` or Azure's `##vso`), so there is no dedicated `--output` style
+— the integration surface is the JUnit file. Point a [CodeBuild report
+group](https://docs.aws.amazon.com/codebuild/latest/userguide/test-reporting.html)
+at `--junitxml` output and CodeBuild renders pass/fail, durations, and
+run-over-run trends in the console.
+
+```yaml
+# buildspec.yml
+version: 0.2
+phases:
+  install:
+    commands:
+      - pip install -r requirements.txt
+      - pip install rstest          # pre-release: install from your hosted wheel
+  build:
+    commands:
+      # The `cache` block below persists .rstest_cache across builds, so
+      # from the second run on the scheduler starts the slowest tests first.
+      - rstest -n auto --junitxml junit.xml
+
+reports:
+  rstest:
+    files:
+      - junit.xml
+    file-format: JUNITXML
+
+# Persist .rstest_cache between builds so scheduling stays warm.
+cache:
+  paths:
+    - '.rstest_cache/**/*'
+```
+
+`-n auto` uses the build container's vCPUs; size the compute type to the
+parallelism you want. For a monorepo root, widen the report `files` glob
+to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
+and the cache to `**/.rstest_cache/**/*`.
+
+## Google Cloud Build
+
+Cloud Build likewise has no annotation protocol — it streams step logs
+to Cloud Logging and has no native test-report UI, so again there is no
+`--output` style to add. Run rstest as a build step and publish the
+JUnit XML (and any doctor/report-json) as build
+[artifacts](https://cloud.google.com/build/docs/building/store-artifacts-in-cloud-storage).
+
+```yaml
+# cloudbuild.yaml
+steps:
+  - name: python:3.13
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r requirements.txt
+        pip install rstest        # pre-release: install from your hosted wheel
+        rstest -n auto --junitxml junit.xml
+
+# Upload the JUnit (and doctor JSON, if produced) to Cloud Storage.
+artifacts:
+  objects:
+    location: 'gs://$PROJECT_ID-ci-artifacts/$BUILD_ID/'
+    paths:
+      - 'junit.xml'
+```
+
+The duration cache lives in `.rstest_cache`; on Cloud Build persist it
+between runs by syncing it to Cloud Storage
+(`gsutil rsync`) at the start and end of the step — the workspace itself
+is not retained across builds. Colors auto-disable off-tty, so the log
+stays clean; the JUnit file is the machine-readable surface for any
+downstream test-reporting tool.
+
 ## Suite-health trending with doctor
 
 `--doctor-json` writes the doctor analysis as a versioned JSON document

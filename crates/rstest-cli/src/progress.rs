@@ -43,6 +43,11 @@ pub enum Mode {
     /// Buildkite: renders dots for the human-readable log; each failure is
     /// emitted under an auto-expanded `+++` group header at end-of-run.
     Buildkite,
+    /// Azure Pipelines: renders dots for the human-readable log, plus
+    /// `##vso[task.logissue type=error;sourcepath=;linenumber=]` logging
+    /// commands per failure (and `type=warning` for flaky-passed tests),
+    /// emitted at end-of-run — surfaced inline on the PR file view.
+    Azure,
 }
 
 #[derive(Default)]
@@ -448,6 +453,23 @@ fn teamcity_messages(r: &Report) -> Option<String> {
     })
 }
 
+/// TeamCity WARNING build messages for tests that passed only after reruns
+/// (`--reruns`). The run stays green — these surface as build-log warnings so
+/// the flake is visible without opening the junit. Empty when nothing flaked.
+pub fn teamcity_flaky_messages(flaky: &[(String, u32)]) -> String {
+    flaky
+        .iter()
+        .map(|(nodeid, attempts)| {
+            format!(
+                "##teamcity[message text='flaky: {} passed only after {attempts} rerun{}' status='WARNING']",
+                tc_escape(nodeid),
+                if *attempts > 1 { "s" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// TeamCity service-message value escaping.
 fn tc_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -532,5 +554,21 @@ mod tests {
         let pass = teamcity_messages(&report("call", "passed")).unwrap();
         assert_eq!(pass.lines().count(), 2);
         assert!(teamcity_messages(&report("setup", "passed")).is_none());
+    }
+
+    #[test]
+    fn teamcity_flaky_warns_per_test() {
+        assert_eq!(teamcity_flaky_messages(&[]), "");
+        let flaky = vec![
+            ("tests/test_a.py::test_x[a]".to_string(), 1u32),
+            ("tests/test_b.py::test_y".to_string(), 3u32),
+        ];
+        let msgs = teamcity_flaky_messages(&flaky);
+        let lines: Vec<&str> = msgs.lines().collect();
+        assert_eq!(
+            lines[0],
+            "##teamcity[message text='flaky: tests/test_a.py::test_x|[a|] passed only after 1 rerun' status='WARNING']"
+        );
+        assert!(lines[1].contains("passed only after 3 reruns' status='WARNING'"));
     }
 }

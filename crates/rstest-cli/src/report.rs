@@ -166,14 +166,25 @@ impl Run {
         &self,
         palette: &crate::color::Palette,
         history: &std::collections::HashMap<String, crate::flakes::FlakeStats>,
+        wrap: FailureWrap,
     ) {
         if self.flaky.is_empty() {
             return;
         }
-        println!(
-            "\n{}",
-            palette.yellow("=========== flaky tests (passed after rerun) ===========")
-        );
+        let header = palette.yellow("=========== flaky tests (passed after rerun) ===========");
+        // GitLab has no per-line warning command; fold the whole flaky block
+        // into one collapsed section so it's tucked away but greppable — the
+        // CI-native analogue of GitHub's `::warning` flaky annotations.
+        let gitlab = wrap == FailureWrap::GitlabSection;
+        let id = format!("rstest_flaky_{}", std::process::id());
+        if gitlab {
+            println!(
+                "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{header}",
+                epoch_secs()
+            );
+        } else {
+            println!("\n{header}");
+        }
         for (nodeid, attempts) in &self.flaky {
             let past = history
                 .get(nodeid)
@@ -184,6 +195,9 @@ impl Run {
                 "  {nodeid}  ({attempts} rerun{}{past})",
                 if *attempts > 1 { "s" } else { "" }
             );
+        }
+        if gitlab {
+            println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
         }
     }
 
