@@ -186,6 +186,125 @@ pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Resu
     Ok(())
 }
 
+/// The doctor analysis as GitHub-flavored markdown, shaped for a job
+/// summary: same signals as the terminal report, tables instead of
+/// aligned columns.
+pub fn render_markdown(r: &DoctorReport) -> String {
+    use std::fmt::Write;
+
+    let mut md = String::from("## rstest doctor\n\n");
+    if r.tests == 0 {
+        md.push_str("No timing data collected.\n");
+        return md;
+    }
+    let _ = writeln!(
+        md,
+        "**{} tests** — test time {:.1}s (wall {:.1}s, {} workers)\n",
+        r.tests, r.test_time_seconds, r.wall_seconds, r.workers
+    );
+
+    if let Some(w) = &r.wait_bound {
+        let _ = writeln!(
+            md,
+            "**Wait-bound:** {:.0}% of test time ({:.1}s) is waiting, not \
+             computing (sleeps / IO / timeouts).\n",
+            w.wait_pct, w.wait_seconds
+        );
+        if !w.tests.is_empty() {
+            md.push_str("| Waiting | Duration | Test |\n|---:|---:|---|\n");
+            for t in w.tests.iter().take(8) {
+                let _ = writeln!(
+                    md,
+                    "| {:.2}s | {:.2}s | `{}` |",
+                    t.wait, t.duration, t.nodeid
+                );
+            }
+            if w.tests.len() > 8 {
+                let _ = writeln!(md, "\n... and {} more", w.tests.len() - 8);
+            }
+            md.push('\n');
+        }
+    }
+
+    if let Some(p) = &r.parallel_floor {
+        let _ = writeln!(
+            md,
+            "**Parallel floor:** the longest test ({:.1}s) exceeds the ideal \
+             per-worker share ({:.1}s at `-n {}`); no worker count can finish \
+             faster than its longest test.\n",
+            p.longest_seconds, p.ideal_share_seconds, r.workers
+        );
+        if !p.gate_tests.is_empty() {
+            md.push_str("| Duration | Gate test |\n|---:|---|\n");
+            for t in p.gate_tests.iter().take(5) {
+                let _ = writeln!(md, "| {:.2}s | `{}` |", t.duration, t.nodeid);
+            }
+            md.push('\n');
+        }
+    }
+
+    let interesting: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| f.total_seconds >= 0.5)
+        .take(8)
+        .collect();
+    if !interesting.is_empty() {
+        md.push_str("### Fixture hotspots (setup time across all workers)\n\n");
+        md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
+        for f in interesting {
+            let advice = if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
+                "ran many times; widen scope if value is reusable"
+            } else if f.scope == "session" && f.count > 1 {
+                "session fixture ran once per worker; must be safe to duplicate"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                md,
+                "| `{}` | {} | {} | {:.1}s | {advice} |",
+                f.name, f.scope, f.count, f.total_seconds
+            );
+        }
+        md.push('\n');
+    }
+
+    if !r.slowest_files.is_empty() {
+        md.push_str("### Slowest files\n\n| File | Time | Share |\n|---|---:|---:|\n");
+        for f in r.slowest_files.iter().take(5) {
+            let _ = writeln!(
+                md,
+                "| `{}` | {:.2}s | {:.0}% |",
+                f.file, f.total_seconds, f.pct
+            );
+        }
+    }
+    md
+}
+
+pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::Result<()> {
+    std::fs::write(path, render_markdown(report))?;
+    Ok(())
+}
+
+/// Under GitHub Actions, append the markdown report to the job summary —
+/// zero-config: any doctor run on a runner shows up on the run page.
+pub fn append_github_summary(report: &DoctorReport) -> anyhow::Result<()> {
+    let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") else {
+        return Ok(());
+    };
+    if path.is_empty() {
+        return Ok(());
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    f.write_all(render_markdown(report).as_bytes())?;
+    Ok(())
+}
+
 pub fn render(r: &DoctorReport) {
     if r.tests == 0 {
         println!("\n== rstest doctor: no timing data collected ==");
@@ -254,4 +373,71 @@ pub fn render(r: &DoctorReport) {
         println!("  {:7.2}s ({:4.1}%)  {}", f.total_seconds, f.pct, f.file);
     }
     println!("===================================================");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(tests: usize) -> DoctorReport {
+        DoctorReport {
+            schema: SCHEMA_VERSION,
+            rstest_version: "test",
+            workers: 4,
+            wall_seconds: 9.0,
+            tests,
+            test_time_seconds: 30.0,
+            cpu_time_seconds: 6.0,
+            wait_bound: Some(WaitBound {
+                wait_seconds: 24.0,
+                wait_pct: 80.0,
+                tests: vec![WaitTest {
+                    nodeid: "tests/test_a.py::test_sleepy".into(),
+                    duration: 5.1,
+                    wait: 5.0,
+                }],
+            }),
+            parallel_floor: Some(ParallelFloor {
+                longest_seconds: 8.4,
+                ideal_share_seconds: 7.5,
+                gate_tests: vec![GateTest {
+                    nodeid: "tests/test_a.py::test_long".into(),
+                    duration: 8.4,
+                }],
+            }),
+            fixtures: vec![FixtureEntry {
+                name: "db".into(),
+                scope: "session".into(),
+                count: 4,
+                total_seconds: 6.1,
+            }],
+            slowest_files: vec![FileEntry {
+                file: "tests/test_a.py".into(),
+                total_seconds: 20.0,
+                pct: 66.7,
+            }],
+        }
+    }
+
+    #[test]
+    fn markdown_renders_all_sections() {
+        let md = render_markdown(&report(12));
+        assert!(md.starts_with("## rstest doctor\n"));
+        assert!(md.contains("**12 tests** — test time 30.0s (wall 9.0s, 4 workers)"));
+        assert!(md.contains("**Wait-bound:** 80% of test time (24.0s)"));
+        assert!(md.contains("| 5.00s | 5.10s | `tests/test_a.py::test_sleepy` |"));
+        assert!(md.contains("**Parallel floor:**"));
+        assert!(md.contains("| 8.40s | `tests/test_a.py::test_long` |"));
+        assert!(md.contains("### Fixture hotspots"));
+        assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
+        assert!(md.contains("### Slowest files"));
+        assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
+    }
+
+    #[test]
+    fn markdown_empty_run() {
+        let md = render_markdown(&report(0));
+        assert!(md.contains("No timing data collected."));
+        assert!(!md.contains("Wait-bound"));
+    }
 }

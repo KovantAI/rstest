@@ -85,6 +85,9 @@ class Gate:
             RSTEST_WORKER_PATH=str(REPO / "python"),
         )
         env.pop("PYTEST_ADDOPTS", None)
+        # Doctor runs auto-append to the job summary under GitHub Actions;
+        # keep the gate's fixture-suite reports out of the real run page.
+        env.pop("GITHUB_STEP_SUMMARY", None)
         # Bare --changed auto-targets the PR base when GITHUB_BASE_REF is
         # set; the gate's fixture repos have no origin, so a PR CI run
         # would break every --changed check. Tests opt in via env_extra.
@@ -938,6 +941,25 @@ def main():
         and d.get("wait_bound")
         and any("test_sleepy" in t["nodeid"] for t in d["wait_bound"]["tests"]),
         str(d)[:200],
+    )
+    dm = g.tmp / "doctor.md"
+    summ = g.tmp / "summary.md"
+    g.run(
+        "doc", "-n", "2", "--doctor-md", str(dm),
+        env_extra={"GITHUB_STEP_SUMMARY": str(summ)},
+    )
+    md = dm.read_text(encoding="utf-8")
+    check(
+        "doctor markdown",
+        md.startswith("## rstest doctor")
+        and "**Wait-bound:**" in md
+        and "### Slowest files" in md
+        and "test_sleepy" in md,
+        md[:300],
+    )
+    check(
+        "doctor auto-appends job summary",
+        summ.exists() and "## rstest doctor" in summ.read_text(encoding="utf-8"),
     )
 
     print("== auto worker capping ==")

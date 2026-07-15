@@ -5,6 +5,10 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- `--doctor-md <path>`: the doctor analysis as GitHub-flavored markdown
+  (job-summary tables). Under GitHub Actions any doctor run now appends
+  this markdown to `$GITHUB_STEP_SUMMARY` automatically, so the report
+  shows up on the run page without a post-processing step.
 - `--changed` is PR-aware in CI: on a GitHub Actions pull_request job
   (`GITHUB_BASE_REF` set), bare `--changed` diffs against the merge-base
   with the PR base branch instead of `HEAD`, so a clean checkout of the
