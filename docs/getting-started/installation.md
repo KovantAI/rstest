@@ -10,15 +10,17 @@ or into a uv-managed project (installs alongside your test deps):
 $ uv add --dev rstest
 ```
 
-or as a standalone tool:
+or as a standalone tool (advanced — the tool env is separate from your
+tests, so the worker runtime must also be in the project env; see
+[Binary vs worker runtime](#binary-vs-worker-runtime-for-tool-scoped-installs)):
 
 ```console
 $ uv tool install rstest      # or run ad hoc: uvx rstest --version
 ```
 
-Install rstest into the **same environment as your test dependencies** —
-workers run your tests in that interpreter (see
-[Which Python does rstest use?](#which-python-does-rstest-use) for the tool-vs-project split).
+For the `pip` and `uv add --dev` paths, install rstest into the **same
+environment as your test dependencies** — workers run your tests in that
+interpreter (see [Which Python does rstest use?](#which-python-does-rstest-use)).
 
 ## Requirements
 
@@ -60,17 +62,17 @@ tests in your environment. `pip install rstest` / `uv add --dev rstest` into
 the project venv provides both at once; a tool-only install needs rstest in
 the project venv too.
 
-## From a wheel (offline / air-gapped)
+## From a wheel or git
 
-To install without index access, point pip or uv at a downloaded release
-wheel:
+For an air-gapped install, point pip or uv at a downloaded release wheel (no
+index access needed):
 
 ```console
 $ pip install rstest-*.whl
 $ uv pip install rstest-*.whl          # or: uv add --dev ./rstest-*.whl
 ```
 
-Or pull straight from git:
+To track an unreleased revision, install straight from git (needs network):
 
 ```console
 $ uv add --dev "rstest @ git+https://github.com/KovantAI/rstest"
@@ -122,7 +124,7 @@ doesn't name an interpreter directly.
 Install rstest into the same environment as your project's test
 dependencies, exactly as you would pytest.
 
-## Verify
+## Verify your install
 
 ```console
 $ rstest --version

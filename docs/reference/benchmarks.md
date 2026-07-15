@@ -17,7 +17,7 @@ runs, warm caches noted.
 <!-- --8<-- [start:suite-table] -->
 | Suite | Tests | pytest serial | xdist | rstest | Outcome parity |
 |---|---|---|---|---|---|
-| pandas | 193,627 | 182s | 61s (`-n 8`) | **63s** (`-n 8`) | 100% |
+| pandas | 193,627 | 182s | 61s (`-n 8`) | 63s (`-n 8`, parity) | 100% |
 | aiohttp | 4,469 | 197s | 160s (`-n 8`) | **68s** (`-n 8`, warm cache; 151s cold) | 100% |
 | django-allauth | 2,050 | 22s | 8s (`-n 8`) | **8s** (`-n 4`) | 100%[^parity] |
 | rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) | 100%[^parity] |
