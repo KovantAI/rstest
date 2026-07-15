@@ -100,6 +100,11 @@ diff:
 location, omitted when none is available. The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
 
+Tests that passed only after reruns (`--reruns` /
+`@pytest.mark.flaky`) additionally emit a `::warning` annotation
+(`flaky: passed only after N reruns`) — the run stays green, but the
+flake is visible on the PR without opening the log.
+
 `json` makes stdout a pure **newline-delimited JSON** stream — one
 `testreport` object per phase as each test finishes, closed by a
 `sessionfinish` envelope. No banner, footer, or human summary is printed,
@@ -128,6 +133,43 @@ the compatibility trade. Configurable via `[tool.rstest] collect`.
 
 With `--collect lazy`, `--dist loadscope|loadgroup` are rejected, and
 nodeid/`--pyargs` arguments fall back to full collection.
+
+### `--durations-regress <RATIO>`
+
+Gate CI on per-test duration regressions. After the run, each test's
+wall time is compared against the duration cache
+(`.rstest_cache/durations.json` — the same file LPT scheduling uses;
+restore it from your CI cache). Any test that grew past `RATIO` × its
+baseline is listed and the run exits 1:
+
+```
+=========== duration regressions (>= 2x baseline) ===========
+     0.10s ->    1.21s  tests/test_api.py::test_poll
+```
+
+Jitter-floored so CI noise can't flag: baselines under 50ms and
+absolute growth under 0.5s never count, and tests absent from the
+baseline (new or renamed) are skipped. A missing baseline file skips
+the comparison entirely (first run / cold cache). The comparison runs
+before the cache is refreshed with this run's times.
+
+### `--shuffle[=SEED]`
+
+Run tests in a seeded random order (the pytest-randomly idea, applied to
+the orchestrator's dispatch queue). Order dependence is the central
+parallel-readiness hazard; a shuffled run flushes it out on demand —
+in CI or before enabling more workers — instead of waiting for a
+scheduling change to bite. Without a value the seed is chosen per run
+and printed; reproduce a failing order with `--shuffle=SEED` (add
+`-n 2 --dist loadfile` to keep the repro stable).
+
+Affinity modes (`loadfile`/`loadscope`/`loadgroup`) shuffle the group
+order and keep in-group order intact — in-group order is the affinity
+contract. In `load` mode the shuffle replaces duration-aware
+sequencing for that run. Requires the parallel pool with full
+collection: single-worker mode, `--collect lazy`, and `--dist each`
+are refused (not silently ignored — a run probing for order
+dependence must not quietly run ordered).
 
 ### `--doctor`
 

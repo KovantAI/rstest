@@ -202,6 +202,7 @@ pub fn run_pool(
     reruns: u32,
     only_rerun: &[regex::Regex],
     worker_timeout: Option<std::time::Duration>,
+    shuffle: Option<u64>,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
@@ -395,6 +396,7 @@ pub fn run_pool(
                             groups.unwrap_or_default(),
                             &duration_cache,
                             dist,
+                            shuffle,
                         ));
                     }
                     ids_store.get_or_insert(ids);
@@ -840,12 +842,37 @@ pub fn run_pool(
     })
 }
 
+/// SplitMix64: tiny, deterministic, platform-stable RNG for --shuffle.
+/// The seed is printed for reproduction, so the permutation must be a
+/// pure function of it — no std RandomState / platform variance.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
+/// Seeded Fisher-Yates.
+fn shuffle_slice<T>(v: &mut [T], seed: u64) {
+    let mut rng = SplitMix64(seed);
+    for i in (1..v.len()).rev() {
+        let j = (rng.next() % (i as u64 + 1)) as usize;
+        v.swap(i, j);
+    }
+}
+
 fn build_dispatch(
     ids: &[String],
     serial: Vec<u64>,
     groups: std::collections::HashMap<String, String>,
     cache: &std::collections::HashMap<String, f64>,
     dist: Dist,
+    shuffle: Option<u64>,
 ) -> Dispatch {
     let serial_set: HashSet<u64> = serial.iter().copied().collect();
     let parallel = || (0..ids.len() as u64).filter(|i| !serial_set.contains(i));
@@ -923,6 +950,41 @@ fn build_dispatch(
             (order, 0, Some(ends))
         }
     };
+    let (mut order, mut slow_count, mut group_ends, mut serial) =
+        (order, slow_count, group_ends, serial);
+    if let Some(seed) = shuffle {
+        match group_ends.take() {
+            // Affinity modes: shuffle GROUP order, keep each group's
+            // internal order intact — in-group order is the affinity
+            // contract (loadfile is the order-dependent-suite remedy).
+            Some(ends) => {
+                let mut units: Vec<&[u64]> = Vec::new();
+                let mut start = 0;
+                for &end in &ends {
+                    units.push(&order[start..end]);
+                    start = end;
+                }
+                shuffle_slice(&mut units, seed);
+                let mut new_order = Vec::with_capacity(order.len());
+                let mut new_ends = Vec::with_capacity(units.len());
+                for unit in units {
+                    new_order.extend_from_slice(unit);
+                    new_ends.push(new_order.len());
+                }
+                order = new_order;
+                group_ends = Some(new_ends);
+            }
+            // Load mode: the shuffle IS the order — duration-aware
+            // long-pole-first sequencing is deliberately defeated.
+            None => {
+                shuffle_slice(&mut order, seed);
+                slow_count = 0;
+            }
+        }
+        // A different stream position for the serial phase, so it isn't
+        // the same permutation pattern as the parallel one.
+        shuffle_slice(&mut serial, seed.wrapping_add(1));
+    }
     Dispatch {
         order,
         slow_count,
@@ -1063,11 +1125,58 @@ mod tests {
         let names = ids(&["t/a.py::t1", "t/a.py::t2", "t/b.py::t3", "t/b.py::t4"]);
         let mut cache = HashMap::new();
         cache.insert("t/b.py::t3".to_string(), 5.0); // long pole
-        let d = build_dispatch(&names, vec![1], HashMap::new(), &cache, Dist::Load);
+        let d = build_dispatch(&names, vec![1], HashMap::new(), &cache, Dist::Load, None);
         // slow item first, serial index 1 absent, rest in collection order
         assert_eq!(d.order, vec![2, 0, 3]);
         assert_eq!(d.slow_count, 1);
         assert_eq!(d.serial, VecDeque::from(vec![1]));
+    }
+
+    #[test]
+    fn shuffle_is_deterministic_and_defeats_duration_order() {
+        let names = ids(&["t/a.py::t1", "t/a.py::t2", "t/b.py::t3", "t/b.py::t4"]);
+        let mut cache = HashMap::new();
+        cache.insert("t/b.py::t3".to_string(), 5.0);
+        let a = build_dispatch(&names, vec![], HashMap::new(), &cache, Dist::Load, Some(7));
+        let b = build_dispatch(&names, vec![], HashMap::new(), &cache, Dist::Load, Some(7));
+        assert_eq!(a.order, b.order); // same seed, same order
+        assert_eq!(a.slow_count, 0); // shuffle defeats long-pole-first
+        let mut seen = a.order.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3]); // a permutation, nothing lost
+                                            // Some seed must produce a different order than seed 7.
+        assert!((0..20u64).any(|s| {
+            build_dispatch(&names, vec![], HashMap::new(), &cache, Dist::Load, Some(s)).order
+                != a.order
+        }));
+    }
+
+    #[test]
+    fn shuffle_keeps_groups_contiguous() {
+        let names = ids(&[
+            "t/a.py::t1",
+            "t/a.py::t2",
+            "t/a.py::t3",
+            "t/b.py::t4",
+            "t/b.py::t5",
+        ]);
+        for seed in 0..10u64 {
+            let mut d = build_dispatch(
+                &names,
+                vec![],
+                HashMap::new(),
+                &HashMap::new(),
+                Dist::Loadfile,
+                Some(seed),
+            );
+            let batches = drain(&mut d, 1, false);
+            // Whole files, in-file order intact — only group ORDER varies.
+            assert!(
+                batches == vec![vec![0, 1, 2], vec![3, 4]]
+                    || batches == vec![vec![3, 4], vec![0, 1, 2]],
+                "seed {seed}: {batches:?}"
+            );
+        }
     }
 
     #[test]
@@ -1085,6 +1194,7 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             Dist::Loadfile,
+            None,
         );
         // want=1 but whole groups must come out regardless
         let batches = drain(&mut d, 1, false);
@@ -1105,6 +1215,7 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             Dist::Loadscope,
+            None,
         );
         let batches = drain(&mut d, 1, false);
         // TestX together; TestY alone; module-level function keys on the file
@@ -1122,7 +1233,14 @@ mod tests {
         let mut groups = HashMap::new();
         groups.insert("0".to_string(), "g".to_string());
         groups.insert("2".to_string(), "g".to_string());
-        let mut d = build_dispatch(&names, vec![], groups, &HashMap::new(), Dist::Loadgroup);
+        let mut d = build_dispatch(
+            &names,
+            vec![],
+            groups,
+            &HashMap::new(),
+            Dist::Loadgroup,
+            None,
+        );
         let batches = drain(&mut d, 1, false);
         // marked group lands at its first member's position, cross-file;
         // unmarked tests are singleton units
@@ -1132,7 +1250,14 @@ mod tests {
     #[test]
     fn take_serves_requeued_before_queue() {
         let names = ids(&["a.py::t1", "a.py::t2", "a.py::t3"]);
-        let mut d = build_dispatch(&names, vec![], HashMap::new(), &HashMap::new(), Dist::Load);
+        let mut d = build_dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &HashMap::new(),
+            Dist::Load,
+            None,
+        );
         d.requeued.push_back(2);
         match d.take(2, false) {
             Take::Items(items) => assert_eq!(items, vec![2, 0]),
@@ -1149,6 +1274,7 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             Dist::Load,
+            None,
         );
         // parallel queue is empty (all serial); inactive phase = exhausted
         assert!(matches!(d.take(2, true), Take::Exhausted));

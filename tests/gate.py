@@ -1045,6 +1045,67 @@ def main():
     )
     (sp / "tests" / "test_new.py").unlink()
 
+    print("== shuffle ==")
+    for i in range(6):
+        g.write(f"shuf/test_s{i}.py", f"def test_s{i}(): assert True\n")
+    r = g.run("shuf", "-n", "2", "--shuffle=42")
+    check(
+        "shuffle: explicit seed echoed, run green",
+        r.returncode == 0
+        and "shuffle seed 42" in r.stderr
+        and "--shuffle=42" in r.stderr
+        and "6 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-100:],
+    )
+    r = g.run("shuf", "-n", "2", "--shuffle")
+    check(
+        "shuffle: random seed printed with reproduce hint",
+        r.returncode == 0 and "reproduce with --shuffle=" in r.stderr,
+        r.stderr[-200:],
+    )
+    r = g.run("shuf", "-n", "0", "--shuffle")
+    check(
+        "shuffle: refused in single-worker mode",
+        r.returncode != 0 and "parallel pool" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+
+    print("== duration regression gate ==")
+    g.write(
+        "dreg/test_d.py",
+        "import os, time\n\n"
+        "def test_variable():\n"
+        "    time.sleep(float(os.environ.get('DREG_SLEEP', '0.1')))\n\n"
+        "def test_stable():\n"
+        "    time.sleep(0.05)\n",
+    )
+    ddir = g.tmp / "dreg"
+    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
+              env_extra={"DREG_SLEEP": "0.1"})
+    check(
+        "durations-regress: cold baseline skips, run green",
+        r.returncode == 0 and "no duration baseline yet" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
+              env_extra={"DREG_SLEEP": "0.1"})
+    check(
+        "durations-regress: warm baseline, no regressions",
+        r.returncode == 0 and "no regressions" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
+              env_extra={"DREG_SLEEP": "1.2"})
+    check(
+        "durations-regress: regression flagged, exit 1, stable test quiet",
+        r.returncode == 1
+        and "duration regressions" in r.stdout
+        and "test_variable" in r.stdout
+        and "test_stable" not in r.stdout.split("duration regressions")[1]
+        and "1 duration regression" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-150:],
+    )
+
     # PR-aware --changed: with GITHUB_BASE_REF set, bare --changed diffs vs
     # the merge-base with origin/<base> — a clean checkout of a PR commit
     # still selects the PR's files (vs HEAD it would select nothing).
@@ -1144,6 +1205,22 @@ def main():
         "flaky flagged in junit property",
         'property name="flaky"' in fx.read_text(encoding="utf-8"),
         fx.read_text(encoding="utf-8")[-300:],
+    )
+    # --output github: a flaky-passed test surfaces as a ::warning
+    # annotation (the run is green, the flake is visible on the PR).
+    marker.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "2", "--reruns", "2", "--output", "github",
+              cwd=fdir, env_extra={"FLAKY_MARKER": str(marker)})
+    warns = [ln for ln in r.stdout.splitlines() if ln.startswith("::warning ")]
+    check(
+        "github: flaky-passed emits ::warning",
+        r.returncode == 0
+        and len(warns) == 1
+        and "flaky" in warns[0]
+        and "rerun" in warns[0]
+        and "test_flaky.py" in warns[0]
+        and not any(ln.startswith("::error ") for ln in r.stdout.splitlines()),
+        r.stdout[-300:],
     )
 
     print("== quarantine ==")

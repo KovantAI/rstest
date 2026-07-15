@@ -40,6 +40,28 @@ pub fn save(run: &Run) {
 /// Items with a cached duration above this run first, longest first.
 pub const SLOW_THRESHOLD_SECS: f64 = 1.0;
 
+/// --durations-regress rows: (nodeid, baseline seconds, current seconds),
+/// worst absolute growth first. A test regresses when its wall time grew
+/// past `ratio` × baseline AND the growth clears a jitter floor: the
+/// baseline itself is at least 50ms (ratio on micro-tests is noise) and
+/// the absolute growth is at least half a second. Tests absent from the
+/// baseline (new/renamed) never flag.
+pub fn regressions(
+    run: &Run,
+    baseline: &HashMap<String, f64>,
+    ratio: f64,
+) -> Vec<(String, f64, f64)> {
+    let mut rows: Vec<(String, f64, f64)> = run
+        .durations()
+        .filter_map(|(id, new)| {
+            let &old = baseline.get(id)?;
+            (old >= 0.05 && new >= old * ratio && new - old >= 0.5).then(|| (id.clone(), old, new))
+        })
+        .collect();
+    rows.sort_by(|a, b| (b.2 - b.1).total_cmp(&(a.2 - a.1)));
+    rows
+}
+
 /// Build the dispatch order: slow long-poles first (individually, longest
 /// first, so they spread across workers immediately), then everything else
 /// in collection order (contiguous = module locality preserved).
@@ -67,6 +89,41 @@ mod tests {
     fn empty_cache_keeps_collection_order() {
         let ids: Vec<String> = (0..4).map(|i| format!("t{i}")).collect();
         assert_eq!(dispatch_order(&ids, &HashMap::new()), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn regression_rows_respect_floors() {
+        let mut run = Run::default();
+        for (id, d) in [
+            ("t/a.py::slow", 2.0),         // 4x over 0.5s baseline -> flags
+            ("t/a.py::micro", 0.02),       // baseline under 50ms floor
+            ("t/a.py::brand_new", 3.0),    // absent from baseline
+            ("t/a.py::small_growth", 0.9), // growth under 0.5s floor
+        ] {
+            run.record(
+                None,
+                crate::proto::Report {
+                    nodeid: id.into(),
+                    when: "call".into(),
+                    outcome: "passed".into(),
+                    duration: d,
+                    longrepr: None,
+                    wasxfail: false,
+                    skip_reason: None,
+                    cpu: None,
+                    sections: Vec::new(),
+                    lineno: None,
+                },
+            );
+        }
+        let mut base = HashMap::new();
+        base.insert("t/a.py::slow".to_string(), 0.5);
+        base.insert("t/a.py::micro".to_string(), 0.005);
+        base.insert("t/a.py::small_growth".to_string(), 0.42);
+        let rows = regressions(&run, &base, 2.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "t/a.py::slow");
+        assert_eq!(rows[0].1, 0.5);
     }
 
     #[test]

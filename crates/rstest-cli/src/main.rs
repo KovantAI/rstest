@@ -164,6 +164,24 @@ pub struct Cli {
     #[arg(long, value_name = "MODE")]
     collect: Option<String>,
 
+    /// Gate CI on per-test duration regressions: after the run, compare
+    /// each test's wall time against the duration cache
+    /// (.rstest_cache/durations.json — restore it from your CI cache)
+    /// and exit non-zero when any test grew past RATIO x its baseline
+    /// (e.g. 2.0). Jitter-floored: baselines under 50ms and growth
+    /// under 0.5s never flag.
+    #[arg(long, value_name = "RATIO")]
+    durations_regress: Option<f64>,
+
+    /// Run tests in a seeded random order (pytest-randomly-style) to
+    /// flush order dependencies on demand. Without a value the seed is
+    /// chosen per run and printed; pass --shuffle=SEED to reproduce a
+    /// failing order. Affinity modes (loadfile/loadscope/loadgroup)
+    /// shuffle group order and keep in-group order intact. Parallel
+    /// pool with full collection only.
+    #[arg(long, num_args = 0..=1, default_missing_value = "random", value_name = "SEED")]
+    shuffle: Option<String>,
+
     /// Terminal output style: "dots" (pytest's per-test chars), "verbose"
     /// (one line per test, like -v), or "bar" (pytest-sugar-style: a
     /// per-test result line, inline failures, and a live progress bar).
@@ -410,8 +428,17 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--migrate-allow=") => own.push(arg),
-            "--changed" | "--changed-strict" => own.push(arg),
+            "--changed" | "--changed-strict" | "--shuffle" => own.push(arg),
             _ if arg.starts_with("--changed=") => own.push(arg),
+            _ if arg.starts_with("--shuffle=") => own.push(arg),
+            // Exact match only: --durations / --durations-min stay session args.
+            "--durations-regress" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--durations-regress=") => own.push(arg),
             "--only-rerun" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -698,6 +725,42 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     if reruns > 0 && (n <= 1 || passthrough) {
         eprintln!("rstest: --reruns requires parallel mode (-n >= 2); ignoring");
     }
+    // --shuffle reorders the orchestrator's dispatch queue, so it needs
+    // the full-collection pool. Refusing (not ignoring) matters: a user
+    // probing for order dependence must not get a silently ordered run.
+    let shuffle_seed: Option<u64> = match cli.shuffle.as_deref() {
+        None => None,
+        Some(v) => {
+            if n <= 1 || passthrough {
+                anyhow::bail!(
+                    "--shuffle needs the parallel pool (-n >= 2); in single-worker \
+                     mode the session owns its own order (use pytest-randomly there)"
+                );
+            }
+            if collect_lazy(cli, &settings, &dist_name, &args)? {
+                anyhow::bail!("--shuffle is not supported with --collect lazy");
+            }
+            if dist_name == "each" {
+                anyhow::bail!(
+                    "--shuffle is not supported with --dist each (workers run the \
+                     full suite in session order)"
+                );
+            }
+            let seed = if v == "random" {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0)
+                    ^ u64::from(std::process::id())
+            } else {
+                v.parse().map_err(|_| {
+                    anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'")
+                })?
+            };
+            eprintln!("rstest: shuffle seed {seed} (reproduce with --shuffle={seed})");
+            Some(seed)
+        }
+    };
     let mut outcome = if n <= 1 || passthrough {
         let io = if passthrough {
             worker::Stdio::Inherit
@@ -811,6 +874,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 .map(|p| regex::Regex::new(p))
                 .collect::<Result<Vec<_>, _>>()?,
             worker_timeout.map(std::time::Duration::from_secs),
+            shuffle_seed,
         )?
     };
 
@@ -941,6 +1005,37 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             );
         }
     }
+    // Duration regression gate: must compare BEFORE durations::save
+    // overwrites the baseline with this run's times.
+    let mut duration_regressions = 0usize;
+    if let Some(ratio) = cli.durations_regress {
+        if ratio <= 1.0 {
+            anyhow::bail!("--durations-regress ratio must be > 1.0, got {ratio}");
+        }
+        let baseline = durations::load();
+        if baseline.is_empty() {
+            eprintln!(
+                "rstest: --durations-regress: no duration baseline yet \
+                 (.rstest_cache/durations.json); comparison skipped"
+            );
+        } else {
+            let rows = durations::regressions(&outcome.run, &baseline, ratio);
+            if rows.is_empty() {
+                eprintln!("rstest: --durations-regress: no regressions (>= {ratio}x baseline)");
+            } else {
+                println!(
+                    "\n{}",
+                    palette.bold_red(&format!(
+                        "=========== duration regressions (>= {ratio}x baseline) ==========="
+                    ))
+                );
+                for (nodeid, old, new) in &rows {
+                    println!("  {old:7.2}s -> {new:7.2}s  {nodeid}");
+                }
+                duration_regressions = rows.len();
+            }
+        }
+    }
     // Each-mode ids carry the [gwN] suffix and every test ran N times —
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
@@ -976,6 +1071,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
             Ok(_) => {}
             Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
+        }
+    }
+    if duration_regressions > 0 {
+        eprintln!(
+            "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
+            if duration_regressions > 1 { "s" } else { "" }
+        );
+        if exitstatus == 0 {
+            exitstatus = 1;
         }
     }
     Ok(exitstatus)
@@ -1461,6 +1565,27 @@ fn print_github_annotations(run: &report::Run) {
         }
         let msg = entry.longrepr.as_deref().unwrap_or("test failed");
         println!("::error {props}::{}", gh_data(msg));
+    }
+    // Flaky-passed tests (green only after reruns) surface as warnings:
+    // the run is green, but the flake is visible on the PR without
+    // opening the junit/log.
+    for (nodeid, attempts) in &run.flaky {
+        let Some(entry) = run.tests().get(nodeid) else {
+            continue;
+        };
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        let file = match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        };
+        let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(",line={}", l + 1));
+        }
+        println!(
+            "::warning {props}::flaky: passed only after {attempts} rerun{}",
+            if *attempts > 1 { "s" } else { "" }
+        );
     }
 }
 
