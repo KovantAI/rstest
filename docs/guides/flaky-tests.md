@@ -36,7 +36,7 @@ Every run (except `--dist each`) merges its events into
 
 - `flaky` — runs where the test passed only after rerun(s)
 - `failed` — runs where it hard-failed (quarantined failures included)
-- `last_epoch` — when it last misbehaved
+- `last_epoch` — when it last misbehaved; also drives **aging** (below)
 
 The file is **sparse**: only tests that ever flaked or failed get an
 entry, so a green suite writes nothing and the file stays small at any
@@ -45,6 +45,14 @@ cache. In CI, persist it the same way you persist `.rstest_cache` for
 scheduling (see [CI quickstart](ci-quickstart.md)) and the counts
 accumulate across runs; without persistence you still get history on
 developer machines and self-hosted runners.
+
+History **ages out**. A test with no flake or failure inside the
+retention window (default **90 days**, from `last_epoch`) reads as fixed:
+its entry is dropped on the next run and it stops carrying the
+annotation below — so a test you actually fixed goes quiet on its own,
+and the ranked candidate list stays current instead of haunted by
+last quarter's offenders. Tune with `RSTEST_FLAKE_RETENTION_DAYS`; set
+it to `0` to keep history forever.
 
 The flaky and quarantined sections annotate each test from this file:
 
@@ -134,9 +142,12 @@ run.
 2. When a test's history shows a pattern, add it to `quarantine.txt`
    with a comment linking the tracking issue.
 3. Fix the test; remove the entry. If it was really fixed, the history
-   stops accruing — if the entry comes back in review, it wasn't.
+   stops accruing and ages out of `flakes.json` after the retention
+   window — if the entry comes back in review, it wasn't.
 
 The failure mode to avoid is a quarantine list that only ever grows.
-The list is diffable and reviewable on purpose: treat an addition like
-a TODO with an owner, and audit entries whose `last_epoch` is old —
-those are either fixed (remove the entry) or abandoned (fix the test).
+`flakes.json` self-ages (see [aging](#remember-the-flake-history)
+above), but `quarantine.txt` is committed and hand-curated on purpose:
+treat an addition like a TODO with an owner, and periodically audit it —
+an entry whose test no longer appears in the flake history is either
+fixed (remove it) or abandoned (fix the test).

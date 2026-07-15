@@ -5,6 +5,19 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- Flake history now **ages out**. A test with no flake or failure inside
+  the retention window (default 90 days) is dropped from
+  `.rstest_cache/flakes.json` on the next run, so a fixed test stops
+  carrying "flaked _N_x before" annotations and the ranked candidate list
+  stays current. Tune with `RSTEST_FLAKE_RETENTION_DAYS`; `0` keeps history
+  forever. See the Flaky tests guide.
+
+- Interpreter-probe cache now keys on file size **and** mtime, not mtime
+  alone. A same-second in-place rewrite or an mtime-preserving restore
+  (`cp -p`, `touch -r`, tar/rsync `--times`, reinstalling the same version)
+  no longer serves a stale probe for a swapped binary. Old cache files load
+  unchanged and re-probe on first use.
+
 - `--shard <K/N>`: split one suite across `N` independent CI jobs and run
   only shard `K` (1-based). Buckets are balanced by the duration cache
   (longest-processing-time-first bin-packing; even count split on a cold
