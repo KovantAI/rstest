@@ -85,13 +85,21 @@ class Gate:
             RSTEST_WORKER_PATH=str(REPO / "python"),
         )
         env.pop("PYTEST_ADDOPTS", None)
-        # Doctor runs auto-append to the job summary under GitHub Actions;
-        # keep the gate's fixture-suite reports out of the real run page.
+        # Doctor runs auto-publish to the CI job summary (GitHub step
+        # summary / Buildkite annotation); keep the gate's fixture-suite
+        # reports off the real run page.
         env.pop("GITHUB_STEP_SUMMARY", None)
-        # Bare --changed auto-targets the PR base when GITHUB_BASE_REF is
-        # set; the gate's fixture repos have no origin, so a PR CI run
-        # would break every --changed check. Tests opt in via env_extra.
-        env.pop("GITHUB_BASE_REF", None)
+        env.pop("BUILDKITE", None)
+        # Bare --changed auto-targets the PR/MR base when a CI exposes it;
+        # the gate's fixture repos have no origin, so a real PR CI run would
+        # break every --changed check. Tests opt in via env_extra.
+        for k in (
+            "GITHUB_BASE_REF",
+            "CI_MERGE_REQUEST_DIFF_BASE_SHA",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+            "BUILDKITE_PULL_REQUEST_BASE_BRANCH",
+        ):
+            env.pop(k, None)
         if env_extra:
             env.update(env_extra)
         return subprocess.run(
@@ -275,6 +283,55 @@ def main():
         "output json + --doctor: stream stays pure",
         ok and "===" not in r.stdout and "wait-bound" not in r.stdout,
         r.stdout[-300:],
+    )
+
+    # --output tap: pure TAP stream — version header, one point per test,
+    # failure text as `#` diagnostics, trailing plan matching the count.
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "tap")
+    lines = [ln for ln in r.stdout.splitlines() if ln]
+    oks = [ln for ln in lines if ln.startswith("ok ")]
+    notoks = [ln for ln in lines if ln.startswith("not ok ")]
+    tap_ok = (
+        lines
+        and lines[0] == "TAP version 13"
+        and len(oks) == 2
+        and len(notoks) == 2
+        and lines[-1] == "1..4"
+        and any(ln.startswith("# ") for ln in lines)  # failure diagnostics
+        and "passed in" not in r.stdout  # no human chrome
+    )
+    check("output tap: pure stream + trailing plan", tap_ok, r.stdout[-400:])
+
+    # --output teamcity: a service-message group per test; failures carry
+    # escaped details. Human summary stays (TeamCity ignores plain lines).
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "teamcity")
+    tc = [ln for ln in r.stdout.splitlines() if ln.startswith("##teamcity[")]
+    tc_ok = (
+        sum("testStarted" in ln for ln in tc) == 4
+        and sum("testFinished" in ln for ln in tc) == 4
+        and sum("testFailed" in ln for ln in tc) == 2
+        and any("|n" in ln for ln in tc if "testFailed" in ln)  # escaping
+        and "2 passed" in r.stdout
+    )
+    check("output teamcity: service messages + summary", tc_ok, r.stdout[-400:])
+
+    # --output gitlab: dots log; each failure folded in a collapsed section.
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "gitlab")
+    gl_ok = (
+        r.stdout.count("section_start:") == 2
+        and r.stdout.count("section_end:") == 2
+        and "[collapsed=true]" in r.stdout
+        and "2 passed" in r.stdout
+    )
+    check("output gitlab: failures in collapsed sections", gl_ok, r.stdout[-400:])
+
+    # --output buildkite: each failure under an auto-expanded +++ group.
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "buildkite")
+    bk = [ln for ln in r.stdout.splitlines() if ln.startswith("+++ ")]
+    check(
+        "output buildkite: failures under +++ groups",
+        len(bk) == 2 and "2 passed" in r.stdout,
+        r.stdout[-400:],
     )
 
     print("== multiprocessing-spawn children ==")
@@ -1172,6 +1229,36 @@ def main():
         "selection: explicit rev wins over GITHUB_BASE_REF",
         "auto-targets" not in r.stderr and "2 affected test file(s)" in r.stderr,
         r.stderr[-300:],
+    )
+    # Buildkite exposes the base as a branch name, resolved the same way.
+    r = g.run(
+        "--changed", "-v", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "mainline"},
+    )
+    check(
+        "selection: Buildkite base branch auto-targets PR base",
+        "auto-targets PR base origin/mainline" in r.stderr and "test_alpha" in r.stdout,
+        r.stderr[-300:],
+    )
+    # GitLab provides the exact diff-base SHA — used directly, no merge-base.
+    r = g.run(
+        "--changed", "-v", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": base_sha},
+    )
+    check(
+        "selection: GitLab diff-base SHA auto-targets MR base",
+        "auto-targets MR base" in r.stderr and "test_alpha" in r.stdout,
+        r.stderr[-300:],
+    )
+    # An unresolvable GitLab base SHA errors — never a silent full skip.
+    r = g.run(
+        "--changed", cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": "0" * 40},
+    )
+    check(
+        "selection: missing GitLab base SHA errors, no silent skip",
+        r.returncode != 0 and "not in the local clone" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
     )
 
     print("== [tool.rstest] config ==")

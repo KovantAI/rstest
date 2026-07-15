@@ -60,6 +60,268 @@ jobs:
           path: junit.xml
 ```
 
+## AWS CodeBuild
+
+CodeBuild has no log-side annotation command (no equivalent of GitHub's
+`::error` or Azure's `##vso`), so there is no dedicated `--output` style
+— the integration surface is the JUnit file. Point a [CodeBuild report
+group](https://docs.aws.amazon.com/codebuild/latest/userguide/test-reporting.html)
+at `--junitxml` output and CodeBuild renders pass/fail, durations, and
+run-over-run trends in the console.
+
+```yaml
+# buildspec.yml
+version: 0.2
+phases:
+  install:
+    commands:
+      - pip install -r requirements.txt
+      - pip install rstest          # pre-release: install from your hosted wheel
+  build:
+    commands:
+      # The `cache` block below persists .rstest_cache across builds, so
+      # from the second run on the scheduler starts the slowest tests first.
+      - rstest -n auto --junitxml junit.xml
+
+reports:
+  rstest:
+    files:
+      - junit.xml
+    file-format: JUNITXML
+
+# Persist .rstest_cache between builds so scheduling stays warm.
+cache:
+  paths:
+    - '.rstest_cache/**/*'
+```
+
+`-n auto` uses the build container's vCPUs; size the compute type to the
+parallelism you want. For a monorepo root, widen the report `files` glob
+to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
+and the cache to `**/.rstest_cache/**/*`.
+
+## Google Cloud Build
+
+Cloud Build likewise has no annotation protocol — it streams step logs
+to Cloud Logging and has no native test-report UI, so again there is no
+`--output` style to add. Run rstest as a build step and publish the
+JUnit XML (and any doctor/report-json) as build
+[artifacts](https://cloud.google.com/build/docs/building/store-artifacts-in-cloud-storage).
+
+```yaml
+# cloudbuild.yaml
+steps:
+  - name: python:3.13
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r requirements.txt
+        pip install rstest        # pre-release: install from your hosted wheel
+        rstest -n auto --junitxml junit.xml
+
+# Upload the JUnit (and doctor JSON, if produced) to Cloud Storage.
+artifacts:
+  objects:
+    location: 'gs://$PROJECT_ID-ci-artifacts/$BUILD_ID/'
+    paths:
+      - 'junit.xml'
+```
+
+The duration cache lives in `.rstest_cache`; on Cloud Build persist it
+between runs by syncing it to Cloud Storage
+(`gsutil rsync`) at the start and end of the step — the workspace itself
+is not retained across builds. Colors auto-disable off-tty, so the log
+stays clean; the JUnit file is the machine-readable surface for any
+downstream test-reporting tool.
+
+## GitLab CI
+
+GitLab reads JUnit from the `artifacts:reports:junit` key to render the
+[test report](https://docs.gitlab.com/ci/testing/unit_test_reports/) and
+per-MR diff. `--output gitlab` additionally folds each failure into a
+[collapsible section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
+so the job log stays readable.
+
+```yaml
+# .gitlab-ci.yml
+test:
+  image: python:3.13
+  # Persist the duration cache between runs (keyed per branch).
+  cache:
+    key: rstest-$CI_COMMIT_REF_SLUG
+    paths:
+      - .rstest_cache/
+  before_script:
+    - pip install -r requirements.txt
+    - pip install rstest        # pre-release: install from your hosted wheel
+  script:
+    - rstest -n auto --output gitlab --junitxml junit.xml
+  artifacts:
+    when: always
+    paths:
+      - junit.xml
+    reports:
+      junit: junit.xml
+```
+
+`-n auto` uses the runner's cores; size the runner (or set `-n <k>`) to
+the parallelism you want. For a monorepo root, glob `junit.*.xml` in
+`artifacts:paths` and widen the cache to `**/.rstest_cache/`.
+
+## Azure Pipelines
+
+`--output azure` emits an `##vso[task.logissue]` per failing test, which
+Azure surfaces as an inline issue on the file in the PR. Publish the
+JUnit with the
+[`PublishTestResults`](https://learn.microsoft.com/azure/devops/pipelines/tasks/reference/publish-test-results-v2)
+task for the run's Tests tab.
+
+```yaml
+# azure-pipelines.yml
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: "3.13"
+
+  # Persist the duration cache between runs.
+  - task: Cache@2
+    inputs:
+      key: 'rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)"'
+      restoreKeys: |
+        rstest | "$(Agent.OS)"
+      path: .rstest_cache
+
+  - script: |
+      pip install -r requirements.txt
+      pip install rstest        # pre-release: install from your hosted wheel
+      rstest -n auto --output azure --junitxml junit.xml
+    displayName: test
+
+  - task: PublishTestResults@2
+    condition: always()
+    inputs:
+      testResultsFormat: JUnit
+      testResultsFiles: junit.xml
+```
+
+## CircleCI
+
+CircleCI has no log-side annotation protocol, so there is no dedicated
+`--output` style — the integration surface is the JUnit file, consumed by
+[`store_test_results`](https://circleci.com/docs/collect-test-data/) for
+the Tests tab and flaky-test detection.
+
+```yaml
+# .circleci/config.yml
+version: 2.1
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.13
+    steps:
+      - checkout
+      # Persist the duration cache between runs.
+      - restore_cache:
+          keys:
+            - rstest-{{ .Branch }}
+            - rstest-
+      - run: pip install -r requirements.txt
+      - run: pip install rstest       # pre-release: install from your hosted wheel
+      - run: rstest -n auto --junitxml test-results/junit.xml
+      - store_test_results:
+          path: test-results
+      - save_cache:
+          key: rstest-{{ .Branch }}-{{ .Revision }}
+          paths:
+            - .rstest_cache
+workflows:
+  ci:
+    jobs:
+      - test
+```
+
+`-n auto` uses the resource-class vCPUs; pick a larger class for more
+parallelism. Point `store_test_results` at a directory (not a single
+file) so a monorepo's `junit.*.xml` are all collected.
+
+## Jenkins
+
+Jenkins renders JUnit via the [JUnit
+plugin](https://plugins.jenkins.io/junit/); publish the file with
+`junit` in a `post` block so results show even when the build fails.
+
+```groovy
+// Jenkinsfile
+pipeline {
+  agent { docker { image 'python:3.13' } }
+  stages {
+    stage('test') {
+      steps {
+        sh '''
+          pip install -r requirements.txt
+          pip install rstest        # pre-release: install from your hosted wheel
+          rstest -n auto --junitxml junit.xml
+        '''
+      }
+    }
+  }
+  post {
+    always {
+      junit 'junit.xml'
+    }
+  }
+}
+```
+
+Persist `.rstest_cache` between runs to keep scheduling warm — stash/unstash
+it, or use a shared workspace/volume on the agent. If you run a TAP harness
+instead, `--output tap` makes stdout a pure TAP 13 stream for the [TAP
+plugin](https://plugins.jenkins.io/tap/).
+
+## Pre-commit
+
+rstest ships [pre-commit](https://pre-commit.com) hooks so a suite runs
+before code lands. Add to your project's `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/KovantAI/rstest
+    rev: v0.1.0             # pin a released tag
+    hooks:
+      - id: rstest         # whole suite, on push
+```
+
+Two hook ids are provided:
+
+- `rstest` — runs the whole suite.
+- `rstest-changed` — runs only tests affected by the working-tree changes
+  (`rstest --changed`), for a fast per-commit gate.
+
+`rstest` defaults to the `pre-push` stage (a full suite is heavy for every
+commit); move it to each commit with `stages: [pre-commit]`.
+
+`rstest-changed` defaults to `pre-commit`, because `--changed` diffs the
+working tree against HEAD — at pre-push everything is already committed, so
+it would select zero tests and pass silently. On CI, set `GITHUB_BASE_REF`
+or `CI_MERGE_REQUEST_*` and `--changed` diffs against the PR base instead.
+
+Pass extra flags with `args`:
+
+```yaml
+      - id: rstest-changed
+        args: ["-q", "--maxfail=1"]
+```
+
+!!! note "Pre-release build"
+    Until rstest is on PyPI, pre-commit builds it from source when it
+    creates the hook environment, which needs a Rust toolchain on the
+    developer's machine. Once wheels are published, pre-commit installs
+    the prebuilt wheel and no toolchain is required.
+
 ## Suite-health trending with doctor
 
 `--doctor-json` writes the doctor analysis as a versioned JSON document
@@ -68,9 +330,12 @@ PR's report against the main branch's — no extra tooling required, the
 document already contains totals, wait-bound tests, parallel-floor gate
 tests, and fixture costs by name.
 
-Any doctor run under GitHub Actions also appends the report as markdown
-to the job summary automatically (`$GITHUB_STEP_SUMMARY`) — the current
-run's analysis is on the run page with no post-processing step.
+Any doctor run also publishes the report as markdown to the CI job
+summary automatically — appended to `$GITHUB_STEP_SUMMARY` on GitHub
+Actions, piped to `buildkite-agent annotate` on Buildkite — so the
+current run's analysis is on the run page with no post-processing step.
+(GitLab and TeamCity have no native markdown summary; use `--doctor-md`
+and publish the file as an artifact.)
 
 The baseline travels via the actions cache: pushes to main save it, PR
 jobs restore it (GitHub lets PRs read the base branch's cache entries):

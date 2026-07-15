@@ -14,6 +14,25 @@ between 0.0.x releases and are listed here.
   `-n >= 2`; refused with `--shuffle` and `--dist each`. See the Sharding
   guide.
 
+- `--output azure`: Azure Pipelines style — the normal `dots` log plus a
+  `##vso[task.logissue type=error;sourcepath=;linenumber=]` command per
+  failure (inline issue on the PR file), and `type=warning` for
+  flaky-passed tests.
+- Flaky-passed tests (`--reruns`) now surface in every CI `--output`
+  style, not just `github`: `azure` emits a `type=warning` logissue,
+  `teamcity` a `WARNING`-status build message, `buildkite` a `warning`
+  annotation on the build page (via `buildkite-agent`), and `gitlab`
+  folds the flaky block into its own collapsed section (GitLab has no
+  per-line warning command).
+
+- Four new CI `--output` styles beyond `github`: `gitlab` (failures
+  folded in collapsible job-log sections), `buildkite` (failures under
+  auto-expanded `+++` groups), `teamcity` (service messages per test,
+  grouped so parallel results never interleave), and `tap` (a pure TAP
+  version 13 stream with a trailing plan — no human chrome). Like
+  `--output json`, `tap` is refused at a monorepo root (concatenated
+  child streams would not be one valid TAP document).
+
 - `--durations-regress <RATIO>`: gate CI on per-test duration
   regressions vs the duration cache the scheduler already maintains.
   Tests grown past RATIO x baseline are listed and the run exits 1;
