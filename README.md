@@ -1,5 +1,14 @@
 # rstest
 
+[![CI](https://github.com/KovantAI/rstest/actions/workflows/ci.yml/badge.svg)](https://github.com/KovantAI/rstest/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/KovantAI/rstest/graph/badge.svg)](https://codecov.io/gh/KovantAI/rstest)
+[![PyPI](https://img.shields.io/pypi/v/rstest)](https://pypi.org/project/rstest/)
+[![Python versions](https://img.shields.io/pypi/pyversions/rstest)](https://pypi.org/project/rstest/)
+[![License](https://img.shields.io/pypi/l/rstest)](https://github.com/KovantAI/rstest/blob/main/LICENSE-MIT)
+[![Downloads](https://static.pepy.tech/badge/rstest/month)](https://pepy.tech/project/rstest)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Docs](https://readthedocs.org/projects/rstest/badge/?version=latest)](https://rstest.readthedocs.io/)
+
 A fast, pytest-compatible test runner. Rust orchestration, your tests
 unchanged: same plugins, same fixtures, same outcomes — parallel by design,
 with built-in suite diagnostics (`--doctor`).

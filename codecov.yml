@@ -1,0 +1,16 @@
+# Coverage measures the Rust orchestrator (crates/); the Python side is
+# mostly vendored pytest and is not instrumented.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+        threshold: 5%
+
+comment:
+  layout: "reach, diff, files"
+  require_changes: true
