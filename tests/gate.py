@@ -431,10 +431,15 @@ def main():
         "    assert os.environ['PYTEST_XDIST_WORKER'].startswith('gw')\n"
         "    assert os.environ['PYTEST_XDIST_WORKER_COUNT'] == '2'\n"
         "def test_uid(request):\n"
-        "    assert request.config.workerinput['testrun_uid']\n",
+        "    assert request.config.workerinput['testrun_uid']\n"
+        # pytest-randomly reads this master-injected key; rstest derives a
+        # single run-level seed from the shared run uid so every worker agrees.
+        "def test_randomly_seed(request):\n"
+        "    wi = request.config.workerinput\n"
+        "    assert wi['randomly_seed'] == (int(wi['testrun_uid'], 16) & 0xFFFFFFFF)\n",
     )
     r = g.run("xdistenv", "-n", "2")
-    check("PYTEST_XDIST_WORKER + testrun_uid", "2 passed" in r.stdout, r.stdout[-300:])
+    check("PYTEST_XDIST_WORKER + testrun_uid", "3 passed" in r.stdout, r.stdout[-300:])
 
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
