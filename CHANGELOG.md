@@ -3,7 +3,32 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.0.x releases and are listed here.
 
-## Unreleased
+## 0.2.1 — 2026-07-15
+
+- Release CI fixes only; no user-facing behavior changes. Corrected the
+  build cache handling in the release workflow and dropped a step
+  unsupported on the free tier.
+
+## 0.2.0 — 2026-07-15
+
+- `--doctor` PARALLEL EFFICIENCY section: the realized parallel speedup
+  measured from the run just finished (`test time / wall` vs worker
+  count), the per-worker busy-time load balance, and the long pole that
+  caps it — the after-the-fact answer to "why isn't `-n auto` faster?".
+  Emitted for multi-worker runs in the terminal report, `--doctor-md`,
+  and `--doctor-json`; the doctor JSON schema is bumped `1` → `2`
+  (adds `parallel_efficiency`).
+- `--shard <K/N>`: split one suite across `N` independent CI jobs and run
+  only shard `K` (1-based). Buckets are balanced by the duration cache
+  (longest-processing-time-first bin-packing; even count split on a cold
+  cache), disjoint, and cover the whole suite, so merging the per-job
+  JUnit reconstructs the full run. Orthogonal to `-n`; shards at file
+  granularity under `--collect lazy`; composes with `--changed`. Under an
+  affinity `--dist` mode (`loadfile`/`loadscope`/`loadgroup`) it partitions
+  at whole-group granularity, so a file/scope/xdist_group never splits
+  across shards (the run-together / in-order contract those modes provide).
+  Requires `-n >= 2`; refused with `--shuffle` and `--dist each`. See the
+  Sharding guide.
 
 - Flake history now **ages out**. A test with no flake or failure inside
   the retention window (default 90 days) is dropped from

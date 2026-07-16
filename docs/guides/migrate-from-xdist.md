@@ -12,10 +12,31 @@ keep working.
 | `-n 1` | differs | xdist's `-n 1` runs one `gw0` worker WITH `workerinput`; rstest's `-n 1` (like `-n 0`) is plain byte-exact mode with no worker identity |
 | `--dist load` | same (default) | plus duration-aware long-pole-first scheduling |
 | `--dist loadfile` | same | file affinity, in-file order |
-| `--dist loadscope` / `loadgroup` | same | incl. `@pytest.mark.xdist_group` |
+| `--dist loadscope` / `loadgroup` | same | incl. `@pytest.mark.xdist_group`; rejected under `--collect lazy` (needs full collection) |
 | `--dist each` | partial | full suite per worker, but every worker uses the SAME interpreter — xdist's heterogeneous `--tx` gateways have no equivalent |
-| `--maxprocesses` | — | use `-n` |
+| `-d` | `--dist load` | `-d` is xdist's shorthand for load-balancing, which is rstest's default |
+| `--maxprocesses` | — | use `-n` (no separate cap) |
 | `-p xdist.looponfail` / `--looponfail` | `--watch` | with import-graph selection |
+| `--dist no` / `--dist=no` | — | **rstest error** (`no` is not a valid `--dist` mode); single-worker is `-n 0` |
+| `--tx` (gateways) | — | no equivalent — one local interpreter; `--dist each` covers same-env broadcast, not heterogeneous environments |
+| `--rsyncdir` / `--rsync` | — | no equivalent — rstest runs local workers, no remote sync |
+| `--max-worker-restart` | — | no equivalent — rstest auto-respawns crashed workers on a fixed budget (see [crash handling](../concepts/crash-handling.md)); the restart count is not user-tunable |
+
+**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` is
+consumed by rstest's own `--dist` and rejected as an invalid mode (exit
+2). The rest — `--tx`, `--rsync*`, `-d`, `--max-worker-restart`,
+`--maxprocesses` — are **forwarded to the vendored pytest session
+verbatim**, so the outcome depends on whether pytest-xdist is installed:
+
+- **pytest-xdist installed** (the usual case mid-migration): the flag
+  *parses* (xdist registered its options) but has **no effect** — rstest
+  keeps xdist's session inert (`dist = no`), so nothing acts on it. No
+  error, no warning; it is silently ignored.
+- **pytest-xdist not installed**: pytest doesn't recognize the option, so
+  it's a usage error from the vendored core (exit 4).
+
+Either way these flags don't *do* anything under rstest — remove them from
+your `addopts` once the switch is done.
 
 pytest-rerunfailures maps: `--reruns N`,
 `@pytest.mark.flaky(reruns=N)`, and `--only-rerun REGEX` work natively
@@ -23,7 +44,9 @@ in parallel modes (and crash-aware — a test that kills its worker
 retries on the replacement). The plugin itself is neutralized inside
 pool workers so nothing double-reruns; at `-n 0` the plugin keeps its
 native behavior and handles reruns itself. Two scope notes: rstest's
-`--reruns` requires `-n ≥ 2`, and is rejected under `--dist each`.
+`--reruns` requires `-n ≥ 2`, and is rejected under `--dist each` (that
+mode exists to expose per-worker outcome differences, so retrying failures
+would defeat it — see [`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
 
 ## What your plugins see
 

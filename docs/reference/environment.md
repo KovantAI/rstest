@@ -19,6 +19,8 @@ Plugins that read pytest-xdist's `workerinput` get the same information via
 
 `RSTEST_BASETEMP`, `RSTEST_SEND_IDS`, `RSTEST_DOCTOR`, `RSTEST_WORKER_PATH`
 coordinate workers and may change between versions. Don't depend on them.
+The orchestrator sets them fresh on every run, so any value you pre-set in
+the environment is overwritten — no need to scrub them for a hermetic run.
 
 ## Honored from the environment
 
@@ -27,5 +29,5 @@ coordinate workers and may change between versions. Don't depend on them.
 | `VIRTUAL_ENV` | worker interpreter discovery (first after `--python`) |
 | `NO_COLOR` | disables colored output (a forwarded `--color=yes/no` wins) |
 | `PYTEST_ADDOPTS` | read by the vendored core, exactly as under pytest |
-| `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache (`<dir>/rstest/interp-probes-v1.json`), which speeds up repeated `--python` version resolution. Defaults to `$XDG_CACHE_HOME` (or `~/.cache`) on Unix and `%LOCALAPPDATA%` on Windows; if none resolve, probing just isn't persisted |
+| `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache **only** (`<dir>/rstest/interp-probes-v1.json`), which speeds up repeated `--python` version resolution. It does **not** relocate `.rstest_cache/` (durations/flakes) — that always lives in the invocation directory. Defaults to `$XDG_CACHE_HOME` (or `~/.cache`) on Unix and `%LOCALAPPDATA%` on Windows; if none resolve, probing just isn't persisted |
 | `RSTEST_FLAKE_RETENTION_DAYS` | how long a test's flake/failure history (`.rstest_cache/flakes.json`) stays relevant. A test with no flake or failure inside this window reads as fixed: its entry is dropped and it stops carrying "flaked _N_x before" annotations. Defaults to `90`; `0` keeps history forever |

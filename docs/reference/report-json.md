@@ -154,7 +154,7 @@ Two event kinds, discriminated by `event`:
 
 ```json
 {"event": "testreport", "nodeid": "tests/test_api.py::test_get", "when": "call", "outcome": "passed", "duration": 0.0123, "wasxfail": false, "lineno": 41, "worker": "gw2"}
-{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "collect_errors": 0}}
+{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0, "collect_errors": 0}}
 ```
 
 One `testreport` is emitted **per phase** (`setup`, `call`, `teardown`), so
@@ -203,8 +203,8 @@ It is a **separate document** from the run snapshot above; combine with
 
 ```json
 {
-  "schema": 1,
-  "rstest_version": "0.1.0",
+  "schema": 2,
+  "rstest_version": "0.2.1",
   "workers": 8,
   "wall_seconds": 68.4,
   "tests": 2048,
@@ -224,6 +224,17 @@ It is a **separate document** from the run snapshot above; combine with
       { "nodeid": "tests/test_e2e.py::test_full_flow", "duration": 84.1 }
     ]
   },
+  "parallel_efficiency": {
+    "realized_speedup": 6.04,
+    "ideal_speedup": 8,
+    "efficiency_pct": 75.4,
+    "workers_busy": [
+      { "worker": "gw3", "busy_seconds": 68.0, "tests": 240 },
+      { "worker": "gw1", "busy_seconds": 41.2, "tests": 268 }
+    ],
+    "imbalance_pct": 39.4,
+    "long_pole_seconds": 84.1
+  },
   "fixtures": [
     { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 }
   ],
@@ -237,7 +248,7 @@ Top-level fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema` | int | document version, currently `1` |
+| `schema` | int | document version, currently `2` |
 | `rstest_version` | string | the rstest version that wrote it |
 | `workers` | int | worker count for this run (`-n`) |
 | `wall_seconds` | float | total wall-clock time; **depends on worker count** — compare across runs only at equal `-n` |
@@ -246,6 +257,7 @@ Top-level fields:
 | `cpu_time_seconds` | float | summed call-phase CPU time, over tests where it was measured |
 | `wait_bound` | object / `null` | wait-bound analysis; **`null`** unless CPU time was measured and waiting is significant (`wait_pct ≥ 20%` and `wait_seconds ≥ 1`) |
 | `parallel_floor` | object / `null` | parallel-floor analysis; **`null`** unless the longest test exceeds the ideal per-worker share |
+| `parallel_efficiency` | object / `null` | realized parallel speedup and per-worker load; **`null`** unless the run used more than one worker (`workers > 1`) |
 | `fixtures` | array | fixture timings, slowest first (≤ 50) |
 | `slowest_files` | array | per-file totals, slowest first (≤ 20) |
 
@@ -265,10 +277,26 @@ Top-level fields:
 | `ideal_share_seconds` | float | `test_time_seconds / workers` — the per-worker floor if work split perfectly |
 | `gate_tests` | array | up to 10 tests longer than that share: `{nodeid, duration}` (seconds) |
 
+`parallel_efficiency` (realized speedup vs the worker budget, measured from
+this run — `null` for single-worker runs):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `realized_speedup` | float | `test_time_seconds / wall_seconds`. May exceed `ideal_speedup` for wait-bound suites (overlapping sleeps/IO run more tests at once than there are cores) |
+| `ideal_speedup` | int | worker count (`-n`) — the ceiling for a purely CPU-bound suite |
+| `efficiency_pct` | float | `100 × realized_speedup / ideal_speedup`; over 100% signals wait-bound overlap |
+| `workers_busy` | array | busy time per worker, busiest first (≤ 8 shown): `{worker, busy_seconds, tests}`. Tests with no recorded worker are bucketed as `"serial"` |
+| `imbalance_pct` | float | `100 × (busiest − idlest) / busiest` — load spread across workers |
+| `long_pole_seconds` | float | slowest single test — the hard floor no worker count beats |
+
 `fixtures[]`: `{name, scope, count, total_seconds}` — fixture name, pytest
 scope, setup count, summed setup time. `slowest_files[]`:
 `{file, total_seconds, pct}` — `pct` is the file's share of
 `test_time_seconds`.
+
+`schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
+`cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
+`slowest_files`); `2` added the `parallel_efficiency` object.
 
 `schema` aside, all times are raw seconds (no rounding) — round in your
 consumer. Increment-only: incompatible changes bump `schema`.

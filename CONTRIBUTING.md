@@ -69,5 +69,7 @@ provenance and update procedure.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the
-[MIT license](LICENSE) that covers the project.
+rstest is dual-licensed under [Apache-2.0](LICENSE-APACHE) or
+[MIT](LICENSE-MIT), at the user's option. Unless you state otherwise, any
+contribution you submit for inclusion is dual-licensed as above, without any
+additional terms or conditions.

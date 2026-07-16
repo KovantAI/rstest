@@ -14,7 +14,12 @@ added by your plugins — works without translation.
 
 Worker count. Default `auto` (logical cores).
 
-- `-n auto` — one worker per logical core
+- `-n auto` — one worker per available logical core, then capped by what the
+  suite can use (test-file count and cached total runtime). On Linux the core
+  count honors the process CPU affinity mask and cgroup CPU quota, so a
+  CPU-limited container (`docker run --cpus=2`, a constrained CI runner) sees
+  its allocation, not the host's core count — no over-subscription. Pin `-n
+  <k>` if you want a fixed count regardless.
 - `-n 4` — four workers
 - `-n 0` or `-n 1` — **single-worker mode**: one pytest session, byte-exact
   pytest semantics; identical to each other, with no worker identity below
@@ -37,7 +42,10 @@ Distribution mode. Default `load`.
   files; unmarked tests distribute individually.
 - `each` — every worker runs the FULL suite. Counts are per-worker
   totals and outcomes are keyed `nodeid [gwN]`; `--reruns` is
-  rejected; the duration cache is not updated. Honest scope note:
+  rejected (the mode exists to *expose* per-worker outcome
+  differences, and rerunning failures would mask exactly the
+  flakiness `each` is there to surface); the duration cache is not
+  updated. Honest scope note:
   every worker uses the same interpreter, so this validates isolation
   and shakes out flakiness — xdist's heterogeneous-environment use
   (`--tx` gateways) has no rstest equivalent.
@@ -53,7 +61,7 @@ workers). `--durations=0` shows everything; entries under
 `-vv`. Phase granularity matches pytest: setup, call, and teardown each
 get a line.
 
-### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>`
+### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>` { #-output-dotsverbosebargithubjson }
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
@@ -85,7 +93,7 @@ closing results bar self-disable; the per-test lines plus the stable
 `verbose` unless `--output` says otherwise. Pin any style explicitly with
 `--output` or `[tool.rstest] output` to override the TTY auto-default.
 
-#### Machine-readable styles
+#### Machine-readable styles { #machine-readable-styles }
 
 `github` renders the normal `dots` log and additionally emits a
 [GitHub Actions](https://docs.github.com/actions) `::error` workflow command
@@ -96,8 +104,9 @@ diff:
 ::error file=<path>,title=<nodeid>,line=<n>::<traceback>
 ```
 
-`file` comes from the nodeid path; `line` (1-based) from pytest's report
-location, omitted when none is available. The traceback is escaped per the
+`file` comes from the nodeid path; `line` (1-based — the annotator adds 1 to
+pytest's 0-based `report.location`, matching the `lineno` in the JSON reports)
+from pytest's report location, omitted when none is available. The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
 
 Tests that passed only after reruns (`--reruns` /
@@ -114,8 +123,9 @@ per failing test, surfaced as an inline issue on the file in the PR:
 ##vso[task.logissue type=error;sourcepath=<path>;linenumber=<n>]<nodeid>: <message>
 ```
 
-`sourcepath` comes from the nodeid path; `linenumber` (1-based) from
-pytest's report location, omitted when none is available. The message is
+`sourcepath` comes from the nodeid path; `linenumber` (1-based — the 0-based
+`report.location` plus 1, as in the GitHub annotator) from pytest's report
+location, omitted when none is available. The message is
 collapsed to one line (logissue is single-line). Flaky-passed tests
 (`--reruns`) additionally emit a `type=warning` logissue — green run,
 visible flake.
@@ -228,7 +238,7 @@ disjoint and cover the whole suite, so merging the per-job JUnit
 reconstructs the full run.
 
 Orthogonal to `-n`: each shard still runs its slice across local
-workers. Requires the parallel pool (`-n >= 2`); rejected with
+workers. Requires the parallel pool (`-n ≥ 2`); rejected with
 `--shuffle` (a per-run shuffle breaks the identical-partition guarantee
 that lets jobs agree without coordinating) and `--dist each`. Under
 `--collect lazy` it shards at file granularity. Composes with
@@ -239,9 +249,10 @@ duration cache on every job so their partitions match — see the
 ### `--doctor`
 
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),
-parallel-floor analysis (the tests that cap any `-n`), fixture hotspots
-(with scope advice), and slowest files. Adds two cheap measurements to the
-run; outcomes are unaffected.
+parallel-floor analysis (the tests that cap any `-n`), parallel efficiency
+(realized speedup and per-worker load imbalance, `-n > 1` only), fixture
+hotspots (with scope advice), and slowest files. Adds two cheap measurements
+to the run; outcomes are unaffected.
 
 ### `--try`
 
@@ -255,7 +266,7 @@ rough CI-time saving. No flags, no config.
 $ rstest --try
 ================= rstest --try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
-  ⚡ speed:   pytest 4.5s  →  rstest 2.9s   (1.5× at -n auto)
+  ⚡ speed:   pytest 96s  →  rstest 21s   (4.6× at -n auto)
 ================================================
   → drop-in ready: `rstest` is `pytest`, in parallel.
 ```
@@ -265,6 +276,12 @@ Exit 0 when outcomes are identical, 1 when they differ (it then points you at
 id or a parallel-only failure), 2 when it couldn't run pytest or rstest refused
 to dispatch. A pre-existing red pytest run is reported as such, not blamed on
 rstest.
+
+`--try` is the one command that needs **pytest installed on its own** (it runs
+your suite under plain `pytest` for the baseline). rstest itself vendors its
+core and doesn't otherwise require an external pytest; if `pytest` isn't on
+PATH, `--try` exits 2. `--migrate-check` and normal runs have no such
+requirement.
 
 ### `--migrate-check`
 
@@ -330,8 +347,7 @@ JSON — but excluded from the non-zero gate. This lets CI gate on **new**
 parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
 findings, and the build only goes red when a fresh one appears.
 
-The first slice of a broader migration assistant (see the project's
-`DESIGN-migrate-check.md`).
+The first slice of a broader migration assistant.
 
 ### `--only-rerun <REGEX>`
 
@@ -424,12 +440,19 @@ works with or without the global flag — but, like `--reruns`, the retry
 machinery is orchestrator-side, so it too only takes effect at `-n ≥ 2`
 (see [Markers](markers.md#pytestmarkflaky)).
 
+Migration footgun: a `reruns` in `[tool.rstest]` (or `--reruns` on the
+command line) is **silently inert** whenever the run drops to single-worker
+— `-n 0`/`-n 1` or a passthrough-IO flag (`--pdb`, `-s`, …). At `-n 0/1`,
+though, an installed pytest-rerunfailures takes over and honors `--reruns`
+natively (rstest only neutralizes it inside the pool), so leave the plugin
+installed if you rely on reruns in single-worker runs.
+
 Crash-aware: **while `--reruns` (or `@pytest.mark.flaky`) budget remains**,
 a test that killed its worker is retried on the replacement worker, bounded
 by both the rerun and restart budgets (the segfault-loop guard) — something
 in-process rerun plugins cannot do. Once that budget is exhausted, or with
 no reruns configured at all, the crashed test is reported FAILED and not
-retried (see [crash handling](troubleshooting.md#a-worker-crashed-what-happened-to-its-tests)). The flag is intercepted by rstest and an installed
+retried (see [crash handling](../concepts/crash-handling.md)). The flag is intercepted by rstest and an installed
 pytest-rerunfailures is neutralized inside workers, so nothing
 double-reruns.
 
@@ -469,7 +492,7 @@ file format, and CI surfaces:
 ### `--doctor-json <path>`
 
 Write the doctor analysis as JSON (stable, versioned schema — currently
-`1`) for CI trending. Implies doctor instrumentation; combine with
+`2`) for CI trending. Implies doctor instrumentation; combine with
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
 
@@ -542,7 +565,7 @@ dist = "loadfile"
 reruns = 2
 worker-timeout = 300
 collect = "full"        # or "lazy"
-output = "bar"          # dots | verbose | bar | github | json (default: bar on a TTY, dots off-TTY)
+output = "bar"          # dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json (default: bar on a TTY, dots off-TTY)
 ```
 
 Precedence: command line > `[tool.rstest]` > built-in defaults. pytest's
@@ -576,6 +599,11 @@ with inherited stdio, and pytest renders its own output:
 ```
 --collect-only / --co     -s / --capture=...     --pdb     --trace
 ```
+
+This **overrides any `-n` value or `[tool.rstest]` worker count without
+error** — e.g. `rstest -n 8 --pdb` runs one session, not eight. `--reruns`
+is likewise inert on this path (like `-n 0/1`). Drop the passthrough flag to
+get the pool back.
 
 The stepwise flags also force single-worker mode, but for sequencing rather
 than IO: stepwise resumes from a single nodeid cursor into one global

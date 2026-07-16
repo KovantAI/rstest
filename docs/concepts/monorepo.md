@@ -71,14 +71,14 @@ cap exists.
   or `{"skipped": true}` (skipped by `--changed`). No globbing, no client-side
   merging. See [Report JSON](../reference/report-json.md) for the exact shape.
 - **`--junitxml` and `--doctor-json`** are written per project with the
-  project slug inserted before the extension (junit consumers want one
+  project slug inserted before the extension (JUnit consumers want one
   testsuite file per package). The slug is the project's path relative to the
   root with separators replaced by `-`: `libs/core` -> `junit.libs-core.xml`,
   `services/api` -> `junit.services-api.xml`. Files anchor at the invocation
   directory. A project skipped by `--changed` writes no files.
 - **Output files are written as each project finishes** (each project is an
   isolated child run) — a hang in one package does not cost you the completed
-  packages' junit/report files.
+  packages' JUnit/report files.
 - **`--output` style** is forwarded to every project, so `dots`, `verbose`,
   `bar`, and `github` all apply per package (each project's block is captured
   and reprinted under its header; `github` `::error` annotations are rewritten
