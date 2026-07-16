@@ -37,7 +37,7 @@ collection work scales with what you select, not with worker count.
 
 **Suites with a few giant files.** Scheduling granularity defaults to
 the file. A file with thousands of parametrized tests pins one worker
-while the rest idle (aiohttp's full run is ~2x slower under lazy
+while the rest idle (aiohttp's full run is ~2× slower under lazy
 affinity; packaging's 61k-in-30-files similar). Two options:
 
 - stay with `--collect full` (the right call for full runs of such

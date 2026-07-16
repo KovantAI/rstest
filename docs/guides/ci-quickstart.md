@@ -1,16 +1,17 @@
 # CI quickstart
 
-rstest behaves like pytest in CI: exit code discipline, JUnit XML for
-your test-report integration, `--report-json` for tooling — and quiet
-human output (machine consumers should parse the files, not stdout). It adds two things worth wiring up: worker
-parallelism with no extra plugin, and a duration cache that makes
-scheduling smarter when persisted between runs.
+rstest behaves like pytest in CI: exit-code discipline, JUnit XML for your
+test-report integration, and `--report-json` for tooling, with quiet human
+output (machine consumers should parse the files, not stdout).
 
-!!! warning "Pre-release"
-    rstest is not yet on PyPI; in CI, install from a wheel you host (or
-    build with maturin in a setup job). The recipe below shows the
-    intended shape once published — substitute your wheel URL for
-    `pip install rstest` until then.
+On top of that, rstest adds two things worth wiring up in CI: worker
+parallelism with no extra plugin, and a duration cache that makes scheduling
+smarter when persisted between runs.
+
+!!! tip "Pin for reproducible CI"
+    The recipes use a bare `pip install rstest`. For reproducible builds,
+    pin a version (`pip install rstest==0.2.1` or `rstest~=0.2`) or install
+    from your lockfile.
 
 ## GitHub Actions
 
@@ -76,7 +77,7 @@ phases:
   install:
     commands:
       - pip install -r requirements.txt
-      - pip install rstest          # pre-release: install from your hosted wheel
+      - pip install rstest
   build:
     commands:
       # The `cache` block below persists .rstest_cache across builds, so
@@ -100,6 +101,13 @@ parallelism you want. For a monorepo root, widen the report `files` glob
 to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
 and the cache to `**/.rstest_cache/**/*`.
 
+This single-job recipe re-saves `.rstest_cache` every build, which is
+correct here — one full run owns the authoritative cache. If you **shard**
+across CodeBuild batch jobs, don't let each shard save: follow the
+[sharding guide](sharding.md)'s discipline (shards restore a stable cache
+read-only; one separate full job saves the fresh one), or the shards will
+race to write divergent duration caches and their partitions will drift.
+
 ## Google Cloud Build
 
 Cloud Build likewise has no annotation protocol — it streams step logs
@@ -117,7 +125,7 @@ steps:
       - -c
       - |
         pip install -r requirements.txt
-        pip install rstest        # pre-release: install from your hosted wheel
+        pip install rstest
         rstest -n auto --junitxml junit.xml
 
 # Upload the JUnit (and doctor JSON, if produced) to Cloud Storage.
@@ -154,7 +162,7 @@ test:
       - .rstest_cache/
   before_script:
     - pip install -r requirements.txt
-    - pip install rstest        # pre-release: install from your hosted wheel
+    - pip install rstest
   script:
     - rstest -n auto --output gitlab --junitxml junit.xml
   artifacts:
@@ -197,7 +205,7 @@ steps:
 
   - script: |
       pip install -r requirements.txt
-      pip install rstest        # pre-release: install from your hosted wheel
+      pip install rstest
       rstest -n auto --output azure --junitxml junit.xml
     displayName: test
 
@@ -230,7 +238,7 @@ jobs:
             - rstest-{{ .Branch }}
             - rstest-
       - run: pip install -r requirements.txt
-      - run: pip install rstest       # pre-release: install from your hosted wheel
+      - run: pip install rstest
       - run: rstest -n auto --junitxml test-results/junit.xml
       - store_test_results:
           path: test-results
@@ -263,7 +271,7 @@ pipeline {
       steps {
         sh '''
           pip install -r requirements.txt
-          pip install rstest        # pre-release: install from your hosted wheel
+          pip install rstest
           rstest -n auto --junitxml junit.xml
         '''
       }
@@ -290,7 +298,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.1.0             # pin a released tag
+    rev: v0.2.1             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```
@@ -316,11 +324,6 @@ Pass extra flags with `args`:
         args: ["-q", "--maxfail=1"]
 ```
 
-!!! note "Pre-release build"
-    Until rstest is on PyPI, pre-commit builds it from source when it
-    creates the hook environment, which needs a Rust toolchain on the
-    developer's machine. Once wheels are published, pre-commit installs
-    the prebuilt wheel and no toolchain is required.
 
 ## Suite-health trending with doctor
 
@@ -427,8 +430,10 @@ and just run `rstest`.
   PR diff — see [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
 - **Crash safety matters most in CI**: a segfaulting test costs one FAILED
   entry instead of an aborted job with partial results.
-- **Worker count**: `-n auto` uses the runner's logical cores. CI runners
-  are small (2–4 cores) and not oversubscribed, so `auto` is the right
-  default there.
+- **Worker count**: `-n auto` uses the runner's available logical cores —
+  on Linux it honors the CPU affinity mask and cgroup CPU quota, so a
+  CPU-limited container gets its allocation, not the host's core count. CI
+  runners are small (2–4 cores) and not oversubscribed, so `auto` is the
+  right default there; pin `-n <k>` only if you need a fixed count.
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` if your CI renders ANSI.

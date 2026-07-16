@@ -4,13 +4,30 @@ Run rstest from your project root, exactly where you would run pytest:
 
 ```console
 $ rstest
-rstest 0.1.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.2.1 — 8 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 48%]
 .....................................................s.................. [ 97%]
 ....                                                                     [100%]
 
 2048 passed, 2 skipped in 7.9s
 ```
+
+That `dots` output is what you get in CI and in these docs. **On your own
+terminal you'll instead see the `bar` view** — a `✓`/`✗` line per test,
+inline failures, and a live progress bar — because rstest auto-detects the
+TTY:
+
+```
+ ✓ tests/test_align.py::test_repr
+ ✓ tests/test_bar.py::test_pulse
+ ...
+Results (7.90s):
+  ██████████████████████████████ 2048/2050   2 skipped
+```
+
+Both are the same run, different renderer (details in [Reading the
+output](#reading-the-output)). This page's examples use `dots` for
+stability.
 
 No arguments needed: rstest honors your project's pytest configuration —
 `pyproject.toml` / `pytest.ini` / `setup.cfg` / `tox.ini`, including
@@ -83,7 +100,11 @@ $ rstest -k "login and not slow"        # keyword filter
 $ rstest -m integration                 # marker filter
 $ rstest --lf                           # only last failures
 $ rstest -x                             # stop at first failure (globally)
+$ rstest --changed                      # only tests affected by your edits
 ```
+
+`--changed` uses the import graph to run just the tests a change can reach —
+see [Watch mode](../guides/watch-mode.md) for the on-save version.
 
 ## Controlling parallelism
 
@@ -98,6 +119,19 @@ $ rstest -n 1      # identical to -n 0
 pytest session, pytest's own behavior in every detail. See
 [Byte-exact mode](../concepts/glossary.md#byte-exact-mode) for what that
 guarantees and how it differs from pytest-xdist's `-n 1`.
+
+Commit your defaults so you don't retype flags — `[tool.rstest]` in
+`pyproject.toml`:
+
+```toml
+[tool.rstest]
+numprocesses = "auto"   # -n auto
+reruns = 0
+worker-timeout = 300
+```
+
+Command-line flags override these; full key list in
+[CLI → Configuration file](../reference/cli.md#configuration-file).
 
 !!! tip "When to drop to `-n 0`"
     Under ~10 seconds of serial runtime, parallelism rarely pays — worker

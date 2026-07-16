@@ -6,10 +6,25 @@ rstest uses pytest's exit-code vocabulary:
 |---|---|
 | 0 | All tests passed |
 | 1 | Some tests failed |
-| 2 | Interrupted (e.g. collection errors abort the run, as in pytest); also a command-line usage error caught by the argument parser — a missing flag value (`--python` with no argument) or an unexpected argument (`-n -5`) |
+| 2 | Interrupted (e.g. collection errors abort the run, as in pytest); also a **usage error from rstest's own argument parser** — a missing flag value (`--python` with no argument) or an unexpected argument (`-n -5`) |
 | 3 | Internal error (including a worker lost beyond the restart budget) |
-| 4 | Usage error from the vendored pytest core — e.g. an unrecognized argument forwarded to it, or a bad pytest option. A bad *value* for an rstest flag (a non-integer `-n`) exits **1** |
+| 4 | **Usage error from the vendored pytest core** — an unrecognized argument forwarded to it, or a bad pytest option. A bad *value* for an rstest flag (a non-integer `-n`) exits **1** |
 | 5 | No tests collected |
+
+The two "usage error" codes split by which parser rejected the input: rstest's
+own CLI parser exits **2**, the vendored pytest core exits **4**.
+
+## Gating flags and their exit codes
+
+Flags that gate CI have exit semantics beyond the table above:
+
+| Flag | Exit codes |
+|---|---|
+| [`--try`](cli.md#-try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest or rstest refused to dispatch |
+| [`--migrate-check`](cli.md#-migrate-check) / `--migrate-check-json` | non-zero (`0` clean) when any WILL-bail unstable id **or** parallel-only failure is found |
+| [`--durations-regress`](cli.md#-durations-regress-ratio) | `1` on a duration regression over the threshold |
+| [`--cov-fail-under`](../guides/coverage.md) | `1` when coverage falls below the target |
+| [`--changed-strict`](cli.md#-changed-strict) | `5` when nothing is affected (instead of `0`) |
 
 ## Special cases
 

@@ -3,7 +3,13 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.0.x releases and are listed here.
 
-## Unreleased
+## 0.2.1 — 2026-07-15
+
+- Release CI fixes only; no user-facing behavior changes. Corrected the
+  build cache handling in the release workflow and dropped a step
+  unsupported on the free tier.
+
+## 0.2.0 — 2026-07-15
 
 - `--doctor` PARALLEL EFFICIENCY section: the realized parallel speedup
   measured from the run just finished (`test time / wall` vs worker
