@@ -8,7 +8,7 @@ and [`LICENSE-MIT`](https://github.com/KovantAI/rstest/blob/main/LICENSE-MIT).
 ## Vendored software
 
 rstest ships a vendored copy of [pytest](https://pytest.org) (currently
-**9.0.3**) inside the `rstest_worker._vendor` package. pytest is MIT
+**9.1.1**) inside the `rstest_worker._vendor` package. pytest is MIT
 licensed:
 
 > Copyright (c) 2004 Holger Krekel and others

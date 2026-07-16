@@ -52,9 +52,18 @@ like pytest-xdist. A user-provided `--basetemp` wins and is left alone.
 
 ## `rstest` runs the wrong Python / can't find my venv
 
-Worker interpreter discovery order: `--python` flag, `$VIRTUAL_ENV`,
-`./.venv`, `python3` on PATH. Activate your environment or pass
-`--python` explicitly.
+Worker interpreter discovery order: `--python` flag, `$VIRTUAL_ENV`, a
+`.venv` walking up from the working directory, versioned `python`/`pythonX.Y`
+on PATH, then uv-managed interpreters (full list:
+[Which Python does rstest use?](../getting-started/installation.md#which-python-does-rstest-use)).
+Activate your environment or pass `--python` explicitly.
+
+## `rstest: command not found` after `pip install rstest`
+
+The install landed in an environment that isn't on your PATH — usually a
+non-activated venv or a `--user` install. Activate the venv you installed
+into (its `bin/`/`Scripts/` holds the `rstest` binary), or run it through
+your env manager (`uv run rstest`).
 
 ## A test hangs forever and the run never finishes
 

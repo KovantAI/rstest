@@ -57,7 +57,7 @@ run it at `-n 0` (or use rstest's native equivalent).
 | pytest-benchmark | Caveat | auto-disables at `-n ≥ 2` (sees the pool as xdist); run benchmarks at `-n 0` and read numbers from `--benchmark-json` (the stats table isn't painted — rstest owns the terminal) |
 | pytest-order | Caveat | ordering only holds within a worker at `-n ≥ 2`; use `-n 0`, or `--dist loadfile`/`loadscope` to keep an ordered group on one worker |
 | pytest-randomly | Works | rstest synthesizes the `randomly_seed` key xdist's master would inject, derived from the run uid so every worker agrees on one reproducible seed. An explicit `--randomly-seed=<n>` still wins. (rstest's native [`--shuffle`](../reference/cli.md#-shuffleseed) remains available and is also parallel-safe.) |
-| pytest-rerunfailures | Parallel-unsafe | with pytest-xdist also installed it raises `KeyError: 'sock_port'` at `-n ≥ 2`; use rstest's native [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun` instead (crash-aware, handles `@mark.flaky`) |
+| pytest-rerunfailures | Parallel-unsafe | with pytest-xdist also installed it raises `KeyError: 'sock_port'` at `-n ≥ 2` (the crash is at plugin *configure*, before rstest's runtime neutralization of its reruns); use rstest's native [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun` instead (crash-aware, handles `@mark.flaky`) |
 | pytest-html | Parallel-unsafe | its pytest-metadata dependency defines a one-arg `pytest_testnodedown(node)` that rstest's emulation calls with an `error=` kwarg → `TypeError` at `-n ≥ 2`, and no HTML is written. Generate the report at `-n 0` |
 
 The recurring fault line: plugins that read xdist-**master**-injected

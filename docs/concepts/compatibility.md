@@ -30,7 +30,7 @@ matches pytest's numbers on the same suites.
 
 ## Vendored pytest version
 
-rstest currently vendors **pytest 9.0.3**, unmodified. Policy:
+rstest currently vendors **pytest 9.1.1**, unmodified. Policy:
 
 - The vendored version is pinned per rstest release and stated in
   [License](../reference/license.md) and `rstest_worker._vendor`.

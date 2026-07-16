@@ -13,7 +13,7 @@ pytest knowledge. New to the terms below (worker, byte-exact, `-n`)? The
 ```console
 $ mkdir rstest-demo && cd rstest-demo
 $ python -m venv .venv && source .venv/bin/activate
-$ pip install rstest    # see Installation for the pre-release wheel
+$ pip install rstest
 ```
 
 rstest discovers the interpreter from the active virtualenv, so activating
