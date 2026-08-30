@@ -757,15 +757,23 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         };
         let cwd = std::env::current_dir()?;
         let project = config::discover(&cwd);
-        let changed = select::changed_files_from_git(rev)?;
-        match select::affected_tests(&project.rootdir, &project, &changed, cli.changed_strict)? {
+        // Coverage-aware selection: uses the line->test index when it is warm
+        // (any --cov-context=test run writes it), else falls back per-file to
+        // import-graph reachability — so --changed only ever gets tighter.
+        let changes = select::changed_line_ranges(rev)?;
+        match select::affected_with_coverage(
+            &project.rootdir,
+            &project,
+            &changes,
+            cli.changed_strict,
+        )? {
             select::Selection::FullRun(reason) => {
                 eprintln!("rstest: --changed falling back to full run ({reason})");
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
                 println!(
                     "rstest: no tests affected by {} changed file(s)",
-                    changed.len()
+                    changes.len()
                 );
                 // Strict gating needs to DISTINGUISH "ran nothing" from
                 // "everything passed": pytest's nothing-collected code.
@@ -773,8 +781,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
             select::Selection::Tests(tests) => {
                 eprintln!(
-                    "rstest: {} changed file(s) -> {} affected test file(s)",
-                    changed.len(),
+                    "rstest: {} changed file(s) -> {} affected test target(s)",
+                    changes.len(),
                     tests.len()
                 );
                 let mut selected: Vec<String> =

@@ -10,6 +10,7 @@ Exit 0 = all gates green. Designed to be the single CI entry point.
 import argparse
 import glob
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -1382,7 +1383,7 @@ def main():
     r = g.run("--changed", "-v", cwd=sp, env_extra={"PYTHONPATH": str(sp)})
     check(
         "selection: direct + transitive, excludes unrelated",
-        "2 affected test file(s)" in r.stderr
+        "2 affected test target(s)" in r.stderr
         and "test_alpha" in r.stdout
         and "test_gamma" in r.stdout
         and "test_beta" not in r.stdout,
@@ -1403,7 +1404,7 @@ def main():
     r = g.run("--changed", "-v", cwd=sp, env_extra={"PYTHONPATH": str(sp)})
     check(
         "selection: conftest -> whole subtree",
-        "3 affected test file(s)" in r.stderr and "test_beta" in r.stdout,
+        "3 affected test target(s)" in r.stderr and "test_beta" in r.stdout,
         r.stderr[-200:],
     )
     (sp / "tests" / "conftest.py").unlink()
@@ -1415,6 +1416,77 @@ def main():
         r.stdout[-200:],
     )
     (sp / "tests" / "test_new.py").unlink()
+
+    print("== coverage-based selection (--changed uses the cov index) ==")
+    # Warm a line->test index, then prove --changed narrows to only the tests
+    # whose recorded coverage hit the changed lines — tighter than the
+    # import-graph (which would run every test importing the module).
+    cs = g.tmp / "covsel"
+    g.write("covsel/mymod.py",
+            "def used_by_a():\n    return 1\n"
+            "def used_by_b():\n    return 2\n"
+            "def used_by_both():\n    return 3\n")
+    g.write("covsel/test_a.py",
+            "import mymod\n"
+            "def test_a():\n    assert mymod.used_by_a() == 1\n"
+            "    assert mymod.used_by_both() == 3\n")
+    g.write("covsel/test_b.py",
+            "import mymod\n"
+            "def test_b():\n    assert mymod.used_by_b() == 2\n"
+            "    assert mymod.used_by_both() == 3\n")
+    g.write("covsel/pyproject.toml", "[tool.pytest.ini_options]\n")
+    subprocess.run(["git", "init", "-q"], cwd=cs, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "init"], cwd=cs, check=True)
+
+    def cov_changed_targets(edit_fn):
+        # reset, apply edit to the working tree, list the selected nodeids
+        subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+        edit_fn()
+        r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs,
+                  env_extra={"PYTHONPATH": str(cs)})
+        got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
+        return got, r
+
+    def edit_line(path, old, new):
+        p = cs / path
+        p.write_text(p.read_text().replace(old, new), encoding="utf-8")
+
+    # Warm the index (writes covsel/.rstest_cache/coverage_index.json).
+    r = g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
+              cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+    check("cov-select: index warmed", (cs / ".rstest_cache" / "coverage_index.json").exists(),
+          r.stdout[-200:] + r.stderr[-200:])
+
+    got, r = cov_changed_targets(lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n"))
+    check("cov-select: edit used_by_a -> only test_a",
+          got == ["test_a.py::test_a"], f"{got} || {r.stderr[-150:]}")
+
+    got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 2\n", "    return 22\n"))
+    check("cov-select: edit used_by_b -> only test_b", got == ["test_b.py::test_b"], str(got))
+
+    got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 3\n", "    return 33\n"))
+    check("cov-select: edit shared line -> both tests",
+          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+
+    # Rail: a pure insertion (new function) has no old-side coverage -> falls
+    # back to import-graph, which runs every test importing the module.
+    got, _ = cov_changed_targets(
+        lambda: (cs / "mymod.py").write_text(
+            (cs / "mymod.py").read_text() + "\ndef brand_new():\n    return 9\n", encoding="utf-8"))
+    check("cov-select: new code falls back to import-graph (both)",
+          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+
+    # Rail: a changed test file always runs its own tests.
+    got, _ = cov_changed_targets(lambda: edit_line("test_a.py", "== 1\n", "== 1  # x\n"))
+    check("cov-select: changed test file runs itself", got == ["test_a.py::test_a"], str(got))
+
+    # Rail: cold cache (no index) is identical to import-graph selection.
+    shutil.rmtree(cs / ".rstest_cache", ignore_errors=True)
+    got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n"))
+    check("cov-select: cold cache -> import-graph (both)",
+          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
 
     print("== shuffle ==")
     for i in range(6):
@@ -1500,7 +1572,7 @@ def main():
     check(
         "selection: GITHUB_BASE_REF auto-targets PR base",
         "auto-targets PR base origin/mainline" in r.stderr
-        and "2 affected test file(s)" in r.stderr
+        and "2 affected test target(s)" in r.stderr
         and "test_alpha" in r.stdout
         and "test_beta" not in r.stdout,
         r.stderr[-300:],
@@ -1520,7 +1592,7 @@ def main():
     )
     check(
         "selection: explicit rev wins over GITHUB_BASE_REF",
-        "auto-targets" not in r.stderr and "2 affected test file(s)" in r.stderr,
+        "auto-targets" not in r.stderr and "2 affected test target(s)" in r.stderr,
         r.stderr[-300:],
     )
     # Buildkite exposes the base as a branch name, resolved the same way.

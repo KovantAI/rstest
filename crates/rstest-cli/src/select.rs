@@ -11,7 +11,7 @@
 //! `__import__`) produce no edges. Teams relying on them should not use
 //! `--changed` for correctness-critical runs.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -182,18 +182,247 @@ pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
     // (users usually gitignore them, but don't rely on it).
     Ok(files
         .into_iter()
-        .filter(|f| {
-            !f.components().any(|c| {
-                matches!(
-                    c.as_os_str().to_str().unwrap_or(""),
-                    ".pytest_cache" | ".rstest_cache" | "__pycache__" | "htmlcov" | ".git"
-                )
-            }) && !f
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(".coverage") || n == "coverage.xml")
-        })
+        .filter(|f| is_selectable_path(f))
         .collect())
+}
+
+/// A changed path that must not defeat selection: runner artifacts
+/// (coverage data, caches) churn every run and are never test inputs.
+fn is_selectable_path(f: &Path) -> bool {
+    !f.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str().unwrap_or(""),
+            ".pytest_cache" | ".rstest_cache" | "__pycache__" | "htmlcov" | ".git"
+        )
+    }) && !f
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(".coverage") || n == "coverage.xml")
+}
+
+/// What changed in one file, from `git diff -U0`, in the shape the coverage
+/// index lookup needs.
+///
+/// The coverage index is keyed by **pre-change (old-side)** line numbers — it
+/// was built from a past run's source — so we look up the OLD lines a hunk
+/// touched, not the new ones (new-side numbers drift after insertions).
+/// `old_ranges` are the inclusive old-side spans of modified/deleted lines
+/// (lines that may have had coverage). `has_new_code` is set when the change
+/// introduces lines with no old-side counterpart (a pure insertion, `-a,0`) or
+/// the file is untracked — brand-new code the index cannot vouch for, so the
+/// file needs the conservative import-graph fallback.
+#[derive(Debug, Default, PartialEq)]
+pub struct FileChange {
+    pub old_ranges: Vec<(u32, u32)>,
+    pub has_new_code: bool,
+}
+
+pub type ChangedLines = BTreeMap<PathBuf, FileChange>;
+
+pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
+    let diff_base = rev.unwrap_or("HEAD");
+    let out = std::process::Command::new("git")
+        // -U0: zero context lines, so every hunk's new-side range is exactly
+        // the changed lines. --relative: paths relative to CWD (monorepo child
+        // safety), matching changed_files_from_git and the index keys.
+        .args(["diff", "-U0", "--relative", diff_base])
+        .output()
+        .context("running git diff -U0 (is this a git repository?)")?;
+    if !out.status.success() {
+        bail!(
+            "git diff -U0 {diff_base} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut map: ChangedLines = parse_diff_hunks(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .map(|(path, change)| (PathBuf::from(path), change))
+        .collect();
+    // Untracked files are all-new code with no old-side lines: mark
+    // has_new_code so the caller falls back to import-graph for them.
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .context("running git ls-files")?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        map.entry(PathBuf::from(line)).or_insert(FileChange {
+            old_ranges: Vec::new(),
+            has_new_code: true,
+        });
+    }
+    map.retain(|f, _| is_selectable_path(f));
+    Ok(map)
+}
+
+/// Parse `git diff -U0` output into (new-side path, FileChange). `/dev/null`
+/// targets (deleted files) are dropped. Pure function over the diff text so it
+/// is unit-testable.
+fn parse_diff_hunks(diff: &str) -> Vec<(String, FileChange)> {
+    let mut out: Vec<(String, FileChange)> = Vec::new();
+    let mut cur: Option<(String, FileChange)> = None;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            if let Some(c) = cur.take() {
+                out.push(c);
+            }
+            // `+++ b/path` (or `+++ /dev/null` for a deleted file).
+            let path = rest.strip_prefix("b/").unwrap_or(rest);
+            cur = (path != "/dev/null").then(|| (path.to_string(), FileChange::default()));
+        } else if line.starts_with("@@") {
+            if let Some((_, change)) = cur.as_mut() {
+                match parse_hunk_old_range(line) {
+                    // Modified/deleted lines existed pre-change: look them up.
+                    Some(Some(range)) => change.old_ranges.push(range),
+                    // Pure insertion (`-a,0`): brand-new code, no old lines.
+                    Some(None) => change.has_new_code = true,
+                    None => {} // unparseable header — ignore
+                }
+            }
+        }
+    }
+    if let Some(c) = cur.take() {
+        out.push(c);
+    }
+    // Keep files that either touched old lines or added new code.
+    out.into_iter()
+        .filter(|(_, c)| !c.old_ranges.is_empty() || c.has_new_code)
+        .collect()
+}
+
+/// From an `@@ -a,b +c,d @@` hunk header, the OLD-side `(start, end)` inclusive
+/// range. `Some(Some(range))` = `b > 0` lines existed and were changed/removed;
+/// `Some(None)` = `-a,0`, a pure insertion (no old lines); `None` = the header
+/// didn't parse.
+fn parse_hunk_old_range(hunk: &str) -> Option<Option<(u32, u32)>> {
+    // token after "@@": "-a" or "-a,b"
+    let minus = hunk
+        .split_whitespace()
+        .nth(1)
+        .filter(|t| t.starts_with('-'))?;
+    let mut nums = minus.trim_start_matches('-').split(',');
+    let start: u32 = nums.next()?.parse().ok()?;
+    let count: u32 = match nums.next() {
+        Some(c) => c.parse().ok()?,
+        None => 1,
+    };
+    if count == 0 {
+        return Some(None); // pure insertion at this point — no old-side lines
+    }
+    Some(Some((start, start + count - 1)))
+}
+
+/// Rule 1: a changed config file or any non-Python file defeats the import
+/// graph — return a full run. Shared by the graph and coverage selectors.
+fn rule1_full_run(changed: &[PathBuf]) -> Option<Selection> {
+    for c in changed {
+        let name = c.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if matches!(
+            name,
+            "pyproject.toml" | "pytest.ini" | "setup.cfg" | "tox.ini" | ".coveragerc"
+        ) {
+            return Some(Selection::FullRun(format!("{name} changed")));
+        }
+        if c.extension().and_then(|e| e.to_str()) != Some("py") {
+            return Some(Selection::FullRun(format!(
+                "non-Python file changed: {}",
+                c.display()
+            )));
+        }
+    }
+    None
+}
+
+const COVERAGE_INDEX_SCHEMA: u32 = 1;
+
+#[derive(serde::Deserialize)]
+struct CoverageIndex {
+    #[serde(default)]
+    schema: u32,
+    /// relative file path -> (line number -> nodeids that covered it)
+    #[serde(default)]
+    files: HashMap<String, HashMap<u32, Vec<String>>>,
+}
+
+/// Load `.rstest_cache/coverage_index.json`, or `None` when it is missing,
+/// unreadable, corrupt, or a schema this build doesn't understand — every
+/// "None" path makes the caller fall back to import-graph selection.
+fn load_coverage_index() -> Option<CoverageIndex> {
+    let bytes = std::fs::read(".rstest_cache/coverage_index.json").ok()?;
+    let idx: CoverageIndex = serde_json::from_slice(&bytes).ok()?;
+    (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
+}
+
+/// Coverage-aware selection: consult the line->test index to pick the exact
+/// tests whose recorded coverage executed the changed lines, falling back to
+/// import-graph selection for anything the index can't vouch for (brand-new
+/// code, files it never measured, untracked files) and to a full run for
+/// non-Python/config changes. With no index (cold cache) it is byte-identical
+/// to `affected_tests`. Over-selection is safe; the rails never under-select
+/// against unknown code — but the index is trusted for lines it *did* record,
+/// so keep it warm (rebuild on `--cov-context=test` runs).
+pub fn affected_with_coverage(
+    rootdir: &Path,
+    project: &ProjectConfig,
+    changes: &ChangedLines,
+    strict: bool,
+) -> Result<Selection> {
+    let files: Vec<PathBuf> = changes.keys().cloned().collect();
+    if let Some(full) = rule1_full_run(&files) {
+        return Ok(full);
+    }
+    let Some(index) = load_coverage_index() else {
+        // Cold cache: identical to the import-graph selector.
+        return affected_tests(rootdir, project, &files, strict);
+    };
+
+    let mut nodeids: BTreeSet<String> = BTreeSet::new();
+    let mut fallback: Vec<PathBuf> = Vec::new();
+    let mut direct_tests: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for (file, change) in changes {
+        // A changed test file always runs its own tests — its assertions or
+        // fixtures may have changed regardless of what covers its lines.
+        if crate::collect::is_test_file(&rootdir.join(file), project) {
+            direct_tests.insert(file.clone());
+            continue;
+        }
+        // conftest.py subtree semantics live in the graph path (its Rule 2).
+        if file.file_name().and_then(|n| n.to_str()) == Some("conftest.py") {
+            fallback.push(file.clone());
+            continue;
+        }
+        // Look up the OLD-side changed lines (index is keyed pre-change).
+        let key = file.to_string_lossy().replace('\\', "/");
+        if let Some(lines) = index.files.get(&key) {
+            for &(start, end) in &change.old_ranges {
+                for line in start..=end {
+                    if let Some(ids) = lines.get(&line) {
+                        nodeids.extend(ids.iter().cloned());
+                    }
+                }
+            }
+        }
+        // Brand-new code, or a file the index never measured, needs the graph.
+        if change.has_new_code || !index.files.contains_key(&key) {
+            fallback.push(file.clone());
+        }
+    }
+
+    let graph_tests = if fallback.is_empty() {
+        Vec::new()
+    } else {
+        match affected_tests(rootdir, project, &fallback, strict)? {
+            Selection::Tests(t) => t,
+            // A strict fallback that can't prove reachability => full run.
+            full @ Selection::FullRun(_) => return Ok(full),
+        }
+    };
+
+    let mut selected: BTreeSet<PathBuf> = BTreeSet::new();
+    selected.extend(nodeids.into_iter().map(PathBuf::from));
+    selected.extend(graph_tests);
+    selected.extend(direct_tests);
+    Ok(Selection::Tests(selected.into_iter().collect()))
 }
 
 /// Map changed files to the affected test files.
@@ -209,20 +438,8 @@ pub fn affected_tests(
     strict: bool,
 ) -> Result<Selection> {
     // Rule 1: anything that isn't a Python file defeats the graph.
-    for c in changed {
-        let name = c.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if matches!(
-            name,
-            "pyproject.toml" | "pytest.ini" | "setup.cfg" | "tox.ini" | ".coveragerc"
-        ) {
-            return Ok(Selection::FullRun(format!("{name} changed")));
-        }
-        if c.extension().and_then(|e| e.to_str()) != Some("py") {
-            return Ok(Selection::FullRun(format!(
-                "non-Python file changed: {}",
-                c.display()
-            )));
-        }
+    if let Some(full) = rule1_full_run(changed) {
+        return Ok(full);
     }
 
     let index = ProjectIndex::build(rootdir)?;
@@ -449,7 +666,82 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::imports_of;
+    use super::{imports_of, parse_diff_hunks, parse_hunk_old_range, FileChange};
+
+    #[test]
+    fn hunk_old_range_parsing() {
+        // modification: old lines 1..2 changed
+        assert_eq!(parse_hunk_old_range("@@ -1,2 +3,4 @@"), Some(Some((1, 2))));
+        // single old line (no count)
+        assert_eq!(
+            parse_hunk_old_range("@@ -5 +5 @@ def foo():"),
+            Some(Some((5, 5)))
+        );
+        // pure insertion (-a,0): no old-side lines
+        assert_eq!(parse_hunk_old_range("@@ -0,0 +1,3 @@"), Some(None));
+        // deletion: old lines 10..12 removed
+        assert_eq!(
+            parse_hunk_old_range("@@ -10,3 +9,0 @@"),
+            Some(Some((10, 12)))
+        );
+    }
+
+    #[test]
+    fn diff_hunks_use_old_side_and_flag_insertions() {
+        // Line 2 modified (old-side (2,2)); two lines inserted after b (-10,0
+        // => pure insertion => has_new_code, no old range).
+        let diff = "\
+diff --git a/pkg/mod.py b/pkg/mod.py
+index e69..abc 100644
+--- a/pkg/mod.py
++++ b/pkg/mod.py
+@@ -2 +2 @@ def a():
+-    return 1
++    return 2
+@@ -10,0 +11,2 @@ def b():
++    x = 1
++    return x
+";
+        let hunks = parse_diff_hunks(diff);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].0, "pkg/mod.py");
+        assert_eq!(
+            hunks[0].1,
+            FileChange {
+                old_ranges: vec![(2, 2)],
+                has_new_code: true
+            }
+        );
+    }
+
+    #[test]
+    fn diff_hunks_deletions_kept_dev_null_dropped() {
+        let diff = "\
+--- a/gone.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-a
+-b
+-c
+--- a/keep.py
++++ b/keep.py
+@@ -5,2 +5,0 @@
+-old
+-lines
+";
+        // gone.py -> /dev/null is dropped; keep.py deleted old lines 5..6, which
+        // had coverage, so it's kept for an old-side index lookup.
+        let hunks = parse_diff_hunks(diff);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].0, "keep.py");
+        assert_eq!(
+            hunks[0].1,
+            FileChange {
+                old_ranges: vec![(5, 6)],
+                has_new_code: false
+            }
+        );
+    }
 
     #[test]
     fn plain_and_comma_imports() {
