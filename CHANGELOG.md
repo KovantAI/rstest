@@ -3,6 +3,16 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.0.x releases and are listed here.
 
+## 0.3.1 — 2026-08-30
+
+- Cache invalidation support.
+- `--doctor` threshold option.
+- Fixed compatibility with `pytest-rerunfailures`; allow reruns below 2
+  workers.
+- Mimic `pytest-randomly` `workerinput` handling and fix xdist hookspec
+  handling.
+- Fixed not persisting negative cache keys.
+
 ## 0.2.1 — 2026-07-15
 
 - Release CI fixes only; no user-facing behavior changes. Corrected the

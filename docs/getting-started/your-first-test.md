@@ -42,7 +42,7 @@ def test_add_negative():
 
 ```console
 $ rstest
-rstest 0.2.1 — single worker (pytest-exact mode)
+rstest 0.3.1 — single worker (pytest-exact mode)
 ..
 
 2 passed in 0.11s
@@ -67,7 +67,7 @@ def test_add_wrong():
 
 ```console
 $ rstest
-rstest 0.2.1 — single worker (pytest-exact mode)
+rstest 0.3.1 — single worker (pytest-exact mode)
 ..F
 
 --- FAILED test_first.py::test_add_wrong ---
@@ -110,7 +110,7 @@ Run it. Twelve one-second tests finish in about `12 / cores` seconds, not 12:
 
 ```console
 $ rstest test_slow.py
-rstest 0.2.1 — 8 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.3.1 — 8 workers (parallel by default; -n 0 for single-worker mode)
 ............
 
 12 passed in 1.68s
