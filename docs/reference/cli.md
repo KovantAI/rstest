@@ -466,6 +466,37 @@ Reruns rescue a flake within one run; the flake history and
 [`--quarantine`](#-quarantine-file) manage it across runs — see
 [Flaky tests](../guides/flaky-tests.md).
 
+### `--reruns-only-known-flaky`
+
+Spend the rerun budget only on tests that have a **prior flaky history** —
+tests recorded as passed-after-rerun in `.rstest_cache/flakes.json` on some
+earlier run. A first-time failure with no flaky history is reported failed
+immediately, without retrying.
+
+The motivation is deterministic mass-failures: one root cause (a missing
+migration, a broken import) fails many tests *identically*, and a plain
+`--reruns 1` re-runs every one of them for zero recovery — pure wall-time
+waste. Those tests were never flaky, so they carry no flaky history and this
+flag skips their reruns, while genuine known-flakes are still rescued.
+
+Details:
+
+- **Keys on flaky history, not failures.** Only a `flaky > 0` record counts.
+  A test with a hard-failure-only history (`failed > 0`, `flaky == 0`) — the
+  signature of a deterministic failure — is *not* treated as known-flaky.
+- **`@pytest.mark.flaky` always bypasses it.** An explicit per-test marker is
+  an author declaration of flakiness, so a marked test is retried regardless
+  of history.
+- **Composes with [`--only-rerun`](#-only-rerun-regex).** Both gates must pass
+  for a retry to fire.
+- **Cold-start trade-off.** A brand-new flaky test isn't rescued on its very
+  *first* flake (no history yet) — it fails that run, is recorded, and is
+  rescued on subsequent runs. Cache `.rstest_cache` across CI runs (as you
+  would for the duration cache) so the history accumulates.
+
+Also settable as `[tool.rstest] reruns-only-known-flaky = true`. No effect
+unless `--reruns` (or a `@pytest.mark.flaky` budget) is active.
+
 ### `--quarantine <FILE>`
 
 Ring-fence known-flaky tests without hiding them. `FILE` lists nodeids

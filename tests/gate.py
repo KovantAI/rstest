@@ -1496,6 +1496,78 @@ def main():
     r = g.run("test_flaky.py", "-n", "2", cwd=fdir,
               env_extra={"FLAKY_MARKER": str(marker)})
     check("flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:])
+
+    print("== flaky-aware reruns (--reruns-only-known-flaky) ==")
+    # Gate reruns on prior flaky history so a deterministic mass-failure
+    # doesn't burn the budget. Fixture: test_flaky_once fails its first
+    # attempt then passes; nodeid is `test_flaky.py::test_flaky_once`.
+    fnode = "test_flaky.py::test_flaky_once"
+    fcache = g.tmp / "flaky" / ".rstest_cache" / "flakes.json"
+    fcache.parent.mkdir(parents=True, exist_ok=True)
+
+    def faware(hist, marker_name, *extra):
+        # hist: dict written to flakes.json (or None to remove it).
+        m = g.tmp / marker_name
+        m.unlink(missing_ok=True)
+        if hist is None:
+            fcache.unlink(missing_ok=True)
+        else:
+            fcache.write_text(json.dumps(hist), encoding="utf-8")
+        r = g.run("test_flaky.py", "-n", "2", "--reruns", "2",
+                  "--reruns-only-known-flaky", *extra, cwd=fdir,
+                  env_extra={"FLAKY_MARKER": str(m)})
+        m.unlink(missing_ok=True)
+        return r
+
+    # In history with flaky>0 -> rerun-eligible -> recovers.
+    r = faware({fnode: {"flaky": 2, "failed": 0, "last_epoch": 1}}, "fa_known")
+    check("flaky-aware: known-flaky test is reran and recovers",
+          r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
+    # No history -> not known-flaky -> not reran -> fails.
+    r = faware(None, "fa_unknown")
+    check("flaky-aware: unknown test not reran, fails",
+          r.returncode == 1 and "1 failed" in r.stdout
+          and "passed after rerun" not in r.stdout,
+          r.stdout[-200:])
+    # Hard-failure-only history (flaky==0) -> still not known-flaky: a
+    # deterministic mass-failure recorded as `failed` never burns the budget.
+    r = faware({fnode: {"flaky": 0, "failed": 9, "last_epoch": 1}}, "fa_failedonly")
+    check("flaky-aware: failed-only history does not count as known-flaky",
+          r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:])
+    # Baseline sanity: same unknown test WITHOUT the flag reruns and recovers.
+    m = g.tmp / "fa_baseline"
+    m.unlink(missing_ok=True)
+    fcache.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "2", "--reruns", "2", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(m)})
+    m.unlink(missing_ok=True)
+    check("flaky-aware: without the flag, unknown flake still recovers",
+          r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
+
+    # An explicit @pytest.mark.flaky declaration bypasses the gate even with
+    # no history: the author already declared it flaky.
+    g.write(
+        "faware_mark/test_m.py",
+        "import os, pathlib, pytest\n"
+        "@pytest.mark.flaky(reruns=2)\n"
+        "def test_marked():\n"
+        "    m = pathlib.Path(os.environ['MK'])\n"
+        "    if not m.exists():\n"
+        "        m.write_text('x'); assert False\n"
+        "    assert True\n",
+    )
+    mdir = g.tmp / "faware_mark"
+    mk = g.tmp / "fa_mark"
+    mk.unlink(missing_ok=True)
+    # --reruns 2 so the gate is actually active (known_flaky loads); with no
+    # history an unmarked test would be blocked, so recovery here proves the
+    # @mark.flaky declaration bypasses the gate.
+    r = g.run("test_m.py", "-n", "2", "--reruns", "2", "--reruns-only-known-flaky",
+              cwd=mdir, env_extra={"MK": str(mk)})
+    mk.unlink(missing_ok=True)
+    check("flaky-aware: @mark.flaky bypasses the gate (no history)",
+          r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
+
     g.write("crashflaky/test_cf.py", CRASHFLAKY)
     cmarker = g.tmp / "cf_marker"
     if cmarker.exists():

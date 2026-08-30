@@ -56,6 +56,29 @@ The flaky and quarantined sections annotate each test from this file:
 A test with `flaky: 7` is not "unlucky" — it's the ranked candidate
 list for the next step.
 
+## Target: `--reruns-only-known-flaky`
+
+By default `--reruns N` retries *every* failure. That backfires on a
+deterministic mass-failure — one broken migration or import failing 50
+tests identically — where each retry just re-fails for zero recovery, at
+50× the wall-time cost.
+
+`--reruns-only-known-flaky` spends the budget only on tests the history
+already knows are flaky (a `flaky > 0` record):
+
+```console
+$ rstest -n auto --reruns 2 --reruns-only-known-flaky
+```
+
+A hard-failure-only record (`failed > 0`, `flaky == 0`) — the signature of
+a deterministic failure — does *not* qualify, so mass-failures fail fast
+while genuine known-flakes are still rescued. An explicit
+`@pytest.mark.flaky` always bypasses the gate (the author already declared
+it), and it composes with `--only-rerun`. The trade-off: a brand-new flake
+isn't rescued on its very first run (no history yet) — so persist
+`.rstest_cache` across CI runs for the history to build up. Full semantics:
+[`--reruns-only-known-flaky`](../reference/cli.md#-reruns-only-known-flaky).
+
 ## Ring-fence: `--quarantine`
 
 Write the known offenders to a file (commit it — the quarantine set is
