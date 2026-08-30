@@ -13,7 +13,7 @@ already does natively — it just wires it into GitHub Actions:
 | `::error` per failed test, `::warning` for flaky reruns | rstest `--output github` (this action defaults to it) |
 | Doctor diagnostics → job summary | rstest `--doctor` (auto-publishes to `$GITHUB_STEP_SUMMARY`) |
 | Machine-readable diagnostics | rstest `--doctor-json` / `--doctor-md` (pass via `args`) |
-| Fail CI on a doctor metric threshold | **this action** (`doctor-fail-on`; rstest has no `--doctor-fail-on` yet) |
+| Fail CI on a doctor metric threshold | rstest `--doctor-fail-on` (this action's `doctor-fail-on` forwards to it) |
 | No silent skip when `--changed` finds nothing | rstest `--changed-strict` (`changed: strict`) |
 | Persist durations/flakes across runs | **this action** (GitHub cache; rstest has no remote cache yet) |
 | Tolerate N% failures (real-LLM) | **this action** (`fail-under-ratio`) |
@@ -108,7 +108,7 @@ steps:
 | `durations-regress` | `""` | `--durations-regress RATIO` (cold cache warns; see `require-baseline`) |
 | `require-baseline` | `false` | strict: fail if no baseline. Default only warns — the first run legitimately has none and seeds it |
 | `doctor` | `false` | add `--doctor` |
-| `doctor-fail-on` | `""` | fail on doctor metrics, e.g. `parallel_efficiency<30, imbalance_pct>60` (implies `--doctor-json`; absent metrics skipped) |
+| `doctor-fail-on` | `""` | fail on doctor metrics, e.g. `parallel_efficiency<30, imbalance_pct>60` (each forwarded to native `--doctor-fail-on`; breach fails via exit code, report auto-published to job summary; inapplicable metrics skipped) |
 | `quarantine` | `""` | `--quarantine FILE` |
 | `shard` / `shard-total` | `""` | `--shard K/N` |
 | `fail-under-ratio` | `""` | max tolerated assertion-failure fraction (0–1) |
