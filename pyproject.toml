@@ -27,6 +27,13 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+[project.urls]
+Documentation = "https://python-rstest.readthedocs.io/en/stable/"
+Homepage = "https://python-rstest.readthedocs.io/en/stable/"
+Repository = "https://github.com/KovantAI/rstest"
+Changelog = "https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md"
+Issues = "https://github.com/KovantAI/rstest/issues"
+
 [tool.maturin]
 bindings = "bin"
 manifest-path = "crates/rstest-cli/Cargo.toml"
