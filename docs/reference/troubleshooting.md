@@ -35,15 +35,34 @@ At `-n ≥ 2` rstest renders the terminal; plugin-drawn UIs (progress bars,
 custom reporters) don't paint. The plugin still *runs* — hooks fire, data
 flows. Use `-n 0` when you specifically want a plugin's own rendering.
 
-## A plugin crashes at `-n ≥ 2` with `KeyError` (`randomly_seed`, `sock_port`, `server_port`)
+## A plugin crashes at `-n ≥ 2` with `KeyError` on a `workerinput` key
 
 The plugin reads a `workerinput` key that pytest-xdist's *master* process
-injects, which rstest has no controller to set (it runs a worker-shaped
-`workerinput` only). Known cases: **pytest-randomly** (`randomly_seed`),
-**pytest-rerunfailures** with pytest-xdist installed (`sock_port`),
-pytest-retry (`server_port`). Run that plugin at `-n 0`, or use rstest's
-native equivalent (`--shuffle`, `--reruns`) — full per-plugin table in
-[Plugins](../guides/plugins.md#tested-compatibility).
+injects, which rstest has no central controller to set (it runs a
+worker-shaped `workerinput` only). The three common cases are now handled, so
+you should not hit them on current rstest:
+
+- **pytest-randomly** (`randomly_seed`) — rstest synthesizes one run-level
+  seed every worker agrees on.
+- **pytest-rerunfailures** with pytest-xdist installed (`sock_port`) — rstest
+  unregisters it inside pool workers (before its configure reads the key) and
+  owns reruns natively.
+- **pytest-retry** (`server_port`) — each worker self-provisions its own
+  report server, so the key is set locally.
+
+If a *different* plugin hits this, run it at `-n 0`, or use rstest's native
+equivalent (`--shuffle`, `--reruns`) — full per-plugin table in
+[Plugins](../guides/plugins.md#tested-compatibility). Please also file it.
+
+## My `--html` (pytest-html) report is missing at `-n ≥ 2`
+
+No crash, no error — the file just isn't written. pytest-html registers its
+report writer only on a node *without* `workerinput` (its xdist "am I the
+master?" check), and every rstest pool worker has a `workerinput`, so nothing
+owns report generation. Producing one file from all workers needs a single
+master process, which rstest doesn't run. Generate the report at `-n 0`/`-n 1`
+(a single session, where no `workerinput` is set) — the rest of your suite can
+still run parallel in a separate step.
 
 ## Where did my `tmp_path` go?
 

@@ -63,15 +63,18 @@ exist yet, so it lands at 3.6×; a warm run, planned from those
 caches, is projected to reach 6.6–7.3× as the planner self-corrects toward
 the next bottleneck.
 
-**Policy.** `checkpoint-sqlite` runs at `-n 0`: it pulls in pytest-retry,
-whose worker reporter reads xdist's controller-injected
-`workerinput["server_port"]` — a key rstest does not provide (see
-[Known gaps](../concepts/compatibility.md#known-gaps)). Single-worker
-mode takes the plugin's non-xdist path and keeps its `flaky` marker
-registered (the suite's one `@pytest.mark.flaky` TTL test lives here).
-The plugin also sits in the shared venv, so it loads in the other five
-libs too; they don't use the marker, so the corpus disables it there
-(`-p no:pytest-retry`, on both the baseline and rstest runs) to keep
+**Policy.** `checkpoint-sqlite` is a small suite and runs single-worker
+(`-n 0`). It pulls in pytest-retry, whose worker reporter reads
+`workerinput["server_port"]`. That key once had no source under rstest (no
+central controller to set it) and forced this pin — but it is now
+**resolved**: each worker self-provisions its own report server, so
+pytest-retry takes its master branch and its `@pytest.mark.flaky` TTL test
+(which lives here) runs correctly at `-n ≥ 2` too (verified — see
+[parity divergences §8](parity-divergences.md#8-plugin-master-hook-gating-rstest-side-fixed)).
+Single-worker remains the natural choice for a suite this small; the numbers
+below are the `-n 0` run. The plugin also sits in the shared venv, so it loads
+in the other five libs too; they don't use the marker, so the corpus disables
+it there (`-p no:pytest-retry`, on both the baseline and rstest runs) to keep
 per-test parity exact.
 
 ## Reading the numbers honestly

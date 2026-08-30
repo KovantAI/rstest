@@ -634,7 +634,18 @@ fn cached_probe(candidate: &Path) -> Option<Probe> {
         .unwrap()
         .insert(candidate.to_path_buf(), result.clone());
     if let (Some((m, s)), Some(p)) = (fp, &result) {
-        disk_cache_put(candidate, m, s, p);
+        // Persist POSITIVE probes only. A negative probe (the interpreter ran
+        // but couldn't import the worker shim — e.g. msgpack not yet installed)
+        // is keyed on the binary's fingerprint, which a `pip install` into
+        // site-packages leaves unchanged. Persisting `false` would let the
+        // stale miss survive the very install that fixes it, so rstest keeps
+        // reporting "no usable Python interpreter found" until the cache is
+        // deleted by hand. Re-probe negatives every run instead: cheap next to
+        // a full session, and self-healing once the dep lands. The in-memory
+        // cache above still de-dupes repeat probes within a single run.
+        if p.worker_importable {
+            disk_cache_put(candidate, m, s, p);
+        }
     }
     result
 }
