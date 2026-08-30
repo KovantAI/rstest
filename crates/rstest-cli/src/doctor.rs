@@ -382,6 +382,17 @@ fn parse_condition(spec: &str) -> anyhow::Result<GateCondition> {
     let threshold: f64 = rhs.parse().map_err(|_| {
         anyhow::anyhow!("--doctor-fail-on '{spec}': threshold '{rhs}' is not a number")
     })?;
+    // Exact == / != is reliable only on the integer-valued metrics; on a
+    // float metric (times, percentages, speedups) it almost never matches and
+    // would silently never fire. Warn rather than reject — someone may still
+    // want it on `tests`/`workers`.
+    if matches!(op, Op::Eq | Op::Ne) && !matches!(metric.as_str(), "tests" | "workers") {
+        eprintln!(
+            "rstest: --doctor-fail-on '{spec}': exact {} on the floating-point \
+             metric '{metric}' rarely matches; a threshold (< / >) is usually meant",
+            op.symbol()
+        );
+    }
     Ok(GateCondition {
         raw: spec.to_string(),
         metric,
@@ -931,6 +942,22 @@ mod tests {
         assert_eq!(out.breaches.len(), 2, "{:?}", out.breaches);
         assert!(out.skipped.is_empty());
         assert!(out.breaches[0].contains("parallel_efficiency = 82.50 < 90.00"));
+    }
+
+    #[test]
+    fn every_known_metric_resolves_on_a_full_report() {
+        // Guards METRICS vs metric_value drift: a name added to METRICS but not
+        // to metric_value would resolve to None even on a fully-populated
+        // report and silently always-skip. `report(12)` has every section.
+        let r = report(12);
+        for name in METRICS {
+            let c = parse_condition(&format!("{name}>=0")).unwrap();
+            let out = evaluate(&r, std::slice::from_ref(&c));
+            assert!(
+                out.skipped.is_empty(),
+                "metric '{name}' is in METRICS but did not resolve (metric_value drift)"
+            );
+        }
     }
 
     #[test]

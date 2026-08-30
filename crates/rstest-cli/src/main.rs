@@ -1078,6 +1078,14 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         }
     }
 
+    // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
+    // gate can't evaluate — say so instead of a silent false green.
+    if !doctor_gate.is_empty() && passthrough {
+        eprintln!(
+            "rstest: --doctor-fail-on is ignored under -s/--pdb/--co \
+             (no doctor instrumentation in an interactive single session)"
+        );
+    }
     let mut doctor_gate_failed = false;
     if (cli.doctor
         || cli.doctor_json.is_some()
@@ -1114,12 +1122,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                     doctor_gate.len()
                 );
             } else {
-                println!(
+                // stderr, not stdout: --output json/tap keep stdout a pure
+                // machine stream, and the failure block must not corrupt it
+                // (same reason the human doctor render is gated above).
+                eprintln!(
                     "\n{}",
                     palette.bold_red("=========== doctor gate failures ===========")
                 );
                 for b in &gate.breaches {
-                    println!("  {b}");
+                    eprintln!("  {b}");
                 }
                 doctor_gate_failed = true;
             }
@@ -1253,6 +1264,9 @@ fn execute_monorepo(
     if cli.watch {
         anyhow::bail!("--watch at a monorepo root is not supported yet; run inside a project");
     }
+    // Validate --doctor-fail-on once here so a malformed condition fails fast
+    // at the root, not as N separate child aborts (children re-validate too).
+    doctor::parse_conditions(&cli.doctor_fail_on)?;
     // The monorepo orchestrator prints per-project banners and a summary
     // around captured child output, so a single clean NDJSON stream is not
     // possible here. The merged --report-json document is the machine-

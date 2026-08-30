@@ -544,7 +544,13 @@ A metric whose section did not apply to the run is **skipped, not failed**
 — e.g. `parallel_efficiency` at `-n 1` (no parallelism to measure) prints a
 `not measured` note and never fails the gate. An unknown metric or malformed
 condition aborts up front, before the run, so a typo can never become a gate
-that silently never fires.
+that silently never fires. `==`/`!=` are reliable only on the integer-valued
+metrics (`tests`, `workers`); on a floating-point metric they almost never
+match, so rstest warns and you should use a `<`/`>` threshold instead.
+
+The failure block prints to stderr, so `--output json`/`tap` stay pure on
+stdout. Under a passthrough-IO flag (`-s`/`--pdb`/`--co`) there is no doctor
+instrumentation, so the gate can't run — rstest warns instead of passing green.
 
 The conditions can live in your CI config or `pyproject.toml` invocation, so
 non-GitHub CIs get the same gate the composite action offers externally.

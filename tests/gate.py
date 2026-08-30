@@ -1127,8 +1127,19 @@ def main():
     r = g.run("doc", "-n", "2", "--doctor-fail-on", "wait_pct>50")
     check(
         "doctor-fail-on: breach fails the run (exit 1)",
-        r.returncode == 1 and "doctor gate failures" in r.stdout and "wait_pct" in r.stdout,
-        f"rc={r.returncode} " + r.stdout[-300:],
+        # Failure block goes to STDERR so --output json/tap stay pure.
+        r.returncode == 1 and "doctor gate failures" in r.stderr and "wait_pct" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    # A gate breach under --output json must NOT corrupt the pure NDJSON stream:
+    # the failure block is stderr-only.
+    r = g.run("doc", "-n", "2", "--output", "json", "--doctor-fail-on", "wait_pct>1")
+    ok, _objs = parse_ndjson(r.stdout)
+    check(
+        "doctor-fail-on: breach keeps --output json pure (stderr only)",
+        r.returncode == 1 and ok and "doctor gate failures" not in r.stdout
+        and "doctor gate failures" in r.stderr,
+        f"rc={r.returncode} ndjson_ok={ok} " + r.stdout[-200:],
     )
     # A threshold the run clears: gate passes, exit stays 0.
     r = g.run("doc", "-n", "2", "--doctor-fail-on", "wall_seconds>1000")
