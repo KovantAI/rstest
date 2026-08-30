@@ -1373,6 +1373,47 @@ def main():
     check("flaky passes with reruns", r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
     check("flaky section listed", "passed after rerun" in r.stdout)
     marker.unlink()
+
+    # Single-worker reruns: --reruns at -n 1 / -n 0 must fire (a degenerate
+    # one-worker pool drives the rerun loop) instead of being silently inert.
+    swm = g.tmp / "sw_reruns_marker"
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "1", "--reruns", "2", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "single-worker reruns fire at -n 1",
+        r.returncode == 0 and "1 flaky" in r.stdout
+        and "single worker (rerun pool" in r.stdout.splitlines()[0],
+        f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stdout[-200:],
+    )
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "0", "--reruns", "2", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "single-worker reruns fire at -n 0",
+        r.returncode == 0 and "1 flaky" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-200:],
+    )
+    # No --reruns at -n 1 stays byte-exact single session: the flake fails.
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "1", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "no-reruns at -n 1 stays byte-exact (flake fails)",
+        r.returncode == 1 and "1 failed" in r.stdout
+        and "pytest-exact mode" in r.stdout.splitlines()[0],
+        f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stdout[-200:],
+    )
+    # Passthrough (-s) can't be pooled: reruns stay inert, warned.
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "1", "--reruns", "2", "-s", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "reruns inert under -s, warned",
+        r.returncode == 1 and "ignored under -s" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    marker.unlink(missing_ok=True)
     r = g.run("test_flaky.py", "-n", "2", cwd=fdir,
               env_extra={"FLAKY_MARKER": str(marker)})
     check("flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:])

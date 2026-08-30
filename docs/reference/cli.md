@@ -430,22 +430,28 @@ keep full runs on the gating path.
 
 ### `--reruns <N>`
 
-Rerun failed tests up to N times (requires `-n ≥ 2`). A test that then
+Rerun failed tests up to N times. A test that then
 passes is reported **flaky**: the run stays green, the test is counted in
 the summary (`N flaky`), listed in its own section, and flagged in
 `--report-json`. Only the final attempt's outcome and output are recorded.
 
 Per-test budgets are available via `@pytest.mark.flaky(reruns=N)`, which
-works with or without the global flag — but, like `--reruns`, the retry
-machinery is orchestrator-side, so it too only takes effect at `-n ≥ 2`
-(see [Markers](markers.md#pytestmarkflaky)).
+works with or without the global flag (see
+[Markers](markers.md#pytestmarkflaky)).
 
-Migration footgun: a `reruns` in `[tool.rstest]` (or `--reruns` on the
-command line) is **silently inert** whenever the run drops to single-worker
-— `-n 0`/`-n 1` or a passthrough-IO flag (`--pdb`, `-s`, …). At `-n 0/1`,
-though, an installed pytest-rerunfailures takes over and honors `--reruns`
-natively (rstest only neutralizes it inside the pool), so leave the plugin
-installed if you rely on reruns in single-worker runs.
+**Works at any worker count, including `-n 0`/`-n 1`.** The retry machinery
+is orchestrator-side, so a single-worker run with `--reruns` set is executed
+as a **degenerate one-worker pool** to drive it — rstest neutralizes an
+installed pytest-rerunfailures inside that worker, so nothing double-reruns.
+This is the escape hatch for rate-limited suites that must run few workers
+(real-LLM tests capped on outbound calls) yet still need retries: you no
+longer have to pin `-n 2` just to get reruns. Passing `--reruns` opts that
+run out of [byte-exact mode](../concepts/glossary.md#byte-exact-mode) — a
+plain `-n 0`/`-n 1` run with no reruns stays the byte-exact single session.
+
+One exception: reruns stay **inert** under a passthrough-IO flag (`--pdb`,
+`-s`, `--co`, …), which needs pytest's own terminal and can't be pooled;
+rstest warns when you combine them.
 
 Crash-aware: **while `--reruns` (or `@pytest.mark.flaky`) budget remains**,
 a test that killed its worker is retried on the replacement worker, bounded

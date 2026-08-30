@@ -621,6 +621,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     let n = parse_numprocesses(&numprocesses)?;
     let passthrough = needs_passthrough_io(&args);
+    // Honor `--reruns` in single-worker mode by running a degenerate
+    // one-worker pool: the rerun loop is orchestrator-side, so an n=1 pool
+    // makes it live (with pytest-rerunfailures neutralized inside the worker,
+    // so nothing double-reruns) without coupling reruns to worker count. The
+    // byte-exact single-session path stays the default whenever no reruns are
+    // requested — passing `--reruns` is the opt-in that trades byte-exactness
+    // for retries. Passthrough (-s/--pdb/--co) needs pytest's own terminal and
+    // can't be pooled, so reruns stay inert there.
+    let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
+    // A one-worker rerun pool is 1 worker everywhere downstream (banner,
+    // doctor, report-json meta), never 0.
+    let n = if single_worker_reruns { 1 } else { n };
     let palette = color::Palette::detect(&args);
     let verbose = args
         .iter()
@@ -698,7 +710,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         println!("TAP version 13");
     }
     if !passthrough && mode != progress::Mode::Json && mode != progress::Mode::Tap {
-        let worker_desc = if n <= 1 {
+        let worker_desc = if single_worker_reruns {
+            "single worker (rerun pool; not byte-exact)".to_string()
+        } else if n <= 1 {
             "single worker (pytest-exact mode)".to_string()
         } else {
             format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
@@ -753,8 +767,11 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if reruns > 0 && (n <= 1 || passthrough) {
-        eprintln!("rstest: --reruns requires parallel mode (-n >= 2); ignoring");
+    if reruns > 0 && passthrough {
+        eprintln!(
+            "rstest: --reruns is ignored under -s/--pdb/--co \
+             (interactive single session); drop those flags to enable reruns"
+        );
     }
     // --shuffle reorders the orchestrator's dispatch queue, so it needs
     // the full-collection pool. Refusing (not ignoring) matters: a user
@@ -824,7 +841,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     };
-    let mut outcome = if n <= 1 || passthrough {
+    let mut outcome = if passthrough || (n <= 1 && !single_worker_reruns) {
         let io = if passthrough {
             worker::Stdio::Inherit
         } else {
