@@ -37,6 +37,31 @@ def _is_dist_internal(plugin):
     return str(mod).split(".", 1)[0] in ("xdist", "pytest_cov")
 
 
+# Signature introspection is stable per underlying function; cache it so a
+# hook fired once per worker teardown doesn't re-parse every invocation.
+_NODE_IMPL_PARAMS = {}
+
+
+def _node_impl_params(impl):
+    """Return the impl's parameter mapping, or None when its signature isn't
+    introspectable (builtins / C hooks). Cached by the underlying function."""
+    key = getattr(impl, "__func__", impl)
+    try:
+        return _NODE_IMPL_PARAMS[key]
+    except (KeyError, TypeError):
+        # Unhashable key — fall through and compute without caching.
+        pass
+    try:
+        params = inspect.signature(impl).parameters
+    except (ValueError, TypeError):
+        params = None
+    try:
+        _NODE_IMPL_PARAMS[key] = params
+    except TypeError:
+        pass
+    return params
+
+
 def _call_node_impl(impl, node, **kwargs):
     """Invoke an xdist node hook (pytest_testnodeready / _testnodedown),
     passing only the keyword args the impl actually declares.
@@ -46,12 +71,24 @@ def _call_node_impl(impl, node, **kwargs):
     via pytest-metadata). Passing ``error=`` unconditionally raises
     ``TypeError: unexpected keyword argument 'error'``. Introspect the
     signature and drop kwargs the impl won't accept; a ``**kwargs`` param
-    means accept everything."""
-    try:
-        params = inspect.signature(impl).parameters
-    except (ValueError, TypeError):
-        # Builtins / C hooks with no introspectable signature — best effort.
-        return impl(node=node, **kwargs)
+    means accept everything.
+
+    ``node`` goes by keyword when the signature is introspectable: pluggy
+    guarantees the param is named ``node``, and a catch-all ``(**kwargs)``
+    impl receives it only via kwargs — a positional would raise
+    ``TypeError: takes 0 positional arguments``. For un-introspectable C
+    hooks (which often reject keyword args) it goes positionally instead."""
+    params = _node_impl_params(impl)
+    if params is None:
+        # No introspectable signature (builtin / C hook). Pass node
+        # positionally (C funcs often reject keywords), then retry node-only
+        # if the extra kwargs don't bind — a one-arg impl would otherwise
+        # TypeError on error=. The mismatch raises at bind time (before the
+        # hook body), so the retry can't double-execute side effects.
+        try:
+            return impl(node, **kwargs)
+        except TypeError:
+            return impl(node)
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return impl(node=node, **kwargs)
     accepted = {k: v for k, v in kwargs.items() if k in params}
@@ -267,12 +304,11 @@ class StreamPlugin:
                 continue
             impl = getattr(plugin, name, None)
             if impl is not None:
-                try:
-                    _call_node_impl(impl, self._xdist_node, **kwargs)
-                except Exception:
-                    # A plugin's node hook must never poison this worker's
-                    # session — align with the crash-cleanup path.
-                    pass
+                # Loud: this is THIS worker's own local node hook. A genuine
+                # bug in it should fail the session, not vanish. (The
+                # crash-cleanup path in run_foreign_node_down swallows, but
+                # that's a DEAD sibling's hook — different contract.)
+                _call_node_impl(impl, self._xdist_node, **kwargs)
 
     def pytest_sessionstart(self, session):
         # Retry any configure_node hooks deferred during configure (state they

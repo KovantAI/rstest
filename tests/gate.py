@@ -656,12 +656,14 @@ def main():
 
     print("== one-arg pytest_testnodedown ==")
     g.write("nodeonearg/conftest.py", NODEONEARG_CONFTEST)
-    g.write("nodeonearg/test_node.py", "def test_ok(): assert True\n")
+    # Two tests so both workers get work and each fires configure_node /
+    # testnodedown — a 1-test suite might leave gw1 idle and unprovisioned.
+    g.write("nodeonearg/test_node.py", "def test_a(): assert True\n\n\ndef test_b(): assert True\n")
     oa_log = g.tmp / "node_onearg.log"
     clear_hook_log(oa_log)
     r = g.run("nodeonearg", "-n", "2", env_extra={"NODE_HOOK_LOG": str(oa_log)})
     oa_text = read_hook_log(oa_log)
-    check("one-arg testnodedown: run not crashed", "1 passed" in r.stdout, r.stdout[-300:])
+    check("one-arg testnodedown: run not crashed", "2 passed" in r.stdout, r.stdout[-300:])
     check(
         "one-arg testnodedown fired (no error= TypeError)",
         "down:oa_gw0" in oa_text and "down:oa_gw1" in oa_text,
