@@ -13,6 +13,7 @@ already does natively — it just wires it into GitHub Actions:
 | `::error` per failed test, `::warning` for flaky reruns | rstest `--output github` (this action defaults to it) |
 | Doctor diagnostics → job summary | rstest `--doctor` (auto-publishes to `$GITHUB_STEP_SUMMARY`) |
 | Machine-readable diagnostics | rstest `--doctor-json` / `--doctor-md` (pass via `args`) |
+| Fail CI on a doctor metric threshold | **this action** (`doctor-fail-on`; rstest has no `--doctor-fail-on` yet) |
 | No silent skip when `--changed` finds nothing | rstest `--changed-strict` (`changed: strict`) |
 | Persist durations/flakes across runs | **this action** (GitHub cache; rstest has no remote cache yet) |
 | Tolerate N% failures (real-LLM) | **this action** (`fail-under-ratio`) |
@@ -37,7 +38,7 @@ already does natively — it just wires it into GitHub Actions:
   with:
     changed: strict          # full run on unconnectable files; exit 5 on nothing-affected
     base-ref: origin/main
-    durations-regress: "2.0" # fails loudly if no baseline was restored
+    durations-regress: "2.0" # cold cache warns + seeds; require-baseline:true to enforce
 ```
 
 ### Real-LLM / nondeterministic suite (fail-ratio gate)
@@ -52,6 +53,19 @@ already does natively — it just wires it into GitHub Actions:
     hard-fail-on: "AssertionError: config"   # ...but never tolerate these
     junit: junit.xml
 ```
+
+### Gate on suite health (doctor metrics)
+
+```yaml
+- uses: KovantAI/rstest/.github/actions/rstest@v1
+  with:
+    args: "-n auto"
+    doctor-fail-on: "parallel_efficiency<25, imbalance_pct>70"
+```
+
+Fails the job if realized parallel efficiency drops below 25% or worker
+imbalance exceeds 70%. Metrics absent from the report (e.g. a single-worker run
+has no `parallel_efficiency`) are skipped, not failed.
 
 ### Sharding
 
@@ -87,13 +101,14 @@ steps:
 | `output` | `github` | `--output` style (`github` gives annotations) |
 | `junit` | `junit.xml` | `--junitxml` path; empty = skip (required for the gate) |
 | `changed` | `false` | `false` / `true` / `strict` |
-| `base-ref` | `""` | base ref for `--changed`; fetched if shallow |
+| `base-ref` | `""` | base ref for `--changed`; fetched if shallow. Empty on a PR = inferred from `$GITHUB_BASE_REF` (`origin/<base>`) |
 | `reruns` | `""` | `--reruns N` |
 | `rerun-on` | `""` | preset(s) → `--only-rerun` (`http-5xx`, `timeouts`, or raw regex) |
 | `worker-timeout` | `""` | `--worker-timeout SECS` (hang / container-boot backstop) |
-| `durations-regress` | `""` | `--durations-regress RATIO` (fails loud on missing baseline) |
-| `require-baseline` | `true` | with `durations-regress`, fail if no baseline restored |
+| `durations-regress` | `""` | `--durations-regress RATIO` (cold cache warns; see `require-baseline`) |
+| `require-baseline` | `false` | strict: fail if no baseline. Default only warns — the first run legitimately has none and seeds it |
 | `doctor` | `false` | add `--doctor` |
+| `doctor-fail-on` | `""` | fail on doctor metrics, e.g. `parallel_efficiency<30, imbalance_pct>60` (implies `--doctor-json`; absent metrics skipped) |
 | `quarantine` | `""` | `--quarantine FILE` |
 | `shard` / `shard-total` | `""` | `--shard K/N` |
 | `fail-under-ratio` | `""` | max tolerated assertion-failure fraction (0–1) |

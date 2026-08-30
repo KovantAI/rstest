@@ -68,17 +68,27 @@ inputs:
     required: false
     default: ""
   durations-regress:
-    description: "--durations-regress RATIO. Fails loudly if no baseline was restored (unless require-baseline=false), instead of silently skipping."
+    description: "--durations-regress RATIO. A cold cache (no baseline) warns loudly and seeds one — never a silent skip; set require-baseline to make it a hard fail."
     required: false
     default: ""
   require-baseline:
-    description: "When durations-regress is set, fail if no baseline cache exists rather than running an inert gate."
+    description: "Strict mode: with durations-regress set, FAIL if no baseline exists. Default false = a cold cache only warns (the first run legitimately has no baseline and seeds it). Turn on once steady-state to catch a broken cache path."
     required: false
-    default: "true"
+    default: "false"
   doctor:
     description: "Add --doctor (diagnostics auto-published to the job summary)."
     required: false
     default: "false"
+  doctor-fail-on:
+    description: >-
+      Comma-separated FAIL conditions on doctor metrics, e.g.
+      'parallel_efficiency<30, wait_pct>50, imbalance_pct>60'. Metrics:
+      parallel_efficiency|efficiency_pct, realized_speedup, imbalance_pct,
+      wait_pct, wall_seconds, long_pole_seconds. Ops: < <= > >= ==. Implies
+      --doctor-json. A metric absent from the report (e.g. single-worker run
+      has no parallel_efficiency) is skipped, not failed.
+    required: false
+    default: ""
   quarantine:
     description: "--quarantine FILE: demote matching-test failures to non-fatal."
     required: false
@@ -159,6 +169,15 @@ runs:
         echo "cache-key=${base}-${GITHUB_RUN_ID}" >>"$GITHUB_OUTPUT"
         echo "cache-restore=${base}-" >>"$GITHUB_OUTPUT"
 
+        # Resolve the --changed base ref: explicit base-ref wins; else infer the
+        # PR base from $GITHUB_BASE_REF (set on pull_request events). Empty on a
+        # push with no base-ref -> --changed falls back to HEAD.
+        bref="${{ inputs.base-ref }}"
+        if [ -z "$bref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+          bref="origin/${GITHUB_BASE_REF}"
+        fi
+        echo "base-ref=$bref" >>"$GITHUB_OUTPUT"
+
     - name: Restore rstest cache
       if: inputs.cache == 'true'
       id: cache-restore
@@ -170,12 +189,12 @@ runs:
           ${{ steps.cfg.outputs.cache-restore }}
 
     - name: Fetch base ref for --changed
-      if: inputs.changed != 'false' && inputs.base-ref != ''
+      if: inputs.changed != 'false' && steps.cfg.outputs.base-ref != ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
-        ref="${{ inputs.base-ref }}"
+        ref="${{ steps.cfg.outputs.base-ref }}"
         remote_ref="${ref#origin/}"
         # Deepen a shallow clone so --changed can diff against the base.
         git fetch --no-tags --depth=1 origin "$remote_ref" || \
@@ -202,6 +221,10 @@ runs:
         fi
         echo "install: $cmd"
         eval "$cmd"
+        # Echo the resolved rstest version for reproducibility/debugging.
+        prefix=""
+        [ "${{ steps.cfg.outputs.mode }}" = "uv" ] && prefix="uv run"
+        $prefix rstest --version || echo "rstest: --version unavailable"
 
     - name: Run rstest
       id: run
@@ -222,10 +245,19 @@ runs:
         if [ -n "$junit" ]; then cmd+=(--junitxml "$junit"); fi
         echo "junit-path=$junit" >>"$GITHUB_OUTPUT"
 
-        # --changed / --changed-strict
+        # --changed / --changed-strict. Always use the =REV form (never bare
+        # --changed, which can greedily swallow a following test path as its
+        # optional value). REV is the resolved base ref (explicit or inferred
+        # PR base), falling back to HEAD.
+        rev="${{ steps.cfg.outputs.base-ref }}"
         case "${{ inputs.changed }}" in
-          strict) if [ -n "${{ inputs.base-ref }}" ]; then cmd+=(--changed-strict --changed="${{ inputs.base-ref }}"); else cmd+=(--changed-strict); fi ;;
-          true)   if [ -n "${{ inputs.base-ref }}" ]; then cmd+=(--changed="${{ inputs.base-ref }}"); else cmd+=(--changed); fi ;;
+          strict)
+            cmd+=(--changed-strict)
+            [ -n "$rev" ] && cmd+=(--changed="$rev")
+            ;;
+          true)
+            cmd+=(--changed="${rev:-HEAD}")
+            ;;
         esac
 
         # reruns + rerun-on presets
@@ -247,17 +279,27 @@ runs:
         [ -n "${{ inputs.worker-timeout }}" ] && cmd+=(--worker-timeout "${{ inputs.worker-timeout }}")
         [ -n "${{ inputs.durations-regress }}" ] && cmd+=(--durations-regress "${{ inputs.durations-regress }}")
         [ "${{ inputs.doctor }}" = "true" ] && cmd+=(--doctor)
+        # Doctor-metric gate needs the JSON report; --doctor-json implies the
+        # instrumentation, so no separate --doctor is required.
+        if [ -n "${{ inputs.doctor-fail-on }}" ]; then
+          cmd+=(--doctor-json rstest-doctor.json)
+        fi
         [ -n "${{ inputs.quarantine }}" ] && cmd+=(--quarantine "${{ inputs.quarantine }}")
         if [ -n "${{ inputs.shard }}" ] && [ -n "${{ inputs.shard-total }}" ]; then
           cmd+=(--shard "${{ inputs.shard }}/${{ inputs.shard-total }}")
         fi
 
-        # Baseline guard: a durations-regress gate with no restored baseline is
-        # an inert no-op that masquerades as green. Fail loudly unless opted out.
-        if [ -n "${{ inputs.durations-regress }}" ] && [ "${{ inputs.require-baseline }}" = "true" ]; then
-          if [ ! -f .rstest_cache/durations.json ]; then
-            echo "::error::--durations-regress set but no duration baseline in .rstest_cache (cache miss). The gate would be a silent no-op. Seed the cache from an authoritative run or set require-baseline: false." >&2
+        # Baseline guard. A durations-regress gate with no restored baseline is
+        # inert. But the FIRST run legitimately has no baseline (it seeds one),
+        # so a cold cache only WARNS (loudly, so an inert gate is never silent —
+        # the kat bug). require-baseline:true opts into a hard fail for steady
+        # state, where a missing baseline means a broken cache path.
+        if [ -n "${{ inputs.durations-regress }}" ] && [ ! -f .rstest_cache/durations.json ]; then
+          if [ "${{ inputs.require-baseline }}" = "true" ]; then
+            echo "::error::--durations-regress set but no duration baseline in .rstest_cache, and require-baseline is true. Seed the baseline from an authoritative run, or set require-baseline: false." >&2
             exit 1
+          else
+            echo "::warning::--durations-regress set but no duration baseline yet (cold cache) — comparison skipped this run; the baseline is being seeded now. Set require-baseline: true once steady-state to catch a broken cache path." >&2
           fi
         fi
 
@@ -267,8 +309,11 @@ runs:
         cmd+=("${extra[@]}")
 
         echo "+ ${cmd[*]}"
-        "${cmd[@]}"
-        code=$?
+        # GitHub runs composite `shell: bash` as `bash -eo pipefail`, so a
+        # non-zero rstest exit (e.g. a failing test) would abort this step
+        # before we can capture the code and defer to the gates. Guard it.
+        code=0
+        "${cmd[@]}" || code=$?
         echo "exit-code=$code" >>"$GITHUB_OUTPUT"
 
         # When a fail-ratio gate is active, defer the pass/fail decision to it.
@@ -289,6 +334,21 @@ runs:
           --fail-under-ratio "${{ inputs.fail-under-ratio }}" \
           --hard-fail-on "${{ inputs.hard-fail-on }}" \
           --rstest-exit "${{ steps.run.outputs.exit-code }}"
+
+    - name: Doctor-metric gate
+      id: doctor-gate
+      if: always() && inputs.doctor-fail-on != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        if [ ! -f rstest-doctor.json ]; then
+          echo "::warning::doctor-fail-on set but rstest-doctor.json was not produced (run may have crashed, or a single-worker run emitted no parallel metrics). Gate skipped." >&2
+          exit 0
+        fi
+        python "${{ github.action_path }}/doctor_gate.py" \
+          --report rstest-doctor.json \
+          --fail-on "${{ inputs.doctor-fail-on }}"
 
     - name: Save rstest cache
       if: always() && inputs.cache == 'true'

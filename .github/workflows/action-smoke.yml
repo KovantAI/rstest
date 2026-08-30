@@ -134,6 +134,54 @@ jobs:
           test "${{ steps.hard.outcome }}" = "failure" \
             || { echo "expected hard-fail-on to fail the gate, got ${{ steps.hard.outcome }}"; exit 1; }
 
+  doctor-gate:
+    name: doctor-metric gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold suite
+        run: |
+          mkdir -p smoke
+          cat > smoke/test_d.py <<'EOF'
+          def test_a():
+              assert True
+
+          def test_b():
+              assert True
+          EOF
+
+      # A threshold that cannot trip -> gate PASSES.
+      - uses: ./.github/actions/rstest
+        id: pass
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          doctor-fail-on: "wall_seconds>99999"
+      - name: assert doctor gate passes
+        run: |
+          set -euo pipefail
+          test "${{ steps.pass.outcome }}" = "success" \
+            || { echo "doctor gate should pass on an untrippable threshold, got ${{ steps.pass.outcome }}"; exit 1; }
+
+      # tests>=1 always holds -> gate FAILS deterministically.
+      - uses: ./.github/actions/rstest
+        id: fail
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          doctor-fail-on: "tests>=1"
+      - name: assert doctor gate fails
+        run: |
+          set -euo pipefail
+          test "${{ steps.fail.outcome }}" = "failure" \
+            || { echo "doctor gate should fail when a condition trips, got ${{ steps.fail.outcome }}"; exit 1; }
+
   baseline-guard:
     name: durations-regress baseline guard
     runs-on: ubuntu-latest
@@ -146,10 +194,11 @@ jobs:
           def test_ok():
               assert True
           EOF
-      # No cache exists on a fresh key -> durations-regress must fail LOUDLY,
-      # not run an inert no-op (the kovant-agent-tools silent-dead-gate bug).
+
+      # Cold cache, default (require-baseline: false): the first run legitimately
+      # has no baseline -> WARN and pass, seeding the baseline. Must NOT fail.
       - uses: ./.github/actions/rstest
-        id: guard
+        id: cold
         continue-on-error: true
         with:
           python-version: "3.13"
@@ -158,8 +207,27 @@ jobs:
           args: "-n 2"
           durations-regress: "2.0"
           cache: false            # force a missing baseline
-      - name: assert loud failure on missing baseline
+      - name: assert cold start passes (warns, does not fail)
         run: |
           set -euo pipefail
-          test "${{ steps.guard.outcome }}" = "failure" \
-            || { echo "expected loud failure on missing baseline, got ${{ steps.guard.outcome }}"; exit 1; }
+          test "${{ steps.cold.outcome }}" = "success" \
+            || { echo "cold start must not fail on a missing baseline, got ${{ steps.cold.outcome }}"; exit 1; }
+
+      # Same cold cache but require-baseline: true -> strict mode, must FAIL
+      # (catches a broken cache path once you expect a baseline to exist).
+      - uses: ./.github/actions/rstest
+        id: strict
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          durations-regress: "2.0"
+          require-baseline: "true"
+          cache: false
+      - name: assert strict mode fails on missing baseline
+        run: |
+          set -euo pipefail
+          test "${{ steps.strict.outcome }}" = "failure" \
+            || { echo "require-baseline:true must fail on a missing baseline, got ${{ steps.strict.outcome }}"; exit 1; }
