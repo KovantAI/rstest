@@ -47,7 +47,9 @@ behavior — the compatibility anchor. There is no worker identity below
 pytest's own terminal (`--co`, `-s`, `--capture`, `--pdb`, `--trace`)
 switch to this mode automatically. See [Compatibility](compatibility.md)
 for the guarantee and [Architecture](architecture.md) for how it falls
-back.
+back. One opt-in exception: passing [`--reruns`](../reference/cli.md#-reruns-n)
+runs `-n 0`/`-n 1` as a degenerate one-worker pool so retries fire, trading
+byte-exactness for the reruns you asked for.
 
 **Selection** — the set of tests chosen to run; under
 [`--changed`](../reference/cli.md#-changedrev), derived from the import

@@ -8,6 +8,7 @@ rstest owns what happens around the session: scheduling, output, exit codes.
 import inspect
 import os
 import sys
+import zlib
 
 import pytest
 
@@ -26,6 +27,24 @@ def _wire_safe(value):
     if isinstance(value, dict):
         return {str(k): _wire_safe(v) for k, v in value.items()}
     return None
+
+
+def _randomly_seed(run_uid):
+    """One run-level seed for pytest-randomly, derived from the shared run
+    uid so every worker computes the same value (xdist's master broadcasts
+    one seed; rstest has no master). 32-bit, matching pytest-randomly's own
+    default range (random.Random().getrandbits(32)).
+
+    rstest's uid is hex (see RSTEST_RUN_UID in the CLI), so int(..., 16) is
+    the normal path. A non-hex or empty uid (e.g. one set by hand) must still
+    yield a stable, cross-worker-consistent seed rather than silently
+    collapsing every run to a single fixed value: crc32 of the raw bytes is
+    deterministic across processes (unlike builtin hash(), which is salted
+    per-process), so every worker still agrees. Empty uid maps to 0."""
+    try:
+        return int(run_uid, 16) & 0xFFFFFFFF
+    except (ValueError, TypeError):
+        return zlib.crc32(str(run_uid).encode("utf-8")) & 0xFFFFFFFF
 
 
 def _is_dist_internal(plugin):
@@ -200,12 +219,21 @@ class StreamPlugin:
             os.environ.setdefault(
                 "PYTEST_XDIST_WORKER_COUNT", os.environ.get("RSTEST_WORKER_COUNT", "1")
             )
+            run_uid = os.environ.get("RSTEST_RUN_UID", "")
             config.workerinput = {
                 "workerid": worker_id,
                 "workercount": int(os.environ.get("RSTEST_WORKER_COUNT", "1")),
                 # One uid per run, shared by every worker (xdist's
                 # testrun_uid contract); the orchestrator provides it.
-                "testrun_uid": os.environ.get("RSTEST_RUN_UID", ""),
+                "testrun_uid": run_uid,
+                # pytest-randomly's master broadcasts one resolved seed to
+                # every worker (its "default" path reads workerinput); absent,
+                # the plugin KeyErrors at -n >= 2. rstest has no master, so
+                # derive a single run-level seed from the shared run uid: same
+                # uid on every worker -> same seed -> all workers agree, and
+                # it is reproducible across the run. An explicit
+                # --randomly-seed takes a different code path and ignores this.
+                "randomly_seed": _randomly_seed(run_uid),
                 "mainargv": sys.argv,
                 # pytest-cov's worker mode expects these from the xdist
                 # master. Workers share our host and cwd (collocated), so

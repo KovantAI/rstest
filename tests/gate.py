@@ -134,25 +134,26 @@ def find_python() -> str:
     sys.exit("gate needs python >= 3.10 on PATH")
 
 
-def make_venv(venv_dir: Path):
+# Worker runtime deps shared by every gate venv.
+BASE_DEPS = [
+    "msgpack",
+    "pluggy>=1.5",
+    "iniconfig",
+    "packaging",
+    "pygments",
+    "coverage",
+    "pytest-cov",
+]
+
+
+def make_venv(venv_dir: Path, extra_deps=None):
     if venv_bin(venv_dir, "python").exists():
         return
     py = find_python()
     print(f"creating gate venv at {venv_dir} (from {py})")
     subprocess.run([py, "-m", "venv", str(venv_dir)], check=True)
     subprocess.run(
-        [
-            str(venv_bin(venv_dir, "pip")),
-            "install",
-            "-q",
-            "msgpack",
-            "pluggy>=1.5",
-            "iniconfig",
-            "packaging",
-            "pygments",
-            "coverage",
-            "pytest-cov",
-        ],
+        [str(venv_bin(venv_dir, "pip")), "install", "-q", *BASE_DEPS, *(extra_deps or [])],
         check=True,
     )
 
@@ -431,10 +432,47 @@ def main():
         "    assert os.environ['PYTEST_XDIST_WORKER'].startswith('gw')\n"
         "    assert os.environ['PYTEST_XDIST_WORKER_COUNT'] == '2'\n"
         "def test_uid(request):\n"
-        "    assert request.config.workerinput['testrun_uid']\n",
+        "    assert request.config.workerinput['testrun_uid']\n"
+        # pytest-randomly reads this master-injected key; rstest derives a
+        # single run-level seed from the shared run uid so every worker agrees.
+        "def test_randomly_seed(request):\n"
+        "    wi = request.config.workerinput\n"
+        "    assert wi['randomly_seed'] == (int(wi['testrun_uid'], 16) & 0xFFFFFFFF)\n",
     )
     r = g.run("xdistenv", "-n", "2")
-    check("PYTEST_XDIST_WORKER + testrun_uid", "2 passed" in r.stdout, r.stdout[-300:])
+    check("PYTEST_XDIST_WORKER + testrun_uid", "3 passed" in r.stdout, r.stdout[-300:])
+
+    print("== pytest-randomly (real plugin) ==")
+    # Isolated venv: pytest-randomly shuffles collection order, so installing
+    # it in the shared venv would break the source-order / lazy-order checks.
+    # Here we prove the real plugin consumes rstest's synthesized workerinput
+    # seed at -n >= 2 instead of KeyError-ing (the bug this PR fixes).
+    rnd_venv = Path(args.venv + "-randomly").resolve()
+    make_venv(rnd_venv, extra_deps=["pytest-randomly"])
+    gr = Gate(binary, rnd_venv)
+    gr.write(
+        "rnd/test_rnd.py",
+        "def test_a(): pass\n"
+        "def test_b(): pass\n"
+        "def test_c(): pass\n"
+        # pytest-randomly resolves --randomly-seed from workerinput per worker.
+        # A missing key -> KeyError at configure (no pass); a plugin that
+        # ignored our key -> resolved seed != our derivation. Asserting the
+        # plugin's *resolved* option (not just the raw workerinput value)
+        # proves it actually consumed the key we synthesize.
+        "def test_seed_consumed(request):\n"
+        "    resolved = request.config.getoption('randomly_seed')\n"
+        "    wi = request.config.workerinput\n"
+        "    assert resolved == (int(wi['testrun_uid'], 16) & 0xFFFFFFFF)\n",
+    )
+    # Pin the run uid so a second invocation derives the same seed: same uid
+    # -> same seed -> same shuffle. Reproducibility, end to end through the
+    # real plugin.
+    uid = "abc123def456789"
+    r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
+    check("randomly: consumes synthesized seed, no crash at -n 2", "4 passed" in r.stdout, r.stdout[-400:])
+    r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
+    check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
@@ -1084,6 +1122,49 @@ def main():
         summ.exists() and "## rstest doctor" in summ.read_text(encoding="utf-8"),
     )
 
+    # --doctor-fail-on: turn the doctor signal into a CI gate. The DOCTOR
+    # suite is ~all wait (test_sleepy), so wait_pct is high.
+    r = g.run("doc", "-n", "2", "--doctor-fail-on", "wait_pct>50")
+    check(
+        "doctor-fail-on: breach fails the run (exit 1)",
+        # Failure block goes to STDERR so --output json/tap stay pure.
+        r.returncode == 1 and "doctor gate failures" in r.stderr and "wait_pct" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    # A gate breach under --output json must NOT corrupt the pure NDJSON stream:
+    # the failure block is stderr-only.
+    r = g.run("doc", "-n", "2", "--output", "json", "--doctor-fail-on", "wait_pct>1")
+    ok, _objs = parse_ndjson(r.stdout)
+    check(
+        "doctor-fail-on: breach keeps --output json pure (stderr only)",
+        r.returncode == 1 and ok and "doctor gate failures" not in r.stdout
+        and "doctor gate failures" in r.stderr,
+        f"rc={r.returncode} ndjson_ok={ok} " + r.stdout[-200:],
+    )
+    # A threshold the run clears: gate passes, exit stays 0.
+    r = g.run("doc", "-n", "2", "--doctor-fail-on", "wall_seconds>1000")
+    check(
+        "doctor-fail-on: within threshold passes (exit 0)",
+        r.returncode == 0 and "condition(s) passed" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # A metric whose section didn't apply to this run (single-worker has no
+    # parallel efficiency) is skipped, never failed.
+    r = g.run("doc", "-n", "0", "--doctor-fail-on", "parallel_efficiency<1")
+    check(
+        "doctor-fail-on: absent metric skipped, not failed",
+        r.returncode == 0 and "not measured" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # A typo'd metric aborts up front (before the run) rather than silently
+    # never firing — the exact dead-gate bug this feature exists to kill.
+    r = g.run("doc", "-n", "2", "--doctor-fail-on", "bogus<1")
+    check(
+        "doctor-fail-on: bad metric aborts loudly",
+        r.returncode != 0 and "unknown metric" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+
     print("== auto worker capping ==")
     for i in range(6):
         g.write(f"kovstyle/mod{i}_test.py", "def test_a(): assert True\n")
@@ -1335,6 +1416,49 @@ def main():
     check("flaky passes with reruns", r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
     check("flaky section listed", "passed after rerun" in r.stdout)
     marker.unlink()
+
+    # Single-worker reruns: --reruns at -n 1 / -n 0 must fire (a degenerate
+    # one-worker pool drives the rerun loop) instead of being silently inert.
+    swm = g.tmp / "sw_reruns_marker"
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "1", "--reruns", "2", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "single-worker reruns fire at -n 1",
+        r.returncode == 0 and "1 flaky" in r.stdout
+        and "single worker (rerun pool" in r.stdout.splitlines()[0]
+        # the byte-exact -> pool switch is announced on stderr, not just the banner
+        and "not byte-exact" in r.stderr,
+        f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stderr[-200:],
+    )
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "0", "--reruns", "2", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "single-worker reruns fire at -n 0",
+        r.returncode == 0 and "1 flaky" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-200:],
+    )
+    # No --reruns at -n 1 stays byte-exact single session: the flake fails.
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "1", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "no-reruns at -n 1 stays byte-exact (flake fails)",
+        r.returncode == 1 and "1 failed" in r.stdout
+        and "pytest-exact mode" in r.stdout.splitlines()[0],
+        f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stdout[-200:],
+    )
+    # Passthrough (-s) can't be pooled: reruns stay inert, warned.
+    swm.unlink(missing_ok=True)
+    r = g.run("test_flaky.py", "-n", "1", "--reruns", "2", "-s", cwd=fdir,
+              env_extra={"FLAKY_MARKER": str(swm)})
+    check(
+        "reruns inert under -s, warned",
+        r.returncode == 1 and "ignored under -s" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    marker.unlink(missing_ok=True)
     r = g.run("test_flaky.py", "-n", "2", cwd=fdir,
               env_extra={"FLAKY_MARKER": str(marker)})
     check("flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:])

@@ -430,22 +430,28 @@ keep full runs on the gating path.
 
 ### `--reruns <N>`
 
-Rerun failed tests up to N times (requires `-n ≥ 2`). A test that then
+Rerun failed tests up to N times. A test that then
 passes is reported **flaky**: the run stays green, the test is counted in
 the summary (`N flaky`), listed in its own section, and flagged in
 `--report-json`. Only the final attempt's outcome and output are recorded.
 
 Per-test budgets are available via `@pytest.mark.flaky(reruns=N)`, which
-works with or without the global flag — but, like `--reruns`, the retry
-machinery is orchestrator-side, so it too only takes effect at `-n ≥ 2`
-(see [Markers](markers.md#pytestmarkflaky)).
+works with or without the global flag (see
+[Markers](markers.md#pytestmarkflaky)).
 
-Migration footgun: a `reruns` in `[tool.rstest]` (or `--reruns` on the
-command line) is **silently inert** whenever the run drops to single-worker
-— `-n 0`/`-n 1` or a passthrough-IO flag (`--pdb`, `-s`, …). At `-n 0/1`,
-though, an installed pytest-rerunfailures takes over and honors `--reruns`
-natively (rstest only neutralizes it inside the pool), so leave the plugin
-installed if you rely on reruns in single-worker runs.
+**Works at any worker count, including `-n 0`/`-n 1`.** The retry machinery
+is orchestrator-side, so a single-worker run with `--reruns` set is executed
+as a **degenerate one-worker pool** to drive it — rstest neutralizes an
+installed pytest-rerunfailures inside that worker, so nothing double-reruns.
+This is the escape hatch for rate-limited suites that must run few workers
+(real-LLM tests capped on outbound calls) yet still need retries: you no
+longer have to pin `-n 2` just to get reruns. Passing `--reruns` opts that
+run out of [byte-exact mode](../concepts/glossary.md#byte-exact-mode) — a
+plain `-n 0`/`-n 1` run with no reruns stays the byte-exact single session.
+
+One exception: reruns stay **inert** under a passthrough-IO flag (`--pdb`,
+`-s`, `--co`, …), which needs pytest's own terminal and can't be pooled;
+rstest warns when you combine them.
 
 Crash-aware: **while `--reruns` (or `@pytest.mark.flaky`) budget remains**,
 a test that killed its worker is retried on the replacement worker, bounded
@@ -509,6 +515,66 @@ GitHub, piped to `buildkite-agent annotate` (info style) on Buildkite —
 so the report shows up on the run page with zero extra steps. GitLab and
 TeamCity have no native markdown job-summary surface; use `--doctor-md`
 and publish the file as an artifact.
+
+### `--doctor-fail-on <COND>`
+
+Fail the run when a doctor metric breaches a threshold — turning the
+otherwise-advisory doctor signal into a CI gate. Repeatable; the run fails
+if *any* condition fires. Implies doctor instrumentation.
+
+Grammar is `metric OP value`:
+
+```console
+$ rstest -n auto --doctor-fail-on 'parallel_efficiency<30' \
+                 --doctor-fail-on 'wait_pct>50'
+```
+
+Operators: `<`, `<=`, `>`, `>=`, `==`, `!=`. Metrics (from the
+[Doctor JSON](report-json.md#doctor-json) model):
+
+| metric | meaning |
+|---|---|
+| `wall_seconds` | total wall-clock time |
+| `test_time_seconds` | summed test durations |
+| `cpu_time_seconds` | summed call-phase CPU time |
+| `tests` | tests with timing data |
+| `workers` | worker count (`-n`) |
+| `wait_pct` | % of test time spent waiting, not computing |
+| `wait_seconds` | seconds spent waiting |
+| `parallel_efficiency` / `efficiency_pct` | realized-vs-possible speedup, % |
+| `realized_speedup` | test time ÷ wall time |
+| `imbalance_pct` | busiest-vs-idlest worker load gap, % |
+| `long_pole_seconds` | slowest single test |
+
+A metric whose section did not apply to the run is **skipped, not failed**
+— e.g. `parallel_efficiency` at `-n 1` (no parallelism to measure) prints a
+`not measured` note and never fails the gate. An unknown metric or malformed
+condition aborts up front, before the run, so a typo can never become a gate
+that silently never fires. `==`/`!=` are reliable only on the integer-valued
+metrics (`tests`, `workers`); on a floating-point metric they almost never
+match, so rstest warns and you should use a `<`/`>` threshold instead.
+
+The failure block prints to stderr, so `--output json`/`tap` stay pure on
+stdout. Under a passthrough-IO flag (`-s`/`--pdb`/`--co`) there is no doctor
+instrumentation, so the gate can't run — rstest warns instead of passing green.
+
+Because the gate is a doctor run, it also **publishes the full doctor report**
+the way any doctor run does — appended to `$GITHUB_STEP_SUMMARY` on GitHub
+Actions, `buildkite-agent annotate` on Buildkite — even when you pass only
+`--doctor-fail-on` (no `--doctor`). That is intentional: a failed gate shows
+its report on the run page so you can see *why* it failed. Pass `--doctor-md`
+for a file copy, or run in a CI with no summary surface if you want gate-only.
+
+Exit-code note for machine consumers: the gate affects the **process exit
+code** (1 on breach), which is authoritative. It does **not** rewrite the
+`exitstatus` inside an already-streamed `--output json`/`tap` `sessionfinish`
+envelope — that field is emitted mid-run and reflects the *test* outcome, so a
+green session that fails the gate still shows `"exitstatus": 0` there. Key CI
+success off the process exit code, not the envelope field (same as
+[`--durations-regress`](#-durations-regress-ratio)).
+
+The conditions can live in your CI config or `pyproject.toml` invocation, so
+non-GitHub CIs get the same gate the composite action offers externally.
 
 ### `--watch`
 
