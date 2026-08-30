@@ -1666,10 +1666,13 @@ def main():
     # subsequent runs". It is NOT. The gate suppresses the rerun that would
     # record `flaky > 0`, so a gated run only ever records the failure as
     # `failed` (flaky == 0) -> the test stays unknown -> the NEXT gated run
-    # gates it again. This test asserts the (ideal) recovery and is EXPECTED
-    # TO FAIL until the learn-without-rerun mechanism (finding #4 fix) lands.
-    # It documents the gap; the corrected docs describe the real two-mode
-    # workflow instead.
+    # gates it again. The corrected docs describe the real two-mode workflow.
+    #
+    # This test PINS that current behavior (run 2 still fails), so gate.py
+    # stays green today. It is the tripwire for the fix: when a
+    # learn-without-rerun mechanism lands and cold-start self-heals, run 2
+    # will start passing and the run-2 assertion below will flip to FAIL —
+    # at which point update it to assert recovery (rc == 0, "1 flaky").
     cs_marker = "fa_coldstart"
 
     def coldstart_run():
@@ -1691,11 +1694,14 @@ def main():
           r1.returncode == 1 and rec.get("failed", 0) > 0 and rec.get("flaky", 0) == 0,
           f"rc={r1.returncode} rec={rec} {r1.stdout[-160:]}")
     # Run 2: same flag, history now carries the run-1 failure (flaky == 0).
-    # A self-healing feature would rescue it here. It does not -> this check
-    # FAILS on purpose, pinning the known cold-start defect.
+    # A self-healing feature WOULD rescue it here; today it does not. Assert
+    # the current (defective) behavior so CI stays green. When cold-start is
+    # fixed this flips red -> update to assert rc == 0 and "1 flaky".
     r2 = coldstart_run()
-    check("flaky-aware cold-start: run 2 rescues the now-recorded flake (EXPECTED FAIL)",
-          r2.returncode == 0 and "1 flaky" in r2.stdout, r2.stdout[-200:])
+    check("flaky-aware cold-start: run 2 still gated-fails (pins finding #4; flip when fixed)",
+          r2.returncode == 1 and "1 failed" in r2.stdout
+          and "passed after rerun" not in r2.stdout,
+          r2.stdout[-200:])
     fcache.unlink(missing_ok=True)
 
     g.write("crashflaky/test_cf.py", CRASHFLAKY)
