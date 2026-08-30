@@ -54,6 +54,16 @@ If a *different* plugin hits this, run it at `-n 0`, or use rstest's native
 equivalent (`--shuffle`, `--reruns`) — full per-plugin table in
 [Plugins](../guides/plugins.md#tested-compatibility). Please also file it.
 
+## My `--html` (pytest-html) report is missing at `-n ≥ 2`
+
+No crash, no error — the file just isn't written. pytest-html registers its
+report writer only on a node *without* `workerinput` (its xdist "am I the
+master?" check), and every rstest pool worker has a `workerinput`, so nothing
+owns report generation. Producing one file from all workers needs a single
+master process, which rstest doesn't run. Generate the report at `-n 0`/`-n 1`
+(a single session, where no `workerinput` is set) — the rest of your suite can
+still run parallel in a separate step.
+
 ## Where did my `tmp_path` go?
 
 Each worker uses a disjoint temp root (`$TMPDIR/rstest-<pid>/gwN/...`),
