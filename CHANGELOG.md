@@ -30,6 +30,31 @@ between 0.0.x releases and are listed here.
   Requires `-n >= 2`; refused with `--shuffle` and `--dist each`. See the
   Sharding guide.
 
+- Flake history now **ages out**. A test with no flake or failure inside
+  the retention window (default 90 days) is dropped from
+  `.rstest_cache/flakes.json` on the next run, so a fixed test stops
+  carrying "flaked _N_x before" annotations and the ranked candidate list
+  stays current. Tune with `RSTEST_FLAKE_RETENTION_DAYS`; `0` keeps history
+  forever. See the Flaky tests guide.
+
+- Interpreter-probe cache now keys on file size **and** mtime, not mtime
+  alone. A same-second in-place rewrite or an mtime-preserving restore
+  (`cp -p`, `touch -r`, tar/rsync `--times`, reinstalling the same version)
+  no longer serves a stale probe for a swapped binary. Old cache files load
+  unchanged and re-probe on first use.
+
+- `--shard <K/N>`: split one suite across `N` independent CI jobs and run
+  only shard `K` (1-based). Buckets are balanced by the duration cache
+  (longest-processing-time-first bin-packing; even count split on a cold
+  cache), disjoint, and cover the whole suite, so merging the per-job
+  JUnit reconstructs the full run. Orthogonal to `-n`; shards at file
+  granularity under `--collect lazy`; composes with `--changed`. Under an
+  affinity `--dist` mode (`loadfile`/`loadscope`/`loadgroup`) it partitions
+  at whole-group granularity, so a file/scope/xdist_group never splits
+  across shards (the run-together / in-order contract those modes provide).
+  Requires `-n >= 2`; refused with `--shuffle` and `--dist each`. See the
+  Sharding guide.
+
 - `--output azure`: Azure Pipelines style — the normal `dots` log plus a
   `##vso[task.logissue type=error;sourcepath=;linenumber=]` command per
   failure (inline issue on the PR file), and `type=warning` for

@@ -47,6 +47,16 @@ def _randomly_seed(run_uid):
         return zlib.crc32(str(run_uid).encode("utf-8")) & 0xFFFFFFFF
 
 
+def _neutralize_rerunfailures(config):
+    """Unregister pytest-rerunfailures so it neither crashes nor double-reruns
+    inside a pool worker. Idempotent — safe to call from both cmdline_main (the
+    effective site) and configure (belt-and-suspenders). See the caller in
+    StreamPlugin.pytest_cmdline_main for why the timing matters."""
+    plugin = config.pluginmanager.get_plugin("rerunfailures")
+    if plugin is not None:
+        config.pluginmanager.unregister(plugin)
+
+
 def _is_dist_internal(plugin):
     """pytest-cov and xdist implement master-side hooks for their own
     master<->worker handshakes — which rstest already emulates directly
@@ -159,6 +169,24 @@ class StreamPlugin:
         self._node_configured = set()  # plugin ids already given configure_node
 
     @pytest.hookimpl(tryfirst=True)
+    def pytest_cmdline_main(self, config):
+        # Unregister pytest-rerunfailures BEFORE pytest_configure runs. Under
+        # the pool every worker has a `workerinput`, so rerunfailures' configure
+        # takes its *client* branch — `ClientStatusDB(workerinput["sock_port"])`
+        # — and KeyErrors, because rstest runs no master to stash `sock_port`
+        # (same controller-service shape as pytest-retry, but gated on
+        # workerinput presence rather than numprocesses, so the retry fix does
+        # not transfer). pytest_configure is dispatched via call_historic, which
+        # snapshots the impl list, so a configure-time unregister fires too late.
+        # cmdline_main runs after entry-point plugins load but before
+        # _do_configure — the one window to remove it cleanly. rstest owns reruns
+        # natively (--reruns / @mark.flaky), so dropping the plugin loses nothing
+        # under the pool; at -n 0 (no RSTEST_WORKER_ID) it keeps native behavior.
+        if os.environ.get("RSTEST_WORKER_ID") is not None:
+            _neutralize_rerunfailures(config)
+        return None  # tryfirst, non-firstresult: let pytest's own impl run
+
+    @pytest.hookimpl(tryfirst=True)
     def pytest_configure(self, config):
         # Neutralize pytest-xdist if the project's ini/addopts pulls it in
         # (-n in addopts is common): its options must PARSE, but its
@@ -197,13 +225,15 @@ class StreamPlugin:
             "xdist_group(name): tests in the same group run on the same "
             "worker under --dist loadgroup (xdist-compatible)",
         )
-        # pytest-rerunfailures would rerun flaky-marked tests in-process,
-        # doubling rstest's orchestrated reruns. Neutralize it inside pool
-        # workers (at -n 0 the plugin keeps its native behavior).
+        # pytest-rerunfailures is neutralized earlier, in pytest_cmdline_main
+        # (see _neutralize_rerunfailures) — it must be gone BEFORE the
+        # pytest_configure hookcall, which pytest fires via call_historic and
+        # therefore snapshots the impl list up front. Unregistering here would
+        # be too late: the plugin's already-scheduled pytest_configure still
+        # runs and KeyErrors on workerinput["sock_port"]. Belt-and-suspenders
+        # only, for a plugin that somehow registered after cmdline_main.
         if os.environ.get("RSTEST_WORKER_ID") is not None:
-            plugin = config.pluginmanager.get_plugin("rerunfailures")
-            if plugin is not None:
-                config.pluginmanager.unregister(plugin)
+            _neutralize_rerunfailures(config)
         # When part of a pool, announce ourselves the way an xdist worker
         # would: plugins key per-worker resources on `config.workerinput`
         # (pytest-django suffixes test DB names with workerid, others detect
