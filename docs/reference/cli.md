@@ -516,6 +516,66 @@ so the report shows up on the run page with zero extra steps. GitLab and
 TeamCity have no native markdown job-summary surface; use `--doctor-md`
 and publish the file as an artifact.
 
+### `--doctor-fail-on <COND>`
+
+Fail the run when a doctor metric breaches a threshold — turning the
+otherwise-advisory doctor signal into a CI gate. Repeatable; the run fails
+if *any* condition fires. Implies doctor instrumentation.
+
+Grammar is `metric OP value`:
+
+```console
+$ rstest -n auto --doctor-fail-on 'parallel_efficiency<30' \
+                 --doctor-fail-on 'wait_pct>50'
+```
+
+Operators: `<`, `<=`, `>`, `>=`, `==`, `!=`. Metrics (from the
+[Doctor JSON](report-json.md#doctor-json) model):
+
+| metric | meaning |
+|---|---|
+| `wall_seconds` | total wall-clock time |
+| `test_time_seconds` | summed test durations |
+| `cpu_time_seconds` | summed call-phase CPU time |
+| `tests` | tests with timing data |
+| `workers` | worker count (`-n`) |
+| `wait_pct` | % of test time spent waiting, not computing |
+| `wait_seconds` | seconds spent waiting |
+| `parallel_efficiency` / `efficiency_pct` | realized-vs-possible speedup, % |
+| `realized_speedup` | test time ÷ wall time |
+| `imbalance_pct` | busiest-vs-idlest worker load gap, % |
+| `long_pole_seconds` | slowest single test |
+
+A metric whose section did not apply to the run is **skipped, not failed**
+— e.g. `parallel_efficiency` at `-n 1` (no parallelism to measure) prints a
+`not measured` note and never fails the gate. An unknown metric or malformed
+condition aborts up front, before the run, so a typo can never become a gate
+that silently never fires. `==`/`!=` are reliable only on the integer-valued
+metrics (`tests`, `workers`); on a floating-point metric they almost never
+match, so rstest warns and you should use a `<`/`>` threshold instead.
+
+The failure block prints to stderr, so `--output json`/`tap` stay pure on
+stdout. Under a passthrough-IO flag (`-s`/`--pdb`/`--co`) there is no doctor
+instrumentation, so the gate can't run — rstest warns instead of passing green.
+
+Because the gate is a doctor run, it also **publishes the full doctor report**
+the way any doctor run does — appended to `$GITHUB_STEP_SUMMARY` on GitHub
+Actions, `buildkite-agent annotate` on Buildkite — even when you pass only
+`--doctor-fail-on` (no `--doctor`). That is intentional: a failed gate shows
+its report on the run page so you can see *why* it failed. Pass `--doctor-md`
+for a file copy, or run in a CI with no summary surface if you want gate-only.
+
+Exit-code note for machine consumers: the gate affects the **process exit
+code** (1 on breach), which is authoritative. It does **not** rewrite the
+`exitstatus` inside an already-streamed `--output json`/`tap` `sessionfinish`
+envelope — that field is emitted mid-run and reflects the *test* outcome, so a
+green session that fails the gate still shows `"exitstatus": 0` there. Key CI
+success off the process exit code, not the envelope field (same as
+[`--durations-regress`](#-durations-regress-ratio)).
+
+The conditions can live in your CI config or `pyproject.toml` invocation, so
+non-GitHub CIs get the same gate the composite action offers externally.
+
 ### `--watch`
 
 Watch the project and rerun on change. A change set consisting only of

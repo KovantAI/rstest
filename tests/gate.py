@@ -1122,6 +1122,49 @@ def main():
         summ.exists() and "## rstest doctor" in summ.read_text(encoding="utf-8"),
     )
 
+    # --doctor-fail-on: turn the doctor signal into a CI gate. The DOCTOR
+    # suite is ~all wait (test_sleepy), so wait_pct is high.
+    r = g.run("doc", "-n", "2", "--doctor-fail-on", "wait_pct>50")
+    check(
+        "doctor-fail-on: breach fails the run (exit 1)",
+        # Failure block goes to STDERR so --output json/tap stay pure.
+        r.returncode == 1 and "doctor gate failures" in r.stderr and "wait_pct" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    # A gate breach under --output json must NOT corrupt the pure NDJSON stream:
+    # the failure block is stderr-only.
+    r = g.run("doc", "-n", "2", "--output", "json", "--doctor-fail-on", "wait_pct>1")
+    ok, _objs = parse_ndjson(r.stdout)
+    check(
+        "doctor-fail-on: breach keeps --output json pure (stderr only)",
+        r.returncode == 1 and ok and "doctor gate failures" not in r.stdout
+        and "doctor gate failures" in r.stderr,
+        f"rc={r.returncode} ndjson_ok={ok} " + r.stdout[-200:],
+    )
+    # A threshold the run clears: gate passes, exit stays 0.
+    r = g.run("doc", "-n", "2", "--doctor-fail-on", "wall_seconds>1000")
+    check(
+        "doctor-fail-on: within threshold passes (exit 0)",
+        r.returncode == 0 and "condition(s) passed" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # A metric whose section didn't apply to this run (single-worker has no
+    # parallel efficiency) is skipped, never failed.
+    r = g.run("doc", "-n", "0", "--doctor-fail-on", "parallel_efficiency<1")
+    check(
+        "doctor-fail-on: absent metric skipped, not failed",
+        r.returncode == 0 and "not measured" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # A typo'd metric aborts up front (before the run) rather than silently
+    # never firing — the exact dead-gate bug this feature exists to kill.
+    r = g.run("doc", "-n", "2", "--doctor-fail-on", "bogus<1")
+    check(
+        "doctor-fail-on: bad metric aborts loudly",
+        r.returncode != 0 and "unknown metric" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+
     print("== auto worker capping ==")
     for i in range(6):
         g.write(f"kovstyle/mod{i}_test.py", "def test_a(): assert True\n")
