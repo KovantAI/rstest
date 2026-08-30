@@ -692,6 +692,22 @@ def main():
     )
     check("testnodeready fired", "ready:gw0" in log_text, log_text)
 
+    print("== one-arg pytest_testnodedown ==")
+    g.write("nodeonearg/conftest.py", NODEONEARG_CONFTEST)
+    # Two tests so both workers get real work (scheduling may still put both
+    # on gw0, but every worker fires its own testnodedown regardless).
+    g.write("nodeonearg/test_node.py", "def test_a(): assert True\n\n\ndef test_b(): assert True\n")
+    oa_log = g.tmp / "node_onearg.log"
+    clear_hook_log(oa_log)
+    r = g.run("nodeonearg", "-n", "2", env_extra={"NODE_HOOK_LOG": str(oa_log)})
+    oa_text = read_hook_log(oa_log)
+    check("one-arg testnodedown: run not crashed", "2 passed" in r.stdout, r.stdout[-300:])
+    check(
+        "one-arg testnodedown fired (no error= TypeError)",
+        "down:oa_gw0" in oa_text and "down:oa_gw1" in oa_text,
+        oa_text + "\n" + r.stdout[-300:],
+    )
+
     print("== --durations ==")
     g.write("dur/test_dur.py", DURATIONS_FIXTURE)
     r = g.run("dur", "-n", "2", "--durations=5")
@@ -1766,6 +1782,46 @@ NODECRASH_TEST = HARD_CRASH + '\nimport time\n\n\ndef test_a(): time.sleep(0.05)
 NODEHOOKS_CONFTEST = '\nimport os\n\nimport pytest\n\n\ndef pytest_addhooks(pluginmanager):\n    # Real suites get these specs from pytest-xdist; declare them the\n    # same way so this fixture is hermetic.\n    class XdistSpecs:\n        @pytest.hookspec\n        def pytest_configure_node(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodeready(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodedown(self, node, error): ...\n\n    pluginmanager.add_hookspecs(XdistSpecs)\n\n\ndef _log(line):\n    path = os.environ.get("NODE_HOOK_LOG")\n    if path:\n        with open(path + "." + str(os.getpid()), "a") as f:\n            f.write(line + "\\n")\n\n\nclass XDistHooks:\n    # the sqlalchemy pattern: master fills workerinput per node\n    def pytest_configure_node(self, node):\n        node.workerinput["follower_ident"] = "follower_" + node.gateway.id\n\n    def pytest_testnodeready(self, node):\n        _log("ready:" + node.gateway.id)\n\n    def pytest_testnodedown(self, node, error):\n        _log("down:" + node.workerinput["follower_ident"])\n\n\ndef pytest_configure(config):\n    config.pluginmanager.register(XDistHooks())\n    # read it back IMMEDIATELY (sqlalchemy does exactly this): only a\n    # synchronous configure_node call at registration time satisfies it\n    if hasattr(config, "workerinput"):\n        config._follower_ident = config.workerinput["follower_ident"]\n'
 
 NODEHOOKS_TEST = '\ndef test_ident_present(request):\n    assert request.config._follower_ident.startswith("follower_gw")\n\n\ndef test_workerinput_kept(request):\n    assert request.config.workerinput["follower_ident"] == request.config._follower_ident\n'
+
+# pytest-html (via pytest-metadata) ships the one-arg form
+# `pytest_testnodedown(node)`. xdist's hookspec is (node, error); rstest must
+# call it without `error=` or it TypeErrors and the HTML report is lost.
+NODEONEARG_CONFTEST = '''
+import os
+
+import pytest
+
+
+def pytest_addhooks(pluginmanager):
+    class XdistSpecs:
+        @pytest.hookspec
+        def pytest_configure_node(self, node): ...
+
+        @pytest.hookspec
+        def pytest_testnodedown(self, node, error): ...
+
+    pluginmanager.add_hookspecs(XdistSpecs)
+
+
+def _log(line):
+    path = os.environ.get("NODE_HOOK_LOG")
+    if path:
+        with open(path + "." + str(os.getpid()), "a") as f:
+            f.write(line + "\\n")
+
+
+class OneArgHooks:
+    def pytest_configure_node(self, node):
+        node.workerinput["oa_ident"] = "oa_" + node.gateway.id
+
+    # ONE arg, no `error` — the pytest-html / pytest-metadata signature.
+    def pytest_testnodedown(self, node):
+        _log("down:" + node.workerinput["oa_ident"])
+
+
+def pytest_configure(config):
+    config.pluginmanager.register(OneArgHooks())
+'''
 
 DURATIONS_FIXTURE = """
 import time
