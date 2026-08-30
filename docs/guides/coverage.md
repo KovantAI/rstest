@@ -49,7 +49,7 @@ so the per-test attribution shows up in the report.)
 
 A `--cov-context=test` run also writes a **line→test index** to
 `.rstest_cache/coverage_index.json` — the map
-[`--changed`](../reference/cli.md#-changed-rev) uses to select only the tests
+[`--changed`](changed.md) uses to select only the tests
 whose coverage actually executed the changed lines. Warm it by running your
 coverage suite once with `--cov-context=test`; persist `.rstest_cache` across
 CI runs the same way you persist it for scheduling.

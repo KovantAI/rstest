@@ -378,7 +378,7 @@ CI) and map to the affected tests; only those run.
 
 **Coverage-aware when a line→test index is warm.** If
 `.rstest_cache/coverage_index.json` exists (written by any
-[`--cov-context=test`](coverage.md#per-test-contexts-cov-contexttest) run),
+[`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest) run),
 `--changed` maps the *changed lines* to only the tests whose recorded coverage
 executed them — far tighter than the import graph, which reselects every test
 importing a changed module. This is automatic and needs no flag; selection only
