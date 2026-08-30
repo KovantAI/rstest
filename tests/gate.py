@@ -1610,8 +1610,10 @@ def main():
         m.unlink(missing_ok=True)
         return r
 
-    # In history with flaky>0 -> rerun-eligible -> recovers.
-    r = faware({fnode: {"flaky": 2, "failed": 0, "last_epoch": 1}}, "fa_known")
+    # In history with flaky>0 -> rerun-eligible -> recovers. Use a current
+    # epoch so retention aging (load() drops entries past the window) keeps it.
+    now_epoch = int(time.time())
+    r = faware({fnode: {"flaky": 2, "failed": 0, "last_epoch": now_epoch}}, "fa_known")
     check("flaky-aware: known-flaky test is reran and recovers",
           r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
     # No history -> not known-flaky -> not reran -> fails.
@@ -1622,7 +1624,7 @@ def main():
           r.stdout[-200:])
     # Hard-failure-only history (flaky==0) -> still not known-flaky: a
     # deterministic mass-failure recorded as `failed` never burns the budget.
-    r = faware({fnode: {"flaky": 0, "failed": 9, "last_epoch": 1}}, "fa_failedonly")
+    r = faware({fnode: {"flaky": 0, "failed": 9, "last_epoch": now_epoch}}, "fa_failedonly")
     check("flaky-aware: failed-only history does not count as known-flaky",
           r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:])
     # Baseline sanity: same unknown test WITHOUT the flag reruns and recovers.
