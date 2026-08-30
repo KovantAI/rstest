@@ -10,46 +10,33 @@
 [![Docs](https://readthedocs.org/projects/python-rstest/badge/?version=stable)](https://python-rstest.readthedocs.io/en/stable/)
 [![GitHub stars](https://img.shields.io/github/stars/KovantAI/rstest)](https://github.com/KovantAI/rstest/stargazers)
 
-A fast, pytest-compatible test runner. Rust orchestration, your tests
-unchanged: same plugins, same fixtures, same outcomes — parallel by design,
-with built-in suite diagnostics (`--doctor`).
+**Run your existing pytest suite in parallel, unchanged.** Same fixtures,
+same plugins, same outcomes — just faster. Rust-orchestrated, parallel by
+default, with built-in suite diagnostics (`--doctor`) that tell you *where
+your test time actually goes*.
+
+```text
+aiohttp, 4,469 tests:   pytest 197s  →  rstest 68s
+```
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
 
 ## Quick start
+
+In any pytest project:
 
 ```bash
 pip install rstest
 rstest
 ```
 
-Parallel by default (`-n auto`). Tests that can't run in parallel can be
-marked `@pytest.mark.serial` (they run exclusively, after the parallel
-phase), order-dependent suites can use `--dist loadfile`, and `rstest -n 0`
-gives a single pytest session with byte-exact pytest semantics.
+No config. No test changes. If `pytest` runs it, `rstest` runs it — in
+parallel (`-n auto`), out of the box.
 
-<details>
-<summary><strong>Compatibility contract</strong></summary>
-
-At `-n 0`, outcomes are byte-exact. In parallel modes, outcomes are
-preserved for parallel-safe tests; tests with hidden
-time/ordering/shared-state assumptions can flake under high concurrency —
-exactly as under pytest-xdist. `rstest --doctor` and lower `-n` values help
-find and contain them; `@pytest.mark.serial` is the escape hatch.
-
-</details>
-
-Highlights:
-- Drop-in: forwards the pytest flag surface; runs conftest, fixtures,
-  parametrize, marks, and pytest plugins (pytest-django, pytest-asyncio,
-  hypothesis, ...) through a vendored pytest core.
-- Parallel by design: test-granular work distribution with duration-aware
-  scheduling; `@pytest.mark.serial` and `--dist loadfile` safety rails;
-  crashed workers respawn without losing your run.
-- `rstest --doctor`: wait-bound tests, parallel-floor analysis, fixture
-  hotspots, slowest files.
-- `rstest --watch`: instant reruns on save; changed test files rerun alone,
-  source changes rerun only the tests the import graph says are affected.
+- Tests that can't run in parallel → `@pytest.mark.serial` (run exclusively,
+  after the parallel phase).
+- Order-dependent suites → `--dist loadfile`.
+- Want byte-exact pytest semantics → `rstest -n 0` (single pytest session).
 
 ## Benchmarks
 
@@ -66,6 +53,40 @@ the pytest baseline — 100% parity.
 
 Apple Silicon, CPython 3.13, pytest-xdist 3.8. Full methodology and monorepo
 numbers: [benchmarks](https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/).
+
+## Why rstest
+
+| | pytest | pytest-xdist | rstest |
+|---|:---:|:---:|:---:|
+| Runs your suite unchanged | ✅ | mostly | ✅ |
+| Parallel by default | ❌ | ⚙️ opt-in | ✅ |
+| Duration-aware scheduling | ❌ | ❌ | ✅ |
+| Crashed workers respawn mid-run | ❌ | ❌ | ✅ |
+| Suite diagnostics | ❌ | ❌ | ✅ `--doctor` |
+| Watch mode | plugin | ❌ | ✅ built-in |
+
+- **Drop-in.** Forwards the pytest flag surface; runs conftest, fixtures,
+  parametrize, marks, and pytest plugins (pytest-django, pytest-asyncio,
+  hypothesis, …) through a vendored pytest core.
+- **Parallel by design.** Test-granular work distribution with duration-aware
+  scheduling; `@pytest.mark.serial` and `--dist loadfile` safety rails;
+  crashed workers respawn without losing your run.
+- **`rstest --doctor`.** Wait-bound tests, parallel-floor analysis, fixture
+  hotspots, slowest files.
+- **`rstest --watch`.** Instant reruns on save; changed test files rerun
+  alone, source changes rerun only the tests the import graph says are
+  affected.
+
+<details>
+<summary><strong>Compatibility contract</strong></summary>
+
+At `-n 0`, outcomes are byte-exact. In parallel modes, outcomes are
+preserved for parallel-safe tests; tests with hidden
+time/ordering/shared-state assumptions can flake under high concurrency —
+exactly as under pytest-xdist. `rstest --doctor` and lower `-n` values help
+find and contain them; `@pytest.mark.serial` is the escape hatch.
+
+</details>
 
 ## `rstest --doctor`
 
