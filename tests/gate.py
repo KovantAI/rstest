@@ -519,6 +519,52 @@ def main():
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
     )
 
+    print("== pytest-retry + xdist (server_port self-provision) ==")
+    # pytest-retry gates master vs. worker on `has_plugin("xdist") and
+    # numprocesses`. rstest keeps numprocesses visible under the pool (only
+    # dist is forced off), so each worker takes the MASTER branch and
+    # self-provisions its own ReportServer — it never reads the
+    # controller-injected workerinput["server_port"] that has no source under
+    # rstest. Without that (e.g. if numprocesses were nulled) the plugin would
+    # take its client branch and KeyError at configure. xdist must be in the
+    # venv for the master branch to be reachable at all.
+    rt_venv = Path(args.venv + "-retry").resolve()
+    make_venv(rt_venv, extra_deps=["pytest-retry", "pytest-xdist"])
+    grt = Gate(binary, rt_venv)
+    grt.write(
+        "rt/test_rt.py",
+        "import pytest\n"
+        "from pytest_retry import retry_plugin\n"
+        "from pytest_retry.server import ReportServer, ClientReporter\n"
+        "_a = {}\n"
+        "def test_retry_recovers():\n"
+        # Only pytest-retry's --retries can pass this: no rstest --reruns, no
+        # @mark.flaky. Fails on attempt 1, passes on attempt 2.
+        "    _a['x'] = _a.get('x', 0) + 1\n"
+        "    assert _a['x'] >= 2\n"
+        "def test_master_branch(request):\n"
+        # Prove the plugin self-provisioned (master), not the server_port client
+        # branch — the direct evidence that the KeyError path is never taken.
+        "    rep = retry_plugin.retry_manager.reporter\n"
+        "    assert isinstance(rep, ReportServer), type(rep).__name__\n"
+        "    assert not isinstance(rep, ClientReporter)\n"
+        "    assert request.config.getoption('numprocesses', False)\n"
+        "def test_real_failure_survives_retries():\n"
+        # Retry must not mask a genuine always-failure.
+        "    assert False\n",
+    )
+    r = grt.run("rt", "-n", "2", "--retries", "2")
+    check(
+        "retry+xdist: no server_port KeyError at -n 2",
+        "server_port" not in (r.stdout + r.stderr) and "KeyError" not in (r.stdout + r.stderr),
+        (r.stdout + r.stderr)[-500:],
+    )
+    check(
+        "retry+xdist: master branch taken, engine recovers, real failure survives",
+        r.returncode == 1 and "1 failed, 2 passed" in r.stdout,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+    )
+
     print("== interpreter probe cache (heals after deps installed) ==")
     # Regression: a NEGATIVE probe (interpreter present, worker shim not
     # importable — e.g. msgpack missing) must NOT be persisted to the on-disk
