@@ -134,6 +134,8 @@ pub struct RstestSettings {
     pub numprocesses: Option<String>,
     pub dist: Option<String>,
     pub reruns: Option<u32>,
+    /// Gate reruns to tests with prior flaky history (`flakes.json`).
+    pub reruns_only_known_flaky: Option<bool>,
     pub worker_timeout: Option<u64>,
     /// Monorepo subproject globs (relative to the pyproject's dir);
     /// restricts/replaces auto-discovery.
@@ -169,6 +171,9 @@ pub fn rstest_settings(start: &Path) -> RstestSettings {
                 .get("reruns")
                 .and_then(|v| v.as_integer())
                 .map(|n| n as u32),
+            reruns_only_known_flaky: tool
+                .get("reruns-only-known-flaky")
+                .and_then(|v| v.as_bool()),
             worker_timeout: tool
                 .get("worker-timeout")
                 .and_then(|v| v.as_integer())

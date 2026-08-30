@@ -149,6 +149,17 @@ pub struct Cli {
     #[arg(long = "only-rerun", value_name = "REGEX")]
     only_rerun: Vec<String>,
 
+    /// With reruns active, retry only tests that have a prior *flaky* history
+    /// in `.rstest_cache/flakes.json` (passed-after-rerun on some earlier
+    /// run). A first-time failure with no flaky history is reported failed
+    /// without spending the budget — so a deterministic mass-failure (one
+    /// cause failing many tests identically) no longer burns reruns for zero
+    /// recovery. `@pytest.mark.flaky` tests are always retried (the marker is
+    /// an explicit declaration). Composes with `--only-rerun` (both gates
+    /// must pass).
+    #[arg(long = "reruns-only-known-flaky")]
+    reruns_only_known_flaky: bool,
+
     /// Kill a worker stuck on ONE test longer than this many seconds
     /// (hang backstop; the test is reported failed, the worker replaced).
     /// Off by default — use pytest-timeout for per-test limits; this
@@ -441,6 +452,7 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
+            "--reruns-only-known-flaky" => own.push(arg),
             "--migrate-check-json" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -637,6 +649,19 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         );
     }
     let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
+    // Flaky-aware reruns: when on, load the prior flaky set ONCE so the pool
+    // can gate rerun eligibility on it. None = feature off (no gating).
+    // Gate on `reruns > 0` deliberately: the gate only ever suppresses the
+    // global `--reruns` budget. @mark.flaky tests always bypass it (see the
+    // pool gate), so a run whose only budget is @mark.flaky needs no set
+    // loaded — loading one would change nothing.
+    let known_flaky: Option<std::collections::HashSet<String>> = if reruns > 0
+        && (cli.reruns_only_known_flaky || settings.reruns_only_known_flaky.unwrap_or(false))
+    {
+        Some(flakes::known_flaky())
+    } else {
+        None
+    };
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     let n = parse_numprocesses(&numprocesses)?;
     let passthrough = needs_passthrough_io(&args);
@@ -975,6 +1000,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 .map(|p| regex::Regex::new(p))
                 .collect::<Result<Vec<_>, _>>()?,
             worker_timeout.map(std::time::Duration::from_secs),
+            known_flaky.as_ref(),
         )?
     } else {
         let dist = match dist_name.as_str() {
@@ -1012,6 +1038,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             worker_timeout.map(std::time::Duration::from_secs),
             shuffle_seed,
             shard,
+            known_flaky.as_ref(),
         )?
     };
 
