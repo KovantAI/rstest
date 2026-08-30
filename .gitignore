@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .rstest_cache/
 .gate-venv/
+.gate-venv-*/
 site/
 uv.lock
 corpus/work/

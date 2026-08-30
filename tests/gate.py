@@ -134,25 +134,26 @@ def find_python() -> str:
     sys.exit("gate needs python >= 3.10 on PATH")
 
 
-def make_venv(venv_dir: Path):
+# Worker runtime deps shared by every gate venv.
+BASE_DEPS = [
+    "msgpack",
+    "pluggy>=1.5",
+    "iniconfig",
+    "packaging",
+    "pygments",
+    "coverage",
+    "pytest-cov",
+]
+
+
+def make_venv(venv_dir: Path, extra_deps=None):
     if venv_bin(venv_dir, "python").exists():
         return
     py = find_python()
     print(f"creating gate venv at {venv_dir} (from {py})")
     subprocess.run([py, "-m", "venv", str(venv_dir)], check=True)
     subprocess.run(
-        [
-            str(venv_bin(venv_dir, "pip")),
-            "install",
-            "-q",
-            "msgpack",
-            "pluggy>=1.5",
-            "iniconfig",
-            "packaging",
-            "pygments",
-            "coverage",
-            "pytest-cov",
-        ],
+        [str(venv_bin(venv_dir, "pip")), "install", "-q", *BASE_DEPS, *(extra_deps or [])],
         check=True,
     )
 
@@ -431,10 +432,47 @@ def main():
         "    assert os.environ['PYTEST_XDIST_WORKER'].startswith('gw')\n"
         "    assert os.environ['PYTEST_XDIST_WORKER_COUNT'] == '2'\n"
         "def test_uid(request):\n"
-        "    assert request.config.workerinput['testrun_uid']\n",
+        "    assert request.config.workerinput['testrun_uid']\n"
+        # pytest-randomly reads this master-injected key; rstest derives a
+        # single run-level seed from the shared run uid so every worker agrees.
+        "def test_randomly_seed(request):\n"
+        "    wi = request.config.workerinput\n"
+        "    assert wi['randomly_seed'] == (int(wi['testrun_uid'], 16) & 0xFFFFFFFF)\n",
     )
     r = g.run("xdistenv", "-n", "2")
-    check("PYTEST_XDIST_WORKER + testrun_uid", "2 passed" in r.stdout, r.stdout[-300:])
+    check("PYTEST_XDIST_WORKER + testrun_uid", "3 passed" in r.stdout, r.stdout[-300:])
+
+    print("== pytest-randomly (real plugin) ==")
+    # Isolated venv: pytest-randomly shuffles collection order, so installing
+    # it in the shared venv would break the source-order / lazy-order checks.
+    # Here we prove the real plugin consumes rstest's synthesized workerinput
+    # seed at -n >= 2 instead of KeyError-ing (the bug this PR fixes).
+    rnd_venv = Path(args.venv + "-randomly").resolve()
+    make_venv(rnd_venv, extra_deps=["pytest-randomly"])
+    gr = Gate(binary, rnd_venv)
+    gr.write(
+        "rnd/test_rnd.py",
+        "def test_a(): pass\n"
+        "def test_b(): pass\n"
+        "def test_c(): pass\n"
+        # pytest-randomly resolves --randomly-seed from workerinput per worker.
+        # A missing key -> KeyError at configure (no pass); a plugin that
+        # ignored our key -> resolved seed != our derivation. Asserting the
+        # plugin's *resolved* option (not just the raw workerinput value)
+        # proves it actually consumed the key we synthesize.
+        "def test_seed_consumed(request):\n"
+        "    resolved = request.config.getoption('randomly_seed')\n"
+        "    wi = request.config.workerinput\n"
+        "    assert resolved == (int(wi['testrun_uid'], 16) & 0xFFFFFFFF)\n",
+    )
+    # Pin the run uid so a second invocation derives the same seed: same uid
+    # -> same seed -> same shuffle. Reproducibility, end to end through the
+    # real plugin.
+    uid = "abc123def456789"
+    r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
+    check("randomly: consumes synthesized seed, no crash at -n 2", "4 passed" in r.stdout, r.stdout[-400:])
+    r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
+    check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
