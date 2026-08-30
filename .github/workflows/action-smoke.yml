@@ -213,6 +213,12 @@ jobs:
           test "${{ steps.cold.outcome }}" = "success" \
             || { echo "cold start must not fail on a missing baseline, got ${{ steps.cold.outcome }}"; exit 1; }
 
+      # The cold run above seeded smoke/.rstest_cache/durations.json locally
+      # (cache: false only skips cross-run restore/save, not the on-disk write).
+      # Wipe it so the strict step below faces a genuinely missing baseline.
+      - name: wipe seeded baseline
+        run: rm -rf smoke/.rstest_cache
+
       # Same cold cache but require-baseline: true -> strict mode, must FAIL
       # (catches a broken cache path once you expect a baseline to exist).
       - uses: ./.github/actions/rstest
