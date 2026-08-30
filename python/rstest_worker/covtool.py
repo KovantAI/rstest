@@ -15,12 +15,13 @@ coverage-based `--changed` selection.
 Exit code: 0, or 1 when --cov-fail-under is not met (matching pytest-cov).
 """
 
+import hashlib
 import json
 import os
 import sys
 
 INDEX_PATH = os.path.join(".rstest_cache", "coverage_index.json")
-INDEX_SCHEMA = 1
+INDEX_SCHEMA = 2
 # coverage labels dynamic contexts "<nodeid>|<phase>" (phase in run/setup/
 # teardown); strip the phase to recover the bare nodeid.
 _PHASE_SUFFIXES = ("|run", "|setup", "|teardown")
@@ -56,9 +57,26 @@ def _base_nodeid(ctx):
     return ctx
 
 
+def _file_sha256(path):
+    """Hex SHA-256 of a file's raw bytes, or None if it can't be read. Stamps
+    each index entry with the source it was built from; selection compares it
+    against the diff base's content and falls back to the import graph on any
+    mismatch (lines drifted since warm), so the index is never trusted for a
+    file whose line numbers no longer line up."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
 def build_index(cov):
     """Invert the combined per-test contexts into a line->test index:
-    { "schema": 1, "files": { "<rel-path>": { "<line>": ["<nodeid>", ...] } } }.
+    { "schema": 2, "files": { "<rel-path>": { "hash": "<sha256>",
+      "lines": { "<line>": ["<nodeid>", ...] } } } }.
 
     Keys are cwd-relative POSIX paths (matching git diff --relative and the
     durations cache), so files outside the tree (site-packages, absolute
@@ -87,14 +105,21 @@ def build_index(cov):
             nodeids = sorted({_base_nodeid(c) for c in ctxs if c})
             if nodeids:
                 line_map[str(line)] = nodeids
-        if line_map:
-            files[rel] = line_map
+        if not line_map:
+            continue
+        # Stamp with the source hash. If the file vanished between the run and
+        # now we can't vouch for its line numbers, so drop it from the index
+        # (selection then falls back to the import graph for it).
+        digest = _file_sha256(path)
+        if digest is None:
+            continue
+        files[rel] = {"hash": digest, "lines": line_map}
     if not files:
         return
     os.makedirs(".rstest_cache", exist_ok=True)
     tmp = INDEX_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"schema": INDEX_SCHEMA, "files": files}, fh)
+        json.dump({"schema": INDEX_SCHEMA, "files": files}, fh)  # schema 2: {hash, lines}
     os.replace(tmp, INDEX_PATH)  # atomic swap so a reader never sees a partial file
 
 

@@ -10,8 +10,8 @@ Exit 0 = all gates green. Designed to be the single CI entry point.
 import argparse
 import glob
 import json
-import re
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1495,6 +1495,46 @@ def main():
     got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n"))
     check("cov-select: cold cache -> import-graph (both)",
           got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+
+    # Rail: a warm index still remembers a test renamed since it was built. The
+    # stale nodeid must NOT be passed to pytest (it aborts the run on a missing
+    # nodeid) and must NOT silently vanish (that skips a test still covering the
+    # changed line) — it demotes its file to import-graph, which runs the
+    # renamed test via its import edge.
+    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
+          cwd=cs, env_extra={"PYTHONPATH": str(cs)})  # warm index (knows test_a.py::test_a)
+    subprocess.run(["git", "mv", "test_a.py", "test_renamed.py"], cwd=cs, check=True)
+    edit_line("mymod.py", "    return 1\n", "    return 111\n")  # line only test_a covered
+    r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+    got = sorted(set(re.findall(r"test_\w+\.py::test_\w+", r.stdout)))
+    check("cov-select: renamed test (stale nodeid) -> no crash, runs via fallback",
+          r.returncode == 0 and "test_renamed.py::test_a" in got and "not found" not in r.stdout,
+          f"rc={r.returncode} {got} {r.stderr[-150:]}")
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=cs, check=True)
+    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+
+    # Rail: an index warmed before commits that SHIFT line numbers must not be
+    # trusted at stale lines. Warm clean, commit a prepend that pushes
+    # used_by_a's body down, then edit that body. The per-file SHA-256 no longer
+    # matches HEAD's content, so the file drifts to import-graph (both tests)
+    # instead of looking up the now-wrong line 2 -> which would pick ONLY
+    # test_b, the wrong answer. Proves drift detection prevents mis-selection.
+    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
+          cwd=cs, env_extra={"PYTHONPATH": str(cs)})  # warm at current HEAD
+    (cs / "mymod.py").write_text(
+        "def zzz():\n    return 0\n" + (cs / "mymod.py").read_text(), encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "prepend shifts lines"], cwd=cs, check=True)
+    edit_line("mymod.py", "    return 1\n", "    return 111\n")  # used_by_a body, now shifted
+    r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+    got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
+    check("cov-select: line-shift drift -> import-graph fallback, not stale lookup",
+          got == ["test_a.py::test_a", "test_b.py::test_b"], f"{got} {r.stderr[-150:]}")
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
+    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
     print("== shuffle ==")
     for i in range(6):

@@ -766,6 +766,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             &project,
             &changes,
             cli.changed_strict,
+            rev,
         )? {
             select::Selection::FullRun(reason) => {
                 eprintln!("rstest: --changed falling back to full run ({reason})");

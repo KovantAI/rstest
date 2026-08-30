@@ -64,6 +64,7 @@ results:
 | **new** code (inserted lines — no prior coverage) | import-graph fallback for that file |
 | a file the index never measured | import-graph fallback for that file |
 | an untracked file | import-graph fallback for that file |
+| a file whose content **drifted** since the index was warmed | import-graph fallback for that file |
 | a changed **test** file | that test file runs itself |
 | `conftest.py` | its whole subtree (import-graph rule) |
 | a config or non-`.py` file | full run |
@@ -72,6 +73,15 @@ results:
 The guiding rule: **over-selection is safe, under-selection is not.** Anything
 the index can't vouch for falls back to the conservative import graph; the
 index is only trusted for the lines it actually recorded.
+
+Each index entry carries a SHA-256 of the source it was built from. Because the
+index is keyed by line number, its lookups are only valid while a file's
+content still matches — once commits land that shift a file's lines (or the
+index was warmed on a dirty tree), those line numbers point at the wrong code.
+`--changed` detects this per file by hashing the file's content at the diff base
+and comparing: on any mismatch the file drifts to the import graph rather than
+being looked up at stale lines. Warm on a **clean tree at the diff base** for
+the tightest selection.
 
 ## Keeping the index warm
 

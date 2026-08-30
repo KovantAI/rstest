@@ -260,15 +260,31 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
 fn parse_diff_hunks(diff: &str) -> Vec<(String, FileChange)> {
     let mut out: Vec<(String, FileChange)> = Vec::new();
     let mut cur: Option<(String, FileChange)> = None;
+    // Only the header block BEFORE a file's first hunk names a file. Inside a
+    // hunk body, an added source line whose content starts with "++ " appears
+    // as "+++ ..." under -U0 (git prefixes it with one more `+`), so treating
+    // every "+++ " line as a header would misparse code as a filename. `diff
+    // --git` opens each file's header block; the `@@` that starts the body sets
+    // `in_hunk`, and only `diff --git` clears it again.
+    let mut in_hunk = false;
     for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("+++ ") {
-            if let Some(c) = cur.take() {
-                out.push(c);
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+        } else if !in_hunk {
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                if let Some(c) = cur.take() {
+                    out.push(c);
+                }
+                // `+++ b/path` (or `+++ /dev/null` for a deleted file).
+                let path = rest.strip_prefix("b/").unwrap_or(rest);
+                cur = (path != "/dev/null").then(|| (path.to_string(), FileChange::default()));
+                continue;
             }
-            // `+++ b/path` (or `+++ /dev/null` for a deleted file).
-            let path = rest.strip_prefix("b/").unwrap_or(rest);
-            cur = (path != "/dev/null").then(|| (path.to_string(), FileChange::default()));
-        } else if line.starts_with("@@") {
+        }
+        // A bare `@@` only ever starts a real hunk header — content lines are
+        // prefixed with +/-/space, so this never collides with source.
+        if line.starts_with("@@") {
+            in_hunk = true;
             if let Some((_, change)) = cur.as_mut() {
                 match parse_hunk_old_range(line) {
                     // Modified/deleted lines existed pre-change: look them up.
@@ -332,24 +348,58 @@ fn rule1_full_run(changed: &[PathBuf]) -> Option<Selection> {
     None
 }
 
-const COVERAGE_INDEX_SCHEMA: u32 = 1;
+const COVERAGE_INDEX_SCHEMA: u32 = 2;
+
+#[derive(serde::Deserialize)]
+struct CoverageFile {
+    /// SHA-256 of the file's content when the index was built. The line map is
+    /// only valid for a base whose content still hashes to this — see
+    /// `old_side_sha256` and the drift check in `affected_with_coverage`.
+    #[serde(default)]
+    hash: String,
+    /// line number -> nodeids that covered it
+    #[serde(default)]
+    lines: HashMap<u32, Vec<String>>,
+}
 
 #[derive(serde::Deserialize)]
 struct CoverageIndex {
     #[serde(default)]
     schema: u32,
-    /// relative file path -> (line number -> nodeids that covered it)
+    /// relative file path -> per-file coverage entry (hash + line map)
     #[serde(default)]
-    files: HashMap<String, HashMap<u32, Vec<String>>>,
+    files: HashMap<String, CoverageFile>,
 }
 
 /// Load `.rstest_cache/coverage_index.json`, or `None` when it is missing,
 /// unreadable, corrupt, or a schema this build doesn't understand — every
-/// "None" path makes the caller fall back to import-graph selection.
+/// "None" path makes the caller fall back to import-graph selection. A v1
+/// index (pre-hash) fails the schema check here and is treated as cold until
+/// the next `--cov-context` warm rewrites it as v2.
 fn load_coverage_index() -> Option<CoverageIndex> {
     let bytes = std::fs::read(".rstest_cache/coverage_index.json").ok()?;
     let idx: CoverageIndex = serde_json::from_slice(&bytes).ok()?;
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
+}
+
+/// Hex SHA-256 of `rel`'s content at the diff `base` (`git show base:./rel`),
+/// or `None` if it doesn't exist there or git fails. The `./` prefix makes git
+/// resolve the path relative to CWD, matching the `--relative` diff keys (so a
+/// monorepo child hashes ITS file, not a repo-root path). Compared against the
+/// index's stored hash to detect line-number drift since the index was warmed.
+fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let spec = format!("{base}:./{}", rel.to_string_lossy().replace('\\', "/"));
+    let out = std::process::Command::new("git")
+        .args(["show", &spec])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut h = Sha256::new();
+    h.update(&out.stdout);
+    Some(format!("{:x}", h.finalize()))
 }
 
 /// Coverage-aware selection: consult the line->test index to pick the exact
@@ -363,12 +413,23 @@ fn load_coverage_index() -> Option<CoverageIndex> {
 /// to `affected_tests`. Over-selection is safe; the rails never under-select
 /// against unknown code — but the index is trusted for lines it *did* record,
 /// so keep it warm (rebuild on `--cov-context=test` runs).
+///
+/// Each index entry carries a SHA-256 of the source it was built from; a file
+/// whose content at the diff base no longer matches (commits landed since the
+/// warm, or it was warmed on a dirty tree) has drifted line numbers and is
+/// routed to the import graph rather than looked up at stale lines. Warm on a
+/// clean tree at the diff base for the tightest selection.
 pub fn affected_with_coverage(
     rootdir: &Path,
     project: &ProjectConfig,
     changes: &ChangedLines,
     strict: bool,
+    rev: Option<&str>,
 ) -> Result<Selection> {
+    // The index's line numbers are keyed to the source it was warmed from; the
+    // diff old-side lines are keyed to this base. They only align when a file's
+    // base content still matches the index (see the per-file drift check).
+    let base = rev.unwrap_or("HEAD");
     let files: Vec<PathBuf> = changes.keys().cloned().collect();
     if let Some(full) = rule1_full_run(&files) {
         return Ok(full);
@@ -396,7 +457,17 @@ pub fn affected_with_coverage(
         }
         // Look up the OLD-side changed lines (index is keyed pre-change).
         let key = file.to_string_lossy().replace('\\', "/");
-        let indexed = index.files.get(&key);
+        // Drift guard: the index's line numbers are only valid if the file's
+        // content at the diff base still hashes to what the index was built
+        // from. On mismatch (commits landed since warm, or warmed on a dirty
+        // tree) — or if the base content can't be read — the entry is treated
+        // as absent, so the file falls back to the import graph instead of
+        // being looked up at drifted line numbers. One `git show` per changed
+        // indexed file (a handful under --changed).
+        let indexed = index
+            .files
+            .get(&key)
+            .filter(|e| old_side_sha256(base, file).as_deref() == Some(e.hash.as_str()));
         // A changed old-side line the index has no nodeid for is a line the
         // index cannot vouch for: it executed only at import/collection time
         // (a `def`/decorator/class/module-level line lands in the empty
@@ -405,11 +476,29 @@ pub fn affected_with_coverage(
         // for that change — an under-selection the module's "err toward
         // running MORE" contract forbids. Route such a file to the graph.
         let mut uncovered_line = false;
-        if let Some(lines) = indexed {
+        if let Some(entry) = indexed {
             for &(start, end) in &change.old_ranges {
                 for line in start..=end {
-                    match lines.get(&line) {
-                        Some(ids) => nodeids.extend(ids.iter().cloned()),
+                    match entry.lines.get(&line) {
+                        Some(ids) => {
+                            for id in ids {
+                                // A warm index still remembers tests renamed or
+                                // deleted since it was built. Passing a missing
+                                // nodeid to pytest errors the whole --changed
+                                // run, and silently dropping it would skip a
+                                // test that still covers this line — so treat a
+                                // stale entry as an uncovered line and fall the
+                                // file back to the import graph (err toward
+                                // running MORE). The file part (before "::") is
+                                // cwd-relative, matching pytest and the index.
+                                let file_part = id.split("::").next().unwrap_or(id);
+                                if rootdir.join(file_part).exists() {
+                                    nodeids.insert(id.clone());
+                                } else {
+                                    uncovered_line = true;
+                                }
+                            }
+                        }
                         None => uncovered_line = true,
                     }
                 }
@@ -432,8 +521,24 @@ pub fn affected_with_coverage(
         }
     };
 
+    // Whole-file selections (graph fallback + changed test files) run every
+    // test in the file, so a specific `file::test` nodeid for the same file is
+    // redundant — emitting both makes pytest collect the file twice. Drop such
+    // nodeids in favor of the broader whole-file entry.
+    let whole_files: BTreeSet<PathBuf> = graph_tests
+        .iter()
+        .chain(direct_tests.iter())
+        .cloned()
+        .collect();
     let mut selected: BTreeSet<PathBuf> = BTreeSet::new();
-    selected.extend(nodeids.into_iter().map(PathBuf::from));
+    // nodeids were already checked for existence as they were collected; any
+    // stale entry demoted its file to the graph fallback above.
+    for id in nodeids {
+        let file_part = id.split("::").next().unwrap_or(&id);
+        if !whole_files.contains(Path::new(file_part)) {
+            selected.insert(PathBuf::from(id));
+        }
+    }
     selected.extend(graph_tests);
     selected.extend(direct_tests);
     Ok(Selection::Tests(selected.into_iter().collect()))
@@ -731,12 +836,14 @@ index e69..abc 100644
     #[test]
     fn diff_hunks_deletions_kept_dev_null_dropped() {
         let diff = "\
+diff --git a/gone.py b/gone.py
 --- a/gone.py
 +++ /dev/null
 @@ -1,3 +0,0 @@
 -a
 -b
 -c
+diff --git a/keep.py b/keep.py
 --- a/keep.py
 +++ b/keep.py
 @@ -5,2 +5,0 @@
@@ -752,6 +859,32 @@ index e69..abc 100644
             hunks[0].1,
             FileChange {
                 old_ranges: vec![(5, 6)],
+                has_new_code: false
+            }
+        );
+    }
+
+    #[test]
+    fn diff_hunks_content_line_starting_with_plusplus_is_not_a_header() {
+        // Source line "++x" (e.g. a C-ish idiom, or literal text) shows up as
+        // "+++x" under -U0. Inside a hunk body it must NOT be read as a "+++ "
+        // file header — the file stays pkg/mod.py, its one old line is recorded.
+        let diff = "\
+diff --git a/pkg/mod.py b/pkg/mod.py
+--- a/pkg/mod.py
++++ b/pkg/mod.py
+@@ -3 +3,2 @@ def f():
+-    old
++++ not_a_file
++    new
+";
+        let hunks = parse_diff_hunks(diff);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].0, "pkg/mod.py");
+        assert_eq!(
+            hunks[0].1,
+            FileChange {
+                old_ranges: vec![(3, 3)],
                 has_new_code: false
             }
         );
