@@ -1347,13 +1347,16 @@ def main():
     if idx_path.exists():
         idx = json.loads(idx_path.read_text())
         fm = idx.get("files", {}).get("mymod.py", {})
+        # schema 2 nests the line map under "lines" and stamps a source "hash".
+        lm = fm.get("lines", {})
         # used_by_a body (line 2) only test_a; used_by_b (line 4) only test_b;
         # used_by_both (line 6) BOTH — proving cross-worker context merge.
         check("cov-context: schema + per-test line mapping",
-              idx.get("schema") == 1
-              and fm.get("2") == ["test_a.py::test_a"]
-              and fm.get("4") == ["test_b.py::test_b"]
-              and fm.get("6") == ["test_a.py::test_a", "test_b.py::test_b"],
+              idx.get("schema") == 2
+              and isinstance(fm.get("hash"), str) and len(fm["hash"]) == 64
+              and lm.get("2") == ["test_a.py::test_a"]
+              and lm.get("4") == ["test_b.py::test_b"]
+              and lm.get("6") == ["test_a.py::test_a", "test_b.py::test_b"],
               json.dumps(fm))
     # Without --cov-context, no index is written (feature is opt-in via the flag).
     shutil.rmtree(ctxdir / ".rstest_cache", ignore_errors=True)
@@ -1535,6 +1538,122 @@ def main():
           got == ["test_a.py::test_a", "test_b.py::test_b"], f"{got} {r.stderr[-150:]}")
     subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+
+    print("== changed selection: files with no line-diff ==")
+    # `git diff -U0` emits NO hunk for deletions (+++ /dev/null), binary files,
+    # and pure renames, so parse_diff_hunks alone would drop them and defeat
+    # selection. A --name-only union recovers them and routes each to the
+    # conservative fallback. Also: a DELETED test file matches is_test_file by
+    # name but has nothing to run -- it must be skipped, never handed to pytest
+    # as a missing path (which aborts the whole --changed run).
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=cs, check=True)
+    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    # Warm the index so the deleted-test case exercises the warm direct_tests
+    # branch (the path actually wired for coverage selection).
+    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
+          cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+
+    # Deleted TEST file: no file on disk -> dropped, not selected. Nothing else
+    # changed -> nothing to run, and crucially NO missing-path error.
+    (cs / "test_a.py").unlink()
+    r = g.run("--changed", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+    check(
+        "changed: deleted test file skipped, no missing-path error",
+        r.returncode == 0
+        and "no tests affected" in r.stdout
+        and "not found" not in (r.stdout + r.stderr)
+        and "No such file" not in (r.stdout + r.stderr),
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-250:],
+    )
+    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+
+    # Deleted SOURCE file under --changed-strict: -U0 shows it as +++ /dev/null
+    # (no hunk). Pre-fix it was dropped before reaching the strict reachability
+    # check, so a lone deletion falsely SKIPPED everything. The --name-only
+    # union routes it to affected_tests, whose strict rail forces a full run
+    # (the deleted module reaches no test via the graph).
+    (cs / "mymod.py").unlink()
+    r = g.run("--changed-strict", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+    check(
+        "changed-strict: deleted source file forces full run (not a false skip)",
+        "falling back to full run" in r.stderr
+        and "no tests affected" not in r.stdout,
+        r.stderr[-250:] + " || " + r.stdout[-150:],
+    )
+    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+
+    # Changed BINARY (non-Python) file: -U0 emits no @@ hunk, so parse_diff_hunks
+    # drops it; the --name-only union recovers it and rule1 forces a full run.
+    (cs / "blob.bin").write_bytes(b"\x00\x01\x02rstest\x00")
+    subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "add binary"], cwd=cs, check=True)
+    (cs / "blob.bin").write_bytes(b"\x00\x01\x02rstest\xffCHANGED\x00")
+    r = g.run("--changed", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+    check(
+        "changed: modified binary file -> full run (name-only recovers it)",
+        "falling back to full run" in r.stderr and "non-Python" in r.stderr,
+        r.stderr[-250:],
+    )
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
+    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+
+    print("== coverage selection under autocrlf (CRLF worktree, LF blob) ==")
+    # Regression: git's autocrlf/text filters store the blob with LF while the
+    # working tree carries CRLF. The index hash (working tree, Python side) and
+    # the drift check (git blob, Rust side) must still agree once both normalize
+    # newlines -- otherwise every indexed file "drifts" and the index is never
+    # used on Windows/CRLF checkouts. Here the blob is LF (git normalizes on
+    # add) but the worktree stays CRLF.
+    cr = g.tmp / "crlf"
+    cr.mkdir(parents=True, exist_ok=True)
+
+    def wr_crlf(rel, text):
+        (cr / rel).write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+
+    wr_crlf("mymod.py",
+            "def used_by_a():\n    return 1\n"
+            "def used_by_b():\n    return 2\n"
+            "def used_by_both():\n    return 3\n")
+    wr_crlf("test_a.py",
+            "import mymod\n"
+            "def test_a():\n    assert mymod.used_by_a() == 1\n"
+            "    assert mymod.used_by_both() == 3\n")
+    wr_crlf("test_b.py",
+            "import mymod\n"
+            "def test_b():\n    assert mymod.used_by_b() == 2\n"
+            "    assert mymod.used_by_both() == 3\n")
+    (cr / "pyproject.toml").write_bytes(b"[tool.pytest.ini_options]\n")
+    subprocess.run(["git", "init", "-q"], cwd=cr, check=True)
+    subprocess.run(["git", "config", "core.autocrlf", "true"], cwd=cr, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=cr, check=True, capture_output=True)  # blobs -> LF
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "init"], cwd=cr, check=True)
+    blob = subprocess.run(["git", "show", "HEAD:mymod.py"], cwd=cr,
+                          capture_output=True).stdout
+    check(
+        "autocrlf: blob normalized to LF, worktree stays CRLF",
+        b"\r\n" not in blob and b"\r\n" in (cr / "mymod.py").read_bytes(),
+        f"blob_has_crlf={b'/r/n' in blob}",
+    )
+    # Warm the index (Python hashes the CRLF worktree, normalized to LF).
+    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
+          cwd=cr, env_extra={"PYTHONPATH": str(cr)})
+    # Edit only used_by_a's body. The stored hash (normalized CRLF) still equals
+    # the diff base's blob hash (normalized LF), so the index is TRUSTED and
+    # narrows to test_a alone. Pre-fix the CRLF-vs-LF byte mismatch drifted every
+    # file to the import graph, running BOTH tests.
+    wr_crlf("mymod.py",
+            "def used_by_a():\n    return 111\n"
+            "def used_by_b():\n    return 2\n"
+            "def used_by_both():\n    return 3\n")
+    r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cr, env_extra={"PYTHONPATH": str(cr)})
+    got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
+    check(
+        "autocrlf: index trusted across CRLF/LF -> narrows to test_a",
+        got == ["test_a.py::test_a"],
+        f"{got} || {r.stderr[-150:]}",
+    )
 
     print("== shuffle ==")
     for i in range(6):

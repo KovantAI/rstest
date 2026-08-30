@@ -58,19 +58,24 @@ def _base_nodeid(ctx):
 
 
 def _file_sha256(path):
-    """Hex SHA-256 of a file's raw bytes, or None if it can't be read. Stamps
-    each index entry with the source it was built from; selection compares it
-    against the diff base's content and falls back to the import graph on any
-    mismatch (lines drifted since warm), so the index is never trusted for a
-    file whose line numbers no longer line up."""
+    """Hex SHA-256 of a file's content with CRLF normalized to LF, or None if it
+    can't be read. Stamps each index entry with the source it was built from;
+    selection compares it against the diff base's content and falls back to the
+    import graph on any mismatch (lines drifted since warm), so the index is
+    never trusted for a file whose line numbers no longer line up.
+
+    Newlines are normalized because git's autocrlf/text filters leave the
+    working tree (what coverage measured, what we hash here) with CRLF while the
+    blob the diff's line numbers come from has LF. The Rust drift check
+    normalizes the git blob the same way, so the two hashes agree; a real
+    content edit still changes the hash. Source files fit in memory, so read
+    whole rather than streaming (a CRLF can straddle a chunk boundary)."""
     try:
-        h = hashlib.sha256()
         with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
+            data = fh.read()
     except OSError:
         return None
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
 def build_index(cov):

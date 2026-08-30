@@ -208,8 +208,10 @@ fn is_selectable_path(f: &Path) -> bool {
 /// touched, not the new ones (new-side numbers drift after insertions).
 /// `old_ranges` are the inclusive old-side spans of modified/deleted lines
 /// (lines that may have had coverage). `has_new_code` is set when the change
-/// introduces lines with no old-side counterpart (a pure insertion, `-a,0`) or
-/// the file is untracked — brand-new code the index cannot vouch for, so the
+/// introduces lines with no old-side counterpart (a pure insertion, `-a,0`),
+/// the file is untracked, or the file changed with no usable line-diff
+/// (deletion, binary, rename, mode-only — recovered via `--name-only`, since
+/// `-U0` emits no hunks for them) — code the index cannot vouch for, so the
 /// file needs the conservative import-graph fallback.
 #[derive(Debug, Default, PartialEq)]
 pub struct FileChange {
@@ -238,6 +240,31 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
         .into_iter()
         .map(|(path, change)| (PathBuf::from(path), change))
         .collect();
+    // `git diff -U0` emits no hunks for files without a line-diff — deletions
+    // (`+++ /dev/null`), binary files, pure renames, mode-only changes — so
+    // parse_diff_hunks drops them. Those still affect selection: a deleted or
+    // renamed module breaks its importers, and a changed non-Python file must
+    // force a full run (rule1). Union the authoritative `--name-only` set so no
+    // changed file is silently skipped; anything the hunk parse already keyed
+    // wins (`or_insert`), everything else lands with empty old_ranges +
+    // has_new_code so the caller routes it to the conservative fallback
+    // (import graph for `.py`, full run for non-`.py`).
+    let out = std::process::Command::new("git")
+        .args(["diff", "--name-only", "--relative", diff_base])
+        .output()
+        .context("running git diff --name-only")?;
+    if !out.status.success() {
+        bail!(
+            "git diff --name-only {diff_base} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        map.entry(PathBuf::from(line)).or_insert(FileChange {
+            old_ranges: Vec::new(),
+            has_new_code: true,
+        });
+    }
     // Untracked files are all-new code with no old-side lines: mark
     // has_new_code so the caller falls back to import-graph for them.
     let out = std::process::Command::new("git")
@@ -382,11 +409,34 @@ fn load_coverage_index() -> Option<CoverageIndex> {
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
 }
 
+/// Strip the CR from every CRLF. git's `autocrlf`/`text` filters store a blob
+/// with LF while the working tree carries CRLF, so the bytes coverage measured
+/// (working tree, hashed by the Python indexer) differ from the blob these diff
+/// line numbers come from — even though the line *count* is identical. Both
+/// sides normalize newlines the same way so the drift hashes agree; a real
+/// content edit still changes the hash. (Exotic clean/smudge filters beyond
+/// line endings won't match and simply fall back to the import graph — safe.)
+fn normalize_newlines(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 1; // drop the CR, keep the following LF
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Hex SHA-256 of `rel`'s content at the diff `base` (`git show base:./rel`),
 /// or `None` if it doesn't exist there or git fails. The `./` prefix makes git
 /// resolve the path relative to CWD, matching the `--relative` diff keys (so a
-/// monorepo child hashes ITS file, not a repo-root path). Compared against the
-/// index's stored hash to detect line-number drift since the index was warmed.
+/// monorepo child hashes ITS file, not a repo-root path). Newlines are
+/// normalized (see `normalize_newlines`) so the hash matches the Python
+/// indexer's under autocrlf. Compared against the index's stored hash to detect
+/// line-number drift since the index was warmed.
 fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
     let spec = format!("{base}:./{}", rel.to_string_lossy().replace('\\', "/"));
@@ -398,7 +448,7 @@ fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
         return None;
     }
     let mut h = Sha256::new();
-    h.update(&out.stdout);
+    h.update(normalize_newlines(&out.stdout));
     Some(format!("{:x}", h.finalize()))
 }
 
@@ -445,9 +495,14 @@ pub fn affected_with_coverage(
 
     for (file, change) in changes {
         // A changed test file always runs its own tests — its assertions or
-        // fixtures may have changed regardless of what covers its lines.
+        // fixtures may have changed regardless of what covers its lines. A
+        // DELETED test file (name still matches, but no file on disk) has
+        // nothing to run: skip it rather than hand pytest a missing path,
+        // which would error the whole --changed run.
         if crate::collect::is_test_file(&rootdir.join(file), project) {
-            direct_tests.insert(file.clone());
+            if rootdir.join(file).exists() {
+                direct_tests.insert(file.clone());
+            }
             continue;
         }
         // conftest.py subtree semantics live in the graph path (its Rule 2).
@@ -631,7 +686,11 @@ pub fn affected_tests(
 
     let tests: Vec<PathBuf> = affected
         .into_iter()
-        .filter(|f| crate::collect::is_test_file(f, project))
+        // is_test_file is a name-pattern match, so a DELETED test file still
+        // matches; drop anything no longer on disk so pytest is never handed a
+        // missing path (a deleted source file's importers are already resolved
+        // and still exist — only the deleted file itself is dropped here).
+        .filter(|f| crate::collect::is_test_file(f, project) && f.exists())
         .collect();
     let mut tests: Vec<PathBuf> = tests
         .into_iter()
@@ -785,7 +844,22 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{imports_of, parse_diff_hunks, parse_hunk_old_range, FileChange};
+    use super::{
+        imports_of, normalize_newlines, parse_diff_hunks, parse_hunk_old_range, FileChange,
+    };
+
+    #[test]
+    fn newline_normalization_makes_crlf_and_lf_hash_equal() {
+        // The whole point: CRLF working tree and LF blob must normalize equal.
+        assert_eq!(normalize_newlines(b"a\r\nb\r\n"), b"a\nb\n");
+        assert_eq!(normalize_newlines(b"a\nb\n"), b"a\nb\n");
+        // A lone CR (old-Mac, or mid-line) is NOT a line ending git rewrites,
+        // so it is preserved — only CR immediately before LF is dropped.
+        assert_eq!(normalize_newlines(b"a\rb"), b"a\rb");
+        assert_eq!(normalize_newlines(b"trailing\r"), b"trailing\r");
+        // Content difference still survives normalization.
+        assert_ne!(normalize_newlines(b"x\r\n"), normalize_newlines(b"y\r\n"));
+    }
 
     #[test]
     fn hunk_old_range_parsing() {
