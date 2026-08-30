@@ -73,6 +73,18 @@ pub struct Cli {
     #[arg(long)]
     doctor_md: Option<PathBuf>,
 
+    /// Fail the run when a doctor metric breaches a threshold (repeatable),
+    /// turning the advisory doctor signal into a CI gate. Grammar:
+    /// `metric OP value`, e.g. `--doctor-fail-on 'parallel_efficiency<30'
+    /// --doctor-fail-on 'wait_pct>50'`. Metrics: wall_seconds,
+    /// test_time_seconds, cpu_time_seconds, tests, workers, wait_pct,
+    /// wait_seconds, parallel_efficiency (efficiency %), realized_speedup,
+    /// imbalance_pct, long_pole_seconds. Operators: < <= > >= == !=. A metric
+    /// whose section didn't apply to this run (e.g. parallel_efficiency at
+    /// -n 1) is skipped, not failed. Implies doctor instrumentation.
+    #[arg(long = "doctor-fail-on", value_name = "COND")]
+    doctor_fail_on: Vec<String>,
+
     /// Parallel-readiness preflight: collect the suite twice and report tests
     /// whose ids are unstable (memory addresses / uuids / timestamps in
     /// parametrize ids) — the class that forces a suite to -n 0 — then run
@@ -496,6 +508,13 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--doctor-md=") => own.push(arg),
+            "--doctor-fail-on" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--doctor-fail-on=") => own.push(arg),
             "--junitxml" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -621,6 +640,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     let n = parse_numprocesses(&numprocesses)?;
     let passthrough = needs_passthrough_io(&args);
+    // Honor `--reruns` in single-worker mode by running a degenerate
+    // one-worker pool: the rerun loop is orchestrator-side, so an n=1 pool
+    // makes it live (with pytest-rerunfailures neutralized inside the worker,
+    // so nothing double-reruns) without coupling reruns to worker count. The
+    // byte-exact single-session path stays the default whenever no reruns are
+    // requested — passing `--reruns` is the opt-in that trades byte-exactness
+    // for retries. Passthrough (-s/--pdb/--co) needs pytest's own terminal and
+    // can't be pooled, so reruns stay inert there.
+    let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
+    // A one-worker rerun pool is 1 worker everywhere downstream (banner,
+    // doctor, report-json meta), never 0.
+    let n = if single_worker_reruns { 1 } else { n };
     let palette = color::Palette::detect(&args);
     let verbose = args
         .iter()
@@ -658,7 +689,11 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         None => progress::Mode::Dots,
     };
     let durations = parse_durations(&args);
-    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() {
+    // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
+    // missing operator aborts now, never silently as a gate that can't fire.
+    let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on)?;
+    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() || !doctor_gate.is_empty()
+    {
         // Workers inherit the environment; this flips on cpu/fixture
         // instrumentation in the shim plugin.
         std::env::set_var("RSTEST_DOCTOR", "1");
@@ -698,7 +733,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         println!("TAP version 13");
     }
     if !passthrough && mode != progress::Mode::Json && mode != progress::Mode::Tap {
-        let worker_desc = if n <= 1 {
+        let worker_desc = if single_worker_reruns {
+            "single worker (rerun pool; not byte-exact)".to_string()
+        } else if n <= 1 {
             "single worker (pytest-exact mode)".to_string()
         } else {
             format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
@@ -753,8 +790,22 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if reruns > 0 && (n <= 1 || passthrough) {
-        eprintln!("rstest: --reruns requires parallel mode (-n >= 2); ignoring");
+    if reruns > 0 && passthrough {
+        eprintln!(
+            "rstest: --reruns is ignored under -s/--pdb/--co \
+             (interactive single session); drop those flags to enable reruns"
+        );
+    }
+    if single_worker_reruns {
+        // Not silent: a run that would otherwise be byte-exact is now a
+        // one-worker pool (orchestrator dispatch order, gw0 worker id,
+        // pytest-rerunfailures neutralized). Say so on stderr so log scrapers
+        // and existing `[tool.rstest] reruns` configs see the switch, not just
+        // the banner.
+        eprintln!(
+            "rstest: --reruns at -n {numprocesses} runs a one-worker rerun pool \
+             (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
+        );
     }
     // --shuffle reorders the orchestrator's dispatch queue, so it needs
     // the full-collection pool. Refusing (not ignoring) matters: a user
@@ -763,6 +814,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         None => None,
         Some(v) => {
             if n <= 1 || passthrough {
+                if single_worker_reruns {
+                    anyhow::bail!(
+                        "--shuffle is not supported by the one-worker rerun pool \
+                         (--reruns at -n <= 1); raise -n to 2+ to combine shuffle \
+                         with reruns"
+                    );
+                }
                 anyhow::bail!(
                     "--shuffle needs the parallel pool (-n >= 2); in single-worker \
                      mode the session owns its own order (use pytest-randomly there)"
@@ -802,6 +860,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 None // 1/1 is the whole suite: no-op.
             } else {
                 if n <= 1 || passthrough {
+                    if single_worker_reruns {
+                        anyhow::bail!(
+                            "--shard is not supported by the one-worker rerun pool \
+                             (--reruns at -n <= 1); raise -n to 2+ to combine shard \
+                             with reruns"
+                        );
+                    }
                     anyhow::bail!(
                         "--shard needs the parallel pool (-n >= 2); the single-worker \
                          path runs the session's own full suite with no dispatch filter"
@@ -824,7 +889,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     };
-    let mut outcome = if n <= 1 || passthrough {
+    let mut outcome = if passthrough || (n <= 1 && !single_worker_reruns) {
         let io = if passthrough {
             worker::Stdio::Inherit
         } else {
@@ -1055,7 +1120,21 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         }
     }
 
-    if (cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some()) && !passthrough {
+    // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
+    // gate can't evaluate — say so instead of a silent false green.
+    if !doctor_gate.is_empty() && passthrough {
+        eprintln!(
+            "rstest: --doctor-fail-on is ignored under -s/--pdb/--co \
+             (no doctor instrumentation in an interactive single session)"
+        );
+    }
+    let mut doctor_gate_failed = false;
+    if (cli.doctor
+        || cli.doctor_json.is_some()
+        || cli.doctor_md.is_some()
+        || !doctor_gate.is_empty())
+        && !passthrough
+    {
         let report = doctor::analyze(
             &outcome.run,
             &merge_fixtures(outcome.fixtures),
@@ -1074,6 +1153,30 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             doctor::write_markdown(path, &report)?;
         }
         doctor::append_ci_summary(&report)?;
+        if !doctor_gate.is_empty() {
+            let gate = doctor::evaluate(&report, &doctor_gate);
+            for s in &gate.skipped {
+                eprintln!("rstest: --doctor-fail-on: {s}");
+            }
+            if gate.breaches.is_empty() {
+                eprintln!(
+                    "rstest: --doctor-fail-on: all {} condition(s) passed",
+                    doctor_gate.len()
+                );
+            } else {
+                // stderr, not stdout: --output json/tap keep stdout a pure
+                // machine stream, and the failure block must not corrupt it
+                // (same reason the human doctor render is gated above).
+                eprintln!(
+                    "\n{}",
+                    palette.bold_red("=========== doctor gate failures ===========")
+                );
+                for b in &gate.breaches {
+                    eprintln!("  {b}");
+                }
+                doctor_gate_failed = true;
+            }
+        }
     }
     if let Some(path) = &cli.junitxml {
         junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
@@ -1177,6 +1280,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             exitstatus = 1;
         }
     }
+    if doctor_gate_failed {
+        eprintln!("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
+        if exitstatus == 0 {
+            exitstatus = 1;
+        }
+    }
     Ok(exitstatus)
 }
 
@@ -1197,6 +1306,9 @@ fn execute_monorepo(
     if cli.watch {
         anyhow::bail!("--watch at a monorepo root is not supported yet; run inside a project");
     }
+    // Validate --doctor-fail-on once here so a malformed condition fails fast
+    // at the root, not as N separate child aborts (children re-validate too).
+    doctor::parse_conditions(&cli.doctor_fail_on)?;
     // The monorepo orchestrator prints per-project banners and a summary
     // around captured child output, so a single clean NDJSON stream is not
     // possible here. The merged --report-json document is the machine-
@@ -1381,6 +1493,11 @@ fn execute_monorepo(
         if let Some(p) = &cli.doctor_md {
             cmd.arg("--doctor-md")
                 .arg(root.join(mono::suffixed(p, &slug)));
+        }
+        // Each project gates its own doctor report; a breach fails that child's
+        // exit code, which the orchestrator aggregates.
+        for c in &cli.doctor_fail_on {
+            cmd.arg("--doctor-fail-on").arg(c);
         }
         cmd.args(args);
         let child = match cmd.spawn() {
@@ -1917,5 +2034,27 @@ mod tests {
             v(&["rstest", "--doctor-md", "d.md", "--doctor-md=e.md"])
         );
         assert_eq!(session, v(&["-v"]));
+    }
+
+    #[test]
+    fn split_owns_doctor_fail_on() {
+        // Both spaced and =-joined forms are rstest-owned; the value (which
+        // contains a `<`/`>`) must not leak into the pytest session args.
+        let (own, session) = split_args(v(&[
+            "--doctor-fail-on",
+            "parallel_efficiency<30",
+            "--doctor-fail-on=wait_pct>50",
+            "tests/",
+        ]));
+        assert_eq!(
+            own,
+            v(&[
+                "rstest",
+                "--doctor-fail-on",
+                "parallel_efficiency<30",
+                "--doctor-fail-on=wait_pct>50",
+            ])
+        );
+        assert_eq!(session, v(&["tests/"]));
     }
 }

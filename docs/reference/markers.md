@@ -30,15 +30,23 @@ def test_talks_to_flaky_service():
     ...
 ```
 
-Per-test rerun budget — works with or without a global
-[`--reruns`](cli.md#-reruns-n) (the mark overrides it for that test).
-Reruns are coordinated by the orchestrator, so the mark only takes effect
-at `-n ≥ 2` (like `--reruns`). A
-pass-after-retry reports as flaky exactly like global reruns.
-pytest-rerunfailures-compatible; the plugin itself is neutralized inside
-rstest workers to prevent double reruns. At `-n 0/1` the orchestrated
-reruns are off, so an installed pytest-rerunfailures handles the mark
-natively (its normal single-process behavior). Registered automatically.
+Per-test rerun budget — the mark overrides a global
+[`--reruns`](cli.md#-reruns-n) for that test. A pass-after-retry reports as
+flaky exactly like global reruns. pytest-rerunfailures-compatible; the plugin
+itself is neutralized inside rstest workers to prevent double reruns.
+Registered automatically.
+
+Reruns are coordinated by the orchestrator:
+
+- **At `-n ≥ 2`** the mark takes effect **with or without** a global
+  `--reruns`.
+- **At `-n 0/1`** the orchestrated retry runs only when a global `--reruns`
+  is set — that flag promotes the single-worker run to a one-worker rerun
+  pool (see [`--reruns`](cli.md#-reruns-n)). A flaky mark **on its own**, with
+  no global `--reruns`, does **not** trigger the pool at `-n 0/1`, so the
+  orchestrated retry is off; an installed pytest-rerunfailures then handles
+  the mark natively (its normal single-process behavior). Pass a global
+  `--reruns` to get rstest's own retry for marked tests in single-worker runs.
 
 ## `@pytest.mark.xdist_group`
 
