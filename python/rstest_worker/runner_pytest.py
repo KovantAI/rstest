@@ -7,6 +7,7 @@ rstest owns what happens around the session: scheduling, output, exit codes.
 
 import os
 import sys
+import zlib
 
 import pytest
 
@@ -31,11 +32,18 @@ def _randomly_seed(run_uid):
     """One run-level seed for pytest-randomly, derived from the shared run
     uid so every worker computes the same value (xdist's master broadcasts
     one seed; rstest has no master). 32-bit, matching pytest-randomly's own
-    default range (random.Random().getrandbits(32))."""
+    default range (random.Random().getrandbits(32)).
+
+    rstest's uid is hex (see RSTEST_RUN_UID in the CLI), so int(..., 16) is
+    the normal path. A non-hex or empty uid (e.g. one set by hand) must still
+    yield a stable, cross-worker-consistent seed rather than silently
+    collapsing every run to a single fixed value: crc32 of the raw bytes is
+    deterministic across processes (unlike builtin hash(), which is salted
+    per-process), so every worker still agrees. Empty uid maps to 0."""
     try:
         return int(run_uid, 16) & 0xFFFFFFFF
     except (ValueError, TypeError):
-        return 0
+        return zlib.crc32(str(run_uid).encode("utf-8")) & 0xFFFFFFFF
 
 
 def _is_dist_internal(plugin):
