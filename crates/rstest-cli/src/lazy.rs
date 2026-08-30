@@ -349,7 +349,7 @@ pub fn run_lazy_pool(
                 let crashed = states[idx].running.take();
                 states[idx].attempt.clear();
                 states[idx].attempt_failed = false;
-                let mut orphaned: Vec<String> = states[idx].outstanding.drain(..).collect();
+                let mut orphaned: Vec<String> = std::mem::take(&mut states[idx].outstanding);
                 // Collected-but-undispatched ids die with their owner's
                 // item cache; survivors re-collect the files.
                 orphaned.extend(states[idx].own_queue.drain(..));
