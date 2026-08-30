@@ -4,10 +4,11 @@
 [![codecov](https://codecov.io/gh/KovantAI/rstest/graph/badge.svg)](https://codecov.io/gh/KovantAI/rstest)
 [![PyPI](https://img.shields.io/pypi/v/rstest)](https://pypi.org/project/rstest/)
 [![Python versions](https://img.shields.io/pypi/pyversions/rstest)](https://pypi.org/project/rstest/)
-[![License](https://img.shields.io/pypi/l/rstest)](https://github.com/KovantAI/rstest/blob/main/LICENSE-MIT)
+[![Wheel](https://img.shields.io/pypi/wheel/rstest)](https://pypi.org/project/rstest/)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/KovantAI/rstest#license)
 [![Downloads](https://static.pepy.tech/badge/rstest/month)](https://pepy.tech/project/rstest)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Docs](https://readthedocs.org/projects/rstest/badge/?version=latest)](https://rstest.readthedocs.io/)
+[![GitHub stars](https://img.shields.io/github/stars/KovantAI/rstest)](https://github.com/KovantAI/rstest/stargazers)
 
 A fast, pytest-compatible test runner. Rust orchestration, your tests
 unchanged: same plugins, same fixtures, same outcomes — parallel by design,
