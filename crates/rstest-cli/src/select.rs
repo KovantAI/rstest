@@ -355,7 +355,10 @@ fn load_coverage_index() -> Option<CoverageIndex> {
 /// Coverage-aware selection: consult the line->test index to pick the exact
 /// tests whose recorded coverage executed the changed lines, falling back to
 /// import-graph selection for anything the index can't vouch for (brand-new
-/// code, files it never measured, untracked files) and to a full run for
+/// code, files it never measured, untracked files, or a changed line with no
+/// recorded coverage — e.g. a `def`/decorator/module-level line, which runs at
+/// import time under the empty context and never enters the index) and to a
+/// full run for
 /// non-Python/config changes. With no index (cold cache) it is byte-identical
 /// to `affected_tests`. Over-selection is safe; the rails never under-select
 /// against unknown code — but the index is trusted for lines it *did* record,
@@ -393,17 +396,28 @@ pub fn affected_with_coverage(
         }
         // Look up the OLD-side changed lines (index is keyed pre-change).
         let key = file.to_string_lossy().replace('\\', "/");
-        if let Some(lines) = index.files.get(&key) {
+        let indexed = index.files.get(&key);
+        // A changed old-side line the index has no nodeid for is a line the
+        // index cannot vouch for: it executed only at import/collection time
+        // (a `def`/decorator/class/module-level line lands in the empty
+        // context and is dropped from the index) or is a non-executable line
+        // (comment/blank). Trusting the empty lookup would select ZERO tests
+        // for that change — an under-selection the module's "err toward
+        // running MORE" contract forbids. Route such a file to the graph.
+        let mut uncovered_line = false;
+        if let Some(lines) = indexed {
             for &(start, end) in &change.old_ranges {
                 for line in start..=end {
-                    if let Some(ids) = lines.get(&line) {
-                        nodeids.extend(ids.iter().cloned());
+                    match lines.get(&line) {
+                        Some(ids) => nodeids.extend(ids.iter().cloned()),
+                        None => uncovered_line = true,
                     }
                 }
             }
         }
-        // Brand-new code, or a file the index never measured, needs the graph.
-        if change.has_new_code || !index.files.contains_key(&key) {
+        // Brand-new code, a file the index never measured, or a changed line
+        // the index can't account for needs the conservative graph.
+        if change.has_new_code || indexed.is_none() || uncovered_line {
             fallback.push(file.clone());
         }
     }

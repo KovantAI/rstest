@@ -1482,6 +1482,14 @@ def main():
     got, _ = cov_changed_targets(lambda: edit_line("test_a.py", "== 1\n", "== 1  # x\n"))
     check("cov-select: changed test file runs itself", got == ["test_a.py::test_a"], str(got))
 
+    # Rail: a `def` line runs at import time under the empty context, so it is
+    # never in the index. Trusting the empty lookup would select ZERO tests;
+    # instead the file must fall back to import-graph (both tests).
+    got, _ = cov_changed_targets(
+        lambda: edit_line("mymod.py", "def used_by_a():\n", "def used_by_a(x=1):\n"))
+    check("cov-select: edited def line falls back to import-graph (both)",
+          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+
     # Rail: cold cache (no index) is identical to import-graph selection.
     shutil.rmtree(cs / ".rstest_cache", ignore_errors=True)
     got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n"))
