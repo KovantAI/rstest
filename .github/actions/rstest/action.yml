@@ -1,0 +1,306 @@
+name: "rstest"
+description: >-
+  Run the rstest test runner in CI: uv-aware install, persistent .rstest_cache,
+  --changed base-ref handling, and an optional fail-ratio gate for
+  nondeterministic (real-LLM) suites. Wraps the rstest CLI; native features
+  (GitHub annotations via --output github, doctor job-summary, flaky
+  --warning annotations) are used directly, not re-implemented.
+
+inputs:
+  args:
+    description: "Extra rstest flags / test paths appended verbatim (e.g. '-n auto -m integration')."
+    required: false
+    default: "-n auto"
+  python-version:
+    description: "If set, runs actions/setup-python at this version; else assumes Python is already set up."
+    required: false
+    default: ""
+  runner:
+    description: "How to invoke rstest: 'uv' (uv run rstest), 'plain' (rstest), or 'auto' (uv when uv.lock / [tool.uv] is present)."
+    required: false
+    default: "auto"
+  install:
+    description: "Install command override. Empty = infer from runner (uv -> 'uv sync --dev', else 'pip install rstest[==version]')."
+    required: false
+    default: ""
+  version:
+    description: "Pin the rstest release to install (plain runner only; uv resolves from the lockfile). Echoed for reproducibility."
+    required: false
+    default: ""
+  working-directory:
+    description: "Directory to run in (monorepo project root)."
+    required: false
+    default: "."
+  cache:
+    description: "Restore/save .rstest_cache (durations + flake history) across runs."
+    required: false
+    default: "true"
+  cache-key-prefix:
+    description: "Prefix for the cache key; bump to invalidate all cached baselines."
+    required: false
+    default: "rstest-cache"
+  output:
+    description: "rstest --output style. Default 'github' emits ::error per failure and ::warning for flaky reruns. Use dots/verbose/bar/gitlab/azure/teamcity as needed."
+    required: false
+    default: "github"
+  junit:
+    description: "--junitxml path; empty to skip. Required for the fail-ratio gate."
+    required: false
+    default: "junit.xml"
+  changed:
+    description: "'false', 'true' (--changed vs base-ref), or 'strict' (--changed-strict: full run on unconnectable files, exit 5 on nothing-affected)."
+    required: false
+    default: "false"
+  base-ref:
+    description: "Base git ref for --changed (e.g. origin/main). Fetched if the clone is shallow. Empty + changed => infers the PR base."
+    required: false
+    default: ""
+  reruns:
+    description: "--reruns N; empty to skip."
+    required: false
+    default: ""
+  rerun-on:
+    description: "Preset name(s) -> --only-rerun regex. 'http-5xx' => 429|500|502|503|504|Too Many Requests|ServerBusy; comma-joinable. Raw regex via args still works."
+    required: false
+    default: ""
+  worker-timeout:
+    description: "--worker-timeout SECS: kill a worker stuck on one test past this (hang/container-boot backstop)."
+    required: false
+    default: ""
+  durations-regress:
+    description: "--durations-regress RATIO. Fails loudly if no baseline was restored (unless require-baseline=false), instead of silently skipping."
+    required: false
+    default: ""
+  require-baseline:
+    description: "When durations-regress is set, fail if no baseline cache exists rather than running an inert gate."
+    required: false
+    default: "true"
+  doctor:
+    description: "Add --doctor (diagnostics auto-published to the job summary)."
+    required: false
+    default: "false"
+  quarantine:
+    description: "--quarantine FILE: demote matching-test failures to non-fatal."
+    required: false
+    default: ""
+  shard:
+    description: "1-based shard index K for --shard K/N (with shard-total)."
+    required: false
+    default: ""
+  shard-total:
+    description: "Total shards N for --shard K/N. Cross-shard JUnit merge is a workflow-level concern (see README)."
+    required: false
+    default: ""
+  fail-under-ratio:
+    description: "Max tolerated fraction of assertion failures (0.0-1.0) for nondeterministic suites; empty = any failure fails. Requires junit."
+    required: false
+    default: ""
+  hard-fail-on:
+    description: "Regex; a failure whose text matches fails the job immediately, bypassing fail-under-ratio (real bug, not nondeterminism)."
+    required: false
+    default: ""
+  upload-junit:
+    description: "Upload the JUnit XML as a build artifact."
+    required: false
+    default: "false"
+
+outputs:
+  exit-code:
+    description: "rstest process exit code (before any fail-ratio gate)."
+    value: ${{ steps.run.outputs.exit-code }}
+  junit-path:
+    description: "Path to the JUnit XML written (empty if none)."
+    value: ${{ steps.run.outputs.junit-path }}
+  passed:
+    description: "Number of passed tests parsed from JUnit (empty if no junit)."
+    value: ${{ steps.gate.outputs.passed }}
+  failed:
+    description: "Number of failed+errored tests parsed from JUnit (empty if no junit)."
+    value: ${{ steps.gate.outputs.failed }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      if: inputs.python-version != ''
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Resolve runner + cache key
+      id: cfg
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        # Resolve runner mode.
+        mode="${{ inputs.runner }}"
+        if [ "$mode" = "auto" ]; then
+          if [ -f uv.lock ] || grep -q '^\[tool\.uv\]' pyproject.toml 2>/dev/null; then
+            mode="uv"
+          else
+            mode="plain"
+          fi
+        fi
+        echo "mode=$mode" >>"$GITHUB_OUTPUT"
+
+        # Cache key segmented by OS + python + lockfile hash so a 3.12 run
+        # never seeds a 3.13 shard (durations/flakes are interpreter-specific).
+        py="${{ inputs.python-version }}"
+        [ -n "$py" ] || py="$(python -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo unknown)"
+        lockhash=none
+        for f in uv.lock poetry.lock requirements.txt pyproject.toml; do
+          if [ -f "$f" ]; then
+            lockhash="$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | cut -c1-16)"
+            break
+          fi
+        done
+        base="${{ inputs.cache-key-prefix }}-${RUNNER_OS}-py${py}-${lockhash}"
+        echo "cache-key=${base}-${GITHUB_RUN_ID}" >>"$GITHUB_OUTPUT"
+        echo "cache-restore=${base}-" >>"$GITHUB_OUTPUT"
+
+    - name: Restore rstest cache
+      if: inputs.cache == 'true'
+      id: cache-restore
+      uses: actions/cache/restore@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # v4.1.2
+      with:
+        path: ${{ inputs.working-directory }}/.rstest_cache
+        key: ${{ steps.cfg.outputs.cache-key }}
+        restore-keys: |
+          ${{ steps.cfg.outputs.cache-restore }}
+
+    - name: Fetch base ref for --changed
+      if: inputs.changed != 'false' && inputs.base-ref != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        ref="${{ inputs.base-ref }}"
+        remote_ref="${ref#origin/}"
+        # Deepen a shallow clone so --changed can diff against the base.
+        git fetch --no-tags --depth=1 origin "$remote_ref" || \
+          git fetch --no-tags origin "$remote_ref" || true
+        if ! git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+          echo "::error::base-ref '$ref' is not reachable after fetch. Set fetch-depth: 0 on checkout, or pass a valid base-ref." >&2
+          exit 1
+        fi
+
+    - name: Install rstest
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        cmd="${{ inputs.install }}"
+        if [ -z "$cmd" ]; then
+          if [ "${{ steps.cfg.outputs.mode }}" = "uv" ]; then
+            cmd="uv sync --dev"
+          elif [ -n "${{ inputs.version }}" ]; then
+            cmd="pip install rstest==${{ inputs.version }}"
+          else
+            cmd="pip install rstest"
+          fi
+        fi
+        echo "install: $cmd"
+        eval "$cmd"
+
+    - name: Run rstest
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -uo pipefail
+        prefix=""
+        [ "${{ steps.cfg.outputs.mode }}" = "uv" ] && prefix="uv run"
+
+        cmd=($prefix rstest)
+
+        # --output
+        [ -n "${{ inputs.output }}" ] && cmd+=(--output "${{ inputs.output }}")
+
+        # junit
+        junit="${{ inputs.junit }}"
+        if [ -n "$junit" ]; then cmd+=(--junitxml "$junit"); fi
+        echo "junit-path=$junit" >>"$GITHUB_OUTPUT"
+
+        # --changed / --changed-strict
+        case "${{ inputs.changed }}" in
+          strict) if [ -n "${{ inputs.base-ref }}" ]; then cmd+=(--changed-strict --changed="${{ inputs.base-ref }}"); else cmd+=(--changed-strict); fi ;;
+          true)   if [ -n "${{ inputs.base-ref }}" ]; then cmd+=(--changed="${{ inputs.base-ref }}"); else cmd+=(--changed); fi ;;
+        esac
+
+        # reruns + rerun-on presets
+        [ -n "${{ inputs.reruns }}" ] && cmd+=(--reruns "${{ inputs.reruns }}")
+        preset_regex=""
+        IFS=',' read -ra presets <<< "${{ inputs.rerun-on }}"
+        for p in "${presets[@]}"; do
+          p="$(echo "$p" | xargs)"
+          case "$p" in
+            http-5xx) r='429|500|502|503|504|Too Many Requests|ServerBusy' ;;
+            timeouts) r='Timeout|TimeoutError|APITimeoutError|APIConnectionError' ;;
+            "" ) continue ;;
+            * ) r="$p" ;;
+          esac
+          [ -z "$preset_regex" ] && preset_regex="$r" || preset_regex="$preset_regex|$r"
+        done
+        [ -n "$preset_regex" ] && cmd+=(--only-rerun "$preset_regex")
+
+        [ -n "${{ inputs.worker-timeout }}" ] && cmd+=(--worker-timeout "${{ inputs.worker-timeout }}")
+        [ -n "${{ inputs.durations-regress }}" ] && cmd+=(--durations-regress "${{ inputs.durations-regress }}")
+        [ "${{ inputs.doctor }}" = "true" ] && cmd+=(--doctor)
+        [ -n "${{ inputs.quarantine }}" ] && cmd+=(--quarantine "${{ inputs.quarantine }}")
+        if [ -n "${{ inputs.shard }}" ] && [ -n "${{ inputs.shard-total }}" ]; then
+          cmd+=(--shard "${{ inputs.shard }}/${{ inputs.shard-total }}")
+        fi
+
+        # Baseline guard: a durations-regress gate with no restored baseline is
+        # an inert no-op that masquerades as green. Fail loudly unless opted out.
+        if [ -n "${{ inputs.durations-regress }}" ] && [ "${{ inputs.require-baseline }}" = "true" ]; then
+          if [ ! -f .rstest_cache/durations.json ]; then
+            echo "::error::--durations-regress set but no duration baseline in .rstest_cache (cache miss). The gate would be a silent no-op. Seed the cache from an authoritative run or set require-baseline: false." >&2
+            exit 1
+          fi
+        fi
+
+        # append verbatim args / paths last
+        # shellcheck disable=SC2206
+        extra=(${{ inputs.args }})
+        cmd+=("${extra[@]}")
+
+        echo "+ ${cmd[*]}"
+        "${cmd[@]}"
+        code=$?
+        echo "exit-code=$code" >>"$GITHUB_OUTPUT"
+
+        # When a fail-ratio gate is active, defer the pass/fail decision to it.
+        if [ -n "${{ inputs.fail-under-ratio }}" ]; then
+          exit 0
+        fi
+        exit $code
+
+    - name: Fail-ratio gate
+      id: gate
+      if: always() && inputs.fail-under-ratio != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        python "${{ github.action_path }}/ratio_gate.py" \
+          --junit "${{ inputs.junit }}" \
+          --fail-under-ratio "${{ inputs.fail-under-ratio }}" \
+          --hard-fail-on "${{ inputs.hard-fail-on }}" \
+          --rstest-exit "${{ steps.run.outputs.exit-code }}"
+
+    - name: Save rstest cache
+      if: always() && inputs.cache == 'true'
+      uses: actions/cache/save@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # v4.1.2
+      with:
+        path: ${{ inputs.working-directory }}/.rstest_cache
+        key: ${{ steps.cfg.outputs.cache-key }}
+
+    - name: Upload JUnit
+      if: always() && inputs.upload-junit == 'true' && inputs.junit != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: rstest-junit${{ inputs.shard != '' && format('-shard-{0}', inputs.shard) || '' }}
+        path: ${{ inputs.working-directory }}/${{ inputs.junit }}
+        retention-days: 7

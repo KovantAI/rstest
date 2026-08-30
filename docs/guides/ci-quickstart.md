@@ -15,6 +15,35 @@ smarter when persisted between runs.
 
 ## GitHub Actions
 
+The quickest path is the bundled composite action, which wraps install, the
+duration cache (correctly keyed), `--changed` base-ref handling, and an
+optional fail-ratio gate:
+
+```yaml
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: KovantAI/rstest/.github/actions/rstest@v1
+        with:
+          python-version: "3.13"
+          args: "-n auto"
+          upload-junit: true
+```
+
+That defaults `--output github` (so failures show as `::error` annotations and
+flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
+`junit.xml`. See the [action README][action] for all inputs (`changed`,
+`durations-regress`, `reruns`/`rerun-on`, `fail-under-ratio`, `shard`, …).
+
+[action]: https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest
+
+### Under the hood
+
+The action is a thin wrapper. If you prefer raw YAML — or need something the
+action does not expose — the equivalent steps are:
+
 ```yaml
 jobs:
   tests:
@@ -44,7 +73,9 @@ jobs:
             rstest-durations-
 
       - name: test
-        run: rstest -n auto --junitxml junit.xml
+        # --output github emits ::error per failure and ::warning for flaky
+        # reruns; --doctor auto-publishes diagnostics to the job summary.
+        run: rstest -n auto --output github --junitxml junit.xml
 
       # Long pole? Fan the suite across a runner matrix with --shard K/N —
       # see the Sharding guide.
