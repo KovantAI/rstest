@@ -656,8 +656,8 @@ def main():
 
     print("== one-arg pytest_testnodedown ==")
     g.write("nodeonearg/conftest.py", NODEONEARG_CONFTEST)
-    # Two tests so both workers get work and each fires configure_node /
-    # testnodedown — a 1-test suite might leave gw1 idle and unprovisioned.
+    # Two tests so both workers get real work (scheduling may still put both
+    # on gw0, but every worker fires its own testnodedown regardless).
     g.write("nodeonearg/test_node.py", "def test_a(): assert True\n\n\ndef test_b(): assert True\n")
     oa_log = g.tmp / "node_onearg.log"
     clear_hook_log(oa_log)

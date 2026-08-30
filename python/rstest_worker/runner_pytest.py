@@ -76,22 +76,32 @@ def _call_node_impl(impl, node, **kwargs):
     ``node`` goes by keyword when the signature is introspectable: pluggy
     guarantees the param is named ``node``, and a catch-all ``(**kwargs)``
     impl receives it only via kwargs — a positional would raise
-    ``TypeError: takes 0 positional arguments``. For un-introspectable C
-    hooks (which often reject keyword args) it goes positionally instead."""
+    ``TypeError: takes 0 positional arguments``. A positional-only ``node``
+    param is the mirror case and goes positionally. For un-introspectable C
+    hooks (which often reject keyword args) it goes positionally too."""
     params = _node_impl_params(impl)
     if params is None:
         # No introspectable signature (builtin / C hook). Pass node
         # positionally (C funcs often reject keywords), then retry node-only
         # if the extra kwargs don't bind — a one-arg impl would otherwise
-        # TypeError on error=. The mismatch raises at bind time (before the
-        # hook body), so the retry can't double-execute side effects.
+        # TypeError on error=.
         try:
             return impl(node, **kwargs)
-        except TypeError:
+        except TypeError as exc:
+            # Retry ONLY when the impl was never entered (arg-binding
+            # failure: the traceback has no inner frame). If the impl body
+            # itself raised TypeError, its side effects already ran and a
+            # retry would double-execute them — re-raise instead.
+            tb = exc.__traceback__
+            if tb is not None and tb.tb_next is not None:
+                raise
             return impl(node)
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return impl(node=node, **kwargs)
     accepted = {k: v for k, v in kwargs.items() if k in params}
+    node_param = params.get("node")
+    if node_param is not None and node_param.kind is inspect.Parameter.POSITIONAL_ONLY:
+        return impl(node, **accepted)
     return impl(node=node, **accepted)
 
 
