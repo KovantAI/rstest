@@ -773,6 +773,17 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
              (interactive single session); drop those flags to enable reruns"
         );
     }
+    if single_worker_reruns {
+        // Not silent: a run that would otherwise be byte-exact is now a
+        // one-worker pool (orchestrator dispatch order, gw0 worker id,
+        // pytest-rerunfailures neutralized). Say so on stderr so log scrapers
+        // and existing `[tool.rstest] reruns` configs see the switch, not just
+        // the banner.
+        eprintln!(
+            "rstest: --reruns at -n {numprocesses} runs a one-worker rerun pool \
+             (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
+        );
+    }
     // --shuffle reorders the orchestrator's dispatch queue, so it needs
     // the full-collection pool. Refusing (not ignoring) matters: a user
     // probing for order dependence must not get a silently ordered run.
@@ -780,6 +791,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         None => None,
         Some(v) => {
             if n <= 1 || passthrough {
+                if single_worker_reruns {
+                    anyhow::bail!(
+                        "--shuffle is not supported by the one-worker rerun pool \
+                         (--reruns at -n <= 1); raise -n to 2+ to combine shuffle \
+                         with reruns"
+                    );
+                }
                 anyhow::bail!(
                     "--shuffle needs the parallel pool (-n >= 2); in single-worker \
                      mode the session owns its own order (use pytest-randomly there)"
@@ -819,6 +837,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 None // 1/1 is the whole suite: no-op.
             } else {
                 if n <= 1 || passthrough {
+                    if single_worker_reruns {
+                        anyhow::bail!(
+                            "--shard is not supported by the one-worker rerun pool \
+                             (--reruns at -n <= 1); raise -n to 2+ to combine shard \
+                             with reruns"
+                        );
+                    }
                     anyhow::bail!(
                         "--shard needs the parallel pool (-n >= 2); the single-worker \
                          path runs the session's own full suite with no dispatch filter"

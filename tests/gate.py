@@ -1383,8 +1383,10 @@ def main():
     check(
         "single-worker reruns fire at -n 1",
         r.returncode == 0 and "1 flaky" in r.stdout
-        and "single worker (rerun pool" in r.stdout.splitlines()[0],
-        f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stdout[-200:],
+        and "single worker (rerun pool" in r.stdout.splitlines()[0]
+        # the byte-exact -> pool switch is announced on stderr, not just the banner
+        and "not byte-exact" in r.stderr,
+        f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stderr[-200:],
     )
     swm.unlink(missing_ok=True)
     r = g.run("test_flaky.py", "-n", "0", "--reruns", "2", cwd=fdir,
