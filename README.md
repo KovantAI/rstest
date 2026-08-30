@@ -26,8 +26,17 @@ aiohttp, 4,469 tests:   pytest 197s  →  rstest 68s
 In any pytest project:
 
 ```bash
-pip install rstest
+pip install rstest      # or: uv pip install rstest
 rstest
+```
+
+Also works with your tool of choice:
+
+```bash
+uv add rstest           # uv projects
+poetry add rstest       # Poetry
+pdm add rstest          # PDM
+pipx install rstest     # isolated CLI install
 ```
 
 No config. No test changes. If `pytest` runs it, `rstest` runs it — in
