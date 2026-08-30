@@ -178,9 +178,15 @@ The stream closes with exactly one `sessionfinish`:
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | always `"sessionfinish"` |
-| `exitstatus` | int | pytest-compatible exit code |
+| `exitstatus` | int | pytest-compatible exit code for the **test session** |
 | `duration` | float | total wall time in seconds |
 | `counts` | object | outcome tallies — the same keys and accounting as the snapshot's `meta.counts` |
+
+`exitstatus` reflects the test session only. Post-run gates
+(`--doctor-fail-on`, `--durations-regress`) run **after** this envelope is
+streamed, so they cannot change it — a green session that fails a gate still
+reports `"exitstatus": 0` here while the **process** exits non-zero. Key CI
+success off the process exit code, not this field.
 
 Unlike the snapshot and discovery documents, the stream is **not versioned**
 (no `schema` field) and should be treated as experimental: consume by

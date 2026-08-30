@@ -552,6 +552,21 @@ The failure block prints to stderr, so `--output json`/`tap` stay pure on
 stdout. Under a passthrough-IO flag (`-s`/`--pdb`/`--co`) there is no doctor
 instrumentation, so the gate can't run — rstest warns instead of passing green.
 
+Because the gate is a doctor run, it also **publishes the full doctor report**
+the way any doctor run does — appended to `$GITHUB_STEP_SUMMARY` on GitHub
+Actions, `buildkite-agent annotate` on Buildkite — even when you pass only
+`--doctor-fail-on` (no `--doctor`). That is intentional: a failed gate shows
+its report on the run page so you can see *why* it failed. Pass `--doctor-md`
+for a file copy, or run in a CI with no summary surface if you want gate-only.
+
+Exit-code note for machine consumers: the gate affects the **process exit
+code** (1 on breach), which is authoritative. It does **not** rewrite the
+`exitstatus` inside an already-streamed `--output json`/`tap` `sessionfinish`
+envelope — that field is emitted mid-run and reflects the *test* outcome, so a
+green session that fails the gate still shows `"exitstatus": 0` there. Key CI
+success off the process exit code, not the envelope field (same as
+[`--durations-regress`](#-durations-regress-ratio)).
+
 The conditions can live in your CI config or `pyproject.toml` invocation, so
 non-GitHub CIs get the same gate the composite action offers externally.
 
