@@ -68,10 +68,17 @@ def build_index(cov):
     data = cov.get_data()
     if not any(c for c in data.measured_contexts()):
         return  # nothing to index (contexts empty)
-    cwd = os.getcwd()
+    # realpath both sides so a Windows 8.3 short name (TEMP is often
+    # C:\Users\RUNNER~1\...) or a junction on one side doesn't make an
+    # in-tree file look external and get skipped. coverage records
+    # canonicalized paths; getcwd() may still carry the short form.
+    cwd = os.path.realpath(os.getcwd())
     files = {}
     for path in data.measured_files():
-        rel = os.path.relpath(path, cwd)
+        try:
+            rel = os.path.relpath(os.path.realpath(path), cwd)
+        except ValueError:
+            continue  # different drive on Windows -> not in the project tree
         if rel.startswith(".."):  # outside the project tree
             continue
         rel = rel.replace(os.sep, "/")
