@@ -474,6 +474,40 @@ def main():
     r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
     check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
+    print("== interpreter probe cache (heals after deps installed) ==")
+    # Regression: a NEGATIVE probe (interpreter present, worker shim not
+    # importable — e.g. msgpack missing) must NOT be persisted to the on-disk
+    # probe cache. The cache keys on the binary's mtime, which a `pip install`
+    # into site-packages leaves unchanged, so a cached `false` would survive the
+    # very install that fixes it — "no usable Python interpreter found" forever.
+    bare = g.tmp / "bareenv"
+    shutil.rmtree(bare, ignore_errors=True)
+    subprocess.run([find_python(), "-m", "venv", str(bare)], check=True)  # no deps -> no msgpack
+    barepy = venv_bin(bare, "python")
+    probe_cache = g.tmp / "probecache"
+    shutil.rmtree(probe_cache, ignore_errors=True)
+    g.write("probe/test_p.py", "def test_ok(): assert True\n")
+    # 1) msgpack absent: the interpreter runs but can't host a worker, so the
+    #    probe is negative and (with the fix) is not written to the cache.
+    r = g.run("probe", "--python", str(barepy),
+              env_extra={"RSTEST_CACHE_DIR": str(probe_cache)})
+    check(
+        "probe: msgpack-less interpreter rejected",
+        r.returncode != 0 and ("worker shim" in r.stderr or "no usable" in r.stderr.lower()),
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # 2) install the worker deps into the SAME interpreter (binary mtime
+    #    unchanged), then rerun with the SAME cache dir: a stale cached negative
+    #    would still reject it; the fix re-probes negatives so it now succeeds.
+    subprocess.run([str(venv_bin(bare, "pip")), "install", "-q", *BASE_DEPS], check=True)
+    r = g.run("probe", "--python", str(barepy),
+              env_extra={"RSTEST_CACHE_DIR": str(probe_cache)})
+    check(
+        "probe: heals after deps installed (negative not cached)",
+        r.returncode == 0 and "1 passed" in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-200:] + " || " + r.stdout[-200:],
+    )
+
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
     # initial collection pass in any worker.
@@ -936,9 +970,9 @@ def main():
             capture_output=True,
         )
     else:
-        venv_bin = local_venv / "bin"
-        venv_bin.mkdir(parents=True, exist_ok=True)
-        local_py = venv_bin / "python"
+        local_bin = local_venv / "bin"
+        local_bin.mkdir(parents=True, exist_ok=True)
+        local_py = local_bin / "python"
         # An exec shim, not a symlink: a bare symlink loses pyvenv.cfg
         # resolution and lands on the base interpreter (no msgpack).
         local_py.write_text(f'#!/bin/sh\nexec "{g.venv}/bin/python" "$@"\n')
