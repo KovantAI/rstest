@@ -20,7 +20,7 @@ The classes, by what actually differs:
 | Exact assert on a fuzzy value | the outcome | rich | assert the tolerant set |
 | Wall-clock deadline | the outcome | urllib3, anyio, django-allauth | mock the clock |
 | Real OS resource | the outcome | werkzeug, httpx | bind ephemeral / mark serial |
-| Plugin master-hook gating | (was a crash) | pytest-retry | — (rstest-side, fixed) |
+| Plugin master-hook gating | (was a crash) | pytest-retry, pytest-rerunfailures | — (rstest-side, fixed) |
 
 ---
 
@@ -258,6 +258,22 @@ The plugin's controller branch then fires per worker (each self-provisions an
 ephemeral `ReportServer`), and `configure_node` hooks that read
 later-stashed state are retried at `pytest_sessionstart`. See
 [xdist hooks](../concepts/xdist-hooks.md). No upstream change required.
+
+### pytest-rerunfailures `sock_port`
+
+pytest-rerunfailures with pytest-xdist installed splits master vs. worker on
+`workerinput` **presence** (not `numprocesses`), so every rstest pool worker
+takes its client branch and reads `workerinput["sock_port"]` — a key only an
+xdist master sets → `KeyError` at configure under `-n ≥ 2`. Unlike pytest-retry
+there is no knob to flip it to the self-provisioning branch.
+
+**Fix (rstest side, done):** rstest wants the plugin inert under the pool
+anyway (it owns reruns natively — crash-aware, `@mark.flaky` — and an active
+plugin would double-rerun), so it **unregisters** it in `pytest_cmdline_main`,
+before the historic `pytest_configure` call that would otherwise read the
+missing key. At `-n 0` the plugin is left native. See
+[xdist hooks](../concepts/xdist-hooks.md#when-self-provisioning-cant-apply-pytest-rerunfailures).
+No upstream change required.
 
 ---
 

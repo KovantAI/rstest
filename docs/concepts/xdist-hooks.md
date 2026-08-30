@@ -39,6 +39,25 @@ the plugin would instead take its *worker* branch and read a
 the width lets each worker self-provision its own server, the same way the
 follower-DB pattern self-provisions.
 
+## When self-provisioning can't apply: pytest-rerunfailures
+
+Not every controller-service plugin can be steered to a master branch.
+pytest-rerunfailures gates its master/client split on **`workerinput`
+presence** (`is_master = not hasattr(config, "workerinput")`), not on
+`numprocesses` — and every rstest pool worker has a `workerinput`, so the
+plugin always takes its *client* branch and reads
+`workerinput["sock_port"]`, a key only an xdist master sets. There is no
+knob (as there is for pytest-retry) to flip it to the self-provisioning
+branch. rstest wants the plugin inert under the pool anyway — it owns reruns
+natively (crash-aware, `@mark.flaky`), and leaving the plugin active would
+double-rerun — so it simply **unregisters** it. The timing matters:
+`pytest_configure` is dispatched via `call_historic`, which snapshots the
+impl list, so unregistering during configure is too late (the already-queued
+`pytest_configure` still runs and `KeyError`s). rstest therefore drops the
+plugin in `pytest_cmdline_main`, after entry-point plugins load but before
+`_do_configure`. At `-n 0` (no worker id) the plugin is left untouched and
+keeps its native behavior.
+
 For hooks that are **pure functions of the node** — read `node.gateway.id`,
 fill `node.workerinput`, provision a resource derived from them — the
 emulation produces the same observable result as xdist. The call *timing*

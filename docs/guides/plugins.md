@@ -35,10 +35,11 @@ rstest's compatibility battery, on real suites:
   `pytest_handlecrashitem`, `pytest_xdist_node_collection_finished` —
   are silent no-ops: scheduling and crash handling are the Rust
   orchestrator's job and are not extensible from Python.
-- **pytest-rerunfailures**: rstest intercepts `--reruns` and handles
-  reruns itself (crash-aware), so the plugin stays inert rather than
-  double-rerunning. rstest's `--reruns` needs `-n ≥ 2` (ignored at
-  `-n 0/1`).
+- **pytest-rerunfailures**: inside pool workers rstest unregisters the
+  plugin (before `pytest_configure`, so its xdist `sock_port` client branch
+  never fires) and handles reruns itself — crash-aware, honoring
+  `@mark.flaky`. rstest's `--reruns` fire at every worker count, including
+  `-n 0/1`. At `-n 0` with no `--reruns` the plugin keeps its own behavior.
 
 ## Tested compatibility
 
@@ -57,19 +58,22 @@ run it at `-n 0` (or use rstest's native equivalent).
 | pytest-benchmark | Caveat | auto-disables at `-n ≥ 2` (sees the pool as xdist); run benchmarks at `-n 0` and read numbers from `--benchmark-json` (the stats table isn't painted — rstest owns the terminal) |
 | pytest-order | Caveat | ordering only holds within a worker at `-n ≥ 2`; use `-n 0`, or `--dist loadfile`/`loadscope` to keep an ordered group on one worker |
 | pytest-randomly | Works | rstest synthesizes the `randomly_seed` key xdist's master would inject, derived from the run uid so every worker agrees on one reproducible seed. An explicit `--randomly-seed=<n>` still wins. (rstest's native [`--shuffle`](../reference/cli.md#-shuffleseed) remains available and is also parallel-safe.) |
-| pytest-rerunfailures | Parallel-unsafe | with pytest-xdist also installed it raises `KeyError: 'sock_port'` at `-n ≥ 2` (the crash is at plugin *configure*, before rstest's runtime neutralization of its reruns); use rstest's native [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun` instead (crash-aware, handles `@mark.flaky`) |
+| pytest-rerunfailures | Works | inside pool workers rstest unregisters it *before* `pytest_configure`, so its xdist `sock_port` client branch never fires (the old `KeyError: 'sock_port'` at `-n ≥ 2` with pytest-xdist installed), and rstest owns reruns natively — crash-aware, honoring `@mark.flaky` and [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun`. At `-n 0` the plugin keeps its own behavior. |
 | pytest-html | Parallel-unsafe | its pytest-metadata dependency defines a one-arg `pytest_testnodedown(node)` that rstest's emulation calls with an `error=` kwarg → `TypeError` at `-n ≥ 2`, and no HTML is written. Generate the report at `-n 0` |
 
 The recurring fault line: plugins that read xdist-**master**-injected
-`workerinput` keys crash under the pool when rstest can't supply them.
-Derivable keys rstest now synthesizes worker-side (`randomly_seed` — a
-single run-level value every worker agrees on); keys backed by a
-controller-side service (`sock_port`, pytest-retry's `server_port`) stay
-absent, because rstest runs no central controller process to host that
-service — the same root as the [master-side-hook / controller-service gaps](../concepts/compatibility.md#known-gaps).
-Where a plugin is risky, rstest ships a native equivalent: `--shuffle`
-(≈pytest-randomly), `--reruns`/`--only-rerun` (≈pytest-rerunfailures),
-`--worker-timeout` (complements pytest-timeout).
+`workerinput` keys used to crash under the pool when rstest had no master to
+supply them. rstest now closes these per plugin: **derivable** keys are
+synthesized worker-side (`randomly_seed` — one run-level value every worker
+agrees on); **controller-service** keys are handled by each worker playing
+master for itself — pytest-retry's branch self-provisions its own report
+server per worker (so its `server_port` is set locally, no central
+controller needed), and pytest-rerunfailures is unregistered before it can
+read `sock_port` (rstest owns reruns instead). The one still-unsupported
+case in this table is pytest-html (see its row). Where a plugin is risky,
+rstest also ships a native equivalent: `--shuffle` (≈pytest-randomly),
+`--reruns`/`--only-rerun` (≈pytest-rerunfailures), `--worker-timeout`
+(complements pytest-timeout).
 
 ## Checking an unlisted plugin
 
