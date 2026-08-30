@@ -1318,6 +1318,49 @@ def main():
               env_extra={"PYTHONPATH": str(covdir)})
     check("coverage fail-under exits 1", r.returncode == 1 and "FAIL Required" in r.stdout, r.stdout[-200:])
 
+    print("== coverage contexts + line->test index (--cov-context) ==")
+    # Per-test contexts must survive the PARALLEL merge (tests land on
+    # different workers, yet each covered line keeps its per-test context),
+    # and --cov-context must additionally emit the line->test index that
+    # coverage-based --changed consumes.
+    ctxdir = g.tmp / "covctx"
+    g.write("covctx/mymod.py",
+            "def used_by_a():\n    return 1\n"
+            "def used_by_b():\n    return 2\n"
+            "def used_by_both():\n    return 3\n")
+    g.write("covctx/test_a.py",
+            "import mymod\n"
+            "def test_a():\n    assert mymod.used_by_a() == 1\n"
+            "    assert mymod.used_by_both() == 3\n")
+    g.write("covctx/test_b.py",
+            "import mymod\n"
+            "def test_b():\n    assert mymod.used_by_b() == 2\n"
+            "    assert mymod.used_by_both() == 3\n")
+    shutil.rmtree(ctxdir / ".rstest_cache", ignore_errors=True)
+    r = g.run("test_a.py", "test_b.py", "-n", "2", "--cov=mymod",
+              "--cov-context=test", "--cov-report=", cwd=ctxdir,
+              env_extra={"PYTHONPATH": str(ctxdir)})
+    idx_path = ctxdir / ".rstest_cache" / "coverage_index.json"
+    check("cov-context: line->test index written", r.returncode == 0 and idx_path.exists(),
+          f"rc={r.returncode} " + r.stdout[-200:])
+    if idx_path.exists():
+        idx = json.loads(idx_path.read_text())
+        fm = idx.get("files", {}).get("mymod.py", {})
+        # used_by_a body (line 2) only test_a; used_by_b (line 4) only test_b;
+        # used_by_both (line 6) BOTH — proving cross-worker context merge.
+        check("cov-context: schema + per-test line mapping",
+              idx.get("schema") == 1
+              and fm.get("2") == ["test_a.py::test_a"]
+              and fm.get("4") == ["test_b.py::test_b"]
+              and fm.get("6") == ["test_a.py::test_a", "test_b.py::test_b"],
+              json.dumps(fm))
+    # Without --cov-context, no index is written (feature is opt-in via the flag).
+    shutil.rmtree(ctxdir / ".rstest_cache", ignore_errors=True)
+    r = g.run("test_a.py", "test_b.py", "-n", "2", "--cov=mymod", "--cov-report=",
+              cwd=ctxdir, env_extra={"PYTHONPATH": str(ctxdir)})
+    check("cov-context: no index without the flag",
+          r.returncode == 0 and not idx_path.exists(), f"rc={r.returncode}")
+
     print("== smart selection ==")
     sp = g.tmp / "selproj"
     g.write("selproj/pkg/__init__.py", "")
