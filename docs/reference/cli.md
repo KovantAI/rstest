@@ -510,6 +510,45 @@ so the report shows up on the run page with zero extra steps. GitLab and
 TeamCity have no native markdown job-summary surface; use `--doctor-md`
 and publish the file as an artifact.
 
+### `--doctor-fail-on <COND>`
+
+Fail the run when a doctor metric breaches a threshold — turning the
+otherwise-advisory doctor signal into a CI gate. Repeatable; the run fails
+if *any* condition fires. Implies doctor instrumentation.
+
+Grammar is `metric OP value`:
+
+```console
+$ rstest -n auto --doctor-fail-on 'parallel_efficiency<30' \
+                 --doctor-fail-on 'wait_pct>50'
+```
+
+Operators: `<`, `<=`, `>`, `>=`, `==`, `!=`. Metrics (from the
+[Doctor JSON](report-json.md#doctor-json) model):
+
+| metric | meaning |
+|---|---|
+| `wall_seconds` | total wall-clock time |
+| `test_time_seconds` | summed test durations |
+| `cpu_time_seconds` | summed call-phase CPU time |
+| `tests` | tests with timing data |
+| `workers` | worker count (`-n`) |
+| `wait_pct` | % of test time spent waiting, not computing |
+| `wait_seconds` | seconds spent waiting |
+| `parallel_efficiency` / `efficiency_pct` | realized-vs-possible speedup, % |
+| `realized_speedup` | test time ÷ wall time |
+| `imbalance_pct` | busiest-vs-idlest worker load gap, % |
+| `long_pole_seconds` | slowest single test |
+
+A metric whose section did not apply to the run is **skipped, not failed**
+— e.g. `parallel_efficiency` at `-n 1` (no parallelism to measure) prints a
+`not measured` note and never fails the gate. An unknown metric or malformed
+condition aborts up front, before the run, so a typo can never become a gate
+that silently never fires.
+
+The conditions can live in your CI config or `pyproject.toml` invocation, so
+non-GitHub CIs get the same gate the composite action offers externally.
+
 ### `--watch`
 
 Watch the project and rerun on change. A change set consisting only of

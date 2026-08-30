@@ -142,3 +142,20 @@ write the markdown to a custom path instead (or outside Actions):
 ```console
 $ rstest --doctor-md doctor.md
 ```
+
+## Gating a PR on doctor metrics
+
+JSON trending is advisory — someone has to look. To make the signal
+*enforce* itself, gate the run on a threshold with `--doctor-fail-on`:
+
+```console
+$ rstest -n auto --doctor-fail-on 'parallel_efficiency<30' \
+                 --doctor-fail-on 'wait_pct>50'
+```
+
+The run exits non-zero if any condition fires (here: efficiency below 30%,
+or more than half of test time spent waiting). Repeatable; the gate is the
+union of all conditions. A metric that didn't apply to the run — e.g.
+`parallel_efficiency` at `-n 1` — is skipped, never failed, and a typo'd
+metric aborts before the run rather than silently passing. Full metric and
+operator list: [`--doctor-fail-on`](../reference/cli.md#--doctor-fail-on-cond).

@@ -73,6 +73,18 @@ pub struct Cli {
     #[arg(long)]
     doctor_md: Option<PathBuf>,
 
+    /// Fail the run when a doctor metric breaches a threshold (repeatable),
+    /// turning the advisory doctor signal into a CI gate. Grammar:
+    /// `metric OP value`, e.g. `--doctor-fail-on 'parallel_efficiency<30'
+    /// --doctor-fail-on 'wait_pct>50'`. Metrics: wall_seconds,
+    /// test_time_seconds, cpu_time_seconds, tests, workers, wait_pct,
+    /// wait_seconds, parallel_efficiency (efficiency %), realized_speedup,
+    /// imbalance_pct, long_pole_seconds. Operators: < <= > >= == !=. A metric
+    /// whose section didn't apply to this run (e.g. parallel_efficiency at
+    /// -n 1) is skipped, not failed. Implies doctor instrumentation.
+    #[arg(long = "doctor-fail-on", value_name = "COND")]
+    doctor_fail_on: Vec<String>,
+
     /// Parallel-readiness preflight: collect the suite twice and report tests
     /// whose ids are unstable (memory addresses / uuids / timestamps in
     /// parametrize ids) — the class that forces a suite to -n 0 — then run
@@ -496,6 +508,13 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
                 }
             }
             _ if arg.starts_with("--doctor-md=") => own.push(arg),
+            "--doctor-fail-on" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--doctor-fail-on=") => own.push(arg),
             "--junitxml" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -658,7 +677,11 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         None => progress::Mode::Dots,
     };
     let durations = parse_durations(&args);
-    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() {
+    // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
+    // missing operator aborts now, never silently as a gate that can't fire.
+    let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on)?;
+    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() || !doctor_gate.is_empty()
+    {
         // Workers inherit the environment; this flips on cpu/fixture
         // instrumentation in the shim plugin.
         std::env::set_var("RSTEST_DOCTOR", "1");
@@ -1055,7 +1078,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         }
     }
 
-    if (cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some()) && !passthrough {
+    let mut doctor_gate_failed = false;
+    if (cli.doctor
+        || cli.doctor_json.is_some()
+        || cli.doctor_md.is_some()
+        || !doctor_gate.is_empty())
+        && !passthrough
+    {
         let report = doctor::analyze(
             &outcome.run,
             &merge_fixtures(outcome.fixtures),
@@ -1074,6 +1103,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             doctor::write_markdown(path, &report)?;
         }
         doctor::append_ci_summary(&report)?;
+        if !doctor_gate.is_empty() {
+            let gate = doctor::evaluate(&report, &doctor_gate);
+            for s in &gate.skipped {
+                eprintln!("rstest: --doctor-fail-on: {s}");
+            }
+            if gate.breaches.is_empty() {
+                eprintln!(
+                    "rstest: --doctor-fail-on: all {} condition(s) passed",
+                    doctor_gate.len()
+                );
+            } else {
+                println!(
+                    "\n{}",
+                    palette.bold_red("=========== doctor gate failures ===========")
+                );
+                for b in &gate.breaches {
+                    println!("  {b}");
+                }
+                doctor_gate_failed = true;
+            }
+        }
     }
     if let Some(path) = &cli.junitxml {
         junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
@@ -1173,6 +1223,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
             if duration_regressions > 1 { "s" } else { "" }
         );
+        if exitstatus == 0 {
+            exitstatus = 1;
+        }
+    }
+    if doctor_gate_failed {
+        eprintln!("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
         if exitstatus == 0 {
             exitstatus = 1;
         }
@@ -1381,6 +1437,11 @@ fn execute_monorepo(
         if let Some(p) = &cli.doctor_md {
             cmd.arg("--doctor-md")
                 .arg(root.join(mono::suffixed(p, &slug)));
+        }
+        // Each project gates its own doctor report; a breach fails that child's
+        // exit code, which the orchestrator aggregates.
+        for c in &cli.doctor_fail_on {
+            cmd.arg("--doctor-fail-on").arg(c);
         }
         cmd.args(args);
         let child = match cmd.spawn() {
@@ -1917,5 +1978,27 @@ mod tests {
             v(&["rstest", "--doctor-md", "d.md", "--doctor-md=e.md"])
         );
         assert_eq!(session, v(&["-v"]));
+    }
+
+    #[test]
+    fn split_owns_doctor_fail_on() {
+        // Both spaced and =-joined forms are rstest-owned; the value (which
+        // contains a `<`/`>`) must not leak into the pytest session args.
+        let (own, session) = split_args(v(&[
+            "--doctor-fail-on",
+            "parallel_efficiency<30",
+            "--doctor-fail-on=wait_pct>50",
+            "tests/",
+        ]));
+        assert_eq!(
+            own,
+            v(&[
+                "rstest",
+                "--doctor-fail-on",
+                "parallel_efficiency<30",
+                "--doctor-fail-on=wait_pct>50",
+            ])
+        );
+        assert_eq!(session, v(&["tests/"]));
     }
 }
