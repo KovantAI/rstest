@@ -515,10 +515,18 @@ pub fn run_pool(
                         });
                     // --reruns-only-known-flaky: gate on prior flaky history.
                     // An explicit @mark.flaky (present in flaky_budget) is an
-                    // author declaration and always bypasses the gate.
+                    // author declaration and always bypasses the gate. Match on
+                    // the CLEAN nodeid from ids_store (keyed by index), not
+                    // s.attempt's report nodeid: in Dist::Each the report id
+                    // carries a ` [gwN]` suffix (added on receipt) and would
+                    // never match the un-suffixed history set. Same lookup the
+                    // crash path uses, keeping the two gates consistent.
                     let known_flaky_ok = known_flaky.is_none_or(|set| {
                         flaky_budget.contains_key(&index)
-                            || s.attempt.first().is_some_and(|r| set.contains(&r.nodeid))
+                            || ids_store
+                                .as_ref()
+                                .and_then(|v| v.get(index as usize))
+                                .is_some_and(|id| set.contains(id))
                     });
                     let used = rerun_used.entry(index).or_insert(0);
                     if s.attempt_failed && *used < item_budget && rerun_allowed && known_flaky_ok {

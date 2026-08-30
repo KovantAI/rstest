@@ -489,13 +489,27 @@ Details:
   of history.
 - **Composes with [`--only-rerun`](#-only-rerun-regex).** Both gates must pass
   for a retry to fire.
-- **Cold-start trade-off.** A brand-new flaky test isn't rescued on its very
-  *first* flake (no history yet) — it fails that run, is recorded, and is
-  rescued on subsequent runs. Cache `.rstest_cache` across CI runs (as you
-  would for the duration cache) so the history accumulates.
+- **Seeding the history is a separate step.** The flag *consumes* flaky
+  history; it does not build it. A `flaky > 0` record is only written when a
+  rerun actually fires and the test recovers — but this flag suppresses that
+  rerun for any not-yet-known test, so a run with the flag on can never
+  promote a brand-new flake into the known set. The history must come from
+  elsewhere:
+  - a run of `--reruns` *without* this flag (e.g. a nightly or pre-merge job)
+    that lets unknown failures rerun and records the ones that recover, or
+  - an explicit `@pytest.mark.flaky` (always rerun, see above).
 
-Also settable as `[tool.rstest] reruns-only-known-flaky = true`. No effect
-unless `--reruns` (or a `@pytest.mark.flaky` budget) is active.
+  So the intended setup is two-mode: an unflagged learning run builds
+  `.rstest_cache/flakes.json`, and the hot path runs with the flag to spend
+  budget only on what that history already knows. A brand-new flake fails the
+  first time it appears on the flagged path and is *not* rescued until a
+  learning run records it. Cache `.rstest_cache` across CI runs (as you would
+  for the duration cache) so the history persists.
+
+Also settable as `[tool.rstest] reruns-only-known-flaky = true`. The gate
+only affects tests whose rerun budget comes from `--reruns`, so it is a no-op
+unless `--reruns` (or `[tool.rstest] reruns`) is active. A `@pytest.mark.flaky`
+budget is unaffected either way — marked tests always bypass the gate.
 
 ### `--quarantine <FILE>`
 

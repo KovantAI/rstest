@@ -1661,6 +1661,43 @@ def main():
     check("flaky-aware: @mark.flaky bypasses the gate (no history)",
           r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
 
+    # Cold-start loop (finding #4 / known defect): the docs once claimed a
+    # brand-new flake "fails that run, is recorded, and is rescued on
+    # subsequent runs". It is NOT. The gate suppresses the rerun that would
+    # record `flaky > 0`, so a gated run only ever records the failure as
+    # `failed` (flaky == 0) -> the test stays unknown -> the NEXT gated run
+    # gates it again. This test asserts the (ideal) recovery and is EXPECTED
+    # TO FAIL until the learn-without-rerun mechanism (finding #4 fix) lands.
+    # It documents the gap; the corrected docs describe the real two-mode
+    # workflow instead.
+    cs_marker = "fa_coldstart"
+
+    def coldstart_run():
+        m = g.tmp / cs_marker
+        m.unlink(missing_ok=True)  # fresh: fixture fails its first attempt
+        r = g.run("test_flaky.py", "-n", "2", "--reruns", "2",
+                  "--reruns-only-known-flaky", cwd=fdir,
+                  env_extra={"FLAKY_MARKER": str(m)})
+        m.unlink(missing_ok=True)
+        return r
+
+    fcache.unlink(missing_ok=True)  # no seeded history: truly cold
+    r1 = coldstart_run()
+    # Run 1: unknown -> gated -> fails, and the failure IS recorded so we know
+    # the miss is the gate, not a missing write.
+    hist_after = json.loads(fcache.read_text()) if fcache.exists() else {}
+    rec = hist_after.get(fnode, {})
+    check("flaky-aware cold-start: run 1 gated-fails and records the failure",
+          r1.returncode == 1 and rec.get("failed", 0) > 0 and rec.get("flaky", 0) == 0,
+          f"rc={r1.returncode} rec={rec} {r1.stdout[-160:]}")
+    # Run 2: same flag, history now carries the run-1 failure (flaky == 0).
+    # A self-healing feature would rescue it here. It does not -> this check
+    # FAILS on purpose, pinning the known cold-start defect.
+    r2 = coldstart_run()
+    check("flaky-aware cold-start: run 2 rescues the now-recorded flake (EXPECTED FAIL)",
+          r2.returncode == 0 and "1 flaky" in r2.stdout, r2.stdout[-200:])
+    fcache.unlink(missing_ok=True)
+
     g.write("crashflaky/test_cf.py", CRASHFLAKY)
     cmarker = g.tmp / "cf_marker"
     if cmarker.exists():

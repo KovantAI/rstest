@@ -651,6 +651,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
     // Flaky-aware reruns: when on, load the prior flaky set ONCE so the pool
     // can gate rerun eligibility on it. None = feature off (no gating).
+    // Gate on `reruns > 0` deliberately: the gate only ever suppresses the
+    // global `--reruns` budget. @mark.flaky tests always bypass it (see the
+    // pool gate), so a run whose only budget is @mark.flaky needs no set
+    // loaded — loading one would change nothing.
     let known_flaky: Option<std::collections::HashSet<String>> = if reruns > 0
         && (cli.reruns_only_known_flaky || settings.reruns_only_known_flaky.unwrap_or(false))
     {
