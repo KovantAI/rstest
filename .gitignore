@@ -17,3 +17,10 @@ corpus/results.json
 .claude/skills/*
 !.claude/skills/migrate-to-rstest/
 .cursor
+
+# cargo-mutants output
+mutants.out/
+mutants.out.old/
+
+# coverage
+.coverage

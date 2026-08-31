@@ -92,6 +92,22 @@ fn filter_known_flaky(log: HashMap<String, FlakeStats>) -> HashSet<String> {
         .collect()
 }
 
+/// Fold `(nodeid, was_flaky)` events into the history: `was_flaky` bumps the
+/// flaky counter, otherwise the failed counter, and every touched entry's
+/// `last_epoch` advances to `now`. Pure (no clock, no IO) so the tallying is
+/// testable in isolation from the load/save round-trip in `record`.
+fn merge_events(log: &mut HashMap<String, FlakeStats>, events: &[(&String, bool)], now: u64) {
+    for &(nodeid, was_flaky) in events {
+        let e = log.entry(nodeid.clone()).or_default();
+        if was_flaky {
+            e.flaky += 1;
+        } else {
+            e.failed += 1;
+        }
+        e.last_epoch = now;
+    }
+}
+
 /// Merge this run's flake/failure events over the stored history.
 /// Best-effort like the duration cache: IO errors are ignored.
 pub fn record(run: &Run) {
@@ -109,15 +125,7 @@ pub fn record(run: &Run) {
     // load() has already dropped entries past the retention window, so writing
     // the merged map back garbage-collects the file on any event-bearing run.
     let mut log = load();
-    for (nodeid, was_flaky) in events {
-        let e = log.entry(nodeid.clone()).or_default();
-        if was_flaky {
-            e.flaky += 1;
-        } else {
-            e.failed += 1;
-        }
-        e.last_epoch = now;
-    }
+    merge_events(&mut log, &events, now);
     let _ = std::fs::create_dir_all(".rstest_cache");
     if let Ok(bytes) = serde_json::to_vec(&log) {
         let _ = std::fs::write(path(), bytes);
@@ -162,6 +170,39 @@ mod tests {
         assert!(set.contains("c::both"));
         assert!(!set.contains("b::failed_only"));
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn merge_events_tallies_flaky_and_failed_separately() {
+        let a = "a::t".to_string();
+        let b = "b::t".to_string();
+        let mut log = HashMap::new();
+        // Two flaky events for a, one failure for b.
+        merge_events(&mut log, &[(&a, true), (&a, true), (&b, false)], 7);
+        assert_eq!(log[&a].flaky, 2, "each flaky event increments by exactly 1");
+        assert_eq!(log[&a].failed, 0, "flaky events must not touch failed");
+        assert_eq!(log[&b].failed, 1);
+        assert_eq!(log[&b].flaky, 0, "failure events must not touch flaky");
+        assert_eq!(log[&a].last_epoch, 7);
+        assert_eq!(log[&b].last_epoch, 7);
+    }
+
+    #[test]
+    fn merge_events_accumulates_over_prior_history() {
+        let a = "a::t".to_string();
+        let mut log = HashMap::from([(
+            a.clone(),
+            FlakeStats {
+                flaky: 5,
+                failed: 1,
+                last_epoch: 1,
+            },
+        )]);
+        merge_events(&mut log, &[(&a, true), (&a, false)], 42);
+        // +1 on top of the stored 5/1 — pins that the op is add, not set/sub/mul.
+        assert_eq!(log[&a].flaky, 6);
+        assert_eq!(log[&a].failed, 2);
+        assert_eq!(log[&a].last_epoch, 42);
     }
 
     fn entry(last_epoch: u64) -> FlakeStats {

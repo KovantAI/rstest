@@ -268,6 +268,47 @@ mod tests {
     }
 
     #[test]
+    fn weights_from_fills_unknown_with_known_average() {
+        // known = [2.0, 4.0] -> avg = 6.0 / 2 = 3.0; the uncached "c" inherits
+        // that mean. Pins the division against `%` (would give 0.0) and `*`
+        // (would give 12.0).
+        let names = ids(&["a", "b", "c"]);
+        let cache = HashMap::from([("a".to_string(), 2.0), ("b".to_string(), 4.0)]);
+        assert_eq!(weights_from(&names, &cache), vec![2.0, 4.0, 3.0]);
+    }
+
+    #[test]
+    fn shard_files_partitions_and_isolates_hog() {
+        let cwd = Path::new(".");
+        let files: Vec<PathBuf> = ["hog.py", "a.py", "b.py", "c.py", "d.py"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let mut cache = HashMap::new();
+        cache.insert("hog.py::t".to_string(), 100.0);
+        for f in ["a.py", "b.py", "c.py", "d.py"] {
+            cache.insert(format!("{f}::t"), 1.0);
+        }
+        let n = 2;
+        let buckets: Vec<Vec<PathBuf>> = (1..=n)
+            .map(|k| shard_files(&files, &cache, cwd, k, n))
+            .collect();
+        // Partition: the shards union to the full file set, each file once.
+        let mut seen: Vec<PathBuf> = buckets.iter().flatten().cloned().collect();
+        seen.sort();
+        let mut all = files.clone();
+        all.sort();
+        assert_eq!(seen, all, "shards must partition the file set exactly");
+        // LPT assigns the heaviest item first and to the emptiest (bin 0) bin,
+        // so the 100s hog is shard 1 EXACTLY — asserting the concrete shard,
+        // not a computed bucket, pins the `== k-1` selector against `!= k-1`
+        // (which is symmetric at n=2 and would otherwise pass either way).
+        let hog = PathBuf::from("hog.py");
+        assert_eq!(buckets[0], vec![hog], "heaviest file lands in shard 1");
+        assert_eq!(buckets[1].len(), 4, "the four 1s files share shard 2");
+    }
+
+    #[test]
     fn groups_never_split_and_partition() {
         // Two files, several tests each. No test of a file may land in a
         // different shard than its siblings; union == full set; disjoint.
