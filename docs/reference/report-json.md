@@ -210,7 +210,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 2,
-  "rstest_version": "0.3.1",
+  "rstest_version": "0.4.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "tests": 2048,
