@@ -191,7 +191,6 @@ projects = [
     "libs/checkpoint",
     "libs/sdk-py",
     "libs/checkpoint-sqlite",
-    "libs/langgraph",
     "libs/prebuilt",
     "libs/cli",
 ]
