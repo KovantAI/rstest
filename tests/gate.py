@@ -1510,7 +1510,8 @@ def main():
           cwd=cs, env_extra={"PYTHONPATH": str(cs)})  # warm at current HEAD
     (cs / "mymod.py").write_text(
         "def zzz():\n    return 0\n" + (cs / "mymod.py").read_text(), encoding="utf-8")
-    subprocess.run(["git", "commit", "-qam", "prepend shifts lines"], cwd=cs, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qam", "prepend shifts lines"], cwd=cs, check=True)
     edit_line("mymod.py", "    return 1\n", "    return 111\n")  # used_by_a body, now shifted
     r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
