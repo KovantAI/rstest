@@ -53,13 +53,17 @@ per-shard JUnit reconstructs the full run.
       those modes exist to provide.
     - Composes with `--changed`: selection narrows the file set first,
       then the shard partitions the survivors.
-    - **Building the coverage index under `--shard` is partial.** A sharded
-      `--cov-context=test` run only measures its own shard's tests, so the
-      `coverage_index.json` it writes covers a fraction of the suite — a later
-      `--changed` would under-select. Warm the [`--changed` coverage
-      index](changed.md#keeping-the-index-warm) from an **unsharded** coverage
-      run (or merge each shard's `.coverage` before building the index), not
-      from the sharded job.
+    - **A sharded coverage index is partial per job, but the shared cache
+      fuses them.** A sharded `--cov-context=test` run only measures its own
+      shard's tests, so the `coverage_index.json` a single job writes covers a
+      fraction of the suite. Push each shard's slice through the
+      [shared cache](../concepts/caching.md#shared-cache-backend)
+      (`--cache-remote … --cache-pull --cache-push`): the slices **union on
+      pull** into a full index, so a later `--changed` selects correctly — no
+      dedicated unsharded warm-up job. Without the shared cache, warm the
+      [`--changed` coverage index](changed.md#keeping-the-index-warm) from an
+      **unsharded** coverage run (or merge each shard's `.coverage` before
+      building the index) instead.
 
 ## GitHub Actions
 

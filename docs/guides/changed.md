@@ -94,7 +94,9 @@ fresh:
   PRs.
 - **Persist `.rstest_cache` across CI runs** — the same cache you persist for
   [duration-aware scheduling](../concepts/scheduling.md) carries the index
-  along (see [CI quickstart](ci-quickstart.md)). No index →
+  along (see [CI quickstart](ci-quickstart.md)). The
+  [shared cache backend](../concepts/caching.md#shared-cache-backend) also
+  unions sharded coverage slices into a full index on pull. No index →
   `--changed` simply falls back to the import graph, so a cold cache is never
   wrong, only coarser.
 - **Safe to delete** at any time; the next `--cov-context=test` run rebuilds it.
@@ -115,8 +117,11 @@ graph for anything the index doesn't cover yet.
 ## Interactions
 
 - **Sharding.** A sharded coverage run only measures the tests in its shard, so
-  its index is partial. Warm the index from an **unsharded** coverage run (or
-  merge shard data before building it). See [Sharding](sharding.md).
+  each job's index is partial. Push the slices through the
+  [shared cache](../concepts/caching.md#shared-cache-backend)
+  (`--cache-pull --cache-push`) and they **union on pull** into a full index;
+  otherwise warm the index from an **unsharded** coverage run (or merge shard
+  data before building it). See [Sharding](sharding.md).
 - **Monorepos.** `--changed` is forwarded to each affected project, which
   narrows within its own tree against its own `.rstest_cache`. See
   [Monorepos](monorepo.md).

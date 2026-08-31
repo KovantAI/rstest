@@ -16,6 +16,8 @@
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
   the changed lines. Safe to delete — `--changed` falls back to the import
   graph without it; rebuild by re-running coverage with `--cov-context=test`.
+  Merges through the shared cache like the others, so sharded coverage runs
+  union into a full index (see the shared-cache section below).
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
 duration-aware scheduling from the second run onward. In the repository,
@@ -49,7 +51,10 @@ clobber each other.
 
 - **Pull** merges `base.json` + every segment into the local cache
   (durations = newest value per test; flake counts = summed per-run events,
-  deduped by segment id so a re-pull never double-counts).
+  deduped by segment id so a re-pull never double-counts; the coverage index
+  unions per file — segments that agree on a file's content hash merge their
+  line→test maps, a changed hash keeps the newest, so **sharded partial
+  indexes fuse into a full one**).
 - **Push** writes just this run's segment (`--cache-push`).
 - **Compact** (`--cache-compact`) folds segments into a new base and prunes
   them; a segment already folded is recorded in the base's absorbed-id set, so

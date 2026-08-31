@@ -119,7 +119,11 @@ jobs:
         with: { pattern: "rstest-seg-*", merge-multiple: true, path: ./rcache }
         continue-on-error: true          # first ever run has nothing to pull
 
+      # --cov-context=test rides the segment too: each shard pushes its partial
+      # coverage slice and they union on pull, keeping --changed selection warm
+      # across the matrix (drop the --cov flags if you don't use --changed).
       - run: rstest -n auto --shard ${{ matrix.shard }}/4
+               --cov=<your_package> --cov-context=test --cov-report=
                --cache-remote ./rcache --cache-pull --cache-push
                --junitxml junit.${{ matrix.shard }}.xml
 
@@ -131,9 +135,11 @@ jobs:
 ```
 
 No refresh job, no `run_id`/`restore-keys` dance, no single writer — each shard
-contributes its slice and they union on the next pull. Artifact retention gives
-free segment eviction; a scheduled `rstest --cache-remote ./rcache
---cache-compact` job folds segments into a base and prunes them.
+contributes its slice (durations, flake events, **and** its coverage-index
+slice) and they union on the next pull, so the `--changed` coverage index stays
+whole across the shard matrix without a dedicated unsharded job. Artifact
+retention gives free segment eviction; a scheduled `rstest --cache-remote
+./rcache --cache-compact` job folds segments into a base and prunes them.
 
 !!! note "Cross-run artifact pulls"
     Artifacts are scoped to a workflow run. To pull segments from *previous*
