@@ -92,6 +92,82 @@ jobs:
           path: junit.xml
 ```
 
+## Shared cache
+
+The `actions/cache` recipe above works, but its per-key immutability forces the
+`run_id` key dance, and across a shard matrix it needs a dedicated full-run job
+to own the cache. rstest's [shared-cache backend](../concepts/caching.md#shared-cache-backend)
+replaces both: every job pushes its own immutable **segment** and pulls the
+union — no single writer, no key hacks.
+
+**GitHub-native, no external cloud, no secrets.** `download-artifact@v4`'s
+`pattern` + `merge-multiple` is exactly the merge-all-segments primitive:
+
+```yaml
+permissions: { contents: read, actions: read }   # actions:read reaches prior-run artifacts
+jobs:
+  test:
+    strategy: { matrix: { shard: [1, 2, 3, 4] } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -r requirements.txt && pip install rstest
+
+      # Pull: merge every prior segment into ./rcache.
+      - uses: actions/download-artifact@v4
+        with: { pattern: "rstest-seg-*", merge-multiple: true, path: ./rcache }
+        continue-on-error: true          # first ever run has nothing to pull
+
+      - run: rstest -n auto --shard ${{ matrix.shard }}/4
+               --cache-remote ./rcache --cache-pull --cache-push
+               --junitxml junit.${{ matrix.shard }}.xml
+
+      # Push: upload only THIS job's new segment (unique name = no collision).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rstest-seg-${{ github.run_id }}-${{ matrix.shard }}
+          path: ./rcache/segments/seg-*.json
+```
+
+No refresh job, no `run_id`/`restore-keys` dance, no single writer — each shard
+contributes its slice and they union on the next pull. Artifact retention gives
+free segment eviction; a scheduled `rstest --cache-remote ./rcache
+--cache-compact` job folds segments into a base and prunes them.
+
+!!! note "Cross-run artifact pulls"
+    Artifacts are scoped to a workflow run. To pull segments from *previous*
+    runs, add `run-id` + `github-token` to `download-artifact`, or list them via
+    `GET /repos/{owner}/{repo}/actions/artifacts`. A per-branch scheduled run
+    that pushes + compacts keeps a warm base the PR jobs pull from.
+
+**Object store (S3/GCS/R2), OIDC — no secrets.** For teams already on cloud
+storage: sync a prefix around the run (immutable, uniquely-named segments make
+`sync` concurrent-safe):
+
+```yaml
+permissions: { id-token: write, contents: read }
+steps:
+  - uses: aws-actions/configure-aws-credentials@v4
+    with: { role-to-assume: arn:aws:iam::…:role/ci, aws-region: us-east-1 }
+  - run: aws s3 sync s3://ci-cache/rstest ./rcache
+  - run: rstest -n auto --shard ${{ matrix.shard }}/4 --cache-remote ./rcache --cache-pull --cache-push
+  - run: aws s3 sync ./rcache s3://ci-cache/rstest
+```
+
+**Self-hosted shared mount — zero glue.** `--cache-remote /mnt/ci-cache/rstest`
+directly; the mount is the remote, no pull/push bookends beyond the flags.
+
+**Reliability.** Add `--require-baseline` to `--durations-regress` so a cold or
+failed pull is a hard error, never a silent green:
+
+```bash
+rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
+```
+
+(`actions/cache` is **not** recommended for this: one blob per key, it can't
+list-and-merge every segment — the exact limitation this design removes.)
+
 ## AWS CodeBuild
 
 CodeBuild has no log-side annotation command (no equivalent of GitHub's

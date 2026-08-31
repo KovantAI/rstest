@@ -1511,6 +1511,42 @@ def main():
         f"rc={r.returncode} " + r.stderr[-300:],
     )
 
+    print("== shared cache backend ==")
+    # Push this run's segment to a remote dir; a fresh project pulls the union.
+    remote = g.tmp / "shared-remote"
+    shutil.rmtree(remote, ignore_errors=True)
+    g.write("scproj_a/test_s.py",
+            "import time\ndef test_slow(): time.sleep(0.05)\ndef test_a(): assert True\n")
+    sca = g.tmp / "scproj_a"
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-push", cwd=sca)
+    segdir = remote / "segments"
+    segs = list(segdir.glob("seg-*.json")) if segdir.exists() else []
+    check("shared-cache: push writes exactly one segment",
+          r.returncode == 0 and len(segs) == 1 and "pushed segment" in r.stderr,
+          f"rc={r.returncode} segs={segs} {r.stderr[-150:]}")
+    # Fresh project with no local cache: pull populates it from the remote.
+    g.write("scproj_b/test_s.py", "def test_a(): assert True\n")
+    scb = g.tmp / "scproj_b"
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=scb)
+    check("shared-cache: pull populates local durations",
+          r.returncode == 0 and (scb / ".rstest_cache" / "durations.json").exists()
+          and "pulled" in r.stderr, r.stderr[-200:])
+    # require-baseline against a cold remote is a hard error, not a silent skip.
+    # RSTEST_CACHE points at an empty dir so a prior local cache can't satisfy it.
+    cold = g.tmp / "cold-remote"
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(cold), "--cache-pull",
+              "--require-baseline", "--durations-regress", "1.5", cwd=scb,
+              env_extra={"RSTEST_CACHE": str(g.tmp / "nolocal-cache")})
+    check("shared-cache: require-baseline errors on a cold remote",
+          r.returncode != 0 and "require-baseline" in r.stderr,
+          f"rc={r.returncode} " + r.stderr[-200:])
+    # Compact folds the segment into a base and prunes segments.
+    r = g.run("--cache-remote", str(remote), "--cache-compact", cwd=sca)
+    leftover = list(segdir.glob("seg-*.json")) if segdir.exists() else []
+    check("shared-cache: compact folds to base, prunes segments",
+          r.returncode == 0 and (remote / "base.json").exists() and not leftover
+          and "compacted" in r.stderr, f"rc={r.returncode} left={leftover}")
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)

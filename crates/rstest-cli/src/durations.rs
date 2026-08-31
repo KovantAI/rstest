@@ -6,16 +6,14 @@
 //! unknown tests just keep collection order.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
+use crate::cache;
 use crate::report::Run;
 
-fn cache_path() -> PathBuf {
-    PathBuf::from(".rstest_cache/durations.json")
-}
+pub const FILE: &str = "durations.json";
 
 pub fn load() -> HashMap<String, f64> {
-    std::fs::read(cache_path())
+    std::fs::read(cache::file(FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
@@ -31,9 +29,8 @@ pub fn save(run: &Run) {
     if cache.is_empty() {
         return;
     }
-    let _ = std::fs::create_dir_all(".rstest_cache");
     if let Ok(bytes) = serde_json::to_vec(&cache) {
-        let _ = std::fs::write(cache_path(), bytes);
+        cache::write_atomic(&cache::file(FILE), &bytes);
     }
 }
 

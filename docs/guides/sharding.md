@@ -141,6 +141,14 @@ jobs:
     not run a separate full job, let shard 1 save the cache instead — but
     accept that its timings only cover 1/N of the suite.
 
+!!! tip "Or skip the dance entirely with the shared cache"
+    The restore-key/refresh-job choreography above exists to work around
+    `actions/cache` immutability. The [shared-cache backend](../concepts/caching.md#shared-cache-backend)
+    removes it: every shard runs `--cache-pull --cache-push`, each pushing its
+    own immutable segment, and they union on the next pull — no single-writer
+    job, no dedicated full run. See
+    [CI quickstart → Shared cache](ci-quickstart.md#shared-cache).
+
 ## GitLab CI
 
 GitLab exposes `CI_NODE_INDEX` (1-based) and `CI_NODE_TOTAL` when you set

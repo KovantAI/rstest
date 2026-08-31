@@ -1,3 +1,4 @@
+mod cache;
 #[allow(dead_code)]
 mod collect; // D5: single-point collection
 mod color;
@@ -14,6 +15,7 @@ mod mono;
 mod pool;
 mod progress;
 mod proto;
+mod remote;
 mod report;
 mod select;
 mod shard;
@@ -25,7 +27,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 /// rstest: a fast, pytest-compatible test runner.
@@ -228,6 +230,37 @@ pub struct Cli {
     /// whole-group grain so a file/scope/group never splits across shards.
     #[arg(long, value_name = "K/N")]
     shard: Option<String>,
+
+    /// Shared-cache remote: a directory or `file://` path (local, an NFS/EFS
+    /// mount, or a dir a CI step materializes via `download-artifact` /
+    /// `aws s3 sync`). Also settable via `RSTEST_CACHE_REMOTE`. Enables
+    /// `--cache-pull` / `--cache-push` / `--cache-compact`.
+    #[arg(long, value_name = "URL|DIR")]
+    cache_remote: Option<String>,
+
+    /// Before the run, merge the remote's segments + base into the local
+    /// `.rstest_cache` (durations, flake history). Warms scheduling and the
+    /// regression baseline. Needs `--cache-remote`.
+    #[arg(long)]
+    cache_pull: bool,
+
+    /// After the run, publish THIS run's contribution as one immutable segment
+    /// on the remote (durations + flake events). Concurrent shards never
+    /// conflict. Needs `--cache-remote`.
+    #[arg(long)]
+    cache_push: bool,
+
+    /// Maintenance: fold all remote segments into a fresh base and prune them,
+    /// then exit without running tests. Needs `--cache-remote`.
+    #[arg(long)]
+    cache_compact: bool,
+
+    /// With a baseline-dependent gate active (`--durations-regress`), treat a
+    /// successful pull that returns NO baseline as a hard error instead of a
+    /// silent skip — the steady-state guard against a cache that never
+    /// restored. A failed pull is always an error.
+    #[arg(long)]
+    require_baseline: bool,
 }
 
 /// -x / --maxfail=N from the session args (also forwarded: each worker
@@ -453,6 +486,16 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
         match arg.as_str() {
             "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
             "--reruns-only-known-flaky" => own.push(arg),
+            "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
+                own.push(arg)
+            }
+            "--cache-remote" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--cache-remote=") => own.push(arg),
             "--migrate-check-json" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -607,6 +650,49 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             format!("{nanos:x}{:x}", std::process::id()),
         );
     }
+    // Shared-cache backend: resolve the remote (flag or env) and, if asked,
+    // run maintenance / warm the local cache BEFORE anything reads it.
+    let cache_remote = cli
+        .cache_remote
+        .clone()
+        .or_else(|| std::env::var("RSTEST_CACHE_REMOTE").ok())
+        .filter(|s| !s.is_empty());
+    if (cli.cache_pull || cli.cache_push || cli.cache_compact) && cache_remote.is_none() {
+        anyhow::bail!(
+            "--cache-pull/--cache-push/--cache-compact need --cache-remote \
+             (or RSTEST_CACHE_REMOTE)"
+        );
+    }
+    if cli.cache_compact {
+        let remote = cache_remote.as_deref().unwrap(); // validated above
+        let t = remote::transport_for(remote)?;
+        let folded = remote::compact_remote(t.as_ref())
+            .with_context(|| format!("compacting shared cache at {remote}"))?;
+        eprintln!("rstest: cache: compacted {folded} segment(s) into base at {remote}");
+        return Ok(0);
+    }
+    if cli.cache_pull {
+        let remote = cache_remote.as_deref().unwrap();
+        let t = remote::transport_for(remote)?;
+        let merged = remote::pull(t.as_ref())
+            .with_context(|| format!("pulling shared cache from {remote}"))?;
+        eprintln!(
+            "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
+            merged.durations.len(),
+            merged.flakes.len()
+        );
+        remote::write_local(&merged);
+    }
+    // require-baseline: with a baseline-dependent gate active, an absent
+    // baseline (cold remote, nothing restored/pulled) is a hard error rather
+    // than the silent skip the gate would otherwise do — the dead-gate guard.
+    if cli.require_baseline && cli.durations_regress.is_some() && durations::load().is_empty() {
+        anyhow::bail!(
+            "--require-baseline: --durations-regress needs a duration baseline in \
+             .rstest_cache, but none is present (cold cache — nothing restored or pulled)"
+        );
+    }
+
     // CLI > [tool.rstest] > built-in defaults.
     let settings = config::rstest_settings(&std::env::current_dir()?);
 
@@ -1268,6 +1354,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);
+        // --cache-push: publish THIS run's contribution as one immutable
+        // segment (from the in-memory Run, not the merged local cache). A push
+        // failure warns but never fails an otherwise-green run.
+        if cli.cache_push {
+            let remote = cache_remote.as_deref().unwrap(); // validated at entry
+            let uid = std::env::var("RSTEST_RUN_UID").unwrap_or_default();
+            let shard_suffix = shard.map(|(k, n)| format!("-{k}of{n}")).unwrap_or_default();
+            let seg = remote::segment_from_run(
+                format!("{uid}{shard_suffix}"),
+                started_epoch,
+                &outcome.run,
+            );
+            match remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg)) {
+                Ok(()) => eprintln!(
+                    "rstest: cache: pushed segment ({} duration(s), {} event(s)) to {remote}",
+                    seg.durations.len(),
+                    seg.flake_events.len()
+                ),
+                Err(e) => eprintln!("rstest: cache: push failed: {e:#}"),
+            }
+        }
     }
     if let Some(path) = &cli.report_json {
         outcome.run.write_snapshot(
