@@ -30,8 +30,8 @@ pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
         let teardown_failed = entry.teardown.as_deref() == Some("failed");
         let call = entry.call.as_deref();
         if entry.quarantined {
-            // No <failure>/<error> element — junit-gating CI must stay
-            // green — but flagged the property way (like flaky) so
+            // No <failure>/<error> element (junit-gating CI must stay
+            // green) but flagged the property way, like flaky, so
             // dashboards can track the quarantine set.
             body.push_str(
                 "><properties><property name=\"quarantined\" value=\"true\"/></properties></testcase>",
@@ -60,7 +60,7 @@ pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
             let _ = write!(body, "><skipped message=\"{}\"/></testcase>", esc(reason));
         } else if entry.flaky {
             // Passed only after reruns: JUnit has no standard flaky element,
-            // so flag it the standard-extension way — a testcase property —
+            // so flag it the standard-extension way (a testcase property)
             // for dashboards that read junit rather than --report-json.
             body.push_str(
                 "><properties><property name=\"flaky\" value=\"true\"/></properties></testcase>",

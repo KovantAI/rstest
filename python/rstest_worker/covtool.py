@@ -6,7 +6,7 @@ master session combines and reports; under rstest that role belongs to the
 orchestrator, which invokes this tool with the original session args.
 
 When the session ran with `--cov-context=test`, the combined data carries
-per-test line contexts (they survive the parallel merge — each worker records
+per-test line contexts (they survive the parallel merge - each worker records
 into its own data file and `combine()` preserves the labels). This tool then
 also (a) enables `show_contexts` so html/json reports surface them and
 (b) writes a line->test index to `.rstest_cache/coverage_index.json` for
@@ -58,18 +58,9 @@ def _base_nodeid(ctx):
 
 
 def _file_sha256(path):
-    """Hex SHA-256 of a file's content with CRLF normalized to LF, or None if it
-    can't be read. Stamps each index entry with the source it was built from;
-    selection compares it against the diff base's content and falls back to the
-    import graph on any mismatch (lines drifted since warm), so the index is
-    never trusted for a file whose line numbers no longer line up.
-
-    Newlines are normalized because git's autocrlf/text filters leave the
-    working tree (what coverage measured, what we hash here) with CRLF while the
-    blob the diff's line numbers come from has LF. The Rust drift check
-    normalizes the git blob the same way, so the two hashes agree; a real
-    content edit still changes the hash. Source files fit in memory, so read
-    whole rather than streaming (a CRLF can straddle a chunk boundary)."""
+    """Hex SHA-256 of a file with CRLF normalized to LF, or None if unreadable.
+    Newlines are normalized so the CRLF working tree (what coverage measured)
+    hashes equal to the LF git blob the diff's line numbers come from."""
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -83,18 +74,16 @@ def build_index(cov):
     { "schema": 2, "files": { "<rel-path>": { "hash": "<sha256>",
       "lines": { "<line>": ["<nodeid>", ...] } } } }.
 
-    Keys are cwd-relative POSIX paths (matching git diff --relative and the
-    durations cache), so files outside the tree (site-packages, absolute
-    third-party paths) are skipped. Best-effort: any error leaves the previous
+    Keys are cwd-relative POSIX paths (matching git diff --relative), so files
+    outside the tree are skipped. Best-effort: any error leaves the previous
     index untouched rather than failing the run.
     """
     data = cov.get_data()
     if not any(c for c in data.measured_contexts()):
         return  # nothing to index (contexts empty)
-    # realpath both sides so a Windows 8.3 short name (TEMP is often
-    # C:\Users\RUNNER~1\...) or a junction on one side doesn't make an
-    # in-tree file look external and get skipped. coverage records
-    # canonicalized paths; getcwd() may still carry the short form.
+    # realpath both sides so a Windows 8.3 short name or junction doesn't make
+    # an in-tree file look external and get skipped (coverage records
+    # canonicalized paths; getcwd() may still carry the short form).
     cwd = os.path.realpath(os.getcwd())
     files = {}
     for path in data.measured_files():
@@ -112,9 +101,8 @@ def build_index(cov):
                 line_map[str(line)] = nodeids
         if not line_map:
             continue
-        # Stamp with the source hash. If the file vanished between the run and
-        # now we can't vouch for its line numbers, so drop it from the index
-        # (selection then falls back to the import graph for it).
+        # Stamp with the source hash. If the file vanished we can't vouch for
+        # its line numbers, so drop it (selection falls back to the import graph).
         digest = _file_sha256(path)
         if digest is None:
             continue
@@ -177,7 +165,7 @@ def main(argv):
             status = 1
 
     # Build the line->test index from the merged contexts (coverage-based
-    # --changed reads this). Best-effort — a failure here must not fail the run.
+    # --changed reads this). Best-effort - a failure here must not fail the run.
     if context_mode:
         try:
             build_index(cov)

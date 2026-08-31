@@ -1,17 +1,6 @@
-//! Interpreter discovery + validation, uv-style. We build an ordered list of
-//! candidate interpreters (explicit flag, active venv, an upward `.venv` walk,
-//! then versioned names on PATH), then *probe* each one — run it, read back
-//! version / implementation / `sys.executable`, and confirm it can import the
-//! worker shim — and commit to the first that passes. Probing up front turns
-//! what used to be a cryptic mid-run spawn failure into one clear error listing
-//! everything tried and why each was rejected.
-//!
-//! Candidates include uv-managed interpreters (newest first, as a fallback for
-//! version requests the venv/PATH can't satisfy) and, on Windows, python.org
-//! installs enumerated by the `py` launcher (`py --list-paths`) that aren't on
-//! `PATH`. Successful probes of stable absolute paths are cached on disk keyed
-//! by mtime so repeated runs skip the subprocess. The version-request grammar's
-//! more exotic corners remain follow-up work.
+//! Interpreter discovery + validation, uv-style: build an ordered candidate
+//! list, probe each (confirm it runs and imports the worker shim), commit to
+//! the first that passes. Positive probes are cached on disk keyed by mtime.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +16,7 @@ use crate::worker::worker_pythonpath;
 const MIN_VERSION: (u8, u8) = (3, 9);
 
 /// What a `--python` value or `.python-version` entry resolves to: either a
-/// concrete interpreter path (authoritative — probed, never fallen back from)
+/// concrete interpreter path (authoritative - probed, never fallen back from)
 /// or a version/implementation request matched against discovered candidates.
 #[derive(Debug, PartialEq)]
 enum PyArg {
@@ -179,7 +168,7 @@ fn parse_request(s: &str) -> Option<Request> {
         }
     }
 
-    // Reject an empty request (no impl, no constraints) — that's not a spec.
+    // Reject an empty request (no impl, no constraints): that's not a spec.
     if req.implementation.is_none() && req.constraints.is_empty() {
         return None;
     }
@@ -224,33 +213,32 @@ pub struct Probe {
     pub executable: PathBuf,
     /// (major, minor, micro).
     pub version: (u8, u8, u8),
-    /// `cpython`, `pypy`, ... — surfaced by the version-grammar tier.
+    /// `cpython`, `pypy`, ... surfaced by the version-grammar tier.
     #[allow(dead_code)]
     pub implementation: String,
-    /// True on free-threaded (`Py_GIL_DISABLED`) builds — used by the
+    /// True on free-threaded (`Py_GIL_DISABLED`) builds; used by the
     /// version-grammar tier (`3.13t`).
     #[allow(dead_code)]
     pub freethreaded: bool,
-    /// Whether `rstest_worker` imports under this interpreter — the thing that
+    /// Whether `rstest_worker` imports under this interpreter - the thing that
     /// actually has to work for the run to start.
     pub worker_importable: bool,
 }
 
 /// Resolve the interpreter to run workers with. `scope` anchors the upward
-/// `.venv` / `.python-version` walk (the invocation dir, or a project dir in
-/// monorepo mode). An explicit `--python` is authoritative: it is still probed,
-/// but we never silently fall back to a different interpreter when it fails.
+/// `.venv` / `.python-version` walk. An explicit `--python` is authoritative:
+/// still probed, but never silently replaced by a different interpreter.
 pub fn resolve(scope: &Path, explicit: Option<&str>) -> Result<PathBuf> {
-    // An explicit --python is authoritative — its version request filters the
-    // pool with no fallback to a mismatching interpreter.
+    // Explicit --python: its version request filters the pool with no fallback
+    // to a mismatching interpreter.
     if let Some(s) = explicit {
         return match parse_pyarg(s) {
             PyArg::Path(p) => resolve_with(&[p], None, cached_probe),
             PyArg::Request(r) => resolve_with(&discovery_candidates(scope), Some(&r), cached_probe),
         };
     }
-    // Otherwise a `.python-version` found up-tree sets the request — but it is
-    // only a soft pin: an active virtualenv wins over it (see resolve_versioned).
+    // A `.python-version` found up-tree sets the request, but only as a soft
+    // pin: an active virtualenv wins over it (see resolve_versioned).
     match python_version_arg(scope) {
         // Concrete path: the one candidate, authoritative.
         Some(PyArg::Path(p)) => resolve_with(&[p], None, cached_probe),
@@ -263,12 +251,9 @@ pub fn resolve(scope: &Path, explicit: Option<&str>) -> Result<PathBuf> {
     }
 }
 
-/// Resolve an implicit `.python-version` request. The pin is *soft*: an active
-/// virtualenv, when usable, wins over it. An activated env is the interpreter
-/// the user is running in (uv/pip semantics), and a stale `.python-version`
-/// must not reject it — the exact contradiction that left the active venv
-/// unselectable. Only when no active venv is usable do we honor the pin as a
-/// filter over the discovered pool.
+/// Resolve an implicit `.python-version` request. The pin is *soft*: a usable
+/// active virtualenv wins over it, since a stale pin must not reject the env
+/// the user is running in. Only with no usable active venv is the pin a filter.
 fn resolve_versioned<F>(
     active_venv: Option<PathBuf>,
     candidates: &[PathBuf],
@@ -286,10 +271,9 @@ where
     resolve_with(candidates, Some(req), probe_fn)
 }
 
-/// Walk the candidate list, probing each, and return the first usable
-/// interpreter's canonical executable — first that also satisfies `request`
-/// when one is given (uv's "first-compatible among system interpreters").
-/// `probe_fn` is injected for tests.
+/// Walk the candidate list, probing each; return the first usable interpreter's
+/// canonical executable that also satisfies `request` when one is given (uv's
+/// "first-compatible among system interpreters"). `probe_fn` is injected for tests.
 fn resolve_with<F>(
     candidates: &[PathBuf],
     request: Option<&Request>,
@@ -379,9 +363,9 @@ fn discovery_candidates(scope: &Path) -> Vec<PathBuf> {
         push(p);
     }
 
-    // 4. uv-managed interpreters, newest first — a fallback for version
-    //    requests the venv/PATH can't satisfy. Placed last so a normal run
-    //    still prefers the active environment (least surprise).
+    // 4. uv-managed interpreters, newest first: a fallback for version requests
+    //    the venv/PATH can't satisfy. Placed last so a normal run still prefers
+    //    the active environment (least surprise).
     for p in managed_candidates() {
         push(p);
     }
@@ -503,7 +487,7 @@ fn path_python_names() -> Vec<String> {
     }
 }
 
-/// Interpreters reported by the Windows Python Launcher (`py --list-paths`) —
+/// Interpreters reported by the Windows Python Launcher (`py --list-paths`):
 /// python.org installs that typically aren't on `PATH`. Empty (and never
 /// spawns) off Windows, or when `py` is absent / reports nothing.
 fn py_launcher_candidates() -> Vec<PathBuf> {
@@ -518,20 +502,8 @@ fn py_launcher_candidates() -> Vec<PathBuf> {
 }
 
 /// Parse `py --list-paths` output into absolute interpreter paths. Each line is
-/// a tag (`-V:3.12`, `-3.10-64`, ...), an interpreter path (which may itself
-/// contain spaces), and an active-`*` marker for the default install. The
-/// marker's side depends on launcher version — legacy `py --list-paths` trails
-/// it, newer `py list` leads it — so we peel the tag off the front and strip a
-/// `*` from either end of the remainder:
-///
-/// ```text
-///  -3.13-64         C:\Program Files\Python313\python.exe
-///  -3.12-64         C:\Users\me\AppData\Local\Programs\Python\Python312\python.exe *
-///  -V:3.11 *        C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe
-/// ```
-///
-/// Lines without a leading `-` tag (headers, blanks) are skipped. Pure — no
-/// process spawn — so it is unit-testable on every platform.
+/// a tag, a path (which may contain spaces), and a default-`*` marker that may
+/// lead or trail by launcher version; peel the tag, strip a `*` from either end.
 fn parse_py_list_paths(output: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for line in output.lines() {
@@ -544,10 +516,9 @@ fn parse_py_list_paths(output: &str) -> Vec<PathBuf> {
         let Some((_tag, rest)) = line.split_once(char::is_whitespace) else {
             continue;
         };
-        // An active install carries a `*` marker — trailing (legacy
-        // `py --list-paths`: `-3.9-64  C:\...\python.exe *`) or leading (newer
-        // `py list`: `-V:3.12 *  C:\...`). Strip whichever side it lands on so
-        // the default interpreter's path doesn't keep a spurious ` *` suffix.
+        // The default install carries a `*` marker, leading or trailing by
+        // launcher version. Strip whichever side it lands on so the path
+        // doesn't keep a spurious ` *` suffix (which would fail its exists()).
         let path = rest.trim();
         let path = path.strip_prefix('*').unwrap_or(path).trim();
         let path = path.strip_suffix('*').unwrap_or(path).trim();
@@ -604,9 +575,8 @@ fn probe(candidate: &Path) -> Option<Probe> {
 }
 
 /// [`probe`] memoized in-process, with a disk layer for stable absolute paths.
-/// Discovery runs once for the session and again per monorepo project, often
-/// over the same names; and managed/venv interpreters rarely change between
-/// runs, so persisting their probes skips the subprocess entirely.
+/// Discovery repeats over the same names (per session, per monorepo project),
+/// and managed/venv interpreters rarely change, so persisting skips subprocesses.
 fn cached_probe(candidate: &Path) -> Option<Probe> {
     static MEM: OnceLock<Mutex<HashMap<PathBuf, Option<Probe>>>> = OnceLock::new();
     let mem = MEM.get_or_init(|| Mutex::new(HashMap::new()));
@@ -634,15 +604,9 @@ fn cached_probe(candidate: &Path) -> Option<Probe> {
         .unwrap()
         .insert(candidate.to_path_buf(), result.clone());
     if let (Some(m), Some(p)) = (mtime, &result) {
-        // Persist POSITIVE probes only. A negative probe (the interpreter ran
-        // but couldn't import the worker shim — e.g. msgpack not yet installed)
-        // is keyed on the binary's mtime, which a `pip install` into
-        // site-packages leaves unchanged. Persisting `false` would let the
-        // stale miss survive the very install that fixes it, so rstest keeps
-        // reporting "no usable Python interpreter found" until the cache is
-        // deleted by hand. Re-probe negatives every run instead: cheap next to
-        // a full session, and self-healing once the dep lands. The in-memory
-        // cache above still de-dupes repeat probes within a single run.
+        // Persist POSITIVE probes only. A negative is keyed on the binary's
+        // mtime, which a `pip install` fixing the shim leaves unchanged; caching
+        // `false` would outlive the fix. Re-probe negatives every run instead.
         if p.worker_importable {
             disk_cache_put(candidate, m, p);
         }
@@ -1108,7 +1072,7 @@ mod tests {
     #[test]
     fn parses_py_list_paths_legacy_trailing_active_marker() {
         // Real legacy `py --list-paths`: `-N.M-64` tags, default marked by a
-        // *trailing* `*`. Regression guard — the default install must not keep
+        // *trailing* `*`. Regression guard: the default install must not keep
         // a ` *` suffix (which would fail its later `exists()` check).
         let out = "\
  -3.13-64         C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe *

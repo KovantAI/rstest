@@ -1,5 +1,5 @@
 //! Guards against drift between the docs and a cheap, committed source of
-//! truth. Two checks, both pure file scans — no python, no binary, always run:
+//! truth. Two checks, both pure file scans - no python, no binary, always run:
 //!
 //! - `docs_version_matches_package_version`: every `rstest X.Y.Z` header in the
 //!   docs/README must match `CARGO_PKG_VERSION` (the workspace version), so a
@@ -9,7 +9,7 @@
 //!   `corpus/suites.toml` (total tables minus the monorepo entry).
 //!
 //! Test-RUN counts (pandas' 193,627 etc.) are deliberately NOT guarded: they
-//! have no cheap committed source — deriving them means running the full
+//! have no cheap committed source - deriving them means running the full
 //! corpus, and freezing a baseline just moves the drift. See the docs review.
 
 use std::path::{Path, PathBuf};
@@ -92,9 +92,8 @@ fn docs_version_matches_package_version() {
 }
 
 /// Count standalone suites in `suites.toml`: every top-level `[table]` header,
-/// minus monorepo entries (those carry `mode = "mono"` and are counted
-/// separately in the docs). Hand-parsed to avoid a toml dev-dependency — the
-/// file is flat (no `[[arrays]]`, no nested tables).
+/// minus monorepo entries (`mode = "mono"`, counted separately in the docs).
+/// Hand-parsed to avoid a toml dev-dependency; the file is flat.
 fn standalone_suite_count(toml: &str) -> usize {
     let mut tables = 0usize;
     let mut mono = 0usize;
@@ -103,7 +102,7 @@ fn standalone_suite_count(toml: &str) -> usize {
         if t.starts_with('[') && t.ends_with(']') && !t.starts_with("[[") {
             tables += 1;
         } else if t.starts_with("mode") {
-            // `mode = "mono"` — strip whitespace/quotes and compare.
+            // `mode = "mono"` - strip whitespace/quotes and compare.
             if let Some((_, val)) = t.split_once('=') {
                 if val.trim().trim_matches('"') == "mono" {
                     mono += 1;

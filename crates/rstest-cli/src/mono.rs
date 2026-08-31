@@ -1,14 +1,9 @@
 //! Monorepo support, P0: discover subprojects (each with its own pytest
 //! config) and run them as sequential session groups.
 //!
-//! Research basis: rtest's 273x collection win comes from per-subproject
-//! cwd in separate processes — impossible for single-session runners,
-//! natural for rstest's worker pool. pytest itself cannot run a repo of
-//! per-package configs from the root: one rootdir, one ini, colliding
-//! conftest trees. Here every project gets its own full pool run with
-//! cwd = the project dir, so rootdir/ini/conftest semantics are exactly
-//! pytest-in-that-directory, and caches (durations, lastfailed) land in
-//! each project where they belong.
+//! pytest cannot run a repo of per-package configs from the root (one
+//! rootdir/ini, colliding conftests). Here each project runs its own full
+//! pool with cwd = project dir, so semantics and caches match pytest there.
 
 use std::path::{Path, PathBuf};
 
@@ -24,9 +19,8 @@ fn pruned(name: &str, dir: &Path) -> bool {
 }
 
 /// Find subprojects under `root`: directories carrying their own pytest
-/// config. Auto mode walks at most `MAX_DEPTH` levels and does not
-/// descend into a found project (its nested configs belong to it).
-/// `[tool.rstest] projects` globs override the walk entirely.
+/// config. Auto mode walks at most `MAX_DEPTH` levels and does not descend
+/// into a found project. `[tool.rstest] projects` globs override the walk.
 const MAX_DEPTH: usize = 4;
 
 pub fn discover_projects(root: &Path, project_globs: Option<&[String]>) -> Vec<PathBuf> {
@@ -176,9 +170,8 @@ mod tests {
 }
 
 /// Per-project worker shares honoring fixed pins: a project whose own
-/// `[tool.rstest] numprocesses` is a number keeps it (clamped to the
-/// budget; 0/1 = its single-worker pytest-exact mode). The rest split
-/// the remaining budget by weight.
+/// `[tool.rstest] numprocesses` is a number keeps it (clamped to budget;
+/// 0/1 = single-worker exact mode). The rest split the remainder by weight.
 pub fn plan_shares_with_fixed(
     costs: &[Option<f64>],
     fixed: &[Option<usize>],
@@ -215,9 +208,8 @@ pub fn project_fixed_n(project: &Path) -> Option<usize> {
 }
 
 /// Per-project worker shares for concurrent groups: weighted by each
-/// project's duration-cache total (the suite time it needed last run),
-/// minimum 1, summing to at most `budget`. Unknown projects (no cache)
-/// get the average known weight — first runs split evenly.
+/// project's duration-cache total, minimum 1, summing to at most `budget`.
+/// Unknown projects get the average known weight (first runs split evenly).
 pub fn plan_shares(costs: &[Option<f64>], budget: usize) -> Vec<usize> {
     let n = costs.len();
     if n == 0 {
@@ -232,8 +224,8 @@ pub fn plan_shares(costs: &[Option<f64>], budget: usize) -> Vec<usize> {
     };
     let weights: Vec<f64> = costs.iter().map(|c| c.unwrap_or(avg).max(0.001)).collect();
     let total: f64 = weights.iter().sum();
-    // Reserve the 1-worker minimum for everyone, split the REST by
-    // weight — floors can never overshoot the budget that way.
+    // Reserve the 1-worker minimum for everyone, split the REST by weight:
+    // floors can never overshoot the budget that way.
     let extra = budget - n;
     let mut shares: Vec<usize> = weights
         .iter()
@@ -307,9 +299,8 @@ pub fn project_name(project: &Path) -> Option<String> {
 }
 
 /// Names this project depends on ([project].dependencies +
-/// [project.optional-dependencies] + [dependency-groups]), normalized.
-/// Only sibling-name matches matter to the caller; over-collecting
-/// third-party names is harmless.
+/// [project.optional-dependencies] + [dependency-groups]), normalized. Only
+/// sibling names matter to the caller; over-collecting third-party is fine.
 pub fn project_deps(project: &Path) -> Vec<String> {
     let Some(text) = std::fs::read_to_string(project.join("pyproject.toml")).ok() else {
         return Vec::new();
@@ -376,16 +367,16 @@ pub enum ChangeImpact {
     /// Files changed inside the project: run with --changed (the child
     /// narrows further via its own import graph).
     Direct,
-    /// A sibling it depends on (transitively) changed: run the FULL
-    /// suite — its own files didn't change, so child-local selection
-    /// would find nothing.
+    /// A sibling it depends on (transitively) changed: run the FULL suite,
+    /// since its own files didn't change and child-local selection would
+    /// find nothing.
     Dependent,
     Unaffected,
 }
 
 /// Classify projects against a changed-file list. Changes outside every
-/// project (root configs, shared scripts) put EVERYTHING in Direct —
-/// the conservative fallback.
+/// project (root configs, shared scripts) run EVERYTHING as the
+/// conservative fallback.
 pub fn classify_changes(
     root: &Path,
     projects: &[PathBuf],
@@ -403,11 +394,9 @@ pub fn classify_changes(
         }
     }
     if orphan_changes {
-        // A change OUTSIDE every project (root config, shared scripts)
-        // is invisible to project-local import graphs: forwarding
-        // --changed would narrow everything to zero. Run every project
-        // FULL instead — same conservatism as single-project rstest's
-        // config-change fallback.
+        // A change OUTSIDE every project is invisible to project-local
+        // import graphs (forwarding --changed narrows to zero), so run every
+        // project FULL, matching single-project rstest's config-change fallback.
         return vec![ChangeImpact::Dependent; n];
     }
     // Reverse dependency closure: dependents of changed projects run too.
@@ -577,9 +566,9 @@ mod fixed_tests {
     }
 }
 
-/// Top-level importable names a project provides: package dirs and
-/// modules at the project root and under `src/` (namespace packages —
-/// a bare `langgraph/` dir — count; tests and hidden dirs don't).
+/// Top-level importable names a project provides: package dirs and modules
+/// at the project root and under `src/` (bare namespace-package dirs count;
+/// tests and hidden dirs don't).
 pub fn top_level_modules(project: &Path) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     for base in [project.to_path_buf(), project.join("src")] {
@@ -621,10 +610,8 @@ pub fn top_level_modules(project: &Path) -> std::collections::HashSet<String> {
 }
 
 /// Scan each project's Python files for imports resolving to a SIBLING
-/// project's top-level modules: the undeclared-dependency detector
-/// behind --changed-strict. Over-connects namespace packages shared by
-/// several siblings — the safe direction (extra runs, never a false
-/// skip).
+/// project's top-level modules: the undeclared-dependency detector behind
+/// --changed-strict. Over-connects the safe way (extra runs, never a skip).
 pub fn scanned_sibling_edges(projects: &[PathBuf]) -> Vec<Vec<usize>> {
     let n = projects.len();
     let provides: Vec<std::collections::HashSet<String>> =
@@ -718,10 +705,9 @@ mod strict_tests {
     }
 }
 
-/// Merge per-project report-json files into one document. Test keys
-/// become ROOT-relative nodeids (`libs/a/tests/test_x.py::test_y` —
-/// what pytest would call them from the root), `meta.projects` carries
-/// per-project exit/skip status. Additive to report schema 2.
+/// Merge per-project report-json files into one document. Test keys become
+/// ROOT-relative nodeids (as pytest would name them from the root);
+/// `meta.projects` carries per-project exit/skip status. Additive to schema 2.
 pub fn merge_reports(
     parts: &[(String, Option<std::path::PathBuf>, Option<i32>, bool)],
     run_meta: &crate::report::RunMeta,

@@ -109,10 +109,9 @@ class Gate:
             env=env,
             capture_output=True,
             text=True,
-            # rstest emits UTF-8 (✓ ✗ ─ etc). Without this, text=True decodes
-            # with the locale encoding — cp1252 on Windows — mangling those
-            # glyphs in the in-memory string (bytes still round-trip, so CI
-            # logs look fine, but `"✓" in r.stdout` is False). Pin UTF-8.
+            # rstest emits UTF-8 glyphs (✓ ✗ ─); pin the decode to UTF-8 so
+            # the locale encoding (cp1252 on Windows) does not mangle them
+            # and make `"✓" in r.stdout` spuriously False.
             encoding="utf-8",
             timeout=timeout,
         )
@@ -162,7 +161,7 @@ def make_venv(venv_dir: Path, extra_deps=None):
 def parse_ndjson(text):
     """Parse stdout as newline-delimited JSON. Returns (all_lines_valid,
     [objects]). A single embedded raw newline would split an object and
-    fail json.loads — exactly the regression this guards against."""
+    fail json.loads - exactly the regression this guards against."""
     objs, ok = [], True
     for ln in text.splitlines():
         if not ln.strip():
@@ -231,7 +230,7 @@ def main():
         and "2 failed" in r.stdout
         and "2 passed" in r.stdout
     )
-    # inline only — the batched "--- FAILED ---" block must NOT also print
+    # inline only - the batched "--- FAILED ---" block must NOT also print
     no_dup = r.stdout.count("--- FAILED") == 0
     check("output bar: per-test lines + summary, failures once", bar_ok and no_dup, r.stdout[-400:])
     # unknown style warns, falls back, still runs
@@ -256,7 +255,7 @@ def main():
     )
     check("output github: human log + ::error per failure", gh_ok, r.stdout[-400:])
 
-    # --output json: stdout is PURE NDJSON — no banner, every line parses,
+    # --output json: stdout is PURE NDJSON - no banner, every line parses,
     # closed by exactly one sessionfinish envelope. The machine-readable
     # inverse of the bar CI-stability rule: consumers must see no human chrome.
     r = g.run("basic/test_basic.py", "-n", "2", "--output", "json")
@@ -287,7 +286,7 @@ def main():
         r.stdout[-300:],
     )
 
-    # --output tap: pure TAP stream — version header, one point per test,
+    # --output tap: pure TAP stream - version header, one point per test,
     # failure text as `#` diagnostics, trailing plan matching the count.
     r = g.run("basic/test_basic.py", "-n", "2", "--output", "tap")
     lines = [ln for ln in r.stdout.splitlines() if ln]
@@ -476,15 +475,9 @@ def main():
     check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
     print("== pytest-rerunfailures + xdist (no sock_port KeyError) ==")
-    # Isolated venv: pytest-rerunfailures with pytest-xdist co-installed takes
-    # its xdist *client* branch under the pool (every worker has a workerinput)
-    # and reads workerinput["sock_port"] — a key only an xdist master sets.
-    # rstest runs no master, so this KeyError'd at configure for -n >= 2 (a
-    # KeyError raised via the historic pytest_configure call, before any
-    # configure-time unregister could help). rstest now drops the plugin in
-    # pytest_cmdline_main, before that call, and owns reruns natively.
-    # xdist is required in the venv: without it rerunfailures takes a no-op
-    # branch and never reads sock_port, so it would not reproduce the bug.
+    # rerunfailures+xdist reads workerinput["sock_port"], a key only an xdist
+    # master sets; with no master rstest KeyError'd at -n>=2. rstest now drops
+    # the plugin in pytest_cmdline_main and owns reruns. xdist reproduces it.
     rf_venv = Path(args.venv + "-rerunfailures").resolve()
     make_venv(rf_venv, extra_deps=["pytest-rerunfailures", "pytest-xdist"])
     grf = Gate(binary, rf_venv)
@@ -521,14 +514,9 @@ def main():
     )
 
     print("== pytest-retry + xdist (server_port self-provision) ==")
-    # pytest-retry gates master vs. worker on `has_plugin("xdist") and
-    # numprocesses`. rstest keeps numprocesses visible under the pool (only
-    # dist is forced off), so each worker takes the MASTER branch and
-    # self-provisions its own ReportServer — it never reads the
-    # controller-injected workerinput["server_port"] that has no source under
-    # rstest. Without that (e.g. if numprocesses were nulled) the plugin would
-    # take its client branch and KeyError at configure. xdist must be in the
-    # venv for the master branch to be reachable at all.
+    # pytest-retry gates master vs worker on xdist + numprocesses; rstest keeps
+    # numprocesses visible so each worker self-provisions a ReportServer (master
+    # branch) and never reads the sourceless workerinput["server_port"].
     rt_venv = Path(args.venv + "-retry").resolve()
     make_venv(rt_venv, extra_deps=["pytest-retry", "pytest-xdist"])
     grt = Gate(binary, rt_venv)
@@ -545,7 +533,7 @@ def main():
         "    assert _a['x'] >= 2\n"
         "def test_master_branch(request):\n"
         # Prove the plugin self-provisioned (master), not the server_port client
-        # branch — the direct evidence that the KeyError path is never taken.
+        # branch - the direct evidence that the KeyError path is never taken.
         "    rep = retry_plugin.retry_manager.reporter\n"
         "    assert isinstance(rep, ReportServer), type(rep).__name__\n"
         "    assert not isinstance(rep, ClientReporter)\n"
@@ -567,11 +555,9 @@ def main():
     )
 
     print("== interpreter probe cache (heals after deps installed) ==")
-    # Regression: a NEGATIVE probe (interpreter present, worker shim not
-    # importable — e.g. msgpack missing) must NOT be persisted to the on-disk
-    # probe cache. The cache keys on the binary's mtime, which a `pip install`
-    # into site-packages leaves unchanged, so a cached `false` would survive the
-    # very install that fixes it — "no usable Python interpreter found" forever.
+    # Regression: a NEGATIVE probe (interpreter present but worker shim not
+    # importable, e.g. msgpack missing) must NOT be cached. The cache keys on
+    # binary mtime, unchanged by pip install, so a cached false would persist.
     bare = g.tmp / "bareenv"
     shutil.rmtree(bare, ignore_errors=True)
     subprocess.run([find_python(), "-m", "venv", str(bare)], check=True)  # no deps -> no msgpack
@@ -772,7 +758,7 @@ def main():
     check("each: --reruns rejected", r.returncode != 0 and "not supported" in r.stderr, r.stderr[-200:])
 
     print("== --dist validation ==")
-    # An invalid --dist value must be rejected the same way on every path —
+    # An invalid --dist value must be rejected the same way on every path;
     # the small-suite/lazy path used to accept garbage silently (exit 0).
     r = g.run("basic/test_basic.py", "--dist", "bogus")
     check(
@@ -1283,7 +1269,7 @@ def main():
         f"rc={r.returncode} " + r.stderr[-200:],
     )
     # A typo'd metric aborts up front (before the run) rather than silently
-    # never firing — the exact dead-gate bug this feature exists to kill.
+    # never firing - the exact dead-gate bug this feature exists to kill.
     r = g.run("doc", "-n", "2", "--doctor-fail-on", "bogus<1")
     check(
         "doctor-fail-on: bad metric aborts loudly",
@@ -1320,10 +1306,9 @@ def main():
     check("coverage fail-under exits 1", r.returncode == 1 and "FAIL Required" in r.stdout, r.stdout[-200:])
 
     print("== coverage contexts + line->test index (--cov-context) ==")
-    # Per-test contexts must survive the PARALLEL merge (tests land on
-    # different workers, yet each covered line keeps its per-test context),
-    # and --cov-context must additionally emit the line->test index that
-    # coverage-based --changed consumes.
+    # Per-test contexts must survive the PARALLEL merge (tests land on different
+    # workers, yet each covered line keeps its context), and --cov-context must
+    # emit the line->test index that coverage-based --changed consumes.
     ctxdir = g.tmp / "covctx"
     g.write("covctx/mymod.py",
             "def used_by_a():\n    return 1\n"
@@ -1350,7 +1335,7 @@ def main():
         # schema 2 nests the line map under "lines" and stamps a source "hash".
         lm = fm.get("lines", {})
         # used_by_a body (line 2) only test_a; used_by_b (line 4) only test_b;
-        # used_by_both (line 6) BOTH — proving cross-worker context merge.
+        # used_by_both (line 6) BOTH - proving cross-worker context merge.
         check("cov-context: schema + per-test line mapping",
               idx.get("schema") == 2
               and isinstance(fm.get("hash"), str) and len(fm["hash"]) == 64
@@ -1422,7 +1407,7 @@ def main():
 
     print("== coverage-based selection (--changed uses the cov index) ==")
     # Warm a line->test index, then prove --changed narrows to only the tests
-    # whose recorded coverage hit the changed lines — tighter than the
+    # whose recorded coverage hit the changed lines - tighter than the
     # import-graph (which would run every test importing the module).
     cs = g.tmp / "covsel"
     g.write("covsel/mymod.py",
@@ -1499,11 +1484,9 @@ def main():
     check("cov-select: cold cache -> import-graph (both)",
           got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
 
-    # Rail: a warm index still remembers a test renamed since it was built. The
-    # stale nodeid must NOT be passed to pytest (it aborts the run on a missing
-    # nodeid) and must NOT silently vanish (that skips a test still covering the
-    # changed line) — it demotes its file to import-graph, which runs the
-    # renamed test via its import edge.
+    # Rail: a warm index may hold a nodeid for a test renamed since it was built.
+    # Passing the stale nodeid aborts the run, and dropping it skips a test still
+    # covering the changed line, so the file demotes to import-graph instead.
     subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
     g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
@@ -1518,12 +1501,9 @@ def main():
     subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
-    # Rail: an index warmed before commits that SHIFT line numbers must not be
-    # trusted at stale lines. Warm clean, commit a prepend that pushes
-    # used_by_a's body down, then edit that body. The per-file SHA-256 no longer
-    # matches HEAD's content, so the file drifts to import-graph (both tests)
-    # instead of looking up the now-wrong line 2 -> which would pick ONLY
-    # test_b, the wrong answer. Proves drift detection prevents mis-selection.
+    # Rail: an index warmed before a line-shifting commit must not be trusted at
+    # stale lines. A prepend shifts used_by_a's body; the per-file SHA-256 no
+    # longer matches HEAD, so the file drifts to import-graph, not a stale lookup.
     subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
     g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
@@ -1540,12 +1520,9 @@ def main():
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
     print("== changed selection: files with no line-diff ==")
-    # `git diff -U0` emits NO hunk for deletions (+++ /dev/null), binary files,
-    # and pure renames, so parse_diff_hunks alone would drop them and defeat
-    # selection. A --name-only union recovers them and routes each to the
-    # conservative fallback. Also: a DELETED test file matches is_test_file by
-    # name but has nothing to run -- it must be skipped, never handed to pytest
-    # as a missing path (which aborts the whole --changed run).
+    # `git diff -U0` emits no hunk for deletions, binaries, and renames, so
+    # parse_diff_hunks drops them; a --name-only union recovers them for the
+    # fallback. A deleted test file must be skipped, not handed to pytest.
     subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
     # Warm the index so the deleted-test case exercises the warm direct_tests
@@ -1567,11 +1544,9 @@ def main():
     )
     subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
 
-    # Deleted SOURCE file under --changed-strict: -U0 shows it as +++ /dev/null
-    # (no hunk). Pre-fix it was dropped before reaching the strict reachability
-    # check, so a lone deletion falsely SKIPPED everything. The --name-only
-    # union routes it to affected_tests, whose strict rail forces a full run
-    # (the deleted module reaches no test via the graph).
+    # Deleted SOURCE file under --changed-strict: -U0 shows +++ /dev/null (no
+    # hunk). Pre-fix it was dropped and falsely SKIPPED everything; the
+    # --name-only union routes it to the strict rail, forcing a full run.
     (cs / "mymod.py").unlink()
     r = g.run("--changed-strict", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     check(
@@ -1599,12 +1574,9 @@ def main():
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
     print("== coverage selection under autocrlf (CRLF worktree, LF blob) ==")
-    # Regression: git's autocrlf/text filters store the blob with LF while the
-    # working tree carries CRLF. The index hash (working tree, Python side) and
-    # the drift check (git blob, Rust side) must still agree once both normalize
-    # newlines -- otherwise every indexed file "drifts" and the index is never
-    # used on Windows/CRLF checkouts. Here the blob is LF (git normalizes on
-    # add) but the worktree stays CRLF.
+    # Regression: autocrlf stores the blob LF while the worktree is CRLF. The
+    # index hash (worktree, Python) and drift check (blob, Rust) must agree once
+    # both normalize newlines, else every indexed file "drifts" on Windows.
     cr = g.tmp / "crlf"
     cr.mkdir(parents=True, exist_ok=True)
 
@@ -1640,9 +1612,8 @@ def main():
     g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
           cwd=cr, env_extra={"PYTHONPATH": str(cr)})
     # Edit only used_by_a's body. The stored hash (normalized CRLF) still equals
-    # the diff base's blob hash (normalized LF), so the index is TRUSTED and
-    # narrows to test_a alone. Pre-fix the CRLF-vs-LF byte mismatch drifted every
-    # file to the import graph, running BOTH tests.
+    # the base blob hash (normalized LF), so the index is trusted and narrows to
+    # test_a. Pre-fix the CRLF-vs-LF mismatch drifted every file, running both.
     wr_crlf("mymod.py",
             "def used_by_a():\n    return 111\n"
             "def used_by_b():\n    return 2\n"
@@ -1717,7 +1688,7 @@ def main():
     )
 
     # PR-aware --changed: with GITHUB_BASE_REF set, bare --changed diffs vs
-    # the merge-base with origin/<base> — a clean checkout of a PR commit
+    # the merge-base with origin/<base> - a clean checkout of a PR commit
     # still selects the PR's files (vs HEAD it would select nothing).
     base_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=sp, capture_output=True, text=True, check=True
@@ -1772,7 +1743,7 @@ def main():
         "auto-targets PR base origin/mainline" in r.stderr and "test_alpha" in r.stdout,
         r.stderr[-300:],
     )
-    # GitLab provides the exact diff-base SHA — used directly, no merge-base.
+    # GitLab provides the exact diff-base SHA - used directly, no merge-base.
     r = g.run(
         "--changed", "-v", cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": base_sha},
@@ -1782,7 +1753,7 @@ def main():
         "auto-targets MR base" in r.stderr and "test_alpha" in r.stdout,
         r.stderr[-300:],
     )
-    # An unresolvable GitLab base SHA errors — never a silent full skip.
+    # An unresolvable GitLab base SHA errors - never a silent full skip.
     r = g.run(
         "--changed", cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": "0" * 40},
@@ -2307,7 +2278,7 @@ class OneArgHooks:
     def pytest_configure_node(self, node):
         node.workerinput["oa_ident"] = "oa_" + node.gateway.id
 
-    # ONE arg, no `error` — the pytest-html / pytest-metadata signature.
+    # ONE arg, no `error` - the pytest-html / pytest-metadata signature.
     def pytest_testnodedown(self, node):
         _log("down:" + node.workerinput["oa_ident"])
 

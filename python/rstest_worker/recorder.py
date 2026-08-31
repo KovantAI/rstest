@@ -5,8 +5,8 @@ Activate (rstest does this for you): run pytest with
 `-p rstest_worker.recorder`; the output path comes from $RSTEST_RECORD.
 
 The emitted `tests` map is keyed by nodeid with per-phase outcomes
-(setup/call/teardown) plus call duration — the same fields rstest's
-`--report-json` writes — so the two snapshots diff directly.
+(setup/call/teardown) plus call duration - the same fields rstest's
+`--report-json` writes - so the two snapshots diff directly.
 """
 import json
 import os

@@ -1,8 +1,5 @@
 //! Per-test duration cache: `.rstest_cache/durations.json` in the cwd.
-//!
-//! Drives long-pole-first scheduling (research: aiohttp's 55s test must
-//! start first or it floors the whole run). Written after every run from
-//! the reports we already stream; absent or stale entries are harmless —
+//! Drives long-pole-first scheduling; absent or stale entries are harmless,
 //! unknown tests just keep collection order.
 
 use std::collections::HashMap;
@@ -40,12 +37,9 @@ pub fn save(run: &Run) {
 /// Items with a cached duration above this run first, longest first.
 pub const SLOW_THRESHOLD_SECS: f64 = 1.0;
 
-/// --durations-regress rows: (nodeid, baseline seconds, current seconds),
-/// worst absolute growth first. A test regresses when its wall time grew
-/// past `ratio` × baseline AND the growth clears a jitter floor: the
-/// baseline itself is at least 50ms (ratio on micro-tests is noise) and
-/// the absolute growth is at least half a second. Tests absent from the
-/// baseline (new/renamed) never flag.
+/// --durations-regress rows: (nodeid, baseline, current), worst absolute
+/// growth first. Flags when new >= ratio*baseline AND baseline >= 50ms AND
+/// growth >= 0.5s (jitter floors). Tests absent from baseline never flag.
 pub fn regressions(
     run: &Run,
     baseline: &HashMap<String, f64>,

@@ -1,26 +1,16 @@
 //! Lazy-collection pool (D5 single-point collection, `--collect lazy`).
 //!
-//! Workers run sessions with NO initial collection pass. The orchestrator
-//! walks test FILES (collect.rs — pytest's python_files rules), orders
-//! them by cached duration totals, and assigns files to workers; a worker
-//! collects each assigned file on demand (one perform_collect per file)
-//! and streams back the ids. Each file is collected by EXACTLY ONE
-//! process — the collection-mismatch failure class of the full pool mode
-//! cannot exist here, and the per-worker full-collection cost (the
-//! dominant startup cost on big suites) is gone.
+//! Workers run sessions with NO initial collection pass; the orchestrator
+//! orders FILES by cached duration and assigns them, each collected on
+//! demand by EXACTLY ONE process (no mismatch class, no per-worker collect).
 //!
 //! Item identity on the wire is the NODEID: lazy workers share no index
-//! space. Reruns, crash redistribution, and the serial phase all travel
-//! as RunIds — a worker re-collects the relevant FILE for a nodeid it has
-//! never seen.
+//! space. Reruns, crash redistribution, and the serial phase travel as
+//! RunIds; a worker re-collects the relevant FILE for an unseen nodeid.
 //!
-//! DISPATCH: the collecting worker does NOT self-queue its file's items.
-//! Collected ids land in a per-worker queue here; chunks go back via
-//! RunIds — normally to the collecting worker (items cached there, zero
-//! cost), but once the file queue is empty an idle worker STEALS from the
-//! longest queue (paying one re-collection of that file). Without
-//! stealing, a few giant parametrize-heavy files pin single workers
-//! (packaging: 61k items in ~30 files ran 1.5x slower than full mode).
+//! DISPATCH: chunks go back via RunIds, normally to the owner (items cached
+//! there). Once files run out an idle worker STEALS the longest queue (one
+//! re-collection); else giant parametrize-heavy files pin single workers.
 //!
 //! --dist loadscope/loadgroup need cross-file consolidation over a global
 //! id list, which lazy mode never builds; they are rejected at the CLI.
@@ -46,7 +36,7 @@ struct WorkerState {
     /// File paths assigned and not yet collected (reclaimed on crash).
     uncollected_files: Vec<String>,
     /// Ids collected by this worker, not yet dispatched anywhere
-    /// (dispatch prefers the owner — items are cached there).
+    /// (dispatch prefers the owner - items are cached there).
     own_queue: VecDeque<String>,
     /// Nodeids dispatched here (RunIds) and not done.
     outstanding: Vec<String>,
@@ -213,9 +203,9 @@ pub fn run_lazy_pool(
             Ok(Event::CollectError { path, longrepr }) => {
                 run.collect_error(path, longrepr);
                 if !continue_on_collect_errors && !stopping {
-                    // pytest aborts the run on collection errors; in lazy
-                    // mode the error can surface mid-run — stop dispatching
-                    // and wind down (already-final outcomes stay reported).
+                    // pytest aborts on collection errors; in lazy mode the
+                    // error can surface mid-run - stop dispatching and wind
+                    // down (already-final outcomes stay reported).
                     collect_aborted = true;
                     stopping = true;
                     for s in states.iter_mut().filter(|s| !s.dead && !s.finishing) {
@@ -228,7 +218,7 @@ pub fn run_lazy_pool(
             Ok(Event::Warnings { entries }) => {
                 // Files are disjoint across lazy workers, so collect and
                 // runtest warnings are each seen once; only config-phase
-                // warnings repeat per session — count those from gw0.
+                // warnings repeat per session - count those from gw0.
                 warnings.extend(
                     entries
                         .into_iter()
@@ -454,20 +444,17 @@ pub fn run_lazy_pool(
             }
         }
 
-        // Id dispatch: top up any worker below the refill threshold.
-        // Sources in order: requeued (reruns/redistribution), the
-        // worker's own collected queue, then — only when no files remain
-        // to hand out — STEAL from the longest other queue.
+        // Id dispatch: top up any worker below the refill threshold. Sources
+        // in order: requeued (reruns/redistribution), the worker's own
+        // queue, then STEAL from the longest queue (only when no files left).
         if !stopping {
             for i in 0..states.len() {
                 if !states[i].ready || states[i].dead || states[i].ended {
                     continue;
                 }
-                // Top up until the worker is safely above the hold
-                // threshold: it holds its last pending item (nextitem
-                // lookahead), and no further event may arrive to trigger
-                // a refill — a single under-threshold dispatch deadlocks
-                // a lone worker.
+                // Top up safely above the hold threshold: the worker holds
+                // its last item (nextitem lookahead) and no event triggers a
+                // refill, so an under-threshold dispatch deadlocks it alone.
                 loop {
                     if states[i].outstanding.len() > (chunk / 2).max(1) {
                         break;
@@ -485,10 +472,9 @@ pub fn run_lazy_pool(
                         if !steal || !file_queue.is_empty() {
                             break; // affinity mode, or more files coming
                         }
-                        // Steal HALF the longest queue's remainder (one
-                        // re-collection of that file on this worker buys
-                        // sustained balance; tiny steals would re-collect
-                        // per chunk).
+                        // Steal HALF the longest queue's remainder: one
+                        // re-collection buys sustained balance, whereas tiny
+                        // steals would re-collect the file per chunk.
                         let victim = (0..states.len())
                             .filter(|&j| j != i)
                             .max_by_key(|&j| states[j].own_queue.len());
@@ -537,13 +523,9 @@ pub fn run_lazy_pool(
             s.finishing = false;
         }
 
-        // Release workers whose queue is exhausted FOR NOW (they hold
-        // their last item awaiting a successor), and EndSession when every
-        // outcome is final. A collection in flight ANYWHERE blocks
-        // release: its ids may be stolen by an already-drained worker,
-        // whose session fixtures were torn down with its last item
-        // (premature NoMoreItems = fixture re-setup, the EndSession
-        // lesson all over again).
+        // Release workers whose queue is exhausted FOR NOW. A collection in
+        // flight ANYWHERE blocks release: its ids may be stolen by a drained
+        // worker whose fixtures were torn down (premature NoMoreItems = re-setup).
         let collecting = states
             .iter()
             .any(|s| !s.dead && !s.uncollected_files.is_empty());
@@ -570,14 +552,9 @@ pub fn run_lazy_pool(
         if parallel_resolved {
             let serial_pending = !stopping && (!serial.is_empty() || serial_active && in_flight);
             for (i, s) in states.iter_mut().enumerate() {
-                // Gate on `ready` (sent LazyReady — parked in
-                // pytest_runtestloop awaiting commands), NOT "was assigned a
-                // file". A collection error can trip `stopping` before file
-                // assignment ever reaches a freshly-ready worker; that worker
-                // still drains on NoMoreItems and then blocks in recv_one
-                // awaiting EndSession. Skipping it here left a never-ended,
-                // never-dead worker that hung the whole run (done_workers
-                // never reached n).
+                // Gate on `ready` (sent LazyReady), NOT "was assigned a file":
+                // a collection error can trip `stopping` before a ready worker
+                // gets one, and skipping it hangs the run (done_workers < n).
                 if s.dead || s.ended || !s.ready {
                     continue;
                 }

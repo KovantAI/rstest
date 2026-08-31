@@ -1,9 +1,6 @@
 //! Minimal pytest ini discovery: rootdir, `python_files`, `testpaths`.
-//!
-//! Port of the validated subset from research spike 1 (static_collect.py).
-//! Precedence per pytest docs: a `[pytest]`/`[tool:pytest]`/ini_options
-//! section wins; files are probed upward from the invocation dir in the
-//! order pytest.ini, pyproject.toml, tox.ini, setup.cfg per directory.
+//! Precedence per pytest docs: a `[pytest]`/`[tool:pytest]`/ini_options section
+//! wins; files probed upward per dir: pytest.ini, pyproject.toml, tox.ini, setup.cfg.
 
 use std::path::{Path, PathBuf};
 
@@ -47,9 +44,8 @@ pub fn discover(start: &Path) -> ProjectConfig {
     ProjectConfig::default()
 }
 
-/// Does this directory carry its own pytest configuration? (Any of the
-/// four config files with a pytest section — the monorepo discovery
-/// predicate.)
+/// Does this directory carry its own pytest configuration? (Any of the four
+/// config files with a pytest section - the monorepo discovery predicate.)
 pub fn has_pytest_config(dir: &Path) -> bool {
     ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"]
         .iter()
@@ -123,12 +119,9 @@ fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
     found.then_some(cfg)
 }
 
-/// rstest's own defaults from `[tool.rstest]` in pyproject.toml.
-/// Precedence everywhere: CLI flag > [tool.rstest] > built-in default.
-///
-/// Looked up independently of pytest-ini discovery: that walk stops at
-/// the FIRST pytest config file (which may be pytest.ini), while this
-/// section only ever lives in pyproject.toml.
+/// rstest's own defaults from `[tool.rstest]` in pyproject.toml. Precedence: CLI
+/// flag > [tool.rstest] > built-in default. Looked up independently of pytest-ini
+/// discovery, since this section only ever lives in pyproject.toml.
 #[derive(Debug, Default, Clone)]
 pub struct RstestSettings {
     pub numprocesses: Option<String>,
@@ -204,7 +197,7 @@ mod tests {
 
     #[test]
     fn default_python_files_match_pytest() {
-        // BOTH patterns — undercounting silently caps -n auto.
+        // BOTH patterns - undercounting silently caps -n auto.
         let cfg = ProjectConfig::default();
         assert_eq!(cfg.python_files, vec!["test_*.py", "*_test.py"]);
     }
@@ -243,7 +236,7 @@ worker-timeout = 120
 
     #[test]
     fn nearest_pyproject_is_the_boundary() {
-        // A pyproject WITHOUT [tool.rstest] stops the ancestor walk —
+        // A pyproject WITHOUT [tool.rstest] stops the ancestor walk -
         // a parent project's settings must not leak in.
         let parent = tmpdir("boundary");
         std::fs::write(parent.join("pyproject.toml"), "[tool.rstest]\nreruns = 9\n").unwrap();

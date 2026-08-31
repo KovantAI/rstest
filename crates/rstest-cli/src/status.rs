@@ -1,26 +1,6 @@
-//! Live status footer: one sticky line per worker showing what it's
-//! running right now, plus a progress/ETA header. nextest-style — pytest's
-//! sequential per-file lines can't survive parallelism, but the
-//! orchestrator knows every worker's in-flight test exactly (item_start),
-//! which is strictly more information.
-//!
-//! TTY-only: when stdout isn't a terminal (CI, pipes) every method is a
-//! no-op passthrough and output is byte-identical to the non-footer mode.
-//!
-//! Rendering uses RELATIVE cursor moves, not an absolute saved position
-//! (DECSC), so it survives the terminal scrolling while the footer is up.
-//! Invariant: between paints the cursor rests at the true end of real
-//! output, with the footer occupying `painted_lines` lines BELOW it.
-//! - erase: `CSI 0J` clears from the rest cursor downward, wiping the
-//!   footer without touching prior output.
-//! - repaint: print the footer below, then move the cursor back UP by the
-//!   line count (relative) and reprint `tail_line` — the current
-//!   not-yet-newlined output line (progress dots) — so the cursor lands at
-//!   its real end, not column 0.
-//!
-//! All run output must flow through print_line / print_inline, which keep
-//! `tail_line` in sync (print_line ends a line and clears it; print_inline
-//! appends to it).
+//! Live per-worker status footer (nextest-style): a sticky line per worker
+//! plus progress/ETA header. TTY-only (no-op elsewhere). RELATIVE cursor
+//! moves survive scroll; all output must flow through print_line/print_inline.
 
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
@@ -36,7 +16,7 @@ pub struct StatusFooter {
     started: Instant,
     /// Number of footer lines currently painted below the rest cursor (0 when
     /// nothing is on screen). Used to move back up by a RELATIVE amount, which
-    /// survives terminal scroll — an absolute saved cursor (DECSC) does not.
+    /// survives terminal scroll - an absolute saved cursor (DECSC) does not.
     painted_lines: usize,
     /// The current real-output line that has not been terminated with a
     /// newline yet (progress dots). Reprinted after each repaint so the rest
@@ -123,10 +103,9 @@ impl StatusFooter {
         self.repaint();
     }
 
-    /// Clear the footer. Precondition: the cursor is at the rest position
-    /// (end of real output), with the footer occupying the lines BELOW it, so
-    /// `CSI 0J` (clear from cursor to end of screen) wipes the footer without
-    /// touching prior output. Scroll-safe: no absolute cursor is involved.
+    /// Clear the footer. Precondition: cursor is at the rest position (end of
+    /// real output) with the footer BELOW it, so `CSI 0J` wipes the footer
+    /// without touching prior output. Scroll-safe: no absolute cursor used.
     fn erase(&mut self) {
         if !self.enabled || self.painted_lines == 0 {
             return;
@@ -175,7 +154,7 @@ impl StatusFooter {
         // Lines printed below the rest cursor: the leading blank, the
         // progress header, and one per worker.
         let lines = 1 + 1 + self.running.len();
-        // Move the cursor back UP to the rest line (relative — survives any
+        // Move the cursor back UP to the rest line (relative - survives any
         // scroll the paint triggered), return to column 0, and reprint the
         // pending real-output line so the cursor lands at its true end.
         out.push_str(&format!("\x1b[{lines}A\r{}", self.tail_line));
@@ -199,9 +178,8 @@ fn bar_header(done: usize, total: usize, width: usize) -> String {
 }
 
 /// Final summary bar for Bar mode: a fully-filled bar segmented by outcome
-/// — green (passed) / red (failed+error) / yellow (skipped+xfail+xpass) —
-/// like pytest-sugar's closing line. Rounding slack goes to the dominant
-/// bucket so no spurious segment appears. Empty run → a dim empty bar.
+/// (green passed / red failed+error / yellow skipped+xfail+xpass). Rounding
+/// slack goes to the dominant bucket so no spurious segment appears.
 pub fn summary_bar(green: usize, red: usize, yellow: usize, palette: &Palette) -> String {
     let total = green + red + yellow;
     if total == 0 {

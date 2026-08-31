@@ -1,15 +1,6 @@
 //! Smart test selection: changed files -> import graph -> affected tests.
-//!
-//! Conservative by construction — every heuristic errs toward running MORE:
-//! - ambiguous module names select every matching file (suffix matching);
-//! - function-local and conditional imports count as edges;
-//! - a changed conftest.py selects its whole subtree;
-//! - a changed pytest config file (or any non-Python file) aborts selection
-//!   entirely -> full run.
-//!
-//! Known gap (documented): dynamic imports (`importlib.import_module`,
-//! `__import__`) produce no edges. Teams relying on them should not use
-//! `--changed` for correctness-critical runs.
+//! Conservative by construction - every heuristic errs toward running MORE.
+//! Known gap: dynamic imports (`importlib.import_module`, `__import__`) make no edges.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -29,12 +20,12 @@ pub enum Selection {
 /// How a CI exposes the PR/MR base for the current job.
 enum CiBase {
     /// A base branch NAME (GitHub/GitLab/Buildkite). Resolved against
-    /// `origin/<name>` via merge-base — the PR fork point, not the base
+    /// `origin/<name>` via merge-base - the PR fork point, not the base
     /// branch's post-fork commits.
     Branch { name: String, env: &'static str },
     /// An exact base SHA the CI already computed (GitLab's
     /// `CI_MERGE_REQUEST_DIFF_BASE_SHA` is the MR's diff base). Used
-    /// directly — no merge-base call, and it survives a shallow clone.
+    /// directly - no merge-base call, and it survives a shallow clone.
     Sha { sha: String, env: &'static str },
 }
 
@@ -83,20 +74,9 @@ fn nonempty(key: &str) -> Option<String> {
     }
 }
 
-/// Resolve the `--changed` base rev, PR-aware.
-///
-/// Bare `--changed` diffs vs HEAD — on a clean CI checkout of a PR that
-/// selects NOTHING (silent full skip). Every supported CI exposes the
-/// PR/MR base branch on its pull-request jobs (GitHub `GITHUB_BASE_REF`,
-/// GitLab `CI_MERGE_REQUEST_*`, Buildkite `BUILDKITE_PULL_REQUEST_BASE_BRANCH`);
-/// when one is set and no explicit rev was given, diff vs the merge-base
-/// with that base instead: exactly the PR's files, not post-branch commits
-/// on the base. (TeamCity has no standard env var for the target branch —
-/// expose one as a build parameter to opt in.)
-///
-/// An unresolvable base ref is an error, not a fallback — the default
-/// checkout is shallow (fetch-depth: 1) and falling back to HEAD would
-/// skip every test while looking green.
+/// Resolve the `--changed` base rev, PR-aware. Bare `--changed` diffs vs HEAD,
+/// which silently skips everything on a CI PR checkout; auto-target the merge-base
+/// with the detected PR base. An unresolvable base is an error, not a HEAD fallback.
 pub fn resolve_base_rev(rev: &str) -> Result<String> {
     if rev != "HEAD" {
         return Ok(rev.to_string());
@@ -155,9 +135,9 @@ pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
     let diff_base = rev.unwrap_or("HEAD");
     let out = std::process::Command::new("git")
-        // --relative: paths relative to the CWD and limited to its
-        // subtree — running from a repo subdirectory (or a monorepo
-        // project child) must see ITS files, not repo-rooted paths.
+        // --relative: paths relative to the CWD and limited to its subtree -
+        // running from a repo subdirectory (or a monorepo project child) must
+        // see ITS files, not repo-rooted paths.
         .args(["diff", "--name-only", "--relative", diff_base])
         .output()
         .context("running git diff (is this a git repository?)")?;
@@ -200,19 +180,9 @@ fn is_selectable_path(f: &Path) -> bool {
         .is_some_and(|n| n.starts_with(".coverage") || n == "coverage.xml")
 }
 
-/// What changed in one file, from `git diff -U0`, in the shape the coverage
-/// index lookup needs.
-///
-/// The coverage index is keyed by **pre-change (old-side)** line numbers — it
-/// was built from a past run's source — so we look up the OLD lines a hunk
-/// touched, not the new ones (new-side numbers drift after insertions).
-/// `old_ranges` are the inclusive old-side spans of modified/deleted lines
-/// (lines that may have had coverage). `has_new_code` is set when the change
-/// introduces lines with no old-side counterpart (a pure insertion, `-a,0`),
-/// the file is untracked, or the file changed with no usable line-diff
-/// (deletion, binary, rename, mode-only — recovered via `--name-only`, since
-/// `-U0` emits no hunks for them) — code the index cannot vouch for, so the
-/// file needs the conservative import-graph fallback.
+/// What changed in one file, from `git diff -U0`. The coverage index is keyed by
+/// pre-change (old-side) line numbers, so `old_ranges` holds old-side spans of
+/// modified/deleted lines; `has_new_code` flags code the index can't vouch for.
 #[derive(Debug, Default, PartialEq)]
 pub struct FileChange {
     pub old_ranges: Vec<(u32, u32)>,
@@ -240,15 +210,9 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
         .into_iter()
         .map(|(path, change)| (PathBuf::from(path), change))
         .collect();
-    // `git diff -U0` emits no hunks for files without a line-diff — deletions
-    // (`+++ /dev/null`), binary files, pure renames, mode-only changes — so
-    // parse_diff_hunks drops them. Those still affect selection: a deleted or
-    // renamed module breaks its importers, and a changed non-Python file must
-    // force a full run (rule1). Union the authoritative `--name-only` set so no
-    // changed file is silently skipped; anything the hunk parse already keyed
-    // wins (`or_insert`), everything else lands with empty old_ranges +
-    // has_new_code so the caller routes it to the conservative fallback
-    // (import graph for `.py`, full run for non-`.py`).
+    // `git diff -U0` emits no hunks for files without a line-diff (deletions,
+    // renames, binary, mode-only), which still affect selection. Union the
+    // authoritative `--name-only` set; hunk-parsed keys win, the rest fall back.
     let out = std::process::Command::new("git")
         .args(["diff", "--name-only", "--relative", diff_base])
         .output()
@@ -287,12 +251,9 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
 fn parse_diff_hunks(diff: &str) -> Vec<(String, FileChange)> {
     let mut out: Vec<(String, FileChange)> = Vec::new();
     let mut cur: Option<(String, FileChange)> = None;
-    // Only the header block BEFORE a file's first hunk names a file. Inside a
-    // hunk body, an added source line whose content starts with "++ " appears
-    // as "+++ ..." under -U0 (git prefixes it with one more `+`), so treating
-    // every "+++ " line as a header would misparse code as a filename. `diff
-    // --git` opens each file's header block; the `@@` that starts the body sets
-    // `in_hunk`, and only `diff --git` clears it again.
+    // Only the header block before a file's first hunk names a file: under -U0 a
+    // body line starting "++ " shows as "+++ " and must not be read as a header.
+    // `diff --git` opens the header; `@@` sets `in_hunk`, only `diff --git` clears it.
     let mut in_hunk = false;
     for line in diff.lines() {
         if line.starts_with("diff --git ") {
@@ -308,7 +269,7 @@ fn parse_diff_hunks(diff: &str) -> Vec<(String, FileChange)> {
                 continue;
             }
         }
-        // A bare `@@` only ever starts a real hunk header — content lines are
+        // A bare `@@` only ever starts a real hunk header - content lines are
         // prefixed with +/-/space, so this never collides with source.
         if line.starts_with("@@") {
             in_hunk = true;
@@ -318,7 +279,7 @@ fn parse_diff_hunks(diff: &str) -> Vec<(String, FileChange)> {
                     Some(Some(range)) => change.old_ranges.push(range),
                     // Pure insertion (`-a,0`): brand-new code, no old lines.
                     Some(None) => change.has_new_code = true,
-                    None => {} // unparseable header — ignore
+                    None => {} // unparseable header - ignore
                 }
             }
         }
@@ -333,9 +294,8 @@ fn parse_diff_hunks(diff: &str) -> Vec<(String, FileChange)> {
 }
 
 /// From an `@@ -a,b +c,d @@` hunk header, the OLD-side `(start, end)` inclusive
-/// range. `Some(Some(range))` = `b > 0` lines existed and were changed/removed;
-/// `Some(None)` = `-a,0`, a pure insertion (no old lines); `None` = the header
-/// didn't parse.
+/// range. `Some(Some(range))` = lines changed/removed; `Some(None)` = `-a,0` pure
+/// insertion (no old lines); `None` = the header didn't parse.
 fn parse_hunk_old_range(hunk: &str) -> Option<Option<(u32, u32)>> {
     // token after "@@": "-a" or "-a,b"
     let minus = hunk
@@ -349,13 +309,13 @@ fn parse_hunk_old_range(hunk: &str) -> Option<Option<(u32, u32)>> {
         None => 1,
     };
     if count == 0 {
-        return Some(None); // pure insertion at this point — no old-side lines
+        return Some(None); // pure insertion at this point - no old-side lines
     }
     Some(Some((start, start + count - 1)))
 }
 
 /// Rule 1: a changed config file or any non-Python file defeats the import
-/// graph — return a full run. Shared by the graph and coverage selectors.
+/// graph - return a full run. Shared by the graph and coverage selectors.
 fn rule1_full_run(changed: &[PathBuf]) -> Option<Selection> {
     for c in changed {
         let name = c.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -380,7 +340,7 @@ const COVERAGE_INDEX_SCHEMA: u32 = 2;
 #[derive(serde::Deserialize)]
 struct CoverageFile {
     /// SHA-256 of the file's content when the index was built. The line map is
-    /// only valid for a base whose content still hashes to this — see
+    /// only valid for a base whose content still hashes to this - see
     /// `old_side_sha256` and the drift check in `affected_with_coverage`.
     #[serde(default)]
     hash: String,
@@ -398,24 +358,18 @@ struct CoverageIndex {
     files: HashMap<String, CoverageFile>,
 }
 
-/// Load `.rstest_cache/coverage_index.json`, or `None` when it is missing,
-/// unreadable, corrupt, or a schema this build doesn't understand — every
-/// "None" path makes the caller fall back to import-graph selection. A v1
-/// index (pre-hash) fails the schema check here and is treated as cold until
-/// the next `--cov-context` warm rewrites it as v2.
+/// Load `.rstest_cache/coverage_index.json`, or `None` when missing, unreadable,
+/// corrupt, or an unrecognized schema - every `None` makes the caller fall back to
+/// import-graph selection. A v1 (pre-hash) index fails the schema check as cold.
 fn load_coverage_index() -> Option<CoverageIndex> {
     let bytes = std::fs::read(".rstest_cache/coverage_index.json").ok()?;
     let idx: CoverageIndex = serde_json::from_slice(&bytes).ok()?;
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
 }
 
-/// Strip the CR from every CRLF. git's `autocrlf`/`text` filters store a blob
-/// with LF while the working tree carries CRLF, so the bytes coverage measured
-/// (working tree, hashed by the Python indexer) differ from the blob these diff
-/// line numbers come from — even though the line *count* is identical. Both
-/// sides normalize newlines the same way so the drift hashes agree; a real
-/// content edit still changes the hash. (Exotic clean/smudge filters beyond
-/// line endings won't match and simply fall back to the import graph — safe.)
+/// Strip the CR from every CRLF so a CRLF working tree and its LF blob hash equal
+/// under git's autocrlf/text filters (the drift hashes must agree, but a real
+/// content edit still changes the hash). Exotic clean/smudge filters just fall back.
 fn normalize_newlines(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -430,13 +384,9 @@ fn normalize_newlines(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Hex SHA-256 of `rel`'s content at the diff `base` (`git show base:./rel`),
-/// or `None` if it doesn't exist there or git fails. The `./` prefix makes git
-/// resolve the path relative to CWD, matching the `--relative` diff keys (so a
-/// monorepo child hashes ITS file, not a repo-root path). Newlines are
-/// normalized (see `normalize_newlines`) so the hash matches the Python
-/// indexer's under autocrlf. Compared against the index's stored hash to detect
-/// line-number drift since the index was warmed.
+/// Hex SHA-256 of `rel`'s content at the diff `base` (`git show base:./rel`), or
+/// `None` if absent. The `./` prefix resolves relative to CWD (monorepo safety);
+/// newlines are normalized so it matches the indexer's hash for the drift check.
 fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
     let spec = format!("{base}:./{}", rel.to_string_lossy().replace('\\', "/"));
@@ -452,14 +402,9 @@ fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
     Some(format!("{:x}", h.finalize()))
 }
 
-/// The single commit `git diff <rev>` uses as its OLD side — what the diff's
-/// old-side line numbers (and so the drift hash) are keyed to. `git show` needs
-/// a single commit, but `--changed` accepts ranges: `A..B` diffs against `A`,
-/// while `A...B` diffs against `merge-base(A, B)` (git's symmetric-difference
-/// rule). A bare ref (or `None` => `HEAD`) is already its own old side. Reducing
-/// the range here keeps `old_side_sha256`'s `git show base:./file` valid —
-/// otherwise a range rev makes every drift check fail and silently disables
-/// coverage-based selection (falls back to the import graph for every file).
+/// The single commit `git diff <rev>` uses as its OLD side, which the drift hash
+/// is keyed to. `git show` needs one commit but `--changed` accepts ranges: `A..B`
+/// reduces to `A`, `A...B` to `merge-base(A, B)`; a bare ref is its own old side.
 fn diff_old_side(rev: Option<&str>) -> String {
     let rev = rev.unwrap_or("HEAD");
     // `...` must be checked before `..` (the latter is a prefix of the former).
@@ -477,7 +422,7 @@ fn diff_old_side(rev: Option<&str>) -> String {
                 }
             }
         }
-        // merge-base unavailable — fall back to the left side; a mismatched
+        // merge-base unavailable - fall back to the left side; a mismatched
         // drift hash just routes the file to the import graph (safe).
         return left.to_string();
     }
@@ -487,23 +432,9 @@ fn diff_old_side(rev: Option<&str>) -> String {
     rev.to_string()
 }
 
-/// Coverage-aware selection: consult the line->test index to pick the exact
-/// tests whose recorded coverage executed the changed lines, falling back to
-/// import-graph selection for anything the index can't vouch for (brand-new
-/// code, files it never measured, untracked files, or a changed line with no
-/// recorded coverage — e.g. a `def`/decorator/module-level line, which runs at
-/// import time under the empty context and never enters the index) and to a
-/// full run for
-/// non-Python/config changes. With no index (cold cache) it is byte-identical
-/// to `affected_tests`. Over-selection is safe; the rails never under-select
-/// against unknown code — but the index is trusted for lines it *did* record,
-/// so keep it warm (rebuild on `--cov-context=test` runs).
-///
-/// Each index entry carries a SHA-256 of the source it was built from; a file
-/// whose content at the diff base no longer matches (commits landed since the
-/// warm, or it was warmed on a dirty tree) has drifted line numbers and is
-/// routed to the import graph rather than looked up at stale lines. Warm on a
-/// clean tree at the diff base for the tightest selection.
+/// Coverage-aware selection: consult the line->test index to pick the exact tests
+/// whose coverage hit the changed lines, falling back to the import graph for what
+/// it can't vouch for (new code, unmeasured/drifted files) and full run for config.
 pub fn affected_with_coverage(
     rootdir: &Path,
     project: &ProjectConfig,
@@ -519,19 +450,13 @@ pub fn affected_with_coverage(
         // Cold cache: identical to the import-graph selector.
         return affected_tests(rootdir, project, &files, strict);
     };
-    // Only reached with a warm index, so the base/cwd work below (one of which
-    // shells `git merge-base` for a `...` rev) isn't spent on a cold run.
-    //
-    // The index's line numbers are keyed to the source it was warmed from; the
-    // diff old-side lines are keyed to this base. They only align when a file's
-    // base content still matches the index (see the per-file drift check). A
-    // range rev (`A..B`/`A...B`) is reduced to the single commit git diffed the
-    // old side against, so the per-file `git show base:./file` stays valid.
+    // Only reached with a warm index. The index's line numbers are keyed to the
+    // warmed source, the diff old-side to this base; they align only when the file's
+    // base content still matches (per-file drift check), so a range rev is reduced.
     let base = diff_old_side(rev);
-    // Changed-file keys and index nodeids are CWD-relative (git `--relative`,
-    // pytest form); graph fallback results are ROOTDIR-relative. Resolve each
-    // against its own base so existence checks and the whole-file dedup compare
-    // real paths even when rootdir != cwd.
+    // Changed-file keys/index nodeids are CWD-relative (git `--relative`); graph
+    // fallback results are ROOTDIR-relative. Resolve each against its own base so
+    // existence checks and the dedup compare real paths when rootdir != cwd.
     let cwd = std::env::current_dir().unwrap_or_else(|_| rootdir.to_path_buf());
 
     let mut nodeids: BTreeSet<String> = BTreeSet::new();
@@ -539,13 +464,11 @@ pub fn affected_with_coverage(
     let mut direct_tests: BTreeSet<PathBuf> = BTreeSet::new();
 
     for (file, change) in changes {
-        // A changed test file always runs its own tests — its assertions or
-        // fixtures may have changed regardless of what covers its lines. A
-        // DELETED test file (name still matches, but no file on disk) has
-        // nothing to run: skip it rather than hand pytest a missing path,
-        // which would error the whole --changed run.
+        // A changed test file always runs its own tests (its assertions/fixtures
+        // may have changed). A DELETED test file (name matches, no file on disk)
+        // is skipped rather than handed to pytest as a missing path.
         if crate::collect::is_test_file(&rootdir.join(file), project) {
-            // `file` is cwd-relative — resolve existence against cwd, not
+            // `file` is cwd-relative - resolve existence against cwd, not
             // rootdir, so a deleted test isn't misjudged when rootdir != cwd.
             if cwd.join(file).exists() {
                 direct_tests.insert(file.clone());
@@ -559,24 +482,16 @@ pub fn affected_with_coverage(
         }
         // Look up the OLD-side changed lines (index is keyed pre-change).
         let key = file.to_string_lossy().replace('\\', "/");
-        // Drift guard: the index's line numbers are only valid if the file's
-        // content at the diff base still hashes to what the index was built
-        // from. On mismatch (commits landed since warm, or warmed on a dirty
-        // tree) — or if the base content can't be read — the entry is treated
-        // as absent, so the file falls back to the import graph instead of
-        // being looked up at drifted line numbers. One `git show` per changed
-        // indexed file (a handful under --changed).
+        // Drift guard: the index's line numbers are valid only if the base
+        // content still hashes to what the index was built from; on mismatch (or
+        // unreadable base) treat the entry as absent and fall back to the graph.
         let indexed = index
             .files
             .get(&key)
             .filter(|e| old_side_sha256(&base, file).as_deref() == Some(e.hash.as_str()));
-        // A changed old-side line the index has no nodeid for is a line the
-        // index cannot vouch for: it executed only at import/collection time
-        // (a `def`/decorator/class/module-level line lands in the empty
-        // context and is dropped from the index) or is a non-executable line
-        // (comment/blank). Trusting the empty lookup would select ZERO tests
-        // for that change — an under-selection the module's "err toward
-        // running MORE" contract forbids. Route such a file to the graph.
+        // A changed old-side line the index has no nodeid for (import-time
+        // def/decorator line dropped from the empty context, or a blank/comment)
+        // would select ZERO tests: route such a file to the graph instead.
         let mut uncovered_line = false;
         if let Some(entry) = indexed {
             for &(start, end) in &change.old_ranges {
@@ -584,15 +499,9 @@ pub fn affected_with_coverage(
                     match entry.lines.get(&line) {
                         Some(ids) => {
                             for id in ids {
-                                // A warm index still remembers tests renamed or
-                                // deleted since it was built. Passing a missing
-                                // nodeid to pytest errors the whole --changed
-                                // run, and silently dropping it would skip a
-                                // test that still covers this line — so treat a
-                                // stale entry as an uncovered line and fall the
-                                // file back to the import graph (err toward
-                                // running MORE). The file part (before "::") is
-                                // cwd-relative, matching pytest and the index.
+                                // A stale nodeid (test renamed/deleted since warm)
+                                // would error pytest or skip real coverage, so treat
+                                // it as uncovered and fall the file back to the graph.
                                 let file_part = id.split("::").next().unwrap_or(id);
                                 if cwd.join(file_part).exists() {
                                     nodeids.insert(id.clone());
@@ -623,16 +532,9 @@ pub fn affected_with_coverage(
         }
     };
 
-    // Whole-file selections (graph fallback + changed test files) run every
-    // test in the file, so a specific `file::test` nodeid for the same file is
-    // redundant — emitting both makes pytest collect the file twice. Drop such
-    // nodeids in favor of the broader whole-file entry.
-    //
-    // graph_tests are ROOTDIR-relative; direct_tests and nodeids are
-    // CWD-relative. Compare on absolute paths so the dedup holds even when
-    // rootdir != cwd (otherwise the two forms never match and pytest is handed
-    // both `f.py` and `f.py::test`). canonicalize() collapses `.`/symlink
-    // differences; every path here was already proven to exist.
+    // Whole-file selections run every test in a file, so a `file::test` nodeid for
+    // the same file is redundant (pytest would collect it twice). Compare on
+    // absolute paths (graph_tests are rootdir-relative, nodeids cwd-relative).
     let abs = |root: &Path, p: &Path| -> PathBuf {
         let joined = root.join(p);
         joined.canonicalize().unwrap_or(joined)
@@ -656,12 +558,9 @@ pub fn affected_with_coverage(
     Ok(Selection::Tests(selected.into_iter().collect()))
 }
 
-/// Map changed files to the affected test files.
-///
-/// `strict`: refuse to skip on unprovable safety — any changed source
-/// file whose reverse import reach contains NO test file (dynamic-import
-/// target, unused module, or a file outside the graph) falls back to a
-/// full run instead of silently selecting nothing for it.
+/// Map changed files to the affected test files. `strict`: any changed source
+/// file whose reverse import reach contains NO test file falls back to a full run
+/// instead of silently selecting nothing (dynamic-import target, unused module).
 pub fn affected_tests(
     rootdir: &Path,
     project: &ProjectConfig,
@@ -745,8 +644,7 @@ pub fn affected_tests(
         .into_iter()
         // is_test_file is a name-pattern match, so a DELETED test file still
         // matches; drop anything no longer on disk so pytest is never handed a
-        // missing path (a deleted source file's importers are already resolved
-        // and still exist — only the deleted file itself is dropped here).
+        // missing path (importers of a deleted source still exist and remain).
         .filter(|f| crate::collect::is_test_file(f, project) && f.exists())
         .collect();
     let mut tests: Vec<PathBuf> = tests
@@ -843,7 +741,7 @@ impl ProjectIndex {
 }
 
 /// Modules imported by `src`. Includes indented (function-local /
-/// conditional) imports — extra edges only ever widen the selection.
+/// conditional) imports - extra edges only ever widen the selection.
 pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
     let mut modules = Vec::new();
     for line in src.lines() {
@@ -908,7 +806,7 @@ mod tests {
 
     #[test]
     fn diff_old_side_reduces_ranges_to_a_single_commit() {
-        // Bare ref (and None => HEAD) is already its own old side — no shell-out.
+        // Bare ref (and None => HEAD) is already its own old side - no shell-out.
         assert_eq!(diff_old_side(None), "HEAD");
         assert_eq!(diff_old_side(Some("origin/main")), "origin/main");
         assert_eq!(diff_old_side(Some("HEAD~3")), "HEAD~3");
@@ -928,7 +826,7 @@ mod tests {
         assert_eq!(normalize_newlines(b"a\r\nb\r\n"), b"a\nb\n");
         assert_eq!(normalize_newlines(b"a\nb\n"), b"a\nb\n");
         // A lone CR (old-Mac, or mid-line) is NOT a line ending git rewrites,
-        // so it is preserved — only CR immediately before LF is dropped.
+        // so it is preserved - only CR immediately before LF is dropped.
         assert_eq!(normalize_newlines(b"a\rb"), b"a\rb");
         assert_eq!(normalize_newlines(b"trailing\r"), b"trailing\r");
         // Content difference still survives normalization.
@@ -1016,7 +914,7 @@ diff --git a/keep.py b/keep.py
     fn diff_hunks_content_line_starting_with_plusplus_is_not_a_header() {
         // Source line "++x" (e.g. a C-ish idiom, or literal text) shows up as
         // "+++x" under -U0. Inside a hunk body it must NOT be read as a "+++ "
-        // file header — the file stays pkg/mod.py, its one old line is recorded.
+        // file header - the file stays pkg/mod.py, its one old line is recorded.
         let diff = "\
 diff --git a/pkg/mod.py b/pkg/mod.py
 --- a/pkg/mod.py
