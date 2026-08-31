@@ -1,13 +1,6 @@
-//! `rstest --doctor`: why is this suite slow?
-//!
-//! Research finding behind this feature: in every suite profiled, the
-//! biggest speedup was suite CONTENT visible in runner-owned timing data —
-//! sleep-bound tests (rich: 74% of call time), wait-bound IO/timeouts
-//! (aiohttp: 78%), and repeated expensive fixtures (allauth: one key
-//! parsed 206×). No runner surfaces this; the data is already streaming.
-//!
-//! One analysis pass feeds two outputs: the terminal report and a
-//! versioned JSON document (`--doctor-json`) for CI trending.
+//! `rstest --doctor`: why is this suite slow? Surfaces suite-content costs
+//! from runner timing data (sleep/wait-bound tests, repeated fixtures). One
+//! pass feeds the terminal report and a versioned JSON doc (`--doctor-json`).
 
 use std::collections::BTreeMap;
 
@@ -63,22 +56,20 @@ struct GateTest {
     duration: f64,
 }
 
-/// Realized parallel speedup measured from an actual run: how much of the
-/// worker budget the run actually converted into wall-clock savings, plus
-/// the per-worker load balance that caps it. Unlike `ParallelFloor` (a
-/// static pre-run estimate), this is the after-the-fact answer to "why
-/// isn't `-n auto` faster?". Only emitted for multi-worker pool runs.
+/// Realized parallel speedup measured from an actual run. Unlike
+/// `ParallelFloor` (a static pre-run estimate), this is the after-the-fact
+/// "why isn't `-n auto` faster?". Only for multi-worker pool runs.
 #[derive(Serialize)]
 struct ParallelEfficiency {
     /// test_time / wall. May exceed `ideal_speedup` for wait-bound suites,
     /// where overlapping sleeps/IO run more tests at once than there are
     /// cores.
     realized_speedup: f64,
-    /// Worker count (`-n`) — the ceiling for a purely CPU-bound suite.
+    /// Worker count (`-n`) - the ceiling for a purely CPU-bound suite.
     ideal_speedup: usize,
     /// 100 * realized / ideal. >100% signals wait-bound overlap.
     efficiency_pct: f64,
-    /// Busy time summed per worker, descending — the load-balance picture.
+    /// Busy time summed per worker, descending - the load-balance picture.
     workers_busy: Vec<WorkerLoad>,
     /// 100 * (busiest - idlest) / busiest. High = uneven distribution.
     imbalance_pct: f64,
@@ -168,9 +159,8 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     });
 
     // -- Parallel efficiency (realized speedup + worker load balance) ------
-    // Only meaningful for multi-worker pool runs. Groups the per-test
-    // durations already collected by their recorded worker to expose load
-    // imbalance without needing any new timeline data from the workers.
+    // Multi-worker only. Groups already-collected per-test durations by
+    // recorded worker to expose load imbalance without new timeline data.
     let parallel_efficiency = (workers > 1 && test_time > 0.0).then(|| {
         let mut by_worker: BTreeMap<&str, (f64, usize)> = BTreeMap::new();
         for e in tests.values() {
@@ -191,10 +181,9 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
             .collect();
         workers_busy.sort_by(|a, b| b.busy_seconds.total_cmp(&a.busy_seconds));
         let max_busy = workers_busy.first().map_or(0.0, |w| w.busy_seconds);
-        // Workers that ran no test are absent from `by_worker` but still part
-        // of the pool: their busy time is 0. Treating min as the smallest
-        // *observed* load hides the worst imbalance (all work on one worker
-        // reads as 0% instead of ~100%). Seed idle workers at 0.
+        // Idle workers are absent from `by_worker` but still in the pool
+        // (busy 0). Using the smallest *observed* load instead hides the
+        // worst case (all work on one worker would read 0%, not ~100%).
         let min_busy = if workers_busy.len() < workers {
             0.0
         } else {
@@ -269,12 +258,8 @@ pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Resu
 }
 
 // ---- threshold gate (`--doctor-fail-on`) --------------------------------
-//
-// Turn the already-computed doctor metrics into a CI gate: fail the run when
-// a metric breaches a threshold (e.g. `parallel_efficiency<30`, `wait_pct>50`).
-// No new analysis — this is a pure evaluator over `DoctorReport`, so the
-// conditions can live in `pyproject.toml`/CI config and any non-GitHub CI gets
-// the gate too (not just the composite action's external `doctor_gate.py`).
+// Fail the run when a doctor metric breaches a threshold. Pure evaluator
+// over `DoctorReport`, no new analysis, so any non-GitHub CI can gate too.
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Op {
@@ -328,10 +313,8 @@ impl Op {
 }
 
 /// The metrics a gate condition can name. A metric backed by an optional
-/// report section (`wait_bound`, `parallel_efficiency`) resolves to `None`
-/// when that section didn't apply to the run — its condition is skipped, not
-/// failed, so gating `parallel_efficiency<30` on an `-n 1` run (which has no
-/// parallel efficiency) never false-fails.
+/// section (`wait_bound`, `parallel_efficiency`) resolves to `None` when that
+/// section didn't apply, so its condition is skipped, not false-failed.
 const METRICS: &[&str] = &[
     "wall_seconds",
     "test_time_seconds",
@@ -349,7 +332,7 @@ const METRICS: &[&str] = &[
 
 /// One parsed `--doctor-fail-on` condition. Parsing validates the metric name
 /// and threshold up front (before the run) so a typo fails fast rather than
-/// silently never firing — the exact bug class this feature exists to kill.
+/// silently never firing - the exact bug class this feature exists to kill.
 #[derive(Debug)]
 pub struct GateCondition {
     raw: String,
@@ -382,10 +365,9 @@ fn parse_condition(spec: &str) -> anyhow::Result<GateCondition> {
     let threshold: f64 = rhs.parse().map_err(|_| {
         anyhow::anyhow!("--doctor-fail-on '{spec}': threshold '{rhs}' is not a number")
     })?;
-    // Exact == / != is reliable only on the integer-valued metrics; on a
-    // float metric (times, percentages, speedups) it almost never matches and
-    // would silently never fire. Warn rather than reject — someone may still
-    // want it on `tests`/`workers`.
+    // Exact == / != is reliable only on integer-valued metrics; on a float
+    // metric it almost never matches and would silently never fire. Warn
+    // rather than reject - someone may still want it on `tests`/`workers`.
     if matches!(op, Op::Eq | Op::Ne) && !matches!(metric.as_str(), "tests" | "workers") {
         eprintln!(
             "rstest: --doctor-fail-on '{spec}': exact {} on the floating-point \
@@ -589,15 +571,12 @@ pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::
     Ok(())
 }
 
-/// Publish the markdown report to the CI's job-summary surface, if any —
-/// zero-config: any doctor run on a supported runner shows up on the run
-/// page. GitHub Actions appends to `$GITHUB_STEP_SUMMARY`; Buildkite pipes
-/// it to `buildkite-agent annotate`. (GitLab and TeamCity have no native
-/// markdown job-summary surface — use `--doctor-md` and publish the file
-/// as an artifact there.)
+/// Publish the markdown report to the CI's job-summary surface, if any:
+/// GitHub Actions appends to `$GITHUB_STEP_SUMMARY`, Buildkite pipes to
+/// `buildkite-agent annotate`. Others: use `--doctor-md` as an artifact.
 pub fn append_ci_summary(report: &DoctorReport) -> anyhow::Result<()> {
     // GitHub Actions: append to the step-summary file (hard error on write
-    // failure — the path came from the runner, so a failure is real).
+    // failure - the path came from the runner, so a failure is real).
     if let Some(path) = std::env::var("GITHUB_STEP_SUMMARY")
         .ok()
         .filter(|p| !p.is_empty())
@@ -611,7 +590,7 @@ pub fn append_ci_summary(report: &DoctorReport) -> anyhow::Result<()> {
         return Ok(());
     }
     // Buildkite: pipe the markdown to the agent as an info annotation.
-    // Best-effort — a missing/failing agent must not fail the test run
+    // Best-effort - a missing/failing agent must not fail the test run
     // (the annotation is cosmetic, unlike GitHub's guaranteed file path).
     if std::env::var("BUILDKITE")
         .ok()
@@ -624,7 +603,7 @@ pub fn append_ci_summary(report: &DoctorReport) -> anyhow::Result<()> {
 }
 
 /// Feed markdown to `buildkite-agent annotate` over stdin. Swallows all
-/// errors (logging to stderr) — see `append_ci_summary`.
+/// errors (logging to stderr) - see `append_ci_summary`.
 fn buildkite_annotate(md: &str) {
     use std::io::Write;
     use std::process::{Command, Stdio};

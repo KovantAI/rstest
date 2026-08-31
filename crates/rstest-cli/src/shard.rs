@@ -1,17 +1,14 @@
 //! CI sharding: partition the suite into `N` independent buckets and keep
-//! bucket `K` (`--shard K/N`, K is 1-based). Each CI job runs one bucket;
-//! buckets are disjoint and their union is the whole suite, so merging the
-//! per-job JUnit reconstructs the full run. No cross-job orchestration —
-//! every job partitions the same list the same way and keeps its slice.
+//! bucket `K` (`--shard K/N`, K 1-based). Buckets are disjoint, their union
+//! is the whole suite, and every job partitions the same list the same way.
 //!
-//! Balance uses the duration cache (`.rstest_cache/durations.json`): LPT
-//! bin-packing (longest-processing-time-first) drops each test into the
-//! currently-lightest bucket, so per-shard wall time stays even even when a
-//! few tests dominate. Tests with no cached timing take the average known
-//! weight, so a fully cold cache degrades to an even round-robin count
-//! split. Deterministic: identical `(ids, cache, k, n)` yields the same
-//! bucket on every machine — which is exactly what lets N jobs partition
-//! without talking. Restore the SAME duration cache on every job.
+//! Balance uses the duration cache (`.rstest_cache/durations.json`) via LPT
+//! bin-packing, so per-shard wall time stays even; untimed tests take the
+//! average weight (a cold cache degrades to a round-robin count split).
+//!
+//! Deterministic: identical `(ids, cache, k, n)` yields the same bucket on
+//! every machine, which is what lets N jobs partition without talking.
+//! Restore the SAME duration cache on every job.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,10 +35,9 @@ pub fn parse_shard(spec: &str) -> anyhow::Result<(usize, usize)> {
     Ok((k, n))
 }
 
-/// LPT assignment: return the bucket index (0-based, `0..n`) each item lands
-/// in. Heaviest first; each goes to the currently-lightest bucket. Ties
-/// (equal weight, equal load) break by lowest index — so equal weights
-/// (cold cache) produce a round-robin even split.
+/// LPT assignment: bucket index (0-based) each item lands in. Heaviest first,
+/// each to the currently-lightest bucket; ties break by lowest index, so
+/// equal weights (cold cache) produce a round-robin even split.
 fn lpt_assign(weights: &[f64], n: usize) -> Vec<usize> {
     let mut order: Vec<usize> = (0..weights.len()).collect();
     order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]).then(a.cmp(&b)));
@@ -88,14 +84,9 @@ pub fn shard_indices(ids: &[String], cache: &HashMap<String, f64>, k: usize, n: 
     out
 }
 
-/// Indices of `ids` assigned to shard `k` of `n`, partitioning at GROUP
-/// granularity: every index sharing a `Some(key)` moves as one unit, so an
-/// affinity group (file / scope / xdist_group) is never split across shards
-/// — the run-together / in-order contract the `--dist` affinity modes exist
-/// to provide. `keys[i] == None` makes index `i` its own singleton group.
-/// A group weighs the sum of its members' cached durations; groups are LPT
-/// bin-packed exactly like individual tests. Kept members come back in
-/// collection order. `n <= 1` keeps everything.
+/// Indices of `ids` for shard `k` of `n`, partitioning at GROUP granularity
+/// so an affinity group is never split across shards. Group weight = sum of
+/// members' durations, LPT bin-packed; `keys[i] == None` is a singleton.
 pub fn shard_groups(
     ids: &[String],
     keys: &[Option<String>],

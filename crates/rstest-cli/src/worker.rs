@@ -7,11 +7,9 @@ use anyhow::{Context, Result};
 
 use crate::proto;
 
-/// Transport: a pair of anonymous OS pipes per worker — POSIX pipes on
-/// unix, CreatePipe handles on Windows — never stdio (D4: fd 0/1/2 stay
-/// free for capture / passthrough modes). The child receives its two pipe
-/// endpoints as numeric argv values: fds on unix, HANDLE values on Windows
-/// (converted to CRT fds in the worker via msvcrt.open_osfhandle).
+/// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
+/// CreatePipe handles on Windows), never stdio (D4: fd 0/1/2 stay free). The
+/// child gets its endpoints as numeric argv: fds on unix, HANDLEs on Windows.
 pub struct Worker {
     child: Child,
     cmd_w: File,
@@ -61,10 +59,9 @@ impl Worker {
                 &evt.write.to_string(),
             ])
             .env("PYTHONPATH", worker_pythonpath())
-            // Worker stdout is not ours to show: capture semantics belong to
-            // the vendored core; user-facing output is rendered Rust-side.
-            // stderr stays inherited for worker crash visibility.
-            // (Passthrough mode inherits instead — pytest renders.)
+            // Worker stdout is not ours to show: output is rendered Rust-side,
+            // except passthrough mode which inherits so pytest renders. stderr
+            // stays inherited for worker crash visibility.
             .stdout(match io {
                 Stdio::Null => std::process::Stdio::null(),
                 Stdio::Inherit => std::process::Stdio::inherit(),
@@ -191,10 +188,9 @@ mod transport {
 
 #[cfg(windows)]
 mod transport {
-    //! EXPERIMENTAL: exercised by CI's windows wheel smoke test, not by
-    //! the full gate. Anonymous pipes; child ends made inheritable, HANDLE
-    //! values passed via argv, converted to CRT fds in the worker with
-    //! msvcrt.open_osfhandle.
+    //! EXPERIMENTAL: exercised by CI's windows wheel smoke test, not the full
+    //! gate. Anonymous pipes; child ends made inheritable, HANDLE values passed
+    //! via argv, converted to CRT fds in the worker with msvcrt.open_osfhandle.
 
     use std::fs::File;
     use std::os::windows::io::FromRawHandle;
@@ -252,8 +248,6 @@ mod transport {
     }
 }
 
-/// The project's interpreter: --python flag, then the active/local venv
-/// (both unix `bin/` and Windows `Scripts/` layouts), then PATH.
 /// Locate the rstest_worker package. Dev layout: exe sits in target/<profile>/,
 /// package in <repo>/python/. Installed wheels ship the package inside
 /// site-packages instead, making this a no-op.

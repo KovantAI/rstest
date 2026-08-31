@@ -1,7 +1,7 @@
 """Run tests through the vendored pytest core, streaming reports to the wire.
 
 The vendored `pytest`/`_pytest` (see python/VENDOR.md) provide full test
-semantics — fixtures, parametrize, classes, marks, conftest, plugin loading.
+semantics: fixtures, parametrize, classes, marks, conftest, plugin loading.
 rstest owns what happens around the session: scheduling, output, exit codes.
 """
 
@@ -30,17 +30,10 @@ def _wire_safe(value):
 
 
 def _randomly_seed(run_uid):
-    """One run-level seed for pytest-randomly, derived from the shared run
-    uid so every worker computes the same value (xdist's master broadcasts
-    one seed; rstest has no master). 32-bit, matching pytest-randomly's own
-    default range (random.Random().getrandbits(32)).
-
-    rstest's uid is hex (see RSTEST_RUN_UID in the CLI), so int(..., 16) is
-    the normal path. A non-hex or empty uid (e.g. one set by hand) must still
-    yield a stable, cross-worker-consistent seed rather than silently
-    collapsing every run to a single fixed value: crc32 of the raw bytes is
-    deterministic across processes (unlike builtin hash(), which is salted
-    per-process), so every worker still agrees. Empty uid maps to 0."""
+    """One run-level seed for pytest-randomly, derived from the shared run uid
+    so every worker agrees (rstest has no master to broadcast one). 32-bit to
+    match pytest-randomly's default; the crc32 fallback for a non-hex/empty uid
+    is deterministic across processes (unlike salted builtin hash())."""
     try:
         return int(run_uid, 16) & 0xFFFFFFFF
     except (ValueError, TypeError):
@@ -49,9 +42,8 @@ def _randomly_seed(run_uid):
 
 def _neutralize_rerunfailures(config):
     """Unregister pytest-rerunfailures so it neither crashes nor double-reruns
-    inside a pool worker. Idempotent — safe to call from both cmdline_main (the
-    effective site) and configure (belt-and-suspenders). See the caller in
-    StreamPlugin.pytest_cmdline_main for why the timing matters."""
+    inside a pool worker. Idempotent - safe to call from both cmdline_main and
+    configure. See StreamPlugin.pytest_cmdline_main for why timing matters."""
     plugin = config.pluginmanager.get_plugin("rerunfailures")
     if plugin is not None:
         config.pluginmanager.unregister(plugin)
@@ -59,7 +51,7 @@ def _neutralize_rerunfailures(config):
 
 def _is_dist_internal(plugin):
     """pytest-cov and xdist implement master-side hooks for their own
-    master<->worker handshakes — which rstest already emulates directly
+    master<->worker handshakes, which rstest already emulates directly
     (workerinput cov keys, covtool combine). Calling their impls inside a
     worker hits controller state that only exists on a real master."""
     mod = getattr(plugin, "__name__", None) or type(plugin).__module__
@@ -78,7 +70,7 @@ def _node_impl_params(impl):
     try:
         return _NODE_IMPL_PARAMS[key]
     except (KeyError, TypeError):
-        # Unhashable key — fall through and compute without caching.
+        # Unhashable key: fall through and compute without caching.
         pass
     try:
         params = inspect.signature(impl).parameters
@@ -93,34 +85,24 @@ def _node_impl_params(impl):
 
 def _call_node_impl(impl, node, **kwargs):
     """Invoke an xdist node hook (pytest_testnodeready / _testnodedown),
-    passing only the keyword args the impl actually declares.
+    passing only the keyword args the impl declares. Real-world hooks often use
+    the one-arg ``(node)`` form, so dropping unaccepted kwargs (e.g. ``error=``)
+    avoids TypeError; a ``**kwargs`` param accepts everything.
 
-    xdist's hookspec for pytest_testnodedown is ``(node, error)``, but
-    real-world hooks often use the one-arg form ``(node)`` (e.g. pytest-html
-    via pytest-metadata). Passing ``error=`` unconditionally raises
-    ``TypeError: unexpected keyword argument 'error'``. Introspect the
-    signature and drop kwargs the impl won't accept; a ``**kwargs`` param
-    means accept everything.
-
-    ``node`` goes by keyword when the signature is introspectable: pluggy
-    guarantees the param is named ``node``, and a catch-all ``(**kwargs)``
-    impl receives it only via kwargs — a positional would raise
-    ``TypeError: takes 0 positional arguments``. A positional-only ``node``
-    param is the mirror case and goes positionally. For un-introspectable C
-    hooks (which often reject keyword args) it goes positionally too."""
+    ``node`` goes by keyword when introspectable (pluggy names the param
+    ``node``, and a ``(**kwargs)`` impl can't take it positionally), but
+    positionally for positional-only params and un-introspectable C hooks."""
     params = _node_impl_params(impl)
     if params is None:
         # No introspectable signature (builtin / C hook). Pass node
-        # positionally (C funcs often reject keywords), then retry node-only
-        # if the extra kwargs don't bind — a one-arg impl would otherwise
-        # TypeError on error=.
+        # positionally (C funcs often reject keywords), then retry node-only if
+        # the extra kwargs don't bind (a one-arg impl would TypeError on error=).
         try:
             return impl(node, **kwargs)
         except TypeError as exc:
-            # Retry ONLY when the impl was never entered (arg-binding
-            # failure: the traceback has no inner frame). If the impl body
-            # itself raised TypeError, its side effects already ran and a
-            # retry would double-execute them — re-raise instead.
+            # Retry ONLY when the impl was never entered (arg-binding failure:
+            # no inner traceback frame). If the impl body itself raised, its
+            # side effects already ran, so a retry would double-execute them.
             tb = exc.__traceback__
             if tb is not None and tb.tb_next is not None:
                 raise
@@ -170,40 +152,20 @@ class StreamPlugin:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_cmdline_main(self, config):
-        # Unregister pytest-rerunfailures BEFORE pytest_configure runs. Under
-        # the pool every worker has a `workerinput`, so rerunfailures' configure
-        # takes its *client* branch — `ClientStatusDB(workerinput["sock_port"])`
-        # — and KeyErrors, because rstest runs no master to stash `sock_port`
-        # (same controller-service shape as pytest-retry, but gated on
-        # workerinput presence rather than numprocesses, so the retry fix does
-        # not transfer). pytest_configure is dispatched via call_historic, which
-        # snapshots the impl list, so a configure-time unregister fires too late.
-        # cmdline_main runs after entry-point plugins load but before
-        # _do_configure — the one window to remove it cleanly. rstest owns reruns
-        # natively (--reruns / @mark.flaky), so dropping the plugin loses nothing
-        # under the pool; at -n 0 (no RSTEST_WORKER_ID) it keeps native behavior.
+        # Unregister pytest-rerunfailures BEFORE pytest_configure: under the pool
+        # its configure KeyErrors on the never-stashed sock_port, and configure
+        # is call_historic (impl list snapshotted, too late to unregister).
+        # cmdline_main is the one clean window; rstest owns reruns natively.
         if os.environ.get("RSTEST_WORKER_ID") is not None:
             _neutralize_rerunfailures(config)
         return None  # tryfirst, non-firstresult: let pytest's own impl run
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_configure(self, config):
-        # Neutralize pytest-xdist if the project's ini/addopts pulls it in
-        # (-n in addopts is common): its options must PARSE, but its
-        # session must not engage — rstest owns parallelism. tryfirst so
-        # this lands before xdist's own configure checks.
-        #
-        # xdist's DSession only registers when `_is_distribution_mode` is true,
-        # i.e. dist != "no" AND tx is set — so forcing dist="no" is sufficient
-        # to keep xdist inert. We deliberately do NOT null `numprocesses`:
-        # third-party plugins gate their parallel-master setup on it (e.g.
-        # pytest-retry: `has_plugin("xdist") and getoption("numprocesses")`
-        # starts a ReportServer and stashes its port for workers to read). In
-        # rstest's "each worker is its own master" model that branch must fire
-        # so the worker self-provisions (its own ephemeral ReportServer); a
-        # nulled numprocesses sent it down the client branch and KeyError'd on
-        # the never-stashed workerinput["server_port"]. We surface the pool
-        # width so master-detection sees the truth; xdist stays off via dist.
+        # Neutralize pytest-xdist if ini/addopts pulls it in: its options must
+        # PARSE but not engage (rstest owns parallelism). dist="no" keeps xdist
+        # inert; numprocesses stays set so plugins that gate parallel-master
+        # setup on it (pytest-retry) self-provision instead of KeyErroring.
         opt = config.option
         if hasattr(opt, "dist"):
             opt.dist = "no"
@@ -225,13 +187,9 @@ class StreamPlugin:
             "xdist_group(name): tests in the same group run on the same "
             "worker under --dist loadgroup (xdist-compatible)",
         )
-        # pytest-rerunfailures is neutralized earlier, in pytest_cmdline_main
-        # (see _neutralize_rerunfailures) — it must be gone BEFORE the
-        # pytest_configure hookcall, which pytest fires via call_historic and
-        # therefore snapshots the impl list up front. Unregistering here would
-        # be too late: the plugin's already-scheduled pytest_configure still
-        # runs and KeyErrors on workerinput["sock_port"]. Belt-and-suspenders
-        # only, for a plugin that somehow registered after cmdline_main.
+        # Belt-and-suspenders: rerunfailures is normally neutralized earlier in
+        # pytest_cmdline_main (it must be gone before configure, which snapshots
+        # the impl list). This only catches a plugin registered after cmdline_main.
         if os.environ.get("RSTEST_WORKER_ID") is not None:
             _neutralize_rerunfailures(config)
         # When part of a pool, announce ourselves the way an xdist worker
@@ -256,26 +214,20 @@ class StreamPlugin:
                 # One uid per run, shared by every worker (xdist's
                 # testrun_uid contract); the orchestrator provides it.
                 "testrun_uid": run_uid,
-                # pytest-randomly's master broadcasts one resolved seed to
-                # every worker (its "default" path reads workerinput); absent,
-                # the plugin KeyErrors at -n >= 2. rstest has no master, so
-                # derive a single run-level seed from the shared run uid: same
-                # uid on every worker -> same seed -> all workers agree, and
-                # it is reproducible across the run. An explicit
-                # --randomly-seed takes a different code path and ignores this.
+                # pytest-randomly's master broadcasts one resolved seed; absent,
+                # the plugin KeyErrors at -n >= 2. rstest has no master, so we
+                # derive one run-level seed from the shared uid (all workers agree).
                 "randomly_seed": _randomly_seed(run_uid),
                 "mainargv": sys.argv,
-                # pytest-cov's worker mode expects these from the xdist
-                # master. Workers share our host and cwd (collocated), so
-                # pytest-cov writes suffixed .coverage.* data files and the
-                # ORCHESTRATOR combines + reports after the run.
+                # pytest-cov's worker mode expects these from the xdist master.
+                # Workers are collocated (same host/cwd), so they write suffixed
+                # .coverage.* files and the ORCHESTRATOR combines after the run.
                 "cov_master_host": socket.gethostname(),
                 "cov_master_topdir": os.getcwd(),
                 "cov_master_rsync_roots": [],
             }
-            # xdist workers expose this channel dict; pytest-cov (and
-            # others) write into it. Nothing reads it here — provided so
-            # worker-mode plugin code paths don't crash.
+            # xdist workers expose this channel dict; pytest-cov and others write
+            # into it. Nothing reads it here - provided so plugin paths don't crash.
             config.workeroutput = {}
             # Disjoint per-worker tmp roots (xdist popen-gwN pattern);
             # user-provided --basetemp wins.
@@ -283,17 +235,13 @@ class StreamPlugin:
             if basetemp and not config.option.basetemp:
                 from pathlib import Path
 
-                # pytest mkdirs option.basetemp with parents=False —
-                # the shared parent must already exist.
+                # pytest mkdirs option.basetemp with parents=False, so the
+                # shared parent must already exist.
                 os.makedirs(basetemp, exist_ok=True)
                 config.option.basetemp = Path(basetemp) / worker_id
-            # xdist MASTER-side hook emulation. Real xdist calls
-            # pytest_configure_node(node) on the controller before each
-            # worker starts, and implementations fill node.workerinput
-            # (sqlalchemy: follower_ident + follower DB provisioning).
-            # rstest has no master Python process, so each worker plays
-            # master for itself: same workerinput dict, same host, same
-            # config — the dominant pattern is semantically identical.
+            # xdist MASTER-side hook emulation: real xdist calls
+            # pytest_configure_node(node) before each worker, filling
+            # node.workerinput. rstest has no master, so each worker plays its own.
             self._xdist_node = _XdistNodeShim(config, worker_id)
             for plugin in config.pluginmanager.get_plugins():
                 self._call_configure_node(plugin, lenient=True)
@@ -301,21 +249,13 @@ class StreamPlugin:
     def _call_configure_node(self, plugin, lenient=False):
         """Direct-call a plugin's pytest_configure_node against our shim.
 
-        Direct (not via config.hook): sqlalchemy registers its XDistHooks
-        DURING its own pytest_configure and reads workerinput["follower_ident"]
-        on the very next line — only a synchronous call at registration
-        time (pytest_plugin_registered fires inside register()) lands in
-        that window.
+        Direct (not via config.hook) so it lands in the registration window:
+        sqlalchemy reads workerinput["follower_ident"] on the line after it
+        registers XDistHooks, which only a synchronous call reaches.
 
-        Two timing patterns coexist:
-          - sqlalchemy: configure_node is self-contained (sets a uuid), so the
-            registration-time call succeeds immediately.
-          - pytest-retry: it registers XdistHook, THEN on the next lines starts
-            a ReportServer and stashes its port; its configure_node READS that
-            stash. The registration-time call therefore fires too early and
-            raises KeyError. `lenient` swallows that and leaves the plugin
-            unmarked so the post-configure sweep (sessionstart) retries it once
-            the stash is populated.
+        pytest-retry instead stashes a ReportServer port AFTER registering, so
+        its configure_node KeyErrors if called then; `lenient` swallows that and
+        leaves it unmarked for the sessionstart sweep to retry once populated.
         """
         if self._xdist_node is None or _is_dist_internal(plugin):
             return
@@ -332,7 +272,7 @@ class StreamPlugin:
 
     def _sweep_configure_node(self):
         """Strict retry of any configure_node hooks the registration-time
-        (lenient) calls left unconfigured — by now every plugin's own
+        (lenient) calls left unconfigured; by now every plugin's own
         pytest_configure has run, so the state they read is populated."""
         if self._xdist_node is None:
             return
@@ -372,15 +312,14 @@ class StreamPlugin:
                 continue
             impl = getattr(plugin, name, None)
             if impl is not None:
-                # Loud: this is THIS worker's own local node hook. A genuine
-                # bug in it should fail the session, not vanish. (The
-                # crash-cleanup path in run_foreign_node_down swallows, but
-                # that's a DEAD sibling's hook — different contract.)
+                # Loud: this is THIS worker's own local node hook, so a genuine
+                # bug should fail the session, not vanish (unlike the DEAD
+                # sibling's hook that run_foreign_node_down swallows).
                 _call_node_impl(impl, self._xdist_node, **kwargs)
 
     def pytest_sessionstart(self, session):
         # Retry any configure_node hooks deferred during configure (state they
-        # read — e.g. pytest-retry's stashed server_port — is now populated).
+        # read, e.g. pytest-retry's stashed server_port, is now populated).
         self._sweep_configure_node()
         self._call_node_hooks(session.config, "pytest_testnodeready")
         if self._xdist_node is not None:
@@ -391,11 +330,9 @@ class StreamPlugin:
                 "node_input",
                 {"workerinput": _wire_safe(self._xdist_node.workerinput)},
             )
-        # Workers must not write shared last-failed/nodeids caches: N
-        # workers each know only THEIR failures, and the last writer would
-        # win. The orchestrator writes the merged truth after the run.
-        # (sessionstart, not configure: cacheprovider creates config.cache
-        # during configure and we run tryfirst there.)
+        # Workers must not write shared last-failed/nodeids caches: each knows
+        # only ITS failures and the last writer would win. The orchestrator
+        # writes merged truth. (sessionstart, not configure: cache exists by now.)
         config = session.config
         if os.environ.get("RSTEST_WORKER_ID") is not None and getattr(config, "cache", None):
             real_set = config.cache.set
@@ -449,10 +386,9 @@ class StreamPlugin:
         self._warnings[key] = self._warnings.get(key, 0) + 1
 
     def pytest_sessionfinish(self, session, exitstatus):
-        # xdist masters call testnodedown as each worker finishes
-        # (sqlalchemy drops its follower DB here). Crash caveat: a dead
-        # worker never reaches this — real xdist's master still fires it;
-        # rstest cannot (no master Python process).
+        # xdist masters call testnodedown as each worker finishes (sqlalchemy
+        # drops its follower DB here). Caveat: a crashed worker never reaches
+        # this, and rstest has no master to fire it in its place.
         self._call_node_hooks(session.config, "pytest_testnodedown", error=None)
         if self._warnings:
             self._conn.send(
@@ -499,8 +435,8 @@ class StreamPlugin:
         if report.when == "call" and report.nodeid in self._cpu:
             payload["cpu"] = round(self._cpu.pop(report.nodeid), 4)
         if report.failed and report.sections:
-            # Captured stdout/stderr/log — pytest shows these under the
-            # failure; ship them only for failures to keep the wire lean.
+            # Captured stdout/stderr/log; ship only for failures to keep the
+            # wire lean.
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
@@ -525,10 +461,10 @@ class StreamPlugin:
 class ItemDispatchPlugin(StreamPlugin):
     """xdist remote.py model: collect everything, run items on command.
 
-    The orchestrator feeds item indices; we keep a pending deque and only
-    run an item when its successor is known (`nextitem` drives teardown
-    scoping — running with the wrong nextitem changes fixture finalization
-    order). `no_more_items` drains the queue, last item gets nextitem=None.
+    The orchestrator feeds item indices; we keep a pending deque and only run
+    an item when its successor is known (`nextitem` drives teardown scoping;
+    the wrong nextitem changes fixture finalization order). `no_more_items`
+    drains the queue, last item gets nextitem=None.
     """
 
     MIN_PENDING = 2
@@ -539,20 +475,20 @@ class ItemDispatchPlugin(StreamPlugin):
         ids = [item.nodeid for item in session.items]
         digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
         payload = {"count": len(ids), "hash": digest}
-        # Full id list rides the wire from ONE worker only (the orchestrator
-        # needs it once, for duration-cache ordering); the rest verify by
-        # hash — at pandas scale that's 8x15MB saved on the startup path.
+        # Full id list rides the wire from ONE worker only (orchestrator needs
+        # it once, for duration-cache ordering); the rest verify by hash - at
+        # pandas scale that's 8x15MB saved on the startup path.
         if os.environ.get("RSTEST_SEND_IDS") == "1":
             payload["ids"] = ids
             # Source location per item (rootdir-relative file + 0-based line),
-            # aligned to `ids` — for --collect-only discovery / editor mapping.
+            # aligned to `ids`, for --collect-only discovery / editor mapping.
             # item.location is (relpath, lineno, domain); lineno may be None.
             payload["locations"] = [
                 [item.location[0] or "", item.location[1]] for item in session.items
             ]
             # Every marker name on each item (own + inherited from class/module),
-            # aligned to `ids` — for --collect-only discovery completeness. Names
-            # only; serial/flaky/groups below stay separate for scheduling.
+            # aligned to `ids`, for --collect-only completeness. Names only;
+            # serial/flaky/groups below stay separate for scheduling.
             payload["marks"] = [
                 sorted({m.name for m in item.iter_markers()}) for item in session.items
             ]
@@ -582,10 +518,9 @@ class ItemDispatchPlugin(StreamPlugin):
     def pytest_runtestloop(self, session):
         from collections import deque
 
-        # Replicate the guard from pytest's own runtestloop (which this
-        # hook replaces): collection errors abort the run unless
-        # --continue-on-collection-errors. Missing this ran 7k jsonschema
-        # tests past an aborting baseline — found by the corpus.
+        # Replicate the guard from pytest's own runtestloop (which this hook
+        # replaces): collection errors abort the run unless
+        # --continue-on-collection-errors (else 7k jsonschema tests ran past it).
         if session.testsfailed and not session.config.option.continue_on_collection_errors:
             raise session.Interrupted(
                 f"{session.testsfailed} error"
@@ -636,12 +571,10 @@ class ItemDispatchPlugin(StreamPlugin):
 class LazyDispatchPlugin(StreamPlugin):
     """D5 lazy collection: no initial collection pass at all.
 
-    The orchestrator assigns FILES; each file is collected here on demand
-    (`Session.perform_collect` supports repeated per-file calls — the
-    Session node persists, so session-scope fixtures survive across files
-    and module fixtures tear down exactly at file boundaries via the
-    cross-file nextitem chain). Item identity on the wire is the NODEID:
-    lazy workers share no index space.
+    The orchestrator assigns FILES, each collected on demand via repeated
+    `Session.perform_collect` calls on one persistent Session, so session-scope
+    fixtures survive across files and module fixtures tear down at file
+    boundaries. Item identity on the wire is the NODEID (no shared index space).
     """
 
     @pytest.hookimpl(tryfirst=True)
@@ -671,9 +604,9 @@ class LazyDispatchPlugin(StreamPlugin):
             payload["flaky"] = flaky
         for it in items:
             items_by_id[it.nodeid] = it
-        # Items are NOT queued here: the orchestrator owns dispatch (it
-        # chunks ids back via run_ids — normally to this worker, where the
-        # items are cached; to another worker when stealing for balance).
+        # Items are NOT queued here: the orchestrator owns dispatch, chunking
+        # ids back via run_ids (normally to this worker, where they're cached;
+        # to another worker when stealing for balance).
         self._conn.send("file_collected", payload)
         return len(items)
 
@@ -697,7 +630,7 @@ class LazyDispatchPlugin(StreamPlugin):
                 total += self._collect_file(session, files.popleft(), items_by_id)
                 continue
             # The last pending item runs only when its successor is known
-            # (nextitem drives fixture teardown scoping) — or on drain.
+            # (nextitem drives fixture teardown scoping) or on drain.
             if len(pending) >= 2 or (draining and pending):
                 item = pending.popleft()
                 nextitem = pending[0] if pending else None
@@ -725,10 +658,9 @@ class LazyDispatchPlugin(StreamPlugin):
                     it = items_by_id.get(nid)
                     if it is None:
                         # Not collected here (steal / crash redistribution /
-                        # serial phase): collect the id's whole FILE once —
-                        # the rest of a stolen chunk is usually from the
-                        # same file, and per-id collection would re-parse
-                        # the module for every id.
+                        # serial phase): collect the id's whole FILE once, since
+                        # a stolen chunk is usually from one file and per-id
+                        # collection would re-parse the module for every id.
                         fpath = nid.split("::", 1)[0]
                         n_before = len(items_by_id)
                         fresh = session.perform_collect([fpath], genitems=True)
@@ -771,10 +703,9 @@ def run(args: list[str], conn) -> int:
     """One pytest session over `args`. Returns the session exit status.
 
     The terminal plugin stays REGISTERED: it owns option definitions
-    (`verbose`, `-r`, ...) and the TerminalReporter object that plugins
-    reach into (pytest-django, sugar, instafail...). Its output is
-    harmless — worker stdout is /dev/null by orchestrator decree.
-
+    (`verbose`, `-r`, ...) and the TerminalReporter object that plugins reach
+    into (pytest-django, sugar, instafail...). Its output is harmless: worker
+    stdout is /dev/null by orchestrator decree.
     """
     return _contained(lambda: pytest.main(list(args), plugins=[StreamPlugin(conn)]), conn)
 
@@ -782,12 +713,10 @@ def run(args: list[str], conn) -> int:
 def _contained(session_fn, conn) -> int:
     """Run a session, never letting exceptions kill the worker process.
 
-    pytest.main can be escaped by BaseExceptions: a conftest doing
-    module-level `pytest.importorskip(...)` raises Skipped at CONFIG time
-    when any session arg lives under that conftest (file-granular dispatch
-    hits this; pandas/tests/io/pytables is the canonical case). Real pytest
-    crashes with a raw traceback there; we contain it so one poisoned
-    session never kills the worker process or the protocol.
+    pytest.main can be escaped by BaseExceptions: a conftest's module-level
+    `pytest.importorskip(...)` raises Skipped at CONFIG time (file-granular
+    dispatch hits this; pandas/tests/io/pytables is the canonical case). We
+    contain it so one poisoned session never kills the worker or the protocol.
     """
     import traceback
 
