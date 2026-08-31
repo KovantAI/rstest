@@ -452,6 +452,41 @@ fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
     Some(format!("{:x}", h.finalize()))
 }
 
+/// The single commit `git diff <rev>` uses as its OLD side — what the diff's
+/// old-side line numbers (and so the drift hash) are keyed to. `git show` needs
+/// a single commit, but `--changed` accepts ranges: `A..B` diffs against `A`,
+/// while `A...B` diffs against `merge-base(A, B)` (git's symmetric-difference
+/// rule). A bare ref (or `None` => `HEAD`) is already its own old side. Reducing
+/// the range here keeps `old_side_sha256`'s `git show base:./file` valid —
+/// otherwise a range rev makes every drift check fail and silently disables
+/// coverage-based selection (falls back to the import graph for every file).
+fn diff_old_side(rev: Option<&str>) -> String {
+    let rev = rev.unwrap_or("HEAD");
+    // `...` must be checked before `..` (the latter is a prefix of the former).
+    if let Some((left, right)) = rev.split_once("...") {
+        let left = if left.is_empty() { "HEAD" } else { left };
+        let right = if right.is_empty() { "HEAD" } else { right };
+        if let Ok(out) = std::process::Command::new("git")
+            .args(["merge-base", left, right])
+            .output()
+        {
+            if out.status.success() {
+                let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !mb.is_empty() {
+                    return mb;
+                }
+            }
+        }
+        // merge-base unavailable — fall back to the left side; a mismatched
+        // drift hash just routes the file to the import graph (safe).
+        return left.to_string();
+    }
+    if let Some((left, _right)) = rev.split_once("..") {
+        return if left.is_empty() { "HEAD" } else { left }.to_string();
+    }
+    rev.to_string()
+}
+
 /// Coverage-aware selection: consult the line->test index to pick the exact
 /// tests whose recorded coverage executed the changed lines, falling back to
 /// import-graph selection for anything the index can't vouch for (brand-new
@@ -476,10 +511,6 @@ pub fn affected_with_coverage(
     strict: bool,
     rev: Option<&str>,
 ) -> Result<Selection> {
-    // The index's line numbers are keyed to the source it was warmed from; the
-    // diff old-side lines are keyed to this base. They only align when a file's
-    // base content still matches the index (see the per-file drift check).
-    let base = rev.unwrap_or("HEAD");
     let files: Vec<PathBuf> = changes.keys().cloned().collect();
     if let Some(full) = rule1_full_run(&files) {
         return Ok(full);
@@ -488,6 +519,20 @@ pub fn affected_with_coverage(
         // Cold cache: identical to the import-graph selector.
         return affected_tests(rootdir, project, &files, strict);
     };
+    // Only reached with a warm index, so the base/cwd work below (one of which
+    // shells `git merge-base` for a `...` rev) isn't spent on a cold run.
+    //
+    // The index's line numbers are keyed to the source it was warmed from; the
+    // diff old-side lines are keyed to this base. They only align when a file's
+    // base content still matches the index (see the per-file drift check). A
+    // range rev (`A..B`/`A...B`) is reduced to the single commit git diffed the
+    // old side against, so the per-file `git show base:./file` stays valid.
+    let base = diff_old_side(rev);
+    // Changed-file keys and index nodeids are CWD-relative (git `--relative`,
+    // pytest form); graph fallback results are ROOTDIR-relative. Resolve each
+    // against its own base so existence checks and the whole-file dedup compare
+    // real paths even when rootdir != cwd.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| rootdir.to_path_buf());
 
     let mut nodeids: BTreeSet<String> = BTreeSet::new();
     let mut fallback: Vec<PathBuf> = Vec::new();
@@ -500,7 +545,9 @@ pub fn affected_with_coverage(
         // nothing to run: skip it rather than hand pytest a missing path,
         // which would error the whole --changed run.
         if crate::collect::is_test_file(&rootdir.join(file), project) {
-            if rootdir.join(file).exists() {
+            // `file` is cwd-relative — resolve existence against cwd, not
+            // rootdir, so a deleted test isn't misjudged when rootdir != cwd.
+            if cwd.join(file).exists() {
                 direct_tests.insert(file.clone());
             }
             continue;
@@ -522,7 +569,7 @@ pub fn affected_with_coverage(
         let indexed = index
             .files
             .get(&key)
-            .filter(|e| old_side_sha256(base, file).as_deref() == Some(e.hash.as_str()));
+            .filter(|e| old_side_sha256(&base, file).as_deref() == Some(e.hash.as_str()));
         // A changed old-side line the index has no nodeid for is a line the
         // index cannot vouch for: it executed only at import/collection time
         // (a `def`/decorator/class/module-level line lands in the empty
@@ -547,7 +594,7 @@ pub fn affected_with_coverage(
                                 // running MORE). The file part (before "::") is
                                 // cwd-relative, matching pytest and the index.
                                 let file_part = id.split("::").next().unwrap_or(id);
-                                if rootdir.join(file_part).exists() {
+                                if cwd.join(file_part).exists() {
                                     nodeids.insert(id.clone());
                                 } else {
                                     uncovered_line = true;
@@ -580,17 +627,27 @@ pub fn affected_with_coverage(
     // test in the file, so a specific `file::test` nodeid for the same file is
     // redundant — emitting both makes pytest collect the file twice. Drop such
     // nodeids in favor of the broader whole-file entry.
+    //
+    // graph_tests are ROOTDIR-relative; direct_tests and nodeids are
+    // CWD-relative. Compare on absolute paths so the dedup holds even when
+    // rootdir != cwd (otherwise the two forms never match and pytest is handed
+    // both `f.py` and `f.py::test`). canonicalize() collapses `.`/symlink
+    // differences; every path here was already proven to exist.
+    let abs = |root: &Path, p: &Path| -> PathBuf {
+        let joined = root.join(p);
+        joined.canonicalize().unwrap_or(joined)
+    };
     let whole_files: BTreeSet<PathBuf> = graph_tests
         .iter()
-        .chain(direct_tests.iter())
-        .cloned()
+        .map(|p| abs(rootdir, p))
+        .chain(direct_tests.iter().map(|p| abs(&cwd, p)))
         .collect();
     let mut selected: BTreeSet<PathBuf> = BTreeSet::new();
     // nodeids were already checked for existence as they were collected; any
     // stale entry demoted its file to the graph fallback above.
     for id in nodeids {
         let file_part = id.split("::").next().unwrap_or(&id);
-        if !whole_files.contains(Path::new(file_part)) {
+        if !whole_files.contains(&abs(&cwd, Path::new(file_part))) {
             selected.insert(PathBuf::from(id));
         }
     }
@@ -845,8 +902,25 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        imports_of, normalize_newlines, parse_diff_hunks, parse_hunk_old_range, FileChange,
+        diff_old_side, imports_of, normalize_newlines, parse_diff_hunks, parse_hunk_old_range,
+        FileChange,
     };
+
+    #[test]
+    fn diff_old_side_reduces_ranges_to_a_single_commit() {
+        // Bare ref (and None => HEAD) is already its own old side — no shell-out.
+        assert_eq!(diff_old_side(None), "HEAD");
+        assert_eq!(diff_old_side(Some("origin/main")), "origin/main");
+        assert_eq!(diff_old_side(Some("HEAD~3")), "HEAD~3");
+        // `A..B` diffs against A (the left side).
+        assert_eq!(diff_old_side(Some("origin/main..HEAD")), "origin/main");
+        assert_eq!(diff_old_side(Some("HEAD~2..HEAD")), "HEAD~2");
+        // Empty left side of a range means HEAD.
+        assert_eq!(diff_old_side(Some("..HEAD")), "HEAD");
+        // `...` is matched before `..`, so it is never mis-split into "" / ".B".
+        // (The symmetric case resolves via `git merge-base`, exercised in the
+        // integration tests; here we only assert `..` doesn't steal it.)
+    }
 
     #[test]
     fn newline_normalization_makes_crlf_and_lf_hash_equal() {
