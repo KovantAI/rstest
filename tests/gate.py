@@ -1874,6 +1874,21 @@ def main():
           "local_only.py::t_local" in merged_local and len(merged_local) > 1,
           f"rc={r.returncode} keys={sorted(merged_local)}")
 
+    # --cache-compact is run-less; combining it with a run-time cache flag would
+    # silently skip the run and the flag, exiting green. Must be rejected.
+    r = g.run("--cache-remote", str(remote), "--cache-compact", "--cache-push", cwd=sca)
+    check("shared-cache: --cache-compact + --cache-push is rejected",
+          r.returncode != 0 and "run-less" in r.stderr,
+          f"rc={r.returncode} {r.stderr[-160:]}")
+
+    # Shared-cache flags in monorepo mode would silently no-op (push unreachable,
+    # pull warms the wrong root cache). Must fail loud instead. `mono` fixture is
+    # the multi-project tree built in the monorepo section above.
+    r = g.run("-n", "2", "--cache-remote", str(remote), "--cache-push", cwd=g.tmp / "mono")
+    check("shared-cache: cache flags rejected in monorepo mode",
+          r.returncode != 0 and "monorepo" in r.stderr,
+          f"rc={r.returncode} {r.stderr[-160:]}")
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)

@@ -611,6 +611,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
              (or RSTEST_CACHE_REMOTE)"
         );
     }
+    // --cache-compact is a run-less maintenance mode that exits before the run;
+    // combining it with the run-time cache flags would silently skip them (and
+    // the tests), reporting green having done neither. Reject the combination.
+    if cli.cache_compact && (cli.cache_pull || cli.cache_push) {
+        anyhow::bail!(
+            "--cache-compact is a run-less maintenance mode; run it on its own, \
+             not combined with --cache-pull/--cache-push"
+        );
+    }
     if cli.cache_compact {
         let remote = cache_remote.as_deref().unwrap(); // validated above
         let t = remote::transport_for(remote)?;
@@ -631,15 +640,6 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         );
         remote::write_local(&merged);
     }
-    // require-baseline: with a baseline-dependent gate active, an absent
-    // baseline (cold remote, nothing restored/pulled) is a hard error rather
-    // than the silent skip the gate would otherwise do — the dead-gate guard.
-    if cli.require_baseline && cli.durations_regress.is_some() && durations::load().is_empty() {
-        anyhow::bail!(
-            "--require-baseline: --durations-regress needs a duration baseline in \
-             .rstest_cache, but none is present (cold cache — nothing restored or pulled)"
-        );
-    }
 
     // CLI > [tool.rstest] > built-in defaults.
     let settings = config::rstest_settings(&std::env::current_dir()?);
@@ -656,6 +656,17 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
             let threshold = if settings.projects.is_some() { 1 } else { 2 };
             if projects.len() >= threshold {
+                // Each project keeps its OWN .rstest_cache (cache::file_in), and
+                // the per-run push/pull wiring lives in the single-project path
+                // that execute_monorepo bypasses — so a cache flag here would
+                // silently no-op (push) or warm the wrong root cache (pull).
+                // Fail loud instead; run rstest per project for shared caching.
+                if cli.cache_pull || cli.cache_push {
+                    anyhow::bail!(
+                        "--cache-pull/--cache-push are not supported in monorepo mode \
+                         (each project has its own .rstest_cache); run rstest per project"
+                    );
+                }
                 return execute_monorepo(cli, &args, &cwd, projects);
             }
         }
@@ -776,6 +787,22 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             let code = run_collect_discovery(&python, &args, out)?;
             std::process::exit(code);
         }
+    }
+    // require-baseline: with the durations-regress gate active, an absent baseline
+    // (cold remote, nothing restored/pulled) is a hard error rather than the silent
+    // skip the gate would otherwise do — the dead-gate guard. Placed after the
+    // non-gating early exits (monorepo, migrate-check, collect-only) and gated on
+    // !passthrough, since the regression gate only runs on a real in-process run;
+    // pull (above) has already warmed the baseline it checks.
+    if cli.require_baseline
+        && cli.durations_regress.is_some()
+        && !passthrough
+        && durations::load().is_empty()
+    {
+        anyhow::bail!(
+            "--require-baseline: --durations-regress needs a duration baseline in \
+             .rstest_cache, but none is present (cold cache — nothing restored or pulled)"
+        );
     }
     // Json/Tap modes keep stdout a pure machine stream: no banner
     // (TAP gets its version header instead).

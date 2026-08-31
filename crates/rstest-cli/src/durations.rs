@@ -27,7 +27,7 @@ pub fn save(run: &Run) {
         return;
     }
     if let Ok(bytes) = serde_json::to_vec(&cache) {
-        cache::write_atomic(&cache::file(FILE), &bytes);
+        let _ = cache::write_atomic(&cache::file(FILE), &bytes);
     }
 }
 

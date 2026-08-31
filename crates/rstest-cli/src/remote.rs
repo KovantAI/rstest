@@ -307,7 +307,7 @@ pub fn write_local(merged: &Merged) {
         let mut d = crate::durations::load();
         d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
         if let Ok(bytes) = serde_json::to_vec(&d) {
-            cache::write_atomic(&cache::file(crate::durations::FILE), &bytes);
+            let _ = cache::write_atomic(&cache::file(crate::durations::FILE), &bytes);
         }
     }
     if !merged.flakes.is_empty() {
@@ -316,14 +316,14 @@ pub fn write_local(merged: &Merged) {
             f.insert(k.clone(), *v);
         }
         if let Ok(bytes) = serde_json::to_vec(&f) {
-            cache::write_atomic(&cache::file(crate::flakes::FILE), &bytes);
+            let _ = cache::write_atomic(&cache::file(crate::flakes::FILE), &bytes);
         }
     }
     // The coverage index is regenerated each run and drives selection off the
     // merged view, so it is replaced (not overlaid) with the pulled union.
     if !merged.cov_index.files.is_empty() {
         if let Ok(bytes) = serde_json::to_vec(&merged.cov_index) {
-            cache::write_atomic(&cache::file(COVERAGE_INDEX_FILE), &bytes);
+            let _ = cache::write_atomic(&cache::file(COVERAGE_INDEX_FILE), &bytes);
         }
     }
 }
@@ -397,12 +397,11 @@ impl Transport for DirTransport {
         }
     }
     fn write_segment(&self, id: &str, bytes: &[u8]) -> Result<()> {
-        cache::write_atomic(&self.segment_path(id), bytes);
-        Ok(())
+        let p = self.segment_path(id);
+        cache::write_atomic(&p, bytes).with_context(|| format!("writing segment {}", p.display()))
     }
     fn write_base(&self, bytes: &[u8]) -> Result<()> {
-        cache::write_atomic(&self.base_path(), bytes);
-        Ok(())
+        cache::write_atomic(&self.base_path(), bytes).context("writing base.json")
     }
     fn delete_segment(&self, id: &str) -> Result<()> {
         match std::fs::remove_file(self.segment_path(id)) {
@@ -878,6 +877,80 @@ mod tests {
         assert!(push(&t, &seg("a\\b", 1, &[], &[])).is_err());
         assert!(push(&t, &seg("", 1, &[], &[])).is_err());
         assert!(push(&t, &seg("run1-1of2", 1, &[("t::a", 1.0)], &[])).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A DirTransport that fails one write op, to prove write failures surface
+    /// as `Err` (not a silently-swallowed no-op).
+    enum FailAt {
+        Base,
+        Segment,
+    }
+    struct FailingTransport {
+        inner: DirTransport,
+        fail: FailAt,
+    }
+    impl Transport for FailingTransport {
+        fn list_segment_ids(&self) -> Result<Vec<String>> {
+            self.inner.list_segment_ids()
+        }
+        fn read_segment(&self, id: &str) -> Result<Vec<u8>> {
+            self.inner.read_segment(id)
+        }
+        fn read_base(&self) -> Result<Option<Vec<u8>>> {
+            self.inner.read_base()
+        }
+        fn write_segment(&self, id: &str, b: &[u8]) -> Result<()> {
+            if matches!(self.fail, FailAt::Segment) {
+                anyhow::bail!("simulated segment write failure");
+            }
+            self.inner.write_segment(id, b)
+        }
+        fn write_base(&self, b: &[u8]) -> Result<()> {
+            if matches!(self.fail, FailAt::Base) {
+                anyhow::bail!("simulated base write failure");
+            }
+            self.inner.write_base(b)
+        }
+        fn delete_segment(&self, id: &str) -> Result<()> {
+            self.inner.delete_segment(id)
+        }
+    }
+
+    #[test]
+    fn push_surfaces_write_failure() {
+        // A failed segment write must be reported, not swallowed as success.
+        let root = tmp_dir("push-write-fail");
+        let t = FailingTransport {
+            inner: DirTransport::new(&root),
+            fail: FailAt::Segment,
+        };
+        assert!(push(&t, &seg("s1", 10, &[("t::a", 1.0)], &[])).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compact_remote_keeps_segments_when_base_write_fails() {
+        // If the base write fails, segments must NOT be deleted — no data loss.
+        let root = tmp_dir("compact-basefail");
+        let seed = DirTransport::new(&root);
+        push(&seed, &seg("s1", 10, &[("t::a", 1.0)], &[])).unwrap();
+        push(&seed, &seg("s2", 20, &[("t::a", 2.0)], &[])).unwrap();
+        let t = FailingTransport {
+            inner: DirTransport::new(&root),
+            fail: FailAt::Base,
+        };
+        assert!(
+            compact_remote(&t).is_err(),
+            "base write failure must fail compaction"
+        );
+        let mut ids = t.list_segment_ids().unwrap();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["s1".to_string(), "s2".to_string()],
+            "segments must survive"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

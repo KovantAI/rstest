@@ -10,6 +10,7 @@
 //! the coverage index.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DIR_NAME: &str = ".rstest_cache";
 
@@ -32,24 +33,41 @@ pub fn file_in(project: &Path, name: &str) -> PathBuf {
     project.join(DIR_NAME).join(name)
 }
 
-/// Best-effort atomic write: a per-pid tmp file in the same directory, then
-/// rename over the target. Errors are ignored, matching the best-effort
-/// contract of the caches this serves.
-pub fn write_atomic(path: &Path, bytes: &[u8]) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(parent);
+/// Atomic write: a uniquely-named tmp file in the same directory, then rename
+/// over the target. Returns the IO result so callers writing AUTHORITATIVE state
+/// (the shared-cache remote) can react to a failure; the best-effort local caches
+/// ignore it with `let _ =`.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
     let fname = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "cache".to_string());
-    // Per-pid tmp name so two rstest processes in the same tree don't collide.
-    let tmp = parent.join(format!(".{fname}.{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    } else {
-        let _ = std::fs::remove_file(&tmp);
+    // Unique tmp name: pid + nanos + a process-local sequence, so two writers of
+    // the SAME target (e.g. two hosts compacting base.json on a shared mount,
+    // which can share a pid) never land on the same tmp path and tear the file.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".{fname}.{}.{nanos:x}.{seq:x}.tmp",
+        std::process::id()
+    ));
+    match std::fs::write(&tmp, bytes) {
+        Ok(()) => std::fs::rename(&tmp, path),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 
@@ -68,7 +86,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("rstest-cache-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let target = base.join("nested").join("durations.json");
-        write_atomic(&target, b"{\"x\":1.0}");
+        write_atomic(&target, b"{\"x\":1.0}").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"{\"x\":1.0}");
         // No leftover per-pid tmp sidecar next to the target.
         let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
@@ -77,6 +95,21 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "tmp sidecar leaked: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_atomic_reports_error_on_unwritable_path() {
+        // A write that can't succeed must return Err (so remote writers can react)
+        // rather than silently swallowing it.
+        let base = std::env::temp_dir().join(format!("rstest-cache-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("afile");
+        std::fs::write(&file, b"x").unwrap();
+        // Parent component `afile` is a regular file, so create_dir_all fails.
+        let target = file.join("nested").join("durations.json");
+        assert!(write_atomic(&target, b"{}").is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
