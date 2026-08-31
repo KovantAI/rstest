@@ -628,17 +628,16 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         eprintln!("rstest: cache: compacted {folded} segment(s) into base at {remote}");
         return Ok(0);
     }
-    if cli.cache_pull {
-        let remote = cache_remote.as_deref().unwrap();
-        let t = remote::transport_for(remote)?;
-        let merged = remote::pull(t.as_ref())
-            .with_context(|| format!("pulling shared cache from {remote}"))?;
+    // An explicit --cache-remote FLAG with no pull/push/compact does nothing;
+    // warn rather than silently ignore it. Gate on the flag, NOT the env-resolved
+    // value: RSTEST_CACHE_REMOTE is ambient config a CI sets once, and plain runs
+    // that don't opt into pull/push must not be nagged every invocation.
+    // (cache_compact already returned above, so it can't be the requested action.)
+    if cli.cache_remote.is_some() && !cli.cache_pull && !cli.cache_push {
         eprintln!(
-            "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
-            merged.durations.len(),
-            merged.flakes.len()
+            "rstest: cache: --cache-remote is set but no --cache-pull/--cache-push \
+             (or --cache-compact) was requested; the shared cache is not being used"
         );
-        remote::write_local(&merged);
     }
 
     // CLI > [tool.rstest] > built-in defaults.
@@ -670,6 +669,22 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 return execute_monorepo(cli, &args, &cwd, projects);
             }
         }
+    }
+    // --cache-pull: warm the local cache from the remote BEFORE anything reads
+    // it (scheduling, selection, the regression baseline). Placed after the
+    // monorepo guard so a monorepo run is rejected rather than pulling into the
+    // wrong (root) cache and printing a misleading success line first.
+    if cli.cache_pull {
+        let remote = cache_remote.as_deref().unwrap(); // validated at entry
+        let t = remote::transport_for(remote)?;
+        let merged = remote::pull(t.as_ref())
+            .with_context(|| format!("pulling shared cache from {remote}"))?;
+        eprintln!(
+            "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
+            merged.durations.len(),
+            merged.flakes.len()
+        );
+        remote::write_local(&merged);
     }
     let numprocesses = cli
         .numprocesses

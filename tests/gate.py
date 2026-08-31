@@ -1882,11 +1882,24 @@ def main():
           f"rc={r.returncode} {r.stderr[-160:]}")
 
     # Shared-cache flags in monorepo mode would silently no-op (push unreachable,
-    # pull warms the wrong root cache). Must fail loud instead. `mono` fixture is
+    # pull warms the wrong root cache). Must fail loud instead, and the rejection
+    # must come BEFORE the pull runs (no 'pulled' line first). `mono` fixture is
     # the multi-project tree built in the monorepo section above.
-    r = g.run("-n", "2", "--cache-remote", str(remote), "--cache-push", cwd=g.tmp / "mono")
-    check("shared-cache: cache flags rejected in monorepo mode",
-          r.returncode != 0 and "monorepo" in r.stderr,
+    r = g.run("-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=g.tmp / "mono")
+    check("shared-cache: cache flags rejected in monorepo mode before pull runs",
+          r.returncode != 0 and "monorepo" in r.stderr and "pulled" not in r.stderr,
+          f"rc={r.returncode} {r.stderr[-200:]}")
+
+    # --cache-remote FLAG with no pull/push/compact does nothing; warn.
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), cwd=sca)
+    check("shared-cache: --cache-remote flag without an action warns",
+          r.returncode == 0 and "not being used" in r.stderr,
+          f"rc={r.returncode} {r.stderr[-160:]}")
+    # But an ambient RSTEST_CACHE_REMOTE env (no flag, no action) must NOT nag.
+    r = g.run("test_s.py", "-n", "2", cwd=sca,
+              env_extra={"RSTEST_CACHE_REMOTE": str(remote)})
+    check("shared-cache: ambient RSTEST_CACHE_REMOTE env does not warn",
+          r.returncode == 0 and "not being used" not in r.stderr,
           f"rc={r.returncode} {r.stderr[-160:]}")
 
     print("== [tool.rstest] config ==")
