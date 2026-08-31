@@ -1,0 +1,16 @@
+# cargo-mutants config. See mutation-testing-plan.md.
+#
+# The env-gated e2e cache round-trip (crates/rstest-cli/tests/gate_e2e.rs) drives
+# the freshly-built mutated binary, so IO/cache mutants that the unit suite can
+# never reach (durations/flakes load/save/record) get caught. Enabling the gate
+# needs a prebuilt worker venv on disk (RSTEST_GATE_VENV or ./.gate-venv); build
+# it once with `python tests/gate.py` before a full-tier run.
+additional_cargo_args = ["--profile", "release"]
+
+# The e2e tests spawn the binary + a Python worker pool; give each mutant room
+# beyond the fast unit tests.
+timeout_multiplier = 5.0
+minimum_test_timeout = 60
+
+# Don't mutate the vendored pytest core or generated sources.
+exclude_globs = ["python/**", "target/**", "corpus/**"]

@@ -126,6 +126,77 @@ mod tests {
         assert_eq!(rows[0].1, 0.5);
     }
 
+    // Build a Run whose call durations are exactly `timings`.
+    fn run_with(timings: &[(&str, f64)]) -> Run {
+        let mut run = Run::default();
+        for &(id, d) in timings {
+            run.record(
+                None,
+                crate::proto::Report {
+                    nodeid: id.into(),
+                    when: "call".into(),
+                    outcome: "passed".into(),
+                    duration: d,
+                    longrepr: None,
+                    wasxfail: false,
+                    skip_reason: None,
+                    cpu: None,
+                    sections: Vec::new(),
+                    lineno: None,
+                },
+            );
+        }
+        run
+    }
+
+    #[test]
+    fn regression_threshold_multiplies_baseline_not_divides() {
+        // old=1.0, ratio=3.0 -> the bar is old*ratio = 3.0s. A 2.0s current is
+        // UNDER the bar, so nothing flags. If the operator were `/` the bar
+        // collapses to 0.33s and this would wrongly flag.
+        let run = run_with(&[("t::a", 2.0)]);
+        let base = HashMap::from([("t::a".to_string(), 1.0)]);
+        assert!(
+            regressions(&run, &base, 3.0).is_empty(),
+            "current below old*ratio must not flag"
+        );
+    }
+
+    #[test]
+    fn regressions_sorted_by_absolute_growth_desc() {
+        // A grew 1.0s (0.1->1.1), B grew 0.8s (5.0->5.8). Worst ABSOLUTE growth
+        // first => A before B. Sorting by sum (b.2+b.1) would put B first (10.8
+        // vs 1.2), so this pins the subtraction against the `+` mutant.
+        let run = run_with(&[("t::a", 1.1), ("t::b", 5.8)]);
+        let base = HashMap::from([("t::a".to_string(), 0.1), ("t::b".to_string(), 5.0)]);
+        let rows = regressions(&run, &base, 1.0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "t::a", "larger absolute growth ranks first");
+        assert_eq!(rows[1].0, "t::b");
+    }
+
+    #[test]
+    fn regressions_ranked_by_growth_not_ratio() {
+        // A grew 1.0s at 1.1x (10.0->11.0); B grew 0.8s at 9x (0.1->0.9). By
+        // absolute growth A wins; a `/`-mutated comparator would rank by ratio
+        // and put B first. Distinguishes subtraction from division.
+        let run = run_with(&[("t::a", 11.0), ("t::b", 0.9)]);
+        let base = HashMap::from([("t::a".to_string(), 10.0), ("t::b".to_string(), 0.1)]);
+        let rows = regressions(&run, &base, 1.0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "t::a", "growth, not ratio, decides the order");
+    }
+
+    #[test]
+    fn under_threshold_cached_test_is_not_a_long_pole() {
+        // t1 is cached but 0.3s < SLOW_THRESHOLD (1.0s), so it is NOT promoted
+        // ahead of the uncached t0 — collection order holds. A mutated guard of
+        // `true` would treat every cached test as slow and yield [1, 0].
+        let ids = vec!["t0".to_string(), "t1".to_string()];
+        let cache = HashMap::from([("t1".to_string(), 0.3)]);
+        assert_eq!(dispatch_order(&ids, &cache), vec![0, 1]);
+    }
+
     #[test]
     fn long_poles_first_longest_first() {
         let ids: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
