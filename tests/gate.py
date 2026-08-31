@@ -1801,6 +1801,49 @@ def main():
           r.returncode == 0 and (remote / "base.json").exists() and not leftover
           and "compacted" in r.stderr, f"rc={r.returncode} left={leftover}")
 
+    # Coverage index rides the shared cache: two shards each push their PARTIAL
+    # coverage slice; a pull unions them into a full line->test index. This is
+    # the sharded-partial-index limitation the shared cache exists to fix.
+    covremote = g.tmp / "shared-cov-remote"
+    shutil.rmtree(covremote, ignore_errors=True)
+    scc = g.tmp / "scproj_cov"
+    g.write("scproj_cov/mymod.py",
+            "def used_by_a():\n    return 1\n"
+            "def used_by_b():\n    return 2\n")
+    g.write("scproj_cov/test_a.py",
+            "import mymod\ndef test_a(): assert mymod.used_by_a() == 1\n")
+    g.write("scproj_cov/test_b.py",
+            "import mymod\ndef test_b(): assert mymod.used_by_b() == 2\n")
+    # Shard 1 covers used_by_a, shard 2 covers used_by_b; each pushes its slice.
+    covenv = {"PYTHONPATH": str(scc)}
+    for k in (1, 2):
+        g.run("-n", "2", "--shard", f"{k}/2", "--cov=mymod", "--cov-context=test",
+              "--cov-report=", "--cache-remote", str(covremote), "--cache-push",
+              cwd=scc, env_extra=covenv)
+    covsegs = sorted((covremote / "segments").glob("seg-*.json"))
+    seg_blobs = [json.loads(p.read_text()) for p in covsegs]
+    covered_files = {f for b in seg_blobs for f in b.get("cov_index", {}).get("files", {})}
+    check("shared-cache: coverage segments carry a cov_index slice",
+          len(covsegs) == 2 and any("mymod.py" in f for f in covered_files),
+          f"segs={len(covsegs)} files={covered_files}")
+    # A fresh clone pulls the UNION: both used_by_a and used_by_b lines mapped.
+    sccb = g.tmp / "scproj_cov_b"
+    shutil.copytree(scc, sccb)
+    shutil.rmtree(sccb / ".rstest_cache", ignore_errors=True)
+    r = g.run("-n", "2", "--cache-remote", str(covremote), "--cache-pull",
+              "--co", "-q", cwd=sccb, env_extra={"PYTHONPATH": str(sccb)})
+    pulled_idx = sccb / ".rstest_cache" / "coverage_index.json"
+    idx = json.loads(pulled_idx.read_text()) if pulled_idx.exists() else {}
+    mymod_key = next((k for k in idx.get("files", {}) if k.endswith("mymod.py")), None)
+    nodeids = set()
+    if mymod_key:
+        for ids in idx["files"][mymod_key]["lines"].values():
+            nodeids.update(ids)
+    check("shared-cache: pull unions shard coverage slices into one index",
+          idx.get("schema") == 2
+          and {"test_a.py::test_a", "test_b.py::test_b"} <= nodeids,
+          f"rc={r.returncode} key={mymod_key} nodeids={sorted(nodeids)}")
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)

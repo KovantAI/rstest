@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::cache;
 use crate::config::ProjectConfig;
 
 /// Why a full run is required instead of a selection.
@@ -335,34 +336,37 @@ fn rule1_full_run(changed: &[PathBuf]) -> Option<Selection> {
     None
 }
 
-const COVERAGE_INDEX_SCHEMA: u32 = 2;
+pub const COVERAGE_INDEX_SCHEMA: u32 = 2;
+/// Filename of the coverage index within the cache dir (`cache::file`).
+pub const COVERAGE_INDEX_FILE: &str = "coverage_index.json";
 
-#[derive(serde::Deserialize)]
-struct CoverageFile {
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default, PartialEq)]
+pub struct CoverageFile {
     /// SHA-256 of the file's content when the index was built. The line map is
     /// only valid for a base whose content still hashes to this - see
     /// `old_side_sha256` and the drift check in `affected_with_coverage`.
     #[serde(default)]
-    hash: String,
+    pub hash: String,
     /// line number -> nodeids that covered it
     #[serde(default)]
-    lines: HashMap<u32, Vec<String>>,
+    pub lines: HashMap<u32, Vec<String>>,
 }
 
-#[derive(serde::Deserialize)]
-struct CoverageIndex {
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default, PartialEq)]
+pub struct CoverageIndex {
     #[serde(default)]
-    schema: u32,
+    pub schema: u32,
     /// relative file path -> per-file coverage entry (hash + line map)
     #[serde(default)]
-    files: HashMap<String, CoverageFile>,
+    pub files: HashMap<String, CoverageFile>,
 }
 
-/// Load `.rstest_cache/coverage_index.json`, or `None` when missing, unreadable,
-/// corrupt, or an unrecognized schema - every `None` makes the caller fall back to
-/// import-graph selection. A v1 (pre-hash) index fails the schema check as cold.
+/// Load the coverage index from the cache dir (honors `RSTEST_CACHE`), or `None`
+/// when missing, unreadable, corrupt, or an unrecognized schema - every `None`
+/// makes the caller fall back to import-graph selection. A v1 (pre-hash) index
+/// fails the schema check as cold.
 fn load_coverage_index() -> Option<CoverageIndex> {
-    let bytes = std::fs::read(".rstest_cache/coverage_index.json").ok()?;
+    let bytes = std::fs::read(cache::file(COVERAGE_INDEX_FILE)).ok()?;
     let idx: CoverageIndex = serde_json::from_slice(&bytes).ok()?;
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
 }

@@ -1290,6 +1290,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
+    // Coverage: workers save suffixed data files (pytest-cov worker mode);
+    // the orchestrator plays the xdist-master role, so combine and report.
+    // Runs BEFORE the cache-push below so this run's coverage-index slice is
+    // materialized (covtool overwrites the local index) in time to be published.
+    let mut exitstatus = outcome.exitstatus;
+    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
+        println!();
+        let status = std::process::Command::new(&python)
+            .args(["-m", "rstest_worker.covtool"])
+            .args(&args)
+            .env("PYTHONPATH", worker::worker_pythonpath())
+            // Same cache dir the Rust side reads (cache::dir()) so the index
+            // lands where load_coverage_index / --cache-push look for it.
+            .env("RSTEST_CACHE", cache::dir())
+            .status();
+        match status {
+            Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
+            Ok(_) => {}
+            Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
+        }
+    }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
@@ -1304,16 +1325,21 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             let remote = cache_remote.as_deref().unwrap(); // validated at entry
             let uid = std::env::var("RSTEST_RUN_UID").unwrap_or_default();
             let shard_suffix = shard.map(|(k, n)| format!("-{k}of{n}")).unwrap_or_default();
+            // This run's coverage slice (covtool wrote it just above); empty for
+            // non-coverage runs. Published as the segment's cov_index.
+            let cov = remote::load_local_cov_index();
             let seg = remote::segment_from_run(
                 format!("{uid}{shard_suffix}"),
                 started_epoch,
                 &outcome.run,
+                cov,
             );
             match remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg)) {
                 Ok(()) => eprintln!(
-                    "rstest: cache: pushed segment ({} duration(s), {} event(s)) to {remote}",
+                    "rstest: cache: pushed segment ({} duration(s), {} event(s), {} covered file(s)) to {remote}",
                     seg.durations.len(),
-                    seg.flake_events.len()
+                    seg.flake_events.len(),
+                    seg.cov_index.files.len()
                 ),
                 Err(e) => eprintln!("rstest: cache: push failed: {e:#}"),
             }
@@ -1332,22 +1358,6 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         )?;
     }
 
-    // Coverage: workers save suffixed data files (pytest-cov worker mode);
-    // the orchestrator plays the xdist-master role, so combine and report.
-    let mut exitstatus = outcome.exitstatus;
-    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
-        println!();
-        let status = std::process::Command::new(&python)
-            .args(["-m", "rstest_worker.covtool"])
-            .args(&args)
-            .env("PYTHONPATH", worker::worker_pythonpath())
-            .status();
-        match status {
-            Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
-            Ok(_) => {}
-            Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
-        }
-    }
     if duration_regressions > 0 {
         eprintln!(
             "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",

@@ -16,7 +16,7 @@
 //! This module is pure data + merge logic; transport (Phase 2) and CLI wiring
 //! (Phase 3) live above it. Kept unit-testable with no IO.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::cache;
 use crate::flakes::FlakeStats;
 use crate::report::Run;
+use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
 pub const SEGMENT_SCHEMA: u32 = 1;
 pub const BASE_SCHEMA: u32 = 1;
@@ -43,6 +44,10 @@ pub struct Segment {
     /// This run's flake/failure events (one per affected test, not totals).
     #[serde(default)]
     pub flake_events: Vec<FlakeEvent>,
+    /// This run's coverage-index slice (line->test map, hash-stamped per file).
+    /// Empty for non-coverage runs; pre-coverage segments deserialize to empty.
+    #[serde(default)]
+    pub cov_index: CoverageIndex,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +75,14 @@ pub struct Base {
     pub durations: HashMap<String, f64>,
     #[serde(default)]
     pub flakes: HashMap<String, FlakeStats>,
+    /// Merged coverage index folded into this base (hash-aware union).
+    #[serde(default)]
+    pub cov_index: CoverageIndex,
+    /// Per-file `generated_at` of the segment that won each coverage file, so a
+    /// later merge can compare a new segment against the base's real age (not 0)
+    /// on a hash conflict. Remote-only; never written to the local cache.
+    #[serde(default)]
+    pub cov_ts: HashMap<String, u64>,
     /// Segment ids already accumulated into this base.
     #[serde(default)]
     pub absorbed: HashSet<String>,
@@ -80,6 +93,7 @@ pub struct Base {
 pub struct Merged {
     pub durations: HashMap<String, f64>,
     pub flakes: HashMap<String, FlakeStats>,
+    pub cov_index: CoverageIndex,
 }
 
 /// Merge a base (optional) and a set of segments into the local cache shape.
@@ -89,9 +103,23 @@ pub struct Merged {
 /// repeated pulls of the same inputs are idempotent (the base is fixed; events
 /// are re-summed fresh, not compounded, until a `compact` folds them in).
 pub fn merge(base: Option<Base>, segments: Vec<Segment>) -> Merged {
+    merge_inner(base, segments).0
+}
+
+/// Core merge, also returning the per-file coverage winner timestamps so
+/// `compact` can persist them in the base (`merge` discards them). Seeds
+/// coverage from the base's own `cov_ts` — a base file's real age, not 0 — so a
+/// stale, un-absorbed older segment can't overwrite newer base content.
+fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<String, u64>) {
     let base = base.unwrap_or_default();
     let mut durations = base.durations;
     let mut flakes = base.flakes;
+    let mut cov = base.cov_index;
+    let mut cov_ts = base.cov_ts;
+    // Any base file lacking a recorded timestamp defaults to 0 (pre-cov_ts base).
+    for k in cov.files.keys() {
+        cov_ts.entry(k.clone()).or_insert(0);
+    }
 
     let mut fresh: Vec<Segment> = segments
         .into_iter()
@@ -111,8 +139,74 @@ pub fn merge(base: Option<Base>, segments: Vec<Segment>) -> Merged {
             }
             e.last_epoch = e.last_epoch.max(seg.generated_at);
         }
+        merge_cov_slice(&mut cov, &mut cov_ts, seg.cov_index, seg.generated_at);
     }
-    Merged { durations, flakes }
+    // Stamp the schema so a written merge loads back as a valid index (the base
+    // may have carried schema 0 when no coverage segment ever contributed).
+    if !cov.files.is_empty() {
+        cov.schema = COVERAGE_INDEX_SCHEMA;
+    }
+    (
+        Merged {
+            durations,
+            flakes,
+            cov_index: cov,
+        },
+        cov_ts,
+    )
+}
+
+/// Fold one segment's coverage slice into the accumulator with the hash-aware
+/// rule: a file whose hash matches the current winner **unions** its line→test
+/// sets (shards of the same run agree on content); a file with a different hash
+/// **replaces** the winner only when newer (a content edit makes old line
+/// numbers meaningless). `cov_ts` tracks the winning segment's timestamp per
+/// file; base entries enter at ts 0.
+fn merge_cov_slice(
+    cov: &mut CoverageIndex,
+    cov_ts: &mut HashMap<String, u64>,
+    slice: CoverageIndex,
+    at: u64,
+) {
+    // Skip empty (pre-coverage / non-coverage) and unrecognized-schema slices.
+    if slice.schema != COVERAGE_INDEX_SCHEMA {
+        return;
+    }
+    for (path, incoming) in slice.files {
+        if incoming.hash.is_empty() {
+            continue; // can't vouch for the lines without a content hash
+        }
+        match cov.files.get_mut(&path) {
+            None => {
+                cov.files.insert(path.clone(), incoming);
+                cov_ts.insert(path, at);
+            }
+            Some(cur) => {
+                let cur_ts = cov_ts.get(&path).copied().unwrap_or(0);
+                if incoming.hash == cur.hash {
+                    union_lines(&mut cur.lines, incoming.lines);
+                    cov_ts.insert(path, cur_ts.max(at));
+                } else if at > cur_ts || (at == cur_ts && incoming.hash > cur.hash) {
+                    // Different content, newer (or a deterministic tiebreak for
+                    // same-timestamp shards): drop the stale lines entirely.
+                    *cur = incoming;
+                    cov_ts.insert(path, at);
+                }
+                // else: older/stale content — dropped.
+            }
+        }
+    }
+}
+
+/// Union `src` line→nodeid map into `dst`, keeping each line's nodeids sorted
+/// and deduped.
+fn union_lines(dst: &mut HashMap<u32, Vec<String>>, src: HashMap<u32, Vec<String>>) {
+    for (line, ids) in src {
+        let slot = dst.entry(line).or_default();
+        let mut set: BTreeSet<String> = slot.drain(..).collect();
+        set.extend(ids);
+        *slot = set.into_iter().collect();
+    }
 }
 
 /// Fold a base and all fresh segments into a NEW base (compaction). The result
@@ -125,13 +219,22 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
         .map(|b| b.absorbed.clone())
         .unwrap_or_default();
     let seg_ids: HashSet<String> = segments.iter().map(|s| s.id.clone()).collect();
-    let Merged { durations, flakes } = merge(base, segments);
+    let (
+        Merged {
+            durations,
+            flakes,
+            cov_index,
+        },
+        cov_ts,
+    ) = merge_inner(base, segments);
     let mut absorbed = prior_absorbed;
     absorbed.extend(seg_ids);
     Base {
         schema: BASE_SCHEMA,
         durations,
         flakes,
+        cov_index,
+        cov_ts,
         absorbed,
     }
 }
@@ -142,7 +245,12 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
 /// durations and flake/failure events, NOT the merged local cache (pushing the
 /// merged state would re-publish everyone else's data). See the plan's
 /// "push publishes THIS run's own contribution" note.
-pub fn segment_from_run(id: String, generated_at: u64, run: &Run) -> Segment {
+pub fn segment_from_run(
+    id: String,
+    generated_at: u64,
+    run: &Run,
+    cov_index: CoverageIndex,
+) -> Segment {
     let durations = run.durations().map(|(k, v)| (k.clone(), v)).collect();
     let mut flake_events: Vec<FlakeEvent> = run
         .flaky
@@ -164,6 +272,20 @@ pub fn segment_from_run(id: String, generated_at: u64, run: &Run) -> Segment {
         generated_at,
         durations,
         flake_events,
+        cov_index,
+    }
+}
+
+/// Read this run's coverage-index slice from the local cache (honors
+/// `RSTEST_CACHE`), for `--cache-push` to embed in its segment. Any error or a
+/// schema mismatch yields an empty index (a non-coverage run pushes no slice).
+pub fn load_local_cov_index() -> CoverageIndex {
+    let Ok(bytes) = std::fs::read(cache::file(COVERAGE_INDEX_FILE)) else {
+        return CoverageIndex::default();
+    };
+    match serde_json::from_slice::<CoverageIndex>(&bytes) {
+        Ok(idx) if idx.schema == COVERAGE_INDEX_SCHEMA => idx,
+        _ => CoverageIndex::default(),
     }
 }
 
@@ -179,6 +301,11 @@ pub fn write_local(merged: &Merged) {
     if !merged.flakes.is_empty() {
         if let Ok(bytes) = serde_json::to_vec(&merged.flakes) {
             cache::write_atomic(&cache::file(crate::flakes::FILE), &bytes);
+        }
+    }
+    if !merged.cov_index.files.is_empty() {
+        if let Ok(bytes) = serde_json::to_vec(&merged.cov_index) {
+            cache::write_atomic(&cache::file(COVERAGE_INDEX_FILE), &bytes);
         }
     }
 }
@@ -333,6 +460,7 @@ pub fn compact_remote(t: &dyn Transport) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::select::CoverageFile;
 
     fn seg(id: &str, at: u64, durs: &[(&str, f64)], events: &[(&str, FlakeKind)]) -> Segment {
         Segment {
@@ -347,6 +475,39 @@ mod tests {
                     kind: *k,
                 })
                 .collect(),
+            cov_index: CoverageIndex::default(),
+        }
+    }
+
+    /// One file's coverage in a test: (path, hash, &[(line, &[nodeid])]).
+    type CovFileSpec<'a> = (&'a str, &'a str, &'a [(u32, &'a [&'a str])]);
+
+    /// Build a coverage-carrying segment from per-file specs.
+    fn cov_seg(id: &str, at: u64, files: &[CovFileSpec]) -> Segment {
+        let mut idx = CoverageIndex {
+            schema: COVERAGE_INDEX_SCHEMA,
+            files: HashMap::new(),
+        };
+        for (path, hash, lines) in files {
+            let lm = lines
+                .iter()
+                .map(|(ln, ids)| (*ln, ids.iter().map(|s| s.to_string()).collect()))
+                .collect();
+            idx.files.insert(
+                path.to_string(),
+                CoverageFile {
+                    hash: hash.to_string(),
+                    lines: lm,
+                },
+            );
+        }
+        Segment {
+            schema: SEGMENT_SCHEMA,
+            id: id.into(),
+            generated_at: at,
+            durations: HashMap::new(),
+            flake_events: Vec::new(),
+            cov_index: idx,
         }
     }
 
@@ -433,6 +594,113 @@ mod tests {
         assert!(base2.absorbed.contains("s1") && base2.absorbed.contains("s2"));
     }
 
+    // ---- coverage-index merge ----------------------------------------------
+
+    fn cov_lines(m: &Merged, path: &str, line: u32) -> Vec<String> {
+        m.cov_index
+            .files
+            .get(path)
+            .and_then(|f| f.lines.get(&line))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn cov_same_hash_unions_lines_across_shards() {
+        // Two shards of ONE run (same hash H1) each cover different lines/tests
+        // of the same file; their line->test maps must union.
+        let a = cov_seg("shard1", 10, &[("mod.py", "H1", &[(1, &["t::a"])])]);
+        let b = cov_seg(
+            "shard2",
+            10,
+            &[("mod.py", "H1", &[(1, &["t::b"]), (2, &["t::c"])])],
+        );
+        let m = merge(None, vec![a, b]);
+        assert_eq!(cov_lines(&m, "mod.py", 1), vec!["t::a", "t::b"]); // sorted+deduped
+        assert_eq!(cov_lines(&m, "mod.py", 2), vec!["t::c"]);
+        assert_eq!(m.cov_index.schema, COVERAGE_INDEX_SCHEMA);
+    }
+
+    #[test]
+    fn cov_different_hash_newest_wins_dropping_stale() {
+        // File edited between runs: H1@10 then H2@20 for the same path. Only the
+        // newer content's lines survive; the stale H1 lines are dropped.
+        let old = cov_seg("s1", 10, &[("mod.py", "H1", &[(1, &["t::old"])])]);
+        let new = cov_seg("s2", 20, &[("mod.py", "H2", &[(5, &["t::new"])])]);
+        let m = merge(None, vec![new, old]); // out of order: ordering is by generated_at
+        assert_eq!(m.cov_index.files.get("mod.py").unwrap().hash, "H2");
+        assert!(cov_lines(&m, "mod.py", 1).is_empty()); // stale gone
+        assert_eq!(cov_lines(&m, "mod.py", 5), vec!["t::new"]);
+    }
+
+    #[test]
+    fn cov_pull_is_idempotent() {
+        let segs = vec![
+            cov_seg("s1", 10, &[("mod.py", "H1", &[(1, &["t::a"])])]),
+            cov_seg("s2", 20, &[("mod.py", "H2", &[(2, &["t::b"])])]),
+        ];
+        assert_eq!(merge(None, segs.clone()), merge(None, segs));
+    }
+
+    #[test]
+    fn cov_absorbed_segment_not_reapplied_after_compact() {
+        // Fold s1 (H2) into a base, then re-present s1 alongside an older s0 (H1).
+        // The base already holds H2@10; the re-presented s1 is skipped (absorbed)
+        // and the older H1 must NOT overwrite the newer base content.
+        let base = compact(
+            None,
+            vec![cov_seg("s1", 10, &[("mod.py", "H2", &[(2, &["t::b"])])])],
+        );
+        assert!(base.cov_index.files.contains_key("mod.py"));
+        let m = merge(
+            Some(base),
+            vec![
+                cov_seg("s1", 10, &[("mod.py", "H2", &[(2, &["t::b"])])]), // re-presented
+                cov_seg("s0", 5, &[("mod.py", "H1", &[(1, &["t::a"])])]),  // older, different hash
+            ],
+        );
+        // Base (H2) wins over the older H1 segment; H1 line dropped, absorbed s1 not doubled.
+        assert_eq!(m.cov_index.files.get("mod.py").unwrap().hash, "H2");
+        assert_eq!(cov_lines(&m, "mod.py", 2), vec!["t::b"]);
+        assert!(cov_lines(&m, "mod.py", 1).is_empty());
+    }
+
+    #[test]
+    fn cov_base_baseline_unions_same_hash_segment() {
+        // A compacted base carries mod.py@H1; a later segment with the SAME hash
+        // adds a new line -> the base's lines accumulate rather than reset.
+        let base = compact(
+            None,
+            vec![cov_seg("s1", 10, &[("mod.py", "H1", &[(1, &["t::a"])])])],
+        );
+        let m = merge(
+            Some(base),
+            vec![cov_seg("s2", 20, &[("mod.py", "H1", &[(2, &["t::b"])])])],
+        );
+        assert_eq!(cov_lines(&m, "mod.py", 1), vec!["t::a"]);
+        assert_eq!(cov_lines(&m, "mod.py", 2), vec!["t::b"]);
+    }
+
+    #[test]
+    fn cov_empty_and_pre_coverage_segments_contribute_nothing() {
+        // A pre-coverage segment (no cov_index / schema 0) and an empty-hash file
+        // are both ignored; a plain durations/flakes segment carries no coverage.
+        let pre = seg("s1", 10, &[("t::x", 1.0)], &[]); // cov_index default (schema 0)
+        let empty_hash = cov_seg("s2", 20, &[("mod.py", "", &[(1, &["t::a"])])]);
+        let m = merge(None, vec![pre, empty_hash]);
+        assert!(m.cov_index.files.is_empty());
+    }
+
+    #[test]
+    fn cov_pre_coverage_segment_json_deserializes() {
+        // A segment serialized before the cov_index field existed still parses,
+        // defaulting to an empty index (backward compatibility, no schema bump).
+        let json = r#"{"schema":1,"id":"old","generated_at":1,"durations":{"t::x":1.0},"flake_events":[]}"#;
+        let s: Segment = serde_json::from_str(json).unwrap();
+        assert_eq!(s.cov_index, CoverageIndex::default());
+        assert_eq!(s.durations.get("t::x"), Some(&1.0));
+    }
+
     fn tmp_dir(label: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("rstest-remote-{}-{label}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -507,6 +775,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pull(&t).unwrap().flakes.get("t::f").unwrap().flaky, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dir_transport_coverage_slices_union_on_pull() {
+        // Two shards push partial coverage slices (same file+hash, disjoint
+        // lines); a pull merges them into the full line->test index — the whole
+        // point of folding coverage into the shared cache.
+        let root = tmp_dir("cov-roundtrip");
+        let t = DirTransport::new(&root);
+        push(
+            &t,
+            &cov_seg("shard1", 10, &[("mod.py", "H1", &[(1, &["t::a"])])]),
+        )
+        .unwrap();
+        push(
+            &t,
+            &cov_seg("shard2", 10, &[("mod.py", "H1", &[(2, &["t::b"])])]),
+        )
+        .unwrap();
+        let m = pull(&t).unwrap();
+        assert_eq!(cov_lines(&m, "mod.py", 1), vec!["t::a"]);
+        assert_eq!(cov_lines(&m, "mod.py", 2), vec!["t::b"]);
+        // Compaction folds the slices into the base and survives a re-pull.
+        assert_eq!(compact_remote(&t).unwrap(), 2);
+        let m2 = pull(&t).unwrap();
+        assert_eq!(cov_lines(&m2, "mod.py", 1), vec!["t::a"]);
+        assert_eq!(cov_lines(&m2, "mod.py", 2), vec!["t::b"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
