@@ -3,6 +3,26 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.0.x releases and are listed here.
 
+## 0.4.0 — 2026-08-31
+
+- Coverage overhaul: full pytest-cov parity under parallelism —
+  `--cov=PKG` measured in every worker, all `--cov-report` targets
+  (`term`/`term-missing`, `xml`, `html`, `json`, `lcov`, `annotate`)
+  rendered by the orchestrator after combining, and `--cov-fail-under=N`
+  enforced post-merge. `--cov-context=test` records which test covered
+  each line, preserved through the parallel merge, and also writes a
+  line→test index to `.rstest_cache/coverage_index.json`. `--changed`
+  becomes coverage-aware: with a warm index it maps changed lines to only
+  the tests whose recorded coverage touches them; a cold cache or
+  unmeasured/brand-new code falls back to the import graph. `--cov-branch`
+  forwards through. See the Coverage guide.
+- `--reruns-only-known-flaky`: with `--reruns` active, spend the rerun
+  budget only on tests the flake history already knows — new failures
+  fail fast instead of being retried, while genuine known-flakes are
+  still rescued. Also settable as `[tool.rstest] reruns-only-known-flaky`.
+  See the Flaky tests guide.
+- GitHub Action: run rstest in CI without a manual install/setup step.
+
 ## 0.3.1 — 2026-08-30
 
 - Cache invalidation support.

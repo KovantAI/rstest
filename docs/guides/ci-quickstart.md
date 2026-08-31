@@ -10,7 +10,7 @@ smarter when persisted between runs.
 
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin a version (`pip install rstest==0.3.1` or `rstest~=0.3`) or install
+    pin a version (`pip install rstest==0.4.0` or `rstest~=0.3`) or install
     from your lockfile.
 
 ## GitHub Actions
@@ -329,7 +329,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.3.1             # pin a released tag
+    rev: v0.4.0             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```
