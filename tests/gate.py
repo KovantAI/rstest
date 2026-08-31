@@ -1844,6 +1844,35 @@ def main():
           and {"test_a.py::test_a", "test_b.py::test_b"} <= nodeids,
           f"rc={r.returncode} key={mymod_key} nodeids={sorted(nodeids)}")
 
+    # sccb now holds the pulled MERGED coverage index. A --cache-push run that
+    # produces NO fresh index of its own (here --cov without --cov-context) must
+    # NOT re-publish that pulled index as its own slice.
+    covr3 = g.tmp / "shared-cov-remote3"
+    shutil.rmtree(covr3, ignore_errors=True)
+    g.run("-n", "2", "--cov=mymod", "--cov-report=",  # note: no --cov-context
+          "--cache-remote", str(covr3), "--cache-push",
+          cwd=sccb, env_extra={"PYTHONPATH": str(sccb)})
+    r3segs = sorted((covr3 / "segments").glob("seg-*.json"))
+    r3blobs = [json.loads(p.read_text()) for p in r3segs]
+    republished = any(b.get("cov_index", {}).get("files") for b in r3blobs)
+    check("shared-cache: push without a fresh index re-publishes no coverage",
+          len(r3segs) >= 1 and not republished,
+          f"segs={len(r3segs)} republished={republished}")
+
+    # --cache-pull OVERLAYS remote onto the local cache: local-only entries that
+    # were never pushed survive the pull rather than being clobbered.
+    scpl = g.tmp / "scproj_pull_local"
+    shutil.rmtree(scpl, ignore_errors=True)
+    (scpl / ".rstest_cache").mkdir(parents=True)
+    (scpl / ".rstest_cache" / "durations.json").write_text(
+        '{"local_only.py::t_local": 4.2}', encoding="utf-8")
+    g.write("scproj_pull_local/test_s.py", "def test_a(): assert True\n")
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=scpl)
+    merged_local = json.loads((scpl / ".rstest_cache" / "durations.json").read_text())
+    check("shared-cache: pull preserves local-only durations (overlay, not clobber)",
+          "local_only.py::t_local" in merged_local and len(merged_local) > 1,
+          f"rc={r.returncode} keys={sorted(merged_local)}")
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)

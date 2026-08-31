@@ -1296,6 +1296,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
     if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
+        // When we're about to push, drop any coverage index left by --cache-pull
+        // first: only an index covtool writes for THIS run may be published, or
+        // a run that produces none (no --cov-context, or an empty shard) would
+        // re-publish the pulled merged index as its own slice.
+        if cli.cache_push {
+            let _ = std::fs::remove_file(cache::file(select::COVERAGE_INDEX_FILE));
+        }
         println!();
         let status = std::process::Command::new(&python)
             .args(["-m", "rstest_worker.covtool"])

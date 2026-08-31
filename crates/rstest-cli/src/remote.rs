@@ -125,7 +125,14 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
         .into_iter()
         .filter(|s| !base.absorbed.contains(&s.id))
         .collect();
-    fresh.sort_by_key(|s| s.generated_at);
+    // Order by timestamp, then segment id as a deterministic tiebreak — two
+    // shards stamped in the same epoch second must merge the same way
+    // regardless of the (filesystem-dependent) order they were listed in.
+    fresh.sort_by(|a, b| {
+        a.generated_at
+            .cmp(&b.generated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     for seg in fresh {
         for (nodeid, secs) in seg.durations {
@@ -289,20 +296,31 @@ pub fn load_local_cov_index() -> CoverageIndex {
     }
 }
 
-/// Write a merged result into the local `.rstest_cache` (durations + flakes),
-/// so the normal `durations::load` / `flakes::load` paths pick it up. Sparse
-/// files are skipped, matching the modules' own behavior.
+/// Write a merged result into the local `.rstest_cache` (durations + flakes +
+/// coverage index), so the normal `durations::load` / `flakes::load` /
+/// `load_coverage_index` paths pick it up. Durations and flakes are OVERLAID
+/// onto the existing local files (remote wins on shared keys) so a pull augments
+/// rather than discards local-only history that hasn't been pushed yet. Sparse
+/// results are skipped, matching the modules' own behavior.
 pub fn write_local(merged: &Merged) {
     if !merged.durations.is_empty() {
-        if let Ok(bytes) = serde_json::to_vec(&merged.durations) {
+        let mut d = crate::durations::load();
+        d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
+        if let Ok(bytes) = serde_json::to_vec(&d) {
             cache::write_atomic(&cache::file(crate::durations::FILE), &bytes);
         }
     }
     if !merged.flakes.is_empty() {
-        if let Ok(bytes) = serde_json::to_vec(&merged.flakes) {
+        let mut f = crate::flakes::load();
+        for (k, v) in &merged.flakes {
+            f.insert(k.clone(), *v);
+        }
+        if let Ok(bytes) = serde_json::to_vec(&f) {
             cache::write_atomic(&cache::file(crate::flakes::FILE), &bytes);
         }
     }
+    // The coverage index is regenerated each run and drives selection off the
+    // merged view, so it is replaced (not overlaid) with the pulled union.
     if !merged.cov_index.files.is_empty() {
         if let Ok(bytes) = serde_json::to_vec(&merged.cov_index) {
             cache::write_atomic(&cache::file(COVERAGE_INDEX_FILE), &bytes);
@@ -427,6 +445,15 @@ pub fn pull(t: &dyn Transport) -> Result<Merged> {
 
 /// Publish one segment (immutable, uniquely named — no read-modify-write).
 pub fn push(t: &dyn Transport, seg: &Segment) -> Result<()> {
+    // The id becomes a filename (`seg-<id>.json`); a separator or `..` would
+    // escape the segments dir or break the list round-trip. Reject rather than
+    // silently write somewhere that never lists back.
+    if seg.id.is_empty() || seg.id.contains('/') || seg.id.contains('\\') || seg.id.contains("..") {
+        anyhow::bail!(
+            "invalid segment id {:?}: must be non-empty and free of path separators",
+            seg.id
+        );
+    }
     let bytes = serde_json::to_vec(seg).context("serializing segment")?;
     t.write_segment(&seg.id, &bytes)
 }
@@ -441,17 +468,24 @@ pub fn compact_remote(t: &dyn Transport) -> Result<usize> {
     };
     let ids = t.list_segment_ids()?;
     let mut segments = Vec::new();
+    // Only ids we actually parse get folded — and only those get deleted, so a
+    // corrupt / truncated / future-schema segment is left in place rather than
+    // destroyed without ever being folded into the base.
+    let mut folded_ids = Vec::new();
     for id in &ids {
         if let Ok(bytes) = t.read_segment(id) {
             if let Ok(seg) = serde_json::from_slice::<Segment>(&bytes) {
                 segments.push(seg);
+                folded_ids.push(id.clone());
+            } else {
+                eprintln!("rstest: cache: compact: keeping unparseable segment {id}");
             }
         }
     }
     let folded = segments.len();
     let new_base = compact(base, segments);
     t.write_base(&serde_json::to_vec(&new_base).context("serializing base.json")?)?;
-    for id in &ids {
+    for id in &folded_ids {
         let _ = t.delete_segment(id);
     }
     Ok(folded)
@@ -803,6 +837,47 @@ mod tests {
         let m2 = pull(&t).unwrap();
         assert_eq!(cov_lines(&m2, "mod.py", 1), vec!["t::a"]);
         assert_eq!(cov_lines(&m2, "mod.py", 2), vec!["t::b"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compact_remote_keeps_unparseable_segments() {
+        // A corrupt segment must not be folded-then-deleted (that would destroy
+        // data never folded into the base). It survives; valid ones fold + prune.
+        let root = tmp_dir("compact-corrupt");
+        let t = DirTransport::new(&root);
+        push(&t, &seg("good", 10, &[("t::a", 1.0)], &[])).unwrap();
+        let corrupt = root.join("segments").join("seg-bad.json");
+        std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
+        std::fs::write(&corrupt, b"{ not json").unwrap();
+        assert_eq!(compact_remote(&t).unwrap(), 1); // only "good" folded
+        assert!(corrupt.exists(), "unparseable segment must be kept");
+        assert_eq!(t.list_segment_ids().unwrap(), vec!["bad".to_string()]);
+        assert_eq!(pull(&t).unwrap().durations.get("t::a"), Some(&1.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn durations_equal_timestamp_deterministic_by_id() {
+        // Same nodeid + same generated_at, different value/id: higher id applies
+        // last and wins, independent of input (filesystem-list) order.
+        let a = seg("id-a", 100, &[("t::x", 1.0)], &[]);
+        let b = seg("id-b", 100, &[("t::x", 2.0)], &[]);
+        let m1 = merge(None, vec![a.clone(), b.clone()]);
+        let m2 = merge(None, vec![b, a]);
+        assert_eq!(m1.durations.get("t::x"), Some(&2.0));
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn push_rejects_unsafe_segment_id() {
+        let root = tmp_dir("bad-id");
+        let t = DirTransport::new(&root);
+        assert!(push(&t, &seg("../escape", 1, &[], &[])).is_err());
+        assert!(push(&t, &seg("a/b", 1, &[], &[])).is_err());
+        assert!(push(&t, &seg("a\\b", 1, &[], &[])).is_err());
+        assert!(push(&t, &seg("", 1, &[], &[])).is_err());
+        assert!(push(&t, &seg("run1-1of2", 1, &[("t::a", 1.0)], &[])).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
