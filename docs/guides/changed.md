@@ -99,6 +99,10 @@ fresh:
   unions sharded coverage slices into a full index on pull. No index →
   `--changed` simply falls back to the import graph, so a cold cache is never
   wrong, only coarser.
+- **Rebuild periodically to shed stale entries.** A same-hash file's line→test
+  map only grows on union — nodeids for deleted or renamed tests linger until the
+  file's content changes (resetting its map) or you rebuild. A dead nodeid on a
+  changed line demotes that file to the import graph: safe, only coarser.
 - **Safe to delete** at any time; the next `--cov-context=test` run rebuilds it.
 
 ## CI usage

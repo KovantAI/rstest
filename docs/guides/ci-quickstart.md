@@ -114,14 +114,34 @@ jobs:
         with: { python-version: "3.13" }
       - run: pip install -r requirements.txt && pip install rstest
 
-      # Pull: merge every prior segment into ./rcache.
+      # Pull: warm from the latest successful run on your default branch — its
+      # shard segments union into a full index. A plain download-artifact only
+      # sees the CURRENT run; run-id + github-token reach a prior run's artifacts.
+      - name: resolve warm-cache run
+        id: warm
+        env: { GH_TOKEN: ${{ github.token }} }
+        run: |
+          rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                  --workflow "${{ github.workflow }}" --branch main \
+                  --status success --limit 1 \
+                  --json databaseId --jq '.[0].databaseId // ""')
+          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
       - uses: actions/download-artifact@v4
-        with: { pattern: "rstest-seg-*", merge-multiple: true, path: ./rcache }
-        continue-on-error: true          # first ever run has nothing to pull
+        if: steps.warm.outputs.run-id != ''
+        with:
+          pattern: "rstest-seg-*"
+          merge-multiple: true
+          path: ./rcache
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.warm.outputs.run-id }}
+        continue-on-error: true          # cold start: nothing to warm from yet
 
       # --cov-context=test rides the segment too: each shard pushes its partial
-      # coverage slice and they union on pull, keeping --changed selection warm
-      # across the matrix (drop the --cov flags if you don't use --changed).
+      # coverage slice, and the next run's pull unions them into a full index
+      # that --changed consumes. --cov-report= suppresses the textual report (we
+      # want only the index side-effect). Drop the --cov flags if you don't use
+      # --changed. Replace <your_package> with your importable package/source dir.
       - run: rstest -n auto --shard ${{ matrix.shard }}/4
                --cov=<your_package> --cov-context=test --cov-report=
                --cache-remote ./rcache --cache-pull --cache-push
@@ -135,17 +155,23 @@ jobs:
 ```
 
 No refresh job, no `run_id`/`restore-keys` dance, no single writer — each shard
-contributes its slice (durations, flake events, **and** its coverage-index
-slice) and they union on the next pull, so the `--changed` coverage index stays
-whole across the shard matrix without a dedicated unsharded job. Artifact
-retention gives free segment eviction; a scheduled `rstest --cache-remote
-./rcache --cache-compact` job folds segments into a base and prunes them.
+contributes its segment (durations, flake events, **and** its share of the
+coverage index). The resolve-and-pull step above warms from the latest
+successful default-branch run, whose shard segments union into a whole
+`--changed` index — no dedicated unsharded job. **Run this workflow on pushes to
+your default branch too**, so those runs publish the segments PR jobs warm from
+(a scheduled run works as well). The first run, or any cold pull, has nothing to
+union and falls back to the import graph — correct, only coarser. Artifact
+retention gives free segment eviction.
 
-!!! note "Cross-run artifact pulls"
-    Artifacts are scoped to a workflow run. To pull segments from *previous*
-    runs, add `run-id` + `github-token` to `download-artifact`, or list them via
-    `GET /repos/{owner}/{repo}/actions/artifacts`. A per-branch scheduled run
-    that pushes + compacts keeps a warm base the PR jobs pull from.
+!!! note "How the cross-run pull works"
+    Artifacts are run-scoped, so warming reaches back to **one** prior run by id
+    — `gh run list` resolves the latest successful one above (the REST API `GET
+    /repos/{owner}/{repo}/actions/artifacts` is the alternative). One complete
+    sharded run is enough: its `N` shard segments union into a full index. To
+    fold *many* runs instead, add a scheduled job that `--cache-compact`s the
+    segments into a base and uploads that base as its own artifact for PR jobs to
+    pull.
 
 **Object store (S3/GCS/R2), OIDC — no secrets.** For teams already on cloud
 storage: sync a prefix around the run (immutable, uniquely-named segments make

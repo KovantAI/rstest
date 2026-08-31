@@ -17,7 +17,7 @@
   the changed lines. Safe to delete — `--changed` falls back to the import
   graph without it; rebuild by re-running coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
-  union into a full index (see the shared-cache section below).
+  union into a full index (see [Shared cache backend](#shared-cache-backend)).
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
 duration-aware scheduling from the second run onward. In the repository,
@@ -49,13 +49,19 @@ clobber each other.
   segments/seg-<id>.json          # one immutable segment per run/shard
 ```
 
-- **Pull** merges `base.json` + every segment into the local cache
-  (durations = newest value per test; flake counts = summed per-run events,
-  deduped by segment id so a re-pull never double-counts; the coverage index
-  unions per file — segments that agree on a file's content hash merge their
-  line→test maps, a changed hash keeps the newest, so **sharded partial
-  indexes fuse into a full one**).
-- **Push** writes just this run's segment (`--cache-push`).
+- **Pull** merges `base.json` and every segment into the local cache, per data type:
+    - *durations* — newest value per test;
+    - *flake counts* — summed per-run events, deduped by segment id so a re-pull
+      never double-counts;
+    - *coverage index* — unioned per file. Segments that agree on a file's
+      content hash merge their line→test maps; a different hash keeps the newer
+      segment's map (same-second ties broken deterministically by hash). Because
+      the shards of one run share a commit their hashes match, so their partial
+      slices **union into a full index**; if a file's content differs between
+      segments the newer wins and `--changed` falls back to the import graph for
+      that file — still correct, only coarser.
+- **Push** writes just this run's segment (`--cache-push`) — its *slice* of the
+  durations, flake events, and coverage index this run measured.
 - **Compact** (`--cache-compact`) folds segments into a new base and prunes
   them; a segment already folded is recorded in the base's absorbed-id set, so
   compaction is safe against concurrent pushes.
