@@ -1844,12 +1844,13 @@ def main():
           and {"test_a.py::test_a", "test_b.py::test_b"} <= nodeids,
           f"rc={r.returncode} key={mymod_key} nodeids={sorted(nodeids)}")
 
-    # sccb now holds the pulled MERGED coverage index. A --cache-push run that
-    # produces NO fresh index of its own (here --cov without --cov-context) must
-    # NOT re-publish that pulled index as its own slice.
+    # sccb still holds the pulled MERGED coverage index from above. A --cache-push
+    # run that produces NO fresh index of its own — here NO --cov at all, the path
+    # that skips covtool entirely — must NOT re-publish that pulled index.
     covr3 = g.tmp / "shared-cov-remote3"
     shutil.rmtree(covr3, ignore_errors=True)
-    g.run("-n", "2", "--cov=mymod", "--cov-report=",  # note: no --cov-context
+    assert (sccb / ".rstest_cache" / "coverage_index.json").exists()  # precondition
+    g.run("-n", "2",  # no --cov: covtool never runs, so only the push-time drop guards it
           "--cache-remote", str(covr3), "--cache-push",
           cwd=sccb, env_extra={"PYTHONPATH": str(sccb)})
     r3segs = sorted((covr3 / "segments").glob("seg-*.json"))

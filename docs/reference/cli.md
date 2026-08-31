@@ -248,8 +248,9 @@ duration cache on every job so their partitions match — see the
 
 ### `--cache-remote <URL|DIR>` / `--cache-pull` / `--cache-push`
 
-Publish and warm the `.rstest_cache` (durations, flake history) to/from a
-**shared remote** — no hand-rolled `actions/cache` glue, no dedicated
+Publish and warm the `.rstest_cache` (durations, flake history, and the
+`--changed` coverage index) to/from a **shared remote** — no hand-rolled
+`actions/cache` glue, no dedicated
 refresh job, no cache-key dance. `--cache-remote` is a directory or `file://`
 path (local, an NFS/EFS mount, or a dir a CI step materializes via
 `download-artifact` / `aws s3 sync`); also settable as `RSTEST_CACHE_REMOTE`.

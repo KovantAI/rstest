@@ -1290,19 +1290,21 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
+    // Before publishing, drop any coverage index left by --cache-pull: only an
+    // index covtool writes for THIS run may be pushed. Unconditional on push (not
+    // gated by --cov) so a run that produces no fresh index — no --cov at all, no
+    // --cov-context, or an empty shard — pushes an empty slice rather than
+    // re-publishing the pulled merged index as its own. Selection already
+    // consumed the pulled index earlier, so removing it now is safe.
+    if cli.cache_push {
+        let _ = std::fs::remove_file(cache::file(select::COVERAGE_INDEX_FILE));
+    }
     // Coverage: workers save suffixed data files (pytest-cov worker mode);
     // the orchestrator plays the xdist-master role, so combine and report.
     // Runs BEFORE the cache-push below so this run's coverage-index slice is
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
     if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
-        // When we're about to push, drop any coverage index left by --cache-pull
-        // first: only an index covtool writes for THIS run may be published, or
-        // a run that produces none (no --cov-context, or an empty shard) would
-        // re-publish the pulled merged index as its own slice.
-        if cli.cache_push {
-            let _ = std::fs::remove_file(cache::file(select::COVERAGE_INDEX_FILE));
-        }
         println!();
         let status = std::process::Command::new(&python)
             .args(["-m", "rstest_worker.covtool"])
