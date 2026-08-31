@@ -1,10 +1,6 @@
 //! Cross-run flake history: `.rstest_cache/flakes.json` in the cwd.
-//!
-//! `--reruns` detects a flake and forgets it when the run ends; this log
-//! is the memory. Only tests that ever flaked or failed get an entry
-//! (sparse — a green suite writes nothing), so the file stays small at
-//! any suite size. The data feeds the flaky-section history annotation
-//! and gives teams a ranked candidate list for `--quarantine`.
+//! `--reruns` forgets a flake when the run ends; this log is the memory.
+//! Sparse (only tests that flaked/failed), feeds history + `--quarantine`.
 
 use std::collections::{HashMap, HashSet};
 

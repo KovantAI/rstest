@@ -8,6 +8,7 @@ Task-oriented how-tos:
 - [Suite diagnostics](doctor.md) — reading `--doctor`
 - [Flaky tests](flaky-tests.md) — reruns, flake history, quarantine
 - [Watch mode](watch-mode.md) — the edit loop
+- [Selecting changed tests](changed.md) — `--changed` via import graph or coverage index
 - [Monorepos](monorepo.md) — one command across a multi-package repo
 - [CI quickstart](ci-quickstart.md) — GitHub, GitLab, Azure, CircleCI, Jenkins, cloud builders, JUnit, caching, pre-commit
 - [Plugins](plugins.md) — how plugin loading works, what's verified

@@ -60,7 +60,7 @@ pub struct RunMeta {
 /// A recorded failure: (nodeid, longrepr, sections of (header, body)).
 type Failure = (Option<usize>, String, String, Vec<(String, String)>);
 
-/// How the failures block wraps each failure — CI log UIs fold on
+/// How the failures block wraps each failure - CI log UIs fold on
 /// vendor-specific markers.
 #[derive(Clone, Copy, PartialEq)]
 pub enum FailureWrap {
@@ -87,7 +87,7 @@ pub struct Run {
     pub collect_skips: u64,
     /// nodeids that passed only after rerun(s), with attempt counts.
     pub flaky: Vec<(String, u32)>,
-    /// Record (duration, phase, nodeid) for every phase report — only when
+    /// Record (duration, phase, nodeid) for every phase report - only when
     /// --durations was requested (3 entries per test; pandas-scale memory
     /// is real, so default off).
     pub track_phase_durations: bool,
@@ -173,7 +173,7 @@ impl Run {
         }
         let header = palette.yellow("=========== flaky tests (passed after rerun) ===========");
         // GitLab has no per-line warning command; fold the whole flaky block
-        // into one collapsed section so it's tucked away but greppable — the
+        // into one collapsed section so it's tucked away but greppable - the
         // CI-native analogue of GitHub's `::warning` flaky annotations.
         let gitlab = wrap == FailureWrap::GitlabSection;
         let id = format!("rstest_flaky_{}", std::process::id());
@@ -201,7 +201,7 @@ impl Run {
         }
     }
 
-    /// The quarantined-failures section: visible (with tracebacks — a
+    /// The quarantined-failures section: visible (with tracebacks - a
     /// quarantined test still needs fixing), never fatal.
     pub fn print_quarantined(
         &self,
@@ -265,7 +265,7 @@ impl Run {
             println!("{duration:.2}s {when:<8} {nodeid}");
         }
         if hidden > 0 {
-            // pytest's exact wording — tooling greps for it.
+            // pytest's exact wording - tooling greps for it.
             println!("\n({hidden} durations < {min}s hidden.  Use -vv to show these durations.)");
         }
     }
@@ -299,7 +299,7 @@ impl Run {
                 );
             }
             // The `+++` group header IS the headline in the Buildkite log
-            // UI — no extra dashes.
+            // UI - no extra dashes.
             FailureWrap::BuildkiteGroup => {
                 println!("\n+++ {}", palette.bold_red(&format!("FAILED {header}")));
             }
@@ -337,7 +337,7 @@ impl Run {
         }
     }
 
-    /// nodeids with any failed phase — the merged `lastfailed` truth.
+    /// nodeids with any failed phase - the merged `lastfailed` truth.
     pub fn failed_nodeids(&self) -> impl Iterator<Item = &String> {
         self.tests.iter().filter_map(|(id, e)| {
             let failed = [&e.setup, &e.call, &e.teardown]
@@ -365,11 +365,9 @@ impl Run {
             })
     }
 
-    /// Demote failures matching the --quarantine list: they classify and
-    /// count as "quarantined", never fail the run, and print in their own
-    /// section. Returns the demoted nodeids (empty = nothing matched).
-    /// Only actual failures are touched — a quarantined test that passes
-    /// stays a plain pass.
+    /// Demote failures matching --quarantine: they count as "quarantined",
+    /// never fail the run, print separately. Returns demoted nodeids.
+    /// Only actual failures are touched; a quarantined pass stays a pass.
     pub fn quarantine(&mut self, matches: impl Fn(&str) -> bool) -> Vec<String> {
         let mut demoted = Vec::new();
         for (nodeid, e) in &mut self.tests {
@@ -396,10 +394,9 @@ impl Run {
             .join(", ")
     }
 
-    /// Outcome counts with pytest accounting — the single source of
-    /// truth for the terminal summary line AND the report-json envelope
-    /// (consumers must never re-derive these by walking `tests`). All
-    /// keys always present (zeros included) for a stable shape.
+    /// Outcome counts with pytest accounting: the single source of truth for
+    /// the summary line AND the report-json envelope (never re-derive by
+    /// walking `tests`). All keys always present (zeros) for a stable shape.
     pub fn counts(&self) -> BTreeMap<&'static str, u64> {
         let mut counts: BTreeMap<&'static str, u64> = [
             ("passed", 0),
@@ -431,11 +428,9 @@ impl Run {
         }
         let mut meta = BTreeMap::new();
         meta.insert("runner", "rstest".into());
-        // Version history: 1 unversioned original; 2 added
-        // longrepr/crashed + the version field; 3 added the envelope
-        // (counts, duration_seconds, started_at_epoch, workers, argv);
-        // 4 added per-test lineno (0-based, from pytest report.location);
-        // 5 added quarantined (per-test flag + counts key).
+        // Schema history: 2 added longrepr/crashed+version; 3 added the
+        // envelope (counts, duration_seconds, started_at_epoch, workers, argv);
+        // 4 added per-test lineno; 5 added quarantined.
         meta.insert("schema", 5.into());
         meta.insert("exitstatus", run_meta.exitstatus.into());
         meta.insert(

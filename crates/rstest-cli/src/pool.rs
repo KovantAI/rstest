@@ -1,30 +1,24 @@
 //! Multi-worker execution: in-worker item dispatch (the xdist model).
 //!
-//! Every worker runs an IDENTICAL session (same args) — pytest's
-//! config/conftest/skip semantics are preserved exactly. Workers collect in
-//! parallel and verify by count+hash against the first collection seen;
-//! full ids (+ serial-mark indices) ride the wire from the designated
-//! worker only (D5).
+//! Every worker runs an IDENTICAL session (same args), preserving pytest's
+//! config/conftest/skip semantics. Workers verify by count+hash against the
+//! first collection; ids ride the wire from the designated worker only.
 //!
-//! Seeding is BARRIER-FREE for everyone except the dispatch queue itself,
-//! which waits for the designated worker's id list (duration ordering and
-//! serial-mark safety both need it). Items flow in contiguous chunks
-//! (module-fixture locality) — or whole-file groups under --dist loadfile —
-//! except cached long-poles, which go out first and individually. The
-//! worker holds its last pending item until it learns the successor
-//! (nextitem lookahead), so dispatch thresholds must never reach 0 and
-//! no_more_items must be sent as soon as a worker's queue truly ends.
+//! Seeding is barrier-free except the dispatch queue, which waits for the
+//! designated worker's id list. Items flow in contiguous chunks (or whole-file
+//! groups under --dist loadfile); cached long-poles go out first, individually.
 //!
-//! SERIAL PHASE: @pytest.mark.serial items are excluded from the parallel
-//! queue. The designated worker (lowest alive index) is held open; once
-//! every other worker's session has FINISHED (Done received — fixtures torn
-//! down, ports/DBs released), the serial items run there exclusively.
+//! Gotcha: the worker holds its last pending item until it learns the
+//! successor (nextitem lookahead), so dispatch thresholds must never reach 0
+//! and no_more_items must be sent as soon as a worker's queue truly ends.
+//!
+//! SERIAL PHASE: @pytest.mark.serial items run on the designated worker
+//! (lowest alive index) exclusively, after every other worker's session has
+//! finished (Done = fixtures torn down, ports/DBs released).
 //!
 //! CRASH HANDLING: workers announce item_start before each test, so a dead
-//! worker's in-flight item is known exactly. The crashed item is reported
-//! failed and NOT retried (segfault-loop guard); its remaining outstanding
-//! items requeue; a replacement respawns under the same gwN identity with a
-//! capped total restart budget.
+//! worker's in-flight item is reported failed and NOT retried (segfault-loop
+//! guard); its outstanding items requeue; a capped-budget respawn reuses gwN.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -57,12 +51,9 @@ pub enum Dist {
     /// @pytest.mark.xdist_group affinity across files; unmarked tests
     /// distribute individually (xdist --dist=loadgroup).
     Loadgroup,
-    /// Every worker runs the FULL suite (xdist --dist=each:
-    /// multi-environment validation). No item dispatch queue — each
-    /// verified worker is seeded with every index; a crash replacement
-    /// gets only the dead worker's remaining items (xdist semantics).
-    /// Outcomes are keyed "nodeid [gwN]" (the run legitimately contains
-    /// every test N times).
+    /// Every worker runs the FULL suite (xdist --dist=each). No dispatch
+    /// queue; a crash replacement gets only the dead worker's remaining
+    /// items. Outcomes keyed "nodeid [gwN]" (every test runs N times).
     Each,
 }
 
@@ -223,7 +214,7 @@ pub fn run_pool(
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
     prog.set_palette(palette);
-    // Json mode keeps stdout pure NDJSON — the footer's ANSI repaint would
+    // Json mode keeps stdout pure NDJSON: the footer's ANSI repaint would
     // corrupt the stream on a TTY, so skip it.
     if mode != crate::progress::Mode::Json {
         prog.enable_footer(n);
@@ -258,7 +249,7 @@ pub fn run_pool(
     };
     let mut fail_count = 0u64;
     // Global -x/--maxfail: once tripped, dispatch halts and every alive
-    // worker is told no_more_items (it finishes in-flight work and ends —
+    // worker is told no_more_items (it finishes in-flight work and ends;
     // bounded overshoot, same trade xdist makes).
     let mut stopping = false;
 
@@ -325,7 +316,7 @@ pub fn run_pool(
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
             Ok(Event::Warnings { entries }) => {
                 // Per-test warnings are disjoint across workers; config and
-                // collection warnings repeat in every session — count those
+                // collection warnings repeat in every session, so count those
                 // from worker 0 only.
                 warnings.extend(
                     entries
@@ -378,7 +369,7 @@ pub fn run_pool(
                         if *ref_count != count || *ref_hash != hash {
                             // Same args should collect identically; divergence
                             // means nondeterministic collection (random-order
-                            // plugins etc.) — refuse rather than misassign.
+                            // plugins etc.), so refuse rather than misassign.
                             for s in &mut states {
                                 let _ = s.worker.send(&proto::Command::Shutdown);
                             }
@@ -394,14 +385,9 @@ pub fn run_pool(
                 }
                 if let Some(ids) = ids {
                     if dispatch.is_none() && dist != Dist::Each {
-                        // --shard: keep only bucket K's node-ids; the rest are
-                        // deselected (never dispatched). Balanced by the same
-                        // duration cache the dispatch order uses. Under an
-                        // affinity dist mode we partition at group granularity
-                        // (whole file / scope / xdist_group per shard) so a
-                        // group is never split across CI jobs — splitting it
-                        // would break the run-together / in-order contract the
-                        // affinity mode exists to provide.
+                        // --shard: keep only bucket K's node-ids, deselecting
+                        // the rest. Under an affinity dist mode we partition at
+                        // group granularity so a group is never split (its contract).
                         let keep = shard.map(|(k, total)| {
                             let idx = match dist {
                                 Dist::Loadfile | Dist::Loadscope => {
@@ -566,9 +552,8 @@ pub fn run_pool(
                 }
                 let s = &mut states[idx];
                 // Refill when half-drained. Threshold must never be 0: the
-                // worker HOLDS its last pending item (nextitem lookahead),
-                // so outstanding floors at 1 until more items or
-                // no_more_items arrive — a 0 threshold deadlocks.
+                // worker HOLDS its last pending item (nextitem lookahead), so
+                // outstanding floors at 1 until refilled; a 0 threshold deadlocks.
                 if !stopping && s.outstanding.len() <= (chunk / 2).max(1) {
                     if let Some(d) = dispatch.as_mut() {
                         dispatch_to(s, d, chunk, idx == designate)?;
@@ -601,15 +586,13 @@ pub fn run_pool(
                 let restartable = states[idx].collected && restarts_left > 0;
                 if restartable {
                     restarts_left -= 1;
-                    // With rerun budget, a crashed item gets another chance
-                    // on the replacement worker (still bounded by BOTH the
-                    // rerun and restart budgets — the segfault-loop guard
-                    // holds). Without budget: reported failed, not retried.
-                    // The crashed item appears in BOTH `running` and
-                    // `outstanding` (it was dispatched); the orphan loop
-                    // below must skip it by its ORIGINAL identity even when
-                    // the rerun branch clears `crashed`, or it requeues
-                    // twice and runs twice.
+                    // Crashed item retries on the replacement worker when it
+                    // has budget, bounded by BOTH rerun and restart budgets
+                    // (segfault-loop guard); else reported failed, not retried.
+
+                    // Gotcha: it appears in BOTH `running` and `outstanding`;
+                    // the orphan loop must skip it by ORIGINAL identity even
+                    // when the rerun branch clears `crashed`, else it runs twice.
                     let crashed_orig = crashed;
                     let mut crashed = crashed;
                     {
@@ -697,12 +680,9 @@ pub fn run_pool(
                     states[idx].dead = true;
                     done_workers += 1;
                     if idx == designate {
-                        // Serial phase needs a host; promote the lowest
-                        // alive worker (it hasn't been told no_more_items
-                        // only if the queue hasn't ended — if it has, the
-                        // serial items are lost and reported below).
-                        // A finishing worker can't host serial (its
-                        // session is already draining).
+                        // Serial phase needs a host; promote the lowest alive
+                        // worker. A finishing worker can't host (session already
+                        // draining); if none remain, serial items are lost (below).
                         if let Some(next) = states.iter().position(|s| !s.dead && !s.finishing) {
                             designate = next;
                         } else if let Some(d) = &dispatch {
@@ -725,18 +705,15 @@ pub fn run_pool(
             }
         }
 
-        // Crash cleanup: hand each dead worker's workerinput to the
-        // lowest surviving worker so its conftest's pytest_testnodedown
-        // runs with the right idents (best-effort — a second crash while
-        // the command is in the pipe loses it, as it can for xdist's
-        // master too).
+        // Crash cleanup: hand each dead worker's workerinput to the lowest
+        // surviving worker so its conftest's pytest_testnodedown runs with the
+        // right idents (best-effort; a second crash mid-pipe loses it).
         while let Some((winput, error)) = pending_downs.pop_front() {
             match states.iter_mut().find(|s| !s.dead && !s.ended) {
                 Some(s) => {
-                    // Best-effort: the chosen worker may itself be dying
-                    // (its crash event not yet processed). Re-queue and
-                    // retry on the next event — its death marks it dead
-                    // and routing moves on.
+                    // Best-effort: the chosen worker may itself be dying (crash
+                    // event not yet processed). Re-queue and retry next event;
+                    // its death marks it dead and routing moves on.
                     if let Err(_e) = s.worker.send(&proto::Command::NodeDown {
                         workerinput: winput.clone(),
                         error: error.clone(),
@@ -756,7 +733,7 @@ pub fn run_pool(
 
         // If the designated id-carrier died before delivering ids, fall
         // back to identity order rather than stalling. Serial marks are
-        // unknown in that case — warn.
+        // unknown in that case, so warn.
         if dist != Dist::Each && dispatch.is_none() && reference.is_some() && states[0].dead {
             eprintln!(
                 "rstest: id-carrier worker died before reporting; \
@@ -795,11 +772,9 @@ pub fn run_pool(
             }
         }
 
-        // Each-mode: a verified worker is seeded with the FULL suite
-        // (or, for a crash replacement, the dead worker's remainder) and
-        // released immediately — there is no shared queue and no reruns,
-        // so its lifecycle is independent: drain, then EndSession once
-        // its outstanding work is gone.
+        // Each-mode: a verified worker is seeded with the FULL suite (or a
+        // crash replacement's remainder) and released immediately. No shared
+        // queue and no reruns, so it drains then EndSessions independently.
         if dist == Dist::Each {
             if reference.is_some() {
                 for (i, s) in states
@@ -847,10 +822,9 @@ pub fn run_pool(
             continue;
         }
 
-        // Barrier-free seeding: any verified-collected worker starts the
-        // moment the dispatch queue exists. Two dispatches each — the
-        // worker only RUNS an item once it knows the successor, so a
-        // single pending item never starts.
+        // Barrier-free seeding: any verified-collected worker starts once the
+        // dispatch queue exists. Two dispatches each: a worker only RUNS an
+        // item once it knows the successor, so a lone pending item never starts.
         if let Some(d) = dispatch.as_mut() {
             let chunk = chunk_size(total_items, states.len());
             for (i, s) in states
@@ -870,10 +844,9 @@ pub fn run_pool(
             }
         }
 
-        // Session lifecycle: workers stay alive after draining so failed
-        // items can rerun anywhere. EndSession goes out only when every
-        // outcome is final (or, for the serial phase, when the parallel
-        // portion is final and the non-designates must wind down).
+        // Session lifecycle: workers stay alive after draining so failed items
+        // can rerun anywhere. EndSession goes out only when every outcome is
+        // final (or the parallel portion is, for the serial phase wind-down).
         if let Some(d) = dispatch.as_ref() {
             let in_flight = states.iter().any(|s| !s.dead && !s.outstanding.is_empty());
             let parallel_resolved = if stopping {
@@ -898,7 +871,7 @@ pub fn run_pool(
     }
 
     // Parallel wind-down: send every shutdown first, THEN wait. Waiting
-    // one-by-one serializes N interpreter teardowns — the visible pause
+    // one-by-one serializes N interpreter teardowns: the visible pause
     // between the last test and the summary on small suites.
     let mut workers: Vec<_> = states.into_iter().map(|s| s.worker).collect();
     for w in &mut workers {
@@ -907,11 +880,9 @@ pub fn run_pool(
     for w in workers {
         let _ = w.wait();
     }
-    // Fabricated crash failures never pass through any worker session, so
-    // session exit codes alone can read 0 — the recorded outcomes win.
-    // The reverse under --reruns: a flaky test's first attempt fails
-    // INSIDE a session (exitstatus 1) but the recorded outcome is a pass —
-    // there too the recorded outcomes win.
+    // Recorded outcomes win over session exit codes both ways: a fabricated
+    // crash failure never hits a session (codes read 0), and a flaky test's
+    // first attempt fails inside a session (code 1) though it finally passed.
     let mut exitstatus = merge_statuses(&statuses);
     if exitstatus == 0 && !run.all_passed() {
         exitstatus = 1;
@@ -931,7 +902,7 @@ pub fn run_pool(
 
 /// SplitMix64: tiny, deterministic, platform-stable RNG for --shuffle.
 /// The seed is printed for reproduction, so the permutation must be a
-/// pure function of it — no std RandomState / platform variance.
+/// pure function of it: no std RandomState / platform variance.
 struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -990,7 +961,7 @@ fn build_dispatch(
             (order, slow_count, None)
         }
         // Affinity modes: collection order, grouped by a key; a dispatch
-        // never splits a group. Duration reordering is off — affinity is
+        // never splits a group. Duration reordering is off; affinity is
         // the point.
         Dist::Loadfile | Dist::Loadscope => {
             let key = |i: u64| -> &str {
@@ -998,7 +969,7 @@ fn build_dispatch(
                 match dist {
                     // whole file
                     Dist::Loadfile => id.split("::").next().unwrap_or(id),
-                    // fixture scope: drop the last segment (test name) —
+                    // fixture scope: drop the last segment (test name);
                     // class methods key on file::Class, module functions
                     // on the file.
                     _ => id.rsplit_once("::").map(|(head, _)| head).unwrap_or(id),
@@ -1047,7 +1018,7 @@ fn build_dispatch(
     if let Some(seed) = shuffle {
         match group_ends.take() {
             // Affinity modes: shuffle GROUP order, keep each group's
-            // internal order intact — in-group order is the affinity
+            // internal order intact: in-group order is the affinity
             // contract (loadfile is the order-dependent-suite remedy).
             Some(ends) => {
                 let mut units: Vec<&[u64]> = Vec::new();
@@ -1066,7 +1037,7 @@ fn build_dispatch(
                 order = new_order;
                 group_ends = Some(new_ends);
             }
-            // Load mode: the shuffle IS the order — duration-aware
+            // Load mode: the shuffle IS the order; duration-aware
             // long-pole-first sequencing is deliberately defeated.
             None => {
                 shuffle_slice(&mut order, seed);
@@ -1131,10 +1102,9 @@ fn dispatch_to(
     match d.take(want, is_designate) {
         Take::Items(indices) => {
             s.outstanding.extend(indices.iter().copied());
-            // Best-effort: a failed send means the worker is dying — its
-            // crash event will orphan-requeue `outstanding` (which already
-            // includes these items). Bailing the whole pool on the race
-            // killed crash-loop runs.
+            // Best-effort: a failed send means the worker is dying; its crash
+            // event orphan-requeues `outstanding` (already includes these
+            // items). Bailing the whole pool on the race killed crash-loop runs.
             if s.worker.send(&proto::Command::RunItems { indices }).is_ok() {
                 // New items after a NoMoreItems: the held-item concern
                 // returns, so the next exhaustion must re-release.
@@ -1143,7 +1113,7 @@ fn dispatch_to(
         }
         Take::Exhausted => {
             // Queue exhausted FOR NOW. Release the worker's held last item
-            // (nextitem lookahead) — it keeps listening for reruns until
+            // (nextitem lookahead); it keeps listening for reruns until
             // EndSession says every outcome is final.
             if !s.finishing {
                 s.finishing = true;
@@ -1296,7 +1266,7 @@ mod tests {
                 None,
             );
             let batches = drain(&mut d, 1, false);
-            // Whole files, in-file order intact — only group ORDER varies.
+            // Whole files, in-file order intact; only group ORDER varies.
             assert!(
                 batches == vec![vec![0, 1, 2], vec![3, 4]]
                     || batches == vec![vec![3, 4], vec![0, 1, 2]],

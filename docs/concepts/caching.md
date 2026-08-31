@@ -11,6 +11,11 @@
   ([`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`), used to
   surface repeat offenders. Auto-written, safe to delete, persisted the same
   way as `durations.json`.
+- `coverage_index.json` — line→test index (which tests' coverage executed
+  each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
+  run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
+  the changed lines. Safe to delete — `--changed` falls back to the import
+  graph without it; rebuild by re-running coverage with `--cov-context=test`.
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
 duration-aware scheduling from the second run onward. In the repository,

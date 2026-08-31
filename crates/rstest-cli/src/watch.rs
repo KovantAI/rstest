@@ -1,11 +1,8 @@
 //! `rstest --watch`: rerun on file change.
 //!
-//! Policy: a change set consisting ONLY of test files reruns exactly those
-//! files (with the user's flags); any other .py change is run through
-//! import-graph selection (`select::affected_tests`) so only tests that
-//! transitively import the changed module rerun, falling back to the full
-//! selection when affected tests can't be resolved. Events are debounced —
-//! editors emit bursts per save.
+//! A change set of only test files reruns exactly those; any other .py
+//! change goes through import-graph selection (`select::affected_tests`),
+//! full selection when affected tests can't be resolved.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -34,11 +31,9 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
 
     let mut status = execute(cli, base_args)?;
     loop {
-        // Discard events the run itself produced (collection touches, test
-        // artifacts) and anything queued while it executed. Without this a
-        // slow run lets prior-cycle events survive into the next change set
-        // and coalesce — e.g. the initial run's collection events bundling
-        // with the first real edit and flipping the rerun mode.
+        // Discard events the run itself produced and anything queued while
+        // it executed. Otherwise a slow run's prior-cycle events (e.g. the
+        // initial collection) survive and coalesce with the next edit.
         while rx.try_recv().is_ok() {}
 
         eprintln!("\n[watch] waiting for changes... (Ctrl+C to quit, last exit: {status})");
@@ -73,7 +68,7 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
                 .map(|p| rel(p, &cwd))
                 .collect();
             if args.is_empty() {
-                continue; // deleted test files only — nothing to run
+                continue; // deleted test files only - nothing to run
             }
             args.extend(flags_only(base_args));
             mode = "changed files";

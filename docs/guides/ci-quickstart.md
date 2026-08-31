@@ -424,6 +424,13 @@ working tree against HEAD — at pre-push everything is already committed, so
 it would select zero tests and pass silently. On CI, set `GITHUB_BASE_REF`
 or `CI_MERGE_REQUEST_*` and `--changed` diffs against the PR base instead.
 
+`--changed` gets **tighter** when a coverage index is warm: run your suite
+once with `--cov-context=test` (e.g. a scheduled main-branch job) and it maps
+changed *lines* to only the tests that cover them, not every importer. The
+`.rstest_cache` you already persist above carries the index, so PR jobs pick
+it up automatically; without it, `--changed` falls back to the import graph.
+See [Selecting changed tests](changed.md).
+
 Pass extra flags with `args`:
 
 ```yaml

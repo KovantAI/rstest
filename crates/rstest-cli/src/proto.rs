@@ -1,5 +1,5 @@
 //! Orchestrator<->worker protocol: msgpack values over dedicated pipes
-//! (never stdio — workers must keep fd 0/1/2 free for capture; see
+//! (never stdio - workers must keep fd 0/1/2 free for capture; see
 //! research D4 / xdist execnet fd-steal lesson).
 //!
 //! Wire shape: every message is a msgpack map `{"kind": ..., "payload": ...}`.
@@ -14,9 +14,8 @@ pub enum Command {
         args: Vec<String>,
     },
     /// Item-dispatch mode: collect per `args`, then await RunItems batches.
-    /// Every pool worker receives IDENTICAL args — this preserves pytest's
-    /// config/conftest semantics exactly (file-granular args do not; see
-    /// pandas pytables importorskip incident).
+    /// Every pool worker gets IDENTICAL args to preserve pytest config/conftest
+    /// semantics (file-granular args do not; see pandas pytables importorskip).
     RunItemsSession {
         args: Vec<String>,
     },
@@ -26,7 +25,7 @@ pub enum Command {
     },
     /// Lazy-collection mode: session over `args` with NO initial
     /// collection; work arrives as RunFiles/RunIds (D5 single-point
-    /// collection — each file is collected by exactly one worker).
+    /// collection - each file is collected by exactly one worker).
     RunLazySession {
         args: Vec<String>,
     },
@@ -34,14 +33,14 @@ pub enum Command {
     RunFiles {
         paths: Vec<String>,
     },
-    /// Lazy mode: (re-)run items by nodeid — reruns, crash
+    /// Lazy mode: (re-)run items by nodeid - reruns, crash
     /// redistribution, and the serial phase. The worker re-collects a
     /// nodeid it has never seen.
     RunIds {
         ids: Vec<String>,
     },
     /// The queue is exhausted FOR NOW: drain pending (last item runs with
-    /// nextitem=None, releasing fixture finalizers), then keep listening —
+    /// nextitem=None, releasing fixture finalizers), then keep listening -
     /// failed items elsewhere may rerun here (--reruns).
     NoMoreItems,
     /// Run pytest_testnodedown for a CRASHED worker: `workerinput` is
@@ -84,7 +83,7 @@ pub struct Report {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct WarningEntry {
-    /// pytest phase: "config" / "collect" / "runtest" — config+collect
+    /// pytest phase: "config" / "collect" / "runtest" - config+collect
     /// warnings repeat in every worker session and must be counted once.
     pub when: String,
     pub category: String,
@@ -124,10 +123,9 @@ pub enum Event {
     Warnings {
         entries: Vec<WarningEntry>,
     },
-    /// Item-dispatch mode: collection finished. Workers verify by
-    /// count+hash; `ids` (session order) ride along from one designated
-    /// worker only — the orchestrator needs the actual list once, for
-    /// duration-cache ordering (D5: no 8x15MB id transfer at pandas scale).
+    /// Item-dispatch mode: collection finished. Workers verify by count+hash;
+    /// `ids` (session order) ride from one designated worker only - the
+    /// orchestrator needs the list once, for duration-cache ordering (D5).
     CollectionDone {
         count: u64,
         hash: String,
@@ -202,7 +200,7 @@ pub enum Event {
         index: u64,
     },
     /// Item at `index` finished its full runtest protocol (scheduling
-    /// signal — distinct from its phase Reports, per xdist lesson).
+    /// signal - distinct from its phase Reports, per xdist lesson).
     ItemDone {
         index: u64,
     },
@@ -221,7 +219,7 @@ mod tests {
     use super::*;
 
     /// Commands are sent with to_vec_named (worker.rs); the worker matches
-    /// on the literal "kind" string. These names ARE the wire protocol —
+    /// on the literal "kind" string. These names ARE the wire protocol -
     /// renaming a variant breaks every worker silently.
     fn kind_of(cmd: &Command) -> String {
         let bytes = rmp_serde::encode::to_vec_named(cmd).unwrap();

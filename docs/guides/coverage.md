@@ -33,9 +33,26 @@ Supported pytest-cov options:
 | `--cov-report=term` / `term-missing` | printed after the summary |
 | `--cov-report=xml[:path]` / `html[:dir]` / `json` / `lcov` / `annotate` | written by the orchestrator |
 | `--cov-fail-under=N` | enforced after combining; run exits 1 below N |
+| `--cov-context=test` | per-test line contexts, preserved through the parallel merge (see below) |
 | `.coveragerc` / `[tool.coverage.*]` config | honored (read by coverage itself) |
 
 Multiple `--cov-report` values compose, as under pytest-cov.
+
+## Per-test contexts (`--cov-context=test`)
+
+`--cov-context=test` records *which test covered each line*. Under rstest the
+contexts **survive the parallel merge**: each worker records into its own data
+file and the combine keeps the labels, so a line executed by tests on different
+workers ends up attributed to each of them — identical to a serial run, at
+parallel speed. (`--cov-report=html`/`json` are rendered with `show_contexts`
+so the per-test attribution shows up in the report.)
+
+A `--cov-context=test` run also writes a **line→test index** to
+`.rstest_cache/coverage_index.json` — the map
+[`--changed`](changed.md) uses to select only the tests
+whose coverage actually executed the changed lines. Warm it by running your
+coverage suite once with `--cov-context=test`; persist `.rstest_cache` across
+CI runs the same way you persist it for scheduling.
 
 ## Notes
 
@@ -60,7 +77,8 @@ Multiple `--cov-report` values compose, as under pytest-cov.
   `coverage combine && coverage report`. `--cov-fail-under` is per-shard —
   enforce the global threshold in that merge step (`coverage report
   --fail-under=N`), not on individual shards.
-- Branch coverage (`--cov-branch`) and context options forward like any
-  other flag.
+- Branch coverage (`--cov-branch`) forwards like any other flag. Per-test
+  contexts (`--cov-context=test`) are preserved through the merge and drive the
+  `--changed` index — see [Per-test contexts](#per-test-contexts-cov-contexttest).
 - Worker data files live in the invocation directory during the run and
   are combined into `.coverage` at the end — the same lifecycle as xdist.

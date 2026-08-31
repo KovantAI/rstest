@@ -53,6 +53,13 @@ per-shard JUnit reconstructs the full run.
       those modes exist to provide.
     - Composes with `--changed`: selection narrows the file set first,
       then the shard partitions the survivors.
+    - **Building the coverage index under `--shard` is partial.** A sharded
+      `--cov-context=test` run only measures its own shard's tests, so the
+      `coverage_index.json` it writes covers a fraction of the suite — a later
+      `--changed` would under-select. Warm the [`--changed` coverage
+      index](changed.md#keeping-the-index-warm) from an **unsharded** coverage
+      run (or merge each shard's `.coverage` before building the index), not
+      from the sharded job.
 
 ## GitHub Actions
 

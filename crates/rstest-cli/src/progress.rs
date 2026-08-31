@@ -13,40 +13,34 @@ pub enum Mode {
     Dots,
     /// pytest -v: one `nodeid OUTCOME [ pct%]` line per test.
     Verbose,
-    /// pytest-sugar-style: a per-test result line (`✓`/`✗ nodeid`) as each
-    /// finishes, failures shown inline, and a live filled progress bar in
-    /// the footer (pool mode). The parallel-safe answer to sugar, which
+    /// pytest-sugar-style: per-test result line inline, plus a live filled
+    /// progress bar in the footer. The parallel-safe answer to sugar, which
     /// can't render under a worker pool.
     Bar,
-    /// GitHub Actions: renders dots for the human-readable log, plus
-    /// `::error file=,title=,line=::` workflow annotations for each failure
-    /// (emitted at end-of-run from the aggregate, in main).
+    /// GitHub Actions: dots plus `::error file=,title=,line=::` workflow
+    /// annotations per failure (emitted at end-of-run from the aggregate).
     Github,
-    /// Newline-delimited JSON: one `{"event":"testreport",...}` object per
-    /// phase report, streamed live as tests finish, closed by a
-    /// `{"event":"sessionfinish",...}` envelope (emitted in main). stdout is
-    /// pure NDJSON — no banner, footer, or summary. For editors/tooling.
+    /// Newline-delimited JSON: one `testreport` object per phase report,
+    /// closed by a `sessionfinish` envelope. stdout is pure NDJSON, no
+    /// banner/footer/summary. For editors/tooling.
     Json,
-    /// Test Anything Protocol (version 13): `ok N - nodeid` per test as it
-    /// finishes, failure text as `#` diagnostics, trailing `1..N` plan
-    /// (emitted in main). stdout is a pure TAP stream — no banner or
-    /// summary. For TAP harnesses (Jenkins TAP plugin, prove, etc.).
+    /// TAP version 13: `ok N - nodeid` per test, failure text as `#`
+    /// diagnostics, trailing `1..N` plan. stdout is a pure TAP stream, no
+    /// banner or summary. For TAP harnesses (prove, Jenkins TAP plugin).
     Tap,
     /// TeamCity service messages: a `testStarted`/`testFinished` pair per
-    /// test (plus `testFailed`/`testIgnored`) as each finishes. The normal
-    /// banner and summary stay — TeamCity ignores non-service lines.
+    /// test (plus `testFailed`/`testIgnored`). Banner and summary stay -
+    /// TeamCity ignores non-service lines.
     Teamcity,
-    /// GitLab CI: renders dots for the human-readable log; each failure is
-    /// wrapped in a collapsed `section_start`/`section_end` block at
-    /// end-of-run, so the job log folds tracebacks per test.
+    /// GitLab CI: dots plus each failure wrapped in a collapsed
+    /// `section_start`/`section_end` block at end-of-run.
     Gitlab,
-    /// Buildkite: renders dots for the human-readable log; each failure is
-    /// emitted under an auto-expanded `+++` group header at end-of-run.
+    /// Buildkite: dots plus each failure under an auto-expanded `+++`
+    /// group header at end-of-run.
     Buildkite,
-    /// Azure Pipelines: renders dots for the human-readable log, plus
-    /// `##vso[task.logissue type=error;sourcepath=;linenumber=]` logging
-    /// commands per failure (and `type=warning` for flaky-passed tests),
-    /// emitted at end-of-run — surfaced inline on the PR file view.
+    /// Azure Pipelines: dots plus `##vso[task.logissue ...]` commands per
+    /// failure (`type=warning` for flaky-passed), emitted at end-of-run and
+    /// surfaced inline on the PR file view.
     Azure,
 }
 
@@ -124,9 +118,8 @@ impl Progress {
     }
 
     /// pytest's char per outcome: '.' pass, 'F' fail, 's' skip, 'x' xfail,
-    /// 'X' xpass, 'E' setup/teardown error. One char per TEST — emitted on
-    /// the call report, or on a non-passed setup report (no call follows),
-    /// or on a failed teardown.
+    /// 'X' xpass, 'E' setup/teardown error. One char per TEST: on the call
+    /// report, a non-passed setup (no call follows), or a failed teardown.
     pub fn on_report(&mut self, worker: Option<usize>, r: &Report) {
         if self.mode == Mode::Json {
             return Self::on_report_json(worker, r);
@@ -143,9 +136,9 @@ impl Progress {
         if self.mode == Mode::Bar {
             return self.on_report_bar(worker, r);
         }
-        // Github/Gitlab/Buildkite share the dots char stream below (the
-        // human-readable log); their annotations / fold markers are emitted
-        // from the aggregate at end-of-run.
+        // Github/Gitlab/Buildkite share the dots char stream below; their
+        // annotations / fold markers are emitted from the aggregate at
+        // end-of-run.
         let ch = match (r.when.as_str(), r.outcome.as_str()) {
             ("call", "passed") => {
                 if r.wasxfail {
@@ -264,7 +257,7 @@ impl Progress {
             String::new()
         };
         let prefix = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-        let palette = self.palette; // Copy — avoids borrowing self during out_line
+        let palette = self.palette; // Copy - avoids borrowing self during out_line
         let painted_sym = color(&palette, sym);
         let meta = format!("{dur}{pct}");
         let tail = if meta.is_empty() {
@@ -273,7 +266,7 @@ impl Progress {
             palette.dim(&meta)
         };
         self.out_line(&format!("{prefix}{painted_sym} {}{tail}", r.nodeid));
-        // Sugar shows failures the moment they happen — inline the repr.
+        // Sugar shows failures the moment they happen - inline the repr.
         if r.outcome == "failed" {
             if let Some(repr) = &r.longrepr {
                 let header = palette.bold_red(&format!("  ── {} ──", r.nodeid));
@@ -309,11 +302,9 @@ impl Progress {
         println!("1..{}", self.done);
     }
 
-    /// One TeamCity service-message group per test as it finishes.
-    /// Retroactive `testStarted`/`testFinished` pairs are fine — TeamCity
-    /// takes the duration from the attribute, not wall-clock between
-    /// messages — and emitting the whole group at once keeps parallel
-    /// results from interleaving.
+    /// One TeamCity service-message group per test. Retroactive
+    /// `testStarted`/`testFinished` pairs are fine (duration rides on the
+    /// attribute); emitting the group at once avoids parallel interleaving.
     fn on_report_teamcity(&mut self, r: &Report) {
         let Some(messages) = teamcity_messages(r) else {
             return;
@@ -324,10 +315,9 @@ impl Progress {
         println!("{messages}");
     }
 
-    /// One NDJSON object per phase report — the live event stream. Printed
-    /// straight to stdout (no footer in Json mode), so consumers get a
-    /// parseable line the moment each phase finishes. `longrepr` rides only
-    /// on failures (it's large); `worker` only in pool runs.
+    /// One NDJSON object per phase report, straight to stdout (no footer in
+    /// Json mode). `longrepr` rides only on failures (it's large); `worker`
+    /// only in pool runs.
     fn on_report_json(worker: Option<usize>, r: &Report) {
         let mut obj = serde_json::json!({
             "event": "testreport",
@@ -371,12 +361,9 @@ impl Progress {
     }
 }
 
-/// The TAP test point for a phase report, or None when this phase emits
-/// nothing (passed setup/teardown, in-progress phases). Mapping follows
-/// TAP semantics: xfail = `not ok # TODO` (the harness expects it to
-/// fail), xpass = `ok # TODO` (a bonus the harness flags), skip =
-/// `ok # SKIP`. A failed teardown gets its own numbered point — the test
-/// already reported at call time, and the plan must match points emitted.
+/// The TAP test point for a phase report, or None when it emits nothing.
+/// xfail = `not ok # TODO`, xpass = `ok # TODO`, skip = `ok # SKIP`. A
+/// failed teardown gets its own point so the plan matches points emitted.
 fn tap_result_line(n: usize, r: &Report) -> Option<String> {
     let directive = |kind: &str, reason: Option<&str>| match reason {
         Some(why) if !why.is_empty() => format!(" # {kind} {}", why.replace(['\n', '\r'], " ")),
@@ -413,10 +400,9 @@ fn tap_result_line(n: usize, r: &Report) -> Option<String> {
     Some(line)
 }
 
-/// The TeamCity service-message group for a phase report, or None when
-/// this phase emits nothing. `testStarted` precedes every result so
-/// TeamCity attributes output correctly; duration rides on
-/// `testFinished` in milliseconds.
+/// The TeamCity service-message group for a phase report, or None when it
+/// emits nothing. `testStarted` precedes every result so output attributes
+/// correctly; duration rides on `testFinished` in milliseconds.
 fn teamcity_messages(r: &Report) -> Option<String> {
     let name = tc_escape(&r.nodeid);
     let started = format!("##teamcity[testStarted name='{name}']");
@@ -453,9 +439,9 @@ fn teamcity_messages(r: &Report) -> Option<String> {
     })
 }
 
-/// TeamCity WARNING build messages for tests that passed only after reruns
-/// (`--reruns`). The run stays green — these surface as build-log warnings so
-/// the flake is visible without opening the junit. Empty when nothing flaked.
+/// TeamCity WARNING build messages for tests that passed only after reruns.
+/// The run stays green; these surface the flake as build-log warnings.
+/// Empty when nothing flaked.
 pub fn teamcity_flaky_messages(flaky: &[(String, u32)]) -> String {
     flaky
         .iter()

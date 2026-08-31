@@ -1,42 +1,25 @@
 """Restore tree-independent conftest fixture visibility for lazy collection.
 
-rstest's D5 lazy collection (LazyDispatchPlugin) calls
-``Session.perform_collect([file])`` once per assigned FILE, reusing a single
-long-lived Session so session-scope fixtures survive across files. pytest's
-own collection model assumes ONE collection pass building ONE tree; vendored
-pytest 9.1's fixture visibility leans on that assumption:
+rstest's D5 lazy collection calls ``Session.perform_collect([file])`` once per
+FILE on one long-lived Session. Vendored pytest 9.1 parses a conftest's
+fixtures once, binding each ``FixtureDef`` to the first ``Directory`` node it
+saw, and ``_matchfactories`` then matches by NODE IDENTITY
+(``fixturedef.node in item.iter_parents()``).
 
-  * A conftest's fixtures are parsed exactly once, when that conftest's
-    ``Directory`` collector is first collected (``pytest_make_collect_report``
-    pops the conftest from ``_pending_conftests``). The resulting ``FixtureDef``
-    is bound to *that* ``Directory`` node instance via ``FixtureDef.node``.
-  * ``FixtureManager._matchfactories`` then matches a fixture to an item by
-    NODE IDENTITY: ``fixturedef.node in item.iter_parents()``.
+Each ``perform_collect`` builds a FRESH tree, so a second file under the same
+conftest directory gets a new ``Directory`` node; the old ``FixtureDef.node``
+isn't in its parent chain and the fixture is reported "not found". This bites
+only when one worker collects 2+ files sharing a conftest directory (file
+affinity, or a stolen/redistributed file), surfacing as a low-rate flake.
 
-Each ``perform_collect`` builds a FRESH collection tree, so the SECOND (and
-later) file collected under the same conftest directory gets a brand-new
-``Directory`` node instance. The conftest's ``FixtureDef.node`` still points at
-the FIRST tree's ``Directory``, which is not in the second file's parent chain,
-so node-identity matching fails and the fixture is reported "not found".
-
-This only bites when one worker collects two+ files sharing a conftest
-directory in separate ``perform_collect`` calls (e.g. file affinity hands both
-files to one worker, or a stolen/redistributed file is re-collected) — which is
-why it surfaced as a low-rate flake (gate "lazy: session fixture once per
-worker").
-
-``FixtureDef.baseid`` is always set to the defining node's nodeid (a string
-prefix), and string-prefix matching is tree-INDEPENDENT and exactly the legacy
-pytest visibility rule. It is also a strict superset of node-identity matching
-within a single tree (``node in parents`` implies ``node.nodeid in
-parentnodeids``), so OR-ing it in is a no-op for the normal single-pass case
-and a correct fix for the repeated-collection case. Crucially it keeps the
-conftest's single ``FixtureDef`` (and its cached session-scope result) intact,
-unlike re-parsing which would re-run session fixtures.
+``FixtureDef.baseid`` (the defining node's nodeid, a string prefix) matches
+tree-independently and is a superset of node-identity within one tree, so
+OR-ing it in is a no-op for the single-pass case and a fix for the repeated
+case, keeping the single cached ``FixtureDef`` (unlike re-parsing, which would
+re-run session fixtures).
 
 The vendored pytest copy must stay byte-identical to upstream (see
-python/VENDOR.md), so the fix lives here as a narrow monkeypatch installed once
-at worker import.
+python/VENDOR.md), so the fix is a narrow monkeypatch installed at worker import.
 """
 
 from __future__ import annotations

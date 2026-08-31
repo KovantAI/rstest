@@ -1,16 +1,8 @@
 //! `--migrate-check`: parallel-readiness preflight (M1).
 //!
-//! Today this implements the unstable-nodeid detector — the cheapest,
-//! highest-value migration signal. It collects the suite twice in fresh
-//! sessions and diffs the id sets: ids present in one collection but not the
-//! other are run-to-run unstable. The per-process-unstable ones (ids embedding
-//! a memory address or a uuid) make per-worker collections disagree and force
-//! rstest to bail ("workers collected different test sets"), pinning the suite
-//! to `-n 0`. The detector names the offending parametrization and the upstream
-//! fix instead of leaving the user with an opaque dispatch refusal.
-//!
-//! See DESIGN-migrate-check.md for the full feature (classifier over outcomes,
-//! scoped discriminators, isolation bisect) this is the first slice of.
+//! Collects the suite twice in fresh sessions and diffs the id sets; ids
+//! present in only one are run-to-run unstable. Per-process-unstable ones
+//! (memory address / uuid) force rstest to `-n 0`; we name them and the fix.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -33,7 +25,7 @@ struct Rec {
 }
 
 impl Rec {
-    /// Wait-bound: spent its time blocked, not computing — the signature of a
+    /// Wait-bound: spent its time blocked, not computing - the signature of a
     /// wall-clock/timeout test. Needs cpu data (doctor) and a non-trivial wall.
     fn wait_bound(&self) -> bool {
         matches!(self.cpu, Some(c) if self.wall >= 0.05 && c < 0.5 * self.wall)
@@ -59,7 +51,7 @@ fn is_fail(entry: &serde_json::Value) -> bool {
 /// every worker); `MAY` bail depend on collection timing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Address, // 0x... — repr() fallback id; differs every process
+    Address, // 0x... - repr() fallback id; differs every process
     Uuid,    // uuid4 in the id
     Time,    // timestamp / date in the id
     Other,   // unstable for an unrecognized reason
@@ -122,9 +114,8 @@ fn classify(param: &str) -> Kind {
 }
 
 /// The parametrize site (nodeid with the trailing `[...]` stripped) and the
-/// param segment, if any. The param starts at the FIRST `[` — test names and
-/// file paths never contain one, but a param's repr can (nested brackets), so
-/// `rfind` would split inside the repr.
+/// param segment. The param starts at the FIRST `[`: names/paths never contain
+/// one, but a param's repr can (nested brackets), so `rfind` would split it.
 fn split_param(nodeid: &str) -> (&str, &str) {
     if nodeid.ends_with(']') {
         if let Some(open) = nodeid.find('[') {
@@ -222,11 +213,11 @@ fn run_session_seq() -> u64 {
 /// The classifier verdict for one test that failed under `-n auto`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verdict {
-    NotParallel,     // fails at -n 0 too (deterministically) — a plain bug / env
-    IntrinsicFlake,  // serial runs disagree — flaky under any runner
+    NotParallel,     // fails at -n 0 too (deterministically) - a plain bug / env
+    IntrinsicFlake,  // serial runs disagree - flaky under any runner
     OrderDependency, // passes serial + loadfile, fails under load
-    WallClock,       // passes serial, fails parallel, wait-bound — load-sensitive timing
-    Isolation,       // passes serial, fails under load AND loadfile — co-location
+    WallClock,       // passes serial, fails parallel, wait-bound - load-sensitive timing
+    Isolation,       // passes serial, fails under load AND loadfile - co-location
 }
 
 impl Verdict {
@@ -278,11 +269,8 @@ fn classify_failures(args: &[String], par: &Outcomes) -> Result<Vec<(String, Ver
         return Ok(Vec::new());
     }
     // M2: scope the discriminators to the FILES containing failures, not the
-    // whole suite — cost ∝ failing files, not suite size. Faithful when
-    // pollution is within the failing-file set; a cross-file polluter living in
-    // a non-failing file may round an ISOLATION down to ORDER-DEPENDENCY, but
-    // the polluter bisect (which searches ALL files) still names it. For a
-    // near-100% suite this turns N whole-suite reruns into a few small ones.
+    // whole suite - cost ∝ failing files. A cross-file polluter in a
+    // non-failing file may round ISOLATION down to ORDER-DEPENDENCY.
     let files: std::collections::BTreeSet<&str> = failed.iter().map(|n| file_of(n)).collect();
     let mut scoped: Vec<String> = files.iter().map(|s| s.to_string()).collect();
     scoped.extend_from_slice(args);
@@ -317,7 +305,7 @@ fn decide(serial1: bool, serial2: bool, loadfile: bool, wait_bound: bool) -> Ver
     } else if !loadfile {
         Verdict::OrderDependency // passes serial + loadfile, fails only under load
     } else if wait_bound {
-        // fails under load AND loadfile, passes serial — a co-location bug OR a
+        // fails under load AND loadfile, passes serial - a co-location bug OR a
         // real-time deadline. Wait-bound (wall >> cpu) -> the latter.
         Verdict::WallClock
     } else {
@@ -334,19 +322,17 @@ fn file_of(nodeid: &str) -> &str {
 enum Polluter {
     SameFile(String),  // reproduces running the victim's own file alone
     OtherFile(String), // a different file, run before the victim, reproduces
-    NotReproducible,   // no serial ordering reproduces — likely a concurrent race
+    NotReproducible,   // no serial ordering reproduces - likely a concurrent race
 }
 
 /// Find the polluter: the file whose tests, run serially BEFORE the victim,
-/// reproduce its failure. First checks the victim's OWN file in isolation
-/// (same-file co-location); otherwise binary-searches the other files (order
-/// matters — the polluter must precede the victim, so its file is listed
-/// first). Bounded by a probe budget.
+/// reproduce its failure. Checks the victim's own file first (same-file
+/// co-location), then binary-searches the rest (polluter must precede victim).
 fn bisect_polluter(args: &[String], victim: &str, all: &Outcomes) -> Result<Polluter> {
     let vfile = file_of(victim).to_string();
 
     // reproduce(subset): run `-n 0 <subset…> <vfile>` (vfile last so the
-    // candidate files run first) — does the victim fail?
+    // candidate files run first) - does the victim fail?
     let reproduce = |subset: &[String]| -> Result<bool> {
         let mut sel: Vec<String> = subset.to_vec();
         sel.push(vfile.clone());
@@ -384,7 +370,7 @@ fn bisect_polluter(args: &[String], victim: &str, all: &Outcomes) -> Result<Poll
         if reproduce(&second)? {
             files = second;
         } else {
-            // Neither half alone reproduces — the polluter spans both
+            // Neither half alone reproduces - the polluter spans both
             // (interaction). Report the smallest confirmed set we have.
             break;
         }
@@ -396,11 +382,9 @@ fn bisect_polluter(args: &[String], victim: &str, all: &Outcomes) -> Result<Poll
         .unwrap_or(Polluter::NotReproducible))
 }
 
-/// Run the migration preflight. Returns a process exit code: 0 = ready,
-/// 1 = at least one blocker (WILL-bail id, or a parallel-only failure).
-/// With `json_path`, also writes the findings as a versioned JSON doc. `allow`
-/// holds substrings of accepted findings: they are reported but excluded from
-/// the non-zero exit gate (CI tolerates known issues, fails on new ones).
+/// Run the migration preflight. Exit code: 0 = ready, 1 = at least one blocker
+/// (WILL-bail id or parallel-only failure). `json_path` writes findings as JSON.
+/// `allow` holds accepted-finding substrings: reported but excluded from the gate.
 pub fn run_migrate_check(
     python: &Path,
     args: &[String],
@@ -524,7 +508,7 @@ pub fn run_migrate_check(
         }
     }
 
-    // A WILL-bail id means -n auto can't even dispatch — fix those first.
+    // A WILL-bail id means -n auto can't even dispatch - fix those first.
     if will_bail_total > 0 {
         // Allow-listed will-bail sites still force -n 0 mechanically, but don't
         // fail the gate (CI may have accepted them).
@@ -565,7 +549,7 @@ pub fn run_migrate_check(
         );
     }
 
-    // Pre-existing failures (fail at -n 0 too) aren't a migration concern —
+    // Pre-existing failures (fail at -n 0 too) aren't a migration concern;
     // summarize, don't drown the real parallelism findings in them.
     let preexisting = verdicts
         .iter()
@@ -591,9 +575,8 @@ pub fn run_migrate_check(
         );
     }
 
-    // Bisect the polluting file for state-pollution victims (order + isolation
-    // — both can be reproduced by running the right file before the victim).
-    // Capped: each bisect is ~log(#files) serial runs.
+    // Bisect the polluting file for order + isolation victims (both reproduce
+    // by running the right file before the victim). ~log(#files) runs each.
     const BISECT_CAP: usize = 3;
     let mut polluter: BTreeMap<&str, Polluter> = BTreeMap::new();
     let victims: Vec<&str> = migration
@@ -938,7 +921,7 @@ mod tests {
 
     #[test]
     fn decide_wait_bound_only_splits_the_loadfile_failure() {
-        // wait_bound must not override the serial/order branches — it only
+        // wait_bound must not override the serial/order branches - it only
         // distinguishes WallClock from Isolation once load+loadfile both fail.
         assert_eq!(decide(true, true, true, true), Verdict::NotParallel);
         assert_eq!(decide(false, false, false, true), Verdict::OrderDependency);

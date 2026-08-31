@@ -408,8 +408,24 @@ session config — are not covered by this watchdog.
 
 Run only tests affected by changed files. Changes come from git (working
 tree + untracked vs `HEAD`, or vs `REV` — e.g. `--changed=origin/main` in
-CI) and map through a project import graph to the test files that can be
-affected; only those run.
+CI) and map to the affected tests; only those run.
+
+**Coverage-aware when a line→test index is warm.** If
+`.rstest_cache/coverage_index.json` exists (written by any
+[`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest) run),
+`--changed` maps the *changed lines* to only the tests whose recorded coverage
+executed them — far tighter than the import graph, which reselects every test
+importing a changed module. This is automatic and needs no flag; selection only
+ever gets tighter once the index exists. The index is trusted for lines it
+recorded, so keep it warm (rebuild on your coverage runs; persist
+`.rstest_cache` across CI runs).
+
+Falls back **per file** to the import graph — and is byte-identical to it with
+no index (cold cache) — for anything coverage can't vouch for: brand-new code
+(inserted lines have no prior coverage), files the index never measured, and
+untracked files. A changed test file always runs its own tests, and any config
+or non-Python change is still a full run. Over-selection is safe; the fallbacks
+never under-select against unknown code.
 
 Conservative by construction: ambiguous module names select every match,
 function-local imports count, a changed `conftest.py` selects its whole

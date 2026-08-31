@@ -30,19 +30,15 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-/// rstest: a fast, pytest-compatible test runner.
-///
-/// Unrecognized flags forward to the test session verbatim, so the whole
-/// pytest flag surface (-k, -m, -x, -v, --lf, ...) works unchanged. We
-/// pre-scan argv ourselves: clap would reject unknown flags, and pytest's
-/// surface is too large (and plugin-extensible) to mirror.
+/// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
+/// to the test session verbatim: clap can't mirror pytest's large,
+/// plugin-extensible flag surface, so we pre-scan argv ourselves.
 #[derive(Parser, Debug, Clone)]
 #[command(name = "rstest", version, disable_help_flag = false)]
 pub struct Cli {
-    /// Number of worker processes (logical cores) — rstest is parallel by
-    /// design. Use 0 (or 1) for single-worker mode: one pytest session,
-    /// byte-exact pytest semantics. Configurable via
-    /// `[tool.rstest] numprocesses` in pyproject.toml. [default: auto]
+    /// Number of worker processes (logical cores); rstest is parallel by
+    /// design. Use 0 or 1 for single-worker mode (byte-exact pytest semantics).
+    /// Config: `[tool.rstest] numprocesses`. [default: auto]
     #[arg(short = 'n', long = "numprocesses")]
     numprocesses: Option<String>,
 
@@ -68,31 +64,20 @@ pub struct Cli {
     doctor_json: Option<PathBuf>,
 
     /// Write the doctor analysis as GitHub-flavored markdown (job-summary
-    /// ready). Implies doctor instrumentation. In CI any doctor run already
-    /// publishes this to the job summary automatically ($GITHUB_STEP_SUMMARY
-    /// on GitHub, `buildkite-agent annotate` on Buildkite); the flag is for
-    /// a custom path (and the way to surface it on GitLab/TeamCity).
+    /// ready; implies doctor instrumentation). In CI a doctor run auto-publishes
+    /// to the job summary; the flag is for a custom path or GitLab/TeamCity.
     #[arg(long)]
     doctor_md: Option<PathBuf>,
 
     /// Fail the run when a doctor metric breaches a threshold (repeatable),
-    /// turning the advisory doctor signal into a CI gate. Grammar:
-    /// `metric OP value`, e.g. `--doctor-fail-on 'parallel_efficiency<30'
-    /// --doctor-fail-on 'wait_pct>50'`. Metrics: wall_seconds,
-    /// test_time_seconds, cpu_time_seconds, tests, workers, wait_pct,
-    /// wait_seconds, parallel_efficiency (efficiency %), realized_speedup,
-    /// imbalance_pct, long_pole_seconds. Operators: < <= > >= == !=. A metric
-    /// whose section didn't apply to this run (e.g. parallel_efficiency at
-    /// -n 1) is skipped, not failed. Implies doctor instrumentation.
+    /// turning the advisory signal into a CI gate. Grammar `metric OP value`,
+    /// e.g. `--doctor-fail-on 'parallel_efficiency<30'`. Implies instrumentation.
     #[arg(long = "doctor-fail-on", value_name = "COND")]
     doctor_fail_on: Vec<String>,
 
-    /// Parallel-readiness preflight: collect the suite twice and report tests
-    /// whose ids are unstable (memory addresses / uuids / timestamps in
-    /// parametrize ids) — the class that forces a suite to -n 0 — then run
-    /// -n auto and classify any parallel-only failure (with the polluter
-    /// bisected). Prints each finding's upstream fix. Exits non-zero if any
-    /// per-process-unstable id or parallelism-specific failure is found.
+    /// Parallel-readiness preflight: collect twice and report tests with
+    /// unstable ids, then run -n auto and classify any parallel-only failure
+    /// (polluter bisected). Exits non-zero on any such finding.
     #[arg(long)]
     migrate_check: bool,
 
@@ -103,7 +88,7 @@ pub struct Cli {
 
     /// Substring of a nodeid/site to accept as a known migrate-check finding
     /// (repeatable): it is still reported (marked "allowed") but does not fail
-    /// the exit code — so CI can gate on NEW issues while tolerating known ones.
+    /// the exit code, so CI can gate on NEW issues while tolerating known ones.
     #[arg(long = "migrate-allow")]
     migrate_allow: Vec<String>,
 
@@ -113,9 +98,8 @@ pub struct Cli {
     #[arg(long = "try")]
     r#try: bool,
 
-    /// Distribution mode: "load" (dynamic, duration-aware), "loadfile"
-    /// (file affinity, in-file order preserved), "loadscope" (class/module
-    /// affinity), "loadgroup" (xdist_group marker affinity), or "each"
+    /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
+    /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
     /// (every test on every worker). [default: load]
     #[arg(long)]
     dist: Option<String>,
@@ -137,12 +121,9 @@ pub struct Cli {
     #[arg(long)]
     reruns: Option<u32>,
 
-    /// Quarantine list: a file of nodeids or glob patterns (one per
-    /// line, # comments). Failures of matching tests are demoted to a
-    /// non-fatal "quarantined" outcome — reported in their own section,
-    /// flagged in junit/report-json, never the exit code. Failures
-    /// OUTSIDE the list still fail the run. Candidates come from the
-    /// flake history (.rstest_cache/flakes.json) every run records.
+    /// Quarantine list: a file of nodeids or glob patterns (one per line,
+    /// # comments). Matching failures are demoted to a non-fatal outcome
+    /// (own section, flagged, never the exit code); others still fail.
     #[arg(long, value_name = "FILE")]
     quarantine: Option<PathBuf>,
 
@@ -164,8 +145,7 @@ pub struct Cli {
 
     /// Kill a worker stuck on ONE test longer than this many seconds
     /// (hang backstop; the test is reported failed, the worker replaced).
-    /// Off by default — use pytest-timeout for per-test limits; this
-    /// catches what in-process timeouts can't (blocked C extensions).
+    /// Off by default; catches what in-process timeouts can't (blocked C exts).
     #[arg(long, value_name = "SECS")]
     worker_timeout: Option<u64>,
 
@@ -175,59 +155,39 @@ pub struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "HEAD", value_name = "REV")]
     changed: Option<String>,
 
-    /// Strict --changed for gating CI: a changed source file the import
-    /// graph cannot connect to any test forces a FULL run (no silent
-    /// skip), undeclared cross-project imports count as dependency
-    /// edges in monorepos, and "nothing affected" exits 5 instead of 0.
-    /// Implies --changed (vs HEAD) when --changed is not given.
+    /// Strict --changed for gating CI: an unconnectable changed source file
+    /// forces a FULL run (no silent skip), and "nothing affected" exits 5
+    /// instead of 0. Implies --changed (vs HEAD) when not given.
     #[arg(long)]
     changed_strict: bool,
 
     /// Collection strategy: "full" (every worker collects the whole suite,
-    /// verified by hash) or "lazy" (D5: the orchestrator walks test files,
-    /// each file is collected by exactly one worker on demand — no
-    /// per-worker full-collection cost, file-affine scheduling).
-    /// Configurable via `[tool.rstest] collect`. [default: full]
+    /// verified by hash) or "lazy" (each file collected by one worker on
+    /// demand). Config `[tool.rstest] collect`. [default: full]
     #[arg(long, value_name = "MODE")]
     collect: Option<String>,
 
-    /// Gate CI on per-test duration regressions: after the run, compare
-    /// each test's wall time against the duration cache
-    /// (.rstest_cache/durations.json — restore it from your CI cache)
-    /// and exit non-zero when any test grew past RATIO x its baseline
-    /// (e.g. 2.0). Jitter-floored: baselines under 50ms and growth
-    /// under 0.5s never flag.
+    /// Gate CI on per-test duration regressions: compare each test's wall time
+    /// against the duration cache and exit non-zero when any test grew past
+    /// RATIO x baseline (e.g. 2.0). Jitter-floored below 50ms / 0.5s growth.
     #[arg(long, value_name = "RATIO")]
     durations_regress: Option<f64>,
 
-    /// Run tests in a seeded random order (pytest-randomly-style) to
-    /// flush order dependencies on demand. Without a value the seed is
-    /// chosen per run and printed; pass --shuffle=SEED to reproduce a
-    /// failing order. Affinity modes (loadfile/loadscope/loadgroup)
-    /// shuffle group order and keep in-group order intact. Parallel
-    /// pool with full collection only.
+    /// Run tests in a seeded random order (pytest-randomly-style) to flush
+    /// order dependencies. No value: per-run seed, printed; --shuffle=SEED
+    /// reproduces. Parallel pool with full collection only.
     #[arg(long, num_args = 0..=1, default_missing_value = "random", value_name = "SEED")]
     shuffle: Option<String>,
 
-    /// Terminal output style: "dots" (pytest's per-test chars), "verbose"
-    /// (one line per test, like -v), or "bar" (pytest-sugar-style: a
-    /// per-test result line, inline failures, and a live progress bar).
-    /// Configurable via `[tool.rstest] output`. Default: "bar" on an
-    /// interactive tty (or "verbose" with -v), "dots" off-tty (CI, pipes)
-    /// for byte-stable logs.
+    /// Terminal output style: "dots", "verbose" (like -v), or "bar"
+    /// (pytest-sugar-style live progress). Config `[tool.rstest] output`.
+    /// Default "bar" on a tty ("verbose" with -v), "dots" off-tty.
     #[arg(long, value_name = "STYLE")]
     output: Option<String>,
 
     /// Split the suite across N independent CI jobs and run only shard K
-    /// (`--shard K/N`, K is 1-based). Each job partitions the collected
-    /// tests into N buckets balanced by the duration cache
-    /// (.rstest_cache/durations.json — restore the SAME cache on every
-    /// job) and runs its bucket; a cold cache falls back to an even
-    /// count split. Buckets are disjoint and cover the whole suite, so
-    /// merging the per-job JUnit reconstructs the full run. Orthogonal to
-    /// -n: each shard still runs its slice across local workers. Under an
-    /// affinity --dist mode (loadfile/loadscope/loadgroup) it partitions at
-    /// whole-group grain so a file/scope/group never splits across shards.
+    /// (`--shard K/N`, K 1-based), balanced by the duration cache. Buckets are
+    /// disjoint, so merging per-job JUnit reconstructs the full run.
     #[arg(long, value_name = "K/N")]
     shard: Option<String>,
 
@@ -287,7 +247,7 @@ fn parse_maxfail(args: &[String]) -> Option<u64> {
 }
 
 /// --durations=N / --durations-min=X from the session args. Workers also
-/// receive them (harmless — their terminals are nulled); the orchestrator
+/// receive them (harmless; their terminals are nulled); the orchestrator
 /// owns the rendered block. Returns (N, min_secs); N == 0 means all.
 fn parse_durations(args: &[String]) -> Option<(usize, f64)> {
     let mut n: Option<usize> = None;
@@ -322,17 +282,8 @@ fn parse_durations(args: &[String]) -> Option<(usize, f64)> {
 }
 
 /// Session flags that need pytest's own terminal (or stdin): run a single
-/// worker with inherited stdio and let the vendored core render.
-///
-/// Stepwise (`--sw` and friends) is here by necessity, not for IO: it is
-/// inherently sequential — stop at the first failure, resume from it next
-/// run — and its resume cursor is a single nodeid indexed into one global
-/// collection order, which parallel dispatch (duration-ordered, split
-/// across workers) does not produce. A single-session run hands the whole
-/// flow to the vendored stepwise plugin, which writes/reads `cache/stepwise`
-/// correctly because this path spawns the worker with no `RSTEST_WORKER_ID`
-/// (so neither rstest's cache guard nor pytest's own xdist-worker guard
-/// fires). Same constraint xdist has: stepwise wants `-n 0`.
+/// worker with inherited stdio and let the vendored core render. Stepwise is
+/// here too because it is inherently sequential and wants `-n 0` like xdist.
 fn needs_passthrough_io(session_args: &[String]) -> bool {
     session_args.iter().any(|a| {
         matches!(
@@ -370,11 +321,9 @@ fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
     }
 }
 
-/// Run a single collect-only session and write a structured discovery doc:
-/// `{ meta, tests: [{nodeid, file (abs), lineno (0-based), markers}],
-/// collect_errors }`. Bypasses passthrough so collection rides the wire
-/// (RSTEST_SEND_IDS) instead of printing pytest's text tree. Returns the
-/// session exit status.
+/// Run a single collect-only session and write a structured discovery doc
+/// (meta, tests, collect_errors). Bypasses passthrough so collection rides
+/// the wire (RSTEST_SEND_IDS), not pytest's text tree. Returns exit status.
 fn run_collect_discovery(
     python: &std::path::Path,
     args: &[String],
@@ -386,9 +335,8 @@ fn run_collect_discovery(
     std::env::set_var("RSTEST_SEND_IDS", "1");
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null)?;
     // Item-dispatch session: its `pytest_collection_finish` emits the
-    // id+location payload, and on --collect-only its runtestloop returns
-    // early (no RunItems batches needed). The plain run_tests session has
-    // no collection_finish, so it cannot feed discovery.
+    // id+location payload (runtestloop returns early on --collect-only). The
+    // plain run_tests session has no collection_finish, so can't feed discovery.
     w.send(&proto::Command::RunItemsSession {
         args: args.to_vec(),
     })?;
@@ -697,9 +645,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let settings = config::rstest_settings(&std::env::current_dir()?);
 
     // Monorepo: cwd has no pytest config of its own, subdirectories do.
-    // Each subproject runs as its own full session group (cwd switched —
-    // rootdir/ini/conftest semantics are exactly pytest-in-that-dir).
-    // Explicit path args mean the user targeted something; stay single.
+    // Each subproject runs as its own session group (cwd switched, so
+    // rootdir/ini/conftest match pytest-in-that-dir). Explicit paths stay single.
     if std::env::var_os("RSTEST_MONO_PROJECT").is_none() {
         let cwd = std::env::current_dir()?;
         let path_args = args
@@ -725,7 +672,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         .unwrap_or_else(|| "load".into());
     // Validate once, up front: every run path (byte-exact, lazy, pool) shares
     // this name, so an invalid value must error the same way regardless of
-    // suite size — not slip through the lazy/small-suite path silently.
+    // suite size, not slip through the lazy/small-suite path silently.
     if !matches!(
         dist_name.as_str(),
         "load" | "loadfile" | "loadscope" | "loadgroup" | "each"
@@ -751,14 +698,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     let n = parse_numprocesses(&numprocesses)?;
     let passthrough = needs_passthrough_io(&args);
-    // Honor `--reruns` in single-worker mode by running a degenerate
-    // one-worker pool: the rerun loop is orchestrator-side, so an n=1 pool
-    // makes it live (with pytest-rerunfailures neutralized inside the worker,
-    // so nothing double-reruns) without coupling reruns to worker count. The
-    // byte-exact single-session path stays the default whenever no reruns are
-    // requested — passing `--reruns` is the opt-in that trades byte-exactness
-    // for retries. Passthrough (-s/--pdb/--co) needs pytest's own terminal and
-    // can't be pooled, so reruns stay inert there.
+    // Honor `--reruns` in single-worker mode via a degenerate one-worker pool:
+    // the rerun loop is orchestrator-side (rerunfailures neutralized inside).
+    // Passthrough can't be pooled, so reruns stay inert there.
     let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
     // A one-worker rerun pool is 1 worker everywhere downstream (banner,
     // doctor, report-json meta), never 0.
@@ -772,11 +714,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         || args
             .iter()
             .any(|a| a.starts_with("-vv") && a.chars().skip(1).all(|c| c == 'v'));
-    // Output style: --output > [tool.rstest] output > (-v ? verbose
-    // : tty ? bar : dots). With nothing specified we auto-promote to the
-    // sugar-style bar on an interactive terminal, but stay on plain dots
-    // off-tty (CI, pipes) so logs remain byte-stable — the live footer
-    // (status.rs) self-disables there too.
+    // Output style: --output > [tool.rstest] output > (-v ? verbose : tty ?
+    // bar : dots). Auto-promote to the sugar bar on a tty, stay on plain dots
+    // off-tty so logs stay byte-stable (the live footer self-disables there).
     let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
         Some("bar") => progress::Mode::Bar,
         Some("verbose") => progress::Mode::Verbose,
@@ -810,7 +750,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         std::env::set_var("RSTEST_DOCTOR", "1");
     }
 
-    // Session args forward verbatim — the vendored core owns ini semantics
+    // Session args forward verbatim: the vendored core owns ini semantics
     // (python_files, testpaths, rootdir) and collection, so session
     // behavior is exactly pytest's.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -829,16 +769,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         );
     }
     // `--collect-only --report-json <p>` writes a structured discovery doc
-    // (nodeid + abs file + 0-based line + markers) instead of pytest's text
-    // tree — the machine-readable surface editors/CI consume. Distinct from
-    // the run snapshot; takes its own single-session path (NOT passthrough).
+    // (nodeid + abs file + 0-based line + markers), the machine-readable
+    // surface editors/CI consume. Own single-session path (NOT passthrough).
     if is_collect_only(&args) {
         if let Some(out) = &cli.report_json {
             let code = run_collect_discovery(&python, &args, out)?;
             std::process::exit(code);
         }
     }
-    // Json/Tap modes keep stdout a pure machine stream — no banner
+    // Json/Tap modes keep stdout a pure machine stream: no banner
     // (TAP gets its version header instead).
     if !passthrough && mode == progress::Mode::Tap {
         println!("TAP version 13");
@@ -868,15 +807,24 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         };
         let cwd = std::env::current_dir()?;
         let project = config::discover(&cwd);
-        let changed = select::changed_files_from_git(rev)?;
-        match select::affected_tests(&project.rootdir, &project, &changed, cli.changed_strict)? {
+        // Coverage-aware selection: uses the line->test index when it is warm
+        // (any --cov-context=test run writes it), else falls back per-file to
+        // import-graph reachability, so --changed only ever gets tighter.
+        let changes = select::changed_line_ranges(rev)?;
+        match select::affected_with_coverage(
+            &project.rootdir,
+            &project,
+            &changes,
+            cli.changed_strict,
+            rev,
+        )? {
             select::Selection::FullRun(reason) => {
                 eprintln!("rstest: --changed falling back to full run ({reason})");
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
                 println!(
                     "rstest: no tests affected by {} changed file(s)",
-                    changed.len()
+                    changes.len()
                 );
                 // Strict gating needs to DISTINGUISH "ran nothing" from
                 // "everything passed": pytest's nothing-collected code.
@@ -884,8 +832,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
             select::Selection::Tests(tests) => {
                 eprintln!(
-                    "rstest: {} changed file(s) -> {} affected test file(s)",
-                    changed.len(),
+                    "rstest: {} changed file(s) -> {} affected test target(s)",
+                    changes.len(),
                     tests.len()
                 );
                 let mut selected: Vec<String> =
@@ -908,11 +856,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         );
     }
     if single_worker_reruns {
-        // Not silent: a run that would otherwise be byte-exact is now a
-        // one-worker pool (orchestrator dispatch order, gw0 worker id,
-        // pytest-rerunfailures neutralized). Say so on stderr so log scrapers
-        // and existing `[tool.rstest] reruns` configs see the switch, not just
-        // the banner.
+        // Not silent: a byte-exact run is now a one-worker pool (dispatch
+        // order, gw0 id, rerunfailures neutralized). Say so on stderr so log
+        // scrapers and existing configs see the switch, not just the banner.
         eprintln!(
             "rstest: --reruns at -n {numprocesses} runs a one-worker rerun pool \
              (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
@@ -1073,11 +1019,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             files,
             mode,
             palette,
-            // Steal (split files across workers for balance) only on an
-            // EXPLICIT --dist load: lazy defaults to strict file
-            // affinity — stealing changes execution composition more
-            // than full-mode chunking and exposes cross-file/in-file
-            // order dependence (trio, rich) that file affinity doesn't.
+            // Steal (split files across workers) only on an EXPLICIT --dist
+            // load: lazy defaults to strict file affinity, since stealing
+            // exposes cross-file/in-file order dependence affinity doesn't.
             cli.dist.as_deref() == Some("load") || settings.dist.as_deref() == Some("load"),
             parse_maxfail(&args),
             reruns,
@@ -1145,8 +1089,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
-    // Loaded before this run's events are recorded below — the history
-    // annotations must say "before this run".
+    // Loaded before this run's events are recorded below, so the history
+    // annotations say "before this run".
     let flake_history = flakes::load();
 
     if !passthrough && mode == progress::Mode::Json {
@@ -1193,7 +1137,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         };
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
-        // the stable summary line (which tooling/CI greps — keep it intact).
+        // the stable summary line (which tooling/CI greps, so keep it intact).
         // The bar gives its own visual break; other modes get a blank line.
         if mode == progress::Mode::Bar && std::io::stdout().is_terminal() {
             let c = outcome.run.counts();
@@ -1216,9 +1160,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         };
         println!("{summary}");
         // CI-native surfaces emitted from the aggregate at end-of-run. Failures
-        // already rode along above (GitHub/Azure annotations here; GitLab folds
-        // and Buildkite groups via print_failures; TeamCity as live service
-        // messages), so these add each platform's flake signal.
+        // already rode along above, so these add each platform's flake signal
+        // (GitHub/Azure annotations here; TeamCity as live service messages).
         match mode {
             progress::Mode::Github => print_github_annotations(&outcome.run),
             progress::Mode::Azure => print_azure_annotations(&outcome.run),
@@ -1234,7 +1177,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     }
 
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
-    // gate can't evaluate — say so instead of a silent false green.
+    // gate can't evaluate; say so instead of a silent false green.
     if !doctor_gate.is_empty() && passthrough {
         eprintln!(
             "rstest: --doctor-fail-on is ignored under -s/--pdb/--co \
@@ -1254,7 +1197,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             start.elapsed().as_secs_f64(),
             n,
         );
-        // In json mode stdout is a pure NDJSON stream — the doctor's human
+        // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {
             doctor::render(&report);
@@ -1299,7 +1242,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // so a follow-up `--lf` behaves exactly as after a serial run.
     if let Some(cache_dir) = &outcome.cache_dir {
         // Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the
-        // plain nodeids (deduped — a test may fail on several workers).
+        // plain nodeids (deduped, since a test may fail on several workers).
         let failed: std::collections::BTreeMap<String, bool> = outcome
             .run
             .failed_nodeids()
@@ -1347,7 +1290,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
-    // Each-mode ids carry the [gwN] suffix and every test ran N times —
+    // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
         durations::save(&outcome.run);
@@ -1390,7 +1333,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     }
 
     // Coverage: workers save suffixed data files (pytest-cov worker mode);
-    // the orchestrator plays the xdist-master role — combine and report.
+    // the orchestrator plays the xdist-master role, so combine and report.
     let mut exitstatus = outcome.exitstatus;
     if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
         println!();
@@ -1444,9 +1387,8 @@ fn execute_monorepo(
     // at the root, not as N separate child aborts (children re-validate too).
     doctor::parse_conditions(&cli.doctor_fail_on)?;
     // The monorepo orchestrator prints per-project banners and a summary
-    // around captured child output, so a single clean NDJSON stream is not
-    // possible here. The merged --report-json document is the machine-
-    // readable monorepo surface instead.
+    // around captured child output, so a clean NDJSON stream isn't possible.
+    // The merged --report-json document is the machine-readable surface.
     if cli.output.as_deref() == Some("json") {
         anyhow::bail!(
             "--output json streams live per-session results and can't be merged \
@@ -1455,7 +1397,7 @@ fn execute_monorepo(
         );
     }
     // Same problem for TAP: each child would emit its own version header,
-    // numbering, and plan — concatenated, that is not one valid stream.
+    // numbering, and plan; concatenated, that is not one valid stream.
     if cli.output.as_deref() == Some("tap") {
         anyhow::bail!(
             "--output tap can't be merged across a monorepo's projects; use \
@@ -1475,10 +1417,9 @@ fn execute_monorepo(
                 .replace('\\', "/")
         })
         .collect();
-    // Worker budget: the user's -n (or auto = cores), split across
-    // projects by their last-known suite time (duration caches). Each
-    // project runs as a CHILD rstest process — cwd-isolated, output
-    // captured and printed whole on completion.
+    // Worker budget: the user's -n (or auto = cores), split across projects
+    // by their last-known suite time (duration caches). Each project runs as
+    // a CHILD rstest process (cwd-isolated, output captured, printed whole).
     let budget = parse_numprocesses(
         &cli.numprocesses
             .clone()
@@ -1487,11 +1428,8 @@ fn execute_monorepo(
     .unwrap_or(4)
     .max(1);
     // --changed at a monorepo root: classify projects ONCE against the
-    // repo-wide changed set. Directly-changed projects keep --changed
-    // (child-local narrowing); dependents (via pyproject dependency
-    // names, transitively) run their FULL suite; the rest are skipped.
-    // Resolved once here; children receive the explicit rev (line below,
-    // --changed={rev}) so they never re-resolve.
+    // repo-wide changed set. Directly-changed projects keep --changed;
+    // dependents run their FULL suite; the rest are skipped.
     let mono_changed = cli
         .changed
         .clone()
@@ -1577,9 +1515,8 @@ fn execute_monorepo(
             cmd.arg("--dist").arg(d);
         }
         // Per-project output style. Children write to a captured pipe (not a
-        // tty), so bar/verbose render their per-test lines and github emits
-        // its `::error` annotations — all reprinted under the project header.
-        // (json is refused at the root above.)
+        // tty), so bar/verbose render per-test lines and github emits its
+        // `::error` annotations, all reprinted under the project header.
         if let Some(o) = &cli.output {
             cmd.arg("--output").arg(o);
         }
@@ -1587,7 +1524,7 @@ fn execute_monorepo(
             cmd.arg("--reruns").arg(r.to_string());
         }
         if let Some(q) = &cli.quarantine {
-            // Children run with cwd=project — hand them an absolute path.
+            // Children run with cwd=project, so hand them an absolute path.
             // Patterns match each child's project-relative nodeids.
             cmd.arg("--quarantine")
                 .arg(std::fs::canonicalize(q).unwrap_or_else(|_| q.clone()));
@@ -1783,14 +1720,9 @@ fn parse_numprocesses(value: &str) -> Result<usize> {
     Ok(value.parse()?)
 }
 
-/// `auto` = logical cores, capped by what the suite can use. Worker startup
-/// and teardown cost real time (interpreter + pytest core + plugins per
-/// worker); a 3-file suite gains nothing from 14 workers and pays 14x the
-/// overhead. Two cheap signals, both best-effort:
-/// - test-file count from an ini-aware walk (a worker per file is already
-///   more than the collection phase can use)
-/// - the duration cache: if the whole suite ran in a few seconds last
-///   time, two workers saturate it
+/// `auto` = logical cores, capped by what the suite can use (worker startup
+/// costs real time). Two best-effort signals: test-file count from an
+/// ini-aware walk, and the duration cache (a few-second suite needs ~2 workers).
 fn auto_workers() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())
@@ -1866,10 +1798,6 @@ fn print_warnings_summary(warnings: &[proto::WarningEntry], palette: &color::Pal
     );
 }
 
-/// Emit a GitHub Actions `::error` workflow command per failed test, read
-/// from the run aggregate (deduped — one per nodeid). GitHub surfaces these
-/// as inline annotations on the PR diff. `file` comes from the nodeid path,
-/// `line` from pytest's 0-based report location (+1 → editor 1-based).
 /// Compile the --quarantine file into one matcher: exact nodeids or `*`
 /// globs, one per line, `#` comments and blanks skipped.
 fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
@@ -1944,12 +1872,9 @@ fn print_github_annotations(run: &report::Run) {
     }
 }
 
-/// Emit Azure Pipelines logging commands per failed test — `##vso[task.logissue
-/// type=error;sourcepath=;linenumber=]` — which Azure renders as an inline issue
-/// on the file in the PR (same nodeid→path/line mapping as the GitHub path).
-/// Flaky-passed tests follow as `type=warning`: the run is green, the flake is
-/// still visible. logissue is one line, so messages are collapsed to their
-/// first line.
+/// Emit Azure Pipelines `##vso[task.logissue ...]` commands per failed test,
+/// which Azure renders as inline issues on the PR (same mapping as GitHub).
+/// Flaky-passed tests follow as `type=warning`; messages collapse to one line.
 fn print_azure_annotations(run: &report::Run) {
     let prefix = std::env::var("RSTEST_MONO_PROJECT")
         .ok()
@@ -2001,10 +1926,9 @@ fn az_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
 
-/// Buildkite: surface flaky-passed tests as a `warning` annotation on the build
-/// page (the native equivalent of GitHub's `::warning`), best-effort — a
-/// missing/failing `buildkite-agent` must not fail the run. No-op off Buildkite
-/// or when nothing flaked.
+/// Buildkite: surface flaky-passed tests as a `warning` annotation on the
+/// build page, best-effort (a missing/failing `buildkite-agent` must not fail
+/// the run). No-op off Buildkite or when nothing flaked.
 fn buildkite_flaky_annotate(run: &report::Run) {
     if run.flaky.is_empty()
         || std::env::var("BUILDKITE")
