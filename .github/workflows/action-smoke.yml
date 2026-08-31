@@ -1,0 +1,239 @@
+name: action smoke
+
+# End-to-end smoke test for the composite action in .github/actions/rstest.
+# References the action by local path (./.github/actions/rstest) so no tag or
+# publish is needed. Installs rstest from PyPI, exactly as a consumer would.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - ".github/actions/rstest/**"
+      - ".github/workflows/action-smoke.yml"
+
+jobs:
+  plain:
+    name: happy path (pip)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold suite
+        run: |
+          mkdir -p smoke
+          cat > smoke/test_smoke.py <<'EOF'
+          def test_ok():
+              assert True
+
+          def test_two():
+              assert 1 + 1 == 2
+          EOF
+      - uses: ./.github/actions/rstest
+        id: run
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          upload-junit: true
+      - name: assert green + junit written
+        run: |
+          set -euo pipefail
+          test -f smoke/junit.xml || { echo "junit not written"; exit 1; }
+          test "${{ steps.run.outputs.exit-code }}" = "0" || { echo "expected exit 0, got ${{ steps.run.outputs.exit-code }}"; exit 1; }
+          echo "OK: exit=${{ steps.run.outputs.exit-code }}, junit-path=${{ steps.run.outputs.junit-path }}"
+
+  uv:
+    name: happy path (uv auto-detect)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v5
+        with:
+          python-version: "3.13"
+      - name: scaffold uv project
+        run: |
+          mkdir -p smoke
+          cat > smoke/pyproject.toml <<'EOF'
+          [project]
+          name = "smoke"
+          version = "0"
+          requires-python = ">=3.10"
+          dependencies = ["rstest==0.2.1"]
+          EOF
+          cat > smoke/test_smoke.py <<'EOF'
+          def test_ok():
+              assert True
+          EOF
+          (cd smoke && uv lock)
+      - uses: ./.github/actions/rstest
+        id: run
+        with:
+          python-version: "3.13"
+          runner: auto            # sees smoke/uv.lock -> uv run rstest
+          working-directory: smoke
+          args: "-n 2"
+      - name: assert green + uv path taken
+        run: |
+          set -euo pipefail
+          test -f smoke/junit.xml || { echo "junit not written"; exit 1; }
+          test "${{ steps.run.outputs.exit-code }}" = "0" || { echo "expected exit 0"; exit 1; }
+
+  ratio-gate:
+    name: fail-ratio gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold suite (3 pass, 1 assertion fail)
+        run: |
+          mkdir -p smoke
+          cat > smoke/test_ratio.py <<'EOF'
+          def test_a():
+              assert True
+
+          def test_b():
+              assert True
+
+          def test_c():
+              assert True
+
+          def test_fail():
+              assert False, "AssertionError: intentional"
+          EOF
+
+      # 1/4 = 0.25 <= 0.5 -> gate PASSES despite the failing test.
+      - uses: ./.github/actions/rstest
+        id: tolerate
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          fail-under-ratio: "0.5"
+      - name: assert tolerated (job step succeeded)
+        run: |
+          set -euo pipefail
+          test "${{ steps.tolerate.outcome }}" = "success" \
+            || { echo "expected ratio gate to tolerate 0.25 <= 0.5, got ${{ steps.tolerate.outcome }}"; exit 1; }
+
+      # Same failure, but hard-fail-on matches -> gate FAILS regardless of ratio.
+      - uses: ./.github/actions/rstest
+        id: hard
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          fail-under-ratio: "0.9"
+          hard-fail-on: "AssertionError"
+      - name: assert hard-fail (job step failed)
+        run: |
+          set -euo pipefail
+          test "${{ steps.hard.outcome }}" = "failure" \
+            || { echo "expected hard-fail-on to fail the gate, got ${{ steps.hard.outcome }}"; exit 1; }
+
+  doctor-gate:
+    name: doctor-metric gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold suite
+        run: |
+          mkdir -p smoke
+          cat > smoke/test_d.py <<'EOF'
+          def test_a():
+              assert True
+
+          def test_b():
+              assert True
+          EOF
+
+      # A threshold that cannot trip -> gate PASSES.
+      - uses: ./.github/actions/rstest
+        id: pass
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          doctor-fail-on: "wall_seconds>99999"
+      - name: assert doctor gate passes
+        run: |
+          set -euo pipefail
+          test "${{ steps.pass.outcome }}" = "success" \
+            || { echo "doctor gate should pass on an untrippable threshold, got ${{ steps.pass.outcome }}"; exit 1; }
+
+      # tests>=1 always holds -> gate FAILS deterministically.
+      - uses: ./.github/actions/rstest
+        id: fail
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          doctor-fail-on: "tests>=1"
+      - name: assert doctor gate fails
+        run: |
+          set -euo pipefail
+          test "${{ steps.fail.outcome }}" = "failure" \
+            || { echo "doctor gate should fail when a condition trips, got ${{ steps.fail.outcome }}"; exit 1; }
+
+  baseline-guard:
+    name: durations-regress baseline guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold suite
+        run: |
+          mkdir -p smoke
+          cat > smoke/test_g.py <<'EOF'
+          def test_ok():
+              assert True
+          EOF
+
+      # Cold cache, default (require-baseline: false): the first run legitimately
+      # has no baseline -> WARN and pass, seeding the baseline. Must NOT fail.
+      - uses: ./.github/actions/rstest
+        id: cold
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          durations-regress: "2.0"
+          cache: false            # force a missing baseline
+      - name: assert cold start passes (warns, does not fail)
+        run: |
+          set -euo pipefail
+          test "${{ steps.cold.outcome }}" = "success" \
+            || { echo "cold start must not fail on a missing baseline, got ${{ steps.cold.outcome }}"; exit 1; }
+
+      # The cold run above seeded smoke/.rstest_cache/durations.json locally
+      # (cache: false only skips cross-run restore/save, not the on-disk write).
+      # Wipe it so the strict step below faces a genuinely missing baseline.
+      - name: wipe seeded baseline
+        run: rm -rf smoke/.rstest_cache
+
+      # Same cold cache but require-baseline: true -> strict mode, must FAIL
+      # (catches a broken cache path once you expect a baseline to exist).
+      - uses: ./.github/actions/rstest
+        id: strict
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          durations-regress: "2.0"
+          require-baseline: "true"
+          cache: false
+      - name: assert strict mode fails on missing baseline
+        run: |
+          set -euo pipefail
+          test "${{ steps.strict.outcome }}" = "failure" \
+            || { echo "require-baseline:true must fail on a missing baseline, got ${{ steps.strict.outcome }}"; exit 1; }

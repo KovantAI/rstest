@@ -586,12 +586,12 @@ fn cached_probe(candidate: &Path) -> Option<Probe> {
 
     // Disk cache only for absolute paths: a bare PATH name like `python3`
     // resolves differently as PATH changes, so caching it by name is unsafe.
-    let mtime = candidate
+    let fp = candidate
         .is_absolute()
-        .then(|| file_mtime(candidate))
+        .then(|| file_fingerprint(candidate))
         .flatten();
-    if let Some(m) = mtime {
-        if let Some(p) = disk_cache_get(candidate, m) {
+    if let Some((m, s)) = fp {
+        if let Some(p) = disk_cache_get(candidate, m, s) {
             mem.lock()
                 .unwrap()
                 .insert(candidate.to_path_buf(), Some(p.clone()));
@@ -603,23 +603,37 @@ fn cached_probe(candidate: &Path) -> Option<Probe> {
     mem.lock()
         .unwrap()
         .insert(candidate.to_path_buf(), result.clone());
-    if let (Some(m), Some(p)) = (mtime, &result) {
-        // Persist POSITIVE probes only. A negative is keyed on the binary's
-        // mtime, which a `pip install` fixing the shim leaves unchanged; caching
-        // `false` would outlive the fix. Re-probe negatives every run instead.
+    if let (Some((m, s)), Some(p)) = (fp, &result) {
+        // Persist POSITIVE probes only. A negative probe (the interpreter ran
+        // but couldn't import the worker shim — e.g. msgpack not yet installed)
+        // is keyed on the binary's fingerprint, which a `pip install` into
+        // site-packages leaves unchanged. Persisting `false` would let the
+        // stale miss survive the very install that fixes it, so rstest keeps
+        // reporting "no usable Python interpreter found" until the cache is
+        // deleted by hand. Re-probe negatives every run instead: cheap next to
+        // a full session, and self-healing once the dep lands. The in-memory
+        // cache above still de-dupes repeat probes within a single run.
         if p.worker_importable {
-            disk_cache_put(candidate, m, p);
+            disk_cache_put(candidate, m, s, p);
         }
     }
     result
 }
 
-fn file_mtime(p: &Path) -> Option<u64> {
-    let modified = std::fs::metadata(p).ok()?.modified().ok()?;
-    modified
+/// (mtime seconds, size bytes) — the pair that gates a cache hit. mtime alone
+/// is a 1-second-resolution clock that an in-place rewrite or a mtime-preserving
+/// restore (`cp -p`, `touch -r`, tar/rsync `--times`, reinstalling the same
+/// version) leaves untouched; a genuinely different interpreter binary almost
+/// always differs in size, so the pair catches the swap mtime would miss.
+fn file_fingerprint(p: &Path) -> Option<(u64, u64)> {
+    let md = std::fs::metadata(p).ok()?;
+    let mtime = md
+        .modified()
+        .ok()?
         .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
+        .ok()?
+        .as_secs();
+    Some((mtime, md.len()))
 }
 
 /// On-disk probe cache. The filename carries a schema version so a format
@@ -632,6 +646,11 @@ struct DiskCache {
 #[derive(Clone, Serialize, Deserialize)]
 struct CacheEntry {
     mtime: u64,
+    /// Interpreter file size in bytes. `#[serde(default)]` keeps old v1 files
+    /// readable: a pre-size entry loads as 0, never matches a real file's size,
+    /// so it misses and re-probes rather than serving a stale binary.
+    #[serde(default)]
+    size: u64,
     probe: Probe,
 }
 
@@ -661,20 +680,21 @@ fn disk() -> &'static Mutex<DiskCache> {
     })
 }
 
-fn disk_cache_get(candidate: &Path, mtime: u64) -> Option<Probe> {
+fn disk_cache_get(candidate: &Path, mtime: u64, size: u64) -> Option<Probe> {
     let key = candidate.to_string_lossy().into_owned();
     let d = disk().lock().unwrap();
     let e = d.entries.get(&key)?;
-    (e.mtime == mtime).then(|| e.probe.clone())
+    (e.mtime == mtime && e.size == size).then(|| e.probe.clone())
 }
 
-fn disk_cache_put(candidate: &Path, mtime: u64, probe: &Probe) {
+fn disk_cache_put(candidate: &Path, mtime: u64, size: u64, probe: &Probe) {
     let key = candidate.to_string_lossy().into_owned();
     let mut d = disk().lock().unwrap();
     d.entries.insert(
         key,
         CacheEntry {
             mtime,
+            size,
             probe: probe.clone(),
         },
     );
@@ -991,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_cache_roundtrips_and_gates_on_mtime() {
+    fn disk_cache_roundtrips_and_gates_on_mtime_and_size() {
         let dir = std::env::temp_dir().join(format!("rstest-cache-{}", std::process::id()));
         let path = dir.join("probes.json");
         let mut cache = DiskCache::default();
@@ -999,6 +1019,7 @@ mod tests {
             "/opt/py/bin/python3".into(),
             CacheEntry {
                 mtime: 1000,
+                size: 4096,
                 probe: probe_at("/opt/py/bin/python3", (3, 12, 4), true),
             },
         );
@@ -1007,11 +1028,32 @@ mod tests {
         let loaded = read_cache(&std::fs::read(&path).unwrap()).unwrap();
         let e = loaded.entries.get("/opt/py/bin/python3").unwrap();
         assert_eq!(e.mtime, 1000);
+        assert_eq!(e.size, 4096);
         assert_eq!(e.probe.version, (3, 12, 4));
-        // A stale mtime must miss (caller re-probes).
-        assert_ne!(e.mtime, 1001);
+        // A hit requires BOTH mtime and size to match: a same-mtime binary swap
+        // (different size) must miss, and so must a changed mtime.
+        assert!(e.mtime == 1000 && e.size == 4096);
+        assert!(
+            !(e.mtime == 1000 && e.size == 8192),
+            "size change must miss"
+        );
+        assert!(
+            !(e.mtime == 1001 && e.size == 4096),
+            "mtime change must miss"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_v1_entry_without_size_loads_and_misses() {
+        // A pre-size cache file (no `size` field) must still parse, load as
+        // size 0, and therefore never match a real interpreter's size.
+        let json = br#"{"entries":{"/opt/py/bin/python3":{"mtime":1000,"probe":{"executable":"/opt/py/bin/python3","version":[3,12,4],"implementation":"cpython","freethreaded":false,"worker_importable":true}}}}"#;
+        let loaded = read_cache(json).expect("old v1 file must still parse");
+        let e = loaded.entries.get("/opt/py/bin/python3").unwrap();
+        assert_eq!(e.mtime, 1000);
+        assert_eq!(e.size, 0, "missing size defaults to 0 -> guaranteed miss");
     }
 
     #[test]

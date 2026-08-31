@@ -10,10 +10,39 @@ smarter when persisted between runs.
 
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin a version (`pip install rstest==0.2.1` or `rstest~=0.2`) or install
+    pin a version (`pip install rstest==0.3.1` or `rstest~=0.3`) or install
     from your lockfile.
 
 ## GitHub Actions
+
+The quickest path is the bundled composite action, which wraps install, the
+duration cache (correctly keyed), `--changed` base-ref handling, and an
+optional fail-ratio gate:
+
+```yaml
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: KovantAI/rstest/.github/actions/rstest@v1
+        with:
+          python-version: "3.13"
+          args: "-n auto"
+          upload-junit: true
+```
+
+That defaults `--output github` (so failures show as `::error` annotations and
+flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
+`junit.xml`. See the [action README][action] for all inputs (`changed`,
+`durations-regress`, `reruns`/`rerun-on`, `fail-under-ratio`, `shard`, …).
+
+[action]: https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest
+
+### Under the hood
+
+The action is a thin wrapper. If you prefer raw YAML — or need something the
+action does not expose — the equivalent steps are:
 
 ```yaml
 jobs:
@@ -44,7 +73,9 @@ jobs:
             rstest-durations-
 
       - name: test
-        run: rstest -n auto --junitxml junit.xml
+        # --output github emits ::error per failure and ::warning for flaky
+        # reruns; --doctor auto-publishes diagnostics to the job summary.
+        run: rstest -n auto --output github --junitxml junit.xml
 
       # Long pole? Fan the suite across a runner matrix with --shard K/N —
       # see the Sharding guide.
@@ -298,7 +329,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.2.1             # pin a released tag
+    rev: v0.3.1             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```

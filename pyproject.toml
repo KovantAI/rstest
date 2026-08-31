@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rstest"
-version = "0.2.1"
+version = "0.3.1"
 description = "A fast, pytest-compatible test runner: parallel by design, with built-in suite diagnostics"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -26,6 +26,13 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Testing",
 ]
+
+[project.urls]
+Documentation = "https://python-rstest.readthedocs.io/en/stable/"
+Homepage = "https://python-rstest.readthedocs.io/en/stable/"
+Repository = "https://github.com/KovantAI/rstest"
+Changelog = "https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md"
+Issues = "https://github.com/KovantAI/rstest/issues"
 
 [tool.maturin]
 bindings = "bin"

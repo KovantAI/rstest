@@ -108,6 +108,9 @@ pub fn run_lazy_pool(
     reruns: u32,
     only_rerun: &[regex::Regex],
     worker_timeout: Option<std::time::Duration>,
+    // Some(set) => --reruns-only-known-flaky: gate reruns on prior flaky
+    // history (or an explicit @mark.flaky budget). See run_pool.
+    known_flaky: Option<&std::collections::HashSet<String>>,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();
@@ -277,8 +280,11 @@ pub fn run_lazy_pool(
                                     .as_deref()
                                     .is_some_and(|t| only_rerun.iter().any(|re| re.is_match(t)))
                         });
+                    // --reruns-only-known-flaky: id IS the nodeid in lazy mode.
+                    let known_flaky_ok = known_flaky
+                        .is_none_or(|set| flaky_budget.contains_key(&id) || set.contains(&id));
                     let used = rerun_used.entry(id.clone()).or_insert(0);
-                    if s.attempt_failed && *used < item_budget && rerun_allowed {
+                    if s.attempt_failed && *used < item_budget && rerun_allowed && known_flaky_ok {
                         *used += 1;
                         s.attempt.clear();
                         s.attempt_failed = false;
@@ -353,8 +359,10 @@ pub fn run_lazy_pool(
                     let crashed_orig = crashed.clone();
                     let mut crashed = crashed;
                     if let Some(id) = &crashed {
+                        let known_ok = known_flaky
+                            .is_none_or(|set| flaky_budget.contains_key(id) || set.contains(id));
                         let used = rerun_used.entry(id.clone()).or_insert(0);
-                        if *used < budget_of(&flaky_budget, id) {
+                        if *used < budget_of(&flaky_budget, id) && known_ok {
                             *used += 1;
                             requeued.push_back(id.clone());
                             crashed = None;

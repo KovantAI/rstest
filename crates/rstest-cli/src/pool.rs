@@ -195,6 +195,9 @@ pub fn run_pool(
     worker_timeout: Option<std::time::Duration>,
     shuffle: Option<u64>,
     shard: Option<(usize, usize)>,
+    // Some(set) => --reruns-only-known-flaky: only tests in this set (prior
+    // flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
+    known_flaky: Option<&std::collections::HashSet<String>>,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
@@ -496,8 +499,23 @@ pub fn run_pool(
                                     .as_deref()
                                     .is_some_and(|t| only_rerun.iter().any(|re| re.is_match(t)))
                         });
+                    // --reruns-only-known-flaky: gate on prior flaky history.
+                    // An explicit @mark.flaky (present in flaky_budget) is an
+                    // author declaration and always bypasses the gate. Match on
+                    // the CLEAN nodeid from ids_store (keyed by index), not
+                    // s.attempt's report nodeid: in Dist::Each the report id
+                    // carries a ` [gwN]` suffix (added on receipt) and would
+                    // never match the un-suffixed history set. Same lookup the
+                    // crash path uses, keeping the two gates consistent.
+                    let known_flaky_ok = known_flaky.is_none_or(|set| {
+                        flaky_budget.contains_key(&index)
+                            || ids_store
+                                .as_ref()
+                                .and_then(|v| v.get(index as usize))
+                                .is_some_and(|id| set.contains(id))
+                    });
                     let used = rerun_used.entry(index).or_insert(0);
-                    if s.attempt_failed && *used < item_budget && rerun_allowed {
+                    if s.attempt_failed && *used < item_budget && rerun_allowed && known_flaky_ok {
                         // Failed attempt with budget left: discard its
                         // reports and requeue the item.
                         *used += 1;
@@ -579,8 +597,18 @@ pub fn run_pool(
                     let mut crashed = crashed;
                     {
                         if let Some(i) = crashed {
+                            // Same known-flaky gate as the ItemDone path: a
+                            // crash of a non-known-flaky, unmarked test is not
+                            // retried when --reruns-only-known-flaky is on.
+                            let known_ok = known_flaky.is_none_or(|set| {
+                                flaky_budget.contains_key(&i)
+                                    || ids_store
+                                        .as_ref()
+                                        .and_then(|v| v.get(i as usize))
+                                        .is_some_and(|id| set.contains(id))
+                            });
                             let used = rerun_used.entry(i).or_insert(0);
-                            if *used < budget_of(&flaky_budget, i) {
+                            if *used < budget_of(&flaky_budget, i) && known_ok {
                                 *used += 1;
                                 if let Some(d) = dispatch.as_mut() {
                                     d.requeued.push_back(i);
