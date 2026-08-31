@@ -124,6 +124,7 @@ better, make the *polluter* restore state):
 @pytest.fixture(autouse=True)
 def _isolate_warnings():
     import warnings
+
     with warnings.catch_warnings():
         warnings.resetwarnings()
         yield

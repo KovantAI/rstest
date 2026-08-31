@@ -1,7 +1,9 @@
 """Wire-serialization helpers shared across the worker plugins."""
 
+from typing import Any
 
-def _wire_safe(value):
+
+def _wire_safe(value: Any) -> Any:
     """msgpack-serializable subset of a workerinput value (xdist requires
     execnet-serializable workerinput; this is the same contract)."""
     if isinstance(value, (str, int, float, bool, type(None))):

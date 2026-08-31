@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import sys
+from typing import Any
 
 INDEX_PATH = os.path.join(".rstest_cache", "coverage_index.json")
 INDEX_SCHEMA = 2
@@ -27,9 +28,9 @@ INDEX_SCHEMA = 2
 _PHASE_SUFFIXES = ("|run", "|setup", "|teardown")
 
 
-def parse(args):
-    reports = []
-    fail_under = None
+def parse(args: list[str]) -> tuple[list[str], str | None]:
+    reports: list[str] = []
+    fail_under: str | None = None
     it = iter(args)
     for a in it:
         if a == "--cov-report":
@@ -45,19 +46,19 @@ def parse(args):
     return [r for r in reports if r], fail_under
 
 
-def _context_mode(args):
+def _context_mode(args: list[str]) -> bool:
     """True when the session recorded per-test contexts (--cov-context)."""
     return any(a == "--cov-context" or a.startswith("--cov-context=") for a in args)
 
 
-def _base_nodeid(ctx):
+def _base_nodeid(ctx: str) -> str:
     for suffix in _PHASE_SUFFIXES:
         if ctx.endswith(suffix):
             return ctx[: -len(suffix)]
     return ctx
 
 
-def _file_sha256(path):
+def _file_sha256(path: str) -> str | None:
     """Hex SHA-256 of a file with CRLF normalized to LF, or None if unreadable.
     Newlines are normalized so the CRLF working tree (what coverage measured)
     hashes equal to the LF git blob the diff's line numbers come from."""
@@ -69,7 +70,7 @@ def _file_sha256(path):
     return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
-def build_index(cov):
+def build_index(cov: Any) -> None:
     """Invert the combined per-test contexts into a line->test index:
     { "schema": 2, "files": { "<rel-path>": { "hash": "<sha256>",
       "lines": { "<line>": ["<nodeid>", ...] } } } }.
@@ -85,7 +86,7 @@ def build_index(cov):
     # an in-tree file look external and get skipped (coverage records
     # canonicalized paths; getcwd() may still carry the short form).
     cwd = os.path.realpath(os.getcwd())
-    files = {}
+    files: dict[str, dict[str, Any]] = {}
     for path in data.measured_files():
         try:
             rel = os.path.relpath(os.path.realpath(path), cwd)
@@ -94,7 +95,7 @@ def build_index(cov):
         if rel.startswith(".."):  # outside the project tree
             continue
         rel = rel.replace(os.sep, "/")
-        line_map = {}
+        line_map: dict[str, list[str]] = {}
         for line, ctxs in data.contexts_by_lineno(path).items():
             nodeids = sorted({_base_nodeid(c) for c in ctxs if c})
             if nodeids:
@@ -116,7 +117,9 @@ def build_index(cov):
     os.replace(tmp, INDEX_PATH)  # atomic swap so a reader never sees a partial file
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
+    # coverage is provided by the user's project (pytest-cov / coverage), not a
+    # declared worker dependency; imported lazily so the worker loads without it.
     import coverage
 
     reports, fail_under = parse(argv)
@@ -169,7 +172,7 @@ def main(argv):
     if context_mode:
         try:
             build_index(cov)
-        except Exception as exc:  # noqa: BLE001 - never let indexing break coverage
+        except Exception as exc:
             print(f"rstest: coverage index build skipped: {exc}", file=sys.stderr)
 
     return status

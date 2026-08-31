@@ -8,6 +8,7 @@ The emitted `tests` map is keyed by nodeid with per-phase outcomes
 (setup/call/teardown) plus call duration - the same fields rstest's
 `--report-json` writes - so the two snapshots diff directly.
 """
+
 import json
 import os
 import sys

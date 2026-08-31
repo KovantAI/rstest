@@ -1,8 +1,10 @@
 """Translate pytest report hooks into wire events, and emulate the xdist
 master-side node hooks each pool worker must play for itself."""
 
+import contextlib
 import os
 import sys
+from typing import Any
 
 import pytest
 
@@ -22,18 +24,18 @@ from rstest_worker._xdistnode import (
 class StreamPlugin:
     """Translate pytest report hooks into wire events."""
 
-    def __init__(self, conn):
+    def __init__(self, conn: Any) -> None:
         self._conn = conn
         self._doctor = os.environ.get("RSTEST_DOCTOR") == "1"
-        self._cpu = {}  # nodeid -> call-phase process_time delta
-        self._fixtures = {}  # (argname, scope) -> [count, total_secs]
+        self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
+        self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
         # (when, category, message, filename, lineno) -> count; aggregated
         # because big suites emit thousands of duplicate warnings.
-        self._warnings = {}
+        self._warnings: dict[tuple[Any, ...], int] = {}
         # xdist master-side hook emulation (pytest_configure_node etc.):
         # the shim node standing in for xdist's WorkerController.
-        self._xdist_node = None
-        self._node_configured = set()  # plugin ids already given configure_node
+        self._xdist_node: Any = None
+        self._node_configured: set[int] = set()  # plugin ids already given configure_node
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_cmdline_main(self, config):
@@ -182,12 +184,10 @@ class StreamPlugin:
                 continue
             impl = getattr(plugin, "pytest_testnodedown", None)
             if impl is not None:
-                try:
+                # Cleanup for a dead sibling must never poison THIS worker's
+                # session, so a misbehaving plugin hook is swallowed here.
+                with contextlib.suppress(Exception):
                     _call_node_impl(impl, shim, error=payload.get("error"))
-                except Exception:
-                    # Cleanup for a dead sibling must never poison THIS
-                    # worker's session.
-                    pass
 
     def _call_node_hooks(self, config, name, **kwargs):
         if self._xdist_node is None:

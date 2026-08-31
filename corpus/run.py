@@ -31,8 +31,9 @@ import re
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
+
+import tomllib  # stdlib on 3.11+, this script's runtime
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -131,11 +132,19 @@ class Suite:
         if r.returncode != 0:
             raise RuntimeError(f"clone failed: {r.stderr[-400:]}")
         if pinned:
-            r = sh(["git", "fetch", "--depth", "1", "origin", pinned], cwd=self.src, timeout=NET_TIMEOUT)
+            r = sh(
+                ["git", "fetch", "--depth", "1", "origin", pinned],
+                cwd=self.src,
+                timeout=NET_TIMEOUT,
+            )
             if r.returncode == 0:
                 sh(["git", "checkout", pinned], cwd=self.src)
                 if self.cfg.get("submodules"):
-                    sh(["git", "submodule", "update", "--init", "--depth", "1"], cwd=self.src, timeout=NET_TIMEOUT)
+                    sh(
+                        ["git", "submodule", "update", "--init", "--depth", "1"],
+                        cwd=self.src,
+                        timeout=NET_TIMEOUT,
+                    )
         sha = sh(["git", "rev-parse", "HEAD"], cwd=self.src).stdout.strip()
         log(f"  {self.name}: at {sha[:12]}")
         return sha
@@ -213,7 +222,7 @@ class Suite:
                 flags = " ".join(f"-p no:{name}" for name in disable)
                 text = re.sub(
                     r'addopts\s*=\s*"([^"]*)"',
-                    lambda m: f'addopts = "{m.group(1)} {flags}"',
+                    lambda m, flags=flags: f'addopts = "{m.group(1)} {flags}"',
                     text,
                     count=1,
                 )
@@ -240,7 +249,15 @@ class Suite:
         log(f"  {self.name}: pytest baseline starting")
         t0 = time.monotonic()
         r = sh(
-            [str(self.venv / "bin" / "python"), "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
+            [
+                str(self.venv / "bin" / "python"),
+                "-m",
+                "pytest",
+                "-p",
+                "recorder",
+                "-q",
+                *self.target_args(),
+            ],
             cwd=self.cwd(),
             env=env,
         )
@@ -248,7 +265,8 @@ class Suite:
         log(f"  {self.name}: pytest done in {wall:.1f}s (rc={r.returncode})")
         if not snap.exists():
             raise RuntimeError(
-                f"pytest produced no snapshot (rc={r.returncode})\n{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
+                f"pytest produced no snapshot (rc={r.returncode})\n"
+                f"{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
             )
         return snap, wall
 
@@ -261,9 +279,7 @@ class Suite:
         # stale on-disk pyproject and the rstest candidate would measure a
         # different set than the (in-memory) baseline loop.
         projects_toml = ", ".join(f'"{p}"' for p in self.cfg["projects"])
-        (self.src / "pyproject.toml").write_text(
-            f"[tool.rstest]\nprojects = [{projects_toml}]\n"
-        )
+        (self.src / "pyproject.toml").write_text(f"[tool.rstest]\nprojects = [{projects_toml}]\n")
 
     def run_pytest_mono(self):
         # The native workflow: pytest has no monorepo mode, so the baseline is
@@ -328,7 +344,8 @@ class Suite:
         log(f"  {self.name}: rstest done in {wall:.1f}s (rc={r.returncode})")
         if not snap.exists():
             raise RuntimeError(
-                f"rstest produced no snapshot (rc={r.returncode})\n{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
+                f"rstest produced no snapshot (rc={r.returncode})\n"
+                f"{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
             )
         return snap, wall
 
@@ -406,10 +423,14 @@ def main():
     ap.add_argument("--wheel", default=None, help="rstest wheel (default: newest in target/wheels)")
     ap.add_argument("--rstest", default=str(REPO / "target" / "release" / "rstest"))
     ap.add_argument("--prepare-only", action="store_true", help="network phase only")
-    ap.add_argument("--execute-only", action="store_true", help="offline phase only (assumes prepared)")
+    ap.add_argument(
+        "--execute-only", action="store_true", help="offline phase only (assumes prepared)"
+    )
     args = ap.parse_args()
 
-    wheel = args.wheel or max(glob.glob(str(REPO / "target" / "wheels" / "rstest-*.whl")), key=os.path.getmtime)
+    wheel = args.wheel or max(
+        glob.glob(str(REPO / "target" / "wheels" / "rstest-*.whl")), key=os.path.getmtime
+    )
     suites_cfg = tomllib.loads((HERE / "suites.toml").read_text())
     if args.only:
         keep = set(args.only.split(","))
@@ -420,7 +441,7 @@ def main():
 
     suites = {name: Suite(name, cfg, wheel, args.rstest) for name, cfg in suites_cfg.items()}
     lock = load_lock()
-    results = {name: {"suite": name} for name in suites}
+    results: dict[str, dict[str, object]] = {name: {"suite": name} for name in suites}
 
     # ---------- PHASE 1: PREPARE (all network) ----------
     if not args.execute_only:
@@ -437,7 +458,7 @@ def main():
             except subprocess.TimeoutExpired as e:
                 results[name].update(status="prepare-timeout", error=str(e.cmd[:3]))
                 log(f"  {name}: PREPARE TIMEOUT")
-            except Exception as e:  # noqa: BLE001 — resilient by design
+            except Exception as e:
                 results[name].update(status="prepare-error", error=str(e)[:600])
                 log(f"  {name}: PREPARE FAILED: {str(e)[:200]}")
             save_lock(lock)
@@ -469,7 +490,7 @@ def main():
         except subprocess.TimeoutExpired as e:
             res.update(status="timeout", error=str(e.cmd[:3]))
             log(f"  {name}: EXECUTE TIMEOUT")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             res.update(status="error", error=str(e)[:600])
             log(f"  {name}: EXECUTE FAILED: {str(e)[:200]}")
         RESULTS.write_text(json.dumps(list(results.values()), indent=1))

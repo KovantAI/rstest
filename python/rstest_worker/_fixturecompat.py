@@ -24,10 +24,20 @@ python/VENDOR.md), so the fix is a narrow monkeypatch installed at worker import
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from _pytest import fixtures as _fixtures
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
 
-def _matchfactories(self, fixturedefs, node):
+    from _pytest.fixtures import FixtureDef
+    from _pytest.nodes import Node
+
+
+def _matchfactories(
+    self, fixturedefs: Iterable[FixtureDef[Any]], node: Node
+) -> Iterator[FixtureDef[Any]]:
     parent_nodes = set(node.iter_parents())
     parentnodeids = {n.nodeid for n in parent_nodes}
     for fixturedef in fixturedefs:
@@ -44,5 +54,6 @@ def install() -> None:
     """Idempotently patch FixtureManager._matchfactories."""
     if getattr(_fixtures.FixtureManager._matchfactories, "_rstest_patched", False):
         return
-    _matchfactories._rstest_patched = True
+    # Idempotency marker stamped on the replacement function (dynamic attr).
+    _matchfactories._rstest_patched = True  # ty: ignore[unresolved-attribute]
     _fixtures.FixtureManager._matchfactories = _matchfactories

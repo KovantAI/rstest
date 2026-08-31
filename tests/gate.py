@@ -59,6 +59,7 @@ def venv_bin(venv_dir: Path, name: str) -> Path:
         return venv_dir / "Scripts" / (name + ".exe")
     return venv_dir / "bin" / name
 
+
 PASS = 0
 FAIL = []
 
@@ -125,7 +126,7 @@ class Gate:
 
 def find_python() -> str:
     # Vendored core requires >=3.10 (pyproject requires-python).
-    if sys.version_info >= (3, 10):
+    if sys.version_info >= (3, 10):  # noqa: UP036 — launcher may run under older python
         return sys.executable
     for name in ("python3.13", "python3.12", "python3.11", "python3.10"):
         p = shutil.which(name)
@@ -470,7 +471,11 @@ def main():
     # real plugin.
     uid = "abc123def456789"
     r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
-    check("randomly: consumes synthesized seed, no crash at -n 2", "4 passed" in r.stdout, r.stdout[-400:])
+    check(
+        "randomly: consumes synthesized seed, no crash at -n 2",
+        "4 passed" in r.stdout,
+        r.stdout[-400:],
+    )
     r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
     check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
@@ -567,8 +572,7 @@ def main():
     g.write("probe/test_p.py", "def test_ok(): assert True\n")
     # 1) msgpack absent: the interpreter runs but can't host a worker, so the
     #    probe is negative and (with the fix) is not written to the cache.
-    r = g.run("probe", "--python", str(barepy),
-              env_extra={"RSTEST_CACHE_DIR": str(probe_cache)})
+    r = g.run("probe", "--python", str(barepy), env_extra={"RSTEST_CACHE_DIR": str(probe_cache)})
     check(
         "probe: msgpack-less interpreter rejected",
         r.returncode != 0 and ("worker shim" in r.stderr or "no usable" in r.stderr.lower()),
@@ -578,8 +582,7 @@ def main():
     #    unchanged), then rerun with the SAME cache dir: a stale cached negative
     #    would still reject it; the fix re-probes negatives so it now succeeds.
     subprocess.run([str(venv_bin(bare, "pip")), "install", "-q", *BASE_DEPS], check=True)
-    r = g.run("probe", "--python", str(barepy),
-              env_extra={"RSTEST_CACHE_DIR": str(probe_cache)})
+    r = g.run("probe", "--python", str(barepy), env_extra={"RSTEST_CACHE_DIR": str(probe_cache)})
     check(
         "probe: heals after deps installed (negative not cached)",
         r.returncode == 0 and "1 passed" in r.stdout,
@@ -593,7 +596,11 @@ def main():
     check("lazy: parallel counts", "2 failed, 2 passed" in r.stdout, r.stdout[-200:])
     check("lazy: exit 1", r.returncode == 1)
     r = g.run("basic", "-n", "2", "--collect", "lazy", "-k", "passes")
-    check("lazy: -k filters per file", "2 passed" in r.stdout and "failed" not in r.stdout, r.stdout[-200:])
+    check(
+        "lazy: -k filters per file",
+        "2 passed" in r.stdout and "failed" not in r.stdout,
+        r.stdout[-200:],
+    )
     r = g.run("crash", "-n", "2", "--collect", "lazy")
     check("lazy: crash completes", "1 failed, 5 passed" in r.stdout, r.stdout[-200:])
     check("lazy: crash attributed", "crashed while running" in r.stdout, r.stdout[-300:])
@@ -619,8 +626,17 @@ def main():
     if marker.exists():
         marker.unlink()
     g.write("flaky/test_flaky.py", FLAKY)
-    r = g.run("test_flaky.py", "-n", "2", "--collect", "lazy", "--reruns", "2", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(marker)})
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "--reruns",
+        "2",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
     check(
         "lazy: flaky passes with reruns",
         r.returncode == 0 and "1 flaky" in r.stdout,
@@ -634,10 +650,7 @@ def main():
     rows = read_e2e_rows(log)
     lser = [x for x in rows if x["name"].startswith("serial")]
     overlap = any(
-        s["start"] < o["end"] and o["start"] < s["end"]
-        for s in lser
-        for o in rows
-        if o is not s
+        s["start"] < o["end"] and o["start"] < s["end"] for s in lser for o in rows if o is not s
     )
     check(
         "lazy: serial exclusive",
@@ -654,10 +667,7 @@ def main():
     serial = [x for x in rows if x["name"].startswith("serial")]
     par = [x for x in rows if x["name"].startswith("par")]
     overlap = any(
-        s["start"] < o["end"] and o["start"] < s["end"]
-        for s in serial
-        for o in rows
-        if o is not s
+        s["start"] < o["end"] and o["start"] < s["end"] for s in serial for o in rows if o is not s
     )
     check("serial exclusive", not overlap and len({s["worker"] for s in serial}) == 1)
     check(
@@ -668,7 +678,10 @@ def main():
     print("== failure output ==")
     g.write("sections/test_sections.py", SECTIONS)
     r = g.run("sections", "-n", "2")
-    check("captured stdout section", "Captured stdout call" in r.stdout and "the database said no" in r.stdout)
+    check(
+        "captured stdout section",
+        "Captured stdout call" in r.stdout and "the database said no" in r.stdout,
+    )
 
     print("== -x / --maxfail ==")
     g.write("maxfail/test_maxfail.py", MAXFAIL)
@@ -684,7 +697,11 @@ def main():
     g.write("lf/test_lf.py", LF)
     g.run("test_lf.py", "-n", "2", cwd=lf)
     r = g.run("test_lf.py", "-n", "2", "--lf", cwd=lf)
-    check("--lf reruns only failures", "1 failed" in r.stdout and "passed" not in r.stdout, r.stdout[-200:])
+    check(
+        "--lf reruns only failures",
+        "1 failed" in r.stdout and "passed" not in r.stdout,
+        r.stdout[-200:],
+    )
 
     print("== junitxml ==")
     xml_path = g.tmp / "junit.xml"
@@ -711,7 +728,9 @@ def main():
         shutil.rmtree(shard_cwd / ".rstest_cache", ignore_errors=True)
         tag = "_".join([str(k), str(n), *extra]).replace("/", "").replace("-", "")
         xp = g.tmp / f"shard_{tag}.xml"
-        g.run(".", "-n", "2", "--shard", f"{k}/{n}", "--junitxml", str(xp), *extra, cwd=str(shard_cwd))
+        g.run(
+            ".", "-n", "2", "--shard", f"{k}/{n}", "--junitxml", str(xp), *extra, cwd=str(shard_cwd)
+        )
         root = ET.parse(xp).getroot()
         return {(tc.get("classname"), tc.get("name")) for tc in root.iter("testcase")}
 
@@ -722,7 +741,11 @@ def main():
     r = g.run("shardsuite", "-n", "2", "--shard", "5/4")
     check("shard: K>N rejected", r.returncode != 0 and "1..=4" in r.stderr, r.stderr[-160:])
     r = g.run("shardsuite", "-n", "2", "--shard", "1/2", "--shuffle")
-    check("shard: +shuffle rejected", r.returncode != 0 and "not supported with --shuffle" in r.stderr, r.stderr[-160:])
+    check(
+        "shard: +shuffle rejected",
+        r.returncode != 0 and "not supported with --shuffle" in r.stderr,
+        r.stderr[-160:],
+    )
     r = g.run("shardsuite", "-n", "2", "--shard", "1/1")
     check("shard: 1/1 runs whole suite", "8 passed" in r.stdout, r.stdout[-160:])
 
@@ -740,7 +763,7 @@ def main():
 
     f1 = by_file(shard_ids(1, 2, "--dist", "loadfile"))
     f2 = by_file(shard_ids(2, 2, "--dist", "loadfile"))
-    split = [cls for cls in set(f1) & set(f2)]
+    split = list(set(f1) & set(f2))
     check("shard loadfile: no file split across shards", not split, f"split files={split}")
     all_files = set(f1) | set(f2)
     check("shard loadfile: buckets cover both files", len(all_files) == 2, f"files={all_files}")
@@ -755,7 +778,11 @@ def main():
         r.stdout[-400:],
     )
     r = g.run("basic/test_basic.py", "-n", "2", "--dist", "each", "--reruns", "2")
-    check("each: --reruns rejected", r.returncode != 0 and "not supported" in r.stderr, r.stderr[-200:])
+    check(
+        "each: --reruns rejected",
+        r.returncode != 0 and "not supported" in r.stderr,
+        r.stderr[-200:],
+    )
 
     print("== --dist validation ==")
     # An invalid --dist value must be rejected the same way on every path;
@@ -780,8 +807,8 @@ def main():
     clear_hook_log(crash_log)
     r = g.run("nodecrash", "-n", "2", env_extra={"NODE_HOOK_LOG": str(crash_log)})
     text = read_hook_log(crash_log)
-    ups = {l.split(":", 1)[1] for l in text.splitlines() if l.startswith("up:")}
-    downs = {l.split(":", 1)[1] for l in text.splitlines() if l.startswith("down:")}
+    ups = {line.split(":", 1)[1] for line in text.splitlines() if line.startswith("up:")}
+    downs = {line.split(":", 1)[1] for line in text.splitlines() if line.startswith("down:")}
     check(
         "every provisioned ident torn down (incl. crashed worker's)",
         ups and ups == downs,
@@ -1008,6 +1035,7 @@ def main():
         "libs/c" in r.stdout and "skipped (no changes)" in r.stdout,
         r.stdout[-400:],
     )
+
     def section(text, rel):
         try:
             seg = text.split(f"project: {rel} ")[1]
@@ -1217,7 +1245,11 @@ def main():
     dm = g.tmp / "doctor.md"
     summ = g.tmp / "summary.md"
     g.run(
-        "doc", "-n", "2", "--doctor-md", str(dm),
+        "doc",
+        "-n",
+        "2",
+        "--doctor-md",
+        str(dm),
         env_extra={"GITHUB_STEP_SUMMARY": str(summ)},
     )
     md = dm.read_text(encoding="utf-8")
@@ -1249,7 +1281,9 @@ def main():
     ok, _objs = parse_ndjson(r.stdout)
     check(
         "doctor-fail-on: breach keeps --output json pure (stderr only)",
-        r.returncode == 1 and ok and "doctor gate failures" not in r.stdout
+        r.returncode == 1
+        and ok
+        and "doctor gate failures" not in r.stdout
         and "doctor gate failures" in r.stderr,
         f"rc={r.returncode} ndjson_ok={ok} " + r.stdout[-200:],
     )
@@ -1295,40 +1329,84 @@ def main():
     )
 
     print("== coverage ==")
-    g.write("cov/mypkg/__init__.py", "def used(x):\n    return x * 2\n\n\ndef unused(x):\n    return x - 1\n")
-    g.write("cov/test_cov.py", "from mypkg import used\n\n\ndef test_used():\n    assert used(2) == 4\n")
+    g.write(
+        "cov/mypkg/__init__.py",
+        "def used(x):\n    return x * 2\n\n\ndef unused(x):\n    return x - 1\n",
+    )
+    g.write(
+        "cov/test_cov.py", "from mypkg import used\n\n\ndef test_used():\n    assert used(2) == 4\n"
+    )
     covdir = g.tmp / "cov"
-    r = g.run("test_cov.py", "-n", "2", "--cov=mypkg", "--cov-report=term", cwd=covdir,
-              env_extra={"PYTHONPATH": str(covdir)})
-    check("coverage report under pool", "mypkg" in r.stdout and "__init__.py" in r.stdout and "%" in r.stdout, r.stdout[-300:])
-    r = g.run("test_cov.py", "-n", "2", "--cov=mypkg", "--cov-fail-under=99", cwd=covdir,
-              env_extra={"PYTHONPATH": str(covdir)})
-    check("coverage fail-under exits 1", r.returncode == 1 and "FAIL Required" in r.stdout, r.stdout[-200:])
+    r = g.run(
+        "test_cov.py",
+        "-n",
+        "2",
+        "--cov=mypkg",
+        "--cov-report=term",
+        cwd=covdir,
+        env_extra={"PYTHONPATH": str(covdir)},
+    )
+    check(
+        "coverage report under pool",
+        "mypkg" in r.stdout and "__init__.py" in r.stdout and "%" in r.stdout,
+        r.stdout[-300:],
+    )
+    r = g.run(
+        "test_cov.py",
+        "-n",
+        "2",
+        "--cov=mypkg",
+        "--cov-fail-under=99",
+        cwd=covdir,
+        env_extra={"PYTHONPATH": str(covdir)},
+    )
+    check(
+        "coverage fail-under exits 1",
+        r.returncode == 1 and "FAIL Required" in r.stdout,
+        r.stdout[-200:],
+    )
 
     print("== coverage contexts + line->test index (--cov-context) ==")
     # Per-test contexts must survive the PARALLEL merge (tests land on different
     # workers, yet each covered line keeps its context), and --cov-context must
     # emit the line->test index that coverage-based --changed consumes.
     ctxdir = g.tmp / "covctx"
-    g.write("covctx/mymod.py",
-            "def used_by_a():\n    return 1\n"
-            "def used_by_b():\n    return 2\n"
-            "def used_by_both():\n    return 3\n")
-    g.write("covctx/test_a.py",
-            "import mymod\n"
-            "def test_a():\n    assert mymod.used_by_a() == 1\n"
-            "    assert mymod.used_by_both() == 3\n")
-    g.write("covctx/test_b.py",
-            "import mymod\n"
-            "def test_b():\n    assert mymod.used_by_b() == 2\n"
-            "    assert mymod.used_by_both() == 3\n")
+    g.write(
+        "covctx/mymod.py",
+        "def used_by_a():\n    return 1\n"
+        "def used_by_b():\n    return 2\n"
+        "def used_by_both():\n    return 3\n",
+    )
+    g.write(
+        "covctx/test_a.py",
+        "import mymod\n"
+        "def test_a():\n    assert mymod.used_by_a() == 1\n"
+        "    assert mymod.used_by_both() == 3\n",
+    )
+    g.write(
+        "covctx/test_b.py",
+        "import mymod\n"
+        "def test_b():\n    assert mymod.used_by_b() == 2\n"
+        "    assert mymod.used_by_both() == 3\n",
+    )
     shutil.rmtree(ctxdir / ".rstest_cache", ignore_errors=True)
-    r = g.run("test_a.py", "test_b.py", "-n", "2", "--cov=mymod",
-              "--cov-context=test", "--cov-report=", cwd=ctxdir,
-              env_extra={"PYTHONPATH": str(ctxdir)})
+    r = g.run(
+        "test_a.py",
+        "test_b.py",
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-context=test",
+        "--cov-report=",
+        cwd=ctxdir,
+        env_extra={"PYTHONPATH": str(ctxdir)},
+    )
     idx_path = ctxdir / ".rstest_cache" / "coverage_index.json"
-    check("cov-context: line->test index written", r.returncode == 0 and idx_path.exists(),
-          f"rc={r.returncode} " + r.stdout[-200:])
+    check(
+        "cov-context: line->test index written",
+        r.returncode == 0 and idx_path.exists(),
+        f"rc={r.returncode} " + r.stdout[-200:],
+    )
     if idx_path.exists():
         idx = json.loads(idx_path.read_text())
         fm = idx.get("files", {}).get("mymod.py", {})
@@ -1336,19 +1414,33 @@ def main():
         lm = fm.get("lines", {})
         # used_by_a body (line 2) only test_a; used_by_b (line 4) only test_b;
         # used_by_both (line 6) BOTH - proving cross-worker context merge.
-        check("cov-context: schema + per-test line mapping",
-              idx.get("schema") == 2
-              and isinstance(fm.get("hash"), str) and len(fm["hash"]) == 64
-              and lm.get("2") == ["test_a.py::test_a"]
-              and lm.get("4") == ["test_b.py::test_b"]
-              and lm.get("6") == ["test_a.py::test_a", "test_b.py::test_b"],
-              json.dumps(fm))
+        check(
+            "cov-context: schema + per-test line mapping",
+            idx.get("schema") == 2
+            and isinstance(fm.get("hash"), str)
+            and len(fm["hash"]) == 64
+            and lm.get("2") == ["test_a.py::test_a"]
+            and lm.get("4") == ["test_b.py::test_b"]
+            and lm.get("6") == ["test_a.py::test_a", "test_b.py::test_b"],
+            json.dumps(fm),
+        )
     # Without --cov-context, no index is written (feature is opt-in via the flag).
     shutil.rmtree(ctxdir / ".rstest_cache", ignore_errors=True)
-    r = g.run("test_a.py", "test_b.py", "-n", "2", "--cov=mymod", "--cov-report=",
-              cwd=ctxdir, env_extra={"PYTHONPATH": str(ctxdir)})
-    check("cov-context: no index without the flag",
-          r.returncode == 0 and not idx_path.exists(), f"rc={r.returncode}")
+    r = g.run(
+        "test_a.py",
+        "test_b.py",
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-report=",
+        cwd=ctxdir,
+        env_extra={"PYTHONPATH": str(ctxdir)},
+    )
+    check(
+        "cov-context: no index without the flag",
+        r.returncode == 0 and not idx_path.exists(),
+        f"rc={r.returncode}",
+    )
 
     print("== smart selection ==")
     sp = g.tmp / "selproj"
@@ -1356,15 +1448,24 @@ def main():
     g.write("selproj/pkg/a.py", "def alpha():\n    return 1\n")
     g.write("selproj/pkg/b.py", "def beta():\n    return 2\n")
     g.write("selproj/pkg/c.py", "from .a import alpha\n\n\ndef gamma():\n    return alpha() + 1\n")
-    g.write("selproj/tests/test_a.py", "from pkg.a import alpha\n\ndef test_alpha(): assert alpha() == 1\n")
-    g.write("selproj/tests/test_b.py", "from pkg.b import beta\n\ndef test_beta(): assert beta() == 2\n")
-    g.write("selproj/tests/test_c.py", "from pkg.c import gamma\n\ndef test_gamma(): assert gamma() == 2\n")
+    g.write(
+        "selproj/tests/test_a.py",
+        "from pkg.a import alpha\n\ndef test_alpha(): assert alpha() == 1\n",
+    )
+    g.write(
+        "selproj/tests/test_b.py", "from pkg.b import beta\n\ndef test_beta(): assert beta() == 2\n"
+    )
+    g.write(
+        "selproj/tests/test_c.py",
+        "from pkg.c import gamma\n\ndef test_gamma(): assert gamma() == 2\n",
+    )
     g.write("selproj/pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')
     subprocess.run(["git", "init", "-q"], cwd=sp, check=True)
     subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
     subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
-        cwd=sp, check=True,
+        cwd=sp,
+        check=True,
     )
     with open(sp / "pkg" / "a.py", "a") as f:
         f.write("# touched\n")
@@ -1379,15 +1480,24 @@ def main():
     )
     g.write("selproj/pytest.ini", "[pytest]\n")
     r = g.run("--changed", cwd=sp, env_extra={"PYTHONPATH": str(sp)})
-    check("selection: config change -> full run", "falling back to full run" in r.stderr, r.stderr[-200:])
+    check(
+        "selection: config change -> full run",
+        "falling back to full run" in r.stderr,
+        r.stderr[-200:],
+    )
     (sp / "pytest.ini").unlink()
     subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
     subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "w"],
-        cwd=sp, check=True,
+        cwd=sp,
+        check=True,
     )
     r = g.run("--changed", cwd=sp, env_extra={"PYTHONPATH": str(sp)})
-    check("selection: clean tree -> nothing", r.returncode == 0 and "no tests affected" in r.stdout, r.stdout[-200:])
+    check(
+        "selection: clean tree -> nothing",
+        r.returncode == 0 and "no tests affected" in r.stdout,
+        r.stdout[-200:],
+    )
     g.write("selproj/tests/conftest.py", "import pytest\n")
     r = g.run("--changed", "-v", cwd=sp, env_extra={"PYTHONPATH": str(sp)})
     check(
@@ -1410,30 +1520,38 @@ def main():
     # whose recorded coverage hit the changed lines - tighter than the
     # import-graph (which would run every test importing the module).
     cs = g.tmp / "covsel"
-    g.write("covsel/mymod.py",
-            "def used_by_a():\n    return 1\n"
-            "def used_by_b():\n    return 2\n"
-            "def used_by_both():\n    return 3\n")
-    g.write("covsel/test_a.py",
-            "import mymod\n"
-            "def test_a():\n    assert mymod.used_by_a() == 1\n"
-            "    assert mymod.used_by_both() == 3\n")
-    g.write("covsel/test_b.py",
-            "import mymod\n"
-            "def test_b():\n    assert mymod.used_by_b() == 2\n"
-            "    assert mymod.used_by_both() == 3\n")
+    g.write(
+        "covsel/mymod.py",
+        "def used_by_a():\n    return 1\n"
+        "def used_by_b():\n    return 2\n"
+        "def used_by_both():\n    return 3\n",
+    )
+    g.write(
+        "covsel/test_a.py",
+        "import mymod\n"
+        "def test_a():\n    assert mymod.used_by_a() == 1\n"
+        "    assert mymod.used_by_both() == 3\n",
+    )
+    g.write(
+        "covsel/test_b.py",
+        "import mymod\n"
+        "def test_b():\n    assert mymod.used_by_b() == 2\n"
+        "    assert mymod.used_by_both() == 3\n",
+    )
     g.write("covsel/pyproject.toml", "[tool.pytest.ini_options]\n")
     subprocess.run(["git", "init", "-q"], cwd=cs, check=True)
     subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
-                    "commit", "-qm", "init"], cwd=cs, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+        cwd=cs,
+        check=True,
+    )
 
     def cov_changed_targets(edit_fn):
         # reset, apply edit to the working tree, list the selected nodeids
         subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
         edit_fn()
-        r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs,
-                  env_extra={"PYTHONPATH": str(cs)})
+        r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
         got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
         return got, r
 
@@ -1442,29 +1560,52 @@ def main():
         p.write_text(p.read_text().replace(old, new), encoding="utf-8")
 
     # Warm the index (writes covsel/.rstest_cache/coverage_index.json).
-    r = g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
-              cwd=cs, env_extra={"PYTHONPATH": str(cs)})
-    check("cov-select: index warmed", (cs / ".rstest_cache" / "coverage_index.json").exists(),
-          r.stdout[-200:] + r.stderr[-200:])
+    r = g.run(
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-context=test",
+        "--cov-report=",
+        cwd=cs,
+        env_extra={"PYTHONPATH": str(cs)},
+    )
+    check(
+        "cov-select: index warmed",
+        (cs / ".rstest_cache" / "coverage_index.json").exists(),
+        r.stdout[-200:] + r.stderr[-200:],
+    )
 
-    got, r = cov_changed_targets(lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n"))
-    check("cov-select: edit used_by_a -> only test_a",
-          got == ["test_a.py::test_a"], f"{got} || {r.stderr[-150:]}")
+    got, r = cov_changed_targets(
+        lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n")
+    )
+    check(
+        "cov-select: edit used_by_a -> only test_a",
+        got == ["test_a.py::test_a"],
+        f"{got} || {r.stderr[-150:]}",
+    )
 
     got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 2\n", "    return 22\n"))
     check("cov-select: edit used_by_b -> only test_b", got == ["test_b.py::test_b"], str(got))
 
     got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 3\n", "    return 33\n"))
-    check("cov-select: edit shared line -> both tests",
-          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+    check(
+        "cov-select: edit shared line -> both tests",
+        got == ["test_a.py::test_a", "test_b.py::test_b"],
+        str(got),
+    )
 
     # Rail: a pure insertion (new function) has no old-side coverage -> falls
     # back to import-graph, which runs every test importing the module.
     got, _ = cov_changed_targets(
         lambda: (cs / "mymod.py").write_text(
-            (cs / "mymod.py").read_text() + "\ndef brand_new():\n    return 9\n", encoding="utf-8"))
-    check("cov-select: new code falls back to import-graph (both)",
-          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+            (cs / "mymod.py").read_text() + "\ndef brand_new():\n    return 9\n", encoding="utf-8"
+        )
+    )
+    check(
+        "cov-select: new code falls back to import-graph (both)",
+        got == ["test_a.py::test_a", "test_b.py::test_b"],
+        str(got),
+    )
 
     # Rail: a changed test file always runs its own tests.
     got, _ = cov_changed_targets(lambda: edit_line("test_a.py", "== 1\n", "== 1  # x\n"))
@@ -1474,30 +1615,48 @@ def main():
     # never in the index. Trusting the empty lookup would select ZERO tests;
     # instead the file must fall back to import-graph (both tests).
     got, _ = cov_changed_targets(
-        lambda: edit_line("mymod.py", "def used_by_a():\n", "def used_by_a(x=1):\n"))
-    check("cov-select: edited def line falls back to import-graph (both)",
-          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+        lambda: edit_line("mymod.py", "def used_by_a():\n", "def used_by_a(x=1):\n")
+    )
+    check(
+        "cov-select: edited def line falls back to import-graph (both)",
+        got == ["test_a.py::test_a", "test_b.py::test_b"],
+        str(got),
+    )
 
     # Rail: cold cache (no index) is identical to import-graph selection.
     shutil.rmtree(cs / ".rstest_cache", ignore_errors=True)
-    got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n"))
-    check("cov-select: cold cache -> import-graph (both)",
-          got == ["test_a.py::test_a", "test_b.py::test_b"], str(got))
+    got, _ = cov_changed_targets(
+        lambda: edit_line("mymod.py", "    return 1\n", "    return 111\n")
+    )
+    check(
+        "cov-select: cold cache -> import-graph (both)",
+        got == ["test_a.py::test_a", "test_b.py::test_b"],
+        str(got),
+    )
 
     # Rail: a warm index may hold a nodeid for a test renamed since it was built.
     # Passing the stale nodeid aborts the run, and dropping it skips a test still
     # covering the changed line, so the file demotes to import-graph instead.
     subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
-    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
-          cwd=cs, env_extra={"PYTHONPATH": str(cs)})  # warm index (knows test_a.py::test_a)
+    g.run(
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-context=test",
+        "--cov-report=",
+        cwd=cs,
+        env_extra={"PYTHONPATH": str(cs)},
+    )  # warm index (knows test_a.py::test_a)
     subprocess.run(["git", "mv", "test_a.py", "test_renamed.py"], cwd=cs, check=True)
     edit_line("mymod.py", "    return 1\n", "    return 111\n")  # line only test_a covered
     r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     got = sorted(set(re.findall(r"test_\w+\.py::test_\w+", r.stdout)))
-    check("cov-select: renamed test (stale nodeid) -> no crash, runs via fallback",
-          r.returncode == 0 and "test_renamed.py::test_a" in got and "not found" not in r.stdout,
-          f"rc={r.returncode} {got} {r.stderr[-150:]}")
+    check(
+        "cov-select: renamed test (stale nodeid) -> no crash, runs via fallback",
+        r.returncode == 0 and "test_renamed.py::test_a" in got and "not found" not in r.stdout,
+        f"rc={r.returncode} {got} {r.stderr[-150:]}",
+    )
     subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
@@ -1506,17 +1665,40 @@ def main():
     # longer matches HEAD, so the file drifts to import-graph, not a stale lookup.
     subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
-    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
-          cwd=cs, env_extra={"PYTHONPATH": str(cs)})  # warm at current HEAD
+    g.run(
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-context=test",
+        "--cov-report=",
+        cwd=cs,
+        env_extra={"PYTHONPATH": str(cs)},
+    )  # warm at current HEAD
     (cs / "mymod.py").write_text(
-        "def zzz():\n    return 0\n" + (cs / "mymod.py").read_text(), encoding="utf-8")
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
-                    "commit", "-qam", "prepend shifts lines"], cwd=cs, check=True)
+        "def zzz():\n    return 0\n" + (cs / "mymod.py").read_text(), encoding="utf-8"
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qam",
+            "prepend shifts lines",
+        ],
+        cwd=cs,
+        check=True,
+    )
     edit_line("mymod.py", "    return 1\n", "    return 111\n")  # used_by_a body, now shifted
     r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
-    check("cov-select: line-shift drift -> import-graph fallback, not stale lookup",
-          got == ["test_a.py::test_a", "test_b.py::test_b"], f"{got} {r.stderr[-150:]}")
+    check(
+        "cov-select: line-shift drift -> import-graph fallback, not stale lookup",
+        got == ["test_a.py::test_a", "test_b.py::test_b"],
+        f"{got} {r.stderr[-150:]}",
+    )
     subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
@@ -1528,8 +1710,15 @@ def main():
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
     # Warm the index so the deleted-test case exercises the warm direct_tests
     # branch (the path actually wired for coverage selection).
-    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
-          cwd=cs, env_extra={"PYTHONPATH": str(cs)})
+    g.run(
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-context=test",
+        "--cov-report=",
+        cwd=cs,
+        env_extra={"PYTHONPATH": str(cs)},
+    )
 
     # Deleted TEST file: no file on disk -> dropped, not selected. Nothing else
     # changed -> nothing to run, and crucially NO missing-path error.
@@ -1552,8 +1741,7 @@ def main():
     r = g.run("--changed-strict", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     check(
         "changed-strict: deleted source file forces full run (not a false skip)",
-        "falling back to full run" in r.stderr
-        and "no tests affected" not in r.stdout,
+        "falling back to full run" in r.stderr and "no tests affected" not in r.stdout,
         r.stderr[-250:] + " || " + r.stdout[-150:],
     )
     subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
@@ -1562,8 +1750,11 @@ def main():
     # drops it; the --name-only union recovers it and rule1 forces a full run.
     (cs / "blob.bin").write_bytes(b"\x00\x01\x02rstest\x00")
     subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
-                    "commit", "-qm", "add binary"], cwd=cs, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add binary"],
+        cwd=cs,
+        check=True,
+    )
     (cs / "blob.bin").write_bytes(b"\x00\x01\x02rstest\xffCHANGED\x00")
     r = g.run("--changed", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     check(
@@ -1584,41 +1775,58 @@ def main():
     def wr_crlf(rel, text):
         (cr / rel).write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
 
-    wr_crlf("mymod.py",
-            "def used_by_a():\n    return 1\n"
-            "def used_by_b():\n    return 2\n"
-            "def used_by_both():\n    return 3\n")
-    wr_crlf("test_a.py",
-            "import mymod\n"
-            "def test_a():\n    assert mymod.used_by_a() == 1\n"
-            "    assert mymod.used_by_both() == 3\n")
-    wr_crlf("test_b.py",
-            "import mymod\n"
-            "def test_b():\n    assert mymod.used_by_b() == 2\n"
-            "    assert mymod.used_by_both() == 3\n")
+    wr_crlf(
+        "mymod.py",
+        "def used_by_a():\n    return 1\n"
+        "def used_by_b():\n    return 2\n"
+        "def used_by_both():\n    return 3\n",
+    )
+    wr_crlf(
+        "test_a.py",
+        "import mymod\n"
+        "def test_a():\n    assert mymod.used_by_a() == 1\n"
+        "    assert mymod.used_by_both() == 3\n",
+    )
+    wr_crlf(
+        "test_b.py",
+        "import mymod\n"
+        "def test_b():\n    assert mymod.used_by_b() == 2\n"
+        "    assert mymod.used_by_both() == 3\n",
+    )
     (cr / "pyproject.toml").write_bytes(b"[tool.pytest.ini_options]\n")
     subprocess.run(["git", "init", "-q"], cwd=cr, check=True)
     subprocess.run(["git", "config", "core.autocrlf", "true"], cwd=cr, check=True)
     subprocess.run(["git", "add", "-A"], cwd=cr, check=True, capture_output=True)  # blobs -> LF
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
-                    "commit", "-qm", "init"], cwd=cr, check=True)
-    blob = subprocess.run(["git", "show", "HEAD:mymod.py"], cwd=cr,
-                          capture_output=True).stdout
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+        cwd=cr,
+        check=True,
+    )
+    blob = subprocess.run(["git", "show", "HEAD:mymod.py"], cwd=cr, capture_output=True).stdout
     check(
         "autocrlf: blob normalized to LF, worktree stays CRLF",
         b"\r\n" not in blob and b"\r\n" in (cr / "mymod.py").read_bytes(),
         f"blob_has_crlf={b'/r/n' in blob}",
     )
     # Warm the index (Python hashes the CRLF worktree, normalized to LF).
-    g.run("-n", "2", "--cov=mymod", "--cov-context=test", "--cov-report=",
-          cwd=cr, env_extra={"PYTHONPATH": str(cr)})
+    g.run(
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-context=test",
+        "--cov-report=",
+        cwd=cr,
+        env_extra={"PYTHONPATH": str(cr)},
+    )
     # Edit only used_by_a's body. The stored hash (normalized CRLF) still equals
     # the base blob hash (normalized LF), so the index is trusted and narrows to
     # test_a. Pre-fix the CRLF-vs-LF mismatch drifted every file, running both.
-    wr_crlf("mymod.py",
-            "def used_by_a():\n    return 111\n"
-            "def used_by_b():\n    return 2\n"
-            "def used_by_both():\n    return 3\n")
+    wr_crlf(
+        "mymod.py",
+        "def used_by_a():\n    return 111\n"
+        "def used_by_b():\n    return 2\n"
+        "def used_by_both():\n    return 3\n",
+    )
     r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cr, env_extra={"PYTHONPATH": str(cr)})
     got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
     check(
@@ -1662,22 +1870,25 @@ def main():
         "    time.sleep(0.05)\n",
     )
     ddir = g.tmp / "dreg"
-    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
-              env_extra={"DREG_SLEEP": "0.1"})
+    r = g.run(
+        ".", "-n", "2", "--durations-regress", "2.0", cwd=ddir, env_extra={"DREG_SLEEP": "0.1"}
+    )
     check(
         "durations-regress: cold baseline skips, run green",
         r.returncode == 0 and "no duration baseline yet" in r.stderr,
         f"rc={r.returncode} " + r.stderr[-200:],
     )
-    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
-              env_extra={"DREG_SLEEP": "0.1"})
+    r = g.run(
+        ".", "-n", "2", "--durations-regress", "2.0", cwd=ddir, env_extra={"DREG_SLEEP": "0.1"}
+    )
     check(
         "durations-regress: warm baseline, no regressions",
         r.returncode == 0 and "no regressions" in r.stderr,
         f"rc={r.returncode} " + r.stderr[-200:],
     )
-    r = g.run(".", "-n", "2", "--durations-regress", "2.0", cwd=ddir,
-              env_extra={"DREG_SLEEP": "1.2"})
+    r = g.run(
+        ".", "-n", "2", "--durations-regress", "2.0", cwd=ddir, env_extra={"DREG_SLEEP": "1.2"}
+    )
     check(
         "durations-regress: regression flagged, exit 1, stable test quiet",
         r.returncode == 1
@@ -1702,10 +1913,13 @@ def main():
     subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
     subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pr"],
-        cwd=sp, check=True,
+        cwd=sp,
+        check=True,
     )
     r = g.run(
-        "--changed", "-v", cwd=sp,
+        "--changed",
+        "-v",
+        cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
     )
     check(
@@ -1717,7 +1931,8 @@ def main():
         r.stderr[-300:],
     )
     r = g.run(
-        "--changed", cwd=sp,
+        "--changed",
+        cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "nosuchbranch"},
     )
     check(
@@ -1726,7 +1941,8 @@ def main():
         f"rc={r.returncode} " + r.stderr[-300:],
     )
     r = g.run(
-        "--changed=HEAD~1", cwd=sp,
+        "--changed=HEAD~1",
+        cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
     )
     check(
@@ -1736,7 +1952,9 @@ def main():
     )
     # Buildkite exposes the base as a branch name, resolved the same way.
     r = g.run(
-        "--changed", "-v", cwd=sp,
+        "--changed",
+        "-v",
+        cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "mainline"},
     )
     check(
@@ -1746,7 +1964,9 @@ def main():
     )
     # GitLab provides the exact diff-base SHA - used directly, no merge-base.
     r = g.run(
-        "--changed", "-v", cwd=sp,
+        "--changed",
+        "-v",
+        cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": base_sha},
     )
     check(
@@ -1756,7 +1976,8 @@ def main():
     )
     # An unresolvable GitLab base SHA errors - never a silent full skip.
     r = g.run(
-        "--changed", cwd=sp,
+        "--changed",
+        cwd=sp,
         env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": "0" * 40},
     )
     check(
@@ -1777,7 +1998,9 @@ def main():
         r.returncode == 0 and "2 workers" in r.stdout.splitlines()[0] and "1 flaky" in r.stdout,
         r.stdout[:120] + r.stdout[-160:],
     )
-    r = g.run("test_cfg.py", "-n", "0", cwd=g.tmp / "toolcfg", env_extra={"FLAKY_MARKER": str(tmarker)})
+    r = g.run(
+        "test_cfg.py", "-n", "0", cwd=g.tmp / "toolcfg", env_extra={"FLAKY_MARKER": str(tmarker)}
+    )
     check("CLI overrides tool.rstest", "single worker" in r.stdout.splitlines()[0], r.stdout[:120])
     check(
         "tail-batch rerun works (EndSession model)",
@@ -1790,8 +2013,15 @@ def main():
     marker = g.tmp / "flaky_marker"
     if marker.exists():
         marker.unlink()
-    r = g.run("test_flaky.py", "-n", "2", "--reruns", "2", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(marker)})
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--reruns",
+        "2",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
     check("flaky passes with reruns", r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
     check("flaky section listed", "passed after rerun" in r.stdout)
     marker.unlink()
@@ -1800,19 +2030,22 @@ def main():
     # one-worker pool drives the rerun loop) instead of being silently inert.
     swm = g.tmp / "sw_reruns_marker"
     swm.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "1", "--reruns", "2", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(swm)})
+    r = g.run(
+        "test_flaky.py", "-n", "1", "--reruns", "2", cwd=fdir, env_extra={"FLAKY_MARKER": str(swm)}
+    )
     check(
         "single-worker reruns fire at -n 1",
-        r.returncode == 0 and "1 flaky" in r.stdout
+        r.returncode == 0
+        and "1 flaky" in r.stdout
         and "single worker (rerun pool" in r.stdout.splitlines()[0]
         # the byte-exact -> pool switch is announced on stderr, not just the banner
         and "not byte-exact" in r.stderr,
         f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stderr[-200:],
     )
     swm.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "0", "--reruns", "2", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(swm)})
+    r = g.run(
+        "test_flaky.py", "-n", "0", "--reruns", "2", cwd=fdir, env_extra={"FLAKY_MARKER": str(swm)}
+    )
     check(
         "single-worker reruns fire at -n 0",
         r.returncode == 0 and "1 flaky" in r.stdout,
@@ -1820,27 +2053,36 @@ def main():
     )
     # No --reruns at -n 1 stays byte-exact single session: the flake fails.
     swm.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "1", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(swm)})
+    r = g.run("test_flaky.py", "-n", "1", cwd=fdir, env_extra={"FLAKY_MARKER": str(swm)})
     check(
         "no-reruns at -n 1 stays byte-exact (flake fails)",
-        r.returncode == 1 and "1 failed" in r.stdout
+        r.returncode == 1
+        and "1 failed" in r.stdout
         and "pytest-exact mode" in r.stdout.splitlines()[0],
         f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stdout[-200:],
     )
     # Passthrough (-s) can't be pooled: reruns stay inert, warned.
     swm.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "1", "--reruns", "2", "-s", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(swm)})
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "1",
+        "--reruns",
+        "2",
+        "-s",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(swm)},
+    )
     check(
         "reruns inert under -s, warned",
         r.returncode == 1 and "ignored under -s" in r.stderr,
         f"rc={r.returncode} " + r.stderr[-200:],
     )
     marker.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "2", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(marker)})
-    check("flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:])
+    r = g.run("test_flaky.py", "-n", "2", cwd=fdir, env_extra={"FLAKY_MARKER": str(marker)})
+    check(
+        "flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:]
+    )
 
     print("== flaky-aware reruns (--reruns-only-known-flaky) ==")
     # Gate reruns on prior flaky history so a deterministic mass-failure
@@ -1858,9 +2100,17 @@ def main():
             fcache.unlink(missing_ok=True)
         else:
             fcache.write_text(json.dumps(hist), encoding="utf-8")
-        r = g.run("test_flaky.py", "-n", "2", "--reruns", "2",
-                  "--reruns-only-known-flaky", *extra, cwd=fdir,
-                  env_extra={"FLAKY_MARKER": str(m)})
+        r = g.run(
+            "test_flaky.py",
+            "-n",
+            "2",
+            "--reruns",
+            "2",
+            "--reruns-only-known-flaky",
+            *extra,
+            cwd=fdir,
+            env_extra={"FLAKY_MARKER": str(m)},
+        )
         m.unlink(missing_ok=True)
         return r
 
@@ -1868,28 +2118,39 @@ def main():
     # epoch so retention aging (load() drops entries past the window) keeps it.
     now_epoch = int(time.time())
     r = faware({fnode: {"flaky": 2, "failed": 0, "last_epoch": now_epoch}}, "fa_known")
-    check("flaky-aware: known-flaky test is reran and recovers",
-          r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
+    check(
+        "flaky-aware: known-flaky test is reran and recovers",
+        r.returncode == 0 and "1 flaky" in r.stdout,
+        r.stdout[-200:],
+    )
     # No history -> not known-flaky -> not reran -> fails.
     r = faware(None, "fa_unknown")
-    check("flaky-aware: unknown test not reran, fails",
-          r.returncode == 1 and "1 failed" in r.stdout
-          and "passed after rerun" not in r.stdout,
-          r.stdout[-200:])
+    check(
+        "flaky-aware: unknown test not reran, fails",
+        r.returncode == 1 and "1 failed" in r.stdout and "passed after rerun" not in r.stdout,
+        r.stdout[-200:],
+    )
     # Hard-failure-only history (flaky==0) -> still not known-flaky: a
     # deterministic mass-failure recorded as `failed` never burns the budget.
     r = faware({fnode: {"flaky": 0, "failed": 9, "last_epoch": now_epoch}}, "fa_failedonly")
-    check("flaky-aware: failed-only history does not count as known-flaky",
-          r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:])
+    check(
+        "flaky-aware: failed-only history does not count as known-flaky",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        r.stdout[-200:],
+    )
     # Baseline sanity: same unknown test WITHOUT the flag reruns and recovers.
     m = g.tmp / "fa_baseline"
     m.unlink(missing_ok=True)
     fcache.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "2", "--reruns", "2", cwd=fdir,
-              env_extra={"FLAKY_MARKER": str(m)})
+    r = g.run(
+        "test_flaky.py", "-n", "2", "--reruns", "2", cwd=fdir, env_extra={"FLAKY_MARKER": str(m)}
+    )
     m.unlink(missing_ok=True)
-    check("flaky-aware: without the flag, unknown flake still recovers",
-          r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
+    check(
+        "flaky-aware: without the flag, unknown flake still recovers",
+        r.returncode == 0 and "1 flaky" in r.stdout,
+        r.stdout[-200:],
+    )
 
     # An explicit @pytest.mark.flaky declaration bypasses the gate even with
     # no history: the author already declared it flaky.
@@ -1909,11 +2170,22 @@ def main():
     # --reruns 2 so the gate is actually active (known_flaky loads); with no
     # history an unmarked test would be blocked, so recovery here proves the
     # @mark.flaky declaration bypasses the gate.
-    r = g.run("test_m.py", "-n", "2", "--reruns", "2", "--reruns-only-known-flaky",
-              cwd=mdir, env_extra={"MK": str(mk)})
+    r = g.run(
+        "test_m.py",
+        "-n",
+        "2",
+        "--reruns",
+        "2",
+        "--reruns-only-known-flaky",
+        cwd=mdir,
+        env_extra={"MK": str(mk)},
+    )
     mk.unlink(missing_ok=True)
-    check("flaky-aware: @mark.flaky bypasses the gate (no history)",
-          r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
+    check(
+        "flaky-aware: @mark.flaky bypasses the gate (no history)",
+        r.returncode == 0 and "1 flaky" in r.stdout,
+        r.stdout[-200:],
+    )
 
     # Cold-start loop (finding #4 / known defect): the docs once claimed a
     # brand-new flake "fails that run, is recorded, and is rescued on
@@ -1932,9 +2204,16 @@ def main():
     def coldstart_run():
         m = g.tmp / cs_marker
         m.unlink(missing_ok=True)  # fresh: fixture fails its first attempt
-        r = g.run("test_flaky.py", "-n", "2", "--reruns", "2",
-                  "--reruns-only-known-flaky", cwd=fdir,
-                  env_extra={"FLAKY_MARKER": str(m)})
+        r = g.run(
+            "test_flaky.py",
+            "-n",
+            "2",
+            "--reruns",
+            "2",
+            "--reruns-only-known-flaky",
+            cwd=fdir,
+            env_extra={"FLAKY_MARKER": str(m)},
+        )
         m.unlink(missing_ok=True)
         return r
 
@@ -1944,26 +2223,36 @@ def main():
     # the miss is the gate, not a missing write.
     hist_after = json.loads(fcache.read_text()) if fcache.exists() else {}
     rec = hist_after.get(fnode, {})
-    check("flaky-aware cold-start: run 1 gated-fails and records the failure",
-          r1.returncode == 1 and rec.get("failed", 0) > 0 and rec.get("flaky", 0) == 0,
-          f"rc={r1.returncode} rec={rec} {r1.stdout[-160:]}")
+    check(
+        "flaky-aware cold-start: run 1 gated-fails and records the failure",
+        r1.returncode == 1 and rec.get("failed", 0) > 0 and rec.get("flaky", 0) == 0,
+        f"rc={r1.returncode} rec={rec} {r1.stdout[-160:]}",
+    )
     # Run 2: same flag, history now carries the run-1 failure (flaky == 0).
     # A self-healing feature WOULD rescue it here; today it does not. Assert
     # the current (defective) behavior so CI stays green. When cold-start is
     # fixed this flips red -> update to assert rc == 0 and "1 flaky".
     r2 = coldstart_run()
-    check("flaky-aware cold-start: run 2 still gated-fails (pins finding #4; flip when fixed)",
-          r2.returncode == 1 and "1 failed" in r2.stdout
-          and "passed after rerun" not in r2.stdout,
-          r2.stdout[-200:])
+    check(
+        "flaky-aware cold-start: run 2 still gated-fails (pins finding #4; flip when fixed)",
+        r2.returncode == 1 and "1 failed" in r2.stdout and "passed after rerun" not in r2.stdout,
+        r2.stdout[-200:],
+    )
     fcache.unlink(missing_ok=True)
 
     g.write("crashflaky/test_cf.py", CRASHFLAKY)
     cmarker = g.tmp / "cf_marker"
     if cmarker.exists():
         cmarker.unlink()
-    r = g.run("test_cf.py", "-n", "2", "--reruns", "1", cwd=g.tmp / "crashflaky",
-              env_extra={"FLAKY_MARKER": str(cmarker)})
+    r = g.run(
+        "test_cf.py",
+        "-n",
+        "2",
+        "--reruns",
+        "1",
+        cwd=g.tmp / "crashflaky",
+        env_extra={"FLAKY_MARKER": str(cmarker)},
+    )
     check(
         "crashed test retried within budget",
         r.returncode == 0 and "1 flaky" in r.stdout and "2 passed" in r.stdout,
@@ -1971,8 +2260,17 @@ def main():
     )
     marker.unlink(missing_ok=True)
     fx = g.tmp / "flaky_junit.xml"
-    g.run("test_flaky.py", "-n", "2", "--reruns", "2", "--junitxml", str(fx),
-          cwd=fdir, env_extra={"FLAKY_MARKER": str(marker)})
+    g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--reruns",
+        "2",
+        "--junitxml",
+        str(fx),
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
     check(
         "flaky flagged in junit property",
         'property name="flaky"' in fx.read_text(encoding="utf-8"),
@@ -1981,8 +2279,17 @@ def main():
     # --output github: a flaky-passed test surfaces as a ::warning
     # annotation (the run is green, the flake is visible on the PR).
     marker.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "2", "--reruns", "2", "--output", "github",
-              cwd=fdir, env_extra={"FLAKY_MARKER": str(marker)})
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--reruns",
+        "2",
+        "--output",
+        "github",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
     warns = [ln for ln in r.stdout.splitlines() if ln.startswith("::warning ")]
     check(
         "github: flaky-passed emits ::warning",
@@ -2016,8 +2323,7 @@ def main():
     )
     g.write("quar/quarantine.txt", "test_q.py::*\n")
     qx = g.tmp / "quar_junit.xml"
-    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt",
-              "--junitxml", str(qx), cwd=qdir)
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", "--junitxml", str(qx), cwd=qdir)
     jx = qx.read_text(encoding="utf-8")
     check(
         "quarantine: glob demotes all -> exit 0, junit green + flagged",
@@ -2045,12 +2351,12 @@ def main():
     g.write("scopes/test_sc_b.py", SCOPE_B)
     g.write("scopes/test_sc_c.py", SCOPE_C)
     slog = g.tmp / "scope_log"
-    for mode, label in (("loadscope", "class"), ("loadgroup", "group")):
+    for mode, _label in (("loadscope", "class"), ("loadgroup", "group")):
         clear_e2e_log(slog)
-        r = g.run("-n", "3", "--dist", mode, cwd=g.tmp / "scopes",
-                  env_extra={"SLOG": str(slog)})
+        r = g.run("-n", "3", "--dist", mode, cwd=g.tmp / "scopes", env_extra={"SLOG": str(slog)})
         rows = read_e2e_rows(slog)
         import collections
+
         by = collections.defaultdict(set)
         for x in rows:
             by[x["t"].split(".")[0]].add(x["w"])
@@ -2074,8 +2380,9 @@ def main():
     for f in (mk, cnt):
         if f.exists():
             f.unlink()
-    r = g.run("test_marks.py", "-n", "2", cwd=g.tmp / "marks",
-              env_extra={"MK": str(mk), "CNT": str(cnt)})
+    r = g.run(
+        "test_marks.py", "-n", "2", cwd=g.tmp / "marks", env_extra={"MK": str(mk), "CNT": str(cnt)}
+    )
     check(
         "flaky mark reruns without --reruns",
         "1 flaky" in r.stdout and "1 failed" in r.stdout,
@@ -2088,8 +2395,17 @@ def main():
     )
     mk.unlink()
     cnt.unlink()
-    r = g.run("test_marks.py", "-n", "2", "--reruns", "2", "--only-rerun", "transient",
-              cwd=g.tmp / "marks", env_extra={"MK": str(mk), "CNT": str(cnt)})
+    r = g.run(
+        "test_marks.py",
+        "-n",
+        "2",
+        "--reruns",
+        "2",
+        "--only-rerun",
+        "transient",
+        cwd=g.tmp / "marks",
+        env_extra={"MK": str(mk), "CNT": str(cnt)},
+    )
     check(
         "only-rerun gates non-matching failures",
         "1 flaky" in r.stdout and cnt.read_text() == "1",
@@ -2098,13 +2414,10 @@ def main():
 
     print("== worker-timeout watchdog ==")
     g.write("hang/test_hang.py", HANG)
-    r = g.run("test_hang.py", "-n", "2", "--worker-timeout", "3",
-              cwd=g.tmp / "hang", timeout=60)
+    r = g.run("test_hang.py", "-n", "2", "--worker-timeout", "3", cwd=g.tmp / "hang", timeout=60)
     check(
         "hung test killed and attributed",
-        r.returncode == 1
-        and "exceeded --worker-timeout" in r.stdout
-        and "2 passed" in r.stdout,
+        r.returncode == 1 and "exceeded --worker-timeout" in r.stdout and "2 passed" in r.stdout,
         r.stdout[-300:],
     )
 
@@ -2131,9 +2444,10 @@ def main():
     import queue
     import threading
 
-    lines: "queue.Queue[str]" = queue.Queue()
+    lines: queue.Queue[str] = queue.Queue()
 
     def _pump():
+        assert proc.stdout is not None
         for line in proc.stdout:
             lines.put(line)
 
@@ -2274,7 +2588,9 @@ def _hard_crash():
     os._exit(137)
 """
 
-CRASH = HARD_CRASH + """
+CRASH = (
+    HARD_CRASH
+    + """
 def test_before_a(): assert True
 def test_before_b(): assert True
 
@@ -2285,8 +2601,11 @@ def test_after_a(): assert True
 def test_after_b(): assert True
 def test_after_c(): assert True
 """
+)
 
-CRASHLOOP = HARD_CRASH + """
+CRASHLOOP = (
+    HARD_CRASH
+    + """
 def test_k1(): _hard_crash()
 def test_k2(): _hard_crash()
 def test_k3(): _hard_crash()
@@ -2295,6 +2614,7 @@ def test_k5(): _hard_crash()
 def test_k6(): _hard_crash()
 def test_ok(): assert True
 """
+)
 
 SERIAL = """
 import json, os, time
@@ -2357,18 +2677,21 @@ def test_ok_two(): assert True
 def test_flaky_not(): assert False
 """
 
-NODECRASH_CONFTEST = '\nimport os\nimport uuid\n\nimport pytest\n\n\ndef pytest_addhooks(pluginmanager):\n    class XdistSpecs:\n        @pytest.hookspec\n        def pytest_configure_node(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodedown(self, node, error): ...\n\n    pluginmanager.add_hookspecs(XdistSpecs)\n\n\ndef _log(line):\n    path = os.environ.get("NODE_HOOK_LOG")\n    if path:\n        with open(path + "." + str(os.getpid()), "a") as f:\n            f.write(line + "\\n")\n\n\nclass XDistHooks:\n    def pytest_configure_node(self, node):\n        ident = "res_%s_%s" % (node.gateway.id, uuid.uuid4().hex[:6])\n        node.workerinput["resource_ident"] = ident\n        _log("up:" + ident)\n\n    def pytest_testnodedown(self, node, error):\n        _log("down:" + node.workerinput["resource_ident"])\n\n\ndef pytest_configure(config):\n    config.pluginmanager.register(XDistHooks())\n'
+NODECRASH_CONFTEST = '\nimport os\nimport uuid\n\nimport pytest\n\n\ndef pytest_addhooks(pluginmanager):\n    class XdistSpecs:\n        @pytest.hookspec\n        def pytest_configure_node(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodedown(self, node, error): ...\n\n    pluginmanager.add_hookspecs(XdistSpecs)\n\n\ndef _log(line):\n    path = os.environ.get("NODE_HOOK_LOG")\n    if path:\n        with open(path + "." + str(os.getpid()), "a") as f:\n            f.write(line + "\\n")\n\n\nclass XDistHooks:\n    def pytest_configure_node(self, node):\n        ident = "res_%s_%s" % (node.gateway.id, uuid.uuid4().hex[:6])\n        node.workerinput["resource_ident"] = ident\n        _log("up:" + ident)\n\n    def pytest_testnodedown(self, node, error):\n        _log("down:" + node.workerinput["resource_ident"])\n\n\ndef pytest_configure(config):\n    config.pluginmanager.register(XDistHooks())\n'  # noqa: E501
 
-NODECRASH_TEST = HARD_CRASH + '\nimport time\n\n\ndef test_a(): time.sleep(0.05)\ndef test_b(): time.sleep(0.05)\n\n\ndef test_killer():\n    _hard_crash()\n\n\ndef test_c(): time.sleep(0.05)\ndef test_d(): time.sleep(0.05)\ndef test_e(): time.sleep(0.05)\n'
+NODECRASH_TEST = (
+    HARD_CRASH
+    + "\nimport time\n\n\ndef test_a(): time.sleep(0.05)\ndef test_b(): time.sleep(0.05)\n\n\ndef test_killer():\n    _hard_crash()\n\n\ndef test_c(): time.sleep(0.05)\ndef test_d(): time.sleep(0.05)\ndef test_e(): time.sleep(0.05)\n"  # noqa: E501
+)
 
-NODEHOOKS_CONFTEST = '\nimport os\n\nimport pytest\n\n\ndef pytest_addhooks(pluginmanager):\n    # Real suites get these specs from pytest-xdist; declare them the\n    # same way so this fixture is hermetic.\n    class XdistSpecs:\n        @pytest.hookspec\n        def pytest_configure_node(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodeready(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodedown(self, node, error): ...\n\n    pluginmanager.add_hookspecs(XdistSpecs)\n\n\ndef _log(line):\n    path = os.environ.get("NODE_HOOK_LOG")\n    if path:\n        with open(path + "." + str(os.getpid()), "a") as f:\n            f.write(line + "\\n")\n\n\nclass XDistHooks:\n    # the sqlalchemy pattern: master fills workerinput per node\n    def pytest_configure_node(self, node):\n        node.workerinput["follower_ident"] = "follower_" + node.gateway.id\n\n    def pytest_testnodeready(self, node):\n        _log("ready:" + node.gateway.id)\n\n    def pytest_testnodedown(self, node, error):\n        _log("down:" + node.workerinput["follower_ident"])\n\n\ndef pytest_configure(config):\n    config.pluginmanager.register(XDistHooks())\n    # read it back IMMEDIATELY (sqlalchemy does exactly this): only a\n    # synchronous configure_node call at registration time satisfies it\n    if hasattr(config, "workerinput"):\n        config._follower_ident = config.workerinput["follower_ident"]\n'
+NODEHOOKS_CONFTEST = '\nimport os\n\nimport pytest\n\n\ndef pytest_addhooks(pluginmanager):\n    # Real suites get these specs from pytest-xdist; declare them the\n    # same way so this fixture is hermetic.\n    class XdistSpecs:\n        @pytest.hookspec\n        def pytest_configure_node(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodeready(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodedown(self, node, error): ...\n\n    pluginmanager.add_hookspecs(XdistSpecs)\n\n\ndef _log(line):\n    path = os.environ.get("NODE_HOOK_LOG")\n    if path:\n        with open(path + "." + str(os.getpid()), "a") as f:\n            f.write(line + "\\n")\n\n\nclass XDistHooks:\n    # the sqlalchemy pattern: master fills workerinput per node\n    def pytest_configure_node(self, node):\n        node.workerinput["follower_ident"] = "follower_" + node.gateway.id\n\n    def pytest_testnodeready(self, node):\n        _log("ready:" + node.gateway.id)\n\n    def pytest_testnodedown(self, node, error):\n        _log("down:" + node.workerinput["follower_ident"])\n\n\ndef pytest_configure(config):\n    config.pluginmanager.register(XDistHooks())\n    # read it back IMMEDIATELY (sqlalchemy does exactly this): only a\n    # synchronous configure_node call at registration time satisfies it\n    if hasattr(config, "workerinput"):\n        config._follower_ident = config.workerinput["follower_ident"]\n'  # noqa: E501
 
-NODEHOOKS_TEST = '\ndef test_ident_present(request):\n    assert request.config._follower_ident.startswith("follower_gw")\n\n\ndef test_workerinput_kept(request):\n    assert request.config.workerinput["follower_ident"] == request.config._follower_ident\n'
+NODEHOOKS_TEST = '\ndef test_ident_present(request):\n    assert request.config._follower_ident.startswith("follower_gw")\n\n\ndef test_workerinput_kept(request):\n    assert request.config.workerinput["follower_ident"] == request.config._follower_ident\n'  # noqa: E501
 
 # pytest-html (via pytest-metadata) ships the one-arg form
 # `pytest_testnodedown(node)`. xdist's hookspec is (node, error); rstest must
 # call it without `error=` or it TypeErrors and the HTML report is lost.
-NODEONEARG_CONFTEST = '''
+NODEONEARG_CONFTEST = """
 import os
 
 import pytest
@@ -2403,7 +2726,7 @@ class OneArgHooks:
 
 def pytest_configure(config):
     config.pluginmanager.register(OneArgHooks())
-'''
+"""
 
 DURATIONS_FIXTURE = """
 import time
@@ -2412,7 +2735,7 @@ def test_sleepy(): time.sleep(0.3)
 def test_quick(): pass
 """
 
-DOCTEST_MOD = "def add(a, b):\n    '''\n    >>> add(2, 3)\n    5\n    '''\n    return a + b\n\ndef sub(a, b):\n    '''\n    >>> sub(5, 3)\n    1\n    '''\n    return a - b\n"
+DOCTEST_MOD = "def add(a, b):\n    '''\n    >>> add(2, 3)\n    5\n    '''\n    return a + b\n\ndef sub(a, b):\n    '''\n    >>> sub(5, 3)\n    1\n    '''\n    return a - b\n"  # noqa: E501
 
 WARN = """
 import warnings
@@ -2441,7 +2764,9 @@ def test_stable():
     assert True
 """
 
-CRASHFLAKY = HARD_CRASH + """
+CRASHFLAKY = (
+    HARD_CRASH
+    + """
 import pathlib
 
 
@@ -2456,6 +2781,7 @@ def test_crashes_once():
 def test_other():
     assert True
 """
+)
 
 SCOPE_A = """
 import json

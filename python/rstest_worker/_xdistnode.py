@@ -2,14 +2,19 @@
 WorkerController, plus the introspection needed to invoke node hooks
 (pytest_testnodeready / pytest_testnodedown) with the right arguments."""
 
+import contextlib
 import inspect
+from collections.abc import Mapping
+from typing import Any
+
+_Params = Mapping[str, inspect.Parameter]
 
 # Signature introspection is stable per underlying function; cache it so a
 # hook fired once per worker teardown doesn't re-parse every invocation.
-_NODE_IMPL_PARAMS = {}
+_NODE_IMPL_PARAMS: dict[Any, _Params | None] = {}
 
 
-def _node_impl_params(impl):
+def _node_impl_params(impl: Any) -> _Params | None:
     """Return the impl's parameter mapping, or None when its signature isn't
     introspectable (builtins / C hooks). Cached by the underlying function."""
     key = getattr(impl, "__func__", impl)
@@ -19,17 +24,16 @@ def _node_impl_params(impl):
         # Unhashable key: fall through and compute without caching.
         pass
     try:
-        params = inspect.signature(impl).parameters
+        params: _Params | None = inspect.signature(impl).parameters
     except (ValueError, TypeError):
         params = None
-    try:
+    # Unhashable key: skip the cache write, still return the computed params.
+    with contextlib.suppress(TypeError):
         _NODE_IMPL_PARAMS[key] = params
-    except TypeError:
-        pass
     return params
 
 
-def _call_node_impl(impl, node, **kwargs):
+def _call_node_impl(impl: Any, node: Any, **kwargs: Any) -> Any:
     """Invoke an xdist node hook (pytest_testnodeready / _testnodedown),
     passing only the keyword args the impl declares. Real-world hooks often use
     the one-arg ``(node)`` form, so dropping unaccepted kwargs (e.g. ``error=``)
@@ -63,7 +67,7 @@ def _call_node_impl(impl, node, **kwargs):
 
 
 class _XdistGatewayShim:
-    def __init__(self, gid):
+    def __init__(self, gid: str) -> None:
         self.id = gid
 
 
@@ -74,7 +78,7 @@ class _XdistNodeShim:
     node.gateway.id, and occasionally node.config.
     """
 
-    def __init__(self, config, worker_id):
+    def __init__(self, config: Any, worker_id: str) -> None:
         self.config = config
         self.workerinput = config.workerinput
         self.gateway = _XdistGatewayShim(worker_id)

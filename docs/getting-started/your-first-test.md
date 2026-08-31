@@ -103,7 +103,7 @@ import pytest
 
 @pytest.mark.parametrize("i", range(12))
 def test_sleepy(i):
-    time.sleep(1)      # pretend each test does real work
+    time.sleep(1)  # pretend each test does real work
 ```
 
 Run it. Twelve one-second tests finish in about `12 / cores` seconds, not 12:

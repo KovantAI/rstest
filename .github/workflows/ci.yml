@@ -9,6 +9,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  rust-lint:
+    name: rust lint (debug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # Debug clippy for fast feedback (release build lives in the gate job).
+      # Same invocation as the pre-commit hook, so local == CI.
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
   gate:
     name: gate (${{ matrix.os }})
     strategy:
@@ -29,12 +49,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: rustfmt
-        run: cargo fmt --check
-
-      - name: clippy
-        run: cargo clippy --release -- -D warnings
-
       - name: build
         run: cargo build --release
 
@@ -43,6 +57,29 @@ jobs:
 
       - name: test gate
         run: python tests/gate.py
+
+  python-lint:
+    name: python lint + worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: uv lock --check
+        run: uv lock --check
+
+      - name: ruff check
+        run: uvx ruff@0.16.5 check python/rstest_worker python/tests
+
+      - name: ruff format --check
+        run: uvx ruff@0.16.5 format --check python/rstest_worker python/tests
+
+      - name: ty (type check worker)
+        run: uvx --with msgpack --with pytest --with coverage ty@0.0.75 check python/rstest_worker
+
+      - name: worker unit tests
+        run: uvx --with msgpack --with coverage pytest python/tests
 
   wheel:
     name: wheel builds (${{ matrix.os }})

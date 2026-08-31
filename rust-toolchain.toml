@@ -1,0 +1,6 @@
+# Pins the toolchain so local dev, pre-commit, and CI all lint/format with the
+# same rustc/clippy/rustfmt. rustup and dtolnay/rust-toolchain (CI) both honor
+# this file; a Homebrew-installed cargo ignores it (uses the system toolchain).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

@@ -135,6 +135,7 @@ registry inside the test, or use a fixture:
 @pytest.fixture(autouse=True)
 def _clean_warnings():
     import warnings
+
     with warnings.catch_warnings():
         warnings.resetwarnings()
         yield
@@ -187,7 +188,7 @@ runner. Not ordering, not isolation: load.
 ```python
 signal.setitimer(signal.ITIMER_REAL, 0.1, 0.1)
 wfs(a, read=True, timeout=1)
-assert 0.9 < dur < 3      # hard upper bound
+assert 0.9 < dur < 3  # hard upper bound
 ```
 
 The `< 3` upper bound breaks under CPU saturation.

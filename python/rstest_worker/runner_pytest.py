@@ -23,12 +23,12 @@ _fixturecompat.install()
 # Re-exported for callers that reach for the plugin classes by their historical
 # import path (rstest_worker.runner_pytest.StreamPlugin, ...).
 __all__ = [
-    "StreamPlugin",
     "ItemDispatchPlugin",
     "LazyDispatchPlugin",
+    "StreamPlugin",
     "run",
-    "run_session",
     "run_lazy_session",
+    "run_session",
 ]
 
 

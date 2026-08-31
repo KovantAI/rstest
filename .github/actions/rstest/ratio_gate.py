@@ -32,6 +32,7 @@ def _parse(path: str) -> ET.Element:
     """
     try:
         from defusedxml.ElementTree import parse as _dparse  # type: ignore
+
         return _dparse(path).getroot()
     except ImportError:
         pass
@@ -63,8 +64,11 @@ def main() -> int:
     args = ap.parse_args()
 
     if not os.path.isfile(args.junit):
-        print(f"::error::fail-ratio gate: JUnit file '{args.junit}' not found. "
-              "Set the `junit` input (empty disables the report).", file=sys.stderr)
+        print(
+            f"::error::fail-ratio gate: JUnit file '{args.junit}' not found. "
+            "Set the `junit` input (empty disables the report).",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -78,12 +82,14 @@ def main() -> int:
 
     total = len(cases)
     skipped = sum(1 for c in cases if c.find("skipped") is not None)
-    failed_cases = [c for c in cases if c.find("failure") is not None or c.find("error") is not None]
+    failed_cases = [
+        c for c in cases if c.find("failure") is not None or c.find("error") is not None
+    ]
     failed = len(failed_cases)
     executed = total - skipped
     passed = executed - failed
 
-    hard = re.compile(args.hard_fail_on) if args.hard_fail_on else None
+    hard: re.Pattern[str] | None = re.compile(args.hard_fail_on) if args.hard_fail_on else None
     hard_hits = []
     if hard:
         for c in failed_cases:
@@ -107,12 +113,18 @@ def main() -> int:
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
             fh.write("### rstest fail-ratio gate\n\n")
-            fh.write(f"- Executed: **{executed}** (passed {passed}, failed {failed}, skipped {skipped})\n")
+            fh.write(
+                f"- Executed: **{executed}** "
+                f"(passed {passed}, failed {failed}, skipped {skipped})\n"
+            )
             fh.write(f"- Fail ratio: **{ratio:.3f}**  |  Threshold: **{threshold:.3f}**\n")
             if hard_hits:
-                fh.write(f"- Hard-fail matches ({len(hard_hits)}): "
-                         + ", ".join(f"`{h}`" for h in hard_hits[:10])
-                         + ("…" if len(hard_hits) > 10 else "") + "\n")
+                fh.write(
+                    f"- Hard-fail matches ({len(hard_hits)}): "
+                    + ", ".join(f"`{h}`" for h in hard_hits[:10])
+                    + ("…" if len(hard_hits) > 10 else "")
+                    + "\n"
+                )
             fh.write(f"- **Result: {verdict}**\n")
 
     # Outputs.
@@ -122,8 +134,10 @@ def main() -> int:
             fh.write(f"passed={passed}\n")
             fh.write(f"failed={failed}\n")
 
-    print(f"fail-ratio gate: executed={executed} failed={failed} "
-          f"ratio={ratio:.3f} threshold={threshold:.3f} -> {verdict}")
+    print(
+        f"fail-ratio gate: executed={executed} failed={failed} "
+        f"ratio={ratio:.3f} threshold={threshold:.3f} -> {verdict}"
+    )
     if hard_hits:
         print("hard-fail matches: " + ", ".join(hard_hits))
     return 0 if ok else 1

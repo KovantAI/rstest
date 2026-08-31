@@ -39,3 +39,45 @@ bindings = "bin"
 manifest-path = "crates/rstest-cli/Cargo.toml"
 python-source = "python"
 module-name = "rstest_worker"
+
+[dependency-groups]
+# Dev tooling for the Python worker (installed with `uv sync --group dev`).
+# The vendored pytest core ships in-tree; msgpack/coverage are worker runtime
+# deps needed to import and exercise the worker under a real test session.
+dev = [
+    "msgpack>=1.0",
+    "coverage>=7",
+]
+
+[tool.ruff]
+# The vendored pytest core is third-party source; never lint or format it.
+# tests/e2e/toy holds deliberately-broken fixtures (e.g. a missing-import
+# collect-error case) that must not be linted or auto-fixed.
+extend-exclude = ["python/rstest_worker/_vendor", "tests/e2e/toy"]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Curated set: correctness + modernization + import hygiene, minus the
+# opinionated rules that fight the worker's deliberate patterns (blind
+# BaseException containment in _contained, dead-sibling cleanup swallowing in
+# stream.py — both load-bearing and documented at the call site).
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# __main__ must manipulate sys.path before importing the worker package, so its
+# imports intentionally sit below module-level statements.
+"python/rstest_worker/__main__.py" = ["E402"]
+
+[tool.ty.src]
+# ty type-checks the worker package only; the vendored pytest core is excluded.
+# tests/e2e/toy holds deliberately-broken fixtures (e.g. a missing-import
+# collect-error case) that must not be type-checked.
+exclude = ["python/rstest_worker/_vendor", "tests/e2e"]
+
+[tool.pytest.ini_options]
+# Worker unit tests (helpers that don't need the vendored pytest core). Run with
+# a real pytest: `uvx --with msgpack pytest`. The end-to-end suite is separate
+# (`python tests/gate.py`, which drives the built rstest binary).
+testpaths = ["python/tests"]
+pythonpath = ["python"]

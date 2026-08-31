@@ -25,7 +25,7 @@ class ItemDispatchPlugin(StreamPlugin):
 
         ids = [item.nodeid for item in session.items]
         digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
-        payload = {"count": len(ids), "hash": digest}
+        payload: dict[str, object] = {"count": len(ids), "hash": digest}
         # Full id list rides the wire from ONE worker only (orchestrator needs
         # it once, for duration-cache ordering); the rest verify by hash - at
         # pandas scale that's 8x15MB saved on the startup path.
@@ -98,7 +98,10 @@ class ItemDispatchPlugin(StreamPlugin):
                     # the run-global coordination).
                     self._conn.send(
                         "stopped",
-                        {"unrun": list(pending), "reason": str(session.shouldfail or session.shouldstop)},
+                        {
+                            "unrun": list(pending),
+                            "reason": str(session.shouldfail or session.shouldstop),
+                        },
                     )
                     return True
             # Even after draining, keep listening: a failed item from any
