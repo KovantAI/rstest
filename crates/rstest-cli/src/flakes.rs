@@ -3,13 +3,15 @@
 //! Sparse (only tests that flaked/failed), feeds history + `--quarantine`.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cache;
 use crate::report::Run;
 
-#[derive(Default, Clone, Copy, Serialize, Deserialize)]
+pub const FILE: &str = "flakes.json";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlakeStats {
     /// Runs where the test passed only after rerun(s).
     #[serde(default)]
@@ -20,10 +22,6 @@ pub struct FlakeStats {
     /// Unix epoch of the last recorded event.
     #[serde(default)]
     pub last_epoch: u64,
-}
-
-fn path() -> PathBuf {
-    PathBuf::from(".rstest_cache/flakes.json")
 }
 
 /// Seconds a flake/failure record stays relevant. A test with no event inside
@@ -63,7 +61,7 @@ fn retain_recent(log: &mut HashMap<String, FlakeStats>, now: u64, max_age: u64) 
 }
 
 pub fn load() -> HashMap<String, FlakeStats> {
-    let mut log: HashMap<String, FlakeStats> = std::fs::read(path())
+    let mut log: HashMap<String, FlakeStats> = std::fs::read(cache::file(FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
@@ -114,9 +112,8 @@ pub fn record(run: &Run) {
         }
         e.last_epoch = now;
     }
-    let _ = std::fs::create_dir_all(".rstest_cache");
     if let Ok(bytes) = serde_json::to_vec(&log) {
-        let _ = std::fs::write(path(), bytes);
+        let _ = cache::write_atomic(&cache::file(FILE), &bytes);
     }
 }
 

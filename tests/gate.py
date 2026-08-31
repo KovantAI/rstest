@@ -1765,6 +1765,143 @@ def main():
         f"rc={r.returncode} " + r.stderr[-300:],
     )
 
+    print("== shared cache backend ==")
+    # Push this run's segment to a remote dir; a fresh project pulls the union.
+    remote = g.tmp / "shared-remote"
+    shutil.rmtree(remote, ignore_errors=True)
+    g.write("scproj_a/test_s.py",
+            "import time\ndef test_slow(): time.sleep(0.05)\ndef test_a(): assert True\n")
+    sca = g.tmp / "scproj_a"
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-push", cwd=sca)
+    segdir = remote / "segments"
+    segs = list(segdir.glob("seg-*.json")) if segdir.exists() else []
+    check("shared-cache: push writes exactly one segment",
+          r.returncode == 0 and len(segs) == 1 and "pushed segment" in r.stderr,
+          f"rc={r.returncode} segs={segs} {r.stderr[-150:]}")
+    # Fresh project with no local cache: pull populates it from the remote.
+    g.write("scproj_b/test_s.py", "def test_a(): assert True\n")
+    scb = g.tmp / "scproj_b"
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=scb)
+    check("shared-cache: pull populates local durations",
+          r.returncode == 0 and (scb / ".rstest_cache" / "durations.json").exists()
+          and "pulled" in r.stderr, r.stderr[-200:])
+    # require-baseline against a cold remote is a hard error, not a silent skip.
+    # RSTEST_CACHE points at an empty dir so a prior local cache can't satisfy it.
+    cold = g.tmp / "cold-remote"
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(cold), "--cache-pull",
+              "--require-baseline", "--durations-regress", "1.5", cwd=scb,
+              env_extra={"RSTEST_CACHE": str(g.tmp / "nolocal-cache")})
+    check("shared-cache: require-baseline errors on a cold remote",
+          r.returncode != 0 and "require-baseline" in r.stderr,
+          f"rc={r.returncode} " + r.stderr[-200:])
+    # Compact folds the segment into a base and prunes segments.
+    r = g.run("--cache-remote", str(remote), "--cache-compact", cwd=sca)
+    leftover = list(segdir.glob("seg-*.json")) if segdir.exists() else []
+    check("shared-cache: compact folds to base, prunes segments",
+          r.returncode == 0 and (remote / "base.json").exists() and not leftover
+          and "compacted" in r.stderr, f"rc={r.returncode} left={leftover}")
+
+    # Coverage index rides the shared cache: two shards each push their PARTIAL
+    # coverage slice; a pull unions them into a full line->test index. This is
+    # the sharded-partial-index limitation the shared cache exists to fix.
+    covremote = g.tmp / "shared-cov-remote"
+    shutil.rmtree(covremote, ignore_errors=True)
+    scc = g.tmp / "scproj_cov"
+    g.write("scproj_cov/mymod.py",
+            "def used_by_a():\n    return 1\n"
+            "def used_by_b():\n    return 2\n")
+    g.write("scproj_cov/test_a.py",
+            "import mymod\ndef test_a(): assert mymod.used_by_a() == 1\n")
+    g.write("scproj_cov/test_b.py",
+            "import mymod\ndef test_b(): assert mymod.used_by_b() == 2\n")
+    # Shard 1 covers used_by_a, shard 2 covers used_by_b; each pushes its slice.
+    covenv = {"PYTHONPATH": str(scc)}
+    for k in (1, 2):
+        g.run("-n", "2", "--shard", f"{k}/2", "--cov=mymod", "--cov-context=test",
+              "--cov-report=", "--cache-remote", str(covremote), "--cache-push",
+              cwd=scc, env_extra=covenv)
+    covsegs = sorted((covremote / "segments").glob("seg-*.json"))
+    seg_blobs = [json.loads(p.read_text()) for p in covsegs]
+    covered_files = {f for b in seg_blobs for f in b.get("cov_index", {}).get("files", {})}
+    check("shared-cache: coverage segments carry a cov_index slice",
+          len(covsegs) == 2 and any("mymod.py" in f for f in covered_files),
+          f"segs={len(covsegs)} files={covered_files}")
+    # A fresh clone pulls the UNION: both used_by_a and used_by_b lines mapped.
+    sccb = g.tmp / "scproj_cov_b"
+    shutil.copytree(scc, sccb)
+    shutil.rmtree(sccb / ".rstest_cache", ignore_errors=True)
+    r = g.run("-n", "2", "--cache-remote", str(covremote), "--cache-pull",
+              "--co", "-q", cwd=sccb, env_extra={"PYTHONPATH": str(sccb)})
+    pulled_idx = sccb / ".rstest_cache" / "coverage_index.json"
+    idx = json.loads(pulled_idx.read_text()) if pulled_idx.exists() else {}
+    mymod_key = next((k for k in idx.get("files", {}) if k.endswith("mymod.py")), None)
+    nodeids = set()
+    if mymod_key:
+        for ids in idx["files"][mymod_key]["lines"].values():
+            nodeids.update(ids)
+    check("shared-cache: pull unions shard coverage slices into one index",
+          idx.get("schema") == 2
+          and {"test_a.py::test_a", "test_b.py::test_b"} <= nodeids,
+          f"rc={r.returncode} key={mymod_key} nodeids={sorted(nodeids)}")
+
+    # sccb still holds the pulled MERGED coverage index from above. A --cache-push
+    # run that produces NO fresh index of its own — here NO --cov at all, the path
+    # that skips covtool entirely — must NOT re-publish that pulled index.
+    covr3 = g.tmp / "shared-cov-remote3"
+    shutil.rmtree(covr3, ignore_errors=True)
+    assert (sccb / ".rstest_cache" / "coverage_index.json").exists()  # precondition
+    g.run("-n", "2",  # no --cov: covtool never runs, so only the push-time drop guards it
+          "--cache-remote", str(covr3), "--cache-push",
+          cwd=sccb, env_extra={"PYTHONPATH": str(sccb)})
+    r3segs = sorted((covr3 / "segments").glob("seg-*.json"))
+    r3blobs = [json.loads(p.read_text()) for p in r3segs]
+    republished = any(b.get("cov_index", {}).get("files") for b in r3blobs)
+    check("shared-cache: push without a fresh index re-publishes no coverage",
+          len(r3segs) >= 1 and not republished,
+          f"segs={len(r3segs)} republished={republished}")
+
+    # --cache-pull OVERLAYS remote onto the local cache: local-only entries that
+    # were never pushed survive the pull rather than being clobbered.
+    scpl = g.tmp / "scproj_pull_local"
+    shutil.rmtree(scpl, ignore_errors=True)
+    (scpl / ".rstest_cache").mkdir(parents=True)
+    (scpl / ".rstest_cache" / "durations.json").write_text(
+        '{"local_only.py::t_local": 4.2}', encoding="utf-8")
+    g.write("scproj_pull_local/test_s.py", "def test_a(): assert True\n")
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=scpl)
+    merged_local = json.loads((scpl / ".rstest_cache" / "durations.json").read_text())
+    check("shared-cache: pull preserves local-only durations (overlay, not clobber)",
+          "local_only.py::t_local" in merged_local and len(merged_local) > 1,
+          f"rc={r.returncode} keys={sorted(merged_local)}")
+
+    # --cache-compact is run-less; combining it with a run-time cache flag would
+    # silently skip the run and the flag, exiting green. Must be rejected.
+    r = g.run("--cache-remote", str(remote), "--cache-compact", "--cache-push", cwd=sca)
+    check("shared-cache: --cache-compact + --cache-push is rejected",
+          r.returncode != 0 and "run-less" in r.stderr,
+          f"rc={r.returncode} {r.stderr[-160:]}")
+
+    # Shared-cache flags in monorepo mode would silently no-op (push unreachable,
+    # pull warms the wrong root cache). Must fail loud instead, and the rejection
+    # must come BEFORE the pull runs (no 'pulled' line first). `mono` fixture is
+    # the multi-project tree built in the monorepo section above.
+    r = g.run("-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=g.tmp / "mono")
+    check("shared-cache: cache flags rejected in monorepo mode before pull runs",
+          r.returncode != 0 and "monorepo" in r.stderr and "pulled" not in r.stderr,
+          f"rc={r.returncode} {r.stderr[-200:]}")
+
+    # --cache-remote FLAG with no pull/push/compact does nothing; warn.
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), cwd=sca)
+    check("shared-cache: --cache-remote flag without an action warns",
+          r.returncode == 0 and "not being used" in r.stderr,
+          f"rc={r.returncode} {r.stderr[-160:]}")
+    # But an ambient RSTEST_CACHE_REMOTE env (no flag, no action) must NOT nag.
+    r = g.run("test_s.py", "-n", "2", cwd=sca,
+              env_extra={"RSTEST_CACHE_REMOTE": str(remote)})
+    check("shared-cache: ambient RSTEST_CACHE_REMOTE env does not warn",
+          r.returncode == 0 and "not being used" not in r.stderr,
+          f"rc={r.returncode} {r.stderr[-160:]}")
+
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)

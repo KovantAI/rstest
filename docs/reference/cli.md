@@ -246,6 +246,50 @@ that lets jobs agree without coordinating) and `--dist each`. Under
 duration cache on every job so their partitions match — see the
 [Sharding guide](../guides/sharding.md).
 
+### `--cache-remote <URL|DIR>` / `--cache-pull` / `--cache-push`
+
+Publish and warm the `.rstest_cache` (durations, flake history, and the
+`--changed` coverage index) to/from a **shared remote** — no hand-rolled
+`actions/cache` glue, no dedicated
+refresh job, no cache-key dance. `--cache-remote` is a directory or `file://`
+path (local, an NFS/EFS mount, or a dir a CI step materializes via
+`download-artifact` / `aws s3 sync`); also settable as `RSTEST_CACHE_REMOTE`.
+
+- `--cache-pull` merges the remote into the local cache **before** the run —
+  warming scheduling and the regression baseline.
+- `--cache-push` publishes **this run's** contribution afterward as one
+  immutable, uniquely-named **segment**. Concurrent shards/PRs each drop their
+  own segment and never conflict; readers union all segments on the next pull.
+  (A push failure warns but never fails an otherwise-green run.)
+
+Because each run pushes an immutable segment rather than overwriting a shared
+blob, there is no single-writer job: every shard just runs
+`--cache-pull --cache-push`. See [Shared cache](../concepts/caching.md#shared-cache-backend).
+
+`--cache-remote` on its own (without pull/push/compact) does nothing and warns.
+Pull/push are **not** supported in [monorepo mode](../guides/monorepo.md) — each
+project keeps its own `.rstest_cache`, so run rstest per project for shared
+caching there (rstest errors rather than silently no-op).
+
+### `--cache-compact`
+
+Maintenance: fold all remote segments into a fresh `base.json` and prune them,
+then exit without running tests. Keeps the segment count (and pull size) down;
+optional — pull/push work without it. Run occasionally (nightly, or on merge to
+main). Needs `--cache-remote`. It is **run-less** — it exits before the run, so
+don't combine it with `--cache-pull`/`--cache-push` (rstest rejects that
+combination rather than silently skipping them).
+
+### `--require-baseline`
+
+With `--durations-regress` active, treat an **absent** duration baseline as a
+hard error instead of the silent "comparison skipped". This closes the
+dead-gate failure mode where a CI run that never restored (or pulled) the cache
+passes regressions green. A *failed* `--cache-pull` is always an error; this
+adds the "*successful* pull returned nothing, but a gate needs it" case. It only
+enforces on an actual gated run — collect-only (`--co`), `--migrate-check`, and
+passthrough (`-s`/`--pdb`) modes don't evaluate the gate, so they don't trip it.
+
 ### `--doctor`
 
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),

@@ -1,3 +1,4 @@
+mod cache;
 #[allow(dead_code)]
 mod collect; // D5: single-point collection
 mod color;
@@ -14,6 +15,7 @@ mod mono;
 mod pool;
 mod progress;
 mod proto;
+mod remote;
 mod report;
 mod select;
 mod shard;
@@ -25,7 +27,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 /// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
@@ -188,6 +190,37 @@ pub struct Cli {
     /// disjoint, so merging per-job JUnit reconstructs the full run.
     #[arg(long, value_name = "K/N")]
     shard: Option<String>,
+
+    /// Shared-cache remote: a directory or `file://` path (local, an NFS/EFS
+    /// mount, or a dir a CI step materializes via `download-artifact` /
+    /// `aws s3 sync`). Also settable via `RSTEST_CACHE_REMOTE`. Enables
+    /// `--cache-pull` / `--cache-push` / `--cache-compact`.
+    #[arg(long, value_name = "URL|DIR")]
+    cache_remote: Option<String>,
+
+    /// Before the run, merge the remote's segments + base into the local
+    /// `.rstest_cache` (durations, flake history). Warms scheduling and the
+    /// regression baseline. Needs `--cache-remote`.
+    #[arg(long)]
+    cache_pull: bool,
+
+    /// After the run, publish THIS run's contribution as one immutable segment
+    /// on the remote (durations + flake events). Concurrent shards never
+    /// conflict. Needs `--cache-remote`.
+    #[arg(long)]
+    cache_push: bool,
+
+    /// Maintenance: fold all remote segments into a fresh base and prune them,
+    /// then exit without running tests. Needs `--cache-remote`.
+    #[arg(long)]
+    cache_compact: bool,
+
+    /// With a baseline-dependent gate active (`--durations-regress`), treat a
+    /// successful pull that returns NO baseline as a hard error instead of a
+    /// silent skip — the steady-state guard against a cache that never
+    /// restored. A failed pull is always an error.
+    #[arg(long)]
+    require_baseline: bool,
 }
 
 /// -x / --maxfail=N from the session args (also forwarded: each worker
@@ -401,6 +434,16 @@ fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<Strin
         match arg.as_str() {
             "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
             "--reruns-only-known-flaky" => own.push(arg),
+            "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
+                own.push(arg)
+            }
+            "--cache-remote" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--cache-remote=") => own.push(arg),
             "--migrate-check-json" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -555,6 +598,48 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             format!("{nanos:x}{:x}", std::process::id()),
         );
     }
+    // Shared-cache backend: resolve the remote (flag or env) and, if asked,
+    // run maintenance / warm the local cache BEFORE anything reads it.
+    let cache_remote = cli
+        .cache_remote
+        .clone()
+        .or_else(|| std::env::var("RSTEST_CACHE_REMOTE").ok())
+        .filter(|s| !s.is_empty());
+    if (cli.cache_pull || cli.cache_push || cli.cache_compact) && cache_remote.is_none() {
+        anyhow::bail!(
+            "--cache-pull/--cache-push/--cache-compact need --cache-remote \
+             (or RSTEST_CACHE_REMOTE)"
+        );
+    }
+    // --cache-compact is a run-less maintenance mode that exits before the run;
+    // combining it with the run-time cache flags would silently skip them (and
+    // the tests), reporting green having done neither. Reject the combination.
+    if cli.cache_compact && (cli.cache_pull || cli.cache_push) {
+        anyhow::bail!(
+            "--cache-compact is a run-less maintenance mode; run it on its own, \
+             not combined with --cache-pull/--cache-push"
+        );
+    }
+    if cli.cache_compact {
+        let remote = cache_remote.as_deref().unwrap(); // validated above
+        let t = remote::transport_for(remote)?;
+        let folded = remote::compact_remote(t.as_ref())
+            .with_context(|| format!("compacting shared cache at {remote}"))?;
+        eprintln!("rstest: cache: compacted {folded} segment(s) into base at {remote}");
+        return Ok(0);
+    }
+    // An explicit --cache-remote FLAG with no pull/push/compact does nothing;
+    // warn rather than silently ignore it. Gate on the flag, NOT the env-resolved
+    // value: RSTEST_CACHE_REMOTE is ambient config a CI sets once, and plain runs
+    // that don't opt into pull/push must not be nagged every invocation.
+    // (cache_compact already returned above, so it can't be the requested action.)
+    if cli.cache_remote.is_some() && !cli.cache_pull && !cli.cache_push {
+        eprintln!(
+            "rstest: cache: --cache-remote is set but no --cache-pull/--cache-push \
+             (or --cache-compact) was requested; the shared cache is not being used"
+        );
+    }
+
     // CLI > [tool.rstest] > built-in defaults.
     let settings = config::rstest_settings(&std::env::current_dir()?);
 
@@ -570,9 +655,36 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
             let threshold = if settings.projects.is_some() { 1 } else { 2 };
             if projects.len() >= threshold {
+                // Each project keeps its OWN .rstest_cache (cache::file_in), and
+                // the per-run push/pull wiring lives in the single-project path
+                // that execute_monorepo bypasses — so a cache flag here would
+                // silently no-op (push) or warm the wrong root cache (pull).
+                // Fail loud instead; run rstest per project for shared caching.
+                if cli.cache_pull || cli.cache_push {
+                    anyhow::bail!(
+                        "--cache-pull/--cache-push are not supported in monorepo mode \
+                         (each project has its own .rstest_cache); run rstest per project"
+                    );
+                }
                 return execute_monorepo(cli, &args, &cwd, projects);
             }
         }
+    }
+    // --cache-pull: warm the local cache from the remote BEFORE anything reads
+    // it (scheduling, selection, the regression baseline). Placed after the
+    // monorepo guard so a monorepo run is rejected rather than pulling into the
+    // wrong (root) cache and printing a misleading success line first.
+    if cli.cache_pull {
+        let remote = cache_remote.as_deref().unwrap(); // validated at entry
+        let t = remote::transport_for(remote)?;
+        let merged = remote::pull(t.as_ref())
+            .with_context(|| format!("pulling shared cache from {remote}"))?;
+        eprintln!(
+            "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
+            merged.durations.len(),
+            merged.flakes.len()
+        );
+        remote::write_local(&merged);
     }
     let numprocesses = cli
         .numprocesses
@@ -690,6 +802,22 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             let code = run_collect_discovery(&python, &args, out)?;
             std::process::exit(code);
         }
+    }
+    // require-baseline: with the durations-regress gate active, an absent baseline
+    // (cold remote, nothing restored/pulled) is a hard error rather than the silent
+    // skip the gate would otherwise do — the dead-gate guard. Placed after the
+    // non-gating early exits (monorepo, migrate-check, collect-only) and gated on
+    // !passthrough, since the regression gate only runs on a real in-process run;
+    // pull (above) has already warmed the baseline it checks.
+    if cli.require_baseline
+        && cli.durations_regress.is_some()
+        && !passthrough
+        && durations::load().is_empty()
+    {
+        anyhow::bail!(
+            "--require-baseline: --durations-regress needs a duration baseline in \
+             .rstest_cache, but none is present (cold cache — nothing restored or pulled)"
+        );
     }
     // Json/Tap modes keep stdout a pure machine stream: no banner
     // (TAP gets its version header instead).
@@ -1204,6 +1332,36 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
+    // Before publishing, drop any coverage index left by --cache-pull: only an
+    // index covtool writes for THIS run may be pushed. Unconditional on push (not
+    // gated by --cov) so a run that produces no fresh index — no --cov at all, no
+    // --cov-context, or an empty shard — pushes an empty slice rather than
+    // re-publishing the pulled merged index as its own. Selection already
+    // consumed the pulled index earlier, so removing it now is safe.
+    if cli.cache_push {
+        let _ = std::fs::remove_file(cache::file(select::COVERAGE_INDEX_FILE));
+    }
+    // Coverage: workers save suffixed data files (pytest-cov worker mode);
+    // the orchestrator plays the xdist-master role, so combine and report.
+    // Runs BEFORE the cache-push below so this run's coverage-index slice is
+    // materialized (covtool overwrites the local index) in time to be published.
+    let mut exitstatus = outcome.exitstatus;
+    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
+        println!();
+        let status = std::process::Command::new(&python)
+            .args(["-m", "rstest_worker.covtool"])
+            .args(&args)
+            .env("PYTHONPATH", worker::worker_pythonpath())
+            // Same cache dir the Rust side reads (cache::dir()) so the index
+            // lands where load_coverage_index / --cache-push look for it.
+            .env("RSTEST_CACHE", cache::dir())
+            .status();
+        match status {
+            Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
+            Ok(_) => {}
+            Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
+        }
+    }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
@@ -1211,6 +1369,32 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);
+        // --cache-push: publish THIS run's contribution as one immutable
+        // segment (from the in-memory Run, not the merged local cache). A push
+        // failure warns but never fails an otherwise-green run.
+        if cli.cache_push {
+            let remote = cache_remote.as_deref().unwrap(); // validated at entry
+            let uid = std::env::var("RSTEST_RUN_UID").unwrap_or_default();
+            let shard_suffix = shard.map(|(k, n)| format!("-{k}of{n}")).unwrap_or_default();
+            // This run's coverage slice (covtool wrote it just above); empty for
+            // non-coverage runs. Published as the segment's cov_index.
+            let cov = remote::load_local_cov_index();
+            let seg = remote::segment_from_run(
+                format!("{uid}{shard_suffix}"),
+                started_epoch,
+                &outcome.run,
+                cov,
+            );
+            match remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg)) {
+                Ok(()) => eprintln!(
+                    "rstest: cache: pushed segment ({} duration(s), {} event(s), {} covered file(s)) to {remote}",
+                    seg.durations.len(),
+                    seg.flake_events.len(),
+                    seg.cov_index.files.len()
+                ),
+                Err(e) => eprintln!("rstest: cache: push failed: {e:#}"),
+            }
+        }
     }
     if let Some(path) = &cli.report_json {
         outcome.run.write_snapshot(
@@ -1225,22 +1409,6 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         )?;
     }
 
-    // Coverage: workers save suffixed data files (pytest-cov worker mode);
-    // the orchestrator plays the xdist-master role, so combine and report.
-    let mut exitstatus = outcome.exitstatus;
-    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
-        println!();
-        let status = std::process::Command::new(&python)
-            .args(["-m", "rstest_worker.covtool"])
-            .args(&args)
-            .env("PYTHONPATH", worker::worker_pythonpath())
-            .status();
-        match status {
-            Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
-            Ok(_) => {}
-            Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
-        }
-    }
     if duration_regressions > 0 {
         eprintln!(
             "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",

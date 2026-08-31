@@ -16,6 +16,8 @@
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
   the changed lines. Safe to delete — `--changed` falls back to the import
   graph without it; rebuild by re-running coverage with `--cov-context=test`.
+  Merges through the shared cache like the others, so sharded coverage runs
+  union into a full index (see [Shared cache backend](#shared-cache-backend)).
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
 duration-aware scheduling from the second run onward. In the repository,
@@ -25,6 +27,48 @@ add it to `.gitignore` alongside `.pytest_cache/`:
 .pytest_cache/
 .rstest_cache/
 ```
+
+The location is CWD-relative by default; set `RSTEST_CACHE` to relocate it
+(distinct from `RSTEST_CACHE_DIR`, which steers the machine-global
+interpreter-probe cache). Writes are atomic (tmp + rename), so a concurrent
+reader never sees a half-written file.
+
+## Shared cache backend
+
+Instead of hand-wiring `actions/cache` (with its per-key immutability dance and
+a dedicated refresh job), rstest can publish and warm `.rstest_cache` to a
+**shared remote** directly — see [`--cache-remote`](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push).
+
+It is **segmented, merge-on-read**: each run pushes its own immutable segment
+rather than overwriting one shared blob, so concurrent shards and PRs never
+clobber each other.
+
+```
+<remote>/
+  base.json                       # compacted merged state
+  segments/seg-<id>.json          # one immutable segment per run/shard
+```
+
+- **Pull** merges `base.json` and every segment into the local cache, per data type:
+    - *durations* — newest value per test;
+    - *flake counts* — summed per-run events, deduped by segment id so a re-pull
+      never double-counts;
+    - *coverage index* — unioned per file. Segments that agree on a file's
+      content hash merge their line→test maps; a different hash keeps the newer
+      segment's map (same-second ties broken deterministically by hash). Because
+      the shards of one run share a commit their hashes match, so their partial
+      slices **union into a full index**; if a file's content differs between
+      segments the newer wins and `--changed` falls back to the import graph for
+      that file — still correct, only coarser.
+- **Push** writes just this run's segment (`--cache-push`) — its *slice* of the
+  durations, flake events, and coverage index this run measured.
+- **Compact** (`--cache-compact`) folds segments into a new base and prunes
+  them; a segment already folded is recorded in the base's absorbed-id set, so
+  compaction is safe against concurrent pushes.
+
+The remote is a plain directory — a local path, an NFS/EFS mount, or a dir a CI
+step materializes (GitHub `download-artifact`, `aws s3 sync`). Recipes:
+[CI quickstart → Shared cache](../guides/ci-quickstart.md#shared-cache).
 
 ## `.pytest_cache/` (pytest's, shared)
 
