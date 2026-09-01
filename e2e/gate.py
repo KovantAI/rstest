@@ -674,6 +674,36 @@ def gate_lazy_collection(g, args, binary):
         r.returncode == 0 and "1 flaky" in r.stdout,
         r.stdout[-200:],
     )
+    # lazy + --only-rerun: the failure text matches the regex, so the flaky test
+    # is rerun-eligible and recovers (exercises the lazy rerun gate).
+    marker.unlink(missing_ok=True)
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "--reruns",
+        "2",
+        "--only-rerun",
+        "first attempt fails",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
+    check(
+        "lazy: --only-rerun match reruns and recovers",
+        r.returncode == 0 and "1 flaky" in r.stdout,
+        r.stdout[-200:],
+    )
+    # lazy + -x: the global maxfail trip halts dispatch and tells every worker
+    # no_more_items (bounded overshoot), same coordination as the pool path.
+    g.write("maxfail/test_maxfail.py", MAXFAIL)
+    r = g.run("maxfail", "-n", "2", "--collect", "lazy", "-x", timeout=60)
+    check(
+        "lazy: -x trips global maxfail",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-200:],
+    )
     log = g.tmp / "serial_lazy.jsonl"
     clear_e2e_log(log)
     g.write("serial/test_serial.py", SERIAL)
