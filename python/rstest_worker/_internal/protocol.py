@@ -84,4 +84,9 @@ class Connection:
     def send(self, kind: Literal["done"], payload: m.DonePayload) -> None: ...
 
     def send(self, kind: str, payload: object) -> None:
-        os.write(self._evt_fd, msgpack.packb({"kind": kind, "payload": payload}))
+        # os.write on a pipe may short-write (a large ids/locations/marks
+        # payload can exceed the pipe buffer), so loop until every byte drains;
+        # a partial frame would desync the orchestrator's msgpack stream.
+        buf = memoryview(msgpack.packb({"kind": kind, "payload": payload}))
+        while buf:
+            buf = buf[os.write(self._evt_fd, buf) :]
