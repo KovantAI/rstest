@@ -679,11 +679,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             })
             .collect();
         let dir = std::path::Path::new(cache_dir).join("v/cache");
-        if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = std::fs::write(
-                dir.join("lastfailed"),
-                serde_json::to_vec(&failed).unwrap_or_default(),
-            );
+        // Only write when serialization succeeds: a serialize error must not
+        // clobber pytest's lastfailed cache with an empty `{}`.
+        if let (Ok(()), Ok(bytes)) = (std::fs::create_dir_all(&dir), serde_json::to_vec(&failed)) {
+            let _ = std::fs::write(dir.join("lastfailed"), bytes);
         }
     }
     // Duration regression gate: must compare BEFORE durations::save
