@@ -60,7 +60,7 @@ jobs:
           rstest pins a complete, unmodified copy of pytest under
           \`python/rstest_worker/_vendor/\`. To upgrade, re-extract the new wheel
           verbatim per \`python/VENDOR.md\`, then run the full e2e gate
-          (\`python tests/gate.py\`) before merging.
+          (\`python e2e/gate.py\`) before merging.
 
           _Filed automatically by \`.github/workflows/pytest-upgrade-watch.yml\`._
           EOF

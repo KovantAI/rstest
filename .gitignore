@@ -3,10 +3,21 @@ __pycache__/
 *.pyc
 .venv/
 .rstest_cache/
+# Coverage + mutation-testing artifacts (dev-local, never committed).
+.coverage
+.coverage.*
+lcov.info
+htmlcov/
+mutants.out/
+mutants.out.old/
+# Dev planning docs (ideas parked locally; not shipped source).
+/BACKLOG.md
+/github-action-plan.md
+/mutation-testing-plan.md
+/shared-cache-plan.md
 .gate-venv/
 .gate-venv-*/
 site/
-uv.lock
 corpus/work/
 corpus/lock.json
 corpus/results.json

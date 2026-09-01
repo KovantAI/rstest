@@ -11,9 +11,9 @@ every class of them.
 ```python
 import pytest
 
+
 @pytest.mark.serial
-def test_rebinds_the_global_port():
-    ...
+def test_rebinds_the_global_port(): ...
 ```
 
 `@pytest.mark.serial` tests are excluded from the parallel phase entirely.
@@ -87,6 +87,7 @@ Tests and fixtures can read the worker they run on:
 
 ```python
 import os
+
 worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", ... ; unset at -n 0 or -n 1
 ```
 

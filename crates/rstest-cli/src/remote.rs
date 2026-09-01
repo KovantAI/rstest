@@ -23,8 +23,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cache;
-use crate::flakes::FlakeStats;
-use crate::report::Run;
+use crate::reporting::flakes::FlakeStats;
+use crate::reporting::report::Run;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
 pub const SEGMENT_SCHEMA: u32 = 1;
@@ -304,19 +304,19 @@ pub fn load_local_cov_index() -> CoverageIndex {
 /// results are skipped, matching the modules' own behavior.
 pub fn write_local(merged: &Merged) {
     if !merged.durations.is_empty() {
-        let mut d = crate::durations::load();
+        let mut d = crate::scheduling::durations::load();
         d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
         if let Ok(bytes) = serde_json::to_vec(&d) {
-            let _ = cache::write_atomic(&cache::file(crate::durations::FILE), &bytes);
+            let _ = cache::write_atomic(&cache::file(crate::scheduling::durations::FILE), &bytes);
         }
     }
     if !merged.flakes.is_empty() {
-        let mut f = crate::flakes::load();
+        let mut f = crate::reporting::flakes::load();
         for (k, v) in &merged.flakes {
             f.insert(k.clone(), *v);
         }
         if let Ok(bytes) = serde_json::to_vec(&f) {
-            let _ = cache::write_atomic(&cache::file(crate::flakes::FILE), &bytes);
+            let _ = cache::write_atomic(&cache::file(crate::reporting::flakes::FILE), &bytes);
         }
     }
     // The coverage index is regenerated each run and drives selection off the

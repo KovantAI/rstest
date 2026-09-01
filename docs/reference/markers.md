@@ -5,9 +5,9 @@
 ```python
 import pytest
 
+
 @pytest.mark.serial
-def test_binds_port_8080():
-    ...
+def test_binds_port_8080(): ...
 ```
 
 Excludes the test from the parallel phase. Serial tests run exclusively:
@@ -26,8 +26,7 @@ when to use it in [Parallel safety](../guides/parallel-safety.md).
 
 ```python
 @pytest.mark.flaky(reruns=3)
-def test_talks_to_flaky_service():
-    ...
+def test_talks_to_flaky_service(): ...
 ```
 
 Per-test rerun budget — the mark overrides a global
@@ -52,8 +51,7 @@ Reruns are coordinated by the orchestrator:
 
 ```python
 @pytest.mark.xdist_group("dbpool")
-def test_uses_shared_pool():
-    ...
+def test_uses_shared_pool(): ...
 ```
 
 Under [`--dist loadgroup`](cli.md#-dist-loadloadfileloadscopeloadgroupeach),

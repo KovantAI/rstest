@@ -8,3 +8,14 @@ exclude = ["corpus/work"]
 version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+# MSRV: the crate uses `Option::is_none_or` (stable since Rust 1.82).
+rust-version = "1.82"
+
+# Codify the lint policy CI enforces (`cargo clippy -- -D warnings`) so a local
+# `cargo clippy` denies the same set without the extra flag. Crates opt in via
+# `[lints] workspace = true`.
+[workspace.lints.rust]
+unused = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
