@@ -51,9 +51,9 @@ dev = [
 
 [tool.ruff]
 # The vendored pytest core is third-party source; never lint or format it.
-# e2e/toy holds deliberately-broken fixtures (e.g. a missing-import
-# collect-error case) that must not be linted or auto-fixed.
-extend-exclude = ["python/rstest_worker/_vendor", "e2e/toy"]
+# e2e/toy and e2e/fixtures hold deliberately-broken suites (missing imports,
+# crashing tests, doctest failures) that must not be linted or auto-fixed.
+extend-exclude = ["python/rstest_worker/_vendor", "e2e/toy", "e2e/fixtures"]
 line-length = 100
 target-version = "py310"
 

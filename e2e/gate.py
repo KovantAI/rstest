@@ -22,8 +22,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 E2E = REPO / "e2e"
+FIXTURES = E2E / "fixtures"
 
 WINDOWS = os.name == "nt"
+
+
+def fx(name: str) -> str:
+    """Load a fixture suite from e2e/fixtures/ (real .py files, not inlined
+    string blobs). The gate writes these into per-test tmp dirs via g.write."""
+    return (FIXTURES / name).read_text(encoding="utf-8")
 
 
 def clear_hook_log(base: Path):
@@ -174,18 +181,7 @@ def parse_ndjson(text):
     return ok, objs
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    default_binary = REPO / "target" / "release" / ("rstest.exe" if WINDOWS else "rstest")
-    ap.add_argument("--binary", default=str(default_binary))
-    ap.add_argument("--venv", default=str(REPO / ".gate-venv"))
-    args = ap.parse_args()
-
-    binary = Path(args.binary).resolve()
-    assert binary.exists(), f"binary missing: {binary} (cargo build --release first)"
-    make_venv(Path(args.venv))
-    g = Gate(binary, Path(args.venv).resolve())
-
+def gate_01_basics(g, args, binary):
     print("== basics ==")
     g.write("basic/test_basic.py", BASIC)
     r = g.run("basic/test_basic.py", "-n", "2")
@@ -206,6 +202,8 @@ def main():
     r = g.run("empty")
     check("no tests exit 5", r.returncode in (4, 5), f"rc={r.returncode}")
 
+
+def gate_02_collection_error_semantics(g, args, binary):
     print("== collection error semantics ==")
     g.write("broken/test_broken.py", "import nonexistent_module_xyz\n")
     r = g.run("broken/test_broken.py", "-n", "0")
@@ -218,6 +216,8 @@ def main():
         f"rc={r.returncode} " + r.stdout[-200:],
     )
 
+
+def gate_03_output_styles(g, args, binary):
     print("== output styles ==")
     # --output bar (pytest-sugar-style): per-test lines + inline failures.
     # Non-tty here, so the live footer self-disables; the per-test lines and
@@ -336,6 +336,8 @@ def main():
         r.stdout[-400:],
     )
 
+
+def gate_04_multiprocessing_spawn_children(g, args, binary):
     print("== multiprocessing-spawn children ==")
     # spawn-mode children re-import the worker's __main__ as __mp_main__
     # (runpy, no package context): the worker entry must import absolutely,
@@ -345,6 +347,8 @@ def main():
     r = g.run("mpspawn", "-n", "2")
     check("mp-spawn under pool", "2 passed" in r.stdout, r.stdout[-300:])
 
+
+def gate_05_crash_handling(g, args, binary):
     print("== crash handling ==")
     g.write("crash/test_crash.py", CRASH)
     r = g.run("crash", "-n", "2")
@@ -356,6 +360,8 @@ def main():
     r = g.run("crashloop", "-n", "2", timeout=60)
     check("crash-loop terminates", r.returncode != 0 and "passed" in r.stdout, r.stdout[-200:])
 
+
+def gate_06_report_json_contract(g, args, binary):
     print("== report-json contract ==")
     rj = g.tmp / "contract.json"
     g.run("basic/test_basic.py", "-n", "2", "--report-json", str(rj))
@@ -397,6 +403,8 @@ def main():
         str(crashed),
     )
 
+
+def gate_07_collect_only_discovery_json(g, args, binary):
     print("== collect-only discovery json ==")
     g.write("disco/test_disco.py", DISCO)
     dj = g.tmp / "disco.json"
@@ -443,6 +451,8 @@ def main():
     r = g.run("xdistenv", "-n", "2")
     check("PYTEST_XDIST_WORKER + testrun_uid", "3 passed" in r.stdout, r.stdout[-300:])
 
+
+def gate_08_pytest_randomly_real_plugin(g, args, binary):
     print("== pytest-randomly (real plugin) ==")
     # Isolated venv: pytest-randomly shuffles collection order, so installing
     # it in the shared venv would break the source-order / lazy-order checks.
@@ -479,6 +489,8 @@ def main():
     r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
     check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
+
+def gate_09_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
     print("== pytest-rerunfailures + xdist (no sock_port KeyError) ==")
     # rerunfailures+xdist reads workerinput["sock_port"], a key only an xdist
     # master sets; with no master rstest KeyError'd at -n>=2. rstest now drops
@@ -518,6 +530,8 @@ def main():
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
     )
 
+
+def gate_10_pytest_retry_xdist_server_port_self_prov(g, args, binary):
     print("== pytest-retry + xdist (server_port self-provision) ==")
     # pytest-retry gates master vs worker on xdist + numprocesses; rstest keeps
     # numprocesses visible so each worker self-provisions a ReportServer (master
@@ -559,6 +573,8 @@ def main():
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
     )
 
+
+def gate_11_interpreter_probe_cache_heals_after_deps(g, args, binary):
     print("== interpreter probe cache (heals after deps installed) ==")
     # Regression: a NEGATIVE probe (interpreter present but worker shim not
     # importable, e.g. msgpack missing) must NOT be cached. The cache keys on
@@ -589,6 +605,8 @@ def main():
         f"rc={r.returncode} " + r.stderr[-200:] + " || " + r.stdout[-200:],
     )
 
+
+def gate_12_lazy_collection(g, args, binary):
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
     # initial collection pass in any worker.
@@ -657,6 +675,8 @@ def main():
         not overlap and len({s["worker"] for s in lser}) == 1,
     )
 
+
+def gate_13_serial_mark(g, args, binary):
     print("== serial mark ==")
     g.write("serial/test_serial.py", SERIAL)
     log = g.tmp / "serial.jsonl"
@@ -675,6 +695,8 @@ def main():
         min(s["start"] for s in serial) >= max(p["end"] for p in par),
     )
 
+
+def gate_14_failure_output(g, args, binary):
     print("== failure output ==")
     g.write("sections/test_sections.py", SECTIONS)
     r = g.run("sections", "-n", "2")
@@ -683,6 +705,8 @@ def main():
         "Captured stdout call" in r.stdout and "the database said no" in r.stdout,
     )
 
+
+def gate_15_x_maxfail(g, args, binary):
     print("== -x / --maxfail ==")
     g.write("maxfail/test_maxfail.py", MAXFAIL)
     r = g.run("maxfail", "-n", "2", "-x", timeout=60)
@@ -691,6 +715,8 @@ def main():
     check("-x stops early", "1 failed" in r.stdout and ran_x < 8, r.stdout[-120:])
     check("full run unaffected", "8 passed" in full.stdout, full.stdout[-120:])
 
+
+def gate_16_lf(g, args, binary):
     print("== --lf ==")
     lf = g.tmp / "lf"
     shutil.rmtree(lf / ".pytest_cache", ignore_errors=True)
@@ -703,6 +729,8 @@ def main():
         r.stdout[-200:],
     )
 
+
+def gate_17_junitxml(g, args, binary):
     print("== junitxml ==")
     xml_path = g.tmp / "junit.xml"
     g.run("maxfail", "-n", "2", "--junitxml", str(xml_path), timeout=60)
@@ -713,6 +741,8 @@ def main():
         str(dict(ts.attrib) if ts is not None else None),
     )
 
+
+def gate_18_shard_k_n(g, args, binary):
     print("== --shard K/N ==")
     g.write("shardsuite/test_a.py", "".join(f"def test_a{i}(): assert True\n" for i in range(4)))
     g.write("shardsuite/test_b.py", "".join(f"def test_b{i}(): assert True\n" for i in range(4)))
@@ -768,6 +798,8 @@ def main():
     all_files = set(f1) | set(f2)
     check("shard loadfile: buckets cover both files", len(all_files) == 2, f"files={all_files}")
 
+
+def gate_19_dist_each(g, args, binary):
     print("== --dist each ==")
     r = g.run("basic/test_basic.py", "-n", "2", "--dist", "each")
     check("each: counts are per-worker", "4 failed, 4 passed" in r.stdout, r.stdout[-200:])
@@ -784,6 +816,8 @@ def main():
         r.stderr[-200:],
     )
 
+
+def gate_20_dist_validation(g, args, binary):
     print("== --dist validation ==")
     # An invalid --dist value must be rejected the same way on every path;
     # the small-suite/lazy path used to accept garbage silently (exit 0).
@@ -800,6 +834,8 @@ def main():
         f"rc={r.returncode} " + r.stderr[-200:],
     )
 
+
+def gate_21_testnodedown_for_crashed_workers(g, args, binary):
     print("== testnodedown for crashed workers ==")
     g.write("nodecrash/conftest.py", NODECRASH_CONFTEST)
     g.write("nodecrash/test_crashy.py", NODECRASH_TEST)
@@ -816,6 +852,8 @@ def main():
     )
     check("crash still attributed", "crashed while running" in r.stdout, r.stdout[-300:])
 
+
+def gate_22_xdist_master_side_hooks(g, args, binary):
     print("== xdist master-side hooks ==")
     g.write("nodehooks/conftest.py", NODEHOOKS_CONFTEST)
     g.write("nodehooks/test_node.py", NODEHOOKS_TEST)
@@ -831,6 +869,8 @@ def main():
     )
     check("testnodeready fired", "ready:gw0" in log_text, log_text)
 
+
+def gate_23_one_arg_pytest_testnodedown(g, args, binary):
     print("== one-arg pytest_testnodedown ==")
     g.write("nodeonearg/conftest.py", NODEONEARG_CONFTEST)
     # Two tests so both workers get real work (scheduling may still put both
@@ -847,6 +887,8 @@ def main():
         oa_text + "\n" + r.stdout[-300:],
     )
 
+
+def gate_24_durations(g, args, binary):
     print("== --durations ==")
     g.write("dur/test_dur.py", DURATIONS_FIXTURE)
     r = g.run("dur", "-n", "2", "--durations=5")
@@ -866,6 +908,8 @@ def main():
     r = g.run("dur", "-n", "2")
     check("no durations block unrequested", "slowest" not in r.stdout, r.stdout[-200:])
 
+
+def gate_25_doctest_modules(g, args, binary):
     print("== --doctest-modules ==")
     g.write("doctests/mymod.py", DOCTEST_MOD)
     g.write("doctests/test_real.py", "def test_plain(): assert True\n")
@@ -883,6 +927,8 @@ def main():
     r = g.run(".", "-n", "0", "--doctest-modules", cwd=g.tmp / "doctests")
     check("doctest-modules -n 0", "1 failed, 2 passed" in r.stdout, r.stdout[-200:])
 
+
+def gate_26_monorepo(g, args, binary):
     print("== monorepo ==")
     mono = g.tmp / "mono"
     shutil.rmtree(mono, ignore_errors=True)
@@ -1221,12 +1267,16 @@ def main():
         r.stdout[:300],
     )
 
+
+def gate_27_warnings(g, args, binary):
     print("== warnings ==")
     g.write("warn/test_warn.py", WARN)
     r = g.run("warn", "-n", "2")
     check("warnings summary section", "warnings summary" in r.stdout and "UserWarning" in r.stdout)
     check("warnings in counts", "warnings in" in r.stdout, r.stdout[-120:])
 
+
+def gate_28_doctor(g, args, binary):
     print("== doctor ==")
     g.write("doc/test_doc.py", DOCTOR)
     r = g.run("doc", "-n", "2", "--doctor")
@@ -1311,6 +1361,8 @@ def main():
         f"rc={r.returncode} " + r.stderr[-200:],
     )
 
+
+def gate_29_auto_worker_capping(g, args, binary):
     print("== auto worker capping ==")
     for i in range(6):
         g.write(f"kovstyle/mod{i}_test.py", "def test_a(): assert True\n")
@@ -1328,6 +1380,8 @@ def main():
         r.stdout[:100],
     )
 
+
+def gate_30_coverage(g, args, binary):
     print("== coverage ==")
     g.write(
         "cov/mypkg/__init__.py",
@@ -1366,6 +1420,8 @@ def main():
         r.stdout[-200:],
     )
 
+
+def gate_31_coverage_contexts_line_test_index_cov_co(g, args, binary):
     print("== coverage contexts + line->test index (--cov-context) ==")
     # Per-test contexts must survive the PARALLEL merge (tests land on different
     # workers, yet each covered line keeps its context), and --cov-context must
@@ -1442,6 +1498,8 @@ def main():
         f"rc={r.returncode}",
     )
 
+
+def gate_32_smart_selection(g, args, binary):
     print("== smart selection ==")
     sp = g.tmp / "selproj"
     g.write("selproj/pkg/__init__.py", "")
@@ -1515,6 +1573,8 @@ def main():
     )
     (sp / "tests" / "test_new.py").unlink()
 
+
+def gate_33_coverage_based_selection_changed_uses_th(g, args, binary):
     print("== coverage-based selection (--changed uses the cov index) ==")
     # Warm a line->test index, then prove --changed narrows to only the tests
     # whose recorded coverage hit the changed lines - tighter than the
@@ -1702,7 +1762,10 @@ def main():
     subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
+
+def gate_34_changed_selection_files_with_no_line_dif(g, args, binary):
     print("== changed selection: files with no line-diff ==")
+    cs = g.tmp / "covsel"  # git repo built in gate_33_coverage_based_selection
     # `git diff -U0` emits no hunk for deletions, binaries, and renames, so
     # parse_diff_hunks drops them; a --name-only union recovers them for the
     # fallback. A deleted test file must be skipped, not handed to pytest.
@@ -1765,6 +1828,8 @@ def main():
     subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
     subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
 
+
+def gate_35_coverage_selection_under_autocrlf_crlf_w(g, args, binary):
     print("== coverage selection under autocrlf (CRLF worktree, LF blob) ==")
     # Regression: autocrlf stores the blob LF while the worktree is CRLF. The
     # index hash (worktree, Python) and drift check (blob, Rust) must agree once
@@ -1835,6 +1900,8 @@ def main():
         f"{got} || {r.stderr[-150:]}",
     )
 
+
+def gate_36_shuffle(g, args, binary):
     print("== shuffle ==")
     for i in range(6):
         g.write(f"shuf/test_s{i}.py", f"def test_s{i}(): assert True\n")
@@ -1860,7 +1927,10 @@ def main():
         f"rc={r.returncode} " + r.stderr[-200:],
     )
 
+
+def gate_37_duration_regression_gate(g, args, binary):
     print("== duration regression gate ==")
+    sp = g.tmp / "selproj"  # git repo built in gate_32_smart_selection (PR-base block below)
     g.write(
         "dreg/test_d.py",
         "import os, time\n\n"
@@ -1986,6 +2056,8 @@ def main():
         f"rc={r.returncode} " + r.stderr[-300:],
     )
 
+
+def gate_38_tool_rstest_config(g, args, binary):
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)
@@ -2007,6 +2079,8 @@ def main():
         True,  # asserted by 'tool.rstest defaults applied': 1 item, rerun delivered post-drain
     )
 
+
+def gate_39_flaky_reruns(g, args, binary):
     print("== flaky reruns ==")
     g.write("flaky/test_flaky.py", FLAKY)
     fdir = g.tmp / "flaky"
@@ -2084,7 +2158,11 @@ def main():
         "flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:]
     )
 
+
+def gate_40_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
     print("== flaky-aware reruns (--reruns-only-known-flaky) ==")
+    fdir = g.tmp / "flaky"  # flaky/test_flaky.py written in gate_39_flaky_reruns
+    marker = g.tmp / "flaky_marker"
     # Gate reruns on prior flaky history so a deterministic mass-failure
     # doesn't burn the budget. Fixture: test_flaky_once fails its first
     # attempt then passes; nodeid is `test_flaky.py::test_flaky_once`.
@@ -2302,6 +2380,8 @@ def main():
         r.stdout[-300:],
     )
 
+
+def gate_41_quarantine(g, args, binary):
     print("== quarantine ==")
     g.write(
         "quar/test_q.py",
@@ -2346,6 +2426,8 @@ def main():
         r.stdout[-400:],
     )
 
+
+def gate_42_loadscope_loadgroup(g, args, binary):
     print("== loadscope / loadgroup ==")
     g.write("scopes/test_sc_a.py", SCOPE_A)
     g.write("scopes/test_sc_b.py", SCOPE_B)
@@ -2373,6 +2455,8 @@ def main():
                 str(dict(by)),
             )
 
+
+def gate_43_flaky_marks_only_rerun(g, args, binary):
     print("== flaky marks / only-rerun ==")
     g.write("marks/test_marks.py", MARKS)
     mk = g.tmp / "marks_marker"
@@ -2412,6 +2496,8 @@ def main():
         f"count={cnt.read_text()} " + r.stdout[-160:],
     )
 
+
+def gate_44_worker_timeout_watchdog(g, args, binary):
     print("== worker-timeout watchdog ==")
     g.write("hang/test_hang.py", HANG)
     r = g.run("test_hang.py", "-n", "2", "--worker-timeout", "3", cwd=g.tmp / "hang", timeout=60)
@@ -2421,6 +2507,8 @@ def main():
         r.stdout[-300:],
     )
 
+
+def gate_45_watch_mode(g, args, binary):
     print("== watch mode ==")
     wd = g.tmp / "watch"
     wd.mkdir(exist_ok=True)
@@ -2490,419 +2578,104 @@ def main():
     finally:
         proc.kill()
 
+
+def main():
+    ap = argparse.ArgumentParser()
+    default_binary = REPO / "target" / "release" / ("rstest.exe" if WINDOWS else "rstest")
+    ap.add_argument("--binary", default=str(default_binary))
+    ap.add_argument("--venv", default=str(REPO / ".gate-venv"))
+    args = ap.parse_args()
+
+    binary = Path(args.binary).resolve()
+    assert binary.exists(), f"binary missing: {binary} (cargo build --release first)"
+    make_venv(Path(args.venv))
+    g = Gate(binary, Path(args.venv).resolve())
+
+    sections = (
+        gate_01_basics,
+        gate_02_collection_error_semantics,
+        gate_03_output_styles,
+        gate_04_multiprocessing_spawn_children,
+        gate_05_crash_handling,
+        gate_06_report_json_contract,
+        gate_07_collect_only_discovery_json,
+        gate_08_pytest_randomly_real_plugin,
+        gate_09_pytest_rerunfailures_xdist_no_sock_port_,
+        gate_10_pytest_retry_xdist_server_port_self_prov,
+        gate_11_interpreter_probe_cache_heals_after_deps,
+        gate_12_lazy_collection,
+        gate_13_serial_mark,
+        gate_14_failure_output,
+        gate_15_x_maxfail,
+        gate_16_lf,
+        gate_17_junitxml,
+        gate_18_shard_k_n,
+        gate_19_dist_each,
+        gate_20_dist_validation,
+        gate_21_testnodedown_for_crashed_workers,
+        gate_22_xdist_master_side_hooks,
+        gate_23_one_arg_pytest_testnodedown,
+        gate_24_durations,
+        gate_25_doctest_modules,
+        gate_26_monorepo,
+        gate_27_warnings,
+        gate_28_doctor,
+        gate_29_auto_worker_capping,
+        gate_30_coverage,
+        gate_31_coverage_contexts_line_test_index_cov_co,
+        gate_32_smart_selection,
+        gate_33_coverage_based_selection_changed_uses_th,
+        gate_34_changed_selection_files_with_no_line_dif,
+        gate_35_coverage_selection_under_autocrlf_crlf_w,
+        gate_36_shuffle,
+        gate_37_duration_regression_gate,
+        gate_38_tool_rstest_config,
+        gate_39_flaky_reruns,
+        gate_40_flaky_aware_reruns_reruns_only_known_fla,
+        gate_41_quarantine,
+        gate_42_loadscope_loadgroup,
+        gate_43_flaky_marks_only_rerun,
+        gate_44_worker_timeout_watchdog,
+        gate_45_watch_mode,
+    )
+    for _section in sections:
+        _section(g, args, binary)
+
     print(f"\n{PASS} ok, {len(FAIL)} failed")
     if FAIL:
         print("FAILED:", ", ".join(FAIL))
         sys.exit(1)
 
 
-LAZY_CONFTEST = """
-import pytest
-
-@pytest.fixture(scope="session")
-def sess_counter(request):
-    request.config._inits = getattr(request.config, "_inits", 0) + 1
-    return request.config._inits
-"""
-
-LAZY_SESSION_A = """
-def test_a1(sess_counter):
-    assert sess_counter == 1
-
-def test_a2(sess_counter):
-    assert sess_counter == 1
-"""
-
-LAZY_SESSION_B = """
-def test_b1(sess_counter):
-    assert sess_counter == 1
-"""
-
-MP_SPAWN = """
-import multiprocessing as mp
-
-def _sq(x):
-    return x * x
-
-def test_spawn_pool():
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(2) as pool:
-        assert pool.map(_sq, [1, 2, 3]) == [1, 4, 9]
-
-def test_spawn_process():
-    ctx = mp.get_context("spawn")
-    q = ctx.Queue()
-    p = ctx.Process(target=q.put, args=(42,))
-    p.start()
-    assert q.get(timeout=30) == 42
-    p.join()
-"""
-
-DISCO = """
-import pytest
-
-
-def test_one():
-    assert True
-
-
-def test_two():
-    assert True
-
-
-@pytest.mark.serial
-def test_ser():
-    assert True
-
-
-@pytest.mark.parametrize("x", [1, 2])
-def test_p(x):
-    assert x
-"""
-
-BASIC = """
-def test_passes():
-    assert 1 + 1 == 2
-
-def test_fails():
-    assert 1 + 1 == 3, "math broke"
-
-def test_error():
-    raise RuntimeError("boom")
-
-def test_also_passes():
-    assert "abc".upper() == "ABC"
-"""
-
-# Hard-crash a worker mid-test, cross-platform: POSIX SIGKILL (uncatchable,
-# instant), os._exit elsewhere (no SIGKILL on Windows). Either way the worker
-# pipe closes abruptly -> the runner sees EOF and reports a crash.
-HARD_CRASH = """
-import os, signal
-
-
-def _hard_crash():
-    sig = getattr(signal, "SIGKILL", None)
-    if sig is not None:
-        os.kill(os.getpid(), sig)
-    os._exit(137)
-"""
-
-CRASH = (
-    HARD_CRASH
-    + """
-def test_before_a(): assert True
-def test_before_b(): assert True
-
-def test_killer():
-    _hard_crash()
-
-def test_after_a(): assert True
-def test_after_b(): assert True
-def test_after_c(): assert True
-"""
-)
-
-CRASHLOOP = (
-    HARD_CRASH
-    + """
-def test_k1(): _hard_crash()
-def test_k2(): _hard_crash()
-def test_k3(): _hard_crash()
-def test_k4(): _hard_crash()
-def test_k5(): _hard_crash()
-def test_k6(): _hard_crash()
-def test_ok(): assert True
-"""
-)
-
-SERIAL = """
-import json, os, time
-import pytest
-
-def _log(name):
-    start = time.monotonic()
-    time.sleep(0.15)
-    # Per-worker file: cross-process append is not atomic on Windows, so a
-    # shared log tears into blank/partial lines. One file per worker = one
-    # writer per file = no contention.
-    path = os.environ["RSTEST_E2E_LOG"] + "." + (os.environ.get("RSTEST_WORKER_ID") or "main")
-    with open(path, "a") as f:
-        f.write(json.dumps({
-            "name": name,
-            "worker": os.environ.get("RSTEST_WORKER_ID"),
-            "start": start,
-            "end": time.monotonic(),
-        }) + "\\n")
-
-def test_par_a(): _log("par_a")
-def test_par_b(): _log("par_b")
-def test_par_c(): _log("par_c")
-def test_par_d(): _log("par_d")
-def test_par_e(): _log("par_e")
-def test_par_f(): _log("par_f")
-
-@pytest.mark.serial
-def test_serial_one(): _log("serial_one")
-
-@pytest.mark.serial
-def test_serial_two(): _log("serial_two")
-"""
-
-SECTIONS = """
-def test_prints_and_fails():
-    print("DEBUG: the database said no")
-    assert False
-"""
-
-MAXFAIL = """
-import time
-
-def test_fail_fast():
-    assert False
-
-def test_s1(): time.sleep(0.3)
-def test_s2(): time.sleep(0.3)
-def test_s3(): time.sleep(0.3)
-def test_s4(): time.sleep(0.3)
-def test_s5(): time.sleep(0.3)
-def test_s6(): time.sleep(0.3)
-def test_s7(): time.sleep(0.3)
-def test_s8(): time.sleep(0.3)
-"""
-
-LF = """
-def test_ok_one(): assert True
-def test_ok_two(): assert True
-def test_flaky_not(): assert False
-"""
-
-NODECRASH_CONFTEST = '\nimport os\nimport uuid\n\nimport pytest\n\n\ndef pytest_addhooks(pluginmanager):\n    class XdistSpecs:\n        @pytest.hookspec\n        def pytest_configure_node(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodedown(self, node, error): ...\n\n    pluginmanager.add_hookspecs(XdistSpecs)\n\n\ndef _log(line):\n    path = os.environ.get("NODE_HOOK_LOG")\n    if path:\n        with open(path + "." + str(os.getpid()), "a") as f:\n            f.write(line + "\\n")\n\n\nclass XDistHooks:\n    def pytest_configure_node(self, node):\n        ident = "res_%s_%s" % (node.gateway.id, uuid.uuid4().hex[:6])\n        node.workerinput["resource_ident"] = ident\n        _log("up:" + ident)\n\n    def pytest_testnodedown(self, node, error):\n        _log("down:" + node.workerinput["resource_ident"])\n\n\ndef pytest_configure(config):\n    config.pluginmanager.register(XDistHooks())\n'  # noqa: E501
-
-NODECRASH_TEST = (
-    HARD_CRASH
-    + "\nimport time\n\n\ndef test_a(): time.sleep(0.05)\ndef test_b(): time.sleep(0.05)\n\n\ndef test_killer():\n    _hard_crash()\n\n\ndef test_c(): time.sleep(0.05)\ndef test_d(): time.sleep(0.05)\ndef test_e(): time.sleep(0.05)\n"  # noqa: E501
-)
-
-NODEHOOKS_CONFTEST = '\nimport os\n\nimport pytest\n\n\ndef pytest_addhooks(pluginmanager):\n    # Real suites get these specs from pytest-xdist; declare them the\n    # same way so this fixture is hermetic.\n    class XdistSpecs:\n        @pytest.hookspec\n        def pytest_configure_node(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodeready(self, node): ...\n\n        @pytest.hookspec\n        def pytest_testnodedown(self, node, error): ...\n\n    pluginmanager.add_hookspecs(XdistSpecs)\n\n\ndef _log(line):\n    path = os.environ.get("NODE_HOOK_LOG")\n    if path:\n        with open(path + "." + str(os.getpid()), "a") as f:\n            f.write(line + "\\n")\n\n\nclass XDistHooks:\n    # the sqlalchemy pattern: master fills workerinput per node\n    def pytest_configure_node(self, node):\n        node.workerinput["follower_ident"] = "follower_" + node.gateway.id\n\n    def pytest_testnodeready(self, node):\n        _log("ready:" + node.gateway.id)\n\n    def pytest_testnodedown(self, node, error):\n        _log("down:" + node.workerinput["follower_ident"])\n\n\ndef pytest_configure(config):\n    config.pluginmanager.register(XDistHooks())\n    # read it back IMMEDIATELY (sqlalchemy does exactly this): only a\n    # synchronous configure_node call at registration time satisfies it\n    if hasattr(config, "workerinput"):\n        config._follower_ident = config.workerinput["follower_ident"]\n'  # noqa: E501
-
-NODEHOOKS_TEST = '\ndef test_ident_present(request):\n    assert request.config._follower_ident.startswith("follower_gw")\n\n\ndef test_workerinput_kept(request):\n    assert request.config.workerinput["follower_ident"] == request.config._follower_ident\n'  # noqa: E501
-
-# pytest-html (via pytest-metadata) ships the one-arg form
-# `pytest_testnodedown(node)`. xdist's hookspec is (node, error); rstest must
-# call it without `error=` or it TypeErrors and the HTML report is lost.
-NODEONEARG_CONFTEST = """
-import os
-
-import pytest
-
-
-def pytest_addhooks(pluginmanager):
-    class XdistSpecs:
-        @pytest.hookspec
-        def pytest_configure_node(self, node): ...
-
-        @pytest.hookspec
-        def pytest_testnodedown(self, node, error): ...
-
-    pluginmanager.add_hookspecs(XdistSpecs)
-
-
-def _log(line):
-    path = os.environ.get("NODE_HOOK_LOG")
-    if path:
-        with open(path + "." + str(os.getpid()), "a") as f:
-            f.write(line + "\\n")
-
-
-class OneArgHooks:
-    def pytest_configure_node(self, node):
-        node.workerinput["oa_ident"] = "oa_" + node.gateway.id
-
-    # ONE arg, no `error` - the pytest-html / pytest-metadata signature.
-    def pytest_testnodedown(self, node):
-        _log("down:" + node.workerinput["oa_ident"])
-
-
-def pytest_configure(config):
-    config.pluginmanager.register(OneArgHooks())
-"""
-
-DURATIONS_FIXTURE = """
-import time
-
-def test_sleepy(): time.sleep(0.3)
-def test_quick(): pass
-"""
-
-DOCTEST_MOD = "def add(a, b):\n    '''\n    >>> add(2, 3)\n    5\n    '''\n    return a + b\n\ndef sub(a, b):\n    '''\n    >>> sub(5, 3)\n    1\n    '''\n    return a - b\n"  # noqa: E501
-
-WARN = """
-import warnings
-
-def test_warns():
-    warnings.warn("noisy thing", UserWarning)
-
-def test_clean():
-    assert True
-"""
-
-FLAKY = """
-import os
-import pathlib
-
-
-def test_flaky_once():
-    marker = pathlib.Path(os.environ["FLAKY_MARKER"])
-    if not marker.exists():
-        marker.write_text("attempted")
-        assert False, "first attempt fails"
-    assert True
-
-
-def test_stable():
-    assert True
-"""
-
-CRASHFLAKY = (
-    HARD_CRASH
-    + """
-import pathlib
-
-
-def test_crashes_once():
-    marker = pathlib.Path(os.environ["FLAKY_MARKER"])
-    if not marker.exists():
-        marker.write_text("crashed")
-        _hard_crash()
-    assert True
-
-
-def test_other():
-    assert True
-"""
-)
-
-SCOPE_A = """
-import json
-import os
-
-
-def _log(name):
-    w = os.environ["RSTEST_WORKER_ID"]
-    with open(os.environ["SLOG"] + "." + str(os.getpid()), "a") as f:
-        f.write(json.dumps({"t": name, "w": w}) + "\\n")
-
-
-class TestAlpha:
-    def test_a1(self): _log("alpha.a1")
-    def test_a2(self): _log("alpha.a2")
-    def test_a3(self): _log("alpha.a3")
-
-
-class TestBeta:
-    def test_b1(self): _log("beta.b1")
-    def test_b2(self): _log("beta.b2")
-    def test_b3(self): _log("beta.b3")
-"""
-
-SCOPE_B = """
-import json
-import os
-
-import pytest
-
-
-def _log(name):
-    w = os.environ["RSTEST_WORKER_ID"]
-    with open(os.environ["SLOG"] + "." + str(os.getpid()), "a") as f:
-        f.write(json.dumps({"t": name, "w": w}) + "\\n")
-
-
-@pytest.mark.xdist_group("dbpool")
-def test_g1(): _log("grp.g1")
-
-
-def test_free1(): _log("free.1")
-def test_free2(): _log("free.2")
-
-
-@pytest.mark.xdist_group("dbpool")
-def test_g2(): _log("grp.g2")
-"""
-
-SCOPE_C = """
-import json
-import os
-
-import pytest
-
-
-def _log(name):
-    w = os.environ["RSTEST_WORKER_ID"]
-    with open(os.environ["SLOG"] + "." + str(os.getpid()), "a") as f:
-        f.write(json.dumps({"t": name, "w": w}) + "\\n")
-
-
-@pytest.mark.xdist_group("dbpool")
-def test_g3(): _log("grp.g3")
-
-
-def test_free3(): _log("free.3")
-"""
-
-MARKS = """
-import os
-import pathlib
-
-import pytest
-
-
-@pytest.mark.flaky(reruns=2)
-def test_marked_flaky():
-    marker = pathlib.Path(os.environ["MK"])
-    if not marker.exists():
-        marker.write_text("x")
-        assert False, "transient blip"
-    assert True
-
-
-def test_unmarked_fails():
-    cnt = pathlib.Path(os.environ["CNT"])
-    n = int(cnt.read_text()) if cnt.exists() else 0
-    cnt.write_text(str(n + 1))
-    assert False, "permanent failure"
-
-
-def test_ok():
-    assert True
-"""
-
-HANG = """
-import time
-
-
-def test_quick_a():
-    assert True
-
-
-def test_hangs_forever():
-    time.sleep(600)
-
-
-def test_quick_b():
-    assert True
-"""
-
-DOCTOR = """
-import time
-
-def test_sleepy():
-    time.sleep(1.2)
-
-def test_quick():
-    assert True
-"""
+# Fixture suites live as real files under e2e/fixtures/, loaded by name.
+BASIC = fx("basic.py")
+CRASH = fx("crash.py")
+CRASHFLAKY = fx("crashflaky.py")
+CRASHLOOP = fx("crashloop.py")
+DISCO = fx("disco.py")
+DOCTEST_MOD = fx("doctest_mod.py")
+DOCTOR = fx("doctor.py")
+DURATIONS_FIXTURE = fx("durations_fixture.py")
+FLAKY = fx("flaky.py")
+HANG = fx("hang.py")
+LAZY_CONFTEST = fx("lazy_conftest.py")
+LAZY_SESSION_A = fx("lazy_session_a.py")
+LAZY_SESSION_B = fx("lazy_session_b.py")
+LF = fx("lf.py")
+MARKS = fx("marks.py")
+MAXFAIL = fx("maxfail.py")
+MP_SPAWN = fx("mp_spawn.py")
+NODECRASH_CONFTEST = fx("nodecrash_conftest.py")
+NODECRASH_TEST = fx("nodecrash_test.py")
+NODEHOOKS_CONFTEST = fx("nodehooks_conftest.py")
+NODEHOOKS_TEST = fx("nodehooks_test.py")
+NODEONEARG_CONFTEST = fx("nodeonearg_conftest.py")
+SCOPE_A = fx("scope_a.py")
+SCOPE_B = fx("scope_b.py")
+SCOPE_C = fx("scope_c.py")
+SECTIONS = fx("sections.py")
+SERIAL = fx("serial.py")
+WARN = fx("warn.py")
 
 
 if __name__ == "__main__":
