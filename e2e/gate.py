@@ -181,7 +181,7 @@ def parse_ndjson(text):
     return ok, objs
 
 
-def gate_01_basics(g, args, binary):
+def gate_basics(g, args, binary):
     print("== basics ==")
     g.write("basic/test_basic.py", BASIC)
     r = g.run("basic/test_basic.py", "-n", "2")
@@ -203,7 +203,7 @@ def gate_01_basics(g, args, binary):
     check("no tests exit 5", r.returncode in (4, 5), f"rc={r.returncode}")
 
 
-def gate_02_collection_error_semantics(g, args, binary):
+def gate_collection_error_semantics(g, args, binary):
     print("== collection error semantics ==")
     g.write("broken/test_broken.py", "import nonexistent_module_xyz\n")
     r = g.run("broken/test_broken.py", "-n", "0")
@@ -217,7 +217,7 @@ def gate_02_collection_error_semantics(g, args, binary):
     )
 
 
-def gate_03_output_styles(g, args, binary):
+def gate_output_styles(g, args, binary):
     print("== output styles ==")
     # --output bar (pytest-sugar-style): per-test lines + inline failures.
     # Non-tty here, so the live footer self-disables; the per-test lines and
@@ -337,7 +337,7 @@ def gate_03_output_styles(g, args, binary):
     )
 
 
-def gate_04_multiprocessing_spawn_children(g, args, binary):
+def gate_multiprocessing_spawn_children(g, args, binary):
     print("== multiprocessing-spawn children ==")
     # spawn-mode children re-import the worker's __main__ as __mp_main__
     # (runpy, no package context): the worker entry must import absolutely,
@@ -348,7 +348,7 @@ def gate_04_multiprocessing_spawn_children(g, args, binary):
     check("mp-spawn under pool", "2 passed" in r.stdout, r.stdout[-300:])
 
 
-def gate_05_crash_handling(g, args, binary):
+def gate_crash_handling(g, args, binary):
     print("== crash handling ==")
     g.write("crash/test_crash.py", CRASH)
     r = g.run("crash", "-n", "2")
@@ -361,7 +361,7 @@ def gate_05_crash_handling(g, args, binary):
     check("crash-loop terminates", r.returncode != 0 and "passed" in r.stdout, r.stdout[-200:])
 
 
-def gate_06_report_json_contract(g, args, binary):
+def gate_report_json_contract(g, args, binary):
     print("== report-json contract ==")
     rj = g.tmp / "contract.json"
     g.run("basic/test_basic.py", "-n", "2", "--report-json", str(rj))
@@ -404,7 +404,7 @@ def gate_06_report_json_contract(g, args, binary):
     )
 
 
-def gate_07_collect_only_discovery_json(g, args, binary):
+def gate_collect_only_discovery_json(g, args, binary):
     print("== collect-only discovery json ==")
     g.write("disco/test_disco.py", DISCO)
     dj = g.tmp / "disco.json"
@@ -452,7 +452,7 @@ def gate_07_collect_only_discovery_json(g, args, binary):
     check("PYTEST_XDIST_WORKER + testrun_uid", "3 passed" in r.stdout, r.stdout[-300:])
 
 
-def gate_08_pytest_randomly_real_plugin(g, args, binary):
+def gate_pytest_randomly_real_plugin(g, args, binary):
     print("== pytest-randomly (real plugin) ==")
     # Isolated venv: pytest-randomly shuffles collection order, so installing
     # it in the shared venv would break the source-order / lazy-order checks.
@@ -490,7 +490,7 @@ def gate_08_pytest_randomly_real_plugin(g, args, binary):
     check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
 
-def gate_09_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
+def gate_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
     print("== pytest-rerunfailures + xdist (no sock_port KeyError) ==")
     # rerunfailures+xdist reads workerinput["sock_port"], a key only an xdist
     # master sets; with no master rstest KeyError'd at -n>=2. rstest now drops
@@ -531,7 +531,7 @@ def gate_09_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
     )
 
 
-def gate_10_pytest_retry_xdist_server_port_self_prov(g, args, binary):
+def gate_pytest_retry_xdist_server_port_self_prov(g, args, binary):
     print("== pytest-retry + xdist (server_port self-provision) ==")
     # pytest-retry gates master vs worker on xdist + numprocesses; rstest keeps
     # numprocesses visible so each worker self-provisions a ReportServer (master
@@ -574,7 +574,7 @@ def gate_10_pytest_retry_xdist_server_port_self_prov(g, args, binary):
     )
 
 
-def gate_11_interpreter_probe_cache_heals_after_deps(g, args, binary):
+def gate_interpreter_probe_cache_heals_after_deps(g, args, binary):
     print("== interpreter probe cache (heals after deps installed) ==")
     # Regression: a NEGATIVE probe (interpreter present but worker shim not
     # importable, e.g. msgpack missing) must NOT be cached. The cache keys on
@@ -606,7 +606,7 @@ def gate_11_interpreter_probe_cache_heals_after_deps(g, args, binary):
     )
 
 
-def gate_12_lazy_collection(g, args, binary):
+def gate_lazy_collection(g, args, binary):
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
     # initial collection pass in any worker.
@@ -676,7 +676,7 @@ def gate_12_lazy_collection(g, args, binary):
     )
 
 
-def gate_13_serial_mark(g, args, binary):
+def gate_serial_mark(g, args, binary):
     print("== serial mark ==")
     g.write("serial/test_serial.py", SERIAL)
     log = g.tmp / "serial.jsonl"
@@ -696,7 +696,7 @@ def gate_13_serial_mark(g, args, binary):
     )
 
 
-def gate_14_failure_output(g, args, binary):
+def gate_failure_output(g, args, binary):
     print("== failure output ==")
     g.write("sections/test_sections.py", SECTIONS)
     r = g.run("sections", "-n", "2")
@@ -706,7 +706,7 @@ def gate_14_failure_output(g, args, binary):
     )
 
 
-def gate_15_x_maxfail(g, args, binary):
+def gate_x_maxfail(g, args, binary):
     print("== -x / --maxfail ==")
     g.write("maxfail/test_maxfail.py", MAXFAIL)
     r = g.run("maxfail", "-n", "2", "-x", timeout=60)
@@ -716,7 +716,7 @@ def gate_15_x_maxfail(g, args, binary):
     check("full run unaffected", "8 passed" in full.stdout, full.stdout[-120:])
 
 
-def gate_16_lf(g, args, binary):
+def gate_lf(g, args, binary):
     print("== --lf ==")
     lf = g.tmp / "lf"
     shutil.rmtree(lf / ".pytest_cache", ignore_errors=True)
@@ -730,7 +730,7 @@ def gate_16_lf(g, args, binary):
     )
 
 
-def gate_17_junitxml(g, args, binary):
+def gate_junitxml(g, args, binary):
     print("== junitxml ==")
     xml_path = g.tmp / "junit.xml"
     g.run("maxfail", "-n", "2", "--junitxml", str(xml_path), timeout=60)
@@ -742,7 +742,7 @@ def gate_17_junitxml(g, args, binary):
     )
 
 
-def gate_18_shard_k_n(g, args, binary):
+def gate_shard_k_n(g, args, binary):
     print("== --shard K/N ==")
     g.write("shardsuite/test_a.py", "".join(f"def test_a{i}(): assert True\n" for i in range(4)))
     g.write("shardsuite/test_b.py", "".join(f"def test_b{i}(): assert True\n" for i in range(4)))
@@ -799,7 +799,7 @@ def gate_18_shard_k_n(g, args, binary):
     check("shard loadfile: buckets cover both files", len(all_files) == 2, f"files={all_files}")
 
 
-def gate_19_dist_each(g, args, binary):
+def gate_dist_each(g, args, binary):
     print("== --dist each ==")
     r = g.run("basic/test_basic.py", "-n", "2", "--dist", "each")
     check("each: counts are per-worker", "4 failed, 4 passed" in r.stdout, r.stdout[-200:])
@@ -817,7 +817,7 @@ def gate_19_dist_each(g, args, binary):
     )
 
 
-def gate_20_dist_validation(g, args, binary):
+def gate_dist_validation(g, args, binary):
     print("== --dist validation ==")
     # An invalid --dist value must be rejected the same way on every path;
     # the small-suite/lazy path used to accept garbage silently (exit 0).
@@ -835,7 +835,7 @@ def gate_20_dist_validation(g, args, binary):
     )
 
 
-def gate_21_testnodedown_for_crashed_workers(g, args, binary):
+def gate_testnodedown_for_crashed_workers(g, args, binary):
     print("== testnodedown for crashed workers ==")
     g.write("nodecrash/conftest.py", NODECRASH_CONFTEST)
     g.write("nodecrash/test_crashy.py", NODECRASH_TEST)
@@ -853,7 +853,7 @@ def gate_21_testnodedown_for_crashed_workers(g, args, binary):
     check("crash still attributed", "crashed while running" in r.stdout, r.stdout[-300:])
 
 
-def gate_22_xdist_master_side_hooks(g, args, binary):
+def gate_xdist_master_side_hooks(g, args, binary):
     print("== xdist master-side hooks ==")
     g.write("nodehooks/conftest.py", NODEHOOKS_CONFTEST)
     g.write("nodehooks/test_node.py", NODEHOOKS_TEST)
@@ -870,7 +870,7 @@ def gate_22_xdist_master_side_hooks(g, args, binary):
     check("testnodeready fired", "ready:gw0" in log_text, log_text)
 
 
-def gate_23_one_arg_pytest_testnodedown(g, args, binary):
+def gate_one_arg_pytest_testnodedown(g, args, binary):
     print("== one-arg pytest_testnodedown ==")
     g.write("nodeonearg/conftest.py", NODEONEARG_CONFTEST)
     # Two tests so both workers get real work (scheduling may still put both
@@ -888,7 +888,7 @@ def gate_23_one_arg_pytest_testnodedown(g, args, binary):
     )
 
 
-def gate_24_durations(g, args, binary):
+def gate_durations(g, args, binary):
     print("== --durations ==")
     g.write("dur/test_dur.py", DURATIONS_FIXTURE)
     r = g.run("dur", "-n", "2", "--durations=5")
@@ -909,7 +909,7 @@ def gate_24_durations(g, args, binary):
     check("no durations block unrequested", "slowest" not in r.stdout, r.stdout[-200:])
 
 
-def gate_25_doctest_modules(g, args, binary):
+def gate_doctest_modules(g, args, binary):
     print("== --doctest-modules ==")
     g.write("doctests/mymod.py", DOCTEST_MOD)
     g.write("doctests/test_real.py", "def test_plain(): assert True\n")
@@ -928,7 +928,7 @@ def gate_25_doctest_modules(g, args, binary):
     check("doctest-modules -n 0", "1 failed, 2 passed" in r.stdout, r.stdout[-200:])
 
 
-def gate_26_monorepo(g, args, binary):
+def gate_monorepo(g, args, binary):
     print("== monorepo ==")
     mono = g.tmp / "mono"
     shutil.rmtree(mono, ignore_errors=True)
@@ -1062,13 +1062,7 @@ def gate_26_monorepo(g, args, binary):
         '[project]\nname = "pkg-c"\ndependencies = []\n\n[tool.pytest.ini_options]\n',
     )
     g.write("monochg/libs/c/test_c.py", "def test_c(): pass\n")
-    subprocess.run(["git", "init", "-q"], cwd=cm, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=cm, check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=g@g", "-c", "user.name=g", "commit", "-qm", "base"],
-        cwd=cm,
-        check=True,
-    )
+    git_init_commit(cm, "base")
     (cm / "libs/a/src_a.py").write_text("VALUE = 2\n")
     r = g.run("-n", "2", "--changed", cwd=cm)
     check(
@@ -1201,13 +1195,7 @@ def gate_26_monorepo(g, args, binary):
     # b's test imports pkg_a WITHOUT declaring it (shared-venv trap)
     g.write("monostrict/libs/b/test_b.py", "def test_b(): pass\n")
     g.write("monostrict/libs/b/helper.py", "import pkg_a\n")
-    subprocess.run(["git", "init", "-q"], cwd=cs, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=g@g", "-c", "user.name=g", "commit", "-qm", "base"],
-        cwd=cs,
-        check=True,
-    )
+    git_init_commit(cs, "base")
     (cs / "libs/a/pkg_a/__init__.py").write_text("VALUE = 2\n")
     r_lax = g.run("-n", "2", "--changed", cwd=cs)
     r_strict = g.run("-n", "2", "--changed-strict", cwd=cs)
@@ -1219,12 +1207,8 @@ def gate_26_monorepo(g, args, binary):
         f"lax:{r_lax.stdout[-200:]}\nstrict:{r_strict.stderr[-200:]}",
     )
     # nothing affected at all -> exit 5 under strict, 0 without
-    subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=g@g", "-c", "user.name=g", "commit", "-qm", "x"],
-        cwd=cs,
-        check=True,
-    )
+    git(cs, "add", "-A")
+    git_commit(cs, "x")
     r0 = g.run("-n", "2", "--changed", cwd=cs)
     r5 = g.run("-n", "2", "--changed-strict", cwd=cs)
     check(
@@ -1240,13 +1224,7 @@ def gate_26_monorepo(g, args, binary):
     g.write("strictone/used.py", "X = 1\n")
     g.write("strictone/test_main.py", "import used\ndef test_x(): assert used.X\n")
     g.write("strictone/orphan.py", "Y = 1\n")  # imported by nothing
-    subprocess.run(["git", "init", "-q"], cwd=sp, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=g@g", "-c", "user.name=g", "commit", "-qm", "base"],
-        cwd=sp,
-        check=True,
-    )
+    git_init_commit(sp, "base")
     (sp / "orphan.py").write_text("Y = 2\n")
     r_lax = g.run("-n", "2", "--changed", cwd=sp)
     r_str = g.run("-n", "2", "--changed-strict", cwd=sp)
@@ -1268,7 +1246,7 @@ def gate_26_monorepo(g, args, binary):
     )
 
 
-def gate_27_warnings(g, args, binary):
+def gate_warnings(g, args, binary):
     print("== warnings ==")
     g.write("warn/test_warn.py", WARN)
     r = g.run("warn", "-n", "2")
@@ -1276,7 +1254,7 @@ def gate_27_warnings(g, args, binary):
     check("warnings in counts", "warnings in" in r.stdout, r.stdout[-120:])
 
 
-def gate_28_doctor(g, args, binary):
+def gate_doctor(g, args, binary):
     print("== doctor ==")
     g.write("doc/test_doc.py", DOCTOR)
     r = g.run("doc", "-n", "2", "--doctor")
@@ -1362,7 +1340,7 @@ def gate_28_doctor(g, args, binary):
     )
 
 
-def gate_29_auto_worker_capping(g, args, binary):
+def gate_auto_worker_capping(g, args, binary):
     print("== auto worker capping ==")
     for i in range(6):
         g.write(f"kovstyle/mod{i}_test.py", "def test_a(): assert True\n")
@@ -1381,7 +1359,7 @@ def gate_29_auto_worker_capping(g, args, binary):
     )
 
 
-def gate_30_coverage(g, args, binary):
+def gate_coverage(g, args, binary):
     print("== coverage ==")
     g.write(
         "cov/mypkg/__init__.py",
@@ -1421,7 +1399,7 @@ def gate_30_coverage(g, args, binary):
     )
 
 
-def gate_31_coverage_contexts_line_test_index_cov_co(g, args, binary):
+def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
     print("== coverage contexts + line->test index (--cov-context) ==")
     # Per-test contexts must survive the PARALLEL merge (tests land on different
     # workers, yet each covered line keeps its context), and --cov-context must
@@ -1499,7 +1477,7 @@ def gate_31_coverage_contexts_line_test_index_cov_co(g, args, binary):
     )
 
 
-def gate_32_smart_selection(g, args, binary):
+def gate_smart_selection(g, args, binary):
     print("== smart selection ==")
     sp = g.tmp / "selproj"
     g.write("selproj/pkg/__init__.py", "")
@@ -1518,13 +1496,7 @@ def gate_32_smart_selection(g, args, binary):
         "from pkg.c import gamma\n\ndef test_gamma(): assert gamma() == 2\n",
     )
     g.write("selproj/pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')
-    subprocess.run(["git", "init", "-q"], cwd=sp, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
-        cwd=sp,
-        check=True,
-    )
+    git_init_commit(sp, "init")
     with open(sp / "pkg" / "a.py", "a") as f:
         f.write("# touched\n")
     r = g.run("--changed", "-v", cwd=sp, env_extra={"PYTHONPATH": str(sp)})
@@ -1544,12 +1516,8 @@ def gate_32_smart_selection(g, args, binary):
         r.stderr[-200:],
     )
     (sp / "pytest.ini").unlink()
-    subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "w"],
-        cwd=sp,
-        check=True,
-    )
+    git(sp, "add", "-A")
+    git_commit(sp, "w")
     r = g.run("--changed", cwd=sp, env_extra={"PYTHONPATH": str(sp)})
     check(
         "selection: clean tree -> nothing",
@@ -1573,8 +1541,91 @@ def gate_32_smart_selection(g, args, binary):
     )
     (sp / "tests" / "test_new.py").unlink()
 
+    # PR-aware --changed: with GITHUB_BASE_REF set, bare --changed diffs vs
+    # the merge-base with origin/<base> - a clean checkout of a PR commit
+    # still selects the PR's files (vs HEAD it would select nothing).
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=sp, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/mainline", base_sha], cwd=sp, check=True
+    )
+    with open(sp / "pkg" / "a.py", "a") as f:
+        f.write("# pr change\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "pr")
+    r = g.run(
+        "--changed",
+        "-v",
+        cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
+    )
+    check(
+        "selection: GITHUB_BASE_REF auto-targets PR base",
+        "auto-targets PR base origin/mainline" in r.stderr
+        and "2 affected test target(s)" in r.stderr
+        and "test_alpha" in r.stdout
+        and "test_beta" not in r.stdout,
+        r.stderr[-300:],
+    )
+    r = g.run(
+        "--changed",
+        cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "nosuchbranch"},
+    )
+    check(
+        "selection: missing PR base ref errors, no silent skip",
+        r.returncode != 0 and "fetch the base branch" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run(
+        "--changed=HEAD~1",
+        cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
+    )
+    check(
+        "selection: explicit rev wins over GITHUB_BASE_REF",
+        "auto-targets" not in r.stderr and "2 affected test target(s)" in r.stderr,
+        r.stderr[-300:],
+    )
+    # Buildkite exposes the base as a branch name, resolved the same way.
+    r = g.run(
+        "--changed",
+        "-v",
+        cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "mainline"},
+    )
+    check(
+        "selection: Buildkite base branch auto-targets PR base",
+        "auto-targets PR base origin/mainline" in r.stderr and "test_alpha" in r.stdout,
+        r.stderr[-300:],
+    )
+    # GitLab provides the exact diff-base SHA - used directly, no merge-base.
+    r = g.run(
+        "--changed",
+        "-v",
+        cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": base_sha},
+    )
+    check(
+        "selection: GitLab diff-base SHA auto-targets MR base",
+        "auto-targets MR base" in r.stderr and "test_alpha" in r.stdout,
+        r.stderr[-300:],
+    )
+    # An unresolvable GitLab base SHA errors - never a silent full skip.
+    r = g.run(
+        "--changed",
+        cwd=sp,
+        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": "0" * 40},
+    )
+    check(
+        "selection: missing GitLab base SHA errors, no silent skip",
+        r.returncode != 0 and "not in the local clone" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
 
-def gate_33_coverage_based_selection_changed_uses_th(g, args, binary):
+
+def gate_coverage_based_selection_changed_uses_th(g, args, binary):
     print("== coverage-based selection (--changed uses the cov index) ==")
     # Warm a line->test index, then prove --changed narrows to only the tests
     # whose recorded coverage hit the changed lines - tighter than the
@@ -1599,17 +1650,11 @@ def gate_33_coverage_based_selection_changed_uses_th(g, args, binary):
         "    assert mymod.used_by_both() == 3\n",
     )
     g.write("covsel/pyproject.toml", "[tool.pytest.ini_options]\n")
-    subprocess.run(["git", "init", "-q"], cwd=cs, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
-        cwd=cs,
-        check=True,
-    )
+    git_init_commit(cs, "init")
 
     def cov_changed_targets(edit_fn):
         # reset, apply edit to the working tree, list the selected nodeids
-        subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+        git(cs, "checkout", "-q", ".")
         edit_fn()
         r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
         got = sorted(set(re.findall(r"test_[ab]\.py::test_[ab]", r.stdout)))
@@ -1697,8 +1742,8 @@ def gate_33_coverage_based_selection_changed_uses_th(g, args, binary):
     # Rail: a warm index may hold a nodeid for a test renamed since it was built.
     # Passing the stale nodeid aborts the run, and dropping it skips a test still
     # covering the changed line, so the file demotes to import-graph instead.
-    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
-    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    git(cs, "checkout", "-q", ".")
+    git(cs, "clean", "-fdq")
     g.run(
         "-n",
         "2",
@@ -1708,7 +1753,7 @@ def gate_33_coverage_based_selection_changed_uses_th(g, args, binary):
         cwd=cs,
         env_extra={"PYTHONPATH": str(cs)},
     )  # warm index (knows test_a.py::test_a)
-    subprocess.run(["git", "mv", "test_a.py", "test_renamed.py"], cwd=cs, check=True)
+    git(cs, "mv", "test_a.py", "test_renamed.py")
     edit_line("mymod.py", "    return 1\n", "    return 111\n")  # line only test_a covered
     r = g.run("-n", "2", "--changed", "--co", "-q", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     got = sorted(set(re.findall(r"test_\w+\.py::test_\w+", r.stdout)))
@@ -1717,14 +1762,14 @@ def gate_33_coverage_based_selection_changed_uses_th(g, args, binary):
         r.returncode == 0 and "test_renamed.py::test_a" in got and "not found" not in r.stdout,
         f"rc={r.returncode} {got} {r.stderr[-150:]}",
     )
-    subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=cs, check=True)
-    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    git(cs, "reset", "-q", "--hard", "HEAD")
+    git(cs, "clean", "-fdq")
 
     # Rail: an index warmed before a line-shifting commit must not be trusted at
     # stale lines. A prepend shifts used_by_a's body; the per-file SHA-256 no
     # longer matches HEAD, so the file drifts to import-graph, not a stale lookup.
-    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
-    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    git(cs, "checkout", "-q", ".")
+    git(cs, "clean", "-fdq")
     g.run(
         "-n",
         "2",
@@ -1759,18 +1804,15 @@ def gate_33_coverage_based_selection_changed_uses_th(g, args, binary):
         got == ["test_a.py::test_a", "test_b.py::test_b"],
         f"{got} {r.stderr[-150:]}",
     )
-    subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
-    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    git(cs, "reset", "-q", "--hard", "HEAD~1")
+    git(cs, "clean", "-fdq")
 
-
-def gate_34_changed_selection_files_with_no_line_dif(g, args, binary):
     print("== changed selection: files with no line-diff ==")
-    cs = g.tmp / "covsel"  # git repo built in gate_33_coverage_based_selection
     # `git diff -U0` emits no hunk for deletions, binaries, and renames, so
     # parse_diff_hunks drops them; a --name-only union recovers them for the
     # fallback. A deleted test file must be skipped, not handed to pytest.
-    subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=cs, check=True)
-    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    git(cs, "reset", "-q", "--hard", "HEAD")
+    git(cs, "clean", "-fdq")
     # Warm the index so the deleted-test case exercises the warm direct_tests
     # branch (the path actually wired for coverage selection).
     g.run(
@@ -1795,7 +1837,7 @@ def gate_34_changed_selection_files_with_no_line_dif(g, args, binary):
         and "No such file" not in (r.stdout + r.stderr),
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-250:],
     )
-    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+    git(cs, "checkout", "-q", ".")
 
     # Deleted SOURCE file under --changed-strict: -U0 shows +++ /dev/null (no
     # hunk). Pre-fix it was dropped and falsely SKIPPED everything; the
@@ -1807,17 +1849,13 @@ def gate_34_changed_selection_files_with_no_line_dif(g, args, binary):
         "falling back to full run" in r.stderr and "no tests affected" not in r.stdout,
         r.stderr[-250:] + " || " + r.stdout[-150:],
     )
-    subprocess.run(["git", "checkout", "-q", "."], cwd=cs, check=True)
+    git(cs, "checkout", "-q", ".")
 
     # Changed BINARY (non-Python) file: -U0 emits no @@ hunk, so parse_diff_hunks
     # drops it; the --name-only union recovers it and rule1 forces a full run.
     (cs / "blob.bin").write_bytes(b"\x00\x01\x02rstest\x00")
-    subprocess.run(["git", "add", "-A"], cwd=cs, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add binary"],
-        cwd=cs,
-        check=True,
-    )
+    git(cs, "add", "-A")
+    git_commit(cs, "add binary")
     (cs / "blob.bin").write_bytes(b"\x00\x01\x02rstest\xffCHANGED\x00")
     r = g.run("--changed", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     check(
@@ -1825,11 +1863,11 @@ def gate_34_changed_selection_files_with_no_line_dif(g, args, binary):
         "falling back to full run" in r.stderr and "non-Python" in r.stderr,
         r.stderr[-250:],
     )
-    subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=cs, check=True)
-    subprocess.run(["git", "clean", "-fdq"], cwd=cs, check=True)
+    git(cs, "reset", "-q", "--hard", "HEAD~1")
+    git(cs, "clean", "-fdq")
 
 
-def gate_35_coverage_selection_under_autocrlf_crlf_w(g, args, binary):
+def gate_coverage_selection_under_autocrlf_crlf_w(g, args, binary):
     print("== coverage selection under autocrlf (CRLF worktree, LF blob) ==")
     # Regression: autocrlf stores the blob LF while the worktree is CRLF. The
     # index hash (worktree, Python) and drift check (blob, Rust) must agree once
@@ -1859,14 +1897,10 @@ def gate_35_coverage_selection_under_autocrlf_crlf_w(g, args, binary):
         "    assert mymod.used_by_both() == 3\n",
     )
     (cr / "pyproject.toml").write_bytes(b"[tool.pytest.ini_options]\n")
-    subprocess.run(["git", "init", "-q"], cwd=cr, check=True)
-    subprocess.run(["git", "config", "core.autocrlf", "true"], cwd=cr, check=True)
+    git(cr, "init", "-q")
+    git(cr, "config", "core.autocrlf", "true")
     subprocess.run(["git", "add", "-A"], cwd=cr, check=True, capture_output=True)  # blobs -> LF
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
-        cwd=cr,
-        check=True,
-    )
+    git_commit(cr, "init")
     blob = subprocess.run(["git", "show", "HEAD:mymod.py"], cwd=cr, capture_output=True).stdout
     check(
         "autocrlf: blob normalized to LF, worktree stays CRLF",
@@ -1901,7 +1935,7 @@ def gate_35_coverage_selection_under_autocrlf_crlf_w(g, args, binary):
     )
 
 
-def gate_36_shuffle(g, args, binary):
+def gate_shuffle(g, args, binary):
     print("== shuffle ==")
     for i in range(6):
         g.write(f"shuf/test_s{i}.py", f"def test_s{i}(): assert True\n")
@@ -1928,9 +1962,8 @@ def gate_36_shuffle(g, args, binary):
     )
 
 
-def gate_37_duration_regression_gate(g, args, binary):
+def gate_duration_regression_gate(g, args, binary):
     print("== duration regression gate ==")
-    sp = g.tmp / "selproj"  # git repo built in gate_32_smart_selection (PR-base block below)
     g.write(
         "dreg/test_d.py",
         "import os, time\n\n"
@@ -1969,95 +2002,8 @@ def gate_37_duration_regression_gate(g, args, binary):
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-150:],
     )
 
-    # PR-aware --changed: with GITHUB_BASE_REF set, bare --changed diffs vs
-    # the merge-base with origin/<base> - a clean checkout of a PR commit
-    # still selects the PR's files (vs HEAD it would select nothing).
-    base_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=sp, capture_output=True, text=True, check=True
-    ).stdout.strip()
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/mainline", base_sha], cwd=sp, check=True
-    )
-    with open(sp / "pkg" / "a.py", "a") as f:
-        f.write("# pr change\n")
-    subprocess.run(["git", "add", "-A"], cwd=sp, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pr"],
-        cwd=sp,
-        check=True,
-    )
-    r = g.run(
-        "--changed",
-        "-v",
-        cwd=sp,
-        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
-    )
-    check(
-        "selection: GITHUB_BASE_REF auto-targets PR base",
-        "auto-targets PR base origin/mainline" in r.stderr
-        and "2 affected test target(s)" in r.stderr
-        and "test_alpha" in r.stdout
-        and "test_beta" not in r.stdout,
-        r.stderr[-300:],
-    )
-    r = g.run(
-        "--changed",
-        cwd=sp,
-        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "nosuchbranch"},
-    )
-    check(
-        "selection: missing PR base ref errors, no silent skip",
-        r.returncode != 0 and "fetch the base branch" in r.stderr,
-        f"rc={r.returncode} " + r.stderr[-300:],
-    )
-    r = g.run(
-        "--changed=HEAD~1",
-        cwd=sp,
-        env_extra={"PYTHONPATH": str(sp), "GITHUB_BASE_REF": "mainline"},
-    )
-    check(
-        "selection: explicit rev wins over GITHUB_BASE_REF",
-        "auto-targets" not in r.stderr and "2 affected test target(s)" in r.stderr,
-        r.stderr[-300:],
-    )
-    # Buildkite exposes the base as a branch name, resolved the same way.
-    r = g.run(
-        "--changed",
-        "-v",
-        cwd=sp,
-        env_extra={"PYTHONPATH": str(sp), "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "mainline"},
-    )
-    check(
-        "selection: Buildkite base branch auto-targets PR base",
-        "auto-targets PR base origin/mainline" in r.stderr and "test_alpha" in r.stdout,
-        r.stderr[-300:],
-    )
-    # GitLab provides the exact diff-base SHA - used directly, no merge-base.
-    r = g.run(
-        "--changed",
-        "-v",
-        cwd=sp,
-        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": base_sha},
-    )
-    check(
-        "selection: GitLab diff-base SHA auto-targets MR base",
-        "auto-targets MR base" in r.stderr and "test_alpha" in r.stdout,
-        r.stderr[-300:],
-    )
-    # An unresolvable GitLab base SHA errors - never a silent full skip.
-    r = g.run(
-        "--changed",
-        cwd=sp,
-        env_extra={"PYTHONPATH": str(sp), "CI_MERGE_REQUEST_DIFF_BASE_SHA": "0" * 40},
-    )
-    check(
-        "selection: missing GitLab base SHA errors, no silent skip",
-        r.returncode != 0 and "not in the local clone" in r.stderr,
-        f"rc={r.returncode} " + r.stderr[-300:],
-    )
 
-
-def gate_38_tool_rstest_config(g, args, binary):
+def gate_tool_rstest_config(g, args, binary):
     print("== [tool.rstest] config ==")
     g.write("toolcfg/pyproject.toml", "[tool.rstest]\nnumprocesses = 2\nreruns = 1\n")
     g.write("toolcfg/test_cfg.py", FLAKY)
@@ -2080,7 +2026,7 @@ def gate_38_tool_rstest_config(g, args, binary):
     )
 
 
-def gate_39_flaky_reruns(g, args, binary):
+def gate_flaky_reruns(g, args, binary):
     print("== flaky reruns ==")
     g.write("flaky/test_flaky.py", FLAKY)
     fdir = g.tmp / "flaky"
@@ -2159,9 +2105,10 @@ def gate_39_flaky_reruns(g, args, binary):
     )
 
 
-def gate_40_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
+def gate_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
     print("== flaky-aware reruns (--reruns-only-known-flaky) ==")
-    fdir = g.tmp / "flaky"  # flaky/test_flaky.py written in gate_39_flaky_reruns
+    g.write("flaky/test_flaky.py", FLAKY)  # self-contained (also written by gate_flaky_reruns)
+    fdir = g.tmp / "flaky"
     marker = g.tmp / "flaky_marker"
     # Gate reruns on prior flaky history so a deterministic mass-failure
     # doesn't burn the budget. Fixture: test_flaky_once fails its first
@@ -2381,7 +2328,7 @@ def gate_40_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
     )
 
 
-def gate_41_quarantine(g, args, binary):
+def gate_quarantine(g, args, binary):
     print("== quarantine ==")
     g.write(
         "quar/test_q.py",
@@ -2427,7 +2374,7 @@ def gate_41_quarantine(g, args, binary):
     )
 
 
-def gate_42_loadscope_loadgroup(g, args, binary):
+def gate_loadscope_loadgroup(g, args, binary):
     print("== loadscope / loadgroup ==")
     g.write("scopes/test_sc_a.py", SCOPE_A)
     g.write("scopes/test_sc_b.py", SCOPE_B)
@@ -2456,7 +2403,7 @@ def gate_42_loadscope_loadgroup(g, args, binary):
             )
 
 
-def gate_43_flaky_marks_only_rerun(g, args, binary):
+def gate_flaky_marks_only_rerun(g, args, binary):
     print("== flaky marks / only-rerun ==")
     g.write("marks/test_marks.py", MARKS)
     mk = g.tmp / "marks_marker"
@@ -2497,7 +2444,7 @@ def gate_43_flaky_marks_only_rerun(g, args, binary):
     )
 
 
-def gate_44_worker_timeout_watchdog(g, args, binary):
+def gate_worker_timeout_watchdog(g, args, binary):
     print("== worker-timeout watchdog ==")
     g.write("hang/test_hang.py", HANG)
     r = g.run("test_hang.py", "-n", "2", "--worker-timeout", "3", cwd=g.tmp / "hang", timeout=60)
@@ -2508,7 +2455,7 @@ def gate_44_worker_timeout_watchdog(g, args, binary):
     )
 
 
-def gate_45_watch_mode(g, args, binary):
+def gate_watch_mode(g, args, binary):
     print("== watch mode ==")
     wd = g.tmp / "watch"
     wd.mkdir(exist_ok=True)
@@ -2579,66 +2526,101 @@ def gate_45_watch_mode(g, args, binary):
         proc.kill()
 
 
+def git(cwd, *args):
+    """Run a git subcommand in cwd, raising on failure."""
+    subprocess.run(["git", *args], cwd=cwd, check=True)
+
+
+def git_commit(cwd, msg="base"):
+    """Commit staged changes with a fixed throwaway identity (no gate check
+    inspects the author)."""
+    git(cwd, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg)
+
+
+def git_init_commit(cwd, msg="base"):
+    """init + add -A + commit: the standard fixture-repo bootstrap."""
+    git(cwd, "init", "-q")
+    git(cwd, "add", "-A")
+    git_commit(cwd, msg)
+
+
 def main():
     ap = argparse.ArgumentParser()
     default_binary = REPO / "target" / "release" / ("rstest.exe" if WINDOWS else "rstest")
     ap.add_argument("--binary", default=str(default_binary))
     ap.add_argument("--venv", default=str(REPO / ".gate-venv"))
+    ap.add_argument(
+        "--only",
+        default="",
+        help="run only sections whose name contains this substring (dev iteration; "
+        "sections run in order, so a section that reuses an earlier one's fixtures "
+        "may need a broader filter). Use --list to see names.",
+    )
+    ap.add_argument("--list", action="store_true", help="list section names and exit")
     args = ap.parse_args()
+
+    sections = (
+        gate_basics,
+        gate_collection_error_semantics,
+        gate_output_styles,
+        gate_multiprocessing_spawn_children,
+        gate_crash_handling,
+        gate_report_json_contract,
+        gate_collect_only_discovery_json,
+        gate_pytest_randomly_real_plugin,
+        gate_pytest_rerunfailures_xdist_no_sock_port_,
+        gate_pytest_retry_xdist_server_port_self_prov,
+        gate_interpreter_probe_cache_heals_after_deps,
+        gate_lazy_collection,
+        gate_serial_mark,
+        gate_failure_output,
+        gate_x_maxfail,
+        gate_lf,
+        gate_junitxml,
+        gate_shard_k_n,
+        gate_dist_each,
+        gate_dist_validation,
+        gate_testnodedown_for_crashed_workers,
+        gate_xdist_master_side_hooks,
+        gate_one_arg_pytest_testnodedown,
+        gate_durations,
+        gate_doctest_modules,
+        gate_monorepo,
+        gate_warnings,
+        gate_doctor,
+        gate_auto_worker_capping,
+        gate_coverage,
+        gate_coverage_contexts_line_test_index_cov_co,
+        gate_smart_selection,
+        gate_coverage_based_selection_changed_uses_th,
+        gate_coverage_selection_under_autocrlf_crlf_w,
+        gate_shuffle,
+        gate_duration_regression_gate,
+        gate_tool_rstest_config,
+        gate_flaky_reruns,
+        gate_flaky_aware_reruns_reruns_only_known_fla,
+        gate_quarantine,
+        gate_loadscope_loadgroup,
+        gate_flaky_marks_only_rerun,
+        gate_worker_timeout_watchdog,
+        gate_watch_mode,
+    )
+    names = [s.__name__.removeprefix("gate_") for s in sections]
+    if args.list:
+        print("\n".join(names))
+        return
+    selected = [s for s in sections if not args.only or args.only in s.__name__]
+    if not selected:
+        sys.exit(f"--only {args.only!r} matched no section; --list to see names")
+    if args.only:
+        print(f"running {len(selected)}/{len(sections)} sections matching {args.only!r}")
 
     binary = Path(args.binary).resolve()
     assert binary.exists(), f"binary missing: {binary} (cargo build --release first)"
     make_venv(Path(args.venv))
     g = Gate(binary, Path(args.venv).resolve())
 
-    sections = (
-        gate_01_basics,
-        gate_02_collection_error_semantics,
-        gate_03_output_styles,
-        gate_04_multiprocessing_spawn_children,
-        gate_05_crash_handling,
-        gate_06_report_json_contract,
-        gate_07_collect_only_discovery_json,
-        gate_08_pytest_randomly_real_plugin,
-        gate_09_pytest_rerunfailures_xdist_no_sock_port_,
-        gate_10_pytest_retry_xdist_server_port_self_prov,
-        gate_11_interpreter_probe_cache_heals_after_deps,
-        gate_12_lazy_collection,
-        gate_13_serial_mark,
-        gate_14_failure_output,
-        gate_15_x_maxfail,
-        gate_16_lf,
-        gate_17_junitxml,
-        gate_18_shard_k_n,
-        gate_19_dist_each,
-        gate_20_dist_validation,
-        gate_21_testnodedown_for_crashed_workers,
-        gate_22_xdist_master_side_hooks,
-        gate_23_one_arg_pytest_testnodedown,
-        gate_24_durations,
-        gate_25_doctest_modules,
-        gate_26_monorepo,
-        gate_27_warnings,
-        gate_28_doctor,
-        gate_29_auto_worker_capping,
-        gate_30_coverage,
-        gate_31_coverage_contexts_line_test_index_cov_co,
-        gate_32_smart_selection,
-        gate_33_coverage_based_selection_changed_uses_th,
-        gate_34_changed_selection_files_with_no_line_dif,
-        gate_35_coverage_selection_under_autocrlf_crlf_w,
-        gate_36_shuffle,
-        gate_37_duration_regression_gate,
-        gate_38_tool_rstest_config,
-        gate_39_flaky_reruns,
-        gate_40_flaky_aware_reruns_reruns_only_known_fla,
-        gate_41_quarantine,
-        gate_42_loadscope_loadgroup,
-        gate_43_flaky_marks_only_rerun,
-        gate_44_worker_timeout_watchdog,
-        gate_45_watch_mode,
-    )
-    for _section in sections:
+    for _section in selected:
         _section(g, args, binary)
 
     print(f"\n{PASS} ok, {len(FAIL)} failed")
