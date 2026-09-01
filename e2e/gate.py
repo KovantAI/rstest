@@ -219,6 +219,7 @@ def gate_collection_error_semantics(g, args, binary):
 
 def gate_output_styles(g, args, binary):
     print("== output styles ==")
+    g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
     # --output bar (pytest-sugar-style): per-test lines + inline failures.
     # Non-tty here, so the live footer self-disables; the per-test lines and
     # summary must still appear, and failures must NOT be double-printed.
@@ -255,6 +256,19 @@ def gate_output_styles(g, args, binary):
         and all("test_basic.py" in a for a in ann)
     )
     check("output github: human log + ::error per failure", gh_ok, r.stdout[-400:])
+
+    # --output azure: human log PLUS an Azure Pipelines `##vso[task.logissue]`
+    # command per failing test (rendered as inline issues on the PR).
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "azure")
+    az = [ln for ln in r.stdout.splitlines() if ln.startswith("##vso[task.logissue ")]
+    az_ok = (
+        "2 passed" in r.stdout
+        and "2 failed" in r.stdout  # human summary intact
+        and sum("type=error" in ln for ln in az) == 2  # one per failed test
+        and all("sourcepath=" in ln for ln in az if "type=error" in ln)
+        and any("test_basic.py" in ln for ln in az)
+    )
+    check("output azure: human log + logissue per failure", az_ok, r.stdout[-400:])
 
     # --output json: stdout is PURE NDJSON - no banner, every line parses,
     # closed by exactly one sessionfinish envelope. The machine-readable
@@ -2248,6 +2262,27 @@ def gate_flaky_reruns(g, args, binary):
     check("flaky passes with reruns", r.returncode == 0 and "1 flaky" in r.stdout, r.stdout[-200:])
     check("flaky section listed", "passed after rerun" in r.stdout)
     marker.unlink()
+
+    # buildkite_flaky_annotate: with BUILDKITE set and a flaky-passed test, rstest
+    # builds a flaky annotation and hands it to `buildkite-agent annotate`; absent
+    # that binary (CI/gate runners), it best-effort-skips with a stderr notice.
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--reruns",
+        "2",
+        "--output",
+        "buildkite",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker), "BUILDKITE": "1"},
+    )
+    check(
+        "buildkite: flaky annotation attempted (best-effort skip without agent)",
+        r.returncode == 0 and "1 flaky" in r.stdout and "Buildkite flaky annotation" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-200:] + " || " + r.stderr[-200:],
+    )
+    marker.unlink(missing_ok=True)
 
     # Single-worker reruns: --reruns at -n 1 / -n 0 must fire (a degenerate
     # one-worker pool drives the rerun loop) instead of being silently inert.
