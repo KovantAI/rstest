@@ -56,7 +56,7 @@ jobs:
         run: cargo test --release
 
       - name: test gate
-        run: python tests/gate.py
+        run: python e2e/gate.py
 
   python-lint:
     name: python lint + worker tests
@@ -158,7 +158,7 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo build --release
           cargo test --release
-          python tests/gate.py --binary target/release/rstest
+          python e2e/gate.py --binary target/release/rstest
           cargo llvm-cov report --release --lcov --output-path lcov.info
 
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0

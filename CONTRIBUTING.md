@@ -45,7 +45,7 @@ cargo fmt --check                          # formatting
 cargo clippy --release -- -D warnings      # lints (warnings are errors)
 cargo build --release                      # build
 cargo test --release                       # Rust tests
-python tests/gate.py                       # end-to-end test gate
+python e2e/gate.py                         # end-to-end test gate
 ```
 
 `pre-commit run --all-files` covers formatting, clippy, `cargo check`, and

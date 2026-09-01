@@ -2,7 +2,7 @@
 """rstest test gate: end-to-end assertions for every shipped behavior.
 
 Hermetic: builds its own venv (worker runtime deps) and fixture suites.
-Usage: python3 tests/gate.py [--binary target/release/rstest]
+Usage: python3 e2e/gate.py [--binary target/release/rstest]
 
 Exit 0 = all gates green. Designed to be the single CI entry point.
 """
@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-E2E = REPO / "tests" / "e2e"
+E2E = REPO / "e2e"
 
 WINDOWS = os.name == "nt"
 
