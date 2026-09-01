@@ -115,7 +115,7 @@ pub(super) fn build_dispatch(
     dist: Dist,
     shuffle: Option<u64>,
     keep: Option<&HashSet<u64>>,
-) -> Dispatch {
+) -> anyhow::Result<Dispatch> {
     // --shard filter: an index not in `keep` is deselected everywhere
     // (parallel order, serial phase, groups). None keeps everything.
     let kept = |i: &u64| keep.is_none_or(|k| k.contains(i));
@@ -125,8 +125,13 @@ pub(super) fn build_dispatch(
 
     let (order, slow_count, group_ends) = match dist {
         // Each mode never builds a dispatch queue (each worker is seeded
-        // with the full suite); run_pool guards the call.
-        Dist::Each => unreachable!("--dist each has no dispatch queue"),
+        // with the full suite); run_pool guards the call. Return an error
+        // rather than panic if that invariant is ever violated.
+        Dist::Each => {
+            return Err(anyhow::anyhow!(
+                "--dist each has no dispatch queue (run_pool must guard the build_dispatch call)"
+            ))
+        }
         Dist::Load => {
             let full = crate::scheduling::durations::dispatch_order(ids, cache);
             let order: Vec<u64> = full
@@ -231,7 +236,7 @@ pub(super) fn build_dispatch(
         // the same permutation pattern as the parallel one.
         shuffle_slice(&mut serial, seed.wrapping_add(1));
     }
-    Dispatch {
+    Ok(Dispatch {
         order,
         slow_count,
         cursor: 0,
@@ -239,7 +244,7 @@ pub(super) fn build_dispatch(
         requeued: VecDeque::new(),
         serial: serial.into(),
         serial_active: false,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -282,7 +287,8 @@ mod tests {
             Dist::Load,
             None,
             None,
-        );
+        )
+        .unwrap();
         // slow item first, serial index 1 absent, rest in collection order
         assert_eq!(d.order, vec![2, 0, 3]);
         assert_eq!(d.slow_count, 1);
@@ -302,7 +308,8 @@ mod tests {
             Dist::Load,
             Some(7),
             None,
-        );
+        )
+        .unwrap();
         let b = build_dispatch(
             &names,
             vec![],
@@ -311,7 +318,8 @@ mod tests {
             Dist::Load,
             Some(7),
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(a.order, b.order); // same seed, same order
         assert_eq!(a.slow_count, 0); // shuffle defeats long-pole-first
         let mut seen = a.order.clone();
@@ -328,6 +336,7 @@ mod tests {
                 Some(s),
                 None,
             )
+            .unwrap()
             .order
                 != a.order
         }));
@@ -351,7 +360,8 @@ mod tests {
                 Dist::Loadfile,
                 Some(seed),
                 None,
-            );
+            )
+            .unwrap();
             let batches = drain(&mut d, 1, false);
             // Whole files, in-file order intact; only group ORDER varies.
             assert!(
@@ -379,7 +389,8 @@ mod tests {
             Dist::Loadfile,
             None,
             None,
-        );
+        )
+        .unwrap();
         // want=1 but whole groups must come out regardless
         let batches = drain(&mut d, 1, false);
         assert_eq!(batches, vec![vec![0, 1, 2], vec![3, 4]]);
@@ -401,7 +412,8 @@ mod tests {
             Dist::Loadscope,
             None,
             None,
-        );
+        )
+        .unwrap();
         let batches = drain(&mut d, 1, false);
         // TestX together; TestY alone; module-level function keys on the file
         assert_eq!(batches, vec![vec![0, 1], vec![2], vec![3]]);
@@ -426,7 +438,8 @@ mod tests {
             Dist::Loadgroup,
             None,
             None,
-        );
+        )
+        .unwrap();
         let batches = drain(&mut d, 1, false);
         // marked group lands at its first member's position, cross-file;
         // unmarked tests are singleton units
@@ -444,7 +457,8 @@ mod tests {
             Dist::Load,
             None,
             None,
-        );
+        )
+        .unwrap();
         d.requeued.push_back(2);
         match d.take(2, false) {
             Take::Items(items) => assert_eq!(items, vec![2, 0]),
@@ -463,7 +477,8 @@ mod tests {
             Dist::Load,
             None,
             None,
-        );
+        )
+        .unwrap();
         // parallel queue is empty (all serial); inactive phase = exhausted
         assert!(matches!(d.take(2, true), Take::Exhausted));
         d.serial_active = true;

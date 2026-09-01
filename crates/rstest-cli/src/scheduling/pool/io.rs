@@ -19,13 +19,14 @@ pub(super) fn spawn_into(
     n: usize,
     args: &[String],
     tx: &mpsc::Sender<(usize, Result<Event>)>,
+    env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<Worker> {
-    let mut worker = Worker::spawn(python, Some((idx, n)))?;
+    let mut worker = Worker::spawn(python, Some((idx, n)), env)?;
     worker.send(&proto::Command::RunItemsSession {
         args: args.to_vec(),
     })?;
     let tx = tx.clone();
-    let mut reader = worker.take_reader();
+    let mut reader = worker.take_reader()?;
     std::thread::spawn(move || loop {
         let event = reader.recv();
         let done = matches!(event, Ok(Event::Done { .. }) | Err(_));

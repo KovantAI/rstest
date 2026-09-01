@@ -7,6 +7,20 @@ use anyhow::{Context, Result};
 
 use crate::scheduling::proto;
 
+/// Run-wide parameters handed to a worker via its environment at spawn time
+/// (thread-safe), rather than mutating the orchestrator's own process env with
+/// `std::env::set_var` (a data race across threads, `unsafe` in edition 2024).
+#[derive(Clone)]
+pub struct WorkerEnv {
+    /// Shared testrun uid (xdist `testrun_uid` contract); one per run.
+    pub run_uid: String,
+    /// Enable cpu/fixture instrumentation in the worker's shim plugin.
+    pub doctor: bool,
+    /// For a lone worker: ship the full id/location payload from collection
+    /// (pooled workers derive this from their index instead).
+    pub send_ids: bool,
+}
+
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
 /// CreatePipe handles on Windows), never stdio (D4: fd 0/1/2 stay free). The
 /// child gets its endpoints as numeric argv: fds on unix, HANDLEs on Windows.
@@ -37,11 +51,16 @@ pub enum Stdio {
 }
 
 impl Worker {
-    pub fn spawn(python: &Path, worker: Option<(usize, usize)>) -> Result<Self> {
-        Self::spawn_with_io(python, worker, Stdio::Null)
+    pub fn spawn(python: &Path, worker: Option<(usize, usize)>, env: &WorkerEnv) -> Result<Self> {
+        Self::spawn_with_io(python, worker, Stdio::Null, env)
     }
 
-    pub fn spawn_with_io(python: &Path, worker: Option<(usize, usize)>, io: Stdio) -> Result<Self> {
+    pub fn spawn_with_io(
+        python: &Path,
+        worker: Option<(usize, usize)>,
+        io: Stdio,
+        env: &WorkerEnv,
+    ) -> Result<Self> {
         // cmd: parent writes -> child reads; evt: child writes -> parent reads.
         let cmd = transport::pipe()?;
         let evt = transport::pipe()?;
@@ -59,6 +78,10 @@ impl Worker {
                 &evt.write.to_string(),
             ])
             .env("PYTHONPATH", worker_pythonpath())
+            // Run-wide params ride the CHILD's environment (thread-safe), never
+            // process-global `set_var` (which races across threads / is unsafe
+            // in edition 2024).
+            .env("RSTEST_RUN_UID", &env.run_uid)
             // Worker stdout is not ours to show: output is rendered Rust-side,
             // except passthrough mode which inherits so pytest renders. stderr
             // stays inherited for worker crash visibility.
@@ -66,13 +89,21 @@ impl Worker {
                 Stdio::Null => std::process::Stdio::null(),
                 Stdio::Inherit => std::process::Stdio::inherit(),
             });
+        if env.doctor {
+            command.env("RSTEST_DOCTOR", "1");
+        }
+        // Exactly one worker ships the full id list (D5); the rest verify their
+        // collection by count+hash. Worker 0 in a pool; the lone worker only
+        // when the caller asks (collect-only discovery / migrate-check).
+        let send_ids = match worker {
+            Some((idx, _)) => idx == 0,
+            None => env.send_ids,
+        };
+        command.env("RSTEST_SEND_IDS", if send_ids { "1" } else { "0" });
         if let Some((idx, count)) = worker {
             command
                 .env("RSTEST_WORKER_ID", format!("gw{idx}"))
                 .env("RSTEST_WORKER_COUNT", count.to_string())
-                // Exactly one worker ships the full id list (D5);
-                // the rest verify their collection by count+hash.
-                .env("RSTEST_SEND_IDS", if idx == 0 { "1" } else { "0" })
                 // Workers get disjoint tmp roots (xdist popen-gwN pattern):
                 // pytest's numbered-dir cleanup races when siblings share
                 // a basetemp parent.
@@ -106,13 +137,17 @@ impl Worker {
         Ok(())
     }
 
-    /// Detach the event stream (for a dedicated reader thread).
-    pub fn take_reader(&mut self) -> EventReader {
-        self.reader.take().expect("reader already taken")
+    /// Detach the event stream (for a dedicated reader thread). Errors if the
+    /// reader was already taken (would otherwise be a double-detach bug).
+    pub fn take_reader(&mut self) -> Result<EventReader> {
+        self.reader.take().context("event reader already detached")
     }
 
     pub fn recv(&mut self) -> Result<proto::Event> {
-        self.reader.as_mut().expect("reader taken").recv()
+        self.reader
+            .as_mut()
+            .context("event reader was detached; recv is unavailable after take_reader")?
+            .recv()
     }
 
     pub fn shutdown(mut self) -> Result<()> {

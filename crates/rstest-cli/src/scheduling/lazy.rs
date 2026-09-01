@@ -111,11 +111,12 @@ pub fn run_lazy_pool(
     // Some(set) => --reruns-only-known-flaky: gate reruns on prior flaky
     // history (or an explicit @mark.flaky budget). See run_pool.
     known_flaky: Option<&std::collections::HashSet<String>>,
+    worker_env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();
     for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx)?;
+        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
         states.push(WorkerState::fresh(worker));
     }
 
@@ -403,7 +404,7 @@ pub fn run_lazy_pool(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
                     );
-                    let worker = spawn_into(python, idx, states.len(), args, &tx)?;
+                    let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
                     run.collect_error(
@@ -608,13 +609,14 @@ fn spawn_into(
     n: usize,
     args: &[String],
     tx: &mpsc::Sender<(usize, Result<Event>)>,
+    env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<Worker> {
-    let mut worker = Worker::spawn(python, Some((idx, n)))?;
+    let mut worker = Worker::spawn(python, Some((idx, n)), env)?;
     worker.send(&proto::Command::RunLazySession {
         args: args.to_vec(),
     })?;
     let tx = tx.clone();
-    let mut reader = worker.take_reader();
+    let mut reader = worker.take_reader()?;
     std::thread::spawn(move || loop {
         let event = reader.recv();
         let done = matches!(event, Ok(Event::Done { .. }) | Err(_));
