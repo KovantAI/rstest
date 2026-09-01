@@ -1,0 +1,191 @@
+//! CI-native failure/flaky annotations: GitHub Actions `::error`/`::warning`
+//! workflow commands, Azure `##vso[task.logissue]` commands, and Buildkite
+//! flaky annotations, emitted from an aggregate Run at end-of-run.
+
+use super::report;
+
+pub(crate) fn print_github_annotations(run: &report::Run) {
+    // Under a monorepo the parent runs us with cwd=project, so nodeid paths
+    // are project-relative; GitHub resolves annotation `file` from the repo
+    // root, so prefix the project's root-relative path (set by the parent).
+    let prefix = std::env::var("RSTEST_MONO_PROJECT")
+        .ok()
+        .filter(|p| !p.is_empty());
+    for (nodeid, entry) in run.tests() {
+        let failed = entry.call.as_deref() == Some("failed")
+            || entry.setup.as_deref() == Some("failed")
+            || entry.teardown.as_deref() == Some("failed");
+        if !failed {
+            continue;
+        }
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        let file = match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        };
+        let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(",line={}", l + 1));
+        }
+        let msg = entry.longrepr.as_deref().unwrap_or("test failed");
+        println!("::error {props}::{}", gh_data(msg));
+    }
+    // Flaky-passed tests (green only after reruns) surface as warnings:
+    // the run is green, but the flake is visible on the PR without
+    // opening the junit/log.
+    for (nodeid, attempts) in &run.flaky {
+        let Some(entry) = run.tests().get(nodeid) else {
+            continue;
+        };
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        let file = match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        };
+        let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(",line={}", l + 1));
+        }
+        println!(
+            "::warning {props}::flaky: passed only after {attempts} rerun{}",
+            if *attempts > 1 { "s" } else { "" }
+        );
+    }
+}
+
+/// Emit Azure Pipelines `##vso[task.logissue ...]` commands per failed test,
+/// which Azure renders as inline issues on the PR (same mapping as GitHub).
+/// Flaky-passed tests follow as `type=warning`; messages collapse to one line.
+pub(crate) fn print_azure_annotations(run: &report::Run) {
+    let prefix = std::env::var("RSTEST_MONO_PROJECT")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let source = |nodeid: &str| -> String {
+        let rel = nodeid.split("::").next().unwrap_or(nodeid);
+        match &prefix {
+            Some(p) => format!("{p}/{rel}"),
+            None => rel.to_string(),
+        }
+    };
+    for (nodeid, entry) in run.tests() {
+        let failed = entry.call.as_deref() == Some("failed")
+            || entry.setup.as_deref() == Some("failed")
+            || entry.teardown.as_deref() == Some("failed");
+        if !failed {
+            continue;
+        }
+        let mut props = format!("type=error;sourcepath={}", az_prop(&source(nodeid)));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(";linenumber={}", l + 1));
+        }
+        let msg = entry.longrepr.as_deref().unwrap_or("test failed");
+        println!("##vso[task.logissue {props}]{}: {}", nodeid, az_line(msg));
+    }
+    for (nodeid, attempts) in &run.flaky {
+        let Some(entry) = run.tests().get(nodeid) else {
+            continue;
+        };
+        let mut props = format!("type=warning;sourcepath={}", az_prop(&source(nodeid)));
+        if let Some(l) = entry.lineno {
+            props.push_str(&format!(";linenumber={}", l + 1));
+        }
+        println!(
+            "##vso[task.logissue {props}]{nodeid}: flaky, passed only after {attempts} rerun{}",
+            if *attempts > 1 { "s" } else { "" }
+        );
+    }
+}
+
+/// Azure logissue property value: `;` and `]` would end the property list /
+/// command, newlines would split the log line.
+fn az_prop(s: &str) -> String {
+    az_line(s).replace(';', "%3B").replace(']', "%5D")
+}
+
+/// Collapse to the first line for a single-line Azure log message.
+fn az_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// Buildkite: surface flaky-passed tests as a `warning` annotation on the
+/// build page, best-effort (a missing/failing `buildkite-agent` must not fail
+/// the run). No-op off Buildkite or when nothing flaked.
+pub(crate) fn buildkite_flaky_annotate(run: &report::Run) {
+    if run.flaky.is_empty()
+        || std::env::var("BUILDKITE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_none()
+    {
+        return;
+    }
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut md = String::from("**Flaky tests** (passed only after reruns):\n\n");
+    for (nodeid, attempts) in &run.flaky {
+        md.push_str(&format!(
+            "- `{nodeid}` — {attempts} rerun{}\n",
+            if *attempts > 1 { "s" } else { "" }
+        ));
+    }
+    let child = Command::new("buildkite-agent")
+        .args([
+            "annotate",
+            "--style",
+            "warning",
+            "--context",
+            "rstest-flaky",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rstest: skipping Buildkite flaky annotation (buildkite-agent: {e})");
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(md.as_bytes());
+    }
+    if let Err(e) = child.wait() {
+        eprintln!("rstest: buildkite-agent annotate failed: {e}");
+    }
+}
+
+/// Escape a GitHub workflow-command message (the part after `::`).
+fn gh_data(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// Escape a workflow-command property value (stricter: `:` and `,` too).
+fn gh_prop(s: &str) -> String {
+    gh_data(s).replace(':', "%3A").replace(',', "%2C")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gh_escaping_covers_command_metacharacters() {
+        // message (data): only % \r \n are special
+        assert_eq!(gh_data("a%b\nc\rd"), "a%25b%0Ac%0Dd");
+        // property: also : and , so the key=value list can't be broken
+        assert_eq!(gh_prop("pkg::test[a,b]"), "pkg%3A%3Atest[a%2Cb]");
+        // % must escape first, or the other escapes' %XX would double-encode
+        assert_eq!(gh_data("100%"), "100%25");
+    }
+
+    #[test]
+    fn azure_logissue_escaping() {
+        // property value: ; and ] would break the command; newlines collapse
+        assert_eq!(az_prop("a;b]c"), "a%3Bb%5Dc");
+        // message keeps only the first line, trimmed
+        assert_eq!(az_line("  first line  \nsecond\nthird"), "first line");
+        assert_eq!(az_line(""), "");
+    }
+}

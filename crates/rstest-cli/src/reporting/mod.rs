@@ -4,6 +4,7 @@
 //! footer (`status`), the ANSI palette (`color`), and cross-run flake history
 //! (`flakes`).
 
+pub mod ci;
 pub mod color;
 pub mod flakes;
 pub mod junit;
