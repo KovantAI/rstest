@@ -17,9 +17,12 @@ Exit code: 0, or 1 when --cov-fail-under is not met (matching pytest-cov).
 
 import hashlib
 import json
+import logging
 import os
 import sys
 from typing import Any
+
+log = logging.getLogger("rstest.covtool")
 
 # Honor RSTEST_CACHE (the same override the Rust side reads via cache::dir) so
 # the index is written where rstest reads it; defaults to CWD-relative .rstest_cache.
@@ -158,10 +161,10 @@ def main(argv: list[str]) -> int:
                 cov.annotate(directory=arg or None)
                 pct = None
             else:
-                print(f"rstest: unknown --cov-report kind: {kind!r}", file=sys.stderr)
+                log.warning("unknown --cov-report kind: %r", kind)
                 continue
         except coverage.CoverageException as exc:
-            print(f"rstest: coverage report failed: {exc}", file=sys.stderr)
+            log.error("coverage report failed: %s", exc)
             return 1
         if fail_under is not None and pct is not None and pct < float(fail_under):
             print(
@@ -176,10 +179,11 @@ def main(argv: list[str]) -> int:
         try:
             build_index(cov)
         except Exception as exc:
-            print(f"rstest: coverage index build skipped: {exc}", file=sys.stderr)
+            log.warning("coverage index build skipped: %s", exc)
 
     return status
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="rstest: %(message)s", stream=sys.stderr)
     sys.exit(main(sys.argv[1:]))

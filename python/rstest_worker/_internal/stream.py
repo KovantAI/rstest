@@ -1,7 +1,7 @@
 """Translate pytest report hooks into wire events, and emulate the xdist
 master-side node hooks each pool worker must play for itself."""
 
-import contextlib
+import logging
 import os
 import sys
 from typing import Any
@@ -20,6 +20,8 @@ from rstest_worker._internal.xdistnode import (
     _XdistGatewayShim,
     _XdistNodeShim,
 )
+
+log = logging.getLogger("rstest.worker")
 
 
 class StreamPlugin:
@@ -186,9 +188,17 @@ class StreamPlugin:
             impl = getattr(plugin, "pytest_testnodedown", None)
             if impl is not None:
                 # Cleanup for a dead sibling must never poison THIS worker's
-                # session, so a misbehaving plugin hook is swallowed here.
-                with contextlib.suppress(Exception):
+                # session, so a misbehaving plugin hook is swallowed here — but
+                # logged (exc_info) so a real bug leaves a trace instead of
+                # vanishing silently.
+                try:
                     _call_node_impl(impl, shim, error=payload.get("error"))
+                except Exception:
+                    log.warning(
+                        "dead-sibling pytest_testnodedown hook failed for %r",
+                        getattr(plugin, "__class__", type(plugin)).__name__,
+                        exc_info=True,
+                    )
 
     def _call_node_hooks(self, config, name, **kwargs):
         if self._xdist_node is None:
