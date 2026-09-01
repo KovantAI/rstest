@@ -123,6 +123,40 @@ fn run_collect_discovery(
     std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
     Ok(exitstatus)
 }
+/// Resolve the effective `--changed` base rev: the flag's value, or `HEAD` when
+/// `--changed-strict` implies it, run through git rev resolution. `None` = no
+/// changed-selection requested.
+fn resolve_changed_base(cli: &Cli) -> Result<Option<String>> {
+    cli.changed
+        .clone()
+        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
+        .map(|rev| select::resolve_base_rev(&rev))
+        .transpose()
+}
+
+/// `HEAD` means "diff the working tree" (no explicit rev); any other rev is the
+/// diff base. The git-diff helpers take `Option<&str>` with that convention.
+fn head_to_none(rev: &str) -> Option<&str> {
+    (rev != "HEAD").then_some(rev)
+}
+
+/// Assemble the report-json run metadata; `duration_seconds`/`argv` are the same
+/// for every run path, only exit status / start epoch / worker count vary.
+fn build_run_meta(
+    start: Instant,
+    exitstatus: i32,
+    started_at_epoch: u64,
+    workers: usize,
+) -> report::RunMeta {
+    report::RunMeta {
+        exitstatus,
+        duration_seconds: start.elapsed().as_secs_f64(),
+        started_at_epoch,
+        workers,
+        argv: std::env::args().collect(),
+    }
+}
+
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let args = args.to_vec();
     let start = Instant::now();
@@ -379,18 +413,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         println!("rstest {} — {worker_desc}", env!("CARGO_PKG_VERSION"));
     }
     let mut args = args;
-    let effective_changed = cli
-        .changed
-        .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
-        .map(|rev| select::resolve_base_rev(&rev))
-        .transpose()?;
+    let effective_changed = resolve_changed_base(cli)?;
     if let Some(rev) = &effective_changed {
-        let rev = if rev == "HEAD" {
-            None
-        } else {
-            Some(rev.as_str())
-        };
+        let rev = head_to_none(rev);
         let cwd = std::env::current_dir()?;
         let project = config::discover(&cwd);
         // Coverage-aware selection: uses the line->test index when it is warm
@@ -759,13 +784,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     if let Some(path) = &cli.report_json {
         outcome.run.write_snapshot(
             path,
-            &report::RunMeta {
-                exitstatus: outcome.exitstatus,
-                duration_seconds: start.elapsed().as_secs_f64(),
-                started_at_epoch: started_epoch,
-                workers: n,
-                argv: std::env::args().collect(),
-            },
+            &build_run_meta(start, outcome.exitstatus, started_epoch, n),
         )?;
     }
     if duration_regressions > 0 {
@@ -1094,19 +1113,10 @@ fn execute_monorepo(
     // --changed at a monorepo root: classify projects ONCE against the
     // repo-wide changed set. Directly-changed projects keep --changed;
     // dependents run their FULL suite; the rest are skipped.
-    let mono_changed = cli
-        .changed
-        .clone()
-        .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
-        .map(|rev| select::resolve_base_rev(&rev))
-        .transpose()?;
+    let mono_changed = resolve_changed_base(cli)?;
     let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
         Some(rev) => {
-            let rev = if rev == "HEAD" {
-                None
-            } else {
-                Some(rev.as_str())
-            };
+            let rev = head_to_none(rev);
             let changed = select::changed_files_from_git(rev)?;
             let impacts = mono::classify_changes(root, &projects, &changed, cli.changed_strict);
             let skipped = impacts
@@ -1304,16 +1314,11 @@ fn execute_monorepo(
         } else {
             root.join(out)
         };
-        let run_meta = report::RunMeta {
-            exitstatus: merged,
-            duration_seconds: start.elapsed().as_secs_f64(),
-            started_at_epoch: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs().saturating_sub(start.elapsed().as_secs()))
-                .unwrap_or(0),
-            workers: budget,
-            argv: std::env::args().collect(),
-        };
+        let started_at_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().saturating_sub(start.elapsed().as_secs()))
+            .unwrap_or(0);
+        let run_meta = build_run_meta(start, merged, started_at_epoch, budget);
         if let Err(e) = mono::merge_reports(&report_parts, &run_meta, &out) {
             eprintln!("rstest: failed to write merged report: {e}");
         }

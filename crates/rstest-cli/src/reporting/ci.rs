@@ -4,25 +4,50 @@
 
 use super::report;
 
+/// The `RSTEST_MONO_PROJECT` prefix (root-relative project path), set by the
+/// monorepo parent so child annotations resolve from the repo root, not cwd.
+fn mono_prefix() -> Option<String> {
+    std::env::var("RSTEST_MONO_PROJECT")
+        .ok()
+        .filter(|p| !p.is_empty())
+}
+
+/// The source file of a nodeid (everything before `::`), prefixed with the
+/// monorepo project path when present.
+fn source_path(nodeid: &str, prefix: &Option<String>) -> String {
+    let rel = nodeid.split("::").next().unwrap_or(nodeid);
+    match prefix {
+        Some(p) => format!("{p}/{rel}"),
+        None => rel.to_string(),
+    }
+}
+
+/// Whether any phase (setup/call/teardown) of this test failed.
+fn is_failed(entry: &report::TestEntry) -> bool {
+    entry.call.as_deref() == Some("failed")
+        || entry.setup.as_deref() == Some("failed")
+        || entry.teardown.as_deref() == Some("failed")
+}
+
+/// Plural suffix for a rerun count.
+fn plural(n: u32) -> &'static str {
+    if n > 1 {
+        "s"
+    } else {
+        ""
+    }
+}
+
 pub(crate) fn print_github_annotations(run: &report::Run) {
     // Under a monorepo the parent runs us with cwd=project, so nodeid paths
     // are project-relative; GitHub resolves annotation `file` from the repo
     // root, so prefix the project's root-relative path (set by the parent).
-    let prefix = std::env::var("RSTEST_MONO_PROJECT")
-        .ok()
-        .filter(|p| !p.is_empty());
+    let prefix = mono_prefix();
     for (nodeid, entry) in run.tests() {
-        let failed = entry.call.as_deref() == Some("failed")
-            || entry.setup.as_deref() == Some("failed")
-            || entry.teardown.as_deref() == Some("failed");
-        if !failed {
+        if !is_failed(entry) {
             continue;
         }
-        let rel = nodeid.split("::").next().unwrap_or(nodeid);
-        let file = match &prefix {
-            Some(p) => format!("{p}/{rel}"),
-            None => rel.to_string(),
-        };
+        let file = source_path(nodeid, &prefix);
         let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
         if let Some(l) = entry.lineno {
             props.push_str(&format!(",line={}", l + 1));
@@ -37,18 +62,14 @@ pub(crate) fn print_github_annotations(run: &report::Run) {
         let Some(entry) = run.tests().get(nodeid) else {
             continue;
         };
-        let rel = nodeid.split("::").next().unwrap_or(nodeid);
-        let file = match &prefix {
-            Some(p) => format!("{p}/{rel}"),
-            None => rel.to_string(),
-        };
+        let file = source_path(nodeid, &prefix);
         let mut props = format!("file={},title={}", gh_prop(&file), gh_prop(nodeid));
         if let Some(l) = entry.lineno {
             props.push_str(&format!(",line={}", l + 1));
         }
         println!(
             "::warning {props}::flaky: passed only after {attempts} rerun{}",
-            if *attempts > 1 { "s" } else { "" }
+            plural(*attempts)
         );
     }
 }
@@ -57,24 +78,15 @@ pub(crate) fn print_github_annotations(run: &report::Run) {
 /// which Azure renders as inline issues on the PR (same mapping as GitHub).
 /// Flaky-passed tests follow as `type=warning`; messages collapse to one line.
 pub(crate) fn print_azure_annotations(run: &report::Run) {
-    let prefix = std::env::var("RSTEST_MONO_PROJECT")
-        .ok()
-        .filter(|p| !p.is_empty());
-    let source = |nodeid: &str| -> String {
-        let rel = nodeid.split("::").next().unwrap_or(nodeid);
-        match &prefix {
-            Some(p) => format!("{p}/{rel}"),
-            None => rel.to_string(),
-        }
-    };
+    let prefix = mono_prefix();
     for (nodeid, entry) in run.tests() {
-        let failed = entry.call.as_deref() == Some("failed")
-            || entry.setup.as_deref() == Some("failed")
-            || entry.teardown.as_deref() == Some("failed");
-        if !failed {
+        if !is_failed(entry) {
             continue;
         }
-        let mut props = format!("type=error;sourcepath={}", az_prop(&source(nodeid)));
+        let mut props = format!(
+            "type=error;sourcepath={}",
+            az_prop(&source_path(nodeid, &prefix))
+        );
         if let Some(l) = entry.lineno {
             props.push_str(&format!(";linenumber={}", l + 1));
         }
@@ -85,13 +97,16 @@ pub(crate) fn print_azure_annotations(run: &report::Run) {
         let Some(entry) = run.tests().get(nodeid) else {
             continue;
         };
-        let mut props = format!("type=warning;sourcepath={}", az_prop(&source(nodeid)));
+        let mut props = format!(
+            "type=warning;sourcepath={}",
+            az_prop(&source_path(nodeid, &prefix))
+        );
         if let Some(l) = entry.lineno {
             props.push_str(&format!(";linenumber={}", l + 1));
         }
         println!(
             "##vso[task.logissue {props}]{nodeid}: flaky, passed only after {attempts} rerun{}",
-            if *attempts > 1 { "s" } else { "" }
+            plural(*attempts)
         );
     }
 }
@@ -125,7 +140,7 @@ pub(crate) fn buildkite_flaky_annotate(run: &report::Run) {
     for (nodeid, attempts) in &run.flaky {
         md.push_str(&format!(
             "- `{nodeid}` — {attempts} rerun{}\n",
-            if *attempts > 1 { "s" } else { "" }
+            plural(*attempts)
         ));
     }
     let child = Command::new("buildkite-agent")
