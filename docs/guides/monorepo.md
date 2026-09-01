@@ -10,7 +10,7 @@ rstest runs the whole repo in one command:
 
 ```console
 $ cd my-monorepo && rstest
-rstest 0.3.1 — monorepo: 3 projects, 8 workers (libs/cli:-n2, libs/core:-n4, services/api:-n2)
+rstest 0.4.0 — monorepo: 3 projects, 8 workers (libs/cli:-n2, libs/core:-n4, services/api:-n2)
 
 =============== project: libs/core ===============
 ...
@@ -47,7 +47,7 @@ dominated by one package finishes in roughly that package's wall time:
 
 ```console
 $ rstest          # langgraph monorepo, 14-core machine
-rstest 0.3.1 — monorepo: 6 projects, 14 workers (libs/langgraph:-n9, libs/checkpoint:-n1, libs/cli:-n1, libs/sdk:-n1, libs/prebuilt:-n1, libs/checkpoint-sqlite:-n1)
+rstest 0.4.0 — monorepo: 6 projects, 14 workers (libs/langgraph:-n9, libs/checkpoint:-n1, libs/cli:-n1, libs/sdk:-n1, libs/prebuilt:-n1, libs/checkpoint-sqlite:-n1)
 ...
 6 projects in 245.7s   # cold run; six serial pytest invocations: 880.4s (3.6×)
 ```

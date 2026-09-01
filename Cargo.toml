@@ -5,7 +5,7 @@ members = ["crates/rstest-cli"]
 exclude = ["corpus/work"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 # MSRV: the crate uses `Option::is_none_or` (stable since Rust 1.82).

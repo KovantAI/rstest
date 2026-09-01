@@ -21,7 +21,10 @@ import os
 import sys
 from typing import Any
 
-INDEX_PATH = os.path.join(".rstest_cache", "coverage_index.json")
+# Honor RSTEST_CACHE (the same override the Rust side reads via cache::dir) so
+# the index is written where rstest reads it; defaults to CWD-relative .rstest_cache.
+CACHE_DIR = os.environ.get("RSTEST_CACHE") or ".rstest_cache"
+INDEX_PATH = os.path.join(CACHE_DIR, "coverage_index.json")
 INDEX_SCHEMA = 2
 # coverage labels dynamic contexts "<nodeid>|<phase>" (phase in run/setup/
 # teardown); strip the phase to recover the bare nodeid.
@@ -110,7 +113,7 @@ def build_index(cov: Any) -> None:
         files[rel] = {"hash": digest, "lines": line_map}
     if not files:
         return
-    os.makedirs(".rstest_cache", exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
     tmp = INDEX_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"schema": INDEX_SCHEMA, "files": files}, fh)  # schema 2: {hash, lines}

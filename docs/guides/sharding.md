@@ -53,13 +53,14 @@ per-shard JUnit reconstructs the full run.
       those modes exist to provide.
     - Composes with `--changed`: selection narrows the file set first,
       then the shard partitions the survivors.
-    - **Building the coverage index under `--shard` is partial.** A sharded
-      `--cov-context=test` run only measures its own shard's tests, so the
-      `coverage_index.json` it writes covers a fraction of the suite — a later
-      `--changed` would under-select. Warm the [`--changed` coverage
-      index](changed.md#keeping-the-index-warm) from an **unsharded** coverage
-      run (or merge each shard's `.coverage` before building the index), not
-      from the sharded job.
+    - **A sharded coverage index is partial per job.** Each shard measures only
+      its own tests. Push each shard's slice through the
+      [shared cache](../concepts/caching.md#shared-cache-backend)
+      (`--cache-remote … --cache-pull --cache-push`) — the shards share a commit,
+      so their slices **union on pull** into a full index and a later `--changed`
+      selects correctly, no dedicated unsharded job. Without the shared cache,
+      warm the index from an **unsharded** run (or merge each shard's
+      `.coverage`). See [keeping the index warm](changed.md#keeping-the-index-warm).
 
 ## GitHub Actions
 
@@ -147,6 +148,14 @@ jobs:
     matrix job a different cache and break the partition. If you'd rather
     not run a separate full job, let shard 1 save the cache instead — but
     accept that its timings only cover 1/N of the suite.
+
+!!! tip "Or skip the dance entirely with the shared cache"
+    The restore-key/refresh-job choreography above exists to work around
+    `actions/cache` immutability. The [shared-cache backend](../concepts/caching.md#shared-cache-backend)
+    removes it: every shard runs `--cache-pull --cache-push`, each pushing its
+    own immutable segment, and they union on the next pull — no single-writer
+    job, no dedicated full run. See
+    [CI quickstart → Shared cache](ci-quickstart.md#shared-cache).
 
 ## GitLab CI
 

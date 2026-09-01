@@ -1,3 +1,4 @@
+mod cache;
 mod cli;
 #[allow(dead_code)]
 mod collect; // D5: single-point collection
@@ -7,6 +8,7 @@ mod discover;
 mod doctor;
 mod migrate;
 mod mono;
+mod remote;
 mod reporting;
 mod run;
 mod scheduling;

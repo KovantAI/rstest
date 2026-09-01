@@ -166,6 +166,37 @@ pub struct Cli {
     /// disjoint, so merging per-job JUnit reconstructs the full run.
     #[arg(long, value_name = "K/N")]
     pub(crate) shard: Option<String>,
+
+    /// Shared-cache remote: a directory or `file://` path (local, an NFS/EFS
+    /// mount, or a dir a CI step materializes via `download-artifact` /
+    /// `aws s3 sync`). Also settable via `RSTEST_CACHE_REMOTE`. Enables
+    /// `--cache-pull` / `--cache-push` / `--cache-compact`.
+    #[arg(long, value_name = "URL|DIR")]
+    pub(crate) cache_remote: Option<String>,
+
+    /// Before the run, merge the remote's segments + base into the local
+    /// `.rstest_cache` (durations, flake history). Warms scheduling and the
+    /// regression baseline. Needs `--cache-remote`.
+    #[arg(long)]
+    pub(crate) cache_pull: bool,
+
+    /// After the run, publish THIS run's contribution as one immutable segment
+    /// on the remote (durations + flake events). Concurrent shards never
+    /// conflict. Needs `--cache-remote`.
+    #[arg(long)]
+    pub(crate) cache_push: bool,
+
+    /// Maintenance: fold all remote segments into a fresh base and prune them,
+    /// then exit without running tests. Needs `--cache-remote`.
+    #[arg(long)]
+    pub(crate) cache_compact: bool,
+
+    /// With a baseline-dependent gate active (`--durations-regress`), treat a
+    /// successful pull that returns NO baseline as a hard error instead of a
+    /// silent skip — the steady-state guard against a cache that never
+    /// restored. A failed pull is always an error.
+    #[arg(long)]
+    pub(crate) require_baseline: bool,
 }
 
 /// -x / --maxfail=N from the session args (also forwarded: each worker
@@ -269,6 +300,16 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         match arg.as_str() {
             "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
             "--reruns-only-known-flaky" => own.push(arg),
+            "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
+                own.push(arg)
+            }
+            "--cache-remote" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--cache-remote=") => own.push(arg),
             "--migrate-check-json" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {

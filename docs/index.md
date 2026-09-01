@@ -7,7 +7,7 @@ with built-in suite diagnostics (`--doctor`).
 ```console
 $ pip install rstest
 $ rstest
-rstest 0.3.1 — 8 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.4.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 34%]
 ........................................................................ [ 69%]
 ......................................................                   [100%]

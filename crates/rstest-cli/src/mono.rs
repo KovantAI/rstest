@@ -247,7 +247,11 @@ pub fn plan_shares(costs: &[Option<f64>], budget: usize) -> Vec<usize> {
 
 /// Sum of a project's duration cache (suite seconds last run), if any.
 pub fn project_cost(project: &Path) -> Option<f64> {
-    let bytes = std::fs::read(project.join(".rstest_cache/durations.json")).ok()?;
+    let bytes = std::fs::read(crate::cache::file_in(
+        project,
+        crate::scheduling::durations::FILE,
+    ))
+    .ok()?;
     let map: std::collections::HashMap<String, f64> = serde_json::from_slice(&bytes).ok()?;
     Some(map.values().sum())
 }
