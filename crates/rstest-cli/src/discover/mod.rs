@@ -120,10 +120,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::cache::{read_cache, write_cache, CacheEntry, DiskCache};
-    use super::candidates::{
-        discovery_candidates, managed_in, parse_dir_version, parse_py_list_paths,
-        path_python_names, py_launcher_candidates,
-    };
+    #[cfg(not(windows))]
+    use super::candidates::{discovery_candidates, managed_in, py_launcher_candidates};
+    use super::candidates::{parse_dir_version, parse_py_list_paths, path_python_names};
     use super::probe::{probe, Probe};
     use super::request::{matches, parse_pyarg, PyArg, Request};
     use super::{resolve_versioned, resolve_with};
