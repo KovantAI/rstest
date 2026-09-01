@@ -8,6 +8,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[lib]
+name = "rstest_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rstest"
 path = "src/main.rs"
