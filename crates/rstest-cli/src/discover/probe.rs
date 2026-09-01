@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::worker::worker_pythonpath;
+use crate::scheduling::worker::worker_pythonpath;
 
 use super::cache::{disk_cache_get, disk_cache_put, file_fingerprint};
 

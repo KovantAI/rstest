@@ -5,7 +5,7 @@
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
-use crate::color::Palette;
+use crate::reporting::color::Palette;
 
 pub struct StatusFooter {
     enabled: bool,
@@ -221,7 +221,7 @@ fn tail(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{bar_header, summary_bar, tail, BAR_WIDTH};
-    use crate::color::Palette;
+    use crate::reporting::color::Palette;
 
     #[test]
     fn summary_bar_segments_total_width() {

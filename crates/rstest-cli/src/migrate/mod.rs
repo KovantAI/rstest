@@ -16,7 +16,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::{proto, worker};
+use crate::scheduling::{proto, worker};
 
 /// Per-test record from a run snapshot: pass/fail plus timing (for the
 /// wait-bound / wall-clock signal). A test absent from a run isn't in the map.

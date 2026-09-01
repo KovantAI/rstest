@@ -710,7 +710,7 @@ mod strict_tests {
 /// `meta.projects` carries per-project exit/skip status. Additive to schema 2.
 pub fn merge_reports(
     parts: &[(String, Option<std::path::PathBuf>, Option<i32>, bool)],
-    run_meta: &crate::report::RunMeta,
+    run_meta: &crate::reporting::report::RunMeta,
     out: &Path,
 ) -> anyhow::Result<()> {
     let mut tests = serde_json::Map::new();
@@ -811,7 +811,7 @@ mod merge_tests {
                 ("libs/b".into(), Some(b), Some(1), false),
                 ("libs/c".into(), None, None, true), // skipped by --changed
             ],
-            &crate::report::RunMeta {
+            &crate::reporting::report::RunMeta {
                 exitstatus: 1,
                 duration_seconds: 12.345,
                 started_at_epoch: 1_750_000_000,

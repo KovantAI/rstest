@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::report::Run;
+use crate::reporting::report::Run;
 
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
 pub struct FlakeStats {

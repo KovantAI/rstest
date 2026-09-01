@@ -5,7 +5,7 @@ use std::process::{Child, Command};
 
 use anyhow::{Context, Result};
 
-use crate::proto;
+use crate::scheduling::proto;
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
 /// CreatePipe handles on Windows), never stdio (D4: fd 0/1/2 stay free). The

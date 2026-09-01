@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::report::Run;
+use crate::reporting::report::Run;
 
 pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
     let mut tests = 0u64;
@@ -131,11 +131,11 @@ mod tests {
 
     #[test]
     fn renders_counts_and_flaky_property() {
-        let mut run = crate::report::Run::default();
+        let mut run = crate::reporting::report::Run::default();
         for (nodeid, outcome) in [("a.py::ok", "passed"), ("a.py::bad", "failed")] {
             run.record(
                 None,
-                crate::proto::Report {
+                crate::scheduling::proto::Report {
                     nodeid: nodeid.into(),
                     when: "call".into(),
                     outcome: outcome.into(),

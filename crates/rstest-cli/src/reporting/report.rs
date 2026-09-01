@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::proto;
+use crate::scheduling::proto;
 
 /// Per-test phase outcomes, mirroring the compat-harness recorder schema
 /// (rstest-research/harness/recorder.py) so `diff_snapshots.py` can gate
@@ -164,8 +164,8 @@ impl Run {
 
     pub fn print_flaky(
         &self,
-        palette: &crate::color::Palette,
-        history: &std::collections::HashMap<String, crate::flakes::FlakeStats>,
+        palette: &crate::reporting::color::Palette,
+        history: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
         wrap: FailureWrap,
     ) {
         if self.flaky.is_empty() {
@@ -205,8 +205,8 @@ impl Run {
     /// quarantined test still needs fixing), never fatal.
     pub fn print_quarantined(
         &self,
-        palette: &crate::color::Palette,
-        history: &std::collections::HashMap<String, crate::flakes::FlakeStats>,
+        palette: &crate::reporting::color::Palette,
+        history: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
     ) {
         let quarantined: Vec<(&String, &TestEntry)> =
             self.tests.iter().filter(|(_, e)| e.quarantined).collect();
@@ -241,7 +241,13 @@ impl Run {
     /// pytest's "slowest N durations" block (terminal summary_durations):
     /// every phase, sorted slowest first; below `min` hidden unless `vv`,
     /// with pytest's hidden-count note. `n == 0` means all.
-    pub fn print_durations(&self, n: usize, min: f64, vv: bool, palette: &crate::color::Palette) {
+    pub fn print_durations(
+        &self,
+        n: usize,
+        min: f64,
+        vv: bool,
+        palette: &crate::reporting::color::Palette,
+    ) {
         if !self.track_phase_durations {
             return;
         }
@@ -279,7 +285,7 @@ impl Run {
 
     /// The failures block, with each failure optionally wrapped in a CI
     /// log-folding construct so the job UI collapses tracebacks per test.
-    pub fn print_failures(&self, palette: &crate::color::Palette, wrap: FailureWrap) {
+    pub fn print_failures(&self, palette: &crate::reporting::color::Palette, wrap: FailureWrap) {
         let open = |header: &str, idx: usize| match wrap {
             FailureWrap::Plain => {
                 println!(

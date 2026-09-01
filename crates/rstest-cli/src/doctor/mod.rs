@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::proto::FixtureStat;
-use crate::report::Run;
+use crate::reporting::report::Run;
+use crate::scheduling::proto::FixtureStat;
 
 /// Bump when the JSON shape changes incompatibly.
 const SCHEMA_VERSION: u32 = 2;
@@ -273,7 +273,7 @@ pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Resu
 #[cfg(test)]
 pub(crate) mod testutil {
     use super::*;
-    use crate::report::Run;
+    use crate::reporting::report::Run;
 
     pub fn report(tests: usize) -> DoctorReport {
         DoctorReport {
@@ -337,7 +337,7 @@ pub(crate) mod testutil {
     /// Record one completed test (setup/call/teardown) on `worker` with the
     /// given call duration, mirroring what the pool feeds `Run::record`.
     pub fn record_test(run: &mut Run, nodeid: &str, worker: usize, dur: f64) {
-        let r = |when: &str, duration: f64| crate::proto::Report {
+        let r = |when: &str, duration: f64| crate::scheduling::proto::Report {
             nodeid: nodeid.into(),
             when: when.into(),
             outcome: "passed".into(),

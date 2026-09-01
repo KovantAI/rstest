@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::report::Run;
+use crate::reporting::report::Run;
 
 fn cache_path() -> PathBuf {
     PathBuf::from(".rstest_cache/durations.json")
@@ -96,7 +96,7 @@ mod tests {
         ] {
             run.record(
                 None,
-                crate::proto::Report {
+                crate::scheduling::proto::Report {
                     nodeid: id.into(),
                     when: "call".into(),
                     outcome: "passed".into(),

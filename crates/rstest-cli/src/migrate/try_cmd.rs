@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::{is_fail, Outcomes, Phase, Rec};
-use crate::worker;
+use crate::scheduling::worker;
 
 /// Run a command, return (parsed outcomes from its --report-json/recorder
 /// snapshot, wall seconds, exit code). `record_path` is where the run wrote its

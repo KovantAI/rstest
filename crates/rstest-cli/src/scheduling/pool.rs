@@ -26,10 +26,10 @@ use std::sync::mpsc;
 
 use anyhow::{bail, Result};
 
-use crate::progress::Progress;
-use crate::proto::{self, Event};
-use crate::report::Run;
-use crate::worker::Worker;
+use crate::reporting::progress::Progress;
+use crate::reporting::report::Run;
+use crate::scheduling::proto::{self, Event};
+use crate::scheduling::worker::Worker;
 
 /// Items per dispatch message (load mode). Contiguous ranges keep module
 /// locality and cut protocol round-trips; sized so each worker sees ~16
@@ -185,9 +185,9 @@ pub fn run_pool(
     python: &Path,
     n: usize,
     args: &[String],
-    mode: crate::progress::Mode,
+    mode: crate::reporting::progress::Mode,
     track_durations: bool,
-    palette: crate::color::Palette,
+    palette: crate::reporting::color::Palette,
     dist: Dist,
     maxfail: Option<u64>,
     reruns: u32,
@@ -209,14 +209,14 @@ pub fn run_pool(
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
     // explicit done_workers break, not channel disconnect.
 
-    let duration_cache = crate::durations::load();
+    let duration_cache = crate::scheduling::durations::load();
     let mut run = Run::default();
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
     prog.set_palette(palette);
     // Json mode keeps stdout pure NDJSON: the footer's ANSI repaint would
     // corrupt the stream on a TTY, so skip it.
-    if mode != crate::progress::Mode::Json {
+    if mode != crate::reporting::progress::Mode::Json {
         prog.enable_footer(n);
     }
     prog.set_mode(mode);
@@ -406,7 +406,7 @@ pub fn run_pool(
                                             })
                                         })
                                         .collect();
-                                    crate::shard::shard_groups(
+                                    crate::scheduling::shard::shard_groups(
                                         &ids,
                                         &keys,
                                         &duration_cache,
@@ -419,7 +419,7 @@ pub fn run_pool(
                                     let keys: Vec<Option<String>> = (0..ids.len())
                                         .map(|i| g.and_then(|m| m.get(&i.to_string()).cloned()))
                                         .collect();
-                                    crate::shard::shard_groups(
+                                    crate::scheduling::shard::shard_groups(
                                         &ids,
                                         &keys,
                                         &duration_cache,
@@ -428,7 +428,12 @@ pub fn run_pool(
                                     )
                                 }
                                 // Load has no affinity: per-test split is fine.
-                                _ => crate::shard::shard_indices(&ids, &duration_cache, k, total),
+                                _ => crate::scheduling::shard::shard_indices(
+                                    &ids,
+                                    &duration_cache,
+                                    k,
+                                    total,
+                                ),
                             };
                             eprintln!(
                                 "rstest: shard {k}/{total} -> {} of {} test(s)",
@@ -945,7 +950,7 @@ fn build_dispatch(
         // with the full suite); run_pool guards the call.
         Dist::Each => unreachable!("--dist each has no dispatch queue"),
         Dist::Load => {
-            let full = crate::durations::dispatch_order(ids, cache);
+            let full = crate::scheduling::durations::dispatch_order(ids, cache);
             let order: Vec<u64> = full
                 .into_iter()
                 .filter(|i| !serial_set.contains(i) && kept(i))
@@ -955,7 +960,7 @@ fn build_dispatch(
                 .take_while(|&&i| {
                     cache
                         .get(&ids[i as usize])
-                        .is_some_and(|&d| d >= crate::durations::SLOW_THRESHOLD_SECS)
+                        .is_some_and(|&d| d >= crate::scheduling::durations::SLOW_THRESHOLD_SECS)
                 })
                 .count();
             (order, slow_count, None)

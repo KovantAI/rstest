@@ -3,9 +3,9 @@
 
 use std::io::Write;
 
-use crate::color::Palette;
-use crate::proto::Report;
-use crate::status::StatusFooter;
+use crate::reporting::color::Palette;
+use crate::reporting::status::StatusFooter;
+use crate::scheduling::proto::Report;
 
 #[derive(Default, Clone, Copy, PartialEq)]
 pub enum Mode {

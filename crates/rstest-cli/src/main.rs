@@ -1,25 +1,18 @@
 #[allow(dead_code)]
 mod collect; // D5: single-point collection
-mod color;
 #[allow(dead_code)]
 mod config;
 mod discover;
 mod doctor;
-mod durations;
-mod flakes;
-mod junit;
-mod lazy;
 mod migrate;
 mod mono;
-mod pool;
-mod progress;
-mod proto;
-mod report;
+mod reporting;
+mod scheduling;
 mod select;
-mod shard;
-mod status;
 mod watch;
-mod worker;
+
+use reporting::{color, flakes, junit, progress, report, status};
+use scheduling::{durations, lazy, pool, proto, shard, worker};
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

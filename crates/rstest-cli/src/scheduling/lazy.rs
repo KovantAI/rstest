@@ -21,11 +21,11 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 
-use crate::pool::PoolOutcome;
-use crate::progress::Progress;
-use crate::proto::{self, Event};
-use crate::report::Run;
-use crate::worker::Worker;
+use crate::reporting::progress::Progress;
+use crate::reporting::report::Run;
+use crate::scheduling::pool::PoolOutcome;
+use crate::scheduling::proto::{self, Event};
+use crate::scheduling::worker::Worker;
 
 struct WorkerState {
     worker: Worker,
@@ -99,8 +99,8 @@ pub fn run_lazy_pool(
     n: usize,
     args: &[String],
     files: Vec<PathBuf>,
-    mode: crate::progress::Mode,
-    palette: crate::color::Palette,
+    mode: crate::reporting::progress::Mode,
+    palette: crate::reporting::color::Palette,
     // --dist loadfile => steal=false: strict file affinity, the remedy
     // for order-dependent suites (same contract as the full pool).
     steal: bool,
@@ -119,7 +119,7 @@ pub fn run_lazy_pool(
         states.push(WorkerState::fresh(worker));
     }
 
-    let duration_cache = crate::durations::load();
+    let duration_cache = crate::scheduling::durations::load();
     let cwd = std::env::current_dir()?;
     let mut file_queue: VecDeque<String> = order_files(files, &duration_cache, &cwd).into();
 
@@ -129,7 +129,7 @@ pub fn run_lazy_pool(
     let mut prog = Progress::default();
     prog.set_palette(palette);
     // Json mode keeps stdout pure NDJSON; the footer would corrupt it.
-    if mode != crate::progress::Mode::Json {
+    if mode != crate::reporting::progress::Mode::Json {
         prog.enable_footer(n);
     }
     prog.set_mode(mode);
@@ -434,7 +434,7 @@ pub fn run_lazy_pool(
             }
         }
 
-        let chunk = crate::pool::chunk_size(total_items.max(1), states.len());
+        let chunk = crate::scheduling::pool::chunk_size(total_items.max(1), states.len());
 
         // File assignment: a worker collects one file at a time, picked
         // up when it has nothing left to collect and little left to run
@@ -582,7 +582,7 @@ pub fn run_lazy_pool(
     for w in workers {
         let _ = w.wait();
     }
-    let mut exitstatus = crate::pool::merge_statuses(&statuses);
+    let mut exitstatus = crate::scheduling::pool::merge_statuses(&statuses);
     if collect_aborted {
         exitstatus = exitstatus.max(2);
     }
