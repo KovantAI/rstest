@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from rstest_worker._internal import messages as m
 from rstest_worker._internal.stream import StreamPlugin
 
 
@@ -25,7 +26,7 @@ class ItemDispatchPlugin(StreamPlugin):
 
         ids = [item.nodeid for item in session.items]
         digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
-        payload: dict[str, object] = {"count": len(ids), "hash": digest}
+        payload: m.CollectionDonePayload = {"count": len(ids), "hash": digest}
         # Full id list rides the wire from ONE worker only (orchestrator needs
         # it once, for duration-cache ordering); the rest verify by hash - at
         # pandas scale that's 8x15MB saved on the startup path.
@@ -146,7 +147,7 @@ class LazyDispatchPlugin(StreamPlugin):
         items = session.perform_collect([path], genitems=True)
         ids = [it.nodeid for it in items]
         serial = [it.nodeid for it in items if it.get_closest_marker("serial") is not None]
-        payload = {"path": path, "ids": ids}
+        payload: m.FileCollectedPayload = {"path": path, "ids": ids}
         if serial:
             payload["serial"] = serial
         flaky = {}

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from rstest_worker._internal import messages as m
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
@@ -276,35 +277,27 @@ class StreamPlugin:
         # this, and rstest has no master to fire it in its place.
         self._call_node_hooks(session.config, "pytest_testnodedown", error=None)
         if self._warnings:
-            self._conn.send(
-                "warnings",
+            entries: list[m.WarningEntry] = [
                 {
-                    "entries": [
-                        {
-                            "when": when,
-                            "category": cat,
-                            "message": msg,
-                            "filename": fname,
-                            "lineno": lineno,
-                            "count": count,
-                        }
-                        for (when, cat, msg, fname, lineno), count in self._warnings.items()
-                    ]
-                },
-            )
+                    "when": when,
+                    "category": cat,
+                    "message": msg,
+                    "filename": fname,
+                    "lineno": lineno,
+                    "count": count,
+                }
+                for (when, cat, msg, fname, lineno), count in self._warnings.items()
+            ]
+            self._conn.send("warnings", {"entries": entries})
         if self._doctor and self._fixtures:
-            self._conn.send(
-                "doctor_fixtures",
-                {
-                    "fixtures": [
-                        {"name": name, "scope": scope, "count": c, "total": round(t, 4)}
-                        for (name, scope), (c, t) in self._fixtures.items()
-                    ]
-                },
-            )
+            fixtures: list[m.FixtureStat] = [
+                {"name": name, "scope": scope, "count": c, "total": round(t, 4)}
+                for (name, scope), (c, t) in self._fixtures.items()
+            ]
+            self._conn.send("doctor_fixtures", {"fixtures": fixtures})
 
     def pytest_runtest_logreport(self, report):
-        payload = {
+        payload: m.ReportPayload = {
             "nodeid": report.nodeid,
             "when": report.when,
             "outcome": report.outcome,

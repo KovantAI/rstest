@@ -3,6 +3,11 @@
 //! research D4 / xdist execnet fd-steal lesson).
 //!
 //! Wire shape: every message is a msgpack map `{"kind": ..., "payload": ...}`.
+//!
+//! This enum is the source of truth for the protocol. The Python worker mirrors
+//! it as TypedDicts in `python/rstest_worker/_internal/messages.py`; the parity
+//! test `python/tests/test_protocol_parity.py` fails if the two `kind` sets
+//! diverge, so add/rename a variant on both sides together.
 
 use serde::{Deserialize, Serialize};
 
