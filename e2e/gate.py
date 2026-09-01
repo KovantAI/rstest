@@ -2658,6 +2658,73 @@ def gate_worker_timeout_watchdog(g, args, binary):
     )
 
 
+def gate_try(g, args, binary):
+    print("== --try (pytest-vs-rstest parity proof) ==")
+    # A clean all-pass suite: pytest and rstest -n auto agree, so --try reports
+    # identical parity and exits 0. Exercises run_try end-to-end (pytest baseline
+    # + rstest run + parity/speed diff). pytest is available via the pytest-cov
+    # dep in the gate venv.
+    g.write(
+        "tryfix/test_t.py",
+        "def test_a(): assert True\ndef test_b(): assert True\ndef test_c(): assert True\n",
+    )
+    r = g.run("--try", cwd=g.tmp / "tryfix")
+    check(
+        "try: identical parity + speed line + drop-in verdict, exit 0",
+        r.returncode == 0
+        and "rstest --try" in r.stdout
+        and "identical outcomes to pytest" in r.stdout
+        and "at -n auto" in r.stdout
+        and "drop-in ready" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-400:] + r.stderr[-200:],
+    )
+
+
+def gate_migrate_check(g, args, binary):
+    print("== --migrate-check (parallel-readiness preflight) ==")
+    # Clean suite: stable ids across two collections, no parallel-only failures
+    # -> ready at -n auto, exit 0. Drives the full preflight: collect-twice +
+    # the -n auto parallel phase + failure classification (with zero failures).
+    g.write(
+        "mcclean/test_ok.py",
+        "def test_a(): assert True\ndef test_b(): assert True\n"
+        "def test_c(): assert True\ndef test_d(): assert True\n",
+    )
+    r = g.run("--migrate-check", cwd=g.tmp / "mcclean")
+    check(
+        "migrate-check: clean suite is parallel-ready (exit 0)",
+        r.returncode == 0
+        and "tests collected" in r.stdout
+        and "UNSTABLE NODEIDS: none" in r.stdout
+        and "PARALLEL: ready" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-500:] + r.stderr[-200:],
+    )
+    # Unstable parametrize ids: fresh uuid4 per collection -> the two collections
+    # disagree, the classifier tags them `uuid` (a per-process-unstable kind that
+    # forces -n 0). Blocks the run (exit 1) before the parallel phase.
+    g.write(
+        "mcunstable/test_u.py",
+        "import uuid\nimport pytest\n\n"
+        # Dashed uuid form so the classifier's uuid regex matches (a WILL-bail
+        # kind); .hex (undashed) would fall through to the may-bail "other".
+        "@pytest.mark.parametrize('x', [str(uuid.uuid4()), str(uuid.uuid4())])\n"
+        "def test_u(x):\n    assert True\n",
+    )
+    jpath = g.tmp / "mc.json"
+    r = g.run("--migrate-check", "--migrate-check-json", str(jpath), cwd=g.tmp / "mcunstable")
+    check(
+        "migrate-check: unstable uuid ids force -n 0 (exit 1)",
+        r.returncode == 1 and "UNSTABLE NODEIDS:" in r.stdout and "force -n 0" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-500:] + r.stderr[-200:],
+    )
+    doc = json.loads(jpath.read_text(encoding="utf-8"))
+    check(
+        "migrate-check-json: versioned findings doc marks not-ready",
+        doc["ready"] is False and doc["will_bail_count"] >= 1 and bool(doc["unstable_ids"]),
+        str(doc)[:300],
+    )
+
+
 def gate_watch_mode(g, args, binary):
     print("== watch mode ==")
     wd = g.tmp / "watch"
@@ -2807,6 +2874,8 @@ def main():
         gate_loadscope_loadgroup,
         gate_flaky_marks_only_rerun,
         gate_worker_timeout_watchdog,
+        gate_try,
+        gate_migrate_check,
         gate_watch_mode,
     )
     names = [s.__name__.removeprefix("gate_") for s in sections]
