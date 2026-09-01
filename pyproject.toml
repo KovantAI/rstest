@@ -47,6 +47,11 @@ module-name = "rstest_worker"
 dev = [
     "msgpack>=1.0",
     "coverage>=7",
+    # ty resolves the worker's `import pytest` / `from _pytest ...` against the
+    # project .venv (it can't follow the runtime _vendor sys.path shim). Pin to
+    # the vendored version (python/VENDOR.md) so pre-commit's ty matches CI's
+    # `uvx --with pytest ... ty check`.
+    "pytest==9.1.1",
 ]
 
 [tool.ruff]

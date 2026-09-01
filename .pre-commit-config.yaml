@@ -27,7 +27,10 @@ repos:
   - repo: https://github.com/astral-sh/ty-pre-commit
     rev: v0.0.75
     hooks:
+      # Same env as the CI `ty` check (ci.yml): the worker imports pytest/_pytest
+      # and msgpack, so ty needs them installed to resolve those imports.
       - id: ty
+        additional_dependencies: [pytest, msgpack, coverage]
 
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.12.7

@@ -49,7 +49,7 @@ try:
     _vendor = os.path.join(os.path.dirname(rstest_worker.__file__), '_vendor')
     if _vendor not in sys.path:
         sys.path.insert(0, _vendor)
-    from rstest_worker import protocol, runner_pytest  # noqa: F401
+    from rstest_worker._internal import protocol, runner_pytest  # noqa: F401
     ok = True
 except BaseException:
     # protocol raises SystemExit (a BaseException, not Exception) when msgpack
