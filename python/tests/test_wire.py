@@ -1,6 +1,6 @@
 """Unit tests for the wire-serialization helper."""
 
-from rstest_worker._wire import _wire_safe
+from rstest_worker._internal.wire import _wire_safe
 
 
 def test_primitives_pass_through():

@@ -2,7 +2,7 @@
 
 import zlib
 
-from rstest_worker._plugincompat import (
+from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
     _randomly_seed,

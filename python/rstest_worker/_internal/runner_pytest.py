@@ -14,14 +14,14 @@ This module is the session entrypoint. The moving parts live alongside it:
 
 import pytest
 
-from rstest_worker import _fixturecompat
-from rstest_worker.dispatch import ItemDispatchPlugin, LazyDispatchPlugin
-from rstest_worker.stream import StreamPlugin
+from rstest_worker._internal import fixturecompat
+from rstest_worker._internal.dispatch import ItemDispatchPlugin, LazyDispatchPlugin
+from rstest_worker._internal.stream import StreamPlugin
 
-_fixturecompat.install()
+fixturecompat.install()
 
 # Re-exported for callers that reach for the plugin classes by their historical
-# import path (rstest_worker.runner_pytest.StreamPlugin, ...).
+# import path (rstest_worker._internal.runner_pytest.StreamPlugin, ...).
 __all__ = [
     "ItemDispatchPlugin",
     "LazyDispatchPlugin",

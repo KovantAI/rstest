@@ -1,6 +1,6 @@
 """Unit tests for the xdist node shims and hook-argument plumbing."""
 
-from rstest_worker._xdistnode import (
+from rstest_worker._internal.xdistnode import (
     _call_node_impl,
     _node_impl_params,
     _XdistGatewayShim,

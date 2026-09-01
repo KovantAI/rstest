@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from rstest_worker.stream import StreamPlugin
+from rstest_worker._internal.stream import StreamPlugin
 
 
 class ItemDispatchPlugin(StreamPlugin):

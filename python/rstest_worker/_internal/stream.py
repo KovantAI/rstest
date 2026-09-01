@@ -8,13 +8,13 @@ from typing import Any
 
 import pytest
 
-from rstest_worker._plugincompat import (
+from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
     _randomly_seed,
 )
-from rstest_worker._wire import _wire_safe
-from rstest_worker._xdistnode import (
+from rstest_worker._internal.wire import _wire_safe
+from rstest_worker._internal.xdistnode import (
     _call_node_impl,
     _XdistGatewayShim,
     _XdistNodeShim,
