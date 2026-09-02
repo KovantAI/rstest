@@ -13,6 +13,7 @@ mod reporting;
 mod run;
 mod scheduling;
 mod select;
+mod text;
 mod watch;
 
 use anyhow::Result;

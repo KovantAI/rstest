@@ -118,7 +118,7 @@ impl Run {
             // can be huge at pandas scale.
             entry.longrepr = r.longrepr.as_deref().map(|t| {
                 let mut t = t.to_string();
-                t.truncate(20_000);
+                crate::text::truncate_on_boundary(&mut t, 20_000);
                 t
             });
         }

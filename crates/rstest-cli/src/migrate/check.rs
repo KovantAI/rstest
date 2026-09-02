@@ -123,9 +123,7 @@ pub fn run_migrate_check(
                 "may bail (timing)"
             };
             let mut sample = acc.sample.clone();
-            if sample.len() > 90 {
-                sample.truncate(90);
-            }
+            crate::text::truncate_on_boundary(&mut sample, 90);
             println!("  {site}");
             println!("    {}   -> {verdict}", kinds.join(", "));
             println!("    e.g. [{sample}]");
