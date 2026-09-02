@@ -12,6 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Name of the per-project cache directory (durations, flake history, and the
+/// `--changed` coverage index live here). Committed-tree-relative.
 pub const DIR_NAME: &str = ".rstest_cache";
 
 /// The cache directory for the current working tree.

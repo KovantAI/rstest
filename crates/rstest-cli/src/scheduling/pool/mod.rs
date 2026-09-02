@@ -59,12 +59,22 @@ pub enum Dist {
     Each,
 }
 
+/// Everything the orchestrator loop produces from one pool run, handed back to
+/// `run.rs` for post-run reporting and gates.
 pub struct PoolOutcome {
+    /// Merged per-test results across all workers.
     pub run: Run,
+    /// The live progress renderer, carried out so the caller can print the
+    /// closing summary in the same style.
     pub prog: Progress,
+    /// Per-fixture setup timings (doctor mode), aggregated across workers.
     pub fixtures: Vec<proto::FixtureStat>,
+    /// Deduplicated session/collect/runtest warnings.
     pub warnings: Vec<proto::WarningEntry>,
+    /// pytest's cache dir (from the designate worker), where the merged
+    /// lastfailed cache is written after the run.
     pub cache_dir: Option<String>,
+    /// Reconciled process exit status for the run.
     pub exitstatus: i32,
 }
 

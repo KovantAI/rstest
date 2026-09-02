@@ -161,6 +161,11 @@ fn build_run_meta(
     }
 }
 
+/// The crate's main entry point for a single (non-watch) run: resolves the
+/// run configuration from `cli` + forwarded pytest `args`, dispatches to the
+/// worker pool (or the monorepo driver), runs post-run reports and gates
+/// (doctor, junit, lastfailed, duration-regression, cache push, report-json),
+/// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let args = args.to_vec();
     let start = Instant::now();
