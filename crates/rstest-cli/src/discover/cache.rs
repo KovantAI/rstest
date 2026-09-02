@@ -71,14 +71,14 @@ fn disk() -> &'static Mutex<DiskCache> {
 
 pub(super) fn disk_cache_get(candidate: &Path, mtime: u64, size: u64) -> Option<Probe> {
     let key = candidate.to_string_lossy().into_owned();
-    let d = disk().lock().unwrap();
+    let d = super::lock(disk());
     let e = d.entries.get(&key)?;
     (e.mtime == mtime && e.size == size).then(|| e.probe.clone())
 }
 
 pub(super) fn disk_cache_put(candidate: &Path, mtime: u64, size: u64, probe: &Probe) {
     let key = candidate.to_string_lossy().into_owned();
-    let mut d = disk().lock().unwrap();
+    let mut d = super::lock(disk());
     d.entries.insert(
         key,
         CacheEntry {
@@ -97,17 +97,16 @@ pub(super) fn read_cache(bytes: &[u8]) -> Option<DiskCache> {
 }
 
 /// Write the cache via temp-file + rename so a concurrent reader never sees a
-/// half-written file. The temp name is pid-scoped to avoid clobbering between
-/// concurrent rstest processes.
+/// half-written file.
 pub(super) fn write_cache(path: &Path, cache: &DiskCache) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     // Serialize BEFORE touching the filesystem: on a serialize error, return it
     // rather than renaming an empty/default doc over the real cache (that would
     // silently corrupt it to `[]`/`{}`).
     let bytes = serde_json::to_vec(cache).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    // Delegate the tmp+rename to the hardened writer. Its tmp name adds nanos +
+    // a process-local sequence on top of the pid, so two writers of this
+    // MACHINE-GLOBAL cache that happen to share a pid (containers / a shared
+    // mount) can't collide on the tmp path and tear the file — the corruption a
+    // bare `.<pid>.tmp` name allowed.
+    crate::cache::write_atomic(path, &bytes)
 }
