@@ -78,18 +78,44 @@ pub(super) fn disk_cache_get(candidate: &Path, mtime: u64, size: u64) -> Option<
 
 pub(super) fn disk_cache_put(candidate: &Path, mtime: u64, size: u64, probe: &Probe) {
     let key = candidate.to_string_lossy().into_owned();
-    let mut d = super::lock(disk());
-    d.entries.insert(
-        key,
-        CacheEntry {
-            mtime,
-            size,
-            probe: probe.clone(),
-        },
-    );
-    if let Some(path) = cache_path() {
-        let _ = write_cache(&path, &d); // best-effort; never fail the run on cache IO
-    }
+    // Update the in-process cache, snapshot it, then RELEASE the lock before any
+    // disk IO — serializing + a blocking write under the global lock would stall
+    // every other thread probing an interpreter.
+    let snapshot = {
+        let mut d = super::lock(disk());
+        d.entries.insert(
+            key,
+            CacheEntry {
+                mtime,
+                size,
+                probe: probe.clone(),
+            },
+        );
+        d.entries.clone()
+    };
+    let Some(path) = cache_path() else {
+        return;
+    };
+    // Read-merge-write instead of overwriting the whole file with our snapshot:
+    // this cache is machine-global, so a concurrent process may have added its
+    // own freshly-probed entries since we loaded ours. Fold our entries OVER
+    // whatever is on disk now (ours win on key collision, disk-only entries
+    // survive), so parallel invocations don't clobber each other's probes.
+    // A tiny read→write race window remains, but it loses at most the entries
+    // added in that window, not the whole file (the prior last-writer-wins bug).
+    let on_disk = std::fs::read(&path).ok();
+    let merged = merge_entries(on_disk.as_deref(), snapshot);
+    let _ = write_cache(&path, &merged); // best-effort; never fail the run on cache IO
+}
+
+/// Fold `snapshot` (this process's entries) over whatever was last persisted
+/// (`on_disk` bytes, if any parses): ours win on key collision, disk-only
+/// entries from concurrent writers survive. Corrupt/absent disk data degrades
+/// to just our snapshot.
+fn merge_entries(on_disk: Option<&[u8]>, snapshot: HashMap<String, CacheEntry>) -> DiskCache {
+    let mut merged = on_disk.and_then(read_cache).unwrap_or_default();
+    merged.entries.extend(snapshot);
+    merged
 }
 
 pub(super) fn read_cache(bytes: &[u8]) -> Option<DiskCache> {
@@ -109,4 +135,59 @@ pub(super) fn write_cache(path: &Path, cache: &DiskCache) -> std::io::Result<()>
     // mount) can't collide on the tmp path and tear the file — the corruption a
     // bare `.<pid>.tmp` name allowed.
     crate::cache::write_atomic(path, &bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn entry(size: u64) -> CacheEntry {
+        CacheEntry {
+            mtime: 1,
+            size,
+            probe: Probe {
+                executable: PathBuf::from("/usr/bin/python3"),
+                version: (3, 12, 0),
+                implementation: "cpython".into(),
+                freethreaded: false,
+                worker_importable: true,
+            },
+        }
+    }
+
+    fn disk_bytes(pairs: &[(&str, u64)]) -> Vec<u8> {
+        let mut c = DiskCache::default();
+        for (k, s) in pairs {
+            c.entries.insert((*k).into(), entry(*s));
+        }
+        serde_json::to_vec(&c).unwrap()
+    }
+
+    #[test]
+    fn merge_keeps_concurrent_disk_entries_and_ours_win() {
+        // Disk already has another process's fresh probe (`b`) plus an older
+        // copy of a key we also hold (`a`, size 10).
+        let on_disk = disk_bytes(&[("a", 10), ("b", 20)]);
+        let mut snapshot = HashMap::new();
+        snapshot.insert("a".to_string(), entry(11)); // our newer `a`
+        snapshot.insert("c".to_string(), entry(30)); // our new `c`
+
+        let merged = merge_entries(Some(&on_disk), snapshot);
+
+        // b survives (would be dropped by the old full-overwrite), c added,
+        // and our a (size 11) wins over disk's a (size 10).
+        assert_eq!(merged.entries.len(), 3);
+        assert_eq!(merged.entries["a"].size, 11);
+        assert_eq!(merged.entries["b"].size, 20);
+        assert_eq!(merged.entries["c"].size, 30);
+    }
+
+    #[test]
+    fn merge_tolerates_absent_and_corrupt_disk() {
+        let mut snapshot = HashMap::new();
+        snapshot.insert("a".to_string(), entry(1));
+        assert_eq!(merge_entries(None, snapshot.clone()).entries.len(), 1);
+        assert_eq!(merge_entries(Some(b"not json"), snapshot).entries.len(), 1);
+    }
 }
