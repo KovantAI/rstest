@@ -1503,7 +1503,12 @@ def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
             json.dumps(fm),
         )
     # Without --cov-context, no index is written (feature is opt-in via the flag).
+    # Wipe the cache AND run 1's leftover coverage data files so this run is
+    # hermetic: a stale .coverage from the prior run is a SQLite DB that can lock
+    # on Windows when covtool combines into it, flaking this check (rc=1).
     shutil.rmtree(ctxdir / ".rstest_cache", ignore_errors=True)
+    for stale in ctxdir.glob(".coverage*"):
+        stale.unlink()
     r = g.run(
         "test_a.py",
         "test_b.py",
