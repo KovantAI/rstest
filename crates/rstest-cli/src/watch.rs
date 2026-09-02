@@ -147,3 +147,72 @@ fn flags_only(args: &[String]) -> Vec<String> {
 fn rel(path: &Path, cwd: &Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relevant_accepts_python_and_pytest_config_files() {
+        assert!(relevant(Path::new("src/test_x.py")));
+        assert!(relevant(Path::new("conftest.py")));
+        // Only pytest's config files count among toml/ini/cfg.
+        assert!(relevant(Path::new("pyproject.toml")));
+        assert!(relevant(Path::new("pytest.ini")));
+        assert!(relevant(Path::new("tox.ini")));
+        assert!(relevant(Path::new("setup.cfg")));
+        // Unrelated toml/ini/cfg and other extensions are ignored.
+        assert!(!relevant(Path::new("Cargo.toml")));
+        assert!(!relevant(Path::new("mypy.ini")));
+        assert!(!relevant(Path::new("notes.txt")));
+        assert!(!relevant(Path::new("Makefile")));
+    }
+
+    #[test]
+    fn relevant_ignores_cache_vcs_and_env_dirs() {
+        // A .py under any ignored directory never triggers a rerun.
+        for dir in [
+            ".git",
+            "__pycache__",
+            ".pytest_cache",
+            ".rstest_cache",
+            ".venv",
+            ".gate-venv",
+            "node_modules",
+            "target",
+        ] {
+            let p = PathBuf::from(dir).join("pkg").join("mod.py");
+            assert!(!relevant(&p), "{dir} should be ignored");
+        }
+        // Same filename outside an ignored dir is relevant.
+        assert!(relevant(Path::new("pkg/mod.py")));
+    }
+
+    #[test]
+    fn flags_only_keeps_flags_and_drops_existing_paths() {
+        // current_exe exists on disk, so it's treated as a path arg and dropped;
+        // flags and non-existent path-like args are kept for the targeted rerun.
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        let args = vec![
+            "-k".to_string(),
+            "smoke".to_string(),
+            "-x".to_string(),
+            exe.clone(),
+            "does/not/exist.py".to_string(),
+        ];
+        let kept = flags_only(&args);
+        assert!(kept.contains(&"-k".to_string()));
+        assert!(kept.contains(&"smoke".to_string()));
+        assert!(kept.contains(&"-x".to_string()));
+        assert!(kept.contains(&"does/not/exist.py".to_string()));
+        assert!(!kept.contains(&exe), "an existing path arg must be dropped");
+    }
+
+    #[test]
+    fn rel_strips_cwd_prefix_else_returns_path() {
+        let cwd = Path::new("/home/u/proj");
+        assert_eq!(rel(&cwd.join("tests/test_a.py"), cwd), "tests/test_a.py");
+        // A path outside cwd is returned unchanged.
+        assert_eq!(rel(Path::new("/other/x.py"), cwd), "/other/x.py");
+    }
+}

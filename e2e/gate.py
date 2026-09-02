@@ -219,6 +219,7 @@ def gate_collection_error_semantics(g, args, binary):
 
 def gate_output_styles(g, args, binary):
     print("== output styles ==")
+    g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
     # --output bar (pytest-sugar-style): per-test lines + inline failures.
     # Non-tty here, so the live footer self-disables; the per-test lines and
     # summary must still appear, and failures must NOT be double-printed.
@@ -255,6 +256,19 @@ def gate_output_styles(g, args, binary):
         and all("test_basic.py" in a for a in ann)
     )
     check("output github: human log + ::error per failure", gh_ok, r.stdout[-400:])
+
+    # --output azure: human log PLUS an Azure Pipelines `##vso[task.logissue]`
+    # command per failing test (rendered as inline issues on the PR).
+    r = g.run("basic/test_basic.py", "-n", "2", "--output", "azure")
+    az = [ln for ln in r.stdout.splitlines() if ln.startswith("##vso[task.logissue ")]
+    az_ok = (
+        "2 passed" in r.stdout
+        and "2 failed" in r.stdout  # human summary intact
+        and sum("type=error" in ln for ln in az) == 2  # one per failed test
+        and all("sourcepath=" in ln for ln in az if "type=error" in ln)
+        and any("test_basic.py" in ln for ln in az)
+    )
+    check("output azure: human log + logissue per failure", az_ok, r.stdout[-400:])
 
     # --output json: stdout is PURE NDJSON - no banner, every line parses,
     # closed by exactly one sessionfinish envelope. The machine-readable
@@ -659,6 +673,36 @@ def gate_lazy_collection(g, args, binary):
         "lazy: flaky passes with reruns",
         r.returncode == 0 and "1 flaky" in r.stdout,
         r.stdout[-200:],
+    )
+    # lazy + --only-rerun: the failure text matches the regex, so the flaky test
+    # is rerun-eligible and recovers (exercises the lazy rerun gate).
+    marker.unlink(missing_ok=True)
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "--reruns",
+        "2",
+        "--only-rerun",
+        "first attempt fails",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
+    check(
+        "lazy: --only-rerun match reruns and recovers",
+        r.returncode == 0 and "1 flaky" in r.stdout,
+        r.stdout[-200:],
+    )
+    # lazy + -x: the global maxfail trip halts dispatch and tells every worker
+    # no_more_items (bounded overshoot), same coordination as the pool path.
+    g.write("maxfail/test_maxfail.py", MAXFAIL)
+    r = g.run("maxfail", "-n", "2", "--collect", "lazy", "-x", timeout=60)
+    check(
+        "lazy: -x trips global maxfail",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-200:],
     )
     log = g.tmp / "serial_lazy.jsonl"
     clear_e2e_log(log)
@@ -1459,7 +1503,12 @@ def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
             json.dumps(fm),
         )
     # Without --cov-context, no index is written (feature is opt-in via the flag).
+    # Wipe the cache AND run 1's leftover coverage data files so this run is
+    # hermetic: a stale .coverage from the prior run is a SQLite DB that can lock
+    # on Windows when covtool combines into it, flaking this check (rc=1).
     shutil.rmtree(ctxdir / ".rstest_cache", ignore_errors=True)
+    for stale in ctxdir.glob(".coverage*"):
+        stale.unlink()
     r = g.run(
         "test_a.py",
         "test_b.py",
@@ -2249,6 +2298,27 @@ def gate_flaky_reruns(g, args, binary):
     check("flaky section listed", "passed after rerun" in r.stdout)
     marker.unlink()
 
+    # buildkite_flaky_annotate: with BUILDKITE set and a flaky-passed test, rstest
+    # builds a flaky annotation and hands it to `buildkite-agent annotate`; absent
+    # that binary (CI/gate runners), it best-effort-skips with a stderr notice.
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--reruns",
+        "2",
+        "--output",
+        "buildkite",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker), "BUILDKITE": "1"},
+    )
+    check(
+        "buildkite: flaky annotation attempted (best-effort skip without agent)",
+        r.returncode == 0 and "1 flaky" in r.stdout and "Buildkite flaky annotation" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-200:] + " || " + r.stderr[-200:],
+    )
+    marker.unlink(missing_ok=True)
+
     # Single-worker reruns: --reruns at -n 1 / -n 0 must fire (a degenerate
     # one-worker pool drives the rerun loop) instead of being silently inert.
     swm = g.tmp / "sw_reruns_marker"
@@ -2658,6 +2728,73 @@ def gate_worker_timeout_watchdog(g, args, binary):
     )
 
 
+def gate_try(g, args, binary):
+    print("== --try (pytest-vs-rstest parity proof) ==")
+    # A clean all-pass suite: pytest and rstest -n auto agree, so --try reports
+    # identical parity and exits 0. Exercises run_try end-to-end (pytest baseline
+    # + rstest run + parity/speed diff). pytest is available via the pytest-cov
+    # dep in the gate venv.
+    g.write(
+        "tryfix/test_t.py",
+        "def test_a(): assert True\ndef test_b(): assert True\ndef test_c(): assert True\n",
+    )
+    r = g.run("--try", cwd=g.tmp / "tryfix")
+    check(
+        "try: identical parity + speed line + drop-in verdict, exit 0",
+        r.returncode == 0
+        and "rstest --try" in r.stdout
+        and "identical outcomes to pytest" in r.stdout
+        and "at -n auto" in r.stdout
+        and "drop-in ready" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-400:] + r.stderr[-200:],
+    )
+
+
+def gate_migrate_check(g, args, binary):
+    print("== --migrate-check (parallel-readiness preflight) ==")
+    # Clean suite: stable ids across two collections, no parallel-only failures
+    # -> ready at -n auto, exit 0. Drives the full preflight: collect-twice +
+    # the -n auto parallel phase + failure classification (with zero failures).
+    g.write(
+        "mcclean/test_ok.py",
+        "def test_a(): assert True\ndef test_b(): assert True\n"
+        "def test_c(): assert True\ndef test_d(): assert True\n",
+    )
+    r = g.run("--migrate-check", cwd=g.tmp / "mcclean")
+    check(
+        "migrate-check: clean suite is parallel-ready (exit 0)",
+        r.returncode == 0
+        and "tests collected" in r.stdout
+        and "UNSTABLE NODEIDS: none" in r.stdout
+        and "PARALLEL: ready" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-500:] + r.stderr[-200:],
+    )
+    # Unstable parametrize ids: fresh uuid4 per collection -> the two collections
+    # disagree, the classifier tags them `uuid` (a per-process-unstable kind that
+    # forces -n 0). Blocks the run (exit 1) before the parallel phase.
+    g.write(
+        "mcunstable/test_u.py",
+        "import uuid\nimport pytest\n\n"
+        # Dashed uuid form so the classifier's uuid regex matches (a WILL-bail
+        # kind); .hex (undashed) would fall through to the may-bail "other".
+        "@pytest.mark.parametrize('x', [str(uuid.uuid4()), str(uuid.uuid4())])\n"
+        "def test_u(x):\n    assert True\n",
+    )
+    jpath = g.tmp / "mc.json"
+    r = g.run("--migrate-check", "--migrate-check-json", str(jpath), cwd=g.tmp / "mcunstable")
+    check(
+        "migrate-check: unstable uuid ids force -n 0 (exit 1)",
+        r.returncode == 1 and "UNSTABLE NODEIDS:" in r.stdout and "force -n 0" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-500:] + r.stderr[-200:],
+    )
+    doc = json.loads(jpath.read_text(encoding="utf-8"))
+    check(
+        "migrate-check-json: versioned findings doc marks not-ready",
+        doc["ready"] is False and doc["will_bail_count"] >= 1 and bool(doc["unstable_ids"]),
+        str(doc)[:300],
+    )
+
+
 def gate_watch_mode(g, args, binary):
     print("== watch mode ==")
     wd = g.tmp / "watch"
@@ -2807,6 +2944,8 @@ def main():
         gate_loadscope_loadgroup,
         gate_flaky_marks_only_rerun,
         gate_worker_timeout_watchdog,
+        gate_try,
+        gate_migrate_check,
         gate_watch_mode,
     )
     names = [s.__name__.removeprefix("gate_") for s in sections]

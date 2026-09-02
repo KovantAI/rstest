@@ -68,6 +68,40 @@ pub struct PoolOutcome {
     pub exitstatus: i32,
 }
 
+/// The clean nodeid for a dispatched index, from the designate's id list.
+fn nodeid_at(ids_store: &Option<Vec<String>>, index: u64) -> Option<&str> {
+    ids_store
+        .as_ref()
+        .and_then(|v| v.get(index as usize))
+        .map(String::as_str)
+}
+
+/// Whether `index` is rerun-eligible under `--reruns-only-known-flaky`: no gate
+/// set (feature off) always passes; otherwise an explicit `@mark.flaky` (present
+/// in `flaky_budget`) or a prior-flaky nodeid in the set qualifies. Matches on
+/// the clean nodeid from `ids_store` (not a report id, which may carry a `[gwN]`
+/// suffix in Dist::Each) so the ItemDone and crash gates stay consistent.
+fn known_flaky_ok(
+    known_flaky: Option<&std::collections::HashSet<String>>,
+    flaky_budget: &std::collections::HashMap<u64, u32>,
+    ids_store: &Option<Vec<String>>,
+    index: u64,
+) -> bool {
+    known_flaky.is_none_or(|set| {
+        flaky_budget.contains_key(&index)
+            || nodeid_at(ids_store, index).is_some_and(|id| set.contains(id))
+    })
+}
+
+/// Tell every still-listening worker the queue is closed (maxfail trip): each
+/// finishes its in-flight work and ends. Bounded overshoot, the trade xdist makes.
+fn stop_all(states: &mut [WorkerState]) {
+    for s in states.iter_mut().filter(|s| !s.dead && !s.finishing) {
+        s.finishing = true;
+        let _ = s.worker.send(&proto::Command::NoMoreItems);
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // orchestration entry point; a config struct adds noise for one caller
 pub fn run_pool(
     python: &Path,
@@ -190,14 +224,9 @@ pub fn run_pool(
                 }
                 prog.on_report(Some(idx), &r);
                 run.record(Some(idx), r);
-                if let Some(limit) = maxfail {
-                    if !stopping && fail_count >= limit {
-                        stopping = true;
-                        for s in states.iter_mut().filter(|s| !s.dead && !s.finishing) {
-                            s.finishing = true;
-                            let _ = s.worker.send(&proto::Command::NoMoreItems);
-                        }
-                    }
+                if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
+                    stopping = true;
+                    stop_all(&mut states);
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => run.collect_error(path, longrepr),
@@ -350,10 +379,8 @@ pub fn run_pool(
             Ok(Event::ItemStart { index }) => {
                 states[idx].running = Some(index);
                 states[idx].running_since = Some(std::time::Instant::now());
-                let nodeid = ids_store
-                    .as_ref()
-                    .and_then(|v| v.get(index as usize))
-                    .cloned()
+                let nodeid = nodeid_at(&ids_store, index)
+                    .map(str::to_string)
                     .unwrap_or_else(|| format!("<item #{index}>"));
                 prog.item_started(idx, nodeid);
             }
@@ -400,15 +427,9 @@ pub fn run_pool(
                     // carries a ` [gwN]` suffix (added on receipt) and would
                     // never match the un-suffixed history set. Same lookup the
                     // crash path uses, keeping the two gates consistent.
-                    let known_flaky_ok = known_flaky.is_none_or(|set| {
-                        flaky_budget.contains_key(&index)
-                            || ids_store
-                                .as_ref()
-                                .and_then(|v| v.get(index as usize))
-                                .is_some_and(|id| set.contains(id))
-                    });
+                    let flaky_ok = known_flaky_ok(known_flaky, &flaky_budget, &ids_store, index);
                     let used = rerun_used.entry(index).or_insert(0);
-                    if s.attempt_failed && *used < item_budget && rerun_allowed && known_flaky_ok {
+                    if s.attempt_failed && *used < item_budget && rerun_allowed && flaky_ok {
                         // Failed attempt with budget left: discard its
                         // reports and requeue the item.
                         *used += 1;
@@ -436,10 +457,7 @@ pub fn run_pool(
                         }
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
-                            for st in states.iter_mut().filter(|st| !st.dead && !st.finishing) {
-                                st.finishing = true;
-                                let _ = st.worker.send(&proto::Command::NoMoreItems);
-                            }
+                            stop_all(&mut states);
                         }
                     }
                 }
@@ -493,13 +511,8 @@ pub fn run_pool(
                             // Same known-flaky gate as the ItemDone path: a
                             // crash of a non-known-flaky, unmarked test is not
                             // retried when --reruns-only-known-flaky is on.
-                            let known_ok = known_flaky.is_none_or(|set| {
-                                flaky_budget.contains_key(&i)
-                                    || ids_store
-                                        .as_ref()
-                                        .and_then(|v| v.get(i as usize))
-                                        .is_some_and(|id| set.contains(id))
-                            });
+                            let known_ok =
+                                known_flaky_ok(known_flaky, &flaky_budget, &ids_store, i);
                             let used = rerun_used.entry(i).or_insert(0);
                             if *used < budget_of(&flaky_budget, i) && known_ok {
                                 *used += 1;
@@ -511,10 +524,8 @@ pub fn run_pool(
                         }
                     }
                     if let Some(i) = crashed {
-                        let mut nodeid = ids_store
-                            .as_ref()
-                            .and_then(|v| v.get(i as usize))
-                            .cloned()
+                        let mut nodeid = nodeid_at(&ids_store, i)
+                            .map(str::to_string)
                             .unwrap_or_else(|| format!("<collected item #{i}>"));
                         if dist == Dist::Each {
                             nodeid.push_str(&format!(" [gw{idx}]"));
