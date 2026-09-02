@@ -1505,3 +1505,186 @@ fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
     }
     Ok(regex::RegexSet::new(patterns)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_run_meta, collect_lazy, head_to_none, merge_fixtures, parse_numprocesses,
+        quarantine_matcher, report_part_path, resolve_changed_base, strip_verbatim,
+    };
+    use crate::cli::Cli;
+    use crate::config::RstestSettings;
+    use crate::scheduling::proto::FixtureStat;
+    use clap::Parser;
+    use std::time::Instant;
+
+    fn cli() -> Cli {
+        Cli::parse_from(["rstest"])
+    }
+
+    #[test]
+    fn strip_verbatim_removes_windows_extended_prefix() {
+        // The `\\?\` extended-length prefix is dropped so paths render as
+        // editor-usable URIs; anything else is returned untouched.
+        assert_eq!(
+            strip_verbatim(r"\\?\C:\foo\bar".into()),
+            std::path::PathBuf::from(r"C:\foo\bar")
+        );
+        assert_eq!(
+            strip_verbatim("/home/u/proj".into()),
+            std::path::PathBuf::from("/home/u/proj")
+        );
+        // A `?` that is not the exact prefix must not be stripped.
+        assert_eq!(
+            strip_verbatim("a/?b".into()),
+            std::path::PathBuf::from("a/?b")
+        );
+    }
+
+    #[test]
+    fn head_to_none_maps_head_to_working_tree() {
+        // HEAD is the "diff the working tree" sentinel => None for the git helpers.
+        assert_eq!(head_to_none("HEAD"), None);
+        assert_eq!(head_to_none("origin/main"), Some("origin/main"));
+        assert_eq!(head_to_none("HEAD~3"), Some("HEAD~3"));
+    }
+
+    #[test]
+    fn parse_numprocesses_parses_and_rejects() {
+        assert_eq!(parse_numprocesses("4").unwrap(), 4);
+        assert_eq!(parse_numprocesses("0").unwrap(), 0);
+        assert!(parse_numprocesses("abc").is_err());
+        assert!(parse_numprocesses("-1").is_err());
+    }
+
+    #[test]
+    fn resolve_changed_base_is_none_without_request() {
+        // No --changed and no --changed-strict => no changed-selection, and
+        // crucially no git shell-out (kept hermetic).
+        assert!(resolve_changed_base(&cli()).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_run_meta_passes_through_fields() {
+        let m = build_run_meta(Instant::now(), 7, 1_700_000_000, 4);
+        assert_eq!(m.exitstatus, 7);
+        assert_eq!(m.workers, 4);
+        assert_eq!(m.started_at_epoch, 1_700_000_000);
+        assert!(m.duration_seconds >= 0.0);
+        assert!(!m.argv.is_empty());
+    }
+
+    #[test]
+    fn merge_fixtures_sums_by_name_and_scope() {
+        let stat = |name: &str, scope: &str, count, total| FixtureStat {
+            name: name.into(),
+            scope: scope.into(),
+            count,
+            total,
+        };
+        let merged = merge_fixtures(vec![
+            stat("db", "session", 2, 1.0),
+            stat("db", "session", 3, 0.5),   // same key => summed
+            stat("db", "function", 1, 0.25), // different scope => distinct
+            stat("cache", "session", 4, 2.0),
+        ]);
+        assert_eq!(merged.len(), 3);
+        let db_session = merged
+            .iter()
+            .find(|f| f.name == "db" && f.scope == "session")
+            .unwrap();
+        assert_eq!(db_session.count, 5);
+        assert!((db_session.total - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn report_part_path_names_a_json_file_for_slug() {
+        let p = report_part_path("collect", "testuid");
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("rstest-mono-"), "got {name}");
+        assert!(name.contains("collect"), "got {name}");
+        assert!(name.ends_with(".json"), "got {name}");
+    }
+
+    fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {
+        // Unique per-test name (pid + suffix) so parallel tests never collide.
+        let path = std::env::temp_dir().join(format!(
+            "rstest-quarantine-test-{}-{suffix}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn quarantine_matcher_handles_exact_globs_comments_blanks() {
+        let path = write_quarantine(
+            "mixed",
+            "# a comment\n\ntest_foo.py::test_a\ntest_bar.py::*\n",
+        );
+        let set = quarantine_matcher(&path).unwrap();
+        assert_eq!(set.len(), 2); // comment + blank line skipped
+        assert!(set.is_match("test_foo.py::test_a")); // exact
+        assert!(!set.is_match("test_foo.py::test_ab")); // anchored: no substring match
+        assert!(set.is_match("test_bar.py::test_z")); // glob
+        assert!(!set.is_match("other.py::test_a"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn quarantine_matcher_empty_when_only_comments() {
+        let path = write_quarantine("empty", "# nothing here\n\n");
+        let set = quarantine_matcher(&path).unwrap();
+        assert_eq!(set.len(), 0);
+        assert!(!set.is_match("test_foo.py::test_a"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn quarantine_matcher_errors_on_missing_file() {
+        let path = std::env::temp_dir().join("rstest-quarantine-does-not-exist-xyz.txt");
+        assert!(quarantine_matcher(&path).is_err());
+    }
+
+    fn settings_collect(mode: Option<&str>) -> RstestSettings {
+        RstestSettings {
+            collect: mode.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn collect_lazy_defaults_to_full() {
+        // No CLI flag, no setting => "full" => not lazy.
+        assert!(!collect_lazy(&cli(), &settings_collect(None), "load", &[]).unwrap());
+    }
+
+    #[test]
+    fn collect_lazy_enabled_for_file_affine_dist() {
+        let s = settings_collect(Some("lazy"));
+        assert!(collect_lazy(&cli(), &s, "load", &[]).unwrap());
+        assert!(collect_lazy(&cli(), &s, "loadfile", &[]).unwrap());
+    }
+
+    #[test]
+    fn collect_lazy_rejects_incompatible_dist() {
+        let s = settings_collect(Some("lazy"));
+        // loadscope/loadgroup need a global id list; lazy is file-affine.
+        assert!(collect_lazy(&cli(), &s, "loadscope", &[]).is_err());
+        assert!(collect_lazy(&cli(), &s, "loadgroup", &[]).is_err());
+    }
+
+    #[test]
+    fn collect_lazy_falls_back_on_nodeid_or_pyargs() {
+        let s = settings_collect(Some("lazy"));
+        // Explicit nodeid selection can't ride the file walk => full.
+        assert!(!collect_lazy(&cli(), &s, "load", &["test_x.py::test_a".to_string()]).unwrap());
+        // --pyargs selects by import path => full.
+        assert!(!collect_lazy(&cli(), &s, "load", &["--pyargs".to_string()]).unwrap());
+    }
+
+    #[test]
+    fn collect_lazy_rejects_unknown_mode() {
+        assert!(collect_lazy(&cli(), &settings_collect(Some("sometimes")), "load", &[]).is_err());
+    }
+}

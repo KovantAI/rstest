@@ -86,3 +86,11 @@ exclude = ["python/rstest_worker/_vendor", "e2e"]
 # (`python e2e/gate.py`, which drives the built rstest binary).
 testpaths = ["python/tests"]
 pythonpath = ["python"]
+
+[tool.coverage.run]
+source = ["rstest_worker"]
+# The vendored pytest core is third-party; only our worker code is measured.
+omit = ["*/rstest_worker/_vendor/*"]
+
+[tool.coverage.report]
+omit = ["*/rstest_worker/_vendor/*"]

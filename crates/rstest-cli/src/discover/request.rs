@@ -195,3 +195,115 @@ fn parse_constraint(tok: &str) -> Option<Constraint> {
         micro,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_constraint, parse_request, Op};
+
+    #[test]
+    fn constraint_parses_operator_and_precision() {
+        let c = parse_constraint(">=3.12").unwrap();
+        assert_eq!(
+            (c.op, c.major, c.minor, c.micro),
+            (Op::Ge, 3, Some(12), None)
+        );
+
+        let c = parse_constraint("<=3").unwrap();
+        assert_eq!((c.op, c.major, c.minor, c.micro), (Op::Le, 3, None, None));
+
+        let c = parse_constraint("==3.11.4").unwrap();
+        assert_eq!(
+            (c.op, c.major, c.minor, c.micro),
+            (Op::Eq, 3, Some(11), Some(4))
+        );
+
+        // No operator => equality at the written precision.
+        let c = parse_constraint("3.13").unwrap();
+        assert_eq!(
+            (c.op, c.major, c.minor, c.micro),
+            (Op::Eq, 3, Some(13), None)
+        );
+
+        assert_eq!(parse_constraint(">3").unwrap().op, Op::Gt);
+        assert_eq!(parse_constraint("<3.13").unwrap().op, Op::Lt);
+    }
+
+    #[test]
+    fn constraint_rejects_garbage_and_overlong() {
+        assert!(parse_constraint("abc").is_none());
+        assert!(parse_constraint(">=x").is_none());
+        assert!(parse_constraint("3.12.4.5").is_none()); // too many components
+        assert!(parse_constraint("").is_none());
+    }
+
+    #[test]
+    fn constraint_matches_respects_written_precision() {
+        // Bare `3.12` (Eq) matches any 3.12.x but not 3.13.
+        let c = parse_constraint("3.12").unwrap();
+        assert!(c.matches((3, 12, 0)));
+        assert!(c.matches((3, 12, 9)));
+        assert!(!c.matches((3, 13, 0)));
+        assert!(!c.matches((3, 11, 9)));
+
+        // Full-precision Eq pins all three.
+        let c = parse_constraint("==3.12.4").unwrap();
+        assert!(c.matches((3, 12, 4)));
+        assert!(!c.matches((3, 12, 5)));
+    }
+
+    #[test]
+    fn constraint_matches_ordered_ops() {
+        assert!(parse_constraint(">=3.12").unwrap().matches((3, 13, 0)));
+        assert!(!parse_constraint(">=3.12").unwrap().matches((3, 11, 9)));
+        assert!(parse_constraint("<3.13").unwrap().matches((3, 12, 5)));
+        assert!(!parse_constraint("<3.13").unwrap().matches((3, 13, 0)));
+        assert!(parse_constraint(">3.12").unwrap().matches((3, 12, 1)));
+        assert!(!parse_constraint(">3.12").unwrap().matches((3, 12, 0)));
+    }
+
+    #[test]
+    fn request_parses_impl_freethreaded_and_constraints() {
+        // `3.13t`: free-threaded marker after a digit, single Eq constraint.
+        let r = parse_request("3.13t").unwrap();
+        assert!(r.implementation.is_none());
+        assert!(r.freethreaded);
+        assert_eq!(r.constraints.len(), 1);
+
+        // impl@ range: two ANDed constraints, implementation lowercased.
+        let r = parse_request("PyPy@>=3.10,<3.12").unwrap();
+        assert_eq!(r.implementation.as_deref(), Some("pypy"));
+        assert!(!r.freethreaded);
+        assert_eq!(r.constraints.len(), 2);
+
+        // Bare implementation name, no constraints.
+        let r = parse_request("pypy").unwrap();
+        assert_eq!(r.implementation.as_deref(), Some("pypy"));
+        assert!(r.constraints.is_empty());
+
+        // impl + free-threaded + version.
+        let r = parse_request("pypy@3.10t").unwrap();
+        assert_eq!(r.implementation.as_deref(), Some("pypy"));
+        assert!(r.freethreaded);
+        assert_eq!(r.constraints.len(), 1);
+    }
+
+    #[test]
+    fn request_rejects_non_specs() {
+        assert!(parse_request("").is_none()); // empty => not a spec
+        assert!(parse_request("3.13.4.5").is_none()); // bad constraint kills whole parse
+    }
+
+    #[test]
+    fn request_display_roundtrips() {
+        // Display is the inverse of parse for these canonical forms.
+        assert_eq!(
+            parse_request(">=3.12,<3.13").unwrap().to_string(),
+            ">=3.12,<3.13"
+        );
+        assert_eq!(
+            parse_request("pypy@3.13t").unwrap().to_string(),
+            "pypy@3.13t"
+        );
+        assert_eq!(parse_request("==3.11.4").unwrap().to_string(), "3.11.4");
+    }
+}
