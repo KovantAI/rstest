@@ -323,4 +323,61 @@ mod tests {
         assert_eq!(decide(true, true, true, true), Verdict::NotParallel);
         assert_eq!(decide(false, false, false, true), Verdict::OrderDependency);
     }
+
+    #[test]
+    fn kind_label_and_fix_distinct_per_variant() {
+        // Every Kind has its own label and a non-empty, address/uuid-specific fix.
+        for k in [Kind::Address, Kind::Uuid, Kind::Time, Kind::Other] {
+            assert!(!k.label().is_empty());
+            assert!(!k.fix().is_empty());
+        }
+        assert_eq!(Kind::Address.label(), "address");
+        assert_eq!(Kind::Uuid.label(), "uuid");
+        assert_eq!(Kind::Time.label(), "time");
+        assert_eq!(Kind::Other.label(), "other");
+        // The address fix names repr()/address; the uuid fix names uuid.
+        assert!(Kind::Address.fix().contains("repr"));
+        assert!(Kind::Uuid.fix().contains("uuid"));
+        assert!(Kind::Time.fix().contains("clock"));
+        // Labels are all distinct.
+        let labels = [
+            Kind::Address.label(),
+            Kind::Uuid.label(),
+            Kind::Time.label(),
+            Kind::Other.label(),
+        ];
+        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), 4);
+    }
+
+    #[test]
+    fn verdict_title_and_advice_present_for_every_variant() {
+        let all = [
+            Verdict::NotParallel,
+            Verdict::IntrinsicFlake,
+            Verdict::OrderDependency,
+            Verdict::WallClock,
+            Verdict::Isolation,
+        ];
+        for v in all {
+            assert!(!v.title().is_empty());
+            let (why, fix) = v.advice();
+            assert!(!why.is_empty());
+            assert!(!fix.is_empty());
+        }
+        // Titles are all distinct (they key the by-verdict grouping in check.rs).
+        let titles: std::collections::HashSet<_> = all.iter().map(|v| v.title()).collect();
+        assert_eq!(titles.len(), 5);
+        // Spot-check the semantics carried in the advice text.
+        assert!(Verdict::NotParallel.advice().0.contains("-n 0"));
+        assert!(Verdict::WallClock.advice().0.contains("wait-bound"));
+    }
+
+    #[test]
+    fn split_param_ends_with_bracket_but_no_open_is_left_whole() {
+        // Defensive: a trailing ']' with no '[' isn't a param site - return whole.
+        let (site, param) = split_param("weird]");
+        assert_eq!(site, "weird]");
+        assert_eq!(param, "");
+    }
 }

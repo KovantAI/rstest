@@ -203,4 +203,91 @@ mod tests {
         assert_eq!(az_line("  first line  \nsecond\nthird"), "first line");
         assert_eq!(az_line(""), "");
     }
+
+    #[test]
+    fn source_path_strips_nodeid_and_applies_prefix() {
+        // The file is everything before `::`; a monorepo prefix is prepended.
+        assert_eq!(source_path("a/b.py::test_x", &None), "a/b.py");
+        assert_eq!(
+            source_path("a/b.py::test_x", &Some("proj".into())),
+            "proj/a/b.py"
+        );
+        // No `::` => the whole string is the path.
+        assert_eq!(source_path("bare", &None), "bare");
+    }
+
+    #[test]
+    fn plural_suffix_only_past_one() {
+        assert_eq!(plural(0), "");
+        assert_eq!(plural(1), "");
+        assert_eq!(plural(2), "s");
+    }
+
+    // Build a Run with a call-failed test (line + longrepr), a setup-failed test
+    // (no line, no longrepr), and a flaky-passed test, then drive both printers.
+    // Output goes to the captured test stdout; the point is to cover every
+    // branch (is_failed variants, lineno Some/None, longrepr Some/None, flaky).
+    fn report_of(
+        nodeid: &str,
+        when: &str,
+        outcome: &str,
+        lineno: Option<u64>,
+        longrepr: Option<&str>,
+    ) -> crate::scheduling::proto::Report {
+        crate::scheduling::proto::Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: outcome.into(),
+            duration: 0.0,
+            longrepr: longrepr.map(Into::into),
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno,
+        }
+    }
+
+    fn sample_run() -> report::Run {
+        let mut run = report::Run::default();
+        // call-failed with location + traceback
+        run.record(
+            Some(0),
+            report_of(
+                "a.py::test_call",
+                "call",
+                "failed",
+                Some(41),
+                Some("assert x\nframe"),
+            ),
+        );
+        // setup-failed, no location, no longrepr => falls back to "test failed"
+        run.record(
+            Some(1),
+            report_of("b.py::test_setup", "setup", "failed", None, None),
+        );
+        // a passing test that later flakes green
+        run.record(
+            Some(0),
+            report_of("c.py::test_flk", "call", "passed", Some(9), None),
+        );
+        run.mark_flaky("c.py::test_flk".into(), 2);
+        run
+    }
+
+    #[test]
+    fn github_annotations_cover_fail_and_flaky_branches() {
+        print_github_annotations(&sample_run());
+    }
+
+    #[test]
+    fn azure_annotations_cover_fail_and_flaky_branches() {
+        print_azure_annotations(&sample_run());
+    }
+
+    #[test]
+    fn buildkite_annotate_is_noop_without_flaky() {
+        // Empty flaky => early return before any env/agent interaction.
+        buildkite_flaky_annotate(&report::Run::default());
+    }
 }

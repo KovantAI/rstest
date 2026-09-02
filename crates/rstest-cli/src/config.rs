@@ -264,4 +264,94 @@ worker-timeout = 120
         assert_eq!(cfg.testpaths, vec!["tests"]);
         assert_eq!(cfg.rootdir, d.canonicalize().unwrap());
     }
+
+    #[test]
+    fn discover_reads_pyproject_ini_options_with_string_and_list() {
+        // pytest.ini absent (first probe) => the probe loop `continue`s to
+        // pyproject.toml. python_files as a SPACE-STRING exercises the string
+        // arm of toml_str_list; testpaths as a list exercises the array arm.
+        let d = tmpdir("pyproj-ini");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.pytest.ini_options]\npython_files = \"check_*.py chk_*.py\"\ntestpaths = [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        let cfg = discover(&d);
+        assert_eq!(cfg.python_files, vec!["check_*.py", "chk_*.py"]);
+        assert_eq!(cfg.testpaths, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn discover_reads_tox_ini_and_setup_cfg() {
+        // tox.ini uses [pytest]; setup.cfg uses [tool:pytest].
+        let t = tmpdir("tox");
+        std::fs::write(t.join("tox.ini"), "[pytest]\npython_files = tox_*.py\n").unwrap();
+        assert_eq!(discover(&t).python_files, vec!["tox_*.py"]);
+
+        let s = tmpdir("setupcfg");
+        std::fs::write(
+            s.join("setup.cfg"),
+            "[tool:pytest]\npython_files = cfg_*.py\n",
+        )
+        .unwrap();
+        assert_eq!(discover(&s).python_files, vec!["cfg_*.py"]);
+    }
+
+    #[test]
+    fn discover_bare_dir_falls_back_to_default() {
+        // No config file up the ancestry => built-in default (both patterns).
+        let d = tmpdir("bare");
+        let cfg = discover(&d);
+        assert_eq!(cfg.python_files, vec!["test_*.py", "*_test.py"]);
+    }
+
+    #[test]
+    fn has_pytest_config_detects_section() {
+        let yes = tmpdir("has-yes");
+        std::fs::write(yes.join("pytest.ini"), "[pytest]\n").unwrap();
+        assert!(has_pytest_config(&yes));
+
+        // A pyproject with no pytest section is not a pytest config boundary.
+        let no = tmpdir("has-no");
+        std::fs::write(no.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert!(!has_pytest_config(&no));
+    }
+
+    #[test]
+    fn ini_skips_comments_and_unknown_keys() {
+        let d = tmpdir("ini-comments");
+        std::fs::write(
+            d.join("pytest.ini"),
+            "[pytest]\n# a comment\n; also a comment\nunknown = whatever\npython_files = k_*.py\n",
+        )
+        .unwrap();
+        let cfg = discover(&d);
+        assert_eq!(cfg.python_files, vec!["k_*.py"]);
+    }
+
+    #[test]
+    fn settings_projects_and_non_integer_numprocesses() {
+        let d = tmpdir("projects");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nnumprocesses = 1.5\nprojects = [\"pkg_a\", \"pkg_b\"]\ncollect = \"lazy\"\noutput = \"bar\"\n",
+        )
+        .unwrap();
+        let s = rstest_settings(&d);
+        // A float is neither Integer nor String => None.
+        assert_eq!(s.numprocesses, None);
+        assert_eq!(s.projects, Some(vec!["pkg_a".into(), "pkg_b".into()]));
+        assert_eq!(s.collect.as_deref(), Some("lazy"));
+        assert_eq!(s.output.as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn settings_bad_toml_falls_back_to_default() {
+        // Unparseable pyproject => skipped; with none valid up-tree => default.
+        let d = tmpdir("bad-toml");
+        std::fs::write(d.join("pyproject.toml"), "this is : not = valid toml [[[").unwrap();
+        let s = rstest_settings(&d);
+        assert_eq!(s.numprocesses, None);
+        assert_eq!(s.reruns, None);
+    }
 }

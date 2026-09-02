@@ -319,4 +319,58 @@ mod tests {
         assert!(md.contains("No timing data collected."));
         assert!(!md.contains("Wait-bound"));
     }
+
+    // Terminal `render()` mirrors `render_markdown()` but prints to stdout, so
+    // there's nothing to assert on — these drive every branch (the harness
+    // captures stdout) to prove the printing paths don't panic and are covered.
+    #[test]
+    fn render_terminal_populated_and_empty_dont_panic() {
+        render(&report(12)); // full report: every section printed
+        render(&report(0)); // no timing data: early "no timing" line
+    }
+
+    #[test]
+    fn render_truncates_long_lists_after_eight() {
+        use super::super::{FileEntry, GateTest, WaitTest, WorkerLoad};
+        let mut r = report(12);
+        // Push each capped list past 8 so the "... and N more" tails fire in
+        // BOTH the terminal and markdown renderers.
+        if let Some(wb) = r.wait_bound.as_mut() {
+            for i in 0..9 {
+                wb.tests.push(WaitTest {
+                    nodeid: format!("tests/test_a.py::w{i}"),
+                    duration: 1.0,
+                    wait: 0.5,
+                });
+            }
+        }
+        if let Some(pf) = r.parallel_floor.as_mut() {
+            for i in 0..9 {
+                pf.gate_tests.push(GateTest {
+                    nodeid: format!("tests/test_a.py::g{i}"),
+                    duration: 1.0,
+                });
+            }
+        }
+        if let Some(pe) = r.parallel_efficiency.as_mut() {
+            for i in 0..9 {
+                pe.workers_busy.push(WorkerLoad {
+                    worker: format!("gw{i}"),
+                    busy_seconds: 1.0,
+                    tests: 1,
+                });
+            }
+        }
+        for i in 0..9 {
+            r.slowest_files.push(FileEntry {
+                file: format!("tests/test_{i}.py"),
+                total_seconds: 1.0,
+                pct: 1.0,
+            });
+        }
+
+        render(&r);
+        let md = render_markdown(&r);
+        assert!(md.contains("... and")); // truncation tail rendered
+    }
 }
