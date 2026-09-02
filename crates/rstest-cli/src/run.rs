@@ -32,12 +32,16 @@ fn run_collect_discovery(
     python: &std::path::Path,
     args: &[String],
     out: &std::path::Path,
+    run_uid: &str,
 ) -> Result<i32> {
-    // Workers inherit the environment; this flips on the full id+location
-    // payload from `pytest_collection_finish` (single session, so no
-    // per-worker designate needed).
-    std::env::set_var("RSTEST_SEND_IDS", "1");
-    let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null)?;
+    // The lone worker ships the full id+location payload from
+    // `pytest_collection_finish` (single session, so no per-worker designate).
+    let env = worker::WorkerEnv {
+        run_uid: run_uid.to_string(),
+        doctor: false,
+        send_ids: true,
+    };
+    let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     // Item-dispatch session: its `pytest_collection_finish` emits the
     // id+location payload (runtestloop returns early on --collect-only). The
     // plain run_tests session has no collection_finish, so can't feed discovery.
@@ -165,17 +169,16 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     // One uid per test run, shared by every worker (xdist's testrun_uid
-    // contract). Monorepo children inherit the root's: one run.
-    if std::env::var_os("RSTEST_RUN_UID").is_none() {
+    // contract). A monorepo child inherits the root's (passed explicitly on the
+    // child's command); a top-level run generates one. Held as a typed value and
+    // handed to workers via their environment — never process-global set_var.
+    let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        std::env::set_var(
-            "RSTEST_RUN_UID",
-            format!("{nanos:x}{:x}", std::process::id()),
-        );
-    }
+        format!("{nanos:x}{:x}", std::process::id())
+    });
     // Shared-cache backend: resolve the remote (flag or env) and, if asked,
     // run maintenance / warm the local cache BEFORE anything reads it.
     let cache_remote = cli
@@ -244,7 +247,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                          (each project has its own .rstest_cache); run rstest per project"
                     );
                 }
-                return execute_monorepo(cli, &args, &cwd, projects);
+                return execute_monorepo(cli, &args, &cwd, projects, &run_uid);
             }
         }
     }
@@ -347,12 +350,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
     // missing operator aborts now, never silently as a gate that can't fire.
     let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on)?;
-    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() || !doctor_gate.is_empty()
-    {
-        // Workers inherit the environment; this flips on cpu/fixture
-        // instrumentation in the shim plugin.
-        std::env::set_var("RSTEST_DOCTOR", "1");
-    }
+    let doctor = cli.doctor
+        || cli.doctor_json.is_some()
+        || cli.doctor_md.is_some()
+        || !doctor_gate.is_empty();
+    // Run-wide worker params (testrun uid + doctor instrumentation) travel via
+    // each worker's environment at spawn (thread-safe), never this process's
+    // global env.
+    let worker_env = worker::WorkerEnv {
+        run_uid: run_uid.clone(),
+        doctor,
+        send_ids: false,
+    };
 
     // Session args forward verbatim: the vendored core owns ini semantics
     // (python_files, testpaths, rootdir) and collection, so session
@@ -377,7 +386,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // surface editors/CI consume. Own single-session path (NOT passthrough).
     if is_collect_only(&args) {
         if let Some(out) = &cli.report_json {
-            let code = run_collect_discovery(&python, &args, out)?;
+            let code = run_collect_discovery(&python, &args, out, &run_uid)?;
             std::process::exit(code);
         }
     }
@@ -574,6 +583,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         shard,
         passthrough,
         single_worker_reruns,
+        &worker_env,
     )?;
 
     // Quarantine BEFORE any output or exit-code consumer: classification,
@@ -679,11 +689,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             })
             .collect();
         let dir = std::path::Path::new(cache_dir).join("v/cache");
-        if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = std::fs::write(
-                dir.join("lastfailed"),
-                serde_json::to_vec(&failed).unwrap_or_default(),
-            );
+        // Only write when serialization succeeds: a serialize error must not
+        // clobber pytest's lastfailed cache with an empty `{}`.
+        if let (Ok(()), Ok(bytes)) = (std::fs::create_dir_all(&dir), serde_json::to_vec(&failed)) {
+            let _ = std::fs::write(dir.join("lastfailed"), bytes);
         }
     }
     // Duration regression gate: must compare BEFORE durations::save
@@ -759,7 +768,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         // failure warns but never fails an otherwise-green run.
         if cli.cache_push {
             let remote = cache_remote.as_deref().unwrap(); // validated at entry
-            let uid = std::env::var("RSTEST_RUN_UID").unwrap_or_default();
+            let uid = run_uid.clone();
             let shard_suffix = shard.map(|(k, n)| format!("-{k}of{n}")).unwrap_or_default();
             // This run's coverage slice (covtool wrote it just above); empty for
             // non-coverage runs. Published as the segment's cov_index.
@@ -823,6 +832,7 @@ fn dispatch_run(
     shard: Option<(usize, usize)>,
     passthrough: bool,
     single_worker_reruns: bool,
+    worker_env: &worker::WorkerEnv,
 ) -> Result<pool::PoolOutcome> {
     Ok(if passthrough || (n <= 1 && !single_worker_reruns) {
         let io = if passthrough {
@@ -830,7 +840,7 @@ fn dispatch_run(
         } else {
             worker::Stdio::Null
         };
-        let mut w = worker::Worker::spawn_with_io(python, None, io)?;
+        let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
         w.send(&proto::Command::RunTests {
             args: args.to_vec(),
         })?;
@@ -911,6 +921,7 @@ fn dispatch_run(
                 .collect::<Result<Vec<_>, _>>()?,
             worker_timeout.map(std::time::Duration::from_secs),
             known_flaky,
+            worker_env,
         )?
     } else {
         let dist = match dist_name {
@@ -949,6 +960,7 @@ fn dispatch_run(
             shuffle_seed,
             shard,
             known_flaky,
+            worker_env,
         )?
     })
 }
@@ -1055,6 +1067,7 @@ fn execute_monorepo(
     args: &[String],
     root: &std::path::Path,
     projects: Vec<PathBuf>,
+    run_uid: &str,
 ) -> Result<i32> {
     if needs_passthrough_io(args) {
         anyhow::bail!(
@@ -1169,6 +1182,9 @@ fn execute_monorepo(
         let mut cmd = std::process::Command::new(&exe);
         cmd.current_dir(project)
             .env("RSTEST_MONO_PROJECT", rel)
+            // Children inherit the root's run uid (one testrun), passed
+            // explicitly rather than through the parent's process env.
+            .env("RSTEST_RUN_UID", run_uid)
             .arg("-n")
             .arg(shares[i].to_string())
             .stdout(std::process::Stdio::piped())
@@ -1229,7 +1245,8 @@ fn execute_monorepo(
         if cli.report_json.is_some() {
             // Children write to temp parts; the orchestrator merges them
             // into ONE document at the requested path after the run.
-            cmd.arg("--report-json").arg(report_part_path(&slug));
+            cmd.arg("--report-json")
+                .arg(report_part_path(&slug, run_uid));
         }
         if let Some(p) = &cli.doctor_json {
             cmd.arg("--doctor-json")
@@ -1290,7 +1307,7 @@ fn execute_monorepo(
         let slug = mono::slug(root, &projects[i]);
         report_parts.push((
             rel.clone(),
-            Some(report_part_path(&slug)),
+            Some(report_part_path(&slug, run_uid)),
             Some(status),
             false,
         ));
@@ -1337,11 +1354,8 @@ fn execute_monorepo(
 }
 
 /// Temp location for one project's report part during a monorepo run.
-fn report_part_path(slug: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "rstest-mono-{}-{slug}.json",
-        std::env::var("RSTEST_RUN_UID").unwrap_or_default()
-    ))
+fn report_part_path(slug: &str, run_uid: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("rstest-mono-{run_uid}-{slug}.json"))
 }
 
 /// Resolve the collection strategy (CLI > [tool.rstest] > "full") and
@@ -1490,4 +1504,187 @@ fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
         eprintln!("rstest: --quarantine: {} lists no patterns", path.display());
     }
     Ok(regex::RegexSet::new(patterns)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_run_meta, collect_lazy, head_to_none, merge_fixtures, parse_numprocesses,
+        quarantine_matcher, report_part_path, resolve_changed_base, strip_verbatim,
+    };
+    use crate::cli::Cli;
+    use crate::config::RstestSettings;
+    use crate::scheduling::proto::FixtureStat;
+    use clap::Parser;
+    use std::time::Instant;
+
+    fn cli() -> Cli {
+        Cli::parse_from(["rstest"])
+    }
+
+    #[test]
+    fn strip_verbatim_removes_windows_extended_prefix() {
+        // The `\\?\` extended-length prefix is dropped so paths render as
+        // editor-usable URIs; anything else is returned untouched.
+        assert_eq!(
+            strip_verbatim(r"\\?\C:\foo\bar".into()),
+            std::path::PathBuf::from(r"C:\foo\bar")
+        );
+        assert_eq!(
+            strip_verbatim("/home/u/proj".into()),
+            std::path::PathBuf::from("/home/u/proj")
+        );
+        // A `?` that is not the exact prefix must not be stripped.
+        assert_eq!(
+            strip_verbatim("a/?b".into()),
+            std::path::PathBuf::from("a/?b")
+        );
+    }
+
+    #[test]
+    fn head_to_none_maps_head_to_working_tree() {
+        // HEAD is the "diff the working tree" sentinel => None for the git helpers.
+        assert_eq!(head_to_none("HEAD"), None);
+        assert_eq!(head_to_none("origin/main"), Some("origin/main"));
+        assert_eq!(head_to_none("HEAD~3"), Some("HEAD~3"));
+    }
+
+    #[test]
+    fn parse_numprocesses_parses_and_rejects() {
+        assert_eq!(parse_numprocesses("4").unwrap(), 4);
+        assert_eq!(parse_numprocesses("0").unwrap(), 0);
+        assert!(parse_numprocesses("abc").is_err());
+        assert!(parse_numprocesses("-1").is_err());
+    }
+
+    #[test]
+    fn resolve_changed_base_is_none_without_request() {
+        // No --changed and no --changed-strict => no changed-selection, and
+        // crucially no git shell-out (kept hermetic).
+        assert!(resolve_changed_base(&cli()).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_run_meta_passes_through_fields() {
+        let m = build_run_meta(Instant::now(), 7, 1_700_000_000, 4);
+        assert_eq!(m.exitstatus, 7);
+        assert_eq!(m.workers, 4);
+        assert_eq!(m.started_at_epoch, 1_700_000_000);
+        assert!(m.duration_seconds >= 0.0);
+        assert!(!m.argv.is_empty());
+    }
+
+    #[test]
+    fn merge_fixtures_sums_by_name_and_scope() {
+        let stat = |name: &str, scope: &str, count, total| FixtureStat {
+            name: name.into(),
+            scope: scope.into(),
+            count,
+            total,
+        };
+        let merged = merge_fixtures(vec![
+            stat("db", "session", 2, 1.0),
+            stat("db", "session", 3, 0.5),   // same key => summed
+            stat("db", "function", 1, 0.25), // different scope => distinct
+            stat("cache", "session", 4, 2.0),
+        ]);
+        assert_eq!(merged.len(), 3);
+        let db_session = merged
+            .iter()
+            .find(|f| f.name == "db" && f.scope == "session")
+            .unwrap();
+        assert_eq!(db_session.count, 5);
+        assert!((db_session.total - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn report_part_path_names_a_json_file_for_slug() {
+        let p = report_part_path("collect", "testuid");
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("rstest-mono-"), "got {name}");
+        assert!(name.contains("collect"), "got {name}");
+        assert!(name.ends_with(".json"), "got {name}");
+    }
+
+    fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {
+        // Unique per-test name (pid + suffix) so parallel tests never collide.
+        let path = std::env::temp_dir().join(format!(
+            "rstest-quarantine-test-{}-{suffix}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn quarantine_matcher_handles_exact_globs_comments_blanks() {
+        let path = write_quarantine(
+            "mixed",
+            "# a comment\n\ntest_foo.py::test_a\ntest_bar.py::*\n",
+        );
+        let set = quarantine_matcher(&path).unwrap();
+        assert_eq!(set.len(), 2); // comment + blank line skipped
+        assert!(set.is_match("test_foo.py::test_a")); // exact
+        assert!(!set.is_match("test_foo.py::test_ab")); // anchored: no substring match
+        assert!(set.is_match("test_bar.py::test_z")); // glob
+        assert!(!set.is_match("other.py::test_a"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn quarantine_matcher_empty_when_only_comments() {
+        let path = write_quarantine("empty", "# nothing here\n\n");
+        let set = quarantine_matcher(&path).unwrap();
+        assert_eq!(set.len(), 0);
+        assert!(!set.is_match("test_foo.py::test_a"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn quarantine_matcher_errors_on_missing_file() {
+        let path = std::env::temp_dir().join("rstest-quarantine-does-not-exist-xyz.txt");
+        assert!(quarantine_matcher(&path).is_err());
+    }
+
+    fn settings_collect(mode: Option<&str>) -> RstestSettings {
+        RstestSettings {
+            collect: mode.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn collect_lazy_defaults_to_full() {
+        // No CLI flag, no setting => "full" => not lazy.
+        assert!(!collect_lazy(&cli(), &settings_collect(None), "load", &[]).unwrap());
+    }
+
+    #[test]
+    fn collect_lazy_enabled_for_file_affine_dist() {
+        let s = settings_collect(Some("lazy"));
+        assert!(collect_lazy(&cli(), &s, "load", &[]).unwrap());
+        assert!(collect_lazy(&cli(), &s, "loadfile", &[]).unwrap());
+    }
+
+    #[test]
+    fn collect_lazy_rejects_incompatible_dist() {
+        let s = settings_collect(Some("lazy"));
+        // loadscope/loadgroup need a global id list; lazy is file-affine.
+        assert!(collect_lazy(&cli(), &s, "loadscope", &[]).is_err());
+        assert!(collect_lazy(&cli(), &s, "loadgroup", &[]).is_err());
+    }
+
+    #[test]
+    fn collect_lazy_falls_back_on_nodeid_or_pyargs() {
+        let s = settings_collect(Some("lazy"));
+        // Explicit nodeid selection can't ride the file walk => full.
+        assert!(!collect_lazy(&cli(), &s, "load", &["test_x.py::test_a".to_string()]).unwrap());
+        // --pyargs selects by import path => full.
+        assert!(!collect_lazy(&cli(), &s, "load", &["--pyargs".to_string()]).unwrap());
+    }
+
+    #[test]
+    fn collect_lazy_rejects_unknown_mode() {
+        assert!(collect_lazy(&cli(), &settings_collect(Some("sometimes")), "load", &[]).is_err());
+    }
 }

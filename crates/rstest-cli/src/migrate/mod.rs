@@ -120,7 +120,13 @@ fn run_session_seq() -> u64 {
 /// One fresh collect-only session -> the collected nodeids in session order.
 pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>> {
     // Full id+location payload from pytest_collection_finish (single session).
-    std::env::set_var("RSTEST_SEND_IDS", "1");
+    // The lone worker ships ids; params ride its env, not process set_var.
+    let env = worker::WorkerEnv {
+        run_uid: std::env::var("RSTEST_RUN_UID")
+            .unwrap_or_else(|_| format!("migrate-{}", std::process::id())),
+        doctor: false,
+        send_ids: true,
+    };
     let mut collect_args = args.to_vec();
     if !collect_args
         .iter()
@@ -128,7 +134,7 @@ pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>>
     {
         collect_args.push("--collect-only".into());
     }
-    let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null)?;
+    let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     w.send(&proto::Command::RunItemsSession { args: collect_args })?;
     let mut ids: Vec<String> = Vec::new();
     loop {

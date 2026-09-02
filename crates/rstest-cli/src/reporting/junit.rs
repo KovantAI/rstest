@@ -163,4 +163,55 @@ mod tests {
         );
         assert!(xml.contains("assert 1 == 2"), "{xml}");
     }
+
+    fn rep(
+        nodeid: &str,
+        when: &str,
+        outcome: &str,
+        skip_reason: Option<&str>,
+    ) -> crate::scheduling::proto::Report {
+        crate::scheduling::proto::Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: outcome.into(),
+            duration: 0.0,
+            longrepr: (outcome == "failed").then(|| "boom".into()),
+            wasxfail: false,
+            skip_reason: skip_reason.map(Into::into),
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+        }
+    }
+
+    #[test]
+    fn renders_error_skipped_quarantined_and_plain_pass() {
+        let mut run = crate::reporting::report::Run::default();
+        run.record(None, rep("a.py::plain", "call", "passed", None)); // -> `/>`
+        run.record(None, rep("a.py::setup_err", "setup", "failed", None)); // -> <error>
+        run.record(None, rep("a.py::skip", "call", "skipped", Some("no mac"))); // -> <skipped>
+        run.record(None, rep("a.py::quar", "call", "failed", None)); // will be quarantined
+                                                                     // Quarantine the failing test => no <failure>, a property instead.
+        run.quarantine(|nodeid| nodeid.contains("quar"));
+
+        let path =
+            std::env::temp_dir().join(format!("rstest-junit-kinds-{}.xml", std::process::id()));
+        write(&path, &run, 2.0).unwrap();
+        let xml = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(xml.contains(r#"tests="4""#), "{xml}");
+        assert!(xml.contains(r#"errors="1""#), "{xml}");
+        assert!(xml.contains(r#"skipped="1""#), "{xml}");
+        assert!(xml.contains("<error message=\"error\">"), "{xml}");
+        assert!(xml.contains(r#"<skipped message="no mac"/>"#), "{xml}");
+        assert!(
+            xml.contains(r#"<property name="quarantined" value="true"/>"#),
+            "{xml}"
+        );
+        // The plain pass is a self-closed testcase with no child element.
+        assert!(xml.contains(r#"name="plain" time="0.000"/>"#), "{xml}");
+        // Quarantined failure must NOT surface as a <failure> (gate stays green).
+        assert!(!xml.contains("<failure"), "{xml}");
+    }
 }

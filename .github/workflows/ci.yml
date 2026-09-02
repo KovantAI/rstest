@@ -90,8 +90,16 @@ jobs:
       - name: ty (type check worker)
         run: uvx --with msgpack --with pytest --with coverage ty@0.0.75 check python/rstest_worker
 
-      - name: worker unit tests
-        run: uvx --with msgpack --with coverage pytest python/tests
+      - name: worker unit tests (with coverage)
+        run: uvx --with msgpack --with coverage --with pytest-cov pytest python/tests --cov --cov-report=xml
+
+      - name: upload python coverage
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: coverage.xml
+          flags: python
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   wheel:
     name: wheel builds (${{ matrix.os }})
@@ -160,22 +168,38 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      # Instrument once, then run BOTH suites against that instrumented build:
-      # cargo unit tests + the end-to-end gate (which drives the release binary).
-      # `show-env` exports the RUSTFLAGS / LLVM_PROFILE_FILE the build and the
-      # binary inherit, so gate.py's subprocess runs land in the profile set too.
-      - name: collect coverage
+      # Two separate instrumented runs so unit and e2e coverage upload under
+      # distinct flags. `show-env` exports the RUSTFLAGS / LLVM_PROFILE_FILE the
+      # build and binary inherit, so gate.py's subprocess runs land in the
+      # profile set too. `clean` between runs keeps the two profile sets apart.
+      - name: collect rust unit coverage
+        run: |
+          source <(cargo llvm-cov show-env --export-prefix)
+          cargo llvm-cov clean --workspace
+          cargo test --release
+          cargo llvm-cov report --release --lcov --output-path unit.lcov
+
+      - name: collect rust e2e coverage
         run: |
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
           cargo build --release
-          cargo test --release
           python e2e/gate.py --binary target/release/rstest
-          cargo llvm-cov report --release --lcov --output-path lcov.info
+          cargo llvm-cov report --release --lcov --output-path e2e.lcov
 
-      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+      - name: upload rust-unit coverage
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
-          files: lcov.info
+          files: unit.lcov
+          flags: rust-unit
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      - name: upload rust-e2e coverage
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: e2e.lcov
+          flags: rust-e2e
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 

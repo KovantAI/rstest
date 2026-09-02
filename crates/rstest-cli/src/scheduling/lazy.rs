@@ -111,11 +111,12 @@ pub fn run_lazy_pool(
     // Some(set) => --reruns-only-known-flaky: gate reruns on prior flaky
     // history (or an explicit @mark.flaky budget). See run_pool.
     known_flaky: Option<&std::collections::HashSet<String>>,
+    worker_env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();
     for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx)?;
+        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
         states.push(WorkerState::fresh(worker));
     }
 
@@ -403,7 +404,7 @@ pub fn run_lazy_pool(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
                     );
-                    let worker = spawn_into(python, idx, states.len(), args, &tx)?;
+                    let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
                     run.collect_error(
@@ -608,13 +609,14 @@ fn spawn_into(
     n: usize,
     args: &[String],
     tx: &mpsc::Sender<(usize, Result<Event>)>,
+    env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<Worker> {
-    let mut worker = Worker::spawn(python, Some((idx, n)))?;
+    let mut worker = Worker::spawn(python, Some((idx, n)), env)?;
     worker.send(&proto::Command::RunLazySession {
         args: args.to_vec(),
     })?;
     let tx = tx.clone();
-    let mut reader = worker.take_reader();
+    let mut reader = worker.take_reader()?;
     std::thread::spawn(move || loop {
         let event = reader.recv();
         let done = matches!(event, Ok(Event::Done { .. }) | Err(_));
@@ -623,4 +625,48 @@ fn spawn_into(
         }
     });
     Ok(worker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::order_files;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn order_files_sorts_known_by_total_then_unknown_in_path_order() {
+        let cwd = Path::new("/proj");
+        let files = vec![
+            PathBuf::from("/proj/test_a.py"),
+            PathBuf::from("/proj/test_b.py"),
+            PathBuf::from("/proj/test_c.py"),
+        ];
+        // Nodeid keys group by the file prefix (before `::`); test_a sums to 3.0.
+        let cache = HashMap::from([
+            ("test_a.py::t1".to_string(), 1.0),
+            ("test_a.py::t2".to_string(), 2.0),
+            ("test_b.py::t".to_string(), 5.0),
+            // test_c.py absent => unknown, ordered last in input order.
+        ]);
+        let ordered = order_files(files, &cache, cwd);
+        assert_eq!(ordered, vec!["test_b.py", "test_a.py", "test_c.py"]);
+    }
+
+    #[test]
+    fn order_files_all_unknown_keeps_input_order() {
+        let cwd = Path::new("/proj");
+        let files = vec![PathBuf::from("/proj/z.py"), PathBuf::from("/proj/a.py")];
+        let ordered = order_files(files, &HashMap::new(), cwd);
+        assert_eq!(ordered, vec!["z.py", "a.py"]); // no cache => unchanged
+    }
+
+    #[test]
+    fn order_files_keeps_full_path_when_outside_cwd() {
+        // A file that isn't under cwd can't be stripped; it stays absolute and,
+        // unmatched by the cwd-relative cache keys, lands in the unknown tail.
+        let cwd = Path::new("/proj");
+        let files = vec![PathBuf::from("/other/test_x.py")];
+        let ordered = order_files(files, &HashMap::new(), cwd);
+        assert_eq!(ordered, vec!["/other/test_x.py"]);
+    }
 }

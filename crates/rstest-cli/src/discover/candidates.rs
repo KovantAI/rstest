@@ -211,3 +211,114 @@ pub(super) fn parse_py_list_paths(output: &str) -> Vec<PathBuf> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::request::PyArg;
+    use super::*;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rstest-cand-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn parse_dir_version_handles_precision_and_junk() {
+        assert_eq!(
+            parse_dir_version("cpython-3.12.4-macos-aarch64-none"),
+            (3, 12, 4)
+        );
+        // +freethreaded (and similar) suffixes are dropped before parsing.
+        assert_eq!(
+            parse_dir_version("cpython-3.13.0+freethreaded-linux"),
+            (3, 13, 0)
+        );
+        // Two components => micro defaults to 0.
+        assert_eq!(parse_dir_version("cpython-3.11-macos"), (3, 11, 0));
+        // Unparseable / missing version field => (0,0,0) so it sorts last.
+        assert_eq!(parse_dir_version("garbage"), (0, 0, 0));
+        assert_eq!(parse_dir_version("cpython-notaversion-x"), (0, 0, 0));
+    }
+
+    #[test]
+    fn parse_py_list_paths_peels_tag_and_star() {
+        let out = parse_py_list_paths(
+            " -V:3.12 *        C:\\Python312\\python.exe\n\
+             -V:3.11          C:\\Python311\\python.exe *\n\
+             not an entry line\n\
+             -3.10\n", // tag only, no path => skipped (the `split_once` None arm)
+        );
+        assert_eq!(
+            out,
+            vec![
+                PathBuf::from("C:\\Python312\\python.exe"),
+                PathBuf::from("C:\\Python311\\python.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_in_sorts_newest_first_and_empty_on_missing() {
+        // Missing dir => empty (read_dir errors).
+        assert!(managed_in(&tmpdir("missing").join("nope")).is_empty());
+
+        let root = tmpdir("managed");
+        for name in [
+            "cpython-3.11.9-macos",
+            "cpython-3.13.1-macos",
+            "cpython-3.12.4-macos",
+        ] {
+            let bin = root.join(name).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("python3"), "").unwrap();
+        }
+        // A dir with no interpreter inside is ignored.
+        std::fs::create_dir_all(root.join("cpython-9.9.9-empty")).unwrap();
+
+        let found = managed_in(&root);
+        assert_eq!(found.len(), 3); // the empty install is skipped
+                                    // Newest version first.
+        assert!(found[0].to_string_lossy().contains("3.13.1"));
+        assert!(found[2].to_string_lossy().contains("3.11.9"));
+    }
+
+    #[test]
+    fn venv_python_finds_interpreter_or_none() {
+        let empty = tmpdir("venv-empty");
+        assert!(venv_python(&empty).is_none());
+
+        let venv = tmpdir("venv-ok");
+        std::fs::create_dir_all(venv.join("bin")).unwrap();
+        std::fs::write(venv.join("bin/python"), "").unwrap();
+        assert_eq!(venv_python(&venv), Some(venv.join("bin/python")));
+    }
+
+    #[test]
+    fn python_version_arg_reads_first_nonblank_line() {
+        let d = tmpdir("pyver");
+        // Blank lines skipped; first real entry parsed as a version request.
+        std::fs::write(d.join(".python-version"), "\n  \n3.12\n3.11\n").unwrap();
+        assert!(matches!(python_version_arg(&d), Some(PyArg::Request(_))));
+
+        // No file up-tree (and a .git boundary) => None.
+        let none = tmpdir("pyver-none");
+        std::fs::create_dir_all(none.join(".git")).unwrap();
+        assert!(python_version_arg(&none).is_none());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn path_python_names_orders_specific_first() {
+        let names = path_python_names();
+        let pos = |s: &str| names.iter().position(|n| n == s);
+        // Versioned names come before the bare fallbacks...
+        assert!(pos("python3.14") < pos("python3"));
+        assert!(pos("python3") < pos("python"));
+        // ...and free-threaded / pypy names come last.
+        assert!(pos("python") < pos("python3.14t"));
+        assert!(pos("python3.14t") < pos("pypy3"));
+        assert_eq!(names.last().map(String::as_str), Some("pypy"));
+    }
+}

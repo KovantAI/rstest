@@ -73,6 +73,23 @@ plain pytest equally).
 Totals: ~341k tests. Headline walls: pandas 4.6×, aiohttp 3.0×,
 anyio 3.9×, allauth 3.0×, requests 5.5×, typer 3.1×.
 
+### Monorepo (mono mode, rstest 0.4.0)
+
+Measured separately from the table above (wheel 0.4.0, pytest 9.1.1 pin,
+10-run mean ± σ on an idle M-series box). langgraph is a monorepo: N
+per-lib pytest configs the baseline runs serially vs one root rstest
+pass. The measured subset is the five DB-free, service-free libs
+(`libs/langgraph` itself is excluded — its live-app/service tests hang
+the plain-pytest baseline in a service-less env; see `suites.toml`).
+
+| suite | tests | parity | pytest | rstest | speedup |
+|---|---|---|---|---|---|
+| langgraph (5 libs) | 838 | 100% | 187.4±4.4s | 128.9±3.2s | 1.45× |
+
+The 1.45× (vs 2.9–3.0× on the flat suites) is capped by a few slow
+wait/IO-bound tests in `libs/checkpoint`, not by dispatch — per-test
+outcome parity is exact across the separate-pyproject libs in one run.
+
 ## Per-suite policies
 
 Flags live in `suites.toml` as `rstest_args`, with a comment explaining

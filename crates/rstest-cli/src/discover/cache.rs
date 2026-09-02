@@ -103,8 +103,11 @@ pub(super) fn write_cache(path: &Path, cache: &DiskCache) -> std::io::Result<()>
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Serialize BEFORE touching the filesystem: on a serialize error, return it
+    // rather than renaming an empty/default doc over the real cache (that would
+    // silently corrupt it to `[]`/`{}`).
+    let bytes = serde_json::to_vec(cache).map_err(std::io::Error::other)?;
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let bytes = serde_json::to_vec(cache).unwrap_or_default();
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }

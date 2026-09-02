@@ -44,8 +44,9 @@ RESULTS = HERE / "results.json"
 PHASE_TIMEOUT = 2400  # seconds, per pytest/rstest run
 # Baseline pytest is PINNED to the version rstest vendors: a newer pytest
 # in the baseline venv produces version-skew collection diffs that look
-# like rstest bugs (seen with packaging/jsonschema on pytest 9.1).
-PYTEST_PIN = "pytest==9.0.3"
+# like rstest bugs (seen with packaging/jsonschema on pytest 9.1). rstest
+# 0.4.0 vendors pytest 9.1.1, so the baseline matches it.
+PYTEST_PIN = "pytest==9.1.1"
 NET_TIMEOUT = 900  # seconds, per clone / install step
 
 T0 = time.monotonic()
@@ -197,6 +198,15 @@ class Suite:
                 if last:
                     raise last
         self.pip(PYTEST_PIN, str(self.wheel))
+        # Optional compat shim: a rootdir conftest.py written into the checkout,
+        # loaded before collection by BOTH runners (same src), so parity holds.
+        # Used to re-provide a private pytest symbol a pinned suite still imports
+        # but the vendored/baseline pytest has since removed (e.g. flask's
+        # `_pytest.monkeypatch.notset`, dropped in 9.1).
+        shim = self.cfg.get("root_conftest")
+        if shim and self.mode != "pyargs":
+            (self.src / "conftest.py").write_text(shim)
+            log(f"  {self.name}: wrote compat conftest.py")
         log(f"  {self.name}: prepared")
 
     def apply_mono_policy(self):

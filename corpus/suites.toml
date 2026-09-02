@@ -37,6 +37,22 @@ args = ["-m", "not slow and not network and not db"]
 [flask]
 repo = "https://github.com/pallets/flask"
 install = ["--group tests", "-e ."]
+# This pinned flask checkout's tests/test_cli.py imports
+# `_pytest.monkeypatch.notset`, a sentinel pytest 9.1 removed (renamed to
+# `_pytest.compat.NOTSET`). rstest 0.4.0 vendors 9.1.1 and the baseline pins
+# 9.1.1, so the bare import errors collection under BOTH. Re-alias it via a
+# rootdir conftest so the import resolves and monkeypatch.undo()'s
+# `value is NOTSET` teardown still deletes the temporarily-set keys. Aliasing
+# to the SAME object (compat.NOTSET) is required — a fresh sentinel would make
+# undo() re-set the key to junk instead of deleting it.
+root_conftest = '''
+import _pytest.monkeypatch as _mp
+
+if not hasattr(_mp, "notset"):
+    from _pytest.compat import NOTSET as _NOTSET
+
+    _mp.notset = _NOTSET
+'''
 
 [click]
 repo = "https://github.com/pallets/click"
@@ -181,10 +197,13 @@ rstest_args = ["-n", "4"]
 # Monorepo: 8 Python libs/* each with its own pytest config — pytest cannot
 # run from the root, so the baseline is N serial pytest invocations and the
 # candidate is one rstest run at the root. `projects` pins the measured
-# subset: the six DB-free libs (checkpoint-postgres and checkpoint-conformance
-# need a live postgres service under any runner). Listed in dependency order
-# so editable sibling installs resolve locally. The langgraph package's own
-# service-dependent tests fail/error identically under both runners.
+# subset to the five DB-free, service-free libs. Excluded:
+#   - checkpoint-postgres, checkpoint-conformance: need a live postgres
+#     service under any runner;
+#   - libs/langgraph: its live-app/service tests hang the plain-pytest
+#     baseline in a service-less env (unrelated to rstest) and would block
+#     the mono harness — so it is left out of the measured subset.
+# Listed in dependency order so editable sibling installs resolve locally.
 mode = "mono"
 repo = "https://github.com/langchain-ai/langgraph"
 projects = [
@@ -204,6 +223,5 @@ projects = [
 # and defers/retries configure_node, so each worker self-provisions its own
 # ephemeral ReportServer. Verified standalone: checkpoint-sqlite runs at -n auto
 # (108 passed, ~2x vs -n 0) with pytest-retry active. No pin needed.
-# NOTE: a clean full-mono parity re-run is still pending — libs/langgraph's
-# live-app/service tests hang the plain-pytest baseline in a service-less env
-# (unrelated to rstest), which blocks the mono harness here.
+# Mono parity verified on the 5-lib subset: 838 tests, 100% per-test outcome
+# parity, 1.45x wall (10-run mean, rstest 0.4.0).

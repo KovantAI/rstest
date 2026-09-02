@@ -120,12 +120,13 @@ pub fn run_pool(
     // Some(set) => --reruns-only-known-flaky: only tests in this set (prior
     // flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     known_flaky: Option<&std::collections::HashSet<String>>,
+    worker_env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
     let mut states = Vec::new();
     for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx)?;
+        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
         states.push(WorkerState::fresh(worker));
     }
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
@@ -367,7 +368,7 @@ pub fn run_pool(
                             dist,
                             shuffle,
                             keep.as_ref(),
-                        ));
+                        )?);
                     }
                     ids_store.get_or_insert(ids);
                 }
@@ -573,7 +574,7 @@ pub fn run_pool(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
                     );
-                    let worker = spawn_into(python, idx, states.len(), args, &tx)?;
+                    let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
                     run.collect_error(
