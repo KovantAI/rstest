@@ -105,16 +105,18 @@ where
                 "  {}: cannot import the rstest worker shim (is rstest installed in it?)",
                 cand.display()
             )),
-            Some(p) if request.is_some_and(|r| !matches(&p, r)) => rejected.push(format!(
-                "  {}: Python {}.{}.{} ({}) does not satisfy '{}'",
-                cand.display(),
-                p.version.0,
-                p.version.1,
-                p.version.2,
-                p.implementation,
-                request.unwrap(),
-            )),
-            Some(p) => return Ok(p.executable),
+            Some(p) => match request {
+                Some(r) if !matches(&p, r) => rejected.push(format!(
+                    "  {}: Python {}.{}.{} ({}) does not satisfy '{}'",
+                    cand.display(),
+                    p.version.0,
+                    p.version.1,
+                    p.version.2,
+                    p.implementation,
+                    r,
+                )),
+                _ => return Ok(p.executable),
+            },
         }
     }
     let hint = match request {

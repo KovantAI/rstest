@@ -56,10 +56,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // the SAME target (e.g. two hosts compacting base.json on a shared mount,
     // which can share a pid) never land on the same tmp path and tear the file.
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = crate::time::now_epoch_nanos();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(
         ".{fname}.{}.{nanos:x}.{seq:x}.tmp",
