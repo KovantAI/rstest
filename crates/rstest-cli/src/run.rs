@@ -14,7 +14,7 @@ use crate::reporting::ci::{
 };
 use crate::reporting::{color, flakes, junit, progress, report, status};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
-use crate::{cache, collect, config, discover, doctor, migrate, mono, remote, select};
+use crate::{cache, collect, config, discover, doctor, incremental, migrate, mono, remote, select};
 
 fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
     let s = p.to_string_lossy();
@@ -418,7 +418,34 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         println!("rstest {} — {worker_desc}", env!("CARGO_PKG_VERSION"));
     }
     let mut args = args;
-    let effective_changed = resolve_changed_base(cli)?;
+    // Incremental testing: --since-green feeds --changed's selection from the
+    // last green run's commit. An explicit --changed always wins. `head` is
+    // captured up front (it can't change mid-run) so a green run can record it.
+    let since_green = cli.since_green && cli.changed.is_none();
+    // Only shell out to git / hash the env when --since-green is actually
+    // active, so the default run path pays nothing.
+    let head = since_green.then(incremental::head_sha).flatten();
+    let env_fp = if since_green {
+        incremental::env_fingerprint(&scope, &python)
+    } else {
+        String::new()
+    };
+    let mut effective_changed = resolve_changed_base(cli)?;
+    if since_green && effective_changed.is_none() {
+        match incremental::baseline(&std::env::current_dir()?, &env_fp) {
+            Some(sha) => {
+                eprintln!(
+                    "rstest: --since-green: selecting changes since last green run ({})",
+                    &sha[..sha.len().min(12)]
+                );
+                effective_changed = Some(sha);
+            }
+            None => eprintln!(
+                "rstest: --since-green: no prior green run recorded; \
+                 running everything to establish the baseline"
+            ),
+        }
+    }
     if let Some(rev) = &effective_changed {
         let rev = head_to_none(rev);
         let cwd = std::env::current_dir()?;
@@ -442,6 +469,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                     "rstest: no tests affected by {} changed file(s)",
                     changes.len()
                 );
+                // Nothing affected since the last green run is itself a green
+                // outcome: advance the baseline to HEAD so unrelated commits
+                // don't force a re-run next time.
+                if since_green {
+                    if let Some(h) = &head {
+                        incremental::record_green(&cwd, h, &env_fp);
+                    }
+                    std::process::exit(0);
+                }
                 // Strict gating needs to DISTINGUISH "ran nothing" from
                 // "everything passed": pytest's nothing-collected code.
                 std::process::exit(if cli.changed_strict { 5 } else { 0 });
@@ -801,6 +837,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         eprintln!("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
         if exitstatus == 0 {
             exitstatus = 1;
+        }
+    }
+    // Incremental testing: a fully green run advances the baseline to the commit
+    // we ran at, so the next --since-green run only re-selects changes made after
+    // it. Recorded only on green (exitstatus 0) — a failing test keeps being
+    // selected until it passes.
+    if since_green && exitstatus == 0 {
+        if let Some(h) = &head {
+            incremental::record_green(&std::env::current_dir()?, h, &env_fp);
         }
     }
     Ok(exitstatus)

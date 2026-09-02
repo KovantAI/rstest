@@ -6,6 +6,7 @@ mod collect; // D5: single-point collection
 mod config;
 mod discover;
 mod doctor;
+mod incremental;
 mod migrate;
 mod mono;
 mod remote;

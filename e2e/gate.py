@@ -2884,6 +2884,106 @@ def git_init_commit(cwd, msg="base"):
     git_commit(cwd, msg)
 
 
+def _since_green_baseline(proj):
+    """The recorded last-green commit sha, or None if no baseline file yet."""
+    p = proj / ".rstest_cache" / "last_green.json"
+    if not p.exists():
+        return None
+    return json.loads(p.read_text())["sha"]
+
+
+def _head_sha(proj):
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=proj, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def gate_since_green_incremental(g, args, binary):
+    print("== since-green incremental ==")
+    sp = g.tmp / "incrproj"
+    g.write("incrproj/test_alpha.py", "def test_a():\n    assert 1 == 1\n")
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 == 2\n")
+    g.write("incrproj/pyproject.toml", "[tool.pytest.ini_options]\n")
+    git_init_commit(sp, "init")
+    env = {"PYTHONPATH": str(sp)}
+
+    # Run 1: no baseline -> establish it by running everything, then record HEAD.
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: first run has no baseline -> full run",
+        "no prior green run recorded" in r.stderr and "2 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+    check(
+        "since-green: green run records baseline == HEAD",
+        _since_green_baseline(sp) == _head_sha(sp),
+        f"baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # Run 2: nothing changed since the green baseline -> select nothing.
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: no changes since green -> nothing affected",
+        r.returncode == 0
+        and "selecting changes since last green run" in r.stderr
+        and "no tests affected" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 3: edit + commit one test -> only it is selected; baseline advances.
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 + 0 == 2  # touched\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "touch-beta")
+    r = g.run("--since-green", "-n", "2", "-v", cwd=sp, env_extra=env)
+    check(
+        "since-green: only the changed test is selected",
+        "1 affected test target(s)" in r.stderr
+        and "test_b" in r.stdout
+        and "test_a" not in r.stdout,
+        r.stderr[-200:] + r.stdout[-300:],
+    )
+    check(
+        "since-green: passing run advances baseline to new HEAD",
+        _since_green_baseline(sp) == _head_sha(sp),
+        f"baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # Run 4: break the test -> failing run must NOT advance the baseline.
+    baseline_before = _since_green_baseline(sp)
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 == 3  # boom\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "break-beta")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: failing run holds the baseline",
+        r.returncode == 1 and _since_green_baseline(sp) == baseline_before,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} before={baseline_before}",
+    )
+
+    # Run 5: fix the test -> green again advances the baseline to HEAD.
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 == 2  # fixed\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "fix-beta")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: recovery run advances baseline again",
+        r.returncode == 0 and _since_green_baseline(sp) == _head_sha(sp),
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # Run 6: an environment change git can't see (a new lockfile), with NO
+    # source change, must bust the baseline -> full run, not a false
+    # "nothing affected". This is the fingerprint guard against sticky
+    # false-greens after a dependency upgrade.
+    g.write("incrproj/uv.lock", "version = 1\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: dependency change busts the baseline -> full run",
+        r.returncode == 0 and "no prior green run recorded" in r.stderr and "2 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     default_binary = REPO / "target" / "release" / ("rstest.exe" if WINDOWS else "rstest")
@@ -2932,6 +3032,7 @@ def main():
         gate_coverage,
         gate_coverage_contexts_line_test_index_cov_co,
         gate_smart_selection,
+        gate_since_green_incremental,
         gate_coverage_based_selection_changed_uses_th,
         gate_coverage_selection_under_autocrlf_crlf_w,
         gate_shuffle,
