@@ -152,6 +152,10 @@ pub fn run_pool(
     // Some(set) => --reruns-only-known-flaky: only tests in this set (prior
     // flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     known_flaky: Option<&std::collections::HashSet<String>>,
+    // --incremental: nodeids that were green last run and whose covered source
+    // is unchanged. Collected but never dispatched; carried forward as cached
+    // passes. Empty = feature off.
+    skip_ids: &std::collections::HashSet<String>,
     worker_env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
@@ -203,6 +207,9 @@ pub fn run_pool(
         flaky.get(&i).copied().unwrap_or(reruns)
     };
     let mut fail_count = 0u64;
+    // --incremental: nodeids collected but skipped (unchanged since last green),
+    // injected as cached passes once the run finishes.
+    let mut cached_ids: Vec<String> = Vec::new();
     // Global -x/--maxfail: once tripped, dispatch halts and every alive
     // worker is told no_more_items (it finishes in-flight work and ends;
     // bounded overshoot, same trade xdist makes).
@@ -392,6 +399,36 @@ pub fn run_pool(
                             );
                             idx.into_iter().collect::<HashSet<u64>>()
                         });
+                        // --incremental: fold the skip set into `keep` — an index
+                        // whose nodeid is green+unchanged is deselected. Any such
+                        // index that would otherwise have run becomes a cached
+                        // pass. (run.rs guards this off for shard/shuffle, so
+                        // `keep` here is None unless sharding, which it isn't.)
+                        let keep = if skip_ids.is_empty() {
+                            keep
+                        } else {
+                            let run_idx: HashSet<u64> = (0..ids.len() as u64)
+                                .filter(|&i| keep.as_ref().is_none_or(|k| k.contains(&i)))
+                                .filter(|&i| !skip_ids.contains(&ids[i as usize]))
+                                .collect();
+                            for i in 0..ids.len() as u64 {
+                                let in_keep = keep.as_ref().is_none_or(|k| k.contains(&i));
+                                if in_keep && skip_ids.contains(&ids[i as usize]) {
+                                    cached_ids.push(ids[i as usize].clone());
+                                }
+                            }
+                            if !cached_ids.is_empty() {
+                                eprintln!(
+                                    "rstest: --incremental: {} of {} test(s) unchanged since \
+                                     last green -> skipped (cached)",
+                                    cached_ids.len(),
+                                    ids.len()
+                                );
+                                // The progress total tracks only tests that run.
+                                prog.set_total(total_items.saturating_sub(cached_ids.len()));
+                            }
+                            Some(run_idx)
+                        };
                         dispatch = Some(build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
@@ -816,6 +853,12 @@ pub fn run_pool(
     }
     for w in workers {
         let _ = w.wait();
+    }
+    // --incremental: carry forward the skipped tests as cached passes so every
+    // artifact reflects the whole suite. They passed last run and their source
+    // is unchanged, so they never affect the exit status.
+    for id in &cached_ids {
+        run.record_cached(id.clone());
     }
     // Recorded outcomes win over session exit codes both ways: a fabricated
     // crash failure never hits a session (codes read 0), and a flaky test's

@@ -4,6 +4,7 @@ mod cli;
 mod collect; // D5: single-point collection
 #[allow(dead_code)]
 mod config;
+mod coverage_skip;
 mod discover;
 mod doctor;
 mod incremental;

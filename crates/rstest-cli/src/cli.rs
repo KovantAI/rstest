@@ -146,6 +146,15 @@ pub struct Cli {
     #[arg(long = "since-green")]
     pub(crate) since_green: bool,
 
+    /// Dispatch-level incremental testing: collect the whole suite, then SKIP
+    /// running any test that was green last run and whose covered source is
+    /// byte-identical now (content-addressed via the coverage index — no git).
+    /// Skipped tests are carried forward as cached passes. Needs a warm coverage
+    /// index (a prior `--cov-context=test` run); full collection + `--dist load`
+    /// only. A config-file change disables skipping for that run.
+    #[arg(long)]
+    pub(crate) incremental: bool,
+
     /// Collection strategy: "full" (every worker collects the whole suite,
     /// verified by hash) or "lazy" (each file collected by one worker on
     /// demand). Config `[tool.rstest] collect`. [default: full]
@@ -308,7 +317,7 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
-            "--reruns-only-known-flaky" | "--since-green" => own.push(arg),
+            "--reruns-only-known-flaky" | "--since-green" | "--incremental" => own.push(arg),
             "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
                 own.push(arg)
             }

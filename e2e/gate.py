@@ -2984,6 +2984,87 @@ def gate_since_green_incremental(g, args, binary):
     )
 
 
+def gate_incremental_dispatch_skip(g, args, binary):
+    print("== incremental dispatch skip (--incremental) ==")
+    sp = g.tmp / "incrdisp"
+    g.write("incrdisp/mod_a.py", "def a():\n    return 1\n")
+    g.write("incrdisp/mod_b.py", "def b():\n    return 2\n")
+    g.write("incrdisp/test_a.py", "import mod_a\ndef test_a():\n    assert mod_a.a() == 1\n")
+    g.write("incrdisp/test_b.py", "import mod_b\ndef test_b():\n    assert mod_b.b() == 2\n")
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        # Wipe only the coverage data (SQLite; a stale one can lock under the
+        # parallel combine); KEEP .rstest_cache so the index + outcomes persist.
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run(
+            "test_a.py", "test_b.py", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env
+        )
+
+    idx = sp / ".rstest_cache" / "coverage_index.json"
+
+    # Run 1: no baseline -> everything runs, warming the index + green outcomes.
+    r = run()
+    check(
+        "incremental: first run warms index + records green",
+        r.returncode == 0 and idx.exists() and "2 passed" in r.stdout,
+        f"rc={r.returncode} idx={idx.exists()} " + r.stdout[-200:],
+    )
+
+    # Run 2: nothing changed -> BOTH tests skipped as cached.
+    r = run()
+    check(
+        "incremental: unchanged suite -> all cached",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr and "(2 cached)" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 3: edit a dependency of ONE test -> only that test runs; the other is
+    # cached (per-test granularity).
+    g.write("incrdisp/mod_a.py", "def a():\n    return 1  # touched\n")
+    r = run()
+    check(
+        "incremental: changed dependency reruns only the affected test",
+        r.returncode == 0 and "1 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 4: nothing changed since the partial run -> BOTH cached again. This is
+    # the carry-forward guard: the cached test's coverage was folded back into
+    # the index covtool rewrote from only the test that ran.
+    r = run()
+    check(
+        "incremental: carry-forward keeps cached tests skippable",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 5: edit a test's OWN file (its dependency is unchanged) -> it reruns,
+    # proving the test-file hash gate (test files aren't always in the index).
+    g.write(
+        "incrdisp/test_b.py",
+        "import mod_b\ndef test_b():\n    assert mod_b.b() == 2  # touched\n",
+    )
+    r = run()
+    check(
+        "incremental: editing the test file reruns it",
+        r.returncode == 0 and "1 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 6: break a dependency -> the affected test reruns and FAILS; it is
+    # never skipped, and the failure surfaces.
+    g.write("incrdisp/mod_a.py", "def a():\n    return 999  # broken\n")
+    r = run()
+    check(
+        "incremental: a failing test is rerun, not skipped",
+        r.returncode == 1 and "1 failed" in r.stdout and "test_a" in r.stdout,
+        r.stderr[-200:] + r.stdout[-300:],
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     default_binary = REPO / "target" / "release" / ("rstest.exe" if WINDOWS else "rstest")
@@ -3033,6 +3114,7 @@ def main():
         gate_coverage_contexts_line_test_index_cov_co,
         gate_smart_selection,
         gate_since_green_incremental,
+        gate_incremental_dispatch_skip,
         gate_coverage_based_selection_changed_uses_th,
         gate_coverage_selection_under_autocrlf_crlf_w,
         gate_shuffle,

@@ -14,7 +14,10 @@ use crate::reporting::ci::{
 };
 use crate::reporting::{color, flakes, junit, progress, report, status};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
-use crate::{cache, collect, config, discover, doctor, incremental, migrate, mono, remote, select};
+use crate::{
+    cache, collect, config, coverage_skip, discover, doctor, incremental, migrate, mono, remote,
+    select,
+};
 
 fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
     let s = p.to_string_lossy();
@@ -594,6 +597,43 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     };
+    // --incremental: compute the dispatch-level skip set now (before the pool
+    // collects) from the coverage index + last green set, gated by a config
+    // fingerprint. Restricted to the eager pool on --dist load with full
+    // collection; incompatible modes disable it with a note.
+    let config_fp = if cli.incremental {
+        coverage_skip::config_fingerprint(&scope)
+    } else {
+        String::new()
+    };
+    let incremental_active = cli.incremental
+        && dist_name == "load"
+        && !passthrough
+        && n >= 2
+        && shard.is_none()
+        && shuffle_seed.is_none()
+        && !collect_lazy(cli, &settings, &dist_name, &args)?;
+    if cli.incremental && !incremental_active {
+        eprintln!(
+            "rstest: --incremental needs the parallel pool with full collection and \
+             --dist load (not -n 0/1, --dist each/affinity, --collect lazy, --shard, or \
+             --shuffle); running everything this time"
+        );
+    }
+    // Snapshot the index BEFORE the run: it drives the skip decision now, and
+    // post-run it supplies the cached tests' coverage to fold back in (covtool
+    // rewrites the index from only the tests that ran).
+    let prev_index = if incremental_active {
+        remote::load_local_cov_index()
+    } else {
+        select::CoverageIndex::default()
+    };
+    let skip_ids: std::collections::HashSet<String> = if incremental_active {
+        let baseline = coverage_skip::load(&scope, &config_fp);
+        coverage_skip::skippable_now(&prev_index, &baseline)
+    } else {
+        std::collections::HashSet::new()
+    };
     let mut outcome = dispatch_run(
         cli,
         &settings,
@@ -607,6 +647,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         reruns,
         worker_timeout,
         known_flaky.as_ref(),
+        &skip_ids,
         shuffle_seed,
         shard,
         passthrough,
@@ -848,6 +889,21 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             incremental::record_green(&std::env::current_dir()?, h, &env_fp);
         }
     }
+    // --incremental: persist this run's green set (tests that ran green + the
+    // carried-forward cached passes) so the next run skips what stays unchanged.
+    // Recorded regardless of exit status — failures simply aren't in the green
+    // set, so they re-run next time. Best-effort.
+    if incremental_active {
+        // Fold cached tests' prior coverage back into the index covtool just
+        // rewrote (skipped tests produced none), so they stay skippable.
+        let cached = outcome.run.cached_nodeids();
+        if !cached.is_empty() {
+            let mut new_index = remote::load_local_cov_index();
+            coverage_skip::carry_forward(&prev_index, &mut new_index, &cached);
+            coverage_skip::write_index(&new_index);
+        }
+        coverage_skip::record(&scope, &config_fp, outcome.run.green_nodeids());
+    }
     Ok(exitstatus)
 }
 
@@ -865,6 +921,7 @@ fn dispatch_run(
     reruns: u32,
     worker_timeout: Option<u64>,
     known_flaky: Option<&std::collections::HashSet<String>>,
+    skip_ids: &std::collections::HashSet<String>,
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
     passthrough: bool,
@@ -988,6 +1045,7 @@ fn dispatch_run(
             shuffle_seed,
             shard,
             known_flaky,
+            skip_ids,
             worker_env,
         )?
     })
@@ -1064,7 +1122,16 @@ fn finalize_output(
         } else {
             println!();
         }
-        let summary = format!("{}{warn_part} in {elapsed:.2}s", outcome.run.summary_line());
+        let cached = outcome.run.cached_count();
+        let cached_note = if cached > 0 {
+            format!(" ({cached} cached)")
+        } else {
+            String::new()
+        };
+        let summary = format!(
+            "{}{warn_part} in {elapsed:.2}s{cached_note}",
+            outcome.run.summary_line()
+        );
         let summary = if outcome.run.all_passed() {
             palette.green(&summary)
         } else {
