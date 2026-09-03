@@ -24,12 +24,32 @@ from rstest_worker._internal.xdistnode import (
 log = logging.getLogger("rstest.worker")
 
 
+class Timeout(Exception):
+    """Raised in the test's own thread when `--timeout` / `@pytest.mark.timeout`
+    fires, so pytest reports it as a failure whose traceback points at the line
+    the test was stuck on."""
+
+
+def _parse_timeout(raw: "str | float | None") -> "float | None":
+    """Positive float seconds, or None (disabled / unparseable / non-positive)."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
 class StreamPlugin:
     """Translate pytest report hooks into wire events."""
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
         self._doctor = os.environ.get("RSTEST_DOCTOR") == "1"
+        # Per-test timeout (--timeout): interrupt the call phase in-process at
+        # the deadline. @pytest.mark.timeout(N) overrides per test.
+        self._timeout = _parse_timeout(os.environ.get("RSTEST_TIMEOUT"))
         self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
         self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
         # (when, category, message, filename, lineno) -> count; aggregated
@@ -76,6 +96,11 @@ class StreamPlugin:
             "markers",
             "xdist_group(name): tests in the same group run on the same "
             "worker under --dist loadgroup (xdist-compatible)",
+        )
+        config.addinivalue_line(
+            "markers",
+            "timeout(seconds): rstest — fail this test if its call phase runs "
+            "longer than N seconds (per-test override of --timeout)",
         )
         # Belt-and-suspenders: rerunfailures is normally neutralized earlier in
         # pytest_cmdline_main (it must be gone before configure, which snapshots
@@ -240,20 +265,61 @@ class StreamPlugin:
 
             config.cache.set = guarded_set
 
+    def _effective_timeout(self, item) -> "float | None":
+        """`@pytest.mark.timeout(N)` wins over the global `--timeout`."""
+        marker = item.get_closest_marker("timeout")
+        if marker is not None and marker.args:
+            return _parse_timeout(marker.args[0])
+        return self._timeout
+
+    @staticmethod
+    def _arm_timeout(secs: float):
+        """Interrupt the CURRENT (main) thread after `secs` via SIGALRM, so a
+        stuck test fails with a traceback at the line it blocked on. Returns a
+        cancel callback, or None where it can't run (no SIGALRM, or the test
+        isn't on the main thread) — the orchestrator watchdog is the backstop
+        there, and for C-extension calls that never return to the interpreter."""
+        import signal
+        import threading
+
+        if (
+            not hasattr(signal, "SIGALRM")
+            or threading.current_thread() is not threading.main_thread()
+        ):
+            return None
+
+        def _fire(signum, frame):
+            raise Timeout(f"test exceeded --timeout ({secs:g}s)")
+
+        old = signal.signal(signal.SIGALRM, _fire)
+        signal.setitimer(signal.ITIMER_REAL, secs)
+
+        def cancel():
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+
+        return cancel
+
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item):
-        # Doctor: cpu-vs-wall per call phase. wall >> cpu = the test is
-        # waiting (sleep / IO / timeout), the #1 suite-content finding in
-        # the research profiling (rich 74%, aiohttp 78% of test time).
-        if not self._doctor:
+        # Layers two per-call-phase concerns: the --timeout interrupt (outer)
+        # and doctor's cpu-vs-wall measurement (inner). wall >> cpu = the test
+        # is waiting (sleep / IO), the #1 suite-content finding in the research
+        # profiling (rich 74%, aiohttp 78% of test time).
+        secs = self._effective_timeout(item)
+        if secs is None and not self._doctor:
             return (yield)
         import time
 
-        t0 = time.process_time()
+        cancel = self._arm_timeout(secs) if secs else None
+        t0 = time.process_time() if self._doctor else 0.0
         try:
             return (yield)
         finally:
-            self._cpu[item.nodeid] = time.process_time() - t0
+            if cancel is not None:
+                cancel()
+            if self._doctor:
+                self._cpu[item.nodeid] = time.process_time() - t0
 
     @pytest.hookimpl(wrapper=True)
     def pytest_fixture_setup(self, fixturedef, request):

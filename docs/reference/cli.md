@@ -406,13 +406,40 @@ Hang backstop, off by default: a worker stuck on **one test** (any
 phase — setup, call, or teardown) longer than
 SECS is killed — the test is reported failed with a timeout message, the
 worker's other tests redistribute, and a replacement worker joins (the
-crash-recovery machinery, same budgets). Use
-[pytest-timeout](https://pypi.org/project/pytest-timeout/) for ordinary
-per-test limits; `--worker-timeout` catches what in-process timeouts
-can't interrupt — tests hard-blocked inside C extensions or deadlocked
-threads. Under `--reruns`, a timed-out test is retried within the budget
-(deadlocks can be races). Hangs OUTSIDE a test — during collection or
-session config — are not covered by this watchdog.
+crash-recovery machinery, same budgets). This is the coarse hang backstop;
+for ordinary per-test limits use [`--timeout`](#-timeout-secs) (below).
+`--worker-timeout` catches what an in-process timeout can't interrupt —
+tests hard-blocked inside C extensions or deadlocked threads. Under
+`--reruns`, a timed-out test is retried within the budget (deadlocks can be
+races). Hangs OUTSIDE a test — during collection or session config — are not
+covered by this watchdog.
+
+### `--timeout <SECS>`
+
+Per-test deadline: fail any test whose **call phase** runs longer than SECS.
+The test is interrupted **in-process** (a signal in the worker), so the
+failure's traceback points at the exact line it was stuck on — the
+pytest-timeout behaviour, built in, no plugin required and working under the
+parallel pool.
+
+```console
+$ rstest -n auto --timeout 30
+```
+
+Fractional seconds are allowed (`--timeout 0.5`). `@pytest.mark.timeout(N)`
+overrides the global value per test:
+
+```python
+@pytest.mark.timeout(5)
+def test_slow_path(): ...
+```
+
+A test hard-blocked inside a C extension never returns to the interpreter, so
+the signal can't fire — the [`--worker-timeout`](#-worker-timeout-secs)
+watchdog is the backstop for that, and rstest auto-arms it (at a generous
+multiple of `--timeout`) whenever you set `--timeout` without an explicit
+`--worker-timeout`. The interrupt uses a Unix signal on the test's main
+thread; on platforms without it (Windows), the watchdog alone applies.
 
 ### `--changed[=REV]`
 

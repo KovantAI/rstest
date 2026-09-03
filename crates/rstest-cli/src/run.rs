@@ -39,6 +39,7 @@ fn run_collect_discovery(
     let env = worker::WorkerEnv {
         run_uid: run_uid.to_string(),
         doctor: false,
+        timeout: None,
         send_ids: true,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
@@ -360,6 +361,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.clone(),
         doctor,
+        timeout: cli.timeout,
         send_ids: false,
     };
 
@@ -834,6 +836,16 @@ fn dispatch_run(
     single_worker_reruns: bool,
     worker_env: &worker::WorkerEnv,
 ) -> Result<pool::PoolOutcome> {
+    // Watchdog duration: explicit --worker-timeout wins; otherwise auto-arm from
+    // --timeout at a generous multiple, so the worker's in-process interrupt
+    // fires first and the watchdog only catches a C-ext deadlock the signal
+    // can't reach (the test never returns to the interpreter).
+    let watchdog: Option<std::time::Duration> = worker_timeout
+        .map(std::time::Duration::from_secs)
+        .or_else(|| {
+            cli.timeout
+                .map(|t| std::time::Duration::from_secs_f64(t * 3.0 + 10.0))
+        });
     Ok(if passthrough || (n <= 1 && !single_worker_reruns) {
         let io = if passthrough {
             worker::Stdio::Inherit
@@ -919,7 +931,7 @@ fn dispatch_run(
                 .iter()
                 .map(|p| regex::Regex::new(p))
                 .collect::<Result<Vec<_>, _>>()?,
-            worker_timeout.map(std::time::Duration::from_secs),
+            watchdog,
             known_flaky,
             worker_env,
         )?
@@ -956,7 +968,7 @@ fn dispatch_run(
                 .iter()
                 .map(|p| regex::Regex::new(p))
                 .collect::<Result<Vec<_>, _>>()?,
-            worker_timeout.map(std::time::Duration::from_secs),
+            watchdog,
             shuffle_seed,
             shard,
             known_flaky,

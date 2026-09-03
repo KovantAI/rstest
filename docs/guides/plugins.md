@@ -50,7 +50,7 @@ run it at `-n 0` (or use rstest's native equivalent).
 
 | Plugin | Tier | Note |
 |---|---|---|
-| pytest-timeout | Works | per-test timeout fires in both modes; complements rstest's own `--worker-timeout` (a hang backstop for C-extension deadlocks) |
+| pytest-timeout | Works | per-test timeout fires in both modes — though rstest has a built-in [`--timeout`](../reference/cli.md#-timeout-secs) (+ `@pytest.mark.timeout`) that needs no plugin; don't run both (two SIGALRM handlers). See also `--worker-timeout` for C-extension deadlocks |
 | pytest-env | Works | env vars set on every worker |
 | pytest-socket | Works | `--disable-socket` blocks identically in parallel |
 | pytest-repeat | Works | `@mark.repeat(N)` items distribute across workers |

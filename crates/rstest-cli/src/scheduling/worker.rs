@@ -16,6 +16,9 @@ pub struct WorkerEnv {
     pub run_uid: String,
     /// Enable cpu/fixture instrumentation in the worker's shim plugin.
     pub doctor: bool,
+    /// Per-test timeout in seconds (--timeout): the worker interrupts a test
+    /// whose call phase overruns. None = disabled.
+    pub timeout: Option<f64>,
     /// For a lone worker: ship the full id/location payload from collection
     /// (pooled workers derive this from their index instead).
     pub send_ids: bool,
@@ -91,6 +94,9 @@ impl Worker {
             });
         if env.doctor {
             command.env("RSTEST_DOCTOR", "1");
+        }
+        if let Some(secs) = env.timeout {
+            command.env("RSTEST_TIMEOUT", secs.to_string());
         }
         // Exactly one worker ships the full id list (D5); the rest verify their
         // collection by count+hash. Worker 0 in a pool; the lone worker only
