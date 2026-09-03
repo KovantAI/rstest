@@ -146,6 +146,11 @@ impl Run {
         self.collect_errors.push((path, longrepr));
     }
 
+    /// Collection errors as (path, longrepr) pairs, for report renderers.
+    pub fn collect_errors(&self) -> &[(String, String)] {
+        &self.collect_errors
+    }
+
     /// Flag an entry whose failure was fabricated by the orchestrator
     /// (worker crash / watchdog kill) rather than reported by pytest.
     pub fn mark_crashed(&mut self, nodeid: &str) {
@@ -425,41 +430,50 @@ impl Run {
         counts
     }
 
-    pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
-        #[derive(Serialize)]
-        struct Snapshot<'a> {
-            meta: BTreeMap<&'static str, serde_json::Value>,
-            collect_errors: Vec<&'a String>,
-            tests: &'a BTreeMap<String, TestEntry>,
-        }
-        let mut meta = BTreeMap::new();
-        meta.insert("runner", "rstest".into());
+    /// The schema-5 report document as a JSON value: the single source shared by
+    /// the `--report-json` file writer and the HTML report's embedded data blob,
+    /// so the two can never drift.
+    pub fn snapshot_value(&self, run_meta: &RunMeta) -> serde_json::Value {
+        let mut meta = serde_json::Map::new();
+        meta.insert("runner".into(), "rstest".into());
         // Schema history: 2 added longrepr/crashed+version; 3 added the
         // envelope (counts, duration_seconds, started_at_epoch, workers, argv);
         // 4 added per-test lineno; 5 added quarantined.
-        meta.insert("schema", 5.into());
-        meta.insert("exitstatus", run_meta.exitstatus.into());
+        meta.insert("schema".into(), 5.into());
+        meta.insert("exitstatus".into(), run_meta.exitstatus.into());
         meta.insert(
-            "counts",
+            "counts".into(),
             serde_json::to_value(self.counts()).unwrap_or_default(),
         );
         meta.insert(
-            "duration_seconds",
+            "duration_seconds".into(),
             ((run_meta.duration_seconds * 100.0).round() / 100.0).into(),
         );
-        meta.insert("started_at_epoch", run_meta.started_at_epoch.into());
-        meta.insert("workers", run_meta.workers.into());
+        meta.insert("started_at_epoch".into(), run_meta.started_at_epoch.into());
+        meta.insert("workers".into(), run_meta.workers.into());
         meta.insert(
-            "argv",
+            "argv".into(),
             serde_json::to_value(&run_meta.argv).unwrap_or_default(),
         );
-        let snap = Snapshot {
-            meta,
-            collect_errors: self.collect_errors.iter().map(|(p, _)| p).collect(),
-            tests: &self.tests,
-        };
-        std::fs::write(path, serde_json::to_vec(&snap)?)?;
+        let collect_errors: Vec<&String> = self.collect_errors.iter().map(|(p, _)| p).collect();
+        serde_json::json!({
+            "meta": meta,
+            "collect_errors": collect_errors,
+            "tests": &self.tests,
+        })
+    }
+
+    pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
+        std::fs::write(path, serde_json::to_vec(&self.snapshot_value(run_meta))?)?;
         Ok(())
+    }
+}
+
+impl TestEntry {
+    /// The pytest-style outcome bucket for this entry
+    /// (`passed`/`failed`/`errors`/`skipped`/`xfailed`/`xpassed`/`quarantined`).
+    pub fn outcome(&self) -> &'static str {
+        classify(self)
     }
 }
 

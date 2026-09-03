@@ -12,7 +12,7 @@ use crate::cli::{is_collect_only, needs_passthrough_io, parse_durations, parse_m
 use crate::reporting::ci::{
     buildkite_flaky_annotate, print_azure_annotations, print_github_annotations,
 };
-use crate::reporting::{color, flakes, junit, progress, report, status};
+use crate::reporting::{color, flakes, html, junit, progress, report, status};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
 use crate::{cache, collect, config, discover, doctor, migrate, mono, remote, select};
 
@@ -673,6 +673,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     }
     if let Some(path) = &cli.junitxml {
         junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
+    }
+    if let Some(path) = &cli.html {
+        html::write(
+            path,
+            &outcome.run,
+            &build_run_meta(start, outcome.exitstatus, started_epoch, n),
+        )?;
     }
     // Merged lastfailed: workers' own writes are blocked in pool mode
     // (each knows only its failures); write the union into pytest's cache
