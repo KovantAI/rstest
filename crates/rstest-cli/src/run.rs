@@ -740,20 +740,87 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Runs BEFORE the cache-push below so this run's coverage-index slice is
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
-    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
+    let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
+    if cli.cov_diff_fail_under.is_some() && !has_cov && !passthrough {
+        eprintln!(
+            "rstest: --cov-diff-fail-under needs --cov (no coverage data to score); ignoring"
+        );
+    }
+    if !passthrough && has_cov {
         println!();
-        let status = std::process::Command::new(&python)
-            .args(["-m", "rstest_worker.covtool"])
+        // Diff-coverage gate: hand covtool the diff's added lines + a result
+        // path when --cov-diff-fail-under is set; covtool scores them and we
+        // gate on the percentage below.
+        let diff_paths = if cli.cov_diff_fail_under.is_some() {
+            let base = resolve_changed_base(cli)?;
+            match select::changed_new_lines(base.as_deref()) {
+                Ok(map) => {
+                    let pid = std::process::id();
+                    let lines_path =
+                        std::env::temp_dir().join(format!("rstest-difflines-{pid}.json"));
+                    let out_path = std::env::temp_dir().join(format!("rstest-diffcov-{pid}.json"));
+                    // JSON object keys are strings; POSIX-normalize the paths.
+                    let smap: std::collections::BTreeMap<String, Vec<u32>> = map
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string_lossy().replace('\\', "/"), v))
+                        .collect();
+                    let _ = std::fs::write(&lines_path, serde_json::to_vec(&smap)?);
+                    Some((lines_path, out_path))
+                }
+                Err(e) => {
+                    eprintln!("rstest: --cov-diff-fail-under: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut cmd = std::process::Command::new(&python);
+        cmd.args(["-m", "rstest_worker.covtool"])
             .args(&args)
             .env("PYTHONPATH", worker::worker_pythonpath())
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir())
-            .status();
-        match status {
+            .env("RSTEST_CACHE", cache::dir());
+        if let Some((lp, op)) = &diff_paths {
+            cmd.arg("--rstest-diff-lines")
+                .arg(lp)
+                .arg("--rstest-diff-out")
+                .arg(op);
+        }
+        match cmd.status() {
             Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
             Ok(_) => {}
             Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
+        }
+
+        if let Some((lp, op)) = diff_paths {
+            if let Some(threshold) = cli.cov_diff_fail_under {
+                let pct = std::fs::read(&op)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| v.get("pct").and_then(|p| p.as_f64()));
+                match pct {
+                    Some(p) if p + 1e-9 < threshold => {
+                        eprintln!(
+                            "rstest: --cov-diff-fail-under: diff coverage {p:.1}% is below {threshold}%"
+                        );
+                        if exitstatus == 0 {
+                            exitstatus = 1;
+                        }
+                    }
+                    Some(p) => eprintln!(
+                        "rstest: --cov-diff-fail-under: diff coverage {p:.1}% meets {threshold}%"
+                    ),
+                    None => eprintln!(
+                        "rstest: --cov-diff-fail-under: no added executable lines to score \
+                         (nothing changed, or the changed files aren't under --cov)"
+                    ),
+                }
+            }
+            let _ = std::fs::remove_file(&lp);
+            let _ = std::fs::remove_file(&op);
         }
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so

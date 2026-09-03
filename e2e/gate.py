@@ -1443,6 +1443,62 @@ def gate_coverage(g, args, binary):
     )
 
 
+def gate_diff_coverage_gate(g, args, binary):
+    print("== diff coverage gate (--cov-diff-fail-under) ==")
+    dp = g.tmp / "diffcov"
+    g.write("diffcov/mod.py", "def used():\n    return 1\n")
+    g.write("diffcov/test_mod.py", "import mod\ndef test_used():\n    assert mod.used() == 1\n")
+    git_init_commit(dp, "base")
+    # Add a function with a covered branch and an UNcovered branch; cover only
+    # the first from a new test.
+    g.write(
+        "diffcov/mod.py",
+        "def used():\n    return 1\n\n"
+        "def added(flag):\n    if flag:\n"
+        '        return "yes"\n    return "no"\n',
+    )
+    g.write(
+        "diffcov/test_mod.py",
+        "import mod\n"
+        "def test_used():\n    assert mod.used() == 1\n"
+        'def test_added():\n    assert mod.added(True) == "yes"\n',
+    )
+    env = {"PYTHONPATH": str(dp)}
+    cov = ["--cov=.", "--cov-report="]
+
+    r = g.run("-n", "2", *cov, "--cov-diff-fail-under", "100", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: uncovered added line fails the gate + is named",
+        r.returncode == 1
+        and "is below 100%" in r.stderr
+        and "uncovered added line" in r.stdout
+        and "mod.py" in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-200:] + r.stdout[-200:],
+    )
+    # A lower bar (83% covered) passes at --cov-diff-fail-under 80.
+    r = g.run("-n", "2", *cov, "--cov-diff-fail-under", "80", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: partial coverage passes a lower threshold",
+        r.returncode == 0 and "meets 80%" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # Cover the other branch -> 100%, gate passes.
+    g.write(
+        "diffcov/test_mod.py",
+        "import mod\n"
+        "def test_used():\n    assert mod.used() == 1\n"
+        "def test_added():\n"
+        '    assert mod.added(True) == "yes"\n'
+        '    assert mod.added(False) == "no"\n',
+    )
+    r = g.run("-n", "2", *cov, "--cov-diff-fail-under", "100", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: fully-covered diff passes at 100%",
+        r.returncode == 0 and "diff coverage 100.0% meets 100%" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+
+
 def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
     print("== coverage contexts + line->test index (--cov-context) ==")
     # Per-test contexts must survive the PARALLEL merge (tests land on different
@@ -2931,6 +2987,7 @@ def main():
         gate_auto_worker_capping,
         gate_coverage,
         gate_coverage_contexts_line_test_index_cov_co,
+        gate_diff_coverage_gate,
         gate_smart_selection,
         gate_coverage_based_selection_changed_uses_th,
         gate_coverage_selection_under_autocrlf_crlf_w,

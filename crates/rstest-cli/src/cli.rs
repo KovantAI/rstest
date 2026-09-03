@@ -137,6 +137,12 @@ pub struct Cli {
     #[arg(long)]
     pub(crate) changed_strict: bool,
 
+    /// Diff-coverage gate: fail the run when the percentage of ADDED/CHANGED
+    /// lines (vs the --changed base, else HEAD) that are covered by tests falls
+    /// below PCT. Requires --cov. Reports the uncovered added lines per file.
+    #[arg(long = "cov-diff-fail-under", value_name = "PCT")]
+    pub(crate) cov_diff_fail_under: Option<f64>,
+
     /// Collection strategy: "full" (every worker collects the whole suite,
     /// verified by hash) or "lazy" (each file collected by one worker on
     /// demand). Config `[tool.rstest] collect`. [default: full]
@@ -335,13 +341,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                 }
             }
             _ if arg.starts_with("--durations-regress=") => own.push(arg),
-            "--only-rerun" => {
+            "--only-rerun" | "--cov-diff-fail-under" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
                     own.push(v);
                 }
             }
             _ if arg.starts_with("--only-rerun=") => own.push(arg),
+            _ if arg.starts_with("--cov-diff-fail-under=") => own.push(arg),
             "--worker-timeout" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {

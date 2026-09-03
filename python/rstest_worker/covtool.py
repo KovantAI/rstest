@@ -57,6 +57,75 @@ def _context_mode(args: list[str]) -> bool:
     return any(a == "--cov-context" or a.startswith("--cov-context=") for a in args)
 
 
+def _arg_value(args: list[str], name: str) -> "str | None":
+    """Value of `--name value` or `--name=value`, or None."""
+    it = iter(args)
+    for a in it:
+        if a == name:
+            return next(it, None)
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _fmt_ranges(lines: list[int]) -> str:
+    """Compress a sorted line list to `1-3, 7, 10-12`."""
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        j = i
+        while j + 1 < len(lines) and lines[j + 1] == lines[j] + 1:
+            j += 1
+        out.append(str(lines[i]) if i == j else f"{lines[i]}-{lines[j]}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def diff_coverage(cov: Any, diff_lines_path: str, out_path: str) -> None:
+    """Score coverage of the diff's ADDED lines: for each changed file, intersect
+    its added line numbers with coverage.py's executable-statement analysis, and
+    split into covered vs. missed. Non-executable added lines (blank/comment) are
+    ignored. Writes `{pct, covered, uncovered, files:{path:[lines]}}` to
+    `out_path` for the Rust gate, and prints a human summary."""
+    with open(diff_lines_path) as f:
+        diff: dict[str, list[int]] = json.load(f)
+
+    total_cov = total_unc = 0
+    files_out: dict[str, list[int]] = {}
+    for rel, added_list in diff.items():
+        added = set(added_list)
+        if not added:
+            continue
+        try:
+            # (filename, statements, excluded, missing, missing_formatted)
+            _, statements, _excluded, missing, _ = cov.analysis2(os.path.abspath(rel))
+        except Exception:
+            continue  # file not measured (outside --cov, non-python, or absent)
+        added_exec = added & set(statements)
+        if not added_exec:
+            continue
+        uncovered = sorted(added_exec & set(missing))
+        total_cov += len(added_exec) - len(uncovered)
+        total_unc += len(uncovered)
+        if uncovered:
+            files_out[rel] = uncovered
+
+    denom = total_cov + total_unc
+    pct = 100.0 * total_cov / denom if denom else 100.0
+    with open(out_path, "w") as f:
+        json.dump({"pct": pct, "covered": total_cov, "uncovered": total_unc, "files": files_out}, f)
+    if files_out:
+        print(f"rstest: diff coverage {pct:.1f}% ({total_cov}/{denom} added lines covered)")
+        for rel, lines in sorted(files_out.items()):
+            print(f"  {rel}: uncovered added line(s) {_fmt_ranges(lines)}")
+    elif denom:
+        print(
+            f"rstest: diff coverage {pct:.1f}% — all {total_cov} added executable line(s) covered"
+        )
+    else:
+        print("rstest: diff coverage: no added executable lines to check")
+
+
 def _base_nodeid(ctx: str) -> str:
     for suffix in _PHASE_SUFFIXES:
         if ctx.endswith(suffix):
@@ -180,6 +249,16 @@ def main(argv: list[str]) -> int:
             build_index(cov)
         except Exception as exc:
             log.warning("coverage index build skipped: %s", exc)
+
+    # Diff coverage: the Rust side hands us the diff's added lines and a result
+    # path; we score them against the coverage data and it gates the exit code.
+    diff_lines = _arg_value(argv, "--rstest-diff-lines")
+    diff_out = _arg_value(argv, "--rstest-diff-out")
+    if diff_lines and diff_out:
+        try:
+            diff_coverage(cov, diff_lines, diff_out)
+        except Exception as exc:
+            log.warning("diff coverage skipped: %s", exc)
 
     return status
 

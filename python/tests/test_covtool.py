@@ -54,3 +54,15 @@ def test_file_sha256_normalizes_crlf(tmp_path):
 
 def test_file_sha256_missing_file_returns_none():
     assert covtool._file_sha256("/no/such/file/here.py") is None
+
+
+def test_fmt_ranges_compresses_runs():
+    assert covtool._fmt_ranges([1, 2, 3, 7, 10, 11, 12]) == "1-3, 7, 10-12"
+    assert covtool._fmt_ranges([5]) == "5"
+    assert covtool._fmt_ranges([]) == ""
+
+
+def test_arg_value_reads_space_and_equals_forms():
+    assert covtool._arg_value(["--x", "v"], "--x") == "v"
+    assert covtool._arg_value(["--x=v"], "--x") == "v"
+    assert covtool._arg_value(["--y", "v"], "--x") is None

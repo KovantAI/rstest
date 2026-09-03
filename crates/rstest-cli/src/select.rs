@@ -315,6 +315,58 @@ fn parse_hunk_old_range(hunk: &str) -> Option<Option<(u32, u32)>> {
     Some(Some((start, start + count - 1)))
 }
 
+/// Per-file NEW-side added/modified line numbers from `git diff -U0 <base>` —
+/// the lines a diff-coverage gate checks for test coverage. cwd-relative paths
+/// (git `--relative`) so they align with the coverage data's file keys.
+pub fn changed_new_lines(rev: Option<&str>) -> Result<BTreeMap<PathBuf, Vec<u32>>> {
+    let diff_base = rev.unwrap_or("HEAD");
+    let out = std::process::Command::new("git")
+        .args(["diff", "-U0", "--relative", diff_base])
+        .output()
+        .context("running git diff -U0 (is this a git repository?)")?;
+    if !out.status.success() {
+        bail!(
+            "git diff -U0 {diff_base} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut map: BTreeMap<PathBuf, Vec<u32>> = BTreeMap::new();
+    let mut cur: Option<PathBuf> = None;
+    let mut in_hunk = false;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+        } else if !in_hunk {
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                let path = rest.strip_prefix("b/").unwrap_or(rest);
+                cur = (path != "/dev/null").then(|| PathBuf::from(path));
+                continue;
+            }
+        }
+        if line.starts_with("@@") {
+            in_hunk = true;
+            if let (Some(p), Some((start, count))) = (cur.as_ref(), parse_hunk_new_range(line)) {
+                let e = map.entry(p.clone()).or_default();
+                e.extend(start..start + count);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// NEW-side `(start, count)` from `@@ -a,b +c,d @@`; `None` for a pure deletion
+/// (`+c,0`, no new lines) or an unparseable header.
+fn parse_hunk_new_range(hunk: &str) -> Option<(u32, u32)> {
+    let plus = hunk.split_whitespace().find(|t| t.starts_with('+'))?;
+    let mut nums = plus.trim_start_matches('+').split(',');
+    let start: u32 = nums.next()?.parse().ok()?;
+    let count: u32 = match nums.next() {
+        Some(c) => c.parse().ok()?,
+        None => 1,
+    };
+    (count > 0).then_some((start, count))
+}
+
 /// Rule 1: a changed config file or any non-Python file defeats the import
 /// graph - return a full run. Shared by the graph and coverage selectors.
 fn rule1_full_run(changed: &[PathBuf]) -> Option<Selection> {
@@ -804,9 +856,21 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        diff_old_side, imports_of, normalize_newlines, parse_diff_hunks, parse_hunk_old_range,
-        FileChange,
+        diff_old_side, imports_of, normalize_newlines, parse_diff_hunks, parse_hunk_new_range,
+        parse_hunk_old_range, FileChange,
     };
+
+    #[test]
+    fn parse_hunk_new_range_reads_added_lines() {
+        // `+c,d` -> (start=c, count=d).
+        assert_eq!(parse_hunk_new_range("@@ -1,2 +3,4 @@"), Some((3, 4)));
+        // `+c` with no count -> single line.
+        assert_eq!(parse_hunk_new_range("@@ -5 +5 @@ def foo():"), Some((5, 1)));
+        // Pure deletion `+c,0` -> no new-side lines.
+        assert_eq!(parse_hunk_new_range("@@ -10,3 +9,0 @@"), None);
+        // A brand-new file's hunk (`-0,0 +1,3`).
+        assert_eq!(parse_hunk_new_range("@@ -0,0 +1,3 @@"), Some((1, 3)));
+    }
 
     #[test]
     fn diff_old_side_reduces_ranges_to_a_single_commit() {

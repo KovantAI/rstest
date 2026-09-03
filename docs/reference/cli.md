@@ -488,6 +488,34 @@ strings the scanner can't see (`importlib.import_module(f"plugins.{name}")`)
 still produce no edges — name such modules in a test file import, or
 keep full runs on the gating path.
 
+### `--cov-diff-fail-under <PCT>`
+
+Diff-coverage gate: fail the run when fewer than PCT% of the **lines added or
+changed in this diff** are covered by tests. The classic PR gate — "you added
+code with no test exercising it" — computed from the run's own coverage data,
+no `diff-cover`/Codecov round-trip.
+
+```console
+$ rstest -n auto --cov=. --cov-diff-fail-under=90 --changed=origin/main
+```
+
+Requires `--cov` (there must be coverage data to score). The diff is taken
+against the [`--changed`](#-changedrev) base when given, otherwise `HEAD`. Only
+**executable** added lines count — blank lines, comments, and lines coverage.py
+doesn't treat as statements are ignored — and the report names the uncovered
+added lines per file:
+
+```text
+rstest: diff coverage 83.3% (5/6 added lines covered)
+  mymod.py: uncovered added line(s) 7, 12-14
+rstest: --cov-diff-fail-under: diff coverage 83.3% is below 90%
+```
+
+Exits `1` when below the threshold (the gate line prints to stderr, keeping
+`--output json`/`tap` stdout pure). A diff with no added executable lines — or
+whose changed files aren't under `--cov` — passes (nothing to score). See the
+[Coverage guide](../guides/coverage.md#diff-coverage-gate).
+
 ### `--reruns <N>`
 
 Rerun failed tests up to N times. A test that then
