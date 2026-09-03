@@ -1298,6 +1298,53 @@ def gate_warnings(g, args, binary):
     check("warnings in counts", "warnings in" in r.stdout, r.stdout[-120:])
 
 
+def gate_resource_leak_detection(g, args, binary):
+    print("== resource leak detection ==")
+    lp = g.tmp / "leakproj"
+    # test_a is the warm-up (first test, first-touch imports skipped); the
+    # leakers come after so their deltas are attributed.
+    g.write(
+        "leakproj/test_leaks.py",
+        "import threading\n"
+        "def test_a_warmup(): assert True\n"
+        "def test_b_clean(): assert True\n"
+        "def test_c_thread_leak():\n"
+        "    threading.Thread(target=lambda: __import__('time').sleep(30), daemon=True).start()\n"
+        "    assert True\n"
+        "def test_d_fd_leak():\n"
+        "    test_d_fd_leak.f = open('/dev/null')  # never closed\n"
+        "    assert True\n",
+    )
+    # -n 1 keeps collection order deterministic so the warm-up is test_a.
+    r = g.run("test_leaks.py", "-n", "1", "--doctor", cwd=lp, env_extra={"PYTHONPATH": str(lp)})
+    check(
+        "leak: --doctor names the thread + fd leakers",
+        "RESOURCE LEAKS" in r.stdout
+        and "test_c_thread_leak" in r.stdout
+        and "test_d_fd_leak" in r.stdout,
+        r.stdout[-400:],
+    )
+    r = g.run(
+        "test_leaks.py", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)}
+    )
+    check(
+        "leak: --fail-on-leak fails the run (exit 1)",
+        r.returncode == 1 and "leaked threads/fds" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    # A clean suite: no leaks, exit 0.
+    g.write(
+        "leakproj/test_ok.py",
+        "def test_a(): assert True\ndef test_b(): assert True\ndef test_c(): assert True\n",
+    )
+    r = g.run("test_ok.py", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)})
+    check(
+        "leak: clean suite passes the gate (exit 0)",
+        r.returncode == 0 and "no thread/fd leaks" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+
+
 def gate_doctor(g, args, binary):
     print("== doctor ==")
     g.write("doc/test_doc.py", DOCTOR)
@@ -2928,6 +2975,7 @@ def main():
         gate_monorepo,
         gate_warnings,
         gate_doctor,
+        gate_resource_leak_detection,
         gate_auto_worker_capping,
         gate_coverage,
         gate_coverage_contexts_line_test_index_cov_co,

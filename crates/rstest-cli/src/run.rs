@@ -39,6 +39,7 @@ fn run_collect_discovery(
     let env = worker::WorkerEnv {
         run_uid: run_uid.to_string(),
         doctor: false,
+        leakcheck: false,
         send_ids: true,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
@@ -357,9 +358,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Run-wide worker params (testrun uid + doctor instrumentation) travel via
     // each worker's environment at spawn (thread-safe), never this process's
     // global env.
+    // Leak measurement runs under doctor OR --fail-on-leak (doctor already
+    // instruments; --fail-on-leak needs the deltas without the full report).
+    let leakcheck = doctor || cli.fail_on_leak;
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.clone(),
         doctor,
+        leakcheck,
         send_ids: false,
     };
 
@@ -809,6 +814,36 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         eprintln!("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
         if exitstatus == 0 {
             exitstatus = 1;
+        }
+    }
+    // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
+    // stderr so --output json/tap keep stdout a pure machine stream.
+    if cli.fail_on_leak && !passthrough {
+        let leaks = doctor::detect_leaks(&outcome.run);
+        if leaks.is_empty() {
+            eprintln!("rstest: --fail-on-leak: no thread/fd leaks detected");
+        } else {
+            eprintln!(
+                "\n{}",
+                palette.bold_red("=========== resource leaks ===========")
+            );
+            for l in leaks.iter().take(20) {
+                let mut d = Vec::new();
+                if l.threads > 0 {
+                    d.push(format!("+{} thread(s)", l.threads));
+                }
+                if l.fds > 0 {
+                    d.push(format!("+{} fd(s)", l.fds));
+                }
+                eprintln!("  {}  {}", d.join(" "), l.nodeid);
+            }
+            eprintln!(
+                "rstest: --fail-on-leak: {} test(s) leaked threads/fds",
+                leaks.len()
+            );
+            if exitstatus == 0 {
+                exitstatus = 1;
+            }
         }
     }
     Ok(exitstatus)

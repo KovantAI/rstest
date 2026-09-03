@@ -28,6 +28,12 @@ pub struct TestEntry {
     pub skip_reason: Option<String>,
     #[serde(skip)]
     pub cpu: Option<f64>,
+    /// Leak check: net threads / open fds after teardown (from the teardown
+    /// report). Doctor-internal; not serialized to report-json.
+    #[serde(skip)]
+    pub thread_delta: Option<i64>,
+    #[serde(skip)]
+    pub fd_delta: Option<i64>,
     /// Passed only after one or more reruns (--reruns).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -130,7 +136,16 @@ impl Run {
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
             }
-            "teardown" => entry.teardown = outcome,
+            "teardown" => {
+                entry.teardown = outcome;
+                // Leak deltas ride the teardown report (measured after teardown).
+                if r.thread_delta.is_some() {
+                    entry.thread_delta = r.thread_delta;
+                }
+                if r.fd_delta.is_some() {
+                    entry.fd_delta = r.fd_delta;
+                }
+            }
             _ => {}
         }
         entry.wasxfail |= r.wasxfail;
@@ -501,6 +516,8 @@ mod tests {
             wasxfail: false,
             skip_reason: None,
             cpu: None,
+            thread_delta: None,
+            fd_delta: None,
             sections: Vec::new(),
             lineno: None,
         }
@@ -623,6 +640,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },
@@ -640,6 +659,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },

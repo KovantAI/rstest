@@ -51,6 +51,12 @@ pub struct Cli {
     #[arg(long = "doctor-fail-on", value_name = "COND")]
     pub(crate) doctor_fail_on: Vec<String>,
 
+    /// Fail the run if any test leaks a thread or file descriptor (net still
+    /// open after its teardown). Turns the leak signal into a CI gate; enables
+    /// the leak-check instrumentation on its own (no --doctor needed).
+    #[arg(long = "fail-on-leak")]
+    pub(crate) fail_on_leak: bool,
+
     /// Parallel-readiness preflight: collect twice and report tests with
     /// unstable ids, then run -n auto and classify any parallel-only failure
     /// (polluter bisected). Exits non-zero on any such finding.
@@ -298,7 +304,9 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     let mut argv = argv.into_iter().peekable();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
-            "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
+            "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak" => {
+                own.push(arg)
+            }
             "--reruns-only-known-flaky" => own.push(arg),
             "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
                 own.push(arg)

@@ -125,6 +125,13 @@ pub fn render_markdown(r: &DoctorReport) -> String {
             );
         }
     }
+    if !r.leaks.is_empty() {
+        md.push_str("### Resource leaks\n\n> Net threads/fds still open after teardown.\n\n");
+        md.push_str("| Leaked | Test |\n|---|---|\n");
+        for l in r.leaks.iter().take(10) {
+            let _ = writeln!(md, "| {} | `{}` |", leak_delta(l), l.nodeid);
+        }
+    }
     md
 }
 
@@ -288,7 +295,41 @@ pub fn render(r: &DoctorReport) {
     for f in r.slowest_files.iter().take(5) {
         println!("  {:7.2}s ({:4.1}%)  {}", f.total_seconds, f.pct, f.file);
     }
+
+    if !r.leaks.is_empty() {
+        println!("\nRESOURCE LEAKS (net threads/fds still open after teardown):");
+        for l in r.leaks.iter().take(10) {
+            println!("  {}  {}", leak_delta(l), l.nodeid);
+        }
+        if r.leaks.len() > 10 {
+            println!("  ... and {} more", r.leaks.len() - 10);
+        }
+        println!(
+            "  a test opened a thread/fd it never released; leaked state can flake \
+             later tests (reset it, or close in teardown)."
+        );
+    }
     println!("===================================================");
+}
+
+/// `+3 threads`, `+5 fds`, or `+3 threads +5 fds` for a leak entry.
+fn leak_delta(l: &super::Leak) -> String {
+    let mut parts = Vec::new();
+    if l.threads > 0 {
+        parts.push(format!("+{} thread{}", l.threads, plural(l.threads)));
+    }
+    if l.fds > 0 {
+        parts.push(format!("+{} fd{}", l.fds, plural(l.fds)));
+    }
+    parts.join(" ")
+}
+
+fn plural(n: i64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 #[cfg(test)]
