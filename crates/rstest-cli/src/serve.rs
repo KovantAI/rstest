@@ -65,17 +65,7 @@ fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Resul
                 )?;
             }
             "open_session" => {
-                // Session args: the client's, else the daemon's CLI args.
-                let sargs: Vec<String> = payload
-                    .get("args")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .filter(|v: &Vec<String>| !v.is_empty())
-                    .unwrap_or_else(|| cli_args.to_vec());
+                let sargs = session_args(&payload, cli_args);
                 match open_session(python, &sargs) {
                     Ok((w, ids)) => {
                         worker = Some(w);
@@ -104,31 +94,12 @@ fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Resul
                     continue;
                 };
                 let id = payload.get("id").and_then(Value::as_u64).unwrap_or(0);
-                let ids: Vec<String> = payload
-                    .get("node_ids")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let ids = node_ids(&payload);
                 let stop = payload
                     .get("stop_on_first_fail")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                // Overlay patch: `patch.files` is {path: contents} (mutation
-                // carrier). Absent / `mode:"none"` -> run current disk.
-                let overlay: std::collections::HashMap<String, String> = payload
-                    .get("patch")
-                    .and_then(|p| p.get("files"))
-                    .and_then(Value::as_object)
-                    .map(|o| {
-                        o.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let overlay = overlay_files(&payload);
                 run_subset(w, &mut writer, id, ids, overlay, stop)?;
             }
             "close_session" => {
@@ -233,4 +204,100 @@ fn write_msg(stream: &mut UnixStream, kind: &str, payload: Value) -> Result<()> 
     stream.write_all(&buf)?;
     stream.flush()?;
     Ok(())
+}
+
+/// Collect a payload field that is an array of strings, dropping non-strings.
+fn str_array(payload: &Value, key: &str) -> Vec<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Session args for `open_session`: the client's `args`, or (when absent/empty)
+/// the daemon's own CLI args.
+fn session_args(payload: &Value, cli_args: &[String]) -> Vec<String> {
+    let client = str_array(payload, "args");
+    if client.is_empty() {
+        cli_args.to_vec()
+    } else {
+        client
+    }
+}
+
+/// The nodeid subset a `run` targets.
+fn node_ids(payload: &Value) -> Vec<String> {
+    str_array(payload, "node_ids")
+}
+
+/// The overlay carried by a `run`: `patch.files` is `{path: contents}` (the
+/// mutation). Absent / `mode:"none"` (no `files`) -> empty, i.e. run the tree.
+fn overlay_files(payload: &Value) -> std::collections::HashMap<String, String> {
+    payload
+        .get("patch")
+        .and_then(|p| p.get("files"))
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_args_prefers_client_args() {
+        let p = json!({"args": ["tests/a.py", "-k", "foo"]});
+        assert_eq!(
+            session_args(&p, &["cli".into()]),
+            vec!["tests/a.py", "-k", "foo"]
+        );
+    }
+
+    #[test]
+    fn session_args_falls_back_to_cli_when_absent_or_empty() {
+        let cli = vec!["daemon-arg".to_string()];
+        assert_eq!(session_args(&json!({}), &cli), cli);
+        assert_eq!(session_args(&json!({"args": []}), &cli), cli);
+    }
+
+    #[test]
+    fn node_ids_extracts_strings_and_drops_non_strings() {
+        let p = json!({"node_ids": ["t.py::a", 3, "t.py::b", null]});
+        assert_eq!(node_ids(&p), vec!["t.py::a", "t.py::b"]);
+        assert!(node_ids(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn overlay_files_parses_patch_files() {
+        let p = json!({"patch": {"mode": "overlay", "files": {"m.py": "X = 1"}}});
+        let ov = overlay_files(&p);
+        assert_eq!(ov.get("m.py").map(String::as_str), Some("X = 1"));
+    }
+
+    #[test]
+    fn overlay_files_empty_when_no_patch_or_no_files() {
+        assert!(overlay_files(&json!({})).is_empty());
+        assert!(overlay_files(&json!({"patch": {"mode": "none"}})).is_empty());
+    }
+
+    #[test]
+    fn write_msg_roundtrips_through_msgpack() {
+        // The envelope a client decodes must carry kind + payload intact.
+        let env = json!({"kind": "run_done", "payload": {"id": 5, "killed": true, "ran": 2}});
+        let buf = rmp_serde::encode::to_vec_named(&env).unwrap();
+        let back: Value = rmp_serde::from_slice(&buf).unwrap();
+        assert_eq!(back["kind"], "run_done");
+        assert_eq!(back["payload"]["killed"], true);
+        assert_eq!(back["payload"]["ran"], 2);
+    }
 }
