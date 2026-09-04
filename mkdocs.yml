@@ -122,6 +122,7 @@ nav:
       - Environment variables: reference/environment.md
       - Exit codes: reference/exit-codes.md
       - Report JSON: reference/report-json.md
+      - Serve protocol: reference/serve-protocol.md
       - Benchmarks: reference/benchmarks.md
       - Parity divergences: reference/parity-divergences.md
       - Troubleshooting: reference/troubleshooting.md

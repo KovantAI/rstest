@@ -480,12 +480,15 @@ pub fn run_pool(
                     break;
                 }
             }
-            // Lazy-mode events; a full-collection session never emits them.
+            // Lazy-mode + serve-mode events; a full-collection pool never emits them.
             Ok(Event::LazyReady { .. })
             | Ok(Event::FileCollected { .. })
             | Ok(Event::ItemStartId { .. })
             | Ok(Event::ItemDoneId { .. })
-            | Ok(Event::StoppedIds { .. }) => {}
+            | Ok(Event::StoppedIds { .. })
+            | Ok(Event::ServeReady { .. })
+            | Ok(Event::ServeReport { .. })
+            | Ok(Event::ServeRunDone { .. }) => {}
             Err(e) => {
                 if let Some(winput) = states[idx].node_input.take() {
                     pending_downs.push_back((winput, format!("{e:#}")));

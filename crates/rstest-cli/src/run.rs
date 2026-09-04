@@ -872,7 +872,10 @@ fn dispatch_run(
                 | proto::Event::FileCollected { .. }
                 | proto::Event::ItemStartId { .. }
                 | proto::Event::ItemDoneId { .. }
-                | proto::Event::StoppedIds { .. } => {}
+                | proto::Event::StoppedIds { .. }
+                | proto::Event::ServeReady { .. }
+                | proto::Event::ServeReport { .. }
+                | proto::Event::ServeRunDone { .. } => {}
                 proto::Event::Done { exitstatus } => break exitstatus,
             }
         };

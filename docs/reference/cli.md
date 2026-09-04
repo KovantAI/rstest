@@ -690,6 +690,21 @@ test files reruns exactly those files (with your other flags); a source
 selection); a pytest-config change reruns the full selection. Ignores
 VCS, caches, and virtualenvs. `Ctrl+C` exits.
 
+### `--serve <SOCK>` { #-serve-sock }
+
+**Experimental.** Run as a warm-pool daemon on a Unix-domain socket instead of
+executing a run. A persistent client opens a session once — the worker collects
+and stays warm — then fires many `run` requests, each a **nodeid subset** with
+an optional source **overlay** (a mutation), and gets streamed results back.
+Every request runs in a **forked child** off the warm template, so a mutation
+can never leak into the next request.
+
+Built for mutation-testing tools (e.g. fermut) that would otherwise pay a full
+interpreter + plugin startup per mutant. The socket protocol (msgpack framing,
+`hello`/`open_session`/`run`/`shutdown`) is documented in
+[Serve protocol](serve-protocol.md). Unix only; single client, sequential runs
+in the current release.
+
 ### `--junitxml <path>`
 
 Write merged results as JUnit XML. Intercepted by rstest (rather than

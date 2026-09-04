@@ -8,6 +8,7 @@ Exit 0 = all gates green. Designed to be the single CI entry point.
 """
 
 import argparse
+import contextlib
 import glob
 import json
 import os
@@ -2795,6 +2796,138 @@ def gate_migrate_check(g, args, binary):
     )
 
 
+_SERVE_CLIENT = r"""
+import json, socket, sys, time, msgpack
+sock = sys.argv[1]
+c = socket.socket(socket.AF_UNIX)
+for _ in range(80):
+    try:
+        c.connect(sock); break
+    except OSError:
+        time.sleep(0.1)
+else:
+    print(json.dumps({"error": "connect"})); sys.exit(0)
+c.settimeout(30)
+up = msgpack.Unpacker(raw=False)
+def send(k, p): c.sendall(msgpack.packb({"kind": k, "payload": p}))
+def recv():
+    while True:
+        for o in up:
+            return o
+        b = c.recv(65536)
+        if not b:
+            return None
+        up.feed(b)
+def run(rid, node_ids, patch=None):
+    p = {"id": rid, "node_ids": node_ids}
+    if patch is not None:
+        p["patch"] = {"files": patch}
+    send("run", p)
+    reports = []
+    while True:
+        m = recv()
+        if m["kind"] == "report":
+            reports.append(m["payload"]["report"])
+        elif m["kind"] == "run_done":
+            return m["payload"], {r["nodeid"] + "|" + r["when"]: r["outcome"]
+                                  for r in reports if r["when"] == "call"}
+send("hello", {"proto": 1}); welcome = recv()
+send("open_session", {"args": ["test_s.py"]}); ready = recv()
+done, outcomes = run(7, ["test_s.py::test_a", "test_s.py::test_b"])
+# Isolation: mutate mod.py so test_m fails (killed), then run clean again — the
+# overlay must not leak (killed False, and mod.py restored on disk).
+clean1, _ = run(10, ["test_m.py::test_m"])
+mutated, _ = run(11, ["test_m.py::test_m"], {"mod.py": "def val():\n    return 999\n"})
+clean2, _ = run(12, ["test_m.py::test_m"])
+send("shutdown", {}); bye = recv()
+print(json.dumps({
+    "welcome": welcome["kind"], "collected": ready["payload"].get("collected"),
+    "done": done, "bye": bye["kind"], "outcomes": outcomes,
+    "iso": {"clean1": clean1["killed"], "mutated": mutated["killed"], "clean2": clean2["killed"]},
+}))
+"""
+
+
+def gate_serve(g, args, binary):
+    print("== serve daemon (--serve) ==")
+    sp = g.tmp / "serveproj"
+    g.write(
+        "serveproj/test_s.py",
+        "def test_a(): assert True\ndef test_b(): assert 1 == 2\ndef test_c(): assert True\n",
+    )
+    # For the isolation check: a SUT module + a test asserting its value.
+    g.write("serveproj/mod.py", "def val():\n    return 1\n")
+    g.write("serveproj/test_m.py", "import mod\ndef test_m():\n    assert mod.val() == 1\n")
+    g.write("serveproj/client.py", _SERVE_CLIENT)
+    # Unix socket paths are length-limited (~104 chars); g.tmp is long, use /tmp.
+    sock = f"/tmp/rstest-gate-serve-{os.getpid()}.sock"
+    with contextlib.suppress(OSError):
+        os.unlink(sock)
+    env = dict(os.environ, VIRTUAL_ENV=str(g.venv), RSTEST_WORKER_PATH=str(REPO / "python"))
+    proc = subprocess.Popen(
+        [str(binary), "--serve", sock, "test_s.py"],
+        cwd=str(sp),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        # The client runs under the gate venv (has msgpack), not the launcher.
+        r = subprocess.run(
+            [str(venv_bin(g.venv, "python")), "client.py", sock],
+            cwd=str(sp),
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        try:
+            out = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            check("serve: client ran the protocol", False, r.stdout[-300:] + r.stderr[-300:])
+            return
+        done = out.get("done") or {}
+        check(
+            "serve: hello + open_session warms a 3-test session",
+            out.get("welcome") == "welcome" and out.get("collected") == 3,
+            str(out),
+        )
+        check(
+            "serve: run streams the requested subset, test_c not run",
+            done.get("id") == 7
+            and done.get("ran") == 2
+            and out["outcomes"].get("test_s.py::test_a|call") == "passed"
+            and out["outcomes"].get("test_s.py::test_b|call") == "failed"
+            and "test_s.py::test_c|call" not in out["outcomes"],
+            str(out),
+        )
+        check(
+            "serve: a failing test marks the run killed + shutdown replies bye",
+            done.get("killed") is True and out.get("bye") == "bye",
+            str(out),
+        )
+        iso = out.get("iso") or {}
+        check(
+            "serve: overlay mutation kills the test, and does NOT leak to the next run",
+            iso.get("clean1") is False
+            and iso.get("mutated") is True
+            and iso.get("clean2") is False,
+            str(iso),
+        )
+        check(
+            "serve: the overlay is reverted on disk after the run",
+            (sp / "mod.py").read_text() == "def val():\n    return 1\n",
+            (sp / "mod.py").read_text(),
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        with contextlib.suppress(OSError):
+            os.unlink(sock)
+
+
 def gate_watch_mode(g, args, binary):
     print("== watch mode ==")
     wd = g.tmp / "watch"
@@ -2947,6 +3080,7 @@ def main():
         gate_try,
         gate_migrate_check,
         gate_watch_mode,
+        gate_serve,
     )
     names = [s.__name__.removeprefix("gate_") for s in sections]
     if args.list:

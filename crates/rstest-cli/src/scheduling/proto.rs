@@ -48,6 +48,23 @@ pub enum Command {
     /// nextitem=None, releasing fixture finalizers), then keep listening -
     /// failed items elsewhere may rerun here (--reruns).
     NoMoreItems,
+    /// Serve mode: collect the suite once, keep the session warm, then await
+    /// `ServeRun` requests. The worker is a fork template — it imports the
+    /// framework, snapshots module state, collects for the id list, and waits.
+    RunServeSession {
+        args: Vec<String>,
+    },
+    /// Serve mode: run a nodeid subset for one client request. `overlay` maps a
+    /// file path to replacement contents (mutation carrier; empty = run current
+    /// disk). `req_id` correlates the streamed ServeReport/ServeRunDone.
+    ServeRun {
+        req_id: u64,
+        ids: Vec<String>,
+        #[serde(default)]
+        overlay: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        stop_on_first_fail: bool,
+    },
     /// Run pytest_testnodedown for a CRASHED worker: `workerinput` is
     /// the dead worker's snapshot (shipped via NodeInput while it was
     /// alive), so cleanup hooks see the exact idents it provisioned.
@@ -62,7 +79,7 @@ pub enum Command {
 
 /// xdist-shaped per-phase test report (subset; grows toward the full
 /// `_report_to_json` schema as the vendored core lands).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Report {
     pub nodeid: String,
     pub when: String,
@@ -216,6 +233,24 @@ pub enum Event {
     },
     Done {
         exitstatus: i32,
+    },
+    /// Serve mode: collection finished, session warm. `nodeids` is the full
+    /// collected id set the client may target.
+    ServeReady {
+        nodeids: Vec<String>,
+    },
+    /// Serve mode: a per-phase report for run `req_id` (the normal Report body).
+    ServeReport {
+        req_id: u64,
+        report: Report,
+    },
+    /// Serve mode: run `req_id` finished. `killed` = any covering test
+    /// failed/errored; `ran` = tests actually executed (< requested when
+    /// stop_on_first_fail bailed).
+    ServeRunDone {
+        req_id: u64,
+        killed: bool,
+        ran: u64,
     },
 }
 

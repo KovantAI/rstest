@@ -2,7 +2,10 @@
 worker collects and runs items on command instead of in one collect-then-run
 pass. Two models — eager (ItemDispatchPlugin) and lazy (LazyDispatchPlugin)."""
 
+import contextlib
 import os
+import sys
+from typing import Any
 
 import pytest
 
@@ -242,3 +245,131 @@ class LazyDispatchPlugin(StreamPlugin):
             elif kind in ("end_session", "shutdown"):
                 session.testscollected = total
                 return True
+
+
+class _ServeChildPlugin(StreamPlugin):
+    """Runs inside a forked child: a fresh pytest session over the requested
+    nodeids, streaming reports tagged with the request id and closing with
+    serve_run_done. Reuses StreamPlugin's report hook (which tags + tracks
+    _serve_failed) via _serve_req_id."""
+
+    def __init__(self, conn: Any, req_id: int) -> None:
+        super().__init__(conn)
+        self._serve_req_id = req_id
+        self._ran = 0
+
+    def pytest_runtest_logreport(self, report):
+        super().pytest_runtest_logreport(report)
+        # Count each test once: on its call report, or a terminal setup outcome
+        # (skip / error, where no call follows).
+        if report.when == "call" or (report.when == "setup" and report.outcome != "passed"):
+            self._ran += 1
+
+    def pytest_sessionfinish(self, session, exitstatus):
+        self._conn.send(
+            "serve_run_done",
+            {"req_id": self._serve_req_id, "killed": self._serve_failed, "ran": self._ran},
+        )
+
+
+class ServeDispatchPlugin(StreamPlugin):
+    """Serve mode: collect once as a FORK TEMPLATE, then fork per request so a
+    mutation can never leak into the next run. The template imports the framework
+    (pytest + plugins + root conftest) and snapshots module state; each request
+    forks, resets the child's SUT/test modules to that baseline, applies the
+    overlay to disk, and runs a fresh session over the requested nodeids."""
+
+    def __init__(self, conn: Any) -> None:
+        super().__init__(conn)
+        self._baseline: set[str] | None = None
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_collection(self, session):
+        # Config is done here (plugins + root conftest loaded) but test modules
+        # aren't imported yet — the framework baseline each fork resets to.
+        self._baseline = set(sys.modules)
+        return (yield)
+
+    def pytest_collection_finish(self, session):
+        self._conn.send("serve_ready", {"nodeids": [item.nodeid for item in session.items]})
+
+    def pytest_runtestloop(self, session):
+        if session.config.option.collectonly:
+            return True
+        while True:
+            msg = self._conn.recv_one()
+            if msg is None:
+                return True  # client vanished; end the session cleanly
+            kind = msg["kind"]
+            if kind == "serve_run":
+                self._forked_run(msg["payload"])
+            elif kind in ("end_session", "shutdown"):
+                return True
+
+    def _forked_run(self, payload) -> None:
+        req_id = payload["req_id"]
+        ids = payload["ids"]
+        overlay = payload.get("overlay", {}) or {}
+        stop = payload.get("stop_on_first_fail", False)
+
+        # Apply the overlay to disk (sequential runs, so this is safe); the
+        # originals are restored after the child exits.
+        saved = _apply_overlay(overlay)
+        try:
+            pid = os.fork()
+            if pid == 0:  # child
+                code = 0
+                try:
+                    self._child_run(req_id, ids, stop)
+                except BaseException:
+                    code = 1
+                finally:
+                    os._exit(code)
+            else:  # parent: wait for the child to finish this run, then reap
+                os.waitpid(pid, 0)
+        finally:
+            _restore_overlay(saved)
+
+    def _child_run(self, req_id: int, ids: list, stop: bool) -> None:
+        import importlib
+
+        # Reset to the framework baseline: drop every SUT/test module imported
+        # since, so the child re-imports them fresh (seeing the overlay) with
+        # pristine module-level state.
+        for name in list(sys.modules):
+            if self._baseline is not None and name not in self._baseline:
+                del sys.modules[name]
+        importlib.invalidate_caches()
+        # A fresh pytest session over exactly the requested nodeids; -x makes
+        # stop_on_first_fail bail after the first failure.
+        args = list(ids)
+        if stop:
+            args.insert(0, "-x")
+        args += ["-p", "no:cacheprovider", "-q", "--no-header"]
+        pytest.main(args, plugins=[_ServeChildPlugin(self._conn, req_id)])
+
+
+def _apply_overlay(overlay: dict) -> list:
+    """Write overlay contents over the named files, returning restore records
+    (path, original-bytes-or-None) so the originals can be put back."""
+    saved: list = []
+    for rel, content in overlay.items():
+        try:
+            with open(rel, "rb") as fh:
+                original = fh.read()
+        except OSError:
+            original = None  # file didn't exist -> a brand-new-file mutant
+        saved.append((rel, original))
+        with open(rel, "w", encoding="utf-8") as fh:
+            fh.write(content)
+    return saved
+
+
+def _restore_overlay(saved: list) -> None:
+    for rel, original in saved:
+        if original is None:
+            with contextlib.suppress(OSError):
+                os.unlink(rel)
+        else:
+            with open(rel, "wb") as fh:
+                fh.write(original)
