@@ -53,6 +53,9 @@ def _serve(conn) -> None:
         elif kind == "run_lazy_session":
             exitstatus = runner_pytest.run_lazy_session(cmd["payload"]["args"], conn)
             conn.send("done", {"exitstatus": exitstatus})
+        elif kind == "run_serve_session":
+            exitstatus = runner_pytest.run_serve_session(cmd["payload"]["args"], conn)
+            conn.send("done", {"exitstatus": exitstatus})
 
 
 # Guarded like multiprocessing requires: child runtimes (multiprocessing

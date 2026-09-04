@@ -31,6 +31,11 @@ class StreamPlugin:
         self._conn = conn
         self._doctor = os.environ.get("RSTEST_DOCTOR") == "1"
         self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
+        # Serve mode: when a request is in flight, reports are tagged with its
+        # id (serve_report) instead of the plain "report" event, and any
+        # failure flips _serve_failed (the mutant-killed signal).
+        self._serve_req_id: int | None = None
+        self._serve_failed = False
         self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
         # (when, category, message, filename, lineno) -> count; aggregated
         # because big suites emit thousands of duplicate warnings.
@@ -328,7 +333,12 @@ class StreamPlugin:
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
-        self._conn.send("report", payload)
+        if self._serve_req_id is not None:
+            if report.failed:
+                self._serve_failed = True
+            self._conn.send("serve_report", {"req_id": self._serve_req_id, "report": payload})
+        else:
+            self._conn.send("report", payload)
 
     def pytest_collectreport(self, report):
         if report.failed:

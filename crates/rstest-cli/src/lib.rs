@@ -13,6 +13,8 @@ mod reporting;
 mod run;
 mod scheduling;
 mod select;
+#[cfg(unix)]
+mod serve;
 mod watch;
 
 use anyhow::Result;
@@ -27,6 +29,14 @@ pub use run::execute;
 pub fn run() -> Result<i32> {
     let (own_args, args) = cli::split_argv();
     let cli = Cli::parse_from(&own_args);
+    #[cfg(unix)]
+    if let Some(sock) = cli.serve.clone() {
+        return serve::serve(&cli, &args, &sock);
+    }
+    #[cfg(not(unix))]
+    if cli.serve.is_some() {
+        anyhow::bail!("--serve is only supported on Unix");
+    }
     if cli.watch {
         watch::watch_loop(&cli, &args)?;
         return Ok(0);
