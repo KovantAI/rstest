@@ -78,33 +78,38 @@ pub(super) fn disk_cache_get(candidate: &Path, mtime: u64, size: u64) -> Option<
 
 pub(super) fn disk_cache_put(candidate: &Path, mtime: u64, size: u64, probe: &Probe) {
     let key = candidate.to_string_lossy().into_owned();
-    // Update the in-process cache, snapshot it, then RELEASE the lock before any
-    // disk IO — serializing + a blocking write under the global lock would stall
-    // every other thread probing an interpreter.
-    let snapshot = {
-        let mut d = super::lock(disk());
-        d.entries.insert(
-            key,
-            CacheEntry {
-                mtime,
-                size,
-                probe: probe.clone(),
-            },
-        );
-        d.entries.clone()
+    let entry = CacheEntry {
+        mtime,
+        size,
+        probe: probe.clone(),
     };
+    // Hold the lock only for the insert; release before any disk IO.
+    super::lock(disk())
+        .entries
+        .insert(key.clone(), entry.clone());
     let Some(path) = cache_path() else {
         return;
     };
-    // Read-merge-write instead of overwriting the whole file with our snapshot:
-    // this cache is machine-global, so a concurrent process may have added its
-    // own freshly-probed entries since we loaded ours. Fold our entries OVER
-    // whatever is on disk now (ours win on key collision, disk-only entries
-    // survive), so parallel invocations don't clobber each other's probes.
-    // A tiny read→write race window remains, but it loses at most the entries
-    // added in that window, not the whole file (the prior last-writer-wins bug).
     let on_disk = std::fs::read(&path).ok();
-    let merged = merge_entries(on_disk.as_deref(), snapshot);
+    // Skip the write when disk already holds this probe (concurrent process or
+    // prior run): (mtime, size) is the exact hit gate, so an equal pair adds
+    // nothing. Collapses N redundant rewrites in parallel runs sharing an interp.
+    if on_disk
+        .as_deref()
+        .and_then(read_cache)
+        .and_then(|c| {
+            c.entries
+                .get(&key)
+                .map(|e| e.mtime == mtime && e.size == size)
+        })
+        .unwrap_or(false)
+    {
+        return;
+    }
+    // Fold only OUR new entry over disk (which already carries our earlier writes
+    // + concurrent writers'): ours wins on collision, disk-only entries survive.
+    // A tiny read→write race loses at most entries added in that window.
+    let merged = merge_entries(on_disk.as_deref(), HashMap::from([(key, entry)]));
     let _ = write_cache(&path, &merged); // best-effort; never fail the run on cache IO
 }
 
