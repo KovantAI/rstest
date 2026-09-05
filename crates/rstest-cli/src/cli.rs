@@ -137,6 +137,15 @@ pub struct Cli {
     #[arg(long, value_name = "SECS")]
     pub(crate) worker_timeout: Option<u64>,
 
+    /// Per-test timeout: fail any test whose call phase runs longer than SECS.
+    /// Interrupted in-process, so the failure's traceback points at the stuck
+    /// line (pytest-timeout-style; no plugin needed). `@pytest.mark.timeout(N)`
+    /// overrides per test. Fractional seconds allowed. A blocked C extension
+    /// that never returns to Python is caught by the --worker-timeout backstop
+    /// instead (auto-armed from this value when --worker-timeout is unset).
+    #[arg(long, value_name = "SECS")]
+    pub(crate) timeout: Option<f64>,
+
     /// Run only tests affected by changed files (import-graph selection).
     /// Without a value: working tree + untracked vs HEAD. With a value:
     /// vs that git rev (e.g. --changed=origin/main in CI).
@@ -356,13 +365,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                 }
             }
             _ if arg.starts_with("--only-rerun=") => own.push(arg),
-            "--worker-timeout" => {
+            "--worker-timeout" | "--timeout" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
                     own.push(v);
                 }
             }
             _ if arg.starts_with("--worker-timeout=") => own.push(arg),
+            _ if arg.starts_with("--timeout=") => own.push(arg),
             "--reruns" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
