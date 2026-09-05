@@ -28,6 +28,12 @@ pub struct TestEntry {
     pub skip_reason: Option<String>,
     #[serde(skip)]
     pub cpu: Option<f64>,
+    /// Leak check: net threads / open fds after teardown (from the teardown
+    /// report). Doctor-internal; not serialized to report-json.
+    #[serde(skip)]
+    pub thread_delta: Option<i64>,
+    #[serde(skip)]
+    pub fd_delta: Option<i64>,
     /// Passed only after one or more reruns (--reruns).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -127,7 +133,16 @@ impl Run {
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
             }
-            "teardown" => entry.teardown = outcome,
+            "teardown" => {
+                entry.teardown = outcome;
+                // Leak deltas ride the teardown report (measured after teardown).
+                if r.thread_delta.is_some() {
+                    entry.thread_delta = r.thread_delta;
+                }
+                if r.fd_delta.is_some() {
+                    entry.fd_delta = r.fd_delta;
+                }
+            }
             _ => {}
         }
         entry.wasxfail |= r.wasxfail;
@@ -540,6 +555,8 @@ mod tests {
             wasxfail: false,
             skip_reason: None,
             cpu: None,
+            thread_delta: None,
+            fd_delta: None,
             sections: Vec::new(),
             lineno: None,
         }
@@ -570,6 +587,22 @@ mod tests {
         assert!(run.summary_line().contains("2 quarantined"));
         // lastfailed still remembers quarantined failures (--lf must rerun them)
         assert_eq!(run.failed_nodeids().count(), 2);
+    }
+
+    #[test]
+    fn teardown_report_carries_leak_deltas_onto_entry() {
+        let mut run = Run::default();
+        run.record(None, report("a.py::leaker", "setup", "passed"));
+        run.record(None, report("a.py::leaker", "call", "passed"));
+        // Deltas ride the teardown report (measured after teardown runs).
+        let mut td = report("a.py::leaker", "teardown", "passed");
+        td.thread_delta = Some(3);
+        td.fd_delta = Some(2);
+        run.record(None, td);
+
+        let entry = run.tests().get("a.py::leaker").expect("entry recorded");
+        assert_eq!(entry.thread_delta, Some(3));
+        assert_eq!(entry.fd_delta, Some(2));
     }
 
     #[test]
@@ -662,6 +695,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },
@@ -679,6 +714,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },

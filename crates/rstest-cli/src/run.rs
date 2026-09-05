@@ -42,6 +42,7 @@ fn run_collect_discovery(
     let env = worker::WorkerEnv {
         run_uid: run_uid.to_string(),
         doctor: false,
+        leakcheck: false,
         send_ids: true,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
@@ -356,9 +357,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Run-wide worker params (testrun uid + doctor instrumentation) travel via
     // each worker's environment at spawn (thread-safe), never this process's
     // global env.
+    // Leak measurement runs under doctor OR --fail-on-leak (doctor already
+    // instruments; --fail-on-leak needs the deltas without the full report).
+    let leakcheck = doctor || cli.fail_on_leak;
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.clone(),
         doctor,
+        leakcheck,
         send_ids: false,
     };
 
@@ -903,6 +908,47 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             coverage_skip::write_index(&new_index);
         }
         coverage_skip::record(&scope, &config_fp, outcome.run.green_nodeids());
+    }
+    // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
+    // stderr so --output json/tap keep stdout a pure machine stream.
+    if cli.fail_on_leak && passthrough {
+        // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
+        // deltas are measured. Warn instead of silently exiting 0 (matches the
+        // --quarantine passthrough behavior).
+        eprintln!(
+            "rstest: --fail-on-leak has no effect in passthrough mode \
+             (-s/--pdb/--co); ignoring"
+        );
+    } else if cli.fail_on_leak {
+        let leaks = doctor::detect_leaks(&outcome.run);
+        if leaks.is_empty() {
+            // Note the blind spot: the first test each worker runs is an
+            // unchecked warm-up (first-touch imports aren't a per-test leak),
+            // so a clean gate does not prove those tests are leak-free.
+            eprintln!(
+                "rstest: --fail-on-leak: no thread/fd leaks detected \
+                 (first test per worker runs as an unchecked warm-up)"
+            );
+        } else {
+            // Under --doctor the RESOURCE LEAKS section already listed these;
+            // only gate + summarize here to avoid printing the table twice.
+            if !doctor {
+                eprintln!(
+                    "\n{}",
+                    palette.bold_red("=========== resource leaks ===========")
+                );
+                for l in leaks.iter().take(20) {
+                    eprintln!("  {}  {}", doctor::leak_delta(l), l.nodeid);
+                }
+            }
+            eprintln!(
+                "rstest: --fail-on-leak: {} test(s) leaked threads/fds",
+                leaks.len()
+            );
+            if exitstatus == 0 {
+                exitstatus = 1;
+            }
+        }
     }
     Ok(exitstatus)
 }
