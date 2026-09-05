@@ -48,6 +48,8 @@ class _ReportRequired(TypedDict):
 class ReportPayload(_ReportRequired, total=False):
     lineno: int  # 0-based source line
     cpu: float  # doctor mode: call-phase CPU time
+    thread_delta: int  # leak-check: net threads after teardown vs before setup
+    fd_delta: int  # leak-check: net open fds after teardown vs before setup
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
 

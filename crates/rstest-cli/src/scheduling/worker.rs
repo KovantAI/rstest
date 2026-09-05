@@ -16,6 +16,8 @@ pub struct WorkerEnv {
     pub run_uid: String,
     /// Enable cpu/fixture instrumentation in the worker's shim plugin.
     pub doctor: bool,
+    /// Enable per-test thread/fd leak measurement (--doctor or --fail-on-leak).
+    pub leakcheck: bool,
     /// For a lone worker: ship the full id/location payload from collection
     /// (pooled workers derive this from their index instead).
     pub send_ids: bool,
@@ -103,6 +105,9 @@ impl Worker {
             });
         if env.doctor {
             command.env("RSTEST_DOCTOR", "1");
+        }
+        if env.leakcheck {
+            command.env("RSTEST_LEAKCHECK", "1");
         }
         // Exactly one worker ships the full id list (D5); the rest verify their
         // collection by count+hash. Worker 0 in a pool; the lone worker only

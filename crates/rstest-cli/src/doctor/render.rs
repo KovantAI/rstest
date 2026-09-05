@@ -125,6 +125,13 @@ pub fn render_markdown(r: &DoctorReport) -> String {
             );
         }
     }
+    if !r.leaks.is_empty() {
+        md.push_str("### Resource leaks\n\n> Net threads/fds still open after teardown.\n\n");
+        md.push_str("| Leaked | Test |\n|---|---|\n");
+        for l in r.leaks.iter().take(10) {
+            let _ = writeln!(md, "| {} | `{}` |", leak_delta(l), l.nodeid);
+        }
+    }
     md
 }
 
@@ -288,7 +295,42 @@ pub fn render(r: &DoctorReport) {
     for f in r.slowest_files.iter().take(5) {
         println!("  {:7.2}s ({:4.1}%)  {}", f.total_seconds, f.pct, f.file);
     }
+
+    if !r.leaks.is_empty() {
+        println!("\nRESOURCE LEAKS (net threads/fds still open after teardown):");
+        for l in r.leaks.iter().take(10) {
+            println!("  {}  {}", leak_delta(l), l.nodeid);
+        }
+        if r.leaks.len() > 10 {
+            println!("  ... and {} more", r.leaks.len() - 10);
+        }
+        println!(
+            "  a test opened a thread/fd it never released; leaked state can flake \
+             later tests (reset it, or close in teardown)."
+        );
+    }
     println!("===================================================");
+}
+
+/// `+3 threads`, `+5 fds`, or `+3 threads +5 fds` for a leak entry.
+/// Shared by the doctor report and the `--fail-on-leak` gate.
+pub(crate) fn leak_delta(l: &super::Leak) -> String {
+    let mut parts = Vec::new();
+    if l.threads > 0 {
+        parts.push(format!("+{} thread{}", l.threads, plural(l.threads)));
+    }
+    if l.fds > 0 {
+        parts.push(format!("+{} fd{}", l.fds, plural(l.fds)));
+    }
+    parts.join(" ")
+}
+
+fn plural(n: i64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 #[cfg(test)]
@@ -372,5 +414,61 @@ mod tests {
         render(&r);
         let md = render_markdown(&r);
         assert!(md.contains("... and")); // truncation tail rendered
+    }
+
+    #[test]
+    fn leak_delta_pluralizes_and_combines() {
+        use super::super::Leak;
+        let d = |threads, fds| {
+            leak_delta(&Leak {
+                nodeid: "t".into(),
+                threads,
+                fds,
+            })
+        };
+        assert_eq!(d(1, 0), "+1 thread"); // singular, threads only
+        assert_eq!(d(3, 0), "+3 threads"); // plural
+        assert_eq!(d(0, 1), "+1 fd"); // singular, fds only
+        assert_eq!(d(0, 5), "+5 fds"); // plural
+        assert_eq!(d(3, 2), "+3 threads +2 fds"); // both combined
+        assert_eq!(d(0, 0), ""); // nothing positive
+    }
+
+    #[test]
+    fn leaks_render_in_terminal_and_markdown() {
+        use super::super::Leak;
+        let mut r = report(12);
+        r.leaks = vec![
+            Leak {
+                nodeid: "tests/test_pool.py::test_executor".into(),
+                threads: 3,
+                fds: 0,
+            },
+            Leak {
+                nodeid: "tests/test_io.py::test_reader".into(),
+                threads: 0,
+                fds: 5,
+            },
+        ];
+        render(&r); // exercises the terminal RESOURCE LEAKS branch
+        let md = render_markdown(&r);
+        assert!(md.contains("### Resource leaks"));
+        assert!(md.contains("| +3 threads | `tests/test_pool.py::test_executor` |"));
+        assert!(md.contains("| +5 fds | `tests/test_io.py::test_reader` |"));
+    }
+
+    #[test]
+    fn terminal_leaks_truncate_past_ten() {
+        use super::super::Leak;
+        let mut r = report(30);
+        // 12 leaks: terminal caps at 10 and prints a "... and 2 more" tail.
+        r.leaks = (0..12)
+            .map(|i| Leak {
+                nodeid: format!("t.py::leak{i}"),
+                threads: 1,
+                fds: 0,
+            })
+            .collect();
+        render(&r); // exercises the len > 10 truncation-tail branch
     }
 }

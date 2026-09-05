@@ -144,6 +144,8 @@ mod tests {
                     wasxfail: false,
                     skip_reason: None,
                     cpu: None,
+                    thread_delta: None,
+                    fd_delta: None,
                     sections: Vec::new(),
                     lineno: None,
                 },
@@ -179,6 +181,8 @@ mod tests {
             wasxfail: false,
             skip_reason: skip_reason.map(Into::into),
             cpu: None,
+            thread_delta: None,
+            fd_delta: None,
             sections: Vec::new(),
             lineno: None,
         }

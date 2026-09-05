@@ -389,6 +389,8 @@ pub fn run_lazy_pool(
                             wasxfail: false,
                             skip_reason: None,
                             cpu: None,
+                            thread_delta: None,
+                            fd_delta: None,
                             sections: Vec::new(),
                             lineno: None,
                         };
