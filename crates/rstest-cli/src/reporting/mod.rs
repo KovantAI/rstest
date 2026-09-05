@@ -2,8 +2,8 @@
 //! machine-readable output. The run/result model and JSON (`report`), merged
 //! junitxml (`junit`), live progress line (`progress`), per-worker status
 //! footer (`status`), the ANSI palette (`color`), cross-run flake history
-//! (`flakes`), CI-platform annotations (`ci`), and the self-contained HTML
-//! report (`html`).
+//! (`flakes`), CI-platform annotations (`ci`: GitHub/Azure/Buildkite), and the
+//! self-contained HTML report (`html`).
 
 pub mod ci;
 pub mod color;

@@ -334,11 +334,18 @@ pub fn write_local(merged: &Merged) {
 /// immutable segments. Deliberately minimal so filesystem/dir today and
 /// object-store/HTTP later share one merge layer above.
 pub trait Transport {
+    /// List the ids of all segments currently present on the remote.
     fn list_segment_ids(&self) -> Result<Vec<String>>;
+    /// Read one segment's raw bytes by id.
     fn read_segment(&self, id: &str) -> Result<Vec<u8>>;
+    /// Read the `base.json` blob, or `None` if the remote has no base yet.
     fn read_base(&self) -> Result<Option<Vec<u8>>>;
+    /// Write a new immutable segment under `id` (ids are unique per run, so
+    /// concurrent writers never conflict).
     fn write_segment(&self, id: &str, bytes: &[u8]) -> Result<()>;
+    /// Overwrite `base.json` (compaction only).
     fn write_base(&self, bytes: &[u8]) -> Result<()>;
+    /// Delete a segment by id (compaction, after folding it into base).
     fn delete_segment(&self, id: &str) -> Result<()>;
 }
 
