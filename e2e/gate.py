@@ -774,6 +774,58 @@ def gate_lf(g, args, binary):
     )
 
 
+def gate_html_report(g, args, binary):
+    print("== html report ==")
+    hp = g.tmp / "htmlproj"
+    g.write(
+        "htmlproj/test_h.py",
+        "def test_ok(): assert True\n"
+        'def test_bad(): assert 1 == 2, "values <differ> & <script>x</script>"\n',
+    )
+    out = hp / "report.html"
+    # -n 2: the case pytest-html can't do (no writer registered on any worker).
+    r = g.run("test_h.py", "-n", "2", "--html", str(out), cwd=hp, env_extra={"PYTHONPATH": str(hp)})
+    doc = out.read_text() if out.exists() else ""
+    check(
+        "html: written at -n 2 with a valid document",
+        r.returncode == 1 and out.exists() and doc.startswith("<!doctype html>"),
+        f"rc={r.returncode} exists={out.exists()}",
+    )
+    check(
+        "html: summary reflects merged counts",
+        "1 passed" in doc and "1 failed" in doc,
+        doc[:400],
+    )
+    check(
+        "html: failing nodeid + its traceback are present",
+        "test_h.py::test_bad" in doc and "AssertionError" in doc,
+        "",
+    )
+    check(
+        "html: untrusted traceback markup is escaped, not live",
+        "&lt;differ&gt;" in doc
+        and "&lt;script&gt;x&lt;/script&gt;" in doc
+        and "<script>x</script>" not in doc,
+        "escaping breach",
+    )
+    check(
+        "html: self-contained (embedded data, no external asset refs)",
+        'id="data"' in doc and "src=" not in doc and 'href="http' not in doc,
+        "",
+    )
+    # Report write failure must surface as a nonzero exit, not a silent green:
+    # the run completes, then the post-run report writer errors and that error
+    # propagates out of execute() (run.rs write_run_reports `?`). Point --html
+    # into a nonexistent directory so fs::write fails.
+    bad = hp / "nope" / "report.html"
+    r = g.run("test_h.py", "-n", "2", "--html", str(bad), cwd=hp, env_extra={"PYTHONPATH": str(hp)})
+    check(
+        "html: unwritable report path fails the run (error propagated, not swallowed)",
+        r.returncode != 0 and not bad.exists() and "Error:" in r.stderr,
+        f"rc={r.returncode} stderr={r.stderr[-200:]}",
+    )
+
+
 def gate_junitxml(g, args, binary):
     print("== junitxml ==")
     xml_path = g.tmp / "junit.xml"
@@ -3009,6 +3061,7 @@ def main():
         gate_x_maxfail,
         gate_lf,
         gate_junitxml,
+        gate_html_report,
         gate_shard_k_n,
         gate_dist_each,
         gate_dist_validation,

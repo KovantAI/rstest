@@ -12,7 +12,7 @@ use crate::cli::{is_collect_only, needs_passthrough_io, parse_durations, parse_m
 use crate::reporting::ci::{
     buildkite_flaky_annotate, print_azure_annotations, print_github_annotations,
 };
-use crate::reporting::{color, flakes, junit, progress, report, status};
+use crate::reporting::{color, flakes, html, junit, progress, report, status};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
 use crate::{cache, collect, config, discover, doctor, migrate, mono, remote, select};
 
@@ -160,6 +160,38 @@ fn build_run_meta(
         workers,
         argv: std::env::args().collect(),
     }
+}
+
+/// Write the optional junit/html run reports. Extracted from `execute` so the
+/// report side-effects are covered by in-process unit tests (rust-unit), not
+/// only incidentally by the e2e gate.
+fn write_run_reports(
+    junitxml: Option<&std::path::Path>,
+    html: Option<&std::path::Path>,
+    run: &report::Run,
+    suite_seconds: f64,
+    meta: &report::RunMeta,
+) -> Result<()> {
+    if let Some(path) = junitxml {
+        junit::write(path, run, suite_seconds)?;
+    }
+    if let Some(path) = html {
+        html::write(path, run, meta)?;
+    }
+    Ok(())
+}
+
+/// The merged lastfailed map written into pytest's cache after a pool run.
+/// Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the plain nodeids
+/// (deduped, since a test may fail on several workers). BTreeMap => stable,
+/// deduped keys with no extra pass.
+fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bool> {
+    run.failed_nodeids()
+        .map(|id| {
+            let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
+            (plain.to_string(), true)
+        })
+        .collect()
 }
 
 /// The crate's main entry point for a single (non-watch) run: resolves the
@@ -668,23 +700,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if let Some(path) = &cli.junitxml {
-        junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
-    }
+    write_run_reports(
+        cli.junitxml.as_deref(),
+        cli.html.as_deref(),
+        &outcome.run,
+        start.elapsed().as_secs_f64(),
+        &build_run_meta(start, outcome.exitstatus, started_epoch, n),
+    )?;
     // Merged lastfailed: workers' own writes are blocked in pool mode
     // (each knows only its failures); write the union into pytest's cache
     // so a follow-up `--lf` behaves exactly as after a serial run.
     if let Some(cache_dir) = &outcome.cache_dir {
-        // Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the
-        // plain nodeids (deduped, since a test may fail on several workers).
-        let failed: std::collections::BTreeMap<String, bool> = outcome
-            .run
-            .failed_nodeids()
-            .map(|id| {
-                let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
-                (plain.to_string(), true)
-            })
-            .collect();
+        let failed = merged_lastfailed(&outcome.run);
         let dir = std::path::Path::new(cache_dir).join("v/cache");
         // Only write when serialization succeeds: a serialize error must not
         // clobber pytest's lastfailed cache with an empty `{}`.
@@ -1536,11 +1563,13 @@ fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_run_meta, collect_lazy, head_to_none, merge_fixtures, parse_numprocesses,
-        quarantine_matcher, report_part_path, resolve_changed_base, strip_verbatim,
+        build_run_meta, collect_lazy, head_to_none, merge_fixtures, merged_lastfailed,
+        parse_numprocesses, quarantine_matcher, report_part_path, resolve_changed_base,
+        strip_verbatim, write_run_reports,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
+    use crate::reporting::report::Run;
     use crate::scheduling::proto::FixtureStat;
     use clap::Parser;
     use std::time::Instant;
@@ -1592,6 +1621,38 @@ mod tests {
     }
 
     #[test]
+    fn merged_lastfailed_strips_worker_suffix_and_dedups() {
+        use crate::reporting::report::Run;
+        use crate::scheduling::proto::Report;
+        let fail = |nodeid: &str| Report {
+            nodeid: nodeid.into(),
+            when: "call".into(),
+            outcome: "failed".into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+        };
+        let mut run = Run::default();
+        // Same test failing on two workers => one plain key after merge.
+        run.record(Some(0), fail("t.py::a [gw0]"));
+        run.record(Some(1), fail("t.py::a [gw1]"));
+        run.record(Some(0), fail("t.py::b [gw0]"));
+        // A nodeid with no worker suffix passes through untouched.
+        run.record(None, fail("t.py::c"));
+
+        let merged = merged_lastfailed(&run);
+        let keys: Vec<&String> = merged.keys().collect();
+        assert_eq!(keys, vec!["t.py::a", "t.py::b", "t.py::c"]);
+        assert!(merged.values().all(|&v| v));
+    }
+
+    #[test]
     fn build_run_meta_passes_through_fields() {
         let m = build_run_meta(Instant::now(), 7, 1_700_000_000, 4);
         assert_eq!(m.exitstatus, 7);
@@ -1599,6 +1660,27 @@ mod tests {
         assert_eq!(m.started_at_epoch, 1_700_000_000);
         assert!(m.duration_seconds >= 0.0);
         assert!(!m.argv.is_empty());
+    }
+
+    #[test]
+    fn write_run_reports_writes_requested_formats_only() {
+        let run = Run::default();
+        let meta = build_run_meta(Instant::now(), 0, 1_700_000_000, 2);
+        let base = std::env::temp_dir().join(format!("rstest-reports-{}", std::process::id()));
+        let xml = base.with_extension("xml");
+        let html = base.with_extension("html");
+
+        // Neither requested => no files, no error.
+        write_run_reports(None, None, &run, 1.0, &meta).unwrap();
+        assert!(!xml.exists() && !html.exists());
+
+        // Both requested => both written.
+        write_run_reports(Some(&xml), Some(&html), &run, 1.0, &meta).unwrap();
+        assert!(xml.exists(), "junit report not written");
+        assert!(html.exists(), "html report not written");
+
+        let _ = std::fs::remove_file(&xml);
+        let _ = std::fs::remove_file(&html);
     }
 
     #[test]
