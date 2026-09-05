@@ -456,4 +456,19 @@ mod tests {
         assert!(md.contains("| +3 threads | `tests/test_pool.py::test_executor` |"));
         assert!(md.contains("| +5 fds | `tests/test_io.py::test_reader` |"));
     }
+
+    #[test]
+    fn terminal_leaks_truncate_past_ten() {
+        use super::super::Leak;
+        let mut r = report(30);
+        // 12 leaks: terminal caps at 10 and prints a "... and 2 more" tail.
+        r.leaks = (0..12)
+            .map(|i| Leak {
+                nodeid: format!("t.py::leak{i}"),
+                threads: 1,
+                fds: 0,
+            })
+            .collect();
+        render(&r); // exercises the len > 10 truncation-tail branch
+    }
 }

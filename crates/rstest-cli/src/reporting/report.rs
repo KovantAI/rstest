@@ -551,6 +551,22 @@ mod tests {
     }
 
     #[test]
+    fn teardown_report_carries_leak_deltas_onto_entry() {
+        let mut run = Run::default();
+        run.record(None, report("a.py::leaker", "setup", "passed"));
+        run.record(None, report("a.py::leaker", "call", "passed"));
+        // Deltas ride the teardown report (measured after teardown runs).
+        let mut td = report("a.py::leaker", "teardown", "passed");
+        td.thread_delta = Some(3);
+        td.fd_delta = Some(2);
+        run.record(None, td);
+
+        let entry = run.tests().get("a.py::leaker").expect("entry recorded");
+        assert_eq!(entry.thread_delta, Some(3));
+        assert_eq!(entry.fd_delta, Some(2));
+    }
+
+    #[test]
     fn summary_counts_by_phase() {
         let mut run = Run::default();
         full(&mut run, "a.py::pass1", "passed");
