@@ -433,4 +433,44 @@ mod tests {
         assert!(doc.contains("summary ok"));
         assert!(!doc.contains("<section class=\"failures\">"));
     }
+
+    #[test]
+    fn renders_and_escapes_collection_errors() {
+        let mut run = Run::default();
+        run.record(None, rep("t.py::ok", "call", "passed", None));
+        run.collect_error("bad<dir>/t.py".into(), "ImportError: <boom> & bang".into());
+
+        let out =
+            std::env::temp_dir().join(format!("rstest-html-collect-{}.html", std::process::id()));
+        write(&out, &run, &meta()).unwrap();
+        let doc = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+
+        assert!(doc.contains("<section class=\"errors\">"));
+        assert!(doc.contains("Collection errors"));
+        // Path and longrepr both escaped, not live.
+        assert!(doc.contains("bad&lt;dir&gt;/t.py"));
+        assert!(doc.contains("ImportError: &lt;boom&gt; &amp; bang"));
+    }
+
+    #[test]
+    fn renders_flaky_section_and_badge() {
+        let mut run = Run::default();
+        run.record(None, rep("t.py::a", "call", "passed", None));
+        run.record(None, rep("t.py::flap", "call", "passed", None));
+        run.mark_flaky("t.py::flap".into(), 2);
+
+        let out =
+            std::env::temp_dir().join(format!("rstest-html-flaky-{}.html", std::process::id()));
+        write(&out, &run, &meta()).unwrap();
+        let doc = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+
+        // Flaky section (html.rs 125-135), with pluralized rerun count.
+        assert!(doc.contains("<section class=\"flaky\">"));
+        assert!(doc.contains("Flaky (passed after rerun)"));
+        assert!(doc.contains("(2 reruns)"));
+        // Flaky badge in the grid row (html.rs 197).
+        assert!(doc.contains("<span class=\"badge flaky\">flaky</span>"));
+    }
 }

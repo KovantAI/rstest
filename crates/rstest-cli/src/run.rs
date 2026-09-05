@@ -162,6 +162,19 @@ fn build_run_meta(
     }
 }
 
+/// The merged lastfailed map written into pytest's cache after a pool run.
+/// Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the plain nodeids
+/// (deduped, since a test may fail on several workers). BTreeMap => stable,
+/// deduped keys with no extra pass.
+fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bool> {
+    run.failed_nodeids()
+        .map(|id| {
+            let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
+            (plain.to_string(), true)
+        })
+        .collect()
+}
+
 /// The crate's main entry point for a single (non-watch) run: resolves the
 /// run configuration from `cli` + forwarded pytest `args`, dispatches to the
 /// worker pool (or the monorepo driver), runs post-run reports and gates
@@ -682,16 +695,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // (each knows only its failures); write the union into pytest's cache
     // so a follow-up `--lf` behaves exactly as after a serial run.
     if let Some(cache_dir) = &outcome.cache_dir {
-        // Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the
-        // plain nodeids (deduped, since a test may fail on several workers).
-        let failed: std::collections::BTreeMap<String, bool> = outcome
-            .run
-            .failed_nodeids()
-            .map(|id| {
-                let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
-                (plain.to_string(), true)
-            })
-            .collect();
+        let failed = merged_lastfailed(&outcome.run);
         let dir = std::path::Path::new(cache_dir).join("v/cache");
         // Only write when serialization succeeds: a serialize error must not
         // clobber pytest's lastfailed cache with an empty `{}`.
@@ -1543,8 +1547,9 @@ fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_run_meta, collect_lazy, head_to_none, merge_fixtures, parse_numprocesses,
-        quarantine_matcher, report_part_path, resolve_changed_base, strip_verbatim,
+        build_run_meta, collect_lazy, head_to_none, merge_fixtures, merged_lastfailed,
+        parse_numprocesses, quarantine_matcher, report_part_path, resolve_changed_base,
+        strip_verbatim,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1596,6 +1601,38 @@ mod tests {
         // No --changed and no --changed-strict => no changed-selection, and
         // crucially no git shell-out (kept hermetic).
         assert!(resolve_changed_base(&cli()).unwrap().is_none());
+    }
+
+    #[test]
+    fn merged_lastfailed_strips_worker_suffix_and_dedups() {
+        use crate::reporting::report::Run;
+        use crate::scheduling::proto::Report;
+        let fail = |nodeid: &str| Report {
+            nodeid: nodeid.into(),
+            when: "call".into(),
+            outcome: "failed".into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+        };
+        let mut run = Run::default();
+        // Same test failing on two workers => one plain key after merge.
+        run.record(Some(0), fail("t.py::a [gw0]"));
+        run.record(Some(1), fail("t.py::a [gw1]"));
+        run.record(Some(0), fail("t.py::b [gw0]"));
+        // A nodeid with no worker suffix passes through untouched.
+        run.record(None, fail("t.py::c"));
+
+        let merged = merged_lastfailed(&run);
+        let keys: Vec<&String> = merged.keys().collect();
+        assert_eq!(keys, vec!["t.py::a", "t.py::b", "t.py::c"]);
+        assert!(merged.values().all(|&v| v));
     }
 
     #[test]
