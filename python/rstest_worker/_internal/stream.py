@@ -1,6 +1,8 @@
 """Translate pytest report hooks into wire events, and emulate the xdist
 master-side node hooks each pool worker must play for itself."""
 
+from __future__ import annotations
+
 import logging
 import os
 import sys
@@ -30,7 +32,7 @@ class Timeout(Exception):
     the test was stuck on."""
 
 
-def _parse_timeout(raw: "str | float | None") -> "float | None":
+def _parse_timeout(raw: str | float | None) -> float | None:
     """Positive float seconds, or None (disabled / unparseable / non-positive)."""
     if raw is None:
         return None
@@ -39,6 +41,25 @@ def _parse_timeout(raw: "str | float | None") -> "float | None":
     except (TypeError, ValueError):
         return None
     return v if v > 0 else None
+
+
+def _count_threads() -> int:
+    """Live Python thread count (portable). Native C-extension threads that
+    bypass the `threading` module are not counted."""
+    import threading
+
+    return threading.active_count()
+
+
+def _count_fds() -> int | None:
+    """Open file-descriptor count, or None where it can't be read. `/proc/self/fd`
+    on Linux, `/dev/fd` on macOS/BSD; other platforms disable fd tracking."""
+    for d in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(d))
+        except OSError:
+            continue
+    return None
 
 
 class StreamPlugin:
@@ -50,6 +71,16 @@ class StreamPlugin:
         # Per-test timeout (--timeout): interrupt the call phase in-process at
         # the deadline. @pytest.mark.timeout(N) overrides per test.
         self._timeout = _parse_timeout(os.environ.get("RSTEST_TIMEOUT"))
+        # Resource-leak check (--doctor or --fail-on-leak): snapshot threads/fds
+        # before setup and after teardown, ship the net delta on the teardown
+        # report.
+        self._leakcheck = os.environ.get("RSTEST_LEAKCHECK") == "1"
+        self._res_base: dict[str, tuple[int, int | None]] = {}
+        self._res: dict[str, tuple[int, int | None]] = {}
+        # Skip the worker's FIRST test: importing a test module can lazily spin
+        # up a persistent thread / open a cache fd once, which is not a per-test
+        # leak. Measuring from the 2nd test on drops that first-touch noise.
+        self._leak_warmed = False
         self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
         self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
         # (when, category, message, filename, lineno) -> count; aggregated
@@ -265,7 +296,7 @@ class StreamPlugin:
 
             config.cache.set = guarded_set
 
-    def _effective_timeout(self, item) -> "float | None":
+    def _effective_timeout(self, item) -> float | None:
         """`@pytest.mark.timeout(N)` wins over the global `--timeout`."""
         marker = item.get_closest_marker("timeout")
         if marker is not None and marker.args:
@@ -299,6 +330,31 @@ class StreamPlugin:
             signal.signal(signal.SIGALRM, old)
 
         return cancel
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_setup(self, item):
+        # Leak check: baseline thread/fd counts BEFORE any setup fixture runs.
+        if self._leakcheck:
+            self._res_base[item.nodeid] = (_count_threads(), _count_fds())
+        return (yield)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_teardown(self, item, nextitem):
+        # Leak check: net delta AFTER teardown (a test that opens+closes is 0;
+        # one that never releases shows a positive delta). Stashed for the
+        # teardown report to carry.
+        try:
+            return (yield)
+        finally:
+            if self._leakcheck and item.nodeid in self._res_base:
+                bt, bf = self._res_base.pop(item.nodeid)
+                if not self._leak_warmed:
+                    # First test: warm-up, don't attribute first-touch to it.
+                    self._leak_warmed = True
+                else:
+                    at, af = _count_threads(), _count_fds()
+                    fd_delta = (af - bf) if (af is not None and bf is not None) else None
+                    self._res[item.nodeid] = (at - bt, fd_delta)
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item):
@@ -388,6 +444,12 @@ class StreamPlugin:
             payload["lineno"] = location[1]
         if report.when == "call" and report.nodeid in self._cpu:
             payload["cpu"] = round(self._cpu.pop(report.nodeid), 4)
+        if report.when == "teardown" and report.nodeid in self._res:
+            dt, df = self._res.pop(report.nodeid)
+            if dt:
+                payload["thread_delta"] = dt
+            if df:
+                payload["fd_delta"] = df
         if report.failed and report.sections:
             # Captured stdout/stderr/log; ship only for failures to keep the
             # wire lean.

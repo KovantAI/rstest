@@ -40,6 +40,7 @@ fn run_collect_discovery(
         run_uid: run_uid.to_string(),
         doctor: false,
         timeout: None,
+        leakcheck: false,
         send_ids: true,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
@@ -162,22 +163,21 @@ fn build_run_meta(
     }
 }
 
+/// The crate's main entry point for a single (non-watch) run: resolves the
+/// run configuration from `cli` + forwarded pytest `args`, dispatches to the
+/// worker pool (or the monorepo driver), runs post-run reports and gates
+/// (doctor, junit, lastfailed, duration-regression, cache push, report-json),
+/// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let args = args.to_vec();
     let start = Instant::now();
-    let started_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let started_epoch = crate::time::now_epoch_secs();
     // One uid per test run, shared by every worker (xdist's testrun_uid
     // contract). A monorepo child inherits the root's (passed explicitly on the
     // child's command); a top-level run generates one. Held as a typed value and
     // handed to workers via their environment — never process-global set_var.
     let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+        let nanos = crate::time::now_epoch_nanos();
         format!("{nanos:x}{:x}", std::process::id())
     });
     // Shared-cache backend: resolve the remote (flag or env) and, if asked,
@@ -280,15 +280,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         .unwrap_or_else(|| "load".into());
     // Validate once, up front: every run path (byte-exact, lazy, pool) shares
     // this name, so an invalid value must error the same way regardless of
-    // suite size, not slip through the lazy/small-suite path silently.
-    if !matches!(
-        dist_name.as_str(),
-        "load" | "loadfile" | "loadscope" | "loadgroup" | "each"
-    ) {
-        anyhow::bail!(
-            "unknown --dist mode: {dist_name} (use load|loadfile|loadscope|loadgroup|each)"
-        );
-    }
+    // suite size, not slip through the lazy/small-suite path silently. The name
+    // stays a string downstream (lazy/each checks); dispatch_run re-parses it to
+    // the enum via the same `FromStr`.
+    dist_name
+        .parse::<pool::Dist>()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
     // Flaky-aware reruns: when on, load the prior flaky set ONCE so the pool
     // can gate rerun eligibility on it. None = feature off (no gating).
@@ -358,10 +355,14 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Run-wide worker params (testrun uid + doctor instrumentation) travel via
     // each worker's environment at spawn (thread-safe), never this process's
     // global env.
+    // Leak measurement runs under doctor OR --fail-on-leak (doctor already
+    // instruments; --fail-on-leak needs the deltas without the full report).
+    let leakcheck = doctor || cli.fail_on_leak;
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.clone(),
         doctor,
         timeout: cli.timeout,
+        leakcheck,
         send_ids: false,
     };
 
@@ -515,11 +516,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 );
             }
             let seed = if v == "random" {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0)
-                    ^ u64::from(std::process::id())
+                crate::time::now_epoch_nanos() as u64 ^ u64::from(std::process::id())
             } else {
                 v.parse().map_err(|_| {
                     anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'")
@@ -813,6 +810,47 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             exitstatus = 1;
         }
     }
+    // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
+    // stderr so --output json/tap keep stdout a pure machine stream.
+    if cli.fail_on_leak && passthrough {
+        // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
+        // deltas are measured. Warn instead of silently exiting 0 (matches the
+        // --quarantine passthrough behavior).
+        eprintln!(
+            "rstest: --fail-on-leak has no effect in passthrough mode \
+             (-s/--pdb/--co); ignoring"
+        );
+    } else if cli.fail_on_leak {
+        let leaks = doctor::detect_leaks(&outcome.run);
+        if leaks.is_empty() {
+            // Note the blind spot: the first test each worker runs is an
+            // unchecked warm-up (first-touch imports aren't a per-test leak),
+            // so a clean gate does not prove those tests are leak-free.
+            eprintln!(
+                "rstest: --fail-on-leak: no thread/fd leaks detected \
+                 (first test per worker runs as an unchecked warm-up)"
+            );
+        } else {
+            // Under --doctor the RESOURCE LEAKS section already listed these;
+            // only gate + summarize here to avoid printing the table twice.
+            if !doctor {
+                eprintln!(
+                    "\n{}",
+                    palette.bold_red("=========== resource leaks ===========")
+                );
+                for l in leaks.iter().take(20) {
+                    eprintln!("  {}  {}", doctor::leak_delta(l), l.nodeid);
+                }
+            }
+            eprintln!(
+                "rstest: --fail-on-leak: {} test(s) leaked threads/fds",
+                leaks.len()
+            );
+            if exitstatus == 0 {
+                exitstatus = 1;
+            }
+        }
+    }
     Ok(exitstatus)
 }
 
@@ -936,18 +974,9 @@ fn dispatch_run(
             worker_env,
         )?
     } else {
-        let dist = match dist_name {
-            "load" => pool::Dist::Load,
-            "loadfile" => pool::Dist::Loadfile,
-            "loadscope" => pool::Dist::Loadscope,
-            "loadgroup" => pool::Dist::Loadgroup,
-            "each" => pool::Dist::Each,
-            other => {
-                anyhow::bail!(
-                    "unknown --dist mode: {other} (use load|loadfile|loadscope|loadgroup|each)"
-                )
-            }
-        };
+        let dist = dist_name
+            .parse::<pool::Dist>()
+            .map_err(|e| anyhow::anyhow!(e))?;
         if dist == pool::Dist::Each && reruns > 0 {
             anyhow::bail!(
                 "--reruns is not supported with --dist each (every worker runs the \
@@ -1343,10 +1372,8 @@ fn execute_monorepo(
         } else {
             root.join(out)
         };
-        let started_at_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs().saturating_sub(start.elapsed().as_secs()))
-            .unwrap_or(0);
+        let started_at_epoch =
+            crate::time::now_epoch_secs().saturating_sub(start.elapsed().as_secs());
         let run_meta = build_run_meta(start, merged, started_at_epoch, budget);
         if let Err(e) = mono::merge_reports(&report_parts, &run_meta, &out) {
             eprintln!("rstest: failed to write merged report: {e}");

@@ -1,8 +1,8 @@
 //! Reporting: turning the stream of worker reports into human- and
 //! machine-readable output. The run/result model and JSON (`report`), merged
 //! junitxml (`junit`), live progress line (`progress`), per-worker status
-//! footer (`status`), the ANSI palette (`color`), and cross-run flake history
-//! (`flakes`).
+//! footer (`status`), the ANSI palette (`color`), cross-run flake history
+//! (`flakes`), and CI-platform annotations (`ci`: GitHub/Azure/Buildkite).
 
 pub mod ci;
 pub mod color;
