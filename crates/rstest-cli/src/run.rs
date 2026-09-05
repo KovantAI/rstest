@@ -818,24 +818,35 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     }
     // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
     // stderr so --output json/tap keep stdout a pure machine stream.
-    if cli.fail_on_leak && !passthrough {
+    if cli.fail_on_leak && passthrough {
+        // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
+        // deltas are measured. Warn instead of silently exiting 0 (matches the
+        // --quarantine passthrough behavior).
+        eprintln!(
+            "rstest: --fail-on-leak has no effect in passthrough mode \
+             (-s/--pdb/--co); ignoring"
+        );
+    } else if cli.fail_on_leak {
         let leaks = doctor::detect_leaks(&outcome.run);
         if leaks.is_empty() {
-            eprintln!("rstest: --fail-on-leak: no thread/fd leaks detected");
-        } else {
+            // Note the blind spot: the first test each worker runs is an
+            // unchecked warm-up (first-touch imports aren't a per-test leak),
+            // so a clean gate does not prove those tests are leak-free.
             eprintln!(
-                "\n{}",
-                palette.bold_red("=========== resource leaks ===========")
+                "rstest: --fail-on-leak: no thread/fd leaks detected \
+                 (first test per worker runs as an unchecked warm-up)"
             );
-            for l in leaks.iter().take(20) {
-                let mut d = Vec::new();
-                if l.threads > 0 {
-                    d.push(format!("+{} thread(s)", l.threads));
+        } else {
+            // Under --doctor the RESOURCE LEAKS section already listed these;
+            // only gate + summarize here to avoid printing the table twice.
+            if !doctor {
+                eprintln!(
+                    "\n{}",
+                    palette.bold_red("=========== resource leaks ===========")
+                );
+                for l in leaks.iter().take(20) {
+                    eprintln!("  {}  {}", doctor::leak_delta(l), l.nodeid);
                 }
-                if l.fds > 0 {
-                    d.push(format!("+{} fd(s)", l.fds));
-                }
-                eprintln!("  {}  {}", d.join(" "), l.nodeid);
             }
             eprintln!(
                 "rstest: --fail-on-leak: {} test(s) leaked threads/fds",

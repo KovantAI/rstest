@@ -686,7 +686,12 @@ Enables the leak-check instrumentation on its own — you do **not** need
 `--doctor`. Exits `1` when any leak is found (listing the offenders on stderr,
 so `--output json`/`tap` stay pure on stdout); exits `0` and prints
 `no thread/fd leaks detected` on a clean suite. Not evaluated under a
-passthrough-IO flag (`-s`/`--pdb`/`--co`), which has no instrumentation.
+passthrough-IO flag (`-s`/`--pdb`/`--co`), which has no instrumentation — the
+flag is ignored there with a warning rather than passing silently.
+
+The first test each worker runs is an unchecked **warm-up** (first-touch
+imports are not a per-test leak), so under `-n auto` one test per worker is not
+gated; a clean exit does not prove those tests are leak-free.
 
 A leaked thread or fd is shared state that can flake a *later* test; the guide
 covers what is measured, the false-positive cases (session-scoped fixtures),

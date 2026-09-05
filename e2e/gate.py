@@ -1339,9 +1339,54 @@ def gate_resource_leak_detection(g, args, binary):
     )
     r = g.run("test_ok.py", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)})
     check(
-        "leak: clean suite passes the gate (exit 0)",
+        "leak: clean suite passes the gate (exit 0, warm-up caveat noted)",
+        r.returncode == 0 and "no thread/fd leaks" in r.stderr and "warm-up" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # Warm-up skip: the FIRST test each worker runs is not leak-checked, so a
+    # test that leaks but happens to run first is not flagged (first-touch
+    # imports aren't a per-test leak). test_a leaks + runs first under -n 1.
+    g.write(
+        "leakproj/test_warmup.py",
+        "import threading\n"
+        "def test_a_leaks_but_is_warmup():\n"
+        "    threading.Thread(target=lambda: __import__('time').sleep(30), daemon=True).start()\n"
+        "    assert True\n"
+        "def test_b_clean(): assert True\n",
+    )
+    r = g.run(
+        "test_warmup.py", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)}
+    )
+    check(
+        "leak: first test is an unchecked warm-up (its leak not flagged)",
         r.returncode == 0 and "no thread/fd leaks" in r.stderr,
         f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # --doctor + --fail-on-leak together: the RESOURCE LEAKS table is rendered
+    # once (by doctor), not repeated by the gate; gate still fails the run.
+    r = g.run(
+        "test_leaks.py",
+        "-n",
+        "1",
+        "--doctor",
+        "--fail-on-leak",
+        cwd=lp,
+        env_extra={"PYTHONPATH": str(lp)},
+    )
+    check(
+        "leak: --doctor + --fail-on-leak fails once, no double table",
+        r.returncode == 1
+        and "leaked threads/fds" in r.stderr
+        and (r.stdout + r.stderr).count("test_c_thread_leak") == 1,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+    )
+    # Passthrough (-s): no instrumentation, so --fail-on-leak is ignored with a
+    # warning rather than passing silently (exit reflects the tests, not a gate).
+    r = g.run("test_leaks.py", "-s", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)})
+    check(
+        "leak: --fail-on-leak ignored (with warning) in passthrough mode",
+        "has no effect in passthrough mode" in r.stderr and "leaked threads/fds" not in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
     )
 
 

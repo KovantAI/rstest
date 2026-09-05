@@ -11,6 +11,7 @@ mod gate;
 mod render;
 
 pub use gate::{evaluate, parse_conditions};
+pub(crate) use render::leak_delta;
 pub use render::{append_ci_summary, render, write_markdown};
 
 use std::collections::BTreeMap;

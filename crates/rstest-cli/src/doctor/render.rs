@@ -313,7 +313,8 @@ pub fn render(r: &DoctorReport) {
 }
 
 /// `+3 threads`, `+5 fds`, or `+3 threads +5 fds` for a leak entry.
-fn leak_delta(l: &super::Leak) -> String {
+/// Shared by the doctor report and the `--fail-on-leak` gate.
+pub(crate) fn leak_delta(l: &super::Leak) -> String {
     let mut parts = Vec::new();
     if l.threads > 0 {
         parts.push(format!("+{} thread{}", l.threads, plural(l.threads)));
@@ -413,5 +414,46 @@ mod tests {
         render(&r);
         let md = render_markdown(&r);
         assert!(md.contains("... and")); // truncation tail rendered
+    }
+
+    #[test]
+    fn leak_delta_pluralizes_and_combines() {
+        use super::super::Leak;
+        let d = |threads, fds| {
+            leak_delta(&Leak {
+                nodeid: "t".into(),
+                threads,
+                fds,
+            })
+        };
+        assert_eq!(d(1, 0), "+1 thread"); // singular, threads only
+        assert_eq!(d(3, 0), "+3 threads"); // plural
+        assert_eq!(d(0, 1), "+1 fd"); // singular, fds only
+        assert_eq!(d(0, 5), "+5 fds"); // plural
+        assert_eq!(d(3, 2), "+3 threads +2 fds"); // both combined
+        assert_eq!(d(0, 0), ""); // nothing positive
+    }
+
+    #[test]
+    fn leaks_render_in_terminal_and_markdown() {
+        use super::super::Leak;
+        let mut r = report(12);
+        r.leaks = vec![
+            Leak {
+                nodeid: "tests/test_pool.py::test_executor".into(),
+                threads: 3,
+                fds: 0,
+            },
+            Leak {
+                nodeid: "tests/test_io.py::test_reader".into(),
+                threads: 0,
+                fds: 5,
+            },
+        ];
+        render(&r); // exercises the terminal RESOURCE LEAKS branch
+        let md = render_markdown(&r);
+        assert!(md.contains("### Resource leaks"));
+        assert!(md.contains("| +3 threads | `tests/test_pool.py::test_executor` |"));
+        assert!(md.contains("| +5 fds | `tests/test_io.py::test_reader` |"));
     }
 }
