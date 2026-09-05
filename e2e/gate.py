@@ -813,6 +813,17 @@ def gate_html_report(g, args, binary):
         'id="data"' in doc and "src=" not in doc and 'href="http' not in doc,
         "",
     )
+    # Report write failure must surface as a nonzero exit, not a silent green:
+    # the run completes, then the post-run report writer errors and that error
+    # propagates out of execute() (run.rs write_run_reports `?`). Point --html
+    # into a nonexistent directory so fs::write fails.
+    bad = hp / "nope" / "report.html"
+    r = g.run("test_h.py", "-n", "2", "--html", str(bad), cwd=hp, env_extra={"PYTHONPATH": str(hp)})
+    check(
+        "html: unwritable report path fails the run (error propagated, not swallowed)",
+        r.returncode != 0 and not bad.exists() and "Error:" in r.stderr,
+        f"rc={r.returncode} stderr={r.stderr[-200:]}",
+    )
 
 
 def gate_junitxml(g, args, binary):
