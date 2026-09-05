@@ -34,7 +34,7 @@ def _count_threads() -> int:
     return threading.active_count()
 
 
-def _count_fds() -> "int | None":
+def _count_fds() -> int | None:
     """Open file-descriptor count, or None where it can't be read. `/proc/self/fd`
     on Linux, `/dev/fd` on macOS/BSD; other platforms disable fd tracking."""
     for d in ("/proc/self/fd", "/dev/fd"):
