@@ -412,10 +412,10 @@ mod tests {
             "unescaped payload leaked into the document"
         );
         // Summary counts both tests.
+        let head = &doc[..doc.len().min(400)];
         assert!(
             doc.contains("1 passed") && doc.contains("1 failed"),
-            "{}",
-            &doc[..400]
+            "{head}"
         );
         // Embedded data blob present, with its `<` neutralized.
         assert!(doc.contains("id=\"data\""));

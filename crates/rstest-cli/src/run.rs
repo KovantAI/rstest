@@ -162,6 +162,25 @@ fn build_run_meta(
     }
 }
 
+/// Write the optional junit/html run reports. Extracted from `execute` so the
+/// report side-effects are covered by in-process unit tests (rust-unit), not
+/// only incidentally by the e2e gate.
+fn write_run_reports(
+    junitxml: Option<&std::path::Path>,
+    html: Option<&std::path::Path>,
+    run: &report::Run,
+    suite_seconds: f64,
+    meta: &report::RunMeta,
+) -> Result<()> {
+    if let Some(path) = junitxml {
+        junit::write(path, run, suite_seconds)?;
+    }
+    if let Some(path) = html {
+        html::write(path, run, meta)?;
+    }
+    Ok(())
+}
+
 /// The merged lastfailed map written into pytest's cache after a pool run.
 /// Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the plain nodeids
 /// (deduped, since a test may fail on several workers). BTreeMap => stable,
@@ -681,16 +700,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if let Some(path) = &cli.junitxml {
-        junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
-    }
-    if let Some(path) = &cli.html {
-        html::write(
-            path,
-            &outcome.run,
-            &build_run_meta(start, outcome.exitstatus, started_epoch, n),
-        )?;
-    }
+    write_run_reports(
+        cli.junitxml.as_deref(),
+        cli.html.as_deref(),
+        &outcome.run,
+        start.elapsed().as_secs_f64(),
+        &build_run_meta(start, outcome.exitstatus, started_epoch, n),
+    )?;
     // Merged lastfailed: workers' own writes are blocked in pool mode
     // (each knows only its failures); write the union into pytest's cache
     // so a follow-up `--lf` behaves exactly as after a serial run.
@@ -1549,10 +1565,11 @@ mod tests {
     use super::{
         build_run_meta, collect_lazy, head_to_none, merge_fixtures, merged_lastfailed,
         parse_numprocesses, quarantine_matcher, report_part_path, resolve_changed_base,
-        strip_verbatim,
+        strip_verbatim, write_run_reports,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
+    use crate::reporting::report::Run;
     use crate::scheduling::proto::FixtureStat;
     use clap::Parser;
     use std::time::Instant;
@@ -1643,6 +1660,27 @@ mod tests {
         assert_eq!(m.started_at_epoch, 1_700_000_000);
         assert!(m.duration_seconds >= 0.0);
         assert!(!m.argv.is_empty());
+    }
+
+    #[test]
+    fn write_run_reports_writes_requested_formats_only() {
+        let run = Run::default();
+        let meta = build_run_meta(Instant::now(), 0, 1_700_000_000, 2);
+        let base = std::env::temp_dir().join(format!("rstest-reports-{}", std::process::id()));
+        let xml = base.with_extension("xml");
+        let html = base.with_extension("html");
+
+        // Neither requested => no files, no error.
+        write_run_reports(None, None, &run, 1.0, &meta).unwrap();
+        assert!(!xml.exists() && !html.exists());
+
+        // Both requested => both written.
+        write_run_reports(Some(&xml), Some(&html), &run, 1.0, &meta).unwrap();
+        assert!(xml.exists(), "junit report not written");
+        assert!(html.exists(), "html report not written");
+
+        let _ = std::fs::remove_file(&xml);
+        let _ = std::fs::remove_file(&html);
     }
 
     #[test]
