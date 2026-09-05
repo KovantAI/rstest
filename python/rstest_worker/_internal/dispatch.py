@@ -2,6 +2,8 @@
 worker collects and runs items on command instead of in one collect-then-run
 pass. Two models — eager (ItemDispatchPlugin) and lazy (LazyDispatchPlugin)."""
 
+from __future__ import annotations
+
 import os
 
 import pytest

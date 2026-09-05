@@ -1,6 +1,8 @@
 """Translate pytest report hooks into wire events, and emulate the xdist
 master-side node hooks each pool worker must play for itself."""
 
+from __future__ import annotations
+
 import logging
 import os
 import sys

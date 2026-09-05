@@ -71,13 +71,6 @@ pub enum FailureWrap {
     BuildkiteGroup,
 }
 
-fn epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 #[derive(Debug, Default)]
 pub struct Run {
     tests: BTreeMap<String, TestEntry>,
@@ -118,7 +111,7 @@ impl Run {
             // can be huge at pandas scale.
             entry.longrepr = r.longrepr.as_deref().map(|t| {
                 let mut t = t.to_string();
-                t.truncate(20_000);
+                crate::text::truncate_on_boundary(&mut t, 20_000);
                 t
             });
         }
@@ -180,7 +173,7 @@ impl Run {
         if gitlab {
             println!(
                 "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{header}",
-                epoch_secs()
+                crate::time::now_epoch_secs()
             );
         } else {
             println!("\n{header}");
@@ -197,7 +190,10 @@ impl Run {
             );
         }
         if gitlab {
-            println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
+            println!(
+                "\x1b[0Ksection_end:{}:{id}\r\x1b[0K",
+                crate::time::now_epoch_secs()
+            );
         }
     }
 
@@ -300,7 +296,7 @@ impl Run {
                 let id = format!("rstest_fail_{}_{idx}", std::process::id());
                 println!(
                     "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{}",
-                    epoch_secs(),
+                    crate::time::now_epoch_secs(),
                     palette.bold_red(&format!("--- FAILED {header} ---"))
                 );
             }
@@ -313,7 +309,10 @@ impl Run {
         let close = |idx: usize| {
             if wrap == FailureWrap::GitlabSection {
                 let id = format!("rstest_fail_{}_{idx}", std::process::id());
-                println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
+                println!(
+                    "\x1b[0Ksection_end:{}:{id}\r\x1b[0K",
+                    crate::time::now_epoch_secs()
+                );
             }
         };
         let mut idx = 0usize;
