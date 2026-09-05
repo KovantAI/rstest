@@ -91,6 +91,12 @@ pub struct Cli {
     #[arg(long)]
     pub(crate) junitxml: Option<PathBuf>,
 
+    /// Write a self-contained HTML report of the merged run (rendered
+    /// orchestrator-side, so it works under the parallel pool where pytest-html
+    /// produces nothing at -n ≥ 2).
+    #[arg(long)]
+    pub(crate) html: Option<PathBuf>,
+
     /// Watch the project and rerun on change: only-test-file changes rerun
     /// just those files; any other .py change reruns the tests that import
     /// the changed module (import-graph selection).
@@ -410,13 +416,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                 }
             }
             _ if arg.starts_with("--doctor-fail-on=") => own.push(arg),
-            "--junitxml" => {
+            "--junitxml" | "--html" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
                     own.push(v);
                 }
             }
             _ if arg.starts_with("--junitxml=") => own.push(arg),
+            _ if arg.starts_with("--html=") => own.push(arg),
             "--dist" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
