@@ -32,11 +32,14 @@ pub struct Worker {
     reader: Option<EventReader>,
 }
 
+/// The read half of a worker's event pipe, split off from [`Worker`] so a
+/// reader thread can own it while the orchestrator keeps the write half.
 pub struct EventReader {
     events: rmp_serde::Deserializer<rmp_serde::decode::ReadReader<BufReader<File>>>,
 }
 
 impl EventReader {
+    /// Block for the next msgpack [`proto::Event`] from the worker.
     pub fn recv(&mut self) -> Result<proto::Event> {
         use serde::Deserialize;
         proto::Event::deserialize(&mut self.events).context("reading worker event")
@@ -48,15 +51,24 @@ impl EventReader {
 /// or inherited (pytest renders: --co, -s, --pdb).
 #[derive(Clone, Copy, PartialEq)]
 pub enum Stdio {
+    /// Suppress worker stdio; the orchestrator renders output itself.
     Null,
+    /// Let the worker inherit stdio so pytest renders directly (`--co`, `-s`,
+    /// `--pdb`).
     Inherit,
 }
 
 impl Worker {
+    /// Spawn a worker with its stdio suppressed (the common case; the
+    /// orchestrator renders output). `worker` is `(index, count)` in a pool,
+    /// or `None` for the lone single-worker session.
     pub fn spawn(python: &Path, worker: Option<(usize, usize)>, env: &WorkerEnv) -> Result<Self> {
         Self::spawn_with_io(python, worker, Stdio::Null, env)
     }
 
+    /// Spawn a worker, choosing whether its stdio is suppressed or inherited
+    /// (see [`Stdio`]). Sets up the two dedicated pipes and the child's
+    /// per-run environment.
     pub fn spawn_with_io(
         python: &Path,
         worker: Option<(usize, usize)>,
@@ -135,6 +147,7 @@ impl Worker {
         })
     }
 
+    /// Send one msgpack [`proto::Command`] down the worker's command pipe.
     pub fn send(&mut self, cmd: &proto::Command) -> Result<()> {
         let buf = rmp_serde::encode::to_vec_named(cmd)?;
         self.cmd_w.write_all(&buf)?;
@@ -148,6 +161,8 @@ impl Worker {
         self.reader.take().context("event reader already detached")
     }
 
+    /// Block for the next event on the still-attached reader. Errors if the
+    /// reader was detached via [`Worker::take_reader`].
     pub fn recv(&mut self) -> Result<proto::Event> {
         self.reader
             .as_mut()
@@ -155,6 +170,7 @@ impl Worker {
             .recv()
     }
 
+    /// Ask the worker to exit cleanly (send `Shutdown`, then reap it).
     pub fn shutdown(mut self) -> Result<()> {
         self.send(&proto::Command::Shutdown)?;
         self.child.wait()?;

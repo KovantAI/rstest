@@ -84,7 +84,7 @@ pub(super) fn probe(candidate: &Path) -> Option<Probe> {
 pub(super) fn cached_probe(candidate: &Path) -> Option<Probe> {
     static MEM: OnceLock<Mutex<HashMap<PathBuf, Option<Probe>>>> = OnceLock::new();
     let mem = MEM.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = mem.lock().unwrap().get(candidate) {
+    if let Some(hit) = super::lock(mem).get(candidate) {
         return hit.clone();
     }
 
@@ -96,17 +96,13 @@ pub(super) fn cached_probe(candidate: &Path) -> Option<Probe> {
         .flatten();
     if let Some((m, s)) = fp {
         if let Some(p) = disk_cache_get(candidate, m, s) {
-            mem.lock()
-                .unwrap()
-                .insert(candidate.to_path_buf(), Some(p.clone()));
+            super::lock(mem).insert(candidate.to_path_buf(), Some(p.clone()));
             return Some(p);
         }
     }
 
     let result = probe(candidate);
-    mem.lock()
-        .unwrap()
-        .insert(candidate.to_path_buf(), result.clone());
+    super::lock(mem).insert(candidate.to_path_buf(), result.clone());
     if let (Some((m, s)), Some(p)) = (fp, &result) {
         // Persist POSITIVE probes only. A negative probe (the interpreter ran
         // but couldn't import the worker shim — e.g. msgpack not yet installed)

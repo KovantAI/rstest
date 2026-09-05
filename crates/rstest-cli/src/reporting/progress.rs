@@ -44,6 +44,9 @@ pub enum Mode {
     Azure,
 }
 
+/// Orchestrator-side rendering of the live test stream: the per-test glyph/
+/// line output in the selected [`Mode`], plus (in pool mode on a tty) the
+/// per-worker [`StatusFooter`].
 #[derive(Default)]
 pub struct Progress {
     done: usize,
@@ -57,6 +60,7 @@ pub struct Progress {
 const WIDTH: usize = 72;
 
 impl Progress {
+    /// Set the total test count (drives the percentage and the progress bar).
     pub fn set_total(&mut self, total: usize) {
         self.total = Some(total);
         if let Some(f) = &mut self.footer {
@@ -71,18 +75,22 @@ impl Progress {
         self.footer = Some(footer);
     }
 
+    /// Note that `worker` began running `nodeid` (updates the footer's
+    /// per-worker current-test line).
     pub fn item_started(&mut self, worker: usize, nodeid: String) {
         if let Some(f) = &mut self.footer {
             f.item_started(worker, nodeid);
         }
     }
 
+    /// Note that `worker` finished its current test (clears its footer line).
     pub fn item_finished(&mut self, worker: usize) {
         if let Some(f) = &mut self.footer {
             f.item_finished(worker);
         }
     }
 
+    /// Repaint the footer's elapsed timers between reports (tty only).
     pub fn tick(&mut self) {
         if let Some(f) = &mut self.footer {
             f.tick();
@@ -106,6 +114,7 @@ impl Progress {
         }
     }
 
+    /// Select the output style (dots/verbose/bar/json/…).
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
         if let Some(f) = &mut self.footer {
@@ -113,6 +122,7 @@ impl Progress {
         }
     }
 
+    /// Set the ANSI palette (color vs. plain) used for glyphs and the bar.
     pub fn set_palette(&mut self, palette: Palette) {
         self.palette = palette;
     }

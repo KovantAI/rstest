@@ -162,22 +162,21 @@ fn build_run_meta(
     }
 }
 
+/// The crate's main entry point for a single (non-watch) run: resolves the
+/// run configuration from `cli` + forwarded pytest `args`, dispatches to the
+/// worker pool (or the monorepo driver), runs post-run reports and gates
+/// (doctor, junit, lastfailed, duration-regression, cache push, report-json),
+/// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let args = args.to_vec();
     let start = Instant::now();
-    let started_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let started_epoch = crate::time::now_epoch_secs();
     // One uid per test run, shared by every worker (xdist's testrun_uid
     // contract). A monorepo child inherits the root's (passed explicitly on the
     // child's command); a top-level run generates one. Held as a typed value and
     // handed to workers via their environment — never process-global set_var.
     let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+        let nanos = crate::time::now_epoch_nanos();
         format!("{nanos:x}{:x}", std::process::id())
     });
     // Shared-cache backend: resolve the remote (flag or env) and, if asked,
@@ -280,15 +279,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         .unwrap_or_else(|| "load".into());
     // Validate once, up front: every run path (byte-exact, lazy, pool) shares
     // this name, so an invalid value must error the same way regardless of
-    // suite size, not slip through the lazy/small-suite path silently.
-    if !matches!(
-        dist_name.as_str(),
-        "load" | "loadfile" | "loadscope" | "loadgroup" | "each"
-    ) {
-        anyhow::bail!(
-            "unknown --dist mode: {dist_name} (use load|loadfile|loadscope|loadgroup|each)"
-        );
-    }
+    // suite size, not slip through the lazy/small-suite path silently. The name
+    // stays a string downstream (lazy/each checks); dispatch_run re-parses it to
+    // the enum via the same `FromStr`.
+    dist_name
+        .parse::<pool::Dist>()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
     // Flaky-aware reruns: when on, load the prior flaky set ONCE so the pool
     // can gate rerun eligibility on it. None = feature off (no gating).
@@ -518,11 +514,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 );
             }
             let seed = if v == "random" {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0)
-                    ^ u64::from(std::process::id())
+                crate::time::now_epoch_nanos() as u64 ^ u64::from(std::process::id())
             } else {
                 v.parse().map_err(|_| {
                     anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'")
@@ -970,18 +962,9 @@ fn dispatch_run(
             worker_env,
         )?
     } else {
-        let dist = match dist_name {
-            "load" => pool::Dist::Load,
-            "loadfile" => pool::Dist::Loadfile,
-            "loadscope" => pool::Dist::Loadscope,
-            "loadgroup" => pool::Dist::Loadgroup,
-            "each" => pool::Dist::Each,
-            other => {
-                anyhow::bail!(
-                    "unknown --dist mode: {other} (use load|loadfile|loadscope|loadgroup|each)"
-                )
-            }
-        };
+        let dist = dist_name
+            .parse::<pool::Dist>()
+            .map_err(|e| anyhow::anyhow!(e))?;
         if dist == pool::Dist::Each && reruns > 0 {
             anyhow::bail!(
                 "--reruns is not supported with --dist each (every worker runs the \
@@ -1377,10 +1360,8 @@ fn execute_monorepo(
         } else {
             root.join(out)
         };
-        let started_at_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs().saturating_sub(start.elapsed().as_secs()))
-            .unwrap_or(0);
+        let started_at_epoch =
+            crate::time::now_epoch_secs().saturating_sub(start.elapsed().as_secs());
         let run_meta = build_run_meta(start, merged, started_at_epoch, budget);
         if let Err(e) = mono::merge_reports(&report_parts, &run_meta, &out) {
             eprintln!("rstest: failed to write merged report: {e}");

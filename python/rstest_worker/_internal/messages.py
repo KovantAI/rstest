@@ -13,6 +13,8 @@ Mixed required/optional fields use the base-class + `total=False` pattern (rathe
 than `NotRequired`, which is stdlib only on 3.11+; the worker targets 3.10).
 """
 
+from __future__ import annotations
+
 from typing import Literal, TypedDict
 
 # ---- shared structs (mirror the Rust structs of the same name) -------------

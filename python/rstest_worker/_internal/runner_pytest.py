@@ -12,6 +12,8 @@ This module is the session entrypoint. The moving parts live alongside it:
   dispatch      - ItemDispatchPlugin / LazyDispatchPlugin (on-command running)
 """
 
+from __future__ import annotations
+
 import pytest
 
 from rstest_worker._internal import fixturecompat

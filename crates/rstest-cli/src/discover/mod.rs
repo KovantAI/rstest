@@ -8,8 +8,18 @@ mod probe;
 mod request;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
+
+/// Lock a best-effort cache mutex, recovering from poisoning instead of
+/// panicking. These mutexes guard only in-memory cache maps; if a thread
+/// panicked while holding one, the map may be stale but is never unsafe, and
+/// the discovery caches must never turn a poisoned lock into a run-killing
+/// panic (the "never fail the run on cache IO" contract).
+pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 use candidates::{discovery_candidates, python_version_arg, venv_python};
 use probe::{cached_probe, Probe};
@@ -95,16 +105,18 @@ where
                 "  {}: cannot import the rstest worker shim (is rstest installed in it?)",
                 cand.display()
             )),
-            Some(p) if request.is_some_and(|r| !matches(&p, r)) => rejected.push(format!(
-                "  {}: Python {}.{}.{} ({}) does not satisfy '{}'",
-                cand.display(),
-                p.version.0,
-                p.version.1,
-                p.version.2,
-                p.implementation,
-                request.unwrap(),
-            )),
-            Some(p) => return Ok(p.executable),
+            Some(p) => match request {
+                Some(r) if !matches(&p, r) => rejected.push(format!(
+                    "  {}: Python {}.{}.{} ({}) does not satisfy '{}'",
+                    cand.display(),
+                    p.version.0,
+                    p.version.1,
+                    p.version.2,
+                    p.implementation,
+                    r,
+                )),
+                _ => return Ok(p.executable),
+            },
         }
     }
     let hint = match request {

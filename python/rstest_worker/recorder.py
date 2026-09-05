@@ -9,6 +9,8 @@ The emitted `tests` map is keyed by nodeid with per-phase outcomes
 `--report-json` writes - so the two snapshots diff directly.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
