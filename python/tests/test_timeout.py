@@ -227,3 +227,63 @@ def test_sessionstart_no_guard_outside_worker(monkeypatch):
     original = session.config.cache.set
     p.pytest_sessionstart(session)
     assert session.config.cache.set is original
+
+
+# --- pytest_configure ------------------------------------------------------
+
+
+def _config(**option_kwargs):
+    """Duck-typed pytest config recording addinivalue_line + marker lines."""
+    markers = []
+    option = SimpleNamespace(**option_kwargs)
+    pluginmanager = SimpleNamespace(get_plugins=lambda: [], get_plugin=lambda name: None)
+    return SimpleNamespace(
+        option=option,
+        addinivalue_line=lambda kind, line: markers.append((kind, line)),
+        pluginmanager=pluginmanager,
+    ), markers
+
+
+def test_configure_registers_markers_and_neutralizes_dist(monkeypatch):
+    # Non-worker path (no RSTEST_WORKER_ID): dist/numprocesses neutralized and
+    # all four rstest markers registered, including timeout (stream.py:131).
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    p = _plugin(monkeypatch)
+    config, markers = _config(dist="loadscope", numprocesses=4, basetemp=None)
+    p.pytest_configure(config)
+
+    assert config.option.dist == "no"  # xdist kept inert
+    assert config.option.numprocesses is None  # not a worker -> disengaged
+    names = [line.split("(")[0].split(":")[0].strip() for _, line in markers]
+    assert names == ["serial", "flaky", "xdist_group", "timeout"]
+    assert p._xdist_node is None  # worker branch skipped
+
+
+def test_configure_worker_populates_workerinput(monkeypatch, tmp_path):
+    # Worker path: workerinput/workeroutput built, xdist env vars announced,
+    # per-worker basetemp derived, and the master-side node shim installed.
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw3")
+    monkeypatch.setenv("RSTEST_WORKER_COUNT", "5")
+    monkeypatch.setenv("RSTEST_RUN_UID", "run-abc")
+    monkeypatch.setenv("RSTEST_BASETEMP", str(tmp_path))
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_XDIST_WORKER_COUNT", raising=False)
+    p = _plugin(monkeypatch)
+    config, _ = _config(dist="no", numprocesses=None, basetemp=None)
+    p.pytest_configure(config)
+
+    assert config.option.numprocesses == 5  # worker count wired through
+    wi = config.workerinput
+    assert wi["workerid"] == "gw3"
+    assert wi["workercount"] == 5
+    assert wi["testrun_uid"] == "run-abc"
+    assert config.workeroutput == {}
+    import os
+
+    assert os.environ["PYTEST_XDIST_WORKER"] == "gw3"
+    assert os.environ["PYTEST_XDIST_WORKER_COUNT"] == "5"
+    # Per-worker tmp root: <basetemp>/<workerid>, parent created.
+    assert config.option.basetemp == tmp_path / "gw3"
+    # Master-side node shim installed for this worker.
+    assert p._xdist_node is not None
+    assert p._xdist_node.workerinput is wi

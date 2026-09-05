@@ -2877,20 +2877,35 @@ def gate_native_timeout(g, args, binary):
         "    assert True\n",
     )
     r = g.run("test_to.py", "-n", "2", "--timeout", "1", cwd=tp, env_extra={"PYTHONPATH": str(tp)})
-    check(
-        "timeout: slow test fails in-process with a traceback at the stuck line",
-        r.returncode == 1
-        and "2 failed, 1 passed" in r.stdout
-        and "test_to.py::test_slow" in r.stdout
-        and "exceeded --timeout (1s)" in r.stdout
-        and "time.sleep(5)" in r.stdout,  # traceback points at the blocked line
-        r.stdout[-500:],
-    )
-    check(
-        "timeout: @pytest.mark.timeout overrides the global value",
-        "exceeded --timeout (0.3s)" in r.stdout,
-        r.stdout[-500:],
-    )
+    # In-process interrupt of a blocked test needs SIGALRM firing INSIDE the
+    # stuck syscall — Unix-only. Windows has no equivalent, so native per-test
+    # --timeout is a no-op there (the --worker-timeout watchdog is the backstop,
+    # see gate_worker_timeout_watchdog). Assert the in-process behavior only
+    # where it can hold.
+    if not WINDOWS:
+        check(
+            "timeout: slow test fails in-process with a traceback at the stuck line",
+            r.returncode == 1
+            and "2 failed, 1 passed" in r.stdout
+            and "test_to.py::test_slow" in r.stdout
+            and "exceeded --timeout (1s)" in r.stdout
+            and "time.sleep(5)" in r.stdout,  # traceback points at the blocked line
+            r.stdout[-500:],
+        )
+        check(
+            "timeout: @pytest.mark.timeout overrides the global value",
+            "exceeded --timeout (0.3s)" in r.stdout,
+            r.stdout[-500:],
+        )
+    else:
+        # Windows: --timeout can't fire in-process, so the orchestrator warns
+        # the user once and points at the --worker-timeout backstop.
+        check(
+            "timeout: Windows warns --timeout is not enforced in-process",
+            "--timeout can't interrupt a blocked test in-process on Windows" in r.stderr
+            and "--worker-timeout" in r.stderr,
+            r.stderr[-500:],
+        )
     # A suite that finishes under the deadline is unaffected.
     g.write("toproj/test_ok.py", "def test_a(): assert True\ndef test_b(): assert True\n")
     r = g.run("test_ok.py", "-n", "2", "--timeout", "5", cwd=tp, env_extra={"PYTHONPATH": str(tp)})

@@ -333,6 +333,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         None
     };
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
+    warn_windows_timeout(
+        &mut std::io::stderr(),
+        cfg!(windows),
+        cli.timeout,
+        worker_timeout,
+    );
     let n = parse_numprocesses(&numprocesses)?;
     let passthrough = needs_passthrough_io(&args);
     // Honor `--reruns` in single-worker mode via a degenerate one-worker pool:
@@ -1462,6 +1468,28 @@ fn collect_lazy(
     }
 }
 
+/// Warn (once, to `w`) when `--timeout` is asked for on Windows: interrupting a
+/// blocked test in-process needs SIGALRM firing inside the stuck syscall, which
+/// Windows lacks, so the per-test deadline can't be enforced. Silent when the
+/// user already set `--worker-timeout` (they have an explicit hang backstop) or
+/// off Windows. Takes `is_windows` as a param (not `cfg!`) so both branches are
+/// exercised under coverage on any host.
+fn warn_windows_timeout(
+    w: &mut impl std::io::Write,
+    is_windows: bool,
+    timeout: Option<f64>,
+    worker_timeout: Option<u64>,
+) {
+    if is_windows && timeout.is_some() && worker_timeout.is_none() {
+        let _ = writeln!(
+            w,
+            "rstest: warning: --timeout can't interrupt a blocked test in-process on Windows \
+             (no SIGALRM); a test hung past the deadline is only caught by the coarser worker \
+             watchdog. Add --worker-timeout SECS for a hard per-worker cap."
+        );
+    }
+}
+
 fn parse_numprocesses(value: &str) -> Result<usize> {
     if value == "auto" {
         return Ok(auto_workers());
@@ -1577,7 +1605,7 @@ mod tests {
     use super::{
         build_run_meta, collect_lazy, head_to_none, merge_fixtures, merged_lastfailed,
         parse_numprocesses, quarantine_matcher, report_part_path, resolve_changed_base,
-        strip_verbatim, write_run_reports,
+        strip_verbatim, warn_windows_timeout, write_run_reports,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1615,6 +1643,30 @@ mod tests {
         assert_eq!(head_to_none("HEAD"), None);
         assert_eq!(head_to_none("origin/main"), Some("origin/main"));
         assert_eq!(head_to_none("HEAD~3"), Some("HEAD~3"));
+    }
+
+    fn timeout_warning(
+        is_windows: bool,
+        timeout: Option<f64>,
+        worker_timeout: Option<u64>,
+    ) -> String {
+        let mut buf = Vec::new();
+        warn_windows_timeout(&mut buf, is_windows, timeout, worker_timeout);
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn warn_windows_timeout_fires_only_when_unbacked_on_windows() {
+        // Windows + --timeout + no --worker-timeout: the one case that warns.
+        let msg = timeout_warning(true, Some(1.0), None);
+        assert!(msg.contains("can't interrupt a blocked test in-process on Windows"));
+        assert!(msg.contains("--worker-timeout"));
+        // Same platform, but an explicit --worker-timeout backstop => silent.
+        assert_eq!(timeout_warning(true, Some(1.0), Some(5)), "");
+        // No --timeout requested => nothing to warn about.
+        assert_eq!(timeout_warning(true, None, None), "");
+        // Off Windows: SIGALRM works, so no warning regardless of flags.
+        assert_eq!(timeout_warning(false, Some(1.0), None), "");
     }
 
     #[test]
