@@ -407,26 +407,19 @@ pub fn run_pool(
                         let keep = if skip_ids.is_empty() {
                             keep
                         } else {
-                            let run_idx: HashSet<u64> = (0..ids.len() as u64)
-                                .filter(|&i| keep.as_ref().is_none_or(|k| k.contains(&i)))
-                                .filter(|&i| !skip_ids.contains(&ids[i as usize]))
-                                .collect();
-                            for i in 0..ids.len() as u64 {
-                                let in_keep = keep.as_ref().is_none_or(|k| k.contains(&i));
-                                if in_keep && skip_ids.contains(&ids[i as usize]) {
-                                    cached_ids.push(ids[i as usize].clone());
-                                }
-                            }
-                            if !cached_ids.is_empty() {
+                            let (run_idx, mut cached) =
+                                partition_skip(&ids, keep.as_ref(), skip_ids);
+                            if !cached.is_empty() {
                                 eprintln!(
                                     "rstest: --incremental: {} of {} test(s) unchanged since \
                                      last green -> skipped (cached)",
-                                    cached_ids.len(),
+                                    cached.len(),
                                     ids.len()
                                 );
                                 // The progress total tracks only tests that run.
-                                prog.set_total(total_items.saturating_sub(cached_ids.len()));
+                                prog.set_total(total_items.saturating_sub(cached.len()));
                             }
+                            cached_ids.append(&mut cached);
                             Some(run_idx)
                         };
                         dispatch = Some(build_dispatch(
@@ -899,9 +892,67 @@ pub(crate) fn merge_statuses(statuses: &[i32]) -> i32 {
     0
 }
 
+/// Split collected indices into (run, cached) for `--incremental`: starting from
+/// `keep` (None = every index), deselect any index whose nodeid is in `skip_ids`
+/// and move it to the cached set instead. Cached nodeids are DEDUPLICATED —
+/// parametrized tests can share one nodeid across positions, and counting a
+/// nodeid once keeps the "N of M cached" message and progress total honest.
+fn partition_skip(
+    ids: &[String],
+    keep: Option<&HashSet<u64>>,
+    skip_ids: &HashSet<String>,
+) -> (HashSet<u64>, Vec<String>) {
+    let mut run_idx = HashSet::new();
+    let mut cached = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for i in 0..ids.len() as u64 {
+        if !keep.is_none_or(|k| k.contains(&i)) {
+            continue;
+        }
+        let id = ids[i as usize].as_str();
+        if skip_ids.contains(id) {
+            if seen.insert(id) {
+                cached.push(id.to_string());
+            }
+        } else {
+            run_idx.insert(i);
+        }
+    }
+    (run_idx, cached)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_skip_dedups_and_splits() {
+        // nodeid "a" appears at two positions; both are skippable and must
+        // collapse to a single cached entry, while "b" runs.
+        let ids = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ];
+        let skip: HashSet<String> = ["a".to_string(), "c".to_string()].into_iter().collect();
+        let (run, mut cached) = partition_skip(&ids, None, &skip);
+        assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
+        cached.sort();
+        assert_eq!(cached, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn partition_skip_respects_keep() {
+        // Under a shard `keep` of {0,1}, index 2 ("c") is out of scope entirely;
+        // "a" is skippable (cached), leaving only "b" to run.
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let skip: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let keep: HashSet<u64> = [0u64, 1].into_iter().collect();
+        let (run, cached) = partition_skip(&ids, Some(&keep), &skip);
+        assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
+        assert_eq!(cached, vec!["a".to_string()]);
+    }
 
     #[test]
     fn merge_status_rules() {

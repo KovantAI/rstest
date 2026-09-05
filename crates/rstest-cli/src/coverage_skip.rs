@@ -11,7 +11,7 @@
 //! the known gap shared with `--changed` (bust by deleting the cache file).
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,6 +33,18 @@ const CONFIG_FILES: [&str; 5] = [
     "setup.cfg",
     "tox.ini",
     ".coveragerc",
+];
+
+/// Directories never worth descending into when hunting for `conftest.py`:
+/// virtualenvs, VCS, caches. Keeps the walk bounded on real projects.
+const PRUNE_DIRS: [&str; 7] = [
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".rstest_cache",
+    ".tox",
 ];
 
 #[derive(Default, Serialize, Deserialize)]
@@ -62,7 +74,12 @@ pub struct Baseline {
 }
 
 /// Hash the current content of the project's config files (order-stable), so a
-/// change to any of them can bust the skip decision.
+/// change to any of them can bust the skip decision. `conftest.py` files are
+/// folded in the same way: they carry fixtures/hooks/addopts that change test
+/// behavior but frequently live OUTSIDE the coverage scope (e.g. `--cov=<pkg>`
+/// with `tests/conftest.py`), so per-file coverage hashing can't see a conftest
+/// edit. Folding every conftest under `scope` here means adding, editing, or
+/// removing one busts skipping wholesale — the same guard the config files get.
 pub fn config_fingerprint(scope: &Path) -> String {
     let mut h = Sha256::new();
     for name in CONFIG_FILES {
@@ -71,7 +88,48 @@ pub fn config_fingerprint(scope: &Path) -> String {
             h.update(sha.as_bytes());
         }
     }
+    let mut conftests = Vec::new();
+    collect_conftests(scope, &mut conftests);
+    conftests.sort();
+    for path in &conftests {
+        if let Some(sha) = current_sha256(path) {
+            let rel = path.strip_prefix(scope).unwrap_or(path);
+            h.update(rel.to_string_lossy().as_bytes());
+            h.update(sha.as_bytes());
+        }
+    }
     format!("{:x}", h.finalize())
+}
+
+/// Recursively collect every `conftest.py` under `scope`, pruning virtualenv /
+/// VCS / cache directories (and any dot-directory) so the walk stays bounded.
+fn collect_conftests(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || PRUNE_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            collect_conftests(&entry.path(), out);
+        } else if entry.file_name() == "conftest.py" {
+            out.push(entry.path());
+        }
+    }
+}
+
+/// Whether the pytest args request coverage this run (so covtool will refresh
+/// the coverage index). `--incremental` relies on the index advancing each run;
+/// without `--cov` the index is never rewritten, so a test whose dependency
+/// changed re-runs on every invocation until a coverage run refreshes it.
+pub fn coverage_requested(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--cov" || a.starts_with("--cov="))
 }
 
 /// The recorded baseline, but ONLY if the config fingerprint still matches — a
@@ -373,6 +431,39 @@ mod tests {
             vec!["t.py::test_a".to_string()]
         );
         assert!(new.files.contains_key("b.py"), "ran test's coverage kept");
+    }
+
+    #[test]
+    fn conftest_change_busts_config_fingerprint() {
+        // A conftest.py outside the coverage scope must still bust skipping:
+        // adding, editing, and removing one must each move the fingerprint.
+        let scope = std::env::temp_dir().join(format!("rstest-conftest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("tests")).unwrap();
+        let base = config_fingerprint(&scope);
+        std::fs::write(scope.join("tests/conftest.py"), b"import pytest\n").unwrap();
+        let added = config_fingerprint(&scope);
+        assert_ne!(base, added, "adding a nested conftest must bust");
+        std::fs::write(scope.join("tests/conftest.py"), b"import pytest  # edit\n").unwrap();
+        let edited = config_fingerprint(&scope);
+        assert_ne!(added, edited, "editing a conftest must bust");
+        std::fs::remove_file(scope.join("tests/conftest.py")).unwrap();
+        assert_eq!(
+            base,
+            config_fingerprint(&scope),
+            "removing it returns to base"
+        );
+        let _ = std::fs::remove_dir_all(&scope);
+    }
+
+    #[test]
+    fn coverage_requested_detects_cov_flag_only() {
+        assert!(coverage_requested(&["--cov=.".to_string()]));
+        assert!(coverage_requested(&["--cov".to_string()]));
+        assert!(!coverage_requested(&["-n".to_string(), "2".to_string()]));
+        // Coverage sub-options alone don't enable coverage collection.
+        assert!(!coverage_requested(&["--cov-report=".to_string()]));
+        assert!(!coverage_requested(&["--cov-context=test".to_string()]));
     }
 
     #[test]

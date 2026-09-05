@@ -612,17 +612,35 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         String::new()
     };
     let incremental_active = cli.incremental
+        && !since_green
         && dist_name == "load"
         && !passthrough
         && n >= 2
         && shard.is_none()
         && shuffle_seed.is_none()
         && !collect_lazy(cli, &settings, &dist_name, &args)?;
-    if cli.incremental && !incremental_active {
+    if cli.incremental && since_green {
+        // Both incremental modes select on the same run; --since-green already
+        // narrows to the changed subset, so dispatch-level skipping on top would
+        // account the cached passes against a partial suite. --since-green wins.
+        eprintln!(
+            "rstest: --incremental and --since-green are mutually exclusive; \
+             --since-green takes precedence this run"
+        );
+    } else if cli.incremental && !incremental_active {
         eprintln!(
             "rstest: --incremental needs the parallel pool with full collection and \
              --dist load (not -n 0/1, --dist each/affinity, --collect lazy, --shard, or \
              --shuffle); running everything this time"
+        );
+    }
+    // --incremental relies on the coverage index advancing every run; without
+    // --cov this run covtool never rewrites it, so a changed test re-runs on
+    // every invocation until a coverage run refreshes the index.
+    if incremental_active && !coverage_skip::coverage_requested(&args) {
+        eprintln!(
+            "rstest: --incremental without --cov: the coverage index won't be \
+             refreshed this run, so changed tests keep re-running until a --cov run"
         );
     }
     // Snapshot the index BEFORE the run: it drives the skip decision now, and

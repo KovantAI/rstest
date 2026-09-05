@@ -64,21 +64,18 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
 }
 
 /// A hash of the test environment that git can't see: the resolved interpreter
-/// (path + mtime + size) and the content of any dependency manifests under
-/// `scope`. `--changed`-style source selection is blind to an in-place
-/// dependency upgrade; folding this into the baseline makes such a change bust
-/// it (a full run re-establishes), instead of a sticky false green.
+/// (path + size) and the content of any dependency manifests under `scope`.
+/// `--changed`-style source selection is blind to an in-place dependency
+/// upgrade; folding this into the baseline makes such a change bust it (a full
+/// run re-establishes), instead of a sticky false green. Interpreter mtime is
+/// deliberately NOT hashed: a benign venv rebuild bumps mtime without changing
+/// the environment, and the lockfile content below is the real dependency
+/// signal — keying on mtime only produced spurious full runs.
 pub fn env_fingerprint(scope: &Path, python: &Path) -> String {
     let mut h = Sha256::new();
     h.update(python.to_string_lossy().as_bytes());
     if let Ok(md) = std::fs::metadata(python) {
         h.update(md.len().to_le_bytes());
-        if let Ok(mtime) = md.modified() {
-            let secs = mtime
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            h.update(secs.to_le_bytes());
-        }
     }
     for name in LOCKFILES {
         if let Ok(bytes) = std::fs::read(scope.join(name)) {
@@ -158,6 +155,19 @@ mod tests {
         let scope = tmp("empty");
         record_green(&scope, "", FP);
         assert_eq!(baseline(&scope, FP), None);
+    }
+
+    #[test]
+    fn env_fingerprint_ignores_interpreter_mtime() {
+        // Rewriting the interpreter with identical content (same size, new
+        // mtime) must NOT move the fingerprint — a venv rebuild is not an
+        // environment change.
+        let scope = tmp("mtime");
+        let py = scope.join("python");
+        std::fs::write(&py, b"#!fake\n").unwrap();
+        let before = env_fingerprint(&scope, &py);
+        std::fs::write(&py, b"#!fake\n").unwrap();
+        assert_eq!(before, env_fingerprint(&scope, &py));
     }
 
     #[test]
