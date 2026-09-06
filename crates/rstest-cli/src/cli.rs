@@ -80,6 +80,12 @@ pub struct Cli {
     #[arg(long = "try")]
     pub(crate) r#try: bool,
 
+    /// Verify the vendored pytest tree is byte-identical to what shipped
+    /// (rehash _vendor/ against the packaged vendor.lock). Run-less: prints a
+    /// report and exits 0 if intact, non-zero on any drift.
+    #[arg(long = "verify-vendor")]
+    pub(crate) verify_vendor: bool,
+
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
     /// (every test on every worker). [default: load]
@@ -343,9 +349,8 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     let mut argv = argv.into_iter().peekable();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
-            "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak" => {
-                own.push(arg)
-            }
+            "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak"
+            | "--verify-vendor" => own.push(arg),
             "--serve" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -569,6 +574,15 @@ mod tests {
         let (own, session) = split_args(v(&["--reruns=2", "--junitxml=o.xml", "-v"]));
         assert_eq!(own, v(&["rstest", "--reruns=2", "--junitxml=o.xml"]));
         assert_eq!(session, v(&["-v"]));
+    }
+
+    #[test]
+    fn split_owns_verify_vendor_flag() {
+        // Boolean run-less flag: rstest-owned, consumes no value, and does not
+        // leak into the pytest session args.
+        let (own, session) = split_args(v(&["--verify-vendor", "tests/", "-v"]));
+        assert_eq!(own, v(&["rstest", "--verify-vendor"]));
+        assert_eq!(session, v(&["tests/", "-v"]));
     }
 
     #[test]

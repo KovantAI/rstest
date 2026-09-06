@@ -345,7 +345,7 @@ vendored pytest 9.1.1: 84 files verified against vendor.lock
 Exit 0 when the tree matches the manifest, non-zero on any drift (each
 offending file is listed). The check is **offline** — it does not contact
 PyPI. Proving the vendored tree matches *upstream* pytest (not just what
-shipped) is a separate CI check; see
+shipped) is a separate maintainer/CI check (`vendor.yml` provenance job); see
 [Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).
 
 ### `--migrate-check`

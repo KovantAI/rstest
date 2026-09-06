@@ -3,6 +3,20 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.0.x releases and are listed here.
 
+## 0.5.0 — 2026-09-06
+
+- Incremental testing based on coverage: `--changed` now leans on the
+  recorded coverage index to select only the tests whose coverage touches
+  changed lines, falling back to the import graph on a cold cache.
+- Native timeout: per-test timeouts enforced by rstest directly, without
+  `pytest-timeout`, and honored under parallelism.
+- Native HTML report: an HTML report rendered by the orchestrator that
+  works with any worker count (`pytest-html` only supports `-n 1`).
+- Leak detection: fail a test that leaves open file descriptors behind.
+- Mutation testing server: experimental server that serves mutants for
+  mutation testing (Unix only).
+- Cache: refactored to fix corruption and consistency issues.
+
 ## 0.4.0 — 2026-08-31
 
 - Coverage overhaul: full pytest-cov parity under parallelism —

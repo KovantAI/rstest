@@ -412,6 +412,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // behavior is exactly pytest's.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = discover::resolve(&scope, cli.python.as_deref())?;
+    // Run-less: verify the vendored pytest tree against the packaged manifest.
+    if cli.verify_vendor {
+        return crate::vendor::run_verify(&python);
+    }
     // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
     if cli.r#try {
         return migrate::run_try(&python, &args);

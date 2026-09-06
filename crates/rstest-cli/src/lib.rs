@@ -19,6 +19,7 @@ mod select;
 mod serve;
 mod text;
 mod time;
+mod vendor;
 mod watch;
 
 use anyhow::Result;
