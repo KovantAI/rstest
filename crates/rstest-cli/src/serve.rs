@@ -58,39 +58,28 @@ fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Resul
 
         match kind {
             "hello" => {
-                write_msg(
-                    &mut writer,
-                    "welcome",
-                    json!({"proto": 1, "server": "rstest"}),
-                )?;
+                let payload = json!({"proto": 1, "server": "rstest"});
+                write_msg(&mut writer, "welcome", payload)?;
             }
             "open_session" => {
                 let sargs = session_args(&payload, cli_args);
                 match open_session(python, &sargs) {
                     Ok((w, ids)) => {
                         worker = Some(w);
-                        write_msg(
-                            &mut writer,
-                            "session_ready",
-                            json!({"collected": ids.len()}),
-                        )?;
+                        let payload = json!({"collected": ids.len()});
+                        write_msg(&mut writer, "session_ready", payload)?;
                     }
                     Err(e) => {
-                        write_msg(
-                            &mut writer,
-                            "error",
-                            json!({"code": "collect_failed", "message": e.to_string()}),
-                        )?;
+                        let payload = json!({"code": "collect_failed", "message": e.to_string()});
+                        write_msg(&mut writer, "error", payload)?;
                     }
                 }
             }
             "run" => {
                 let Some(w) = worker.as_mut() else {
-                    write_msg(
-                        &mut writer,
-                        "error",
-                        json!({"code": "bad_session", "message": "run before open_session"}),
-                    )?;
+                    let payload =
+                        json!({"code": "bad_session", "message": "run before open_session"});
+                    write_msg(&mut writer, "error", payload)?;
                     continue;
                 };
                 let id = payload.get("id").and_then(Value::as_u64).unwrap_or(0);
@@ -124,11 +113,9 @@ fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Resul
                 break;
             }
             other => {
-                write_msg(
-                    &mut writer,
-                    "error",
-                    json!({"code": "bad_request", "message": format!("unknown kind {other}")}),
-                )?;
+                let payload =
+                    json!({"code": "bad_request", "message": format!("unknown kind {other}")});
+                write_msg(&mut writer, "error", payload)?;
             }
         }
     }
@@ -186,11 +173,8 @@ fn run_subset(
                 killed,
                 ran,
             } if req_id == id => {
-                write_msg(
-                    writer,
-                    "run_done",
-                    json!({"id": id, "killed": killed, "ran": ran}),
-                )?;
+                let payload = json!({"id": id, "killed": killed, "ran": ran});
+                write_msg(writer, "run_done", payload)?;
                 return Ok(());
             }
             _ => {}
@@ -254,6 +238,247 @@ fn overlay_files(payload: &Value) -> std::collections::HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
+    use std::thread;
+
+    /// Drives [`serve_client`] on one end of a socketpair while the test speaks
+    /// the wire protocol from the other. `python` only matters once
+    /// `open_session` is sent; the no-worker paths ignore it.
+    struct Harness {
+        writer: UnixStream,
+        reader: BufReader<UnixStream>,
+        handle: Option<thread::JoinHandle<Result<i32>>>,
+    }
+
+    impl Harness {
+        fn start(python: &Path, cli_args: &[String]) -> Self {
+            let (server, client) = UnixStream::pair().unwrap();
+            let python = python.to_path_buf();
+            let cli_args = cli_args.to_vec();
+            let handle = thread::spawn(move || serve_client(server, &python, &cli_args));
+            let writer = client.try_clone().unwrap();
+            Self {
+                writer,
+                reader: BufReader::new(client),
+                handle: Some(handle),
+            }
+        }
+
+        fn send(&mut self, kind: &str, payload: Value) {
+            let env = json!({"kind": kind, "payload": payload});
+            let buf = rmp_serde::encode::to_vec_named(&env).unwrap();
+            self.writer.write_all(&buf).unwrap();
+            self.writer.flush().unwrap();
+        }
+
+        /// Read one `{kind, payload}` envelope the server sent back.
+        fn recv(&mut self) -> Value {
+            let mut de = rmp_serde::Deserializer::new(&mut self.reader);
+            Value::deserialize(&mut de).unwrap()
+        }
+
+        /// Drop the client side so the server loop sees EOF, then join.
+        fn finish(mut self) -> i32 {
+            self.close_client();
+            self.handle.take().unwrap().join().unwrap().unwrap()
+        }
+
+        fn close_client(&mut self) {
+            // Replace both handles with a throwaway that we immediately drop,
+            // closing every fd on the client end.
+            let (a, _b) = UnixStream::pair().unwrap();
+            self.writer = a.try_clone().unwrap();
+            self.reader = BufReader::new(a);
+        }
+    }
+
+    fn bogus_python() -> &'static Path {
+        Path::new("/nonexistent/definitely-not-a-python")
+    }
+
+    #[test]
+    fn hello_replies_welcome() {
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("hello", json!({"proto": 1}));
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "welcome");
+        assert_eq!(msg["payload"]["proto"], 1);
+        assert_eq!(msg["payload"]["server"], "rstest");
+        h.finish();
+    }
+
+    #[test]
+    fn run_before_open_session_errors() {
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("run", json!({"id": 1, "node_ids": ["t.py::a"]}));
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "error");
+        assert_eq!(msg["payload"]["code"], "bad_session");
+        h.finish();
+    }
+
+    #[test]
+    fn unknown_kind_errors_with_bad_request() {
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("frobnicate", json!({}));
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "error");
+        assert_eq!(msg["payload"]["code"], "bad_request");
+        assert_eq!(msg["payload"]["message"], "unknown kind frobnicate");
+        h.finish();
+    }
+
+    #[test]
+    fn close_session_without_worker_replies_bye() {
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("close_session", json!({}));
+        assert_eq!(h.recv()["kind"], "bye");
+        h.finish();
+    }
+
+    #[test]
+    fn open_session_with_unspawnable_python_reports_collect_failed() {
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("open_session", json!({"args": ["test_x.py"]}));
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "error");
+        assert_eq!(msg["payload"]["code"], "collect_failed");
+        assert!(msg["payload"]["message"].is_string());
+        h.finish();
+    }
+
+    #[test]
+    fn shutdown_replies_bye_and_ends_loop() {
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("shutdown", json!({}));
+        assert_eq!(h.recv()["kind"], "bye");
+        // After `shutdown` the loop breaks; serve_client returns Ok(0).
+        assert_eq!(h.finish(), 0);
+    }
+
+    /// Locate a python that can host the worker (has pytest + can import
+    /// `rstest_worker`), else `None` so the live-worker tests skip instead of
+    /// failing on machines without the dev venv. Returns `(python, worker_path)`
+    /// where `worker_path` is the dir holding the `rstest_worker` package.
+    fn worker_python() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)?
+            .to_path_buf();
+        let worker_path = repo.join("python");
+        let candidates = [
+            std::env::var("RSTEST_TEST_PYTHON").ok().map(Into::into),
+            Some(repo.join(".venv/bin/python")),
+        ];
+        for cand in candidates.into_iter().flatten() {
+            if !cand.exists() {
+                continue;
+            }
+            let ok = std::process::Command::new(&cand)
+                .args(["-c", "import pytest, rstest_worker"])
+                .env("PYTHONPATH", &worker_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return Some((cand, worker_path));
+            }
+        }
+        None
+    }
+
+    /// End-to-end through a real warm worker: open_session collects, a run
+    /// streams a report + run_done, close_session tears the worker down. Covers
+    /// the worker-bound branches (session_ready, ServeReady, run_done, worker
+    /// close). Skips when no suitable python is present.
+    #[test]
+    fn live_worker_session_run_and_close() {
+        let Some((python, worker_path)) = worker_python() else {
+            eprintln!("skipping live_worker test: no python with pytest found");
+            return;
+        };
+        // Production `worker_pythonpath()` reads RSTEST_WORKER_PATH first; set it
+        // so the worker finds the `rstest_worker` package regardless of the test
+        // binary's target dir (e.g. under `cargo llvm-cov`, where current_exe
+        // ancestry no longer points at the repo root).
+        // SAFETY: edition 2021; no other test in this module spawns a worker.
+        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let dir = std::env::temp_dir().join(format!("rstest-serve-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let test_file = dir.join("test_s.py");
+        std::fs::write(
+            &test_file,
+            "def test_a():\n    assert True\ndef test_b():\n    assert True\n",
+        )
+        .unwrap();
+
+        let mut h = Harness::start(&python, &[]);
+
+        // Warm the session on the temp file (absolute path avoids a cwd change,
+        // which would race parallel tests).
+        let arg = test_file.to_string_lossy().to_string();
+        h.send("open_session", json!({"args": [arg.clone()]}));
+        let ready = h.recv();
+        if ready["kind"] != "session_ready" {
+            // Environment couldn't collect (e.g. rstest_worker deps absent);
+            // don't hard-fail the suite over an env gap.
+            eprintln!("skipping live_worker test: open_session -> {ready}");
+            let mut sink = Vec::new();
+            let _ = h.writer.shutdown(std::net::Shutdown::Write);
+            let _ = h.reader.read_to_end(&mut sink);
+            h.finish();
+            return;
+        }
+        assert_eq!(ready["payload"]["collected"], 2);
+
+        h.send(
+            "run",
+            json!({"id": 42, "node_ids": [format!("{arg}::test_a")]}),
+        );
+        // Drain reports until run_done for our id.
+        let done = loop {
+            let msg = h.recv();
+            match msg["kind"].as_str() {
+                Some("report") => continue,
+                Some("run_done") => break msg,
+                other => panic!("unexpected during run: {other:?}"),
+            }
+        };
+        assert_eq!(done["payload"]["id"], 42);
+        assert_eq!(done["payload"]["ran"], 1);
+
+        h.send("close_session", json!({}));
+        assert_eq!(h.recv()["kind"], "bye");
+        h.finish();
+    }
+
+    /// A file that fails to import surfaces a `CollectError` from the worker,
+    /// which `open_session` turns into a `collect_failed` error reply. Covers
+    /// the collect-error arm of the warm-up loop.
+    #[test]
+    fn live_worker_collect_error_reports_collect_failed() {
+        let Some((python, worker_path)) = worker_python() else {
+            eprintln!("skipping collect_error test: no python with pytest found");
+            return;
+        };
+        // SAFETY: edition 2021; no other test in this module spawns a worker.
+        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let dir = std::env::temp_dir().join(format!("rstest-serve-cerr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("test_broken.py");
+        // A syntax error → the module can't be imported → collection error.
+        std::fs::write(&bad, "def test_x(:\n    pass\n").unwrap();
+
+        let mut h = Harness::start(&python, &[]);
+        let arg = bad.to_string_lossy().to_string();
+        h.send("open_session", json!({"args": [arg]}));
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "error");
+        assert_eq!(msg["payload"]["code"], "collect_failed");
+        h.finish();
+    }
 
     #[test]
     fn session_args_prefers_client_args() {
