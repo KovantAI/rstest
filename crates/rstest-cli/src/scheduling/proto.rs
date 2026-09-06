@@ -51,12 +51,14 @@ pub enum Command {
     /// Serve mode: collect the suite once, keep the session warm, then await
     /// `ServeRun` requests. The worker is a fork template — it imports the
     /// framework, snapshots module state, collects for the id list, and waits.
+    #[cfg_attr(not(unix), allow(dead_code))] // only the unix-only serve module builds these
     RunServeSession {
         args: Vec<String>,
     },
     /// Serve mode: run a nodeid subset for one client request. `overlay` maps a
     /// file path to replacement contents (mutation carrier; empty = run current
     /// disk). `req_id` correlates the streamed ServeReport/ServeRunDone.
+    #[cfg_attr(not(unix), allow(dead_code))] // only the unix-only serve module builds these
     ServeRun {
         req_id: u64,
         ids: Vec<String>,
@@ -244,9 +246,11 @@ pub enum Event {
     /// Serve mode: collection finished, session warm. `nodeids` is the full
     /// collected id set the client may target.
     ServeReady {
+        #[cfg_attr(not(unix), allow(dead_code))] // read only by the unix-only serve module
         nodeids: Vec<String>,
     },
     /// Serve mode: a per-phase report for run `req_id` (the normal Report body).
+    #[cfg_attr(not(unix), allow(dead_code))] // read only by the unix-only serve module
     ServeReport {
         req_id: u64,
         report: Report,
@@ -254,6 +258,7 @@ pub enum Event {
     /// Serve mode: run `req_id` finished. `killed` = any covering test
     /// failed/errored; `ran` = tests actually executed (< requested when
     /// stop_on_first_fail bailed).
+    #[cfg_attr(not(unix), allow(dead_code))] // read only by the unix-only serve module
     ServeRunDone {
         req_id: u64,
         killed: bool,
