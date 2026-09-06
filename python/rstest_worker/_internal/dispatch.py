@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import tempfile
 from typing import Any
 
 import pytest
@@ -364,13 +365,34 @@ class ServeDispatchPlugin(StreamPlugin):
         pytest.main(args, plugins=[_ServeChildPlugin(self._conn, req_id)])
 
 
+def _atomic_write(rel: str, data: bytes) -> None:
+    """Replace `rel`'s contents with `data` via a same-directory temp file +
+    os.replace, so `rel` is never observed half-written — a crash mid-write
+    leaves either the old bytes or the new bytes, never a truncated source file.
+    (The same tmp+rename discipline cache.rs uses; see the #50 corruption fix.)"""
+    d = os.path.dirname(rel) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".rstest-overlay-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, rel)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def _apply_overlay(overlay: dict) -> list:
     """Write overlay contents over the named files, returning restore records
     (path, original-bytes-or-None) so the originals can be put back.
 
-    Atomic: if any write fails partway through a multi-file overlay, every file
-    already touched (including the partially-written one) is rolled back before
-    the error propagates, so a failed apply never leaves a mutation on disk."""
+    Atomic per file (temp + os.replace: an interrupted mutant leaves the source
+    intact, never truncated) AND across the batch: if any write fails partway
+    through a multi-file overlay, every file already touched is rolled back
+    before the error propagates, so a failed apply never leaves a mutation on
+    disk."""
     saved: list = []
     try:
         for rel, content in overlay.items():
@@ -381,8 +403,7 @@ def _apply_overlay(overlay: dict) -> list:
                 original = None  # file didn't exist -> a brand-new-file mutant
             # Record BEFORE writing so a partial write is reverted too.
             saved.append((rel, original))
-            with open(rel, "w", encoding="utf-8") as fh:
-                fh.write(content)
+            _atomic_write(rel, content.encode("utf-8"))
     except OSError:
         _restore_overlay(saved)
         raise
@@ -395,5 +416,7 @@ def _restore_overlay(saved: list) -> None:
             with contextlib.suppress(OSError):
                 os.unlink(rel)
         else:
-            with open(rel, "wb") as fh:
-                fh.write(original)
+            # Atomic restore too: a crash while putting the original back must
+            # not corrupt the user's source (the mutation carrier is their real
+            # working tree).
+            _atomic_write(rel, original)

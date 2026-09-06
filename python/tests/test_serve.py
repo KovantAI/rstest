@@ -126,6 +126,31 @@ def test_apply_overlay_rolls_back_on_mid_batch_failure(tmp_path, monkeypatch):
     assert (tmp_path / "a.py").read_text() == "ORIG"  # rolled back, not "MUTATED"
 
 
+def test_overlay_writes_atomically_and_leaves_no_temp_files(tmp_path, monkeypatch):
+    # The overlay must land via tmp + os.replace (never a truncating in-place
+    # open), so a crash mid-write can't corrupt the user's real source. Verify
+    # the discipline's observable trace: the temp sidecar is always cleaned up,
+    # on both the success and the rollback paths.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.py").write_text("ORIG")
+
+    def temp_sidecars():
+        return [p.name for p in tmp_path.iterdir() if p.name.startswith(".rstest-overlay-")]
+
+    saved = _apply_overlay({"a.py": "MUT"})
+    assert (tmp_path / "a.py").read_text() == "MUT"
+    assert temp_sidecars() == []  # replace consumed the tmp; nothing leaked
+    _restore_overlay(saved)
+    assert (tmp_path / "a.py").read_text() == "ORIG"
+    assert temp_sidecars() == []
+
+    # Rollback path (a later write fails) must not strand a temp file either.
+    (tmp_path / "d").mkdir()
+    with pytest.raises(OSError):
+        _apply_overlay({"a.py": "X", "d": "boom"})
+    assert temp_sidecars() == []
+
+
 # ── _ServeChildPlugin: counting + terminal event ───────────────────────────
 
 

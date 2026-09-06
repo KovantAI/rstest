@@ -34,19 +34,82 @@ pub fn serve(cli: &Cli, args: &[String], sock: &Path) -> Result<i32> {
         .with_context(|| format!("binding serve socket {}", sock.display()))?;
     eprintln!("rstest: serve listening on {}", sock.display());
 
+    warn_unsupported_flags(cli);
+
     let scope = std::env::current_dir()?;
     let python = discover::resolve(&scope, cli.python.as_deref())?;
 
     // Phase 1: serve exactly one client, then exit.
     let (stream, _) = listener.accept().context("accepting serve client")?;
-    let result = serve_client(stream, &python, args);
+    let result = serve_client(stream, &python, args, cli.timeout);
     let _ = std::fs::remove_file(sock);
     result
 }
 
-fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Result<i32> {
+/// Serve mode reads only `--python` and `--timeout`; every other rstest flag is
+/// inert here (there is no pool, no reporting, no scheduling). Warn rather than
+/// silently drop them, so a caller who passes e.g. `--junitxml` isn't left
+/// wondering why nothing was written.
+fn warn_unsupported_flags(cli: &Cli) {
+    let mut ignored: Vec<&str> = Vec::new();
+    if cli.numprocesses.is_some() {
+        ignored.push("-n/--numprocesses");
+    }
+    if cli.dist.is_some() {
+        ignored.push("--dist");
+    }
+    if cli.shard.is_some() {
+        ignored.push("--shard");
+    }
+    if cli.shuffle.is_some() {
+        ignored.push("--shuffle");
+    }
+    if cli.collect.is_some() {
+        ignored.push("--collect");
+    }
+    if cli.junitxml.is_some() {
+        ignored.push("--junitxml");
+    }
+    if cli.html.is_some() {
+        ignored.push("--html");
+    }
+    if cli.report_json.is_some() {
+        ignored.push("--report-json");
+    }
+    if cli.reruns.is_some() {
+        ignored.push("--reruns");
+    }
+    if cli.watch {
+        ignored.push("--watch");
+    }
+    if cli.doctor || cli.doctor_json.is_some() || cli.doctor_md.is_some() {
+        ignored.push("--doctor");
+    }
+    if cli.incremental || cli.since_green {
+        ignored.push("--incremental/--since-green");
+    }
+    if cli.changed.is_some() {
+        ignored.push("--changed");
+    }
+    if cli.worker_timeout.is_some() {
+        ignored.push("--worker-timeout");
+    }
+    if !ignored.is_empty() {
+        eprintln!(
+            "rstest: --serve ignores these flags (no effect in daemon mode): {}",
+            ignored.join(", ")
+        );
+    }
+}
+
+fn serve_client(
+    stream: UnixStream,
+    python: &Path,
+    cli_args: &[String],
+    timeout: Option<f64>,
+) -> Result<i32> {
     let mut worker: Option<worker::Worker> = None;
-    let result = serve_session(stream, python, cli_args, &mut worker);
+    let result = serve_session(stream, python, cli_args, timeout, &mut worker);
     // However the session ended — client EOF, a write error, or a worker that
     // died mid-run (the `?` paths below) — never leak the warm worker: a
     // std::process::Child is NOT killed when dropped.
@@ -58,6 +121,7 @@ fn serve_session(
     stream: UnixStream,
     python: &Path,
     cli_args: &[String],
+    timeout: Option<f64>,
     worker: &mut Option<worker::Worker>,
 ) -> Result<i32> {
     let mut writer = stream.try_clone().context("cloning serve stream")?;
@@ -75,8 +139,13 @@ fn serve_session(
                 write_msg(&mut writer, "welcome", payload)?;
             }
             "open_session" => {
+                // A re-open without an intervening close_session must not leak
+                // the prior warm worker: Worker wraps a std::process::Child,
+                // which is NOT killed on drop, so overwriting `*worker` would
+                // orphan a live pytest interpreter. Reap it first.
+                drain_worker(worker);
                 let sargs = session_args(&payload, cli_args);
-                match open_session(python, &sargs) {
+                match open_session(python, &sargs, timeout) {
                     Ok((w, ids)) => {
                         *worker = Some(w);
                         let payload = json!({"collected": ids.len()});
@@ -134,12 +203,22 @@ fn drain_worker(worker: &mut Option<worker::Worker>) {
 }
 
 /// Spawn a warm serve worker: collect once, return it + the collected nodeids.
-fn open_session(python: &Path, args: &[String]) -> Result<(worker::Worker, Vec<String>)> {
+///
+/// `timeout` (from `--timeout`) is armed per-test inside each forked child, so a
+/// mutant that spins a Python-level infinite loop fails on the deadline instead
+/// of wedging the daemon. A blocked C extension that never returns to the
+/// interpreter is out of reach of this in-process guard (the pool's
+/// `--worker-timeout` watchdog has no analogue in serve mode yet).
+fn open_session(
+    python: &Path,
+    args: &[String],
+    timeout: Option<f64>,
+) -> Result<(worker::Worker, Vec<String>)> {
     let env = worker::WorkerEnv {
         run_uid: std::env::var("RSTEST_RUN_UID")
             .unwrap_or_else(|_| format!("serve-{}", std::process::id())),
         doctor: false,
-        timeout: None,
+        timeout,
         send_ids: true,
         leakcheck: false,
     };
@@ -267,7 +346,7 @@ mod tests {
             let (server, client) = UnixStream::pair().unwrap();
             let python = python.to_path_buf();
             let cli_args = cli_args.to_vec();
-            let handle = thread::spawn(move || serve_client(server, &python, &cli_args));
+            let handle = thread::spawn(move || serve_client(server, &python, &cli_args, None));
             let writer = client.try_clone().unwrap();
             Self {
                 writer,
@@ -617,7 +696,7 @@ mod tests {
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
         let mut worker: Option<worker::Worker> = None;
-        let rc = serve_session(server, &python, &[], &mut worker).unwrap();
+        let rc = serve_session(server, &python, &[], None, &mut worker).unwrap();
         assert_eq!(rc, 0);
 
         let Some(w) = worker.as_ref() else {
