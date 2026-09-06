@@ -577,6 +577,15 @@ mod tests {
     }
 
     #[test]
+    fn split_owns_verify_vendor_flag() {
+        // Boolean run-less flag: rstest-owned, consumes no value, and does not
+        // leak into the pytest session args.
+        let (own, session) = split_args(v(&["--verify-vendor", "tests/", "-v"]));
+        assert_eq!(own, v(&["rstest", "--verify-vendor"]));
+        assert_eq!(session, v(&["tests/", "-v"]));
+    }
+
+    #[test]
     fn split_owns_doctor_md() {
         let (own, session) = split_args(v(&["--doctor-md", "d.md", "--doctor-md=e.md", "-v"]));
         assert_eq!(
