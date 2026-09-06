@@ -315,8 +315,14 @@ class ServeDispatchPlugin(StreamPlugin):
         stop = payload.get("stop_on_first_fail", False)
 
         # Apply the overlay to disk (sequential runs, so this is safe); the
-        # originals are restored after the child exits.
-        saved = _apply_overlay(overlay)
+        # originals are restored after the child exits. A failed apply rolls
+        # itself back — report the run as finished so the client never blocks.
+        # An un-writable mutation is an infra error, not a caught mutant.
+        try:
+            saved = _apply_overlay(overlay)
+        except OSError:
+            self._conn.send("serve_run_done", {"req_id": req_id, "killed": False, "ran": 0})
+            return
         try:
             pid = os.fork()
             if pid == 0:  # child
@@ -328,7 +334,14 @@ class ServeDispatchPlugin(StreamPlugin):
                 finally:
                     os._exit(code)
             else:  # parent: wait for the child to finish this run, then reap
-                os.waitpid(pid, 0)
+                _, status = os.waitpid(pid, 0)
+                # The child sends serve_run_done from pytest_sessionfinish, then
+                # exits 0. If it died first (crash, signal, or the except-branch
+                # os._exit(1)), no terminal event reached the client and the
+                # orchestrator would block forever. A mutant that crashes the
+                # interpreter is still killed, so emit the terminal event here.
+                if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
+                    self._conn.send("serve_run_done", {"req_id": req_id, "killed": True, "ran": 0})
         finally:
             _restore_overlay(saved)
 
@@ -353,17 +366,26 @@ class ServeDispatchPlugin(StreamPlugin):
 
 def _apply_overlay(overlay: dict) -> list:
     """Write overlay contents over the named files, returning restore records
-    (path, original-bytes-or-None) so the originals can be put back."""
+    (path, original-bytes-or-None) so the originals can be put back.
+
+    Atomic: if any write fails partway through a multi-file overlay, every file
+    already touched (including the partially-written one) is rolled back before
+    the error propagates, so a failed apply never leaves a mutation on disk."""
     saved: list = []
-    for rel, content in overlay.items():
-        try:
-            with open(rel, "rb") as fh:
-                original = fh.read()
-        except OSError:
-            original = None  # file didn't exist -> a brand-new-file mutant
-        saved.append((rel, original))
-        with open(rel, "w", encoding="utf-8") as fh:
-            fh.write(content)
+    try:
+        for rel, content in overlay.items():
+            try:
+                with open(rel, "rb") as fh:
+                    original = fh.read()
+            except OSError:
+                original = None  # file didn't exist -> a brand-new-file mutant
+            # Record BEFORE writing so a partial write is reverted too.
+            saved.append((rel, original))
+            with open(rel, "w", encoding="utf-8") as fh:
+                fh.write(content)
+    except OSError:
+        _restore_overlay(saved)
+        raise
     return saved
 
 

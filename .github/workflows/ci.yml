@@ -168,12 +168,19 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
+      # The serve.rs live-worker tests need a python that can host the worker
+      # (pytest for the probe, msgpack for the worker's protocol). Without it
+      # they skip, leaving the warm-worker branches uncovered.
+      - name: install worker deps for live serve tests
+        run: pip install pytest msgpack
+
       # Two separate instrumented runs so unit and e2e coverage upload under
       # distinct flags. `show-env` exports the RUSTFLAGS / LLVM_PROFILE_FILE the
       # build and binary inherit, so gate.py's subprocess runs land in the
       # profile set too. `clean` between runs keeps the two profile sets apart.
       - name: collect rust unit coverage
         run: |
+          export RSTEST_TEST_PYTHON="$(command -v python)"
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
           cargo test --release

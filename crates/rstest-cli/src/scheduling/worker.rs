@@ -177,6 +177,12 @@ impl Worker {
         Ok(())
     }
 
+    /// The worker process id (test-only: assert teardown actually killed it).
+    #[cfg(test)]
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Hard-kill the worker process (hang watchdog). The reader thread
     /// sees EOF and the normal crash machinery takes over.
     pub fn kill(&mut self) {

@@ -404,6 +404,11 @@ class StreamPlugin:
 
     def pytest_collectreport(self, report):
         if report.failed:
+            # Serve mode: a collection/import failure IS the mutant being caught
+            # (spec: killed = any test failed OR errored). Without this, a mutant
+            # that breaks import reports killed=False and reads as a survivor.
+            if self._serve_req_id is not None:
+                self._serve_failed = True
             self._conn.send(
                 "collect_error",
                 {"path": report.nodeid, "longrepr": report.longreprtext},
@@ -412,6 +417,10 @@ class StreamPlugin:
             self._conn.send("collect_skip", {"path": report.nodeid})
 
     def pytest_internalerror(self, excrepr):
+        # Same reasoning as pytest_collectreport: an internal error during a
+        # serve run means the mutant errored the session -> killed.
+        if self._serve_req_id is not None:
+            self._serve_failed = True
         self._conn.send(
             "collect_error",
             {"path": "<internalerror>", "longrepr": str(excrepr)},

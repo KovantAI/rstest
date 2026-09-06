@@ -2983,11 +2983,17 @@ done, outcomes = run(7, ["test_s.py::test_a", "test_s.py::test_b"])
 clean1, _ = run(10, ["test_m.py::test_m"])
 mutated, _ = run(11, ["test_m.py::test_m"], {"mod.py": "def val():\n    return 999\n"})
 clean2, _ = run(12, ["test_m.py::test_m"])
+# Import-breaking mutant: mod.py no longer parses, so collecting test_m errors.
+# Spec: killed = failed OR errored, so this must report killed (ran 0), then
+# revert so the next run is clean again.
+broke, _ = run(13, ["test_m.py::test_m"], {"mod.py": "def val(:\n"})
+clean3, _ = run(14, ["test_m.py::test_m"])
 send("shutdown", {}); bye = recv()
 print(json.dumps({
     "welcome": welcome["kind"], "collected": ready["payload"].get("collected"),
     "done": done, "bye": bye["kind"], "outcomes": outcomes,
     "iso": {"clean1": clean1["killed"], "mutated": mutated["killed"], "clean2": clean2["killed"]},
+    "broke": {"killed": broke["killed"], "ran": broke["ran"], "clean3": clean3["killed"]},
 }))
 """
 
@@ -3056,6 +3062,12 @@ def gate_serve(g, args, binary):
             and iso.get("mutated") is True
             and iso.get("clean2") is False,
             str(iso),
+        )
+        broke = out.get("broke") or {}
+        check(
+            "serve: an import-breaking mutant is killed (errored counts) and reverts",
+            broke.get("killed") is True and broke.get("ran") == 0 and broke.get("clean3") is False,
+            str(broke),
         )
         check(
             "serve: the overlay is reverted on disk after the run",

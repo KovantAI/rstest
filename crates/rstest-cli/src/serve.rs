@@ -45,10 +45,23 @@ pub fn serve(cli: &Cli, args: &[String], sock: &Path) -> Result<i32> {
 }
 
 fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Result<i32> {
+    let mut worker: Option<worker::Worker> = None;
+    let result = serve_session(stream, python, cli_args, &mut worker);
+    // However the session ended — client EOF, a write error, or a worker that
+    // died mid-run (the `?` paths below) — never leak the warm worker: a
+    // std::process::Child is NOT killed when dropped.
+    drain_worker(&mut worker);
+    result
+}
+
+fn serve_session(
+    stream: UnixStream,
+    python: &Path,
+    cli_args: &[String],
+    worker: &mut Option<worker::Worker>,
+) -> Result<i32> {
     let mut writer = stream.try_clone().context("cloning serve stream")?;
     let mut reader = rmp_serde::Deserializer::new(BufReader::new(stream));
-
-    let mut worker: Option<worker::Worker> = None;
 
     // Each iteration reads one `{kind, payload}` envelope; a decode error / EOF
     // (client disconnected) ends the loop.
@@ -65,7 +78,7 @@ fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Resul
                 let sargs = session_args(&payload, cli_args);
                 match open_session(python, &sargs) {
                     Ok((w, ids)) => {
-                        worker = Some(w);
+                        *worker = Some(w);
                         let payload = json!({"collected": ids.len()});
                         write_msg(&mut writer, "session_ready", payload)?;
                     }
@@ -92,23 +105,11 @@ fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Resul
                 run_subset(w, &mut writer, id, ids, overlay, stop)?;
             }
             "close_session" => {
-                if let Some(mut w) = worker.take() {
-                    // The serve plugin consumes a Shutdown command as session-end,
-                    // so a graceful shutdown would leave the worker's outer loop
-                    // blocked; SIGKILL + reap tears it down cleanly.
-                    w.kill();
-                    let _ = w.wait();
-                }
+                drain_worker(worker);
                 write_msg(&mut writer, "bye", json!({}))?;
             }
             "shutdown" => {
-                if let Some(mut w) = worker.take() {
-                    // The serve plugin consumes a Shutdown command as session-end,
-                    // so a graceful shutdown would leave the worker's outer loop
-                    // blocked; SIGKILL + reap tears it down cleanly.
-                    w.kill();
-                    let _ = w.wait();
-                }
+                drain_worker(worker);
                 write_msg(&mut writer, "bye", json!({}))?;
                 break;
             }
@@ -120,6 +121,16 @@ fn serve_client(stream: UnixStream, python: &Path, cli_args: &[String]) -> Resul
         }
     }
     Ok(0)
+}
+
+/// Tear down the warm worker if one is live. The serve plugin consumes a
+/// Shutdown command as session-end, so a graceful shutdown would leave the
+/// worker's outer loop blocked; SIGKILL + reap tears it down cleanly.
+fn drain_worker(worker: &mut Option<worker::Worker>) {
+    if let Some(mut w) = worker.take() {
+        w.kill();
+        let _ = w.wait();
+    }
 }
 
 /// Spawn a warm serve worker: collect once, return it + the collected nodeids.
@@ -525,5 +536,142 @@ mod tests {
         assert_eq!(back["kind"], "run_done");
         assert_eq!(back["payload"]["killed"], true);
         assert_eq!(back["payload"]["ran"], 2);
+    }
+
+    /// Drive the public `serve()` entry point over a real Unix socket: it binds,
+    /// resolves the interpreter, accepts one client, serves the protocol, and
+    /// removes the socket on exit. Uses `--python` so `discover::resolve` is
+    /// deterministic; skips when no python is present.
+    #[test]
+    fn serve_daemon_serves_one_client_and_cleans_up() {
+        use clap::Parser as _;
+        let Some((python, _)) = worker_python() else {
+            eprintln!("skipping serve daemon test: no python found");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("rstest-serve-daemon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("d.sock");
+
+        let cli = Cli::parse_from(["rstest", "--python", &python.to_string_lossy()]);
+        let sock_srv = sock.clone();
+        let handle = thread::spawn(move || serve(&cli, &[], &sock_srv));
+
+        // Wait (bounded) for the daemon to bind, then speak the protocol.
+        let mut stream = None;
+        for _ in 0..500 {
+            if let Ok(s) = UnixStream::connect(&sock) {
+                stream = Some(s);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut stream = stream.expect("serve daemon never accepted a connection");
+        let mut de = rmp_serde::Deserializer::new(BufReader::new(stream.try_clone().unwrap()));
+
+        let hello = json!({"kind": "hello", "payload": {}});
+        stream
+            .write_all(&rmp_serde::encode::to_vec_named(&hello).unwrap())
+            .unwrap();
+        stream.flush().unwrap();
+        assert_eq!(Value::deserialize(&mut de).unwrap()["kind"], "welcome");
+
+        let shutdown = json!({"kind": "shutdown", "payload": {}});
+        stream
+            .write_all(&rmp_serde::encode::to_vec_named(&shutdown).unwrap())
+            .unwrap();
+        stream.flush().unwrap();
+        assert_eq!(Value::deserialize(&mut de).unwrap()["kind"], "bye");
+
+        assert_eq!(handle.join().unwrap().unwrap(), 0);
+        assert!(!sock.exists()); // serve() unlinks the socket on exit
+    }
+
+    /// A client that disconnects mid-session (EOF, no shutdown/close) must not
+    /// leak the warm worker: `serve_session` leaves it for the caller, and
+    /// `serve_client`'s unconditional `drain_worker` kills + reaps it. Proven
+    /// by watching the worker pid disappear. Skips when no python is present.
+    #[test]
+    fn worker_is_killed_when_client_disconnects() {
+        let Some((python, worker_path)) = worker_python() else {
+            eprintln!("skipping disconnect test: no python with pytest found");
+            return;
+        };
+        // SAFETY: edition 2021; no other test in this module spawns a worker.
+        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let dir = std::env::temp_dir().join(format!("rstest-serve-disc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let test_file = dir.join("test_s.py");
+        std::fs::write(&test_file, "def test_a():\n    assert True\n").unwrap();
+
+        // Preload one open_session command, then half-close the write end so the
+        // session loop sees EOF right after warming the worker.
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let arg = test_file.to_string_lossy().to_string();
+        let open = json!({"kind": "open_session", "payload": {"args": [arg]}});
+        client
+            .write_all(&rmp_serde::encode::to_vec_named(&open).unwrap())
+            .unwrap();
+        client.flush().unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut worker: Option<worker::Worker> = None;
+        let rc = serve_session(server, &python, &[], &mut worker).unwrap();
+        assert_eq!(rc, 0);
+
+        let Some(w) = worker.as_ref() else {
+            eprintln!("skipping disconnect test: worker never collected");
+            return;
+        };
+        // serve_session itself must NOT drain — the guaranteed teardown is the
+        // caller's job, so a leak-free path holds regardless of how it exits.
+        let pid = w.id();
+        assert!(
+            unsafe { libc::kill(pid as i32, 0) } == 0,
+            "worker should be alive pre-drain"
+        );
+
+        drain_worker(&mut worker);
+        assert!(worker.is_none());
+        // ESRCH: the process is gone (killed and reaped), not orphaned.
+        assert!(
+            unsafe { libc::kill(pid as i32, 0) } != 0,
+            "worker pid {pid} still alive after drain -> leaked"
+        );
+    }
+
+    /// `shutdown` after a warm session must tear the worker down (kill + reap)
+    /// and end the loop. Covers the worker-bound shutdown arm; skips when no
+    /// suitable python is present.
+    #[test]
+    fn live_worker_shutdown_tears_down_worker() {
+        let Some((python, worker_path)) = worker_python() else {
+            eprintln!("skipping shutdown test: no python with pytest found");
+            return;
+        };
+        // SAFETY: edition 2021; no other test in this module spawns a worker.
+        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let dir = std::env::temp_dir().join(format!("rstest-serve-shut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let test_file = dir.join("test_s.py");
+        std::fs::write(&test_file, "def test_a():\n    assert True\n").unwrap();
+
+        let mut h = Harness::start(&python, &[]);
+        let arg = test_file.to_string_lossy().to_string();
+        h.send("open_session", json!({"args": [arg]}));
+        let ready = h.recv();
+        if ready["kind"] != "session_ready" {
+            eprintln!("skipping shutdown test: open_session -> {ready}");
+            let mut sink = Vec::new();
+            let _ = h.writer.shutdown(std::net::Shutdown::Write);
+            let _ = h.reader.read_to_end(&mut sink);
+            h.finish();
+            return;
+        }
+
+        h.send("shutdown", json!({}));
+        assert_eq!(h.recv()["kind"], "bye");
+        // `shutdown` breaks the loop, so serve_client returns Ok(0).
+        assert_eq!(h.finish(), 0);
     }
 }

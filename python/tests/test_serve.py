@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from rstest_worker._internal import dispatch
 from rstest_worker._internal.dispatch import (
     ServeDispatchPlugin,
@@ -111,6 +113,19 @@ def test_restore_new_file_tolerates_already_gone(tmp_path, monkeypatch):
     _restore_overlay(saved)  # contextlib.suppress(OSError) -> no raise
 
 
+def test_apply_overlay_rolls_back_on_mid_batch_failure(tmp_path, monkeypatch):
+    # If a later write in the batch fails, files already written must be
+    # reverted (not left mutated on disk) before the error propagates.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.py").write_text("ORIG")
+    (tmp_path / "d").mkdir()  # opening a directory path for write raises OSError
+
+    with pytest.raises(OSError):
+        _apply_overlay({"a.py": "MUTATED", "d": "boom"})  # dict order: a.py, then d
+
+    assert (tmp_path / "a.py").read_text() == "ORIG"  # rolled back, not "MUTATED"
+
+
 # ── _ServeChildPlugin: counting + terminal event ───────────────────────────
 
 
@@ -209,9 +224,13 @@ def test_forked_run_applies_and_restores_overlay(monkeypatch):
     )
     monkeypatch.setattr(dispatch, "_restore_overlay", lambda s: calls.append(("restore", s)))
     monkeypatch.setattr(os, "fork", lambda: 4321)  # parent branch
-    monkeypatch.setattr(os, "waitpid", lambda pid, flags: calls.append(("waitpid", pid)))
+    # status 0 == child exited cleanly (it sent serve_run_done itself).
+    monkeypatch.setattr(
+        os, "waitpid", lambda pid, flags: calls.append(("waitpid", pid)) or (pid, 0)
+    )
 
-    plugin = ServeDispatchPlugin(FakeConn())
+    conn = FakeConn()
+    plugin = ServeDispatchPlugin(conn)
     plugin._forked_run({"req_id": 1, "ids": ["t.py::a"], "overlay": {"m.py": "x"}})
 
     assert calls == [
@@ -219,6 +238,8 @@ def test_forked_run_applies_and_restores_overlay(monkeypatch):
         ("waitpid", 4321),
         ("restore", ["token"]),
     ]
+    # Clean child exit -> the parent must NOT emit a duplicate terminal event.
+    assert conn.sent == []
 
 
 def test_forked_run_restores_even_if_fork_raises(monkeypatch):
@@ -236,3 +257,246 @@ def test_forked_run_restores_even_if_fork_raises(monkeypatch):
     with contextlib.suppress(OSError):
         plugin._forked_run({"req_id": 1, "ids": [], "overlay": {"m.py": "x"}})
     assert calls == ["restored"]
+
+
+def test_forked_run_parent_emits_run_done_when_child_dies(monkeypatch):
+    # Child that crashed before sending serve_run_done (nonzero exit / signal):
+    # the parent must emit a terminal event so the client never blocks, and a
+    # crashed mutant counts as killed.
+    monkeypatch.setattr(dispatch, "_apply_overlay", lambda ov: [])
+    monkeypatch.setattr(dispatch, "_restore_overlay", lambda s: None)
+    monkeypatch.setattr(os, "fork", lambda: 4321)  # parent branch
+    monkeypatch.setattr(os, "waitpid", lambda pid, flags: (pid, 1 << 8))  # exit code 1
+
+    conn = FakeConn()
+    plugin = ServeDispatchPlugin(conn)
+    plugin._forked_run({"req_id": 77, "ids": ["t.py::a"], "overlay": {}})
+
+    assert conn.sent == [("serve_run_done", {"req_id": 77, "killed": True, "ran": 0})]
+
+
+def test_forked_run_parent_emits_run_done_when_child_signaled(monkeypatch):
+    # A child killed by a signal (e.g. a segfaulting C-extension mutant): status
+    # has no WIFEXITED bit, so it's abnormal -> parent emits killed.
+    monkeypatch.setattr(dispatch, "_apply_overlay", lambda ov: [])
+    monkeypatch.setattr(dispatch, "_restore_overlay", lambda s: None)
+    monkeypatch.setattr(os, "fork", lambda: 4321)
+    monkeypatch.setattr(os, "waitpid", lambda pid, flags: (pid, 9))  # killed by SIGKILL
+
+    conn = FakeConn()
+    plugin = ServeDispatchPlugin(conn)
+    plugin._forked_run({"req_id": 3, "ids": [], "overlay": {}})
+
+    assert conn.sent == [("serve_run_done", {"req_id": 3, "killed": True, "ran": 0})]
+
+
+def test_forked_run_reports_when_overlay_apply_fails(monkeypatch):
+    # An overlay that can't be written (rolled back inside _apply_overlay) must
+    # not fork or block the client: report the run finished, killed=False (infra
+    # error, not a caught mutant).
+    def boom(_overlay):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(dispatch, "_apply_overlay", boom)
+    forked: list[int] = []
+    monkeypatch.setattr(os, "fork", lambda: forked.append(1))
+
+    conn = FakeConn()
+    plugin = ServeDispatchPlugin(conn)
+    plugin._forked_run({"req_id": 9, "ids": ["t.py::a"], "overlay": {"m.py": "x"}})
+
+    assert conn.sent == [("serve_run_done", {"req_id": 9, "killed": False, "ran": 0})]
+    assert forked == []  # never forked when the overlay couldn't be applied
+
+
+# ── collection / import failure counts as killed (spec: killed = failed OR
+#    errored) ──────────────────────────────────────────────────────────────
+
+
+def mk_collectreport(*, failed: bool, skipped: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        nodeid="mod.py",
+        failed=failed,
+        skipped=skipped,
+        longreprtext="ImportError: boom",
+    )
+
+
+def test_child_collect_error_marks_run_killed():
+    # A mutant that breaks import fails collection; the child's serve_run_done
+    # must report killed=True even though no test call ever ran.
+    conn = FakeConn()
+    child = _ServeChildPlugin(conn, req_id=8)
+    child.pytest_collectreport(mk_collectreport(failed=True))
+    child.pytest_sessionfinish(session=None, exitstatus=2)
+
+    assert ("collect_error", {"path": "mod.py", "longrepr": "ImportError: boom"}) in conn.sent
+    assert conn.sent[-1] == ("serve_run_done", {"req_id": 8, "killed": True, "ran": 0})
+
+
+def test_child_internalerror_marks_run_killed():
+    conn = FakeConn()
+    child = _ServeChildPlugin(conn, req_id=4)
+    child.pytest_internalerror("boom")
+    child.pytest_sessionfinish(session=None, exitstatus=3)
+
+    assert conn.sent[-1] == ("serve_run_done", {"req_id": 4, "killed": True, "ran": 0})
+
+
+def test_collect_skip_does_not_mark_killed():
+    # A skipped collector (importorskip) is NOT a kill.
+    conn = FakeConn()
+    child = _ServeChildPlugin(conn, req_id=1)
+    child.pytest_collectreport(mk_collectreport(failed=False, skipped=True))
+    child.pytest_sessionfinish(session=None, exitstatus=0)
+
+    assert conn.sent[-1] == ("serve_run_done", {"req_id": 1, "killed": False, "ran": 0})
+
+
+# ── pytest_collection: framework baseline snapshot ─────────────────────────
+
+
+def test_collection_snapshots_framework_baseline():
+    # The wrapper hook records sys.modules before test modules are imported,
+    # then yields to the real collection and passes its result through.
+    plugin = ServeDispatchPlugin(FakeConn())
+    gen = plugin.pytest_collection(session=SimpleNamespace())
+    assert next(gen) is None  # wrapper yields to the inner hook
+    assert isinstance(plugin._baseline, set) and "sys" in plugin._baseline
+    with pytest.raises(StopIteration) as stop:
+        gen.send("collected")  # resume; wrapper returns the inner result
+    assert stop.value.value == "collected"
+
+
+# ── _child_run: module reset + subset session ──────────────────────────────
+
+
+class _Exit(BaseException):
+    """Stand-in for the process-ending os._exit so a test can observe its code
+    instead of the interpreter vanishing."""
+
+    def __init__(self, code: int) -> None:
+        self.code = code
+
+
+def test_child_run_resets_modules_and_runs_requested_ids(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        pytest, "main", lambda args, plugins: captured.update(args=args, plugins=plugins) or 0
+    )
+    plugin = ServeDispatchPlugin(FakeConn())
+    plugin._baseline = set(sys.modules)
+    # A module imported *after* the baseline must be dropped so the child
+    # re-imports it fresh (seeing the overlay).
+    monkeypatch.setitem(sys.modules, "_serve_fake_sut", SimpleNamespace())
+
+    plugin._child_run(req_id=9, ids=["t.py::a", "t.py::b"], stop=False)
+
+    assert "_serve_fake_sut" not in sys.modules  # reset dropped it
+    assert captured["args"][:2] == ["t.py::a", "t.py::b"]
+    assert "-p" in captured["args"] and "no:cacheprovider" in captured["args"]
+    assert "-x" not in captured["args"]
+    child = captured["plugins"][0]
+    assert isinstance(child, _ServeChildPlugin) and child._serve_req_id == 9
+
+
+def test_child_run_stop_prepends_dash_x(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        pytest, "main", lambda args, plugins: captured.setdefault("args", args) or 0
+    )
+    plugin = ServeDispatchPlugin(FakeConn())
+    plugin._baseline = set(sys.modules)
+
+    plugin._child_run(req_id=1, ids=["t.py::a"], stop=True)
+
+    assert captured["args"][0] == "-x"  # stop_on_first_fail bails after first fail
+
+
+# ── _forked_run: the child (pid == 0) branch ───────────────────────────────
+
+
+def test_forked_run_child_branch_exits_zero_on_success(monkeypatch):
+    monkeypatch.setattr(dispatch, "_apply_overlay", lambda ov: ["saved"])
+    monkeypatch.setattr(dispatch, "_restore_overlay", lambda s: None)
+    monkeypatch.setattr(os, "fork", lambda: 0)  # child branch
+    monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(_Exit(code)))
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        ServeDispatchPlugin, "_child_run", lambda self, r, i, s: seen.update(r=r, i=i, s=s)
+    )
+
+    plugin = ServeDispatchPlugin(FakeConn())
+    with pytest.raises(_Exit) as ei:
+        plugin._forked_run(
+            {"req_id": 5, "ids": ["t.py::a"], "overlay": {}, "stop_on_first_fail": False}
+        )
+    assert ei.value.code == 0
+    assert seen == {"r": 5, "i": ["t.py::a"], "s": False}
+
+
+def test_forked_run_child_branch_exits_one_when_run_raises(monkeypatch):
+    monkeypatch.setattr(dispatch, "_apply_overlay", lambda ov: [])
+    monkeypatch.setattr(dispatch, "_restore_overlay", lambda s: None)
+    monkeypatch.setattr(os, "fork", lambda: 0)  # child branch
+    monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(_Exit(code)))
+
+    def boom(self, r, i, s):
+        raise RuntimeError("child session blew up")
+
+    monkeypatch.setattr(ServeDispatchPlugin, "_child_run", boom)
+
+    plugin = ServeDispatchPlugin(FakeConn())
+    with pytest.raises(_Exit) as ei:
+        plugin._forked_run({"req_id": 1, "ids": [], "overlay": {}})
+    assert ei.value.code == 1  # BaseException in child -> nonzero exit
+
+
+# ── runner_pytest / __main__ wiring ────────────────────────────────────────
+
+
+def test_run_serve_session_runs_pytest_with_serve_plugin(monkeypatch):
+    from rstest_worker._internal import runner_pytest
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        runner_pytest.pytest,
+        "main",
+        lambda args, plugins: captured.update(args=args, plugins=plugins) or 0,
+    )
+    rc = runner_pytest.run_serve_session(["t.py"], FakeConn())
+    assert rc == 0
+    assert captured["args"] == ["t.py"]
+    assert isinstance(captured["plugins"][0], ServeDispatchPlugin)
+
+
+class _MainConn:
+    """A conn shaped for __main__._serve: yields queued commands, records sends."""
+
+    def __init__(self, cmds: list[dict[str, Any]]) -> None:
+        self._cmds = cmds
+        self.sent: list[tuple[str, Any]] = []
+
+    def commands(self):
+        return iter(self._cmds)
+
+    def send(self, kind: str, payload: Any) -> None:
+        self.sent.append((kind, payload))
+
+
+def test_serve_loop_dispatches_run_serve_session(monkeypatch):
+    from rstest_worker import __main__ as main_mod
+
+    monkeypatch.setattr(
+        main_mod.runner_pytest,
+        "run_serve_session",
+        lambda args, conn: 7 if args == ["t.py"] else -1,
+    )
+    conn = _MainConn(
+        [
+            {"kind": "run_serve_session", "payload": {"args": ["t.py"]}},
+            {"kind": "shutdown", "payload": {}},
+        ]
+    )
+    main_mod._serve(conn)
+    assert ("done", {"exitstatus": 7}) in conn.sent
