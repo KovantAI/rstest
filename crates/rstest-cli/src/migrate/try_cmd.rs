@@ -177,3 +177,23 @@ pub fn run_try(python: &Path, args: &[String]) -> Result<i32> {
     }
     Ok(if identical { 0 } else { 1 })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_secs;
+
+    #[test]
+    fn fmt_secs_sub_minute_is_one_decimal_seconds() {
+        assert_eq!(fmt_secs(0.0), "0.0s");
+        assert_eq!(fmt_secs(5.2), "5.2s");
+        assert_eq!(fmt_secs(59.9), "59.9s");
+    }
+
+    #[test]
+    fn fmt_secs_minute_and_over_is_zero_padded_minutes_seconds() {
+        // Exactly a minute -> the seconds field is zero-padded to two digits.
+        assert_eq!(fmt_secs(60.0), "1m00s");
+        assert_eq!(fmt_secs(90.0), "1m30s");
+        assert_eq!(fmt_secs(125.0), "2m05s");
+    }
+}

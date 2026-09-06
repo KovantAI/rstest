@@ -331,11 +331,11 @@ requirement.
 
 ### `--verify-vendor`
 
-Prove the vendored pytest tree shipped in your installed rstest is intact.
-rstest ships an unmodified copy of pytest inside its worker package; this
-rehashes every file under `_vendor/` and compares it to the packaged manifest
-(`vendor.lock`), catching accidental edits, corruption, or a partial install.
-Run-less — it verifies and exits without running your suite.
+Prove the vendored pytest tree in your installed rstest is intact. rstest ships
+an unmodified copy of pytest inside its worker package; this rehashes every
+file under `_vendor/` and compares it to the packaged manifest (`vendor.lock`),
+catching an accidentally-edited, corrupted, or partial install. Run-less — it
+verifies and exits without running your suite.
 
 ```console
 $ rstest --verify-vendor
@@ -346,7 +346,7 @@ Exit 0 when the tree matches the manifest, non-zero on any drift (each
 offending file is listed). The check is **offline** — it does not contact
 PyPI. Proving the vendored tree matches *upstream* pytest (not just what
 shipped) is a separate maintainer/CI check (`vendor.yml` provenance job); see
-[`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md).
+[Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).
 
 ### `--migrate-check`
 
