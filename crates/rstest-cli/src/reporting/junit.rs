@@ -99,10 +99,25 @@ fn split_nodeid(nodeid: &str) -> (String, String) {
 }
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\t' | '\n' | '\r' => out.push(c),
+            // Control bytes < 0x20 (NUL, \x0B, \x1B from ANSI-colored capture,
+            // ...) are illegal in XML 1.0 even as numeric char refs, so strict
+            // CI parsers reject the whole file. pytest (junit_family=xunit2)
+            // replaces them with a visible `#xNN` token; do the same.
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "#x{:02X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -112,6 +127,14 @@ mod tests {
     #[test]
     fn escapes_xml_metacharacters() {
         assert_eq!(esc(r#"a<b & "c">"#), "a&lt;b &amp; &quot;c&quot;&gt;");
+    }
+
+    #[test]
+    fn strips_illegal_control_bytes() {
+        // NUL, \x0B, \x1B (ANSI ESC) are illegal in XML 1.0 even as char refs;
+        // rendered as pytest's visible #xNN token. \t \n \r pass through.
+        assert_eq!(esc("a\x00b\x0Bc\x1Bd"), "a#x00b#x0Bc#x1Bd");
+        assert_eq!(esc("a\tb\nc\rd"), "a\tb\nc\rd");
     }
 
     #[test]

@@ -104,12 +104,13 @@ impl Run {
                 .push((r.duration, r.when.clone(), r.nodeid.clone()));
         }
         if r.outcome == "failed" {
-            self.failures.push((
-                worker,
-                r.nodeid.clone(),
-                r.longrepr.clone().unwrap_or_default(),
-                r.sections.clone(),
-            ));
+            // Cap at the source: junit/html embed `failure_text()`, which reads
+            // this copy — an uncapped copy would let a multi-MB traceback
+            // (pandas scale) land unbounded in those artifacts.
+            let mut repr = r.longrepr.clone().unwrap_or_default();
+            crate::text::truncate_on_boundary(&mut repr, 20_000);
+            self.failures
+                .push((worker, r.nodeid.clone(), repr, r.sections.clone()));
         }
         let entry = self.tests.entry(r.nodeid).or_default();
         if let Some(w) = worker {
@@ -711,6 +712,17 @@ mod tests {
         // A later phase without a lineno must not clobber the recorded one.
         run.record(None, report("a.py::t", "call", "passed"));
         assert_eq!(run.tests()["a.py::t"].lineno, Some(11));
+    }
+
+    #[test]
+    fn failure_text_is_truncated_at_source() {
+        // junit/html embed failure_text(); a multi-MB traceback must be capped
+        // there, not just on the report-json (entry.longrepr) path.
+        let mut run = Run::default();
+        let mut r = report("a.py::big", "call", "failed");
+        r.longrepr = Some("x".repeat(50_000));
+        run.record(None, r);
+        assert_eq!(run.failure_text("a.py::big").unwrap().len(), 20_000);
     }
 
     #[test]
