@@ -101,6 +101,38 @@ pub fn config_fingerprint(scope: &Path) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// What to do with one directory entry while hunting for `conftest.py`.
+enum EntryAction {
+    /// Ignore it (unreadable type, pruned/dot dir, or an unrelated file).
+    Skip,
+    /// A directory worth recursing into.
+    Descend,
+    /// A `conftest.py` to collect.
+    Collect,
+}
+
+/// Classify one entry from its `file_type()` result and name. Pure over its
+/// inputs (no filesystem access) so the unreadable-`file_type` arm is testable:
+/// an `Err` — which only happens when the FS returns `DT_UNKNOWN` and the
+/// follow-up `lstat` fails, unreachable on APFS/ext4 — is simply skipped.
+fn classify_entry(ft: std::io::Result<std::fs::FileType>, name: &std::ffi::OsStr) -> EntryAction {
+    let Ok(ft) = ft else {
+        return EntryAction::Skip;
+    };
+    if ft.is_dir() {
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || PRUNE_DIRS.contains(&name.as_ref()) {
+            EntryAction::Skip
+        } else {
+            EntryAction::Descend
+        }
+    } else if name == "conftest.py" {
+        EntryAction::Collect
+    } else {
+        EntryAction::Skip
+    }
+}
+
 /// Recursively collect every `conftest.py` under `scope`, pruning virtualenv /
 /// VCS / cache directories (and any dot-directory) so the walk stays bounded.
 fn collect_conftests(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -108,18 +140,10 @@ fn collect_conftests(dir: &Path, out: &mut Vec<PathBuf>) {
         return;
     };
     for entry in rd.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_dir() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') || PRUNE_DIRS.contains(&name.as_ref()) {
-                continue;
-            }
-            collect_conftests(&entry.path(), out);
-        } else if entry.file_name() == "conftest.py" {
-            out.push(entry.path());
+        match classify_entry(entry.file_type(), &entry.file_name()) {
+            EntryAction::Descend => collect_conftests(&entry.path(), out),
+            EntryAction::Collect => out.push(entry.path()),
+            EntryAction::Skip => {}
         }
     }
 }
@@ -464,6 +488,61 @@ mod tests {
         // Coverage sub-options alone don't enable coverage collection.
         assert!(!coverage_requested(&["--cov-report=".to_string()]));
         assert!(!coverage_requested(&["--cov-context=test".to_string()]));
+    }
+
+    #[test]
+    fn classify_entry_skips_on_file_type_error() {
+        // Unreadable file_type (DT_UNKNOWN + failed lstat) must be skipped, not
+        // collected or descended into — the arm no real FS reaches in-process.
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            classify_entry(Err(err), std::ffi::OsStr::new("conftest.py")),
+            EntryAction::Skip
+        ));
+    }
+
+    #[test]
+    fn config_file_change_busts_config_fingerprint() {
+        // A tracked config file's presence and content must fold into the
+        // fingerprint (the CONFIG_FILES loop body).
+        let scope = std::env::temp_dir().join(format!("rstest-cfgfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(&scope).unwrap();
+        let empty = config_fingerprint(&scope);
+        std::fs::write(scope.join("pyproject.toml"), b"[tool.pytest]\n").unwrap();
+        let added = config_fingerprint(&scope);
+        assert_ne!(empty, added, "adding pyproject.toml must bust");
+        std::fs::write(scope.join("pyproject.toml"), b"[tool.pytest]  # edit\n").unwrap();
+        assert_ne!(added, config_fingerprint(&scope), "editing it must bust");
+        let _ = std::fs::remove_dir_all(&scope);
+    }
+
+    #[test]
+    fn config_fingerprint_on_missing_scope_is_stable() {
+        // Nonexistent scope: read_dir fails (collect_conftests returns early) and
+        // no config file hashes → the empty-hash fingerprint, computed twice equal.
+        let scope = std::env::temp_dir().join(format!("rstest-nodir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        assert!(!scope.exists());
+        assert_eq!(config_fingerprint(&scope), config_fingerprint(&scope));
+    }
+
+    #[test]
+    fn test_file_hashes_hashes_existing_files_only() {
+        // An existing test file is hashed once; a nonexistent one is omitted.
+        let dir = std::env::temp_dir().join(format!("rstest-tfh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("t_real.py");
+        std::fs::write(&real, b"def test_x(): pass\n").unwrap();
+        let real_id = format!("{}::test_x", real.to_string_lossy());
+        let green: HashSet<String> = [real_id.clone(), "does_not_exist.py::test_y".to_string()]
+            .into_iter()
+            .collect();
+        let hashes = test_file_hashes(&green);
+        assert!(hashes.contains_key(real.to_string_lossy().as_ref()));
+        assert!(!hashes.contains_key("does_not_exist.py"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
