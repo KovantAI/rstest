@@ -3055,6 +3055,12 @@ print(json.dumps({
 
 def gate_serve(g, args, binary):
     print("== serve daemon (--serve) ==")
+    if WINDOWS:
+        # --serve is a Unix-domain-socket daemon (std::os::unix::net); the binary
+        # bails "--serve is only supported on Unix" and Windows Python has no
+        # socket.AF_UNIX. Nothing to exercise here.
+        print("  skip  serve: Unix-only feature")
+        return
     sp = g.tmp / "serveproj"
     g.write(
         "serveproj/test_s.py",
