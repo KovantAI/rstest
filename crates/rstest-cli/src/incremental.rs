@@ -189,4 +189,13 @@ mod tests {
             "editing lock changes fp"
         );
     }
+
+    #[test]
+    fn head_sha_reads_a_commit_in_this_repo() {
+        // The test process runs inside the rstest git checkout, so `git rev-parse
+        // HEAD` succeeds: a non-empty 40-char lowercase-hex sha.
+        let sha = head_sha().expect("HEAD sha inside the repo");
+        assert_eq!(sha.len(), 40, "sha={sha}");
+        assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()), "sha={sha}");
+    }
 }

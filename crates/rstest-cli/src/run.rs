@@ -479,7 +479,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         String::new()
     };
     let mut effective_changed = resolve_changed_base(cli)?;
-    if since_green && effective_changed.is_none() {
+    if since_green {
+        // --since-green owns the diff base: its last-green baseline drives
+        // selection, OVERRIDING the "HEAD" base that --changed-strict would
+        // otherwise imply (changed_strict is a gating modifier here, not a base;
+        // an explicit --changed is already excluded by `since_green`). No
+        // baseline yet -> a full run to establish one.
         match incremental::baseline(&std::env::current_dir()?, &env_fp) {
             Some(sha) => {
                 eprintln!(
@@ -488,10 +493,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 );
                 effective_changed = Some(sha);
             }
-            None => eprintln!(
-                "rstest: --since-green: no prior green run recorded; \
-                 running everything to establish the baseline"
-            ),
+            None => {
+                eprintln!(
+                    "rstest: --since-green: no prior green run recorded; \
+                     running everything to establish the baseline"
+                );
+                effective_changed = None;
+            }
         }
     }
     if let Some(rev) = &effective_changed {
@@ -524,10 +532,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                     if let Some(h) = &head {
                         incremental::record_green(&cwd, h, &env_fp);
                     }
-                    std::process::exit(0);
                 }
-                // Strict gating needs to DISTINGUISH "ran nothing" from
-                // "everything passed": pytest's nothing-collected code.
+                // Strict gating still wins on the exit code: it needs to
+                // DISTINGUISH "ran nothing" from "everything passed" (pytest's
+                // nothing-collected code), even under --since-green.
                 std::process::exit(if cli.changed_strict { 5 } else { 0 });
             }
             select::Selection::Tests(tests) => {

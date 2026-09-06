@@ -556,4 +556,94 @@ mod tests {
         // A config change (different fingerprint) disables skipping.
         assert!(load(&scope, "cfg-B").green.is_empty());
     }
+
+    #[test]
+    fn test_file_hashes_dedups_shared_test_file() {
+        // Two green nodeids in ONE test file: the file is hashed exactly once
+        // (the `contains_key` short-circuit), not re-read per nodeid.
+        let dir = std::env::temp_dir().join(format!("rstest-tfh-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tf = dir.join("t_shared.py");
+        std::fs::write(&tf, b"def test_x(): pass\ndef test_y(): pass\n").unwrap();
+        let rel = tf.to_string_lossy().to_string();
+        let green: HashSet<String> = [format!("{rel}::test_x"), format!("{rel}::test_y")]
+            .into_iter()
+            .collect();
+        let hashes = test_file_hashes(&green);
+        // One distinct file -> one entry, regardless of the two nodeids.
+        assert_eq!(hashes.len(), 1);
+        assert!(hashes.contains_key(rel.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skippable_empty_green_baseline_skips_nothing() {
+        // No recorded green set -> the early return: nothing is skippable even
+        // when the index and hashes would otherwise match.
+        let idx = index(&[("mod.py", "H", &[(1, &["t.py::test_a"])])]);
+        let empty = Baseline::default();
+        assert!(skippable(&idx, &empty, stub("H", "TF")).is_empty());
+    }
+
+    #[test]
+    fn skippable_now_hashes_live_files() {
+        // Wire [`skippable`] to the real working tree via absolute paths (so it
+        // is cwd-independent): a green test whose covered file + own file are
+        // byte-identical to the index/baseline hashes is skippable.
+        let dir = std::env::temp_dir().join(format!("rstest-skipnow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let modf = dir.join("mod.py");
+        let testf = dir.join("t.py");
+        std::fs::write(&modf, b"x = 1\n").unwrap();
+        std::fs::write(&testf, b"def test_a(): pass\n").unwrap();
+        let modrel = modf.to_string_lossy().to_string();
+        let testrel = testf.to_string_lossy().to_string();
+        let id = format!("{testrel}::test_a");
+        let mod_hash = current_sha256(&modf).unwrap();
+        let test_hash = current_sha256(&testf).unwrap();
+        let idx = index(&[(modrel.as_str(), mod_hash.as_str(), &[(1, &[id.as_str()])])]);
+        let green: HashSet<String> = [id.clone()].into_iter().collect();
+        let baseline = Baseline {
+            green,
+            test_file_hashes: [(testrel, test_hash)].into_iter().collect(),
+        };
+        assert!(skippable_now(&idx, &baseline).contains(&id));
+        // Editing the covered file busts it.
+        std::fs::write(&modf, b"x = 2\n").unwrap();
+        assert!(skippable_now(&idx, &baseline).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_conftests_prunes_and_descends() {
+        // Real filesystem so classify_entry sees genuine dir/file FileTypes:
+        // a conftest at root and in a nested source dir is collected; one under
+        // a pruned dir (.venv) and a dot dir is not.
+        let root = std::env::temp_dir().join(format!("rstest-conf-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".venv")).unwrap();
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        std::fs::write(root.join("conftest.py"), b"").unwrap();
+        std::fs::write(root.join("src/conftest.py"), b"").unwrap();
+        std::fs::write(root.join("not_a_conftest.py"), b"").unwrap();
+        std::fs::write(root.join(".venv/conftest.py"), b"").unwrap();
+        std::fs::write(root.join(".hidden/conftest.py"), b"").unwrap();
+        let mut out = Vec::new();
+        collect_conftests(&root, &mut out);
+        let mut names: Vec<String> = out
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["conftest.py", "src/conftest.py"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

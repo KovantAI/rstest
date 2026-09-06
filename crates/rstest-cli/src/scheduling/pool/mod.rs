@@ -407,17 +407,22 @@ pub fn run_pool(
                         let keep = if skip_ids.is_empty() {
                             keep
                         } else {
-                            let (run_idx, mut cached) =
+                            let (run_idx, mut cached, skipped_positions) =
                                 partition_skip(&ids, keep.as_ref(), skip_ids);
                             if !cached.is_empty() {
+                                // Count skipped POSITIONS, not deduped nodeids: a
+                                // nodeid at K collected positions removes K test
+                                // runs. `cached` (deduped) drives carry-forward;
+                                // `skipped_positions` keeps the message and the
+                                // progress total honest against `ids.len()`.
                                 eprintln!(
                                     "rstest: --incremental: {} of {} test(s) unchanged since \
                                      last green -> skipped (cached)",
-                                    cached.len(),
+                                    skipped_positions,
                                     ids.len()
                                 );
                                 // The progress total tracks only tests that run.
-                                prog.set_total(total_items.saturating_sub(cached.len()));
+                                prog.set_total(total_items.saturating_sub(skipped_positions));
                             }
                             cached_ids.append(&mut cached);
                             Some(run_idx)
@@ -892,25 +897,29 @@ pub(crate) fn merge_statuses(statuses: &[i32]) -> i32 {
     0
 }
 
-/// Split collected indices into (run, cached) for `--incremental`: starting from
-/// `keep` (None = every index), deselect any index whose nodeid is in `skip_ids`
-/// and move it to the cached set instead. Cached nodeids are DEDUPLICATED —
-/// parametrized tests can share one nodeid across positions, and counting a
-/// nodeid once keeps the "N of M cached" message and progress total honest.
+/// Split collected indices into (run, cached, skipped_positions) for
+/// `--incremental`: starting from `keep` (None = every index), deselect any
+/// index whose nodeid is in `skip_ids` and move it to the cached set instead.
+/// Cached nodeids are DEDUPLICATED — parametrized tests can share one nodeid
+/// across positions, and carry-forward records each distinct nodeid once.
+/// `skipped_positions` counts the actual removed indices (not deduped), so the
+/// "N of M" message and the progress total stay honest against `ids.len()`.
 fn partition_skip(
     ids: &[String],
     keep: Option<&HashSet<u64>>,
     skip_ids: &HashSet<String>,
-) -> (HashSet<u64>, Vec<String>) {
+) -> (HashSet<u64>, Vec<String>, usize) {
     let mut run_idx = HashSet::new();
     let mut cached = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
+    let mut skipped_positions = 0usize;
     for i in 0..ids.len() as u64 {
         if !keep.is_none_or(|k| k.contains(&i)) {
             continue;
         }
         let id = ids[i as usize].as_str();
         if skip_ids.contains(id) {
+            skipped_positions += 1;
             if seen.insert(id) {
                 cached.push(id.to_string());
             }
@@ -918,7 +927,7 @@ fn partition_skip(
             run_idx.insert(i);
         }
     }
-    (run_idx, cached)
+    (run_idx, cached, skipped_positions)
 }
 
 #[cfg(test)]
@@ -936,10 +945,12 @@ mod tests {
             "c".to_string(),
         ];
         let skip: HashSet<String> = ["a".to_string(), "c".to_string()].into_iter().collect();
-        let (run, mut cached) = partition_skip(&ids, None, &skip);
+        let (run, mut cached, skipped_positions) = partition_skip(&ids, None, &skip);
         assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
         cached.sort();
         assert_eq!(cached, vec!["a".to_string(), "c".to_string()]);
+        // "a" occupies two positions + "c" one: three runs skipped, two cached.
+        assert_eq!(skipped_positions, 3);
     }
 
     #[test]
@@ -949,9 +960,11 @@ mod tests {
         let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let skip: HashSet<String> = ["a".to_string()].into_iter().collect();
         let keep: HashSet<u64> = [0u64, 1].into_iter().collect();
-        let (run, cached) = partition_skip(&ids, Some(&keep), &skip);
+        let (run, cached, skipped_positions) = partition_skip(&ids, Some(&keep), &skip);
         assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
         assert_eq!(cached, vec!["a".to_string()]);
+        // Only position 0 ("a") is both in scope and skipped.
+        assert_eq!(skipped_positions, 1);
     }
 
     #[test]

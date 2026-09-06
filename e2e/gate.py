@@ -3182,6 +3182,27 @@ def gate_since_green_incremental(g, args, binary):
         r.stderr[-200:] + r.stdout[-200:],
     )
 
+    # Run 7: --changed-strict must NOT hijack --since-green's diff base. Commit a
+    # source change so the working tree is CLEAN; strict would otherwise imply a
+    # "HEAD" (working-tree) base and see nothing. --since-green owns the base, so
+    # the last-green baseline is still used -> the changed test is selected and
+    # runs green. The "selecting changes since last green run" line proves the
+    # baseline path was taken (it never prints when strict hijacks the base).
+    git(sp, "add", "-A")
+    git_commit(sp, "commit-lockfile")  # re-establishes baseline on the prior run's green
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)  # advance baseline, clean tree
+    g.write("incrproj/test_alpha.py", "def test_a():\n    assert 1 + 0 == 1  # touched\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "touch-alpha")
+    r = g.run("--since-green", "--changed-strict", "-n", "2", "-v", cwd=sp, env_extra=env)
+    check(
+        "since-green: --changed-strict does not hijack the since-green base",
+        r.returncode == 0
+        and "selecting changes since last green run" in r.stderr
+        and "test_a" in r.stdout,
+        r.stderr[-300:] + r.stdout[-300:],
+    )
+
 
 def gate_incremental_dispatch_skip(g, args, binary):
     print("== incremental dispatch skip (--incremental) ==")
