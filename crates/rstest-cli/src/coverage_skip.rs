@@ -179,15 +179,29 @@ pub fn coverage_requested(args: &[String]) -> bool {
 
 /// Whether coverage is scoped to a subtree rather than the whole project — the
 /// condition under which first-party source OUTSIDE the scope is coverage-
-/// invisible (see the module-level soundness note). `--cov` (bare) and `--cov=.`
-/// / `--cov=./` cover the cwd tree, so they are NOT narrowed; any other explicit
-/// `--cov=<value>` (e.g. `--cov=pkg`, `--cov=src/pkg`) is. Sub-options like
-/// `--cov-report`/`--cov-context` are ignored (they don't set the measured set).
+/// invisible (see the module-level soundness note). Whole-tree scopes cover the
+/// cwd and are NOT narrowed: bare `--cov`, and `--cov=` with an empty / `.` /
+/// `./` value (pytest-cov reads all of these as "measure the cwd"). A subtree
+/// value like `--cov=pkg` or `--cov=src/pkg` IS narrowed. Coverage is the UNION
+/// of every `--cov`, so a single whole-tree `--cov` broadens back to everything
+/// even alongside a scoped one (`--cov=pkg --cov=.` is not narrowed). Sub-options
+/// (`--cov-report`/`--cov-context`) don't set the measured set and are ignored.
 pub fn cov_scope_narrowed(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        a.strip_prefix("--cov=")
-            .is_some_and(|v| !matches!(v, "." | "./"))
-    })
+    let is_whole_tree = |v: &str| matches!(v, "" | "." | "./");
+    let mut any_scoped = false;
+    for a in args {
+        // Bare `--cov` measures the cwd tree: unions in everything.
+        if a == "--cov" {
+            return false;
+        }
+        if let Some(v) = a.strip_prefix("--cov=") {
+            if is_whole_tree(v) {
+                return false;
+            }
+            any_scoped = true;
+        }
+    }
+    any_scoped
 }
 
 /// The recorded baseline, but ONLY if the config fingerprint still matches — a
@@ -535,9 +549,25 @@ mod tests {
         assert!(!cov_scope_narrowed(&["--cov".to_string()]));
         assert!(!cov_scope_narrowed(&["--cov=.".to_string()]));
         assert!(!cov_scope_narrowed(&["--cov=./".to_string()]));
+        // `--cov=` (empty value) reads as cover-cwd in pytest-cov, not narrowed.
+        assert!(!cov_scope_narrowed(&["--cov=".to_string()]));
         // A package/subtree scope is narrowed (first-party outside is invisible).
         assert!(cov_scope_narrowed(&["--cov=pkg".to_string()]));
         assert!(cov_scope_narrowed(&["--cov=src/pkg".to_string()]));
+        // Coverage is the UNION of every --cov: a whole-tree entry broadens back
+        // to everything even next to a scoped one, in either order.
+        assert!(!cov_scope_narrowed(&[
+            "--cov=pkg".to_string(),
+            "--cov=.".to_string()
+        ]));
+        assert!(!cov_scope_narrowed(&[
+            "--cov=pkg".to_string(),
+            "--cov".to_string()
+        ]));
+        assert!(!cov_scope_narrowed(&[
+            "--cov".to_string(),
+            "--cov=pkg".to_string()
+        ]));
         // Sub-options don't set the measured scope.
         assert!(!cov_scope_narrowed(&["--cov-context=test".to_string()]));
         assert!(!cov_scope_narrowed(&["--cov-report=".to_string()]));
