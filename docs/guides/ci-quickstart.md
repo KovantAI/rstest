@@ -264,17 +264,31 @@ has no per-test durations and falls back to an even split. The second run
 slowest tests first and packs workers tightly. The shape, for a wait-bound
 Django suite on a 4-core runner:
 
-| Run | Cache | Scheduling | Wall time |
-|---|---|---|---|
-| 1 (cold) | miss → save | even split | baseline-ish (illustrative) |
-| 2+ (warm) | hit → restore | duration-aware | markedly lower (illustrative) |
+Cold: no timings, dispatched in collection order — the long pole can start
+last and run while other workers idle. Warm: the slowest tests start first and
+pack tightly.
 
-The numbers above are **shape, not a benchmark** — rstest ships no canonical
-Django timing, and a suite's win depends on its own shape (see the self-check
-table in the [README](https://github.com/KovantAI/rstest#will-rstest-speed-up-your-suite)).
-Wait-bound suites (API calls, timeouts, `time.sleep`) win most, because
-test-granular dispatch splits the slow files xdist pins to a single worker. To
-get *your* real numbers before committing, run [`rstest --try`](migrate-from-pytest.md)
+Concretely, on the runnable
+[`examples/ci-bench`](https://github.com/KovantAI/rstest/tree/main/examples/ci-bench)
+suite (136 wait-bound tests with duration skew) — **measured**, `-n 4`, best of
+3, Apple Silicon / CPython 3.13:
+
+<!-- SOURCE OF TRUTH: examples/ci-bench/README.md — keep numbers in sync -->
+| config | wall | vs pytest |
+|---|---|---|
+| pytest (serial) | 12.1s | 1.0× |
+| rstest cold (`-n 4`, no cache) | 5.3s | 2.3× |
+| rstest warm (`-n 4`, cached durations) | 3.6s | 3.3× |
+
+Cold already wins from parallelism; warm adds ~1.5× on top by scheduling the
+long pole first. That is a **synthetic** wait-bound example, not a Django app —
+rstest ships no canonical Django timing, and a suite's win depends on its own
+shape (see the self-check table in the
+[README](https://github.com/KovantAI/rstest#will-rstest-speed-up-your-suite)).
+The [`example-bench.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/example-bench.yml)
+workflow re-runs it on GitHub's runners and posts the table to the job summary,
+so the same measurement is reproducible on standard CI hardware. To get *your*
+real numbers before committing, run [`rstest --try`](migrate-from-pytest.md)
 locally — it runs your suite under plain pytest and under `rstest -n auto`,
 diffs outcomes, and reports the speedup, with no migration.
 
