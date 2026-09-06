@@ -653,20 +653,28 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // --incremental: compute the dispatch-level skip set now (before the pool
     // collects) from the coverage index + last green set, gated by a config
     // fingerprint. Restricted to the eager pool on --dist load with full
-    // collection; incompatible modes disable it with a note.
-    let config_fp = if cli.incremental {
-        coverage_skip::config_fingerprint(&scope)
-    } else {
-        String::new()
-    };
+    // collection; incompatible modes disable it with a note. An explicit
+    // --changed (like --since-green) already narrows selection, so dispatch-level
+    // skipping on top is excluded — it would record a PARTIAL green baseline and
+    // count cached passes against a partial collection.
     let incremental_active = cli.incremental
         && !since_green
+        && cli.changed.is_none()
         && dist_name == "load"
         && !passthrough
         && n >= 2
         && shard.is_none()
         && shuffle_seed.is_none()
         && !collect_lazy(cli, &settings, &dist_name, &args)?;
+    // The config fingerprint is only consumed under `incremental_active` (the
+    // skip-set load and the green-baseline record). Computing it unconditionally
+    // would walk the whole project tree for conftests even when the feature is
+    // off (e.g. -n 1, --collect lazy), so gate it on the same condition.
+    let config_fp = if incremental_active {
+        coverage_skip::config_fingerprint(&scope)
+    } else {
+        String::new()
+    };
     if cli.incremental && since_green {
         // Both incremental modes select on the same run; --since-green already
         // narrows to the changed subset, so dispatch-level skipping on top would
@@ -674,6 +682,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         eprintln!(
             "rstest: --incremental and --since-green are mutually exclusive; \
              --since-green takes precedence this run"
+        );
+    } else if cli.incremental && cli.changed.is_some() {
+        // Explicit --changed owns selection: it narrows args to the changed
+        // subset, so dispatch-level skipping on top would clobber the full green
+        // baseline with a partial one and report cached passes against a partial
+        // collection. --changed wins this run.
+        eprintln!(
+            "rstest: --incremental and --changed are mutually exclusive; \
+             --changed owns selection this run"
         );
     } else if cli.incremental && !incremental_active {
         eprintln!(
@@ -691,6 +708,16 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
              refreshed this run, so changed tests keep re-running until a --cov run"
         );
     }
+    // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
+    // coverage-invisible: editing it won't bust the skip, so a test depending on
+    // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
+    if incremental_active && coverage_skip::cov_scope_narrowed(&args) {
+        eprintln!(
+            "rstest: --incremental with a scoped --cov: edits to first-party source \
+             outside the coverage scope are undetectable and may leave a test cached \
+             on a stale pass; use --cov=. to cover the whole tree"
+        );
+    }
     // Snapshot the index BEFORE the run: it drives the skip decision now, and
     // post-run it supplies the cached tests' coverage to fold back in (covtool
     // rewrites the index from only the tests that ran).
@@ -699,8 +726,15 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     } else {
         select::CoverageIndex::default()
     };
+    // The baseline is loaded once and kept: it drives the skip set now, and its
+    // recorded def lines restore the cached (not-run) entries' source line after
+    // the run (a cached test has no pytest report to supply one).
+    let baseline = if incremental_active {
+        coverage_skip::load(&scope, &config_fp)
+    } else {
+        coverage_skip::Baseline::default()
+    };
     let skip_ids: std::collections::HashSet<String> = if incremental_active {
-        let baseline = coverage_skip::load(&scope, &config_fp);
         coverage_skip::skippable_now(&prev_index, &baseline)
     } else {
         std::collections::HashSet::new()
@@ -968,7 +1002,16 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             coverage_skip::carry_forward(&prev_index, &mut new_index, &cached);
             coverage_skip::write_index(&new_index);
         }
-        coverage_skip::record(&scope, &config_fp, outcome.run.green_nodeids());
+        // Restore cached (not-run) entries' def line from the baseline before
+        // reading it back — so it persists into this run's recorded lines and
+        // every artifact reflects the real line, not a blank.
+        outcome.run.backfill_cached_linenos(&baseline.test_lines);
+        coverage_skip::record(
+            &scope,
+            &config_fp,
+            outcome.run.green_nodeids(),
+            outcome.run.green_linenos(),
+        );
     }
     // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
     // stderr so --output json/tap keep stdout a pure machine stream.

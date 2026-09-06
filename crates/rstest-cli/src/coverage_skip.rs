@@ -9,6 +9,16 @@
 //! see are guarded separately: a config-file change (markers/addopts/coverage
 //! config) disables skipping wholesale, and an in-place dependency upgrade is
 //! the known gap shared with `--changed` (bust by deleting the cache file).
+//!
+//! One more coverage-invisible gap: FIRST-PARTY source outside the `--cov`
+//! scope. Under a narrowed `--cov=<pkg>`, coverage only measures `<pkg>`, so a
+//! test that imports a sibling first-party module NOT under `<pkg>` (and that
+//! isn't a conftest — those are folded into the config fingerprint) records no
+//! coverage for it. Editing that module then leaves every tracked hash
+//! byte-identical → the test is wrongly cached (a stale false-green). `--cov=.`
+//! (cover the whole tree) closes this; [`cov_scope_narrowed`] detects the risky
+//! case so the run can warn. Same escape hatch as the other gaps: one `--cov=.`
+//! or full run re-establishes, or delete the cache file.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -22,7 +32,9 @@ use crate::select::{current_sha256, CoverageFile, CoverageIndex, COVERAGE_INDEX_
 /// Filename of the per-test outcome store within the cache dir.
 pub const FILE: &str = "incremental_outcomes.json";
 
-const SCHEMA: u32 = 1;
+// Schema 2 added `test_lines` (nodeid -> def line) for restoring cached entries'
+// source line; an older schema-1 store reads as absent (one full run to rebuild).
+const SCHEMA: u32 = 2;
 
 /// Config files whose change invalidates the whole skip decision: markers,
 /// addopts, and coverage config aren't reflected in per-test coverage, so a
@@ -63,6 +75,12 @@ struct Outcomes {
     /// must bust the skip even though the index never measured it.
     #[serde(default)]
     test_file_hashes: HashMap<String, String>,
+    /// nodeid -> source def line at record time. A cached (not-run) test has no
+    /// pytest report, so its report-json/junit line would be blank; restoring it
+    /// from here keeps every artifact's line accurate. Its file is unchanged
+    /// (that is why it was skipped), so the line is still valid.
+    #[serde(default)]
+    test_lines: HashMap<String, u64>,
 }
 
 /// The recorded green baseline: which tests passed and the content hashes of
@@ -71,6 +89,9 @@ struct Outcomes {
 pub struct Baseline {
     pub green: HashSet<String>,
     pub test_file_hashes: HashMap<String, String>,
+    /// nodeid -> source def line, for restoring a cached entry's line (see
+    /// [`Outcomes::test_lines`]).
+    pub test_lines: HashMap<String, u64>,
 }
 
 /// Hash the current content of the project's config files (order-stable), so a
@@ -156,6 +177,19 @@ pub fn coverage_requested(args: &[String]) -> bool {
     args.iter().any(|a| a == "--cov" || a.starts_with("--cov="))
 }
 
+/// Whether coverage is scoped to a subtree rather than the whole project — the
+/// condition under which first-party source OUTSIDE the scope is coverage-
+/// invisible (see the module-level soundness note). `--cov` (bare) and `--cov=.`
+/// / `--cov=./` cover the cwd tree, so they are NOT narrowed; any other explicit
+/// `--cov=<value>` (e.g. `--cov=pkg`, `--cov=src/pkg`) is. Sub-options like
+/// `--cov-report`/`--cov-context` are ignored (they don't set the measured set).
+pub fn cov_scope_narrowed(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a.strip_prefix("--cov=")
+            .is_some_and(|v| !matches!(v, "." | "./"))
+    })
+}
+
 /// The recorded baseline, but ONLY if the config fingerprint still matches — a
 /// config change disables skipping (returns empty). Absent / corrupt / schema-
 /// mismatched store also yields empty (nothing skippable).
@@ -167,19 +201,23 @@ pub fn load(scope: &Path, config_fp: &str) -> Baseline {
         .map(|o| Baseline {
             green: o.green,
             test_file_hashes: o.test_file_hashes,
+            test_lines: o.test_lines,
         })
         .unwrap_or_default()
 }
 
-/// Persist the green set + per-test-file hashes + config fingerprint after a
-/// run. Best-effort: a cache-write failure never fails the run.
-pub fn record(scope: &Path, config_fp: &str, green: HashSet<String>) {
+/// Persist the green set + per-test-file hashes + per-nodeid def lines + config
+/// fingerprint after a run. Best-effort: a cache-write failure never fails the
+/// run. `lines` maps green nodeids to their source def line (restores a cached
+/// entry's line next run); nodeids without a known line are simply absent.
+pub fn record(scope: &Path, config_fp: &str, green: HashSet<String>, lines: HashMap<String, u64>) {
     let test_file_hashes = test_file_hashes(&green);
     let doc = Outcomes {
         schema: SCHEMA,
         config_fp: config_fp.to_string(),
         green,
         test_file_hashes,
+        test_lines: lines,
     };
     if let Ok(bytes) = serde_json::to_vec(&doc) {
         let _ = cache::write_atomic(&cache::file_in(scope, FILE), &bytes);
@@ -358,6 +396,7 @@ mod tests {
         Baseline {
             green,
             test_file_hashes,
+            test_lines: HashMap::new(),
         }
     }
 
@@ -491,6 +530,20 @@ mod tests {
     }
 
     #[test]
+    fn cov_scope_narrowed_flags_subtree_scopes_only() {
+        // Whole-tree scopes are not narrowed.
+        assert!(!cov_scope_narrowed(&["--cov".to_string()]));
+        assert!(!cov_scope_narrowed(&["--cov=.".to_string()]));
+        assert!(!cov_scope_narrowed(&["--cov=./".to_string()]));
+        // A package/subtree scope is narrowed (first-party outside is invisible).
+        assert!(cov_scope_narrowed(&["--cov=pkg".to_string()]));
+        assert!(cov_scope_narrowed(&["--cov=src/pkg".to_string()]));
+        // Sub-options don't set the measured scope.
+        assert!(!cov_scope_narrowed(&["--cov-context=test".to_string()]));
+        assert!(!cov_scope_narrowed(&["--cov-report=".to_string()]));
+    }
+
+    #[test]
     fn classify_entry_skips_on_file_type_error() {
         // Unreadable file_type (DT_UNKNOWN + failed lstat) must be skipped, not
         // collected or descended into — the arm no real FS reaches in-process.
@@ -551,8 +604,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scope);
         std::fs::create_dir_all(&scope).unwrap();
         let green: HashSet<String> = ["t.py::test_a".to_string()].into_iter().collect();
-        record(&scope, "cfg-A", green);
-        assert!(load(&scope, "cfg-A").green.contains("t.py::test_a"));
+        let lines: HashMap<String, u64> = [("t.py::test_a".to_string(), 7)].into_iter().collect();
+        record(&scope, "cfg-A", green, lines);
+        let b = load(&scope, "cfg-A");
+        assert!(b.green.contains("t.py::test_a"));
+        // The def line round-trips for restoring a cached entry next run.
+        assert_eq!(b.test_lines.get("t.py::test_a"), Some(&7));
         // A config change (different fingerprint) disables skipping.
         assert!(load(&scope, "cfg-B").green.is_empty());
     }
@@ -608,6 +665,7 @@ mod tests {
         let baseline = Baseline {
             green,
             test_file_hashes: [(testrel, test_hash)].into_iter().collect(),
+            test_lines: HashMap::new(),
         };
         assert!(skippable_now(&idx, &baseline).contains(&id));
         // Editing the covered file busts it.

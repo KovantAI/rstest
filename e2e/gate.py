@@ -3368,6 +3368,17 @@ def gate_incremental_guards(g, args, binary):
         r.stderr[-300:],
     )
 
+    # Review finding 1: a NARROWED --cov=pkg leaves first-party source outside
+    # the scope coverage-invisible, so skipping can go stale. The run must warn.
+    # (The whole gate here runs under --cov=pkg, so the scoped-cov warning fires
+    # on every `run()` above; assert it explicitly.)
+    r = run()
+    check(
+        "incremental: warns on a scoped --cov (invisible first-party source)",
+        "scoped --cov" in r.stderr,
+        r.stderr[-300:],
+    )
+
 
 def main():
     ap = argparse.ArgumentParser()

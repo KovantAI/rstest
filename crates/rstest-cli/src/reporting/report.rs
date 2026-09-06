@@ -194,6 +194,33 @@ impl Run {
             .collect()
     }
 
+    /// Source line of every GREEN nodeid that has one — persisted alongside the
+    /// baseline so a future cached (not-run) entry can be restored with its real
+    /// def line instead of a blank. Cached passes backfilled by
+    /// [`Run::backfill_cached_linenos`] are included, so the line survives across
+    /// arbitrarily many skip runs.
+    pub fn green_linenos(&self) -> std::collections::HashMap<String, u64> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| classify(e) == "passed")
+            .filter_map(|(id, e)| e.lineno.map(|l| (id.clone(), l)))
+            .collect()
+    }
+
+    /// Restore each cached (carried-forward) entry's source line from the prior
+    /// baseline: a cached test is not run this session, so pytest reports no
+    /// location, but its def line hasn't moved (an edit to its file would have
+    /// busted the skip). Fills only cached entries still missing a `lineno`.
+    pub fn backfill_cached_linenos(&mut self, lines: &std::collections::HashMap<String, u64>) {
+        for (id, e) in &mut self.tests {
+            if e.cached && e.lineno.is_none() {
+                if let Some(l) = lines.get(id) {
+                    e.lineno = Some(*l);
+                }
+            }
+        }
+    }
+
     /// Collection errors as (path, longrepr) pairs, for report renderers.
     pub fn collect_errors(&self) -> &[(String, String)] {
         &self.collect_errors

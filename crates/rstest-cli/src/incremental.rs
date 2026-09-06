@@ -64,16 +64,19 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
 }
 
 /// A hash of the test environment that git can't see: the resolved interpreter
-/// (path + size) and the content of any dependency manifests under `scope`.
+/// (size only) and the content of any dependency manifests under `scope`.
 /// `--changed`-style source selection is blind to an in-place dependency
 /// upgrade; folding this into the baseline makes such a change bust it (a full
 /// run re-establishes), instead of a sticky false green. Interpreter mtime is
 /// deliberately NOT hashed: a benign venv rebuild bumps mtime without changing
 /// the environment, and the lockfile content below is the real dependency
-/// signal — keying on mtime only produced spurious full runs.
+/// signal — keying on mtime only produced spurious full runs. The interpreter
+/// PATH is likewise NOT hashed: an absolute venv path varies across machines,
+/// checkouts, and CI-vs-local for the SAME environment, so keying on it busted
+/// the baseline on every relocation — a spurious full run. Its size stands in
+/// as the cheap content proxy the lockfiles then refine.
 pub fn env_fingerprint(scope: &Path, python: &Path) -> String {
     let mut h = Sha256::new();
-    h.update(python.to_string_lossy().as_bytes());
     if let Ok(md) = std::fs::metadata(python) {
         h.update(md.len().to_le_bytes());
     }
@@ -188,6 +191,22 @@ mod tests {
             env_fingerprint(&scope, &py),
             "editing lock changes fp"
         );
+    }
+
+    #[test]
+    fn env_fingerprint_ignores_interpreter_path() {
+        // The SAME interpreter content at two different paths (a relocated venv,
+        // a different checkout dir, CI-vs-local) must yield the SAME fingerprint:
+        // the path is not an environment change, and keying on it forced a
+        // spurious full run on every relocation.
+        let scope = tmp("path");
+        let a = scope.join("venv-a").join("python");
+        let b = scope.join("venv-b").join("python");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::write(&a, b"#!fake\n").unwrap();
+        std::fs::write(&b, b"#!fake\n").unwrap();
+        assert_eq!(env_fingerprint(&scope, &a), env_fingerprint(&scope, &b));
     }
 
     #[test]
