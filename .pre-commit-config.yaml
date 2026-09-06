@@ -40,6 +40,16 @@ repos:
 
   - repo: local
     hooks:
+      - id: verify-vendor
+        name: verify vendored pytest integrity
+        # Self-locating script (finds the repo + inserts sys.path itself), so no
+        # PYTHONPATH and no `-m`. python3 is present on dev and CI; bare `python`
+        # is not guaranteed.
+        entry: python3 .github/scripts/vendor_verify.py --mode local
+        language: system
+        pass_filenames: false
+        files: ^python/rstest_worker/(_vendor/|vendor\.lock$)
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --all
