@@ -88,8 +88,22 @@ def test_effective_timeout_marker_without_args_uses_global(monkeypatch):
 
 def test_effective_timeout_marker_overrides_global(monkeypatch):
     p = _plugin(monkeypatch, timeout=2)
-    marker = SimpleNamespace(args=(0.3,))
+    marker = SimpleNamespace(args=(0.3,), kwargs={})
     assert p._effective_timeout(_item("t::a", marker=marker)) == 0.3
+
+
+def test_effective_timeout_marker_keyword_form(monkeypatch):
+    # pytest-timeout-compatible keyword form: @pytest.mark.timeout(timeout=0.3).
+    p = _plugin(monkeypatch, timeout=2)
+    marker = SimpleNamespace(args=(), kwargs={"timeout": 0.3})
+    assert p._effective_timeout(_item("t::a", marker=marker)) == 0.3
+
+
+def test_effective_timeout_marker_extra_kwargs_only_uses_global(monkeypatch):
+    # @pytest.mark.timeout(method="signal") with no timeout value -> global.
+    p = _plugin(monkeypatch, timeout=2)
+    marker = SimpleNamespace(args=(), kwargs={"method": "signal"})
+    assert p._effective_timeout(_item("t::a", marker=marker)) == 2.0
 
 
 def test_effective_timeout_marker_zero_disables(monkeypatch):
@@ -121,6 +135,22 @@ def test_arm_timeout_fires_and_raises(monkeypatch):
         assert "exceeded --timeout (0.05s)" in str(exc.value)
     finally:
         cancel()
+
+
+def test_timeout_not_swallowed_by_except_exception():
+    # Derives from BaseException so a test's broad `except Exception` (common in
+    # retry loops) can't swallow the deadline. A regular Exception would be
+    # caught here and defeat --timeout.
+    assert issubclass(Timeout, BaseException)
+    assert not issubclass(Timeout, Exception)
+    caught = False
+    try:
+        raise Timeout("deadline")
+    except Exception:
+        caught = True
+    except BaseException:
+        pass
+    assert caught is False
 
 
 @pytest.mark.skipif(not HAS_SIGALRM, reason="SIGALRM unavailable (Windows)")

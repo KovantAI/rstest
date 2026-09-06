@@ -26,10 +26,15 @@ from rstest_worker._internal.xdistnode import (
 log = logging.getLogger("rstest.worker")
 
 
-class Timeout(Exception):
+class Timeout(BaseException):
     """Raised in the test's own thread when `--timeout` / `@pytest.mark.timeout`
     fires, so pytest reports it as a failure whose traceback points at the line
-    the test was stuck on."""
+    the test was stuck on.
+
+    Derives from `BaseException`, not `Exception`, so a test's own broad
+    `except Exception` (common in retry loops) can't swallow the deadline —
+    matching pytest-timeout, whose `pytest.fail` raises a `BaseException`.
+    pytest's call-phase protocol still reports it as a failure with traceback."""
 
 
 def _parse_timeout(raw: str | float | None) -> float | None:
@@ -297,10 +302,16 @@ class StreamPlugin:
             config.cache.set = guarded_set
 
     def _effective_timeout(self, item) -> float | None:
-        """`@pytest.mark.timeout(N)` wins over the global `--timeout`."""
+        """`@pytest.mark.timeout(N)` wins over the global `--timeout`. Accepts
+        the positional `timeout(N)` and keyword `timeout(timeout=N)` forms
+        (pytest-timeout-compatible)."""
         marker = item.get_closest_marker("timeout")
-        if marker is not None and marker.args:
-            return _parse_timeout(marker.args[0])
+        if marker is not None:
+            if marker.args:
+                return _parse_timeout(marker.args[0])
+            kwargs = getattr(marker, "kwargs", {})
+            if "timeout" in kwargs:
+                return _parse_timeout(kwargs["timeout"])
         return self._timeout
 
     @staticmethod

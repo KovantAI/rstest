@@ -907,16 +907,7 @@ fn dispatch_run(
     single_worker_reruns: bool,
     worker_env: &worker::WorkerEnv,
 ) -> Result<pool::PoolOutcome> {
-    // Watchdog duration: explicit --worker-timeout wins; otherwise auto-arm from
-    // --timeout at a generous multiple, so the worker's in-process interrupt
-    // fires first and the watchdog only catches a C-ext deadlock the signal
-    // can't reach (the test never returns to the interpreter).
-    let watchdog: Option<std::time::Duration> = worker_timeout
-        .map(std::time::Duration::from_secs)
-        .or_else(|| {
-            cli.timeout
-                .map(|t| std::time::Duration::from_secs_f64(t * 3.0 + 10.0))
-        });
+    let watchdog = watchdog_duration(worker_timeout, cli.timeout);
     Ok(if passthrough || (n <= 1 && !single_worker_reruns) {
         let io = if passthrough {
             worker::Stdio::Inherit
@@ -1484,10 +1475,33 @@ fn warn_windows_timeout(
         let _ = writeln!(
             w,
             "rstest: warning: --timeout can't interrupt a blocked test in-process on Windows \
-             (no SIGALRM); a test hung past the deadline is only caught by the coarser worker \
-             watchdog. Add --worker-timeout SECS for a hard per-worker cap."
+             (no SIGALRM). rstest auto-arms the coarser --worker-timeout watchdog from it, which \
+             kills the whole worker (not just the stuck test) once the deadline is well exceeded; \
+             set --worker-timeout SECS to tune that cap."
         );
     }
+}
+
+/// Watchdog duration for a run: explicit `--worker-timeout` wins; otherwise
+/// auto-arm from `--timeout` at a generous multiple, so the worker's in-process
+/// interrupt fires first and the watchdog only catches a C-ext deadlock the
+/// signal can't reach (the test never returns to the interpreter). Only a
+/// positive, finite `--timeout` arms it — mirroring the worker's
+/// `_parse_timeout` (0/negative/NaN = disabled) — and the computed duration is
+/// clamped so a huge or near-overflow value can't panic `from_secs_f64`. A bad
+/// `--timeout` must not crash the run.
+fn watchdog_duration(
+    worker_timeout: Option<u64>,
+    timeout: Option<f64>,
+) -> Option<std::time::Duration> {
+    worker_timeout
+        .map(std::time::Duration::from_secs)
+        .or_else(|| {
+            timeout.filter(|t| t.is_finite() && *t > 0.0).map(|t| {
+                std::time::Duration::try_from_secs_f64(t * 3.0 + 10.0)
+                    .unwrap_or(std::time::Duration::MAX)
+            })
+        })
 }
 
 fn parse_numprocesses(value: &str) -> Result<usize> {
@@ -1605,7 +1619,7 @@ mod tests {
     use super::{
         build_run_meta, collect_lazy, head_to_none, merge_fixtures, merged_lastfailed,
         parse_numprocesses, quarantine_matcher, report_part_path, resolve_changed_base,
-        strip_verbatim, warn_windows_timeout, write_run_reports,
+        strip_verbatim, warn_windows_timeout, watchdog_duration, write_run_reports,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1667,6 +1681,48 @@ mod tests {
         assert_eq!(timeout_warning(true, None, None), "");
         // Off Windows: SIGALRM works, so no warning regardless of flags.
         assert_eq!(timeout_warning(false, Some(1.0), None), "");
+    }
+
+    #[test]
+    fn watchdog_explicit_worker_timeout_wins() {
+        // Explicit --worker-timeout always wins, ignoring --timeout.
+        assert_eq!(
+            watchdog_duration(Some(30), Some(2.0)),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            watchdog_duration(Some(30), None),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn watchdog_auto_arms_from_positive_timeout() {
+        // Auto-arm at t*3 + 10 when only --timeout is set.
+        assert_eq!(
+            watchdog_duration(None, Some(2.0)),
+            Some(std::time::Duration::from_secs_f64(16.0))
+        );
+    }
+
+    #[test]
+    fn watchdog_disabled_for_non_positive_or_non_finite_timeout() {
+        // 0/negative/NaN/inf disable the auto-arm instead of panicking
+        // from_secs_f64 (mirrors the worker's _parse_timeout).
+        assert_eq!(watchdog_duration(None, None), None);
+        assert_eq!(watchdog_duration(None, Some(0.0)), None);
+        assert_eq!(watchdog_duration(None, Some(-4.0)), None);
+        assert_eq!(watchdog_duration(None, Some(f64::NAN)), None);
+        assert_eq!(watchdog_duration(None, Some(f64::INFINITY)), None);
+    }
+
+    #[test]
+    fn watchdog_clamps_overflowing_timeout_instead_of_panicking() {
+        // A finite-but-enormous --timeout must clamp to MAX, not panic.
+        assert_eq!(
+            watchdog_duration(None, Some(f64::MAX)),
+            Some(std::time::Duration::MAX)
+        );
     }
 
     #[test]
