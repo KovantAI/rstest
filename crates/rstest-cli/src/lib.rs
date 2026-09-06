@@ -17,6 +17,7 @@ mod scheduling;
 mod select;
 mod text;
 mod time;
+mod vendor;
 mod watch;
 
 use anyhow::Result;

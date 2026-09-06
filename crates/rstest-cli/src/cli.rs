@@ -80,6 +80,12 @@ pub struct Cli {
     #[arg(long = "try")]
     pub(crate) r#try: bool,
 
+    /// Verify the vendored pytest tree is byte-identical to what shipped
+    /// (rehash _vendor/ against the packaged vendor.lock). Run-less: prints a
+    /// report and exits 0 if intact, non-zero on any drift.
+    #[arg(long = "verify-vendor")]
+    pub(crate) verify_vendor: bool,
+
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
     /// (every test on every worker). [default: load]
@@ -337,9 +343,8 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     let mut argv = argv.into_iter().peekable();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
-            "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak" => {
-                own.push(arg)
-            }
+            "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak"
+            | "--verify-vendor" => own.push(arg),
             "--reruns-only-known-flaky" | "--since-green" | "--incremental" => own.push(arg),
             "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
                 own.push(arg)
