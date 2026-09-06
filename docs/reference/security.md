@@ -1,14 +1,5 @@
 # Security & supply chain
 
-<!--
-DRAFT. Consolidates controls already implemented across the repo (release
-workflow, deny.toml, VENDOR.md, SECURITY.md, installation.md) into one
-user-facing page. Items marked "MAINTAINER TODO" state a claim the docs
-*should* make but that needs a maintainer to confirm against the code or
-pipeline before publishing — do not present them as fact until confirmed.
-The vendor-integrity verifier is deliberately omitted from this draft.
--->
-
 rstest ships a compiled Rust orchestrator plus a vendored pytest core inside
 a Python wheel. That is a wider trust surface than a pure-Python package, so
 this page states — in one place — how releases are built and signed, what the
@@ -117,12 +108,36 @@ and released in 0.1.0; see the
 release notes. Keep this table updated whenever the
 [pytest-upgrade-watch](#handling-pytest-security-fixes) issue is actioned.
 
-!!! note "Verifying the vendored copy is unmodified"
-    A user-facing way to verify the shipped `_vendor` tree byte-for-byte
-    against the upstream pytest 9.1.1 wheel (a hash manifest or a
-    `--verify-vendor` check) is **not yet available**. Until it lands, the
-    provenance guarantee rests on the verbatim-copy policy and the signed
-    build provenance of the wheel as a whole.
+### Verifying the vendored copy is unmodified
+
+The vendored tree is covered by an integrity manifest,
+`rstest_worker/vendor.lock`, which pins the pytest version, the upstream
+wheel's PyPI sha256 (the trust anchor), and a sha256 of every file under
+`_vendor/`. The manifest ships in the wheel, so any installed copy can verify
+itself. Two levels of check:
+
+- **Offline integrity — anyone, anytime.** `rstest --verify-vendor` rehashes
+  the installed `_vendor/` tree and compares it to `vendor.lock`, catching a
+  modified, corrupted, or partial vendored copy. It runs without contacting the
+  network and exits non-zero on any drift:
+
+    ```console
+    $ rstest --verify-vendor
+    vendored pytest 9.1.1: 84 files verified against vendor.lock
+    ```
+
+- **Upstream provenance — CI.** The
+  [`vendor.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/vendor.yml)
+  workflow runs the offline check on every change and, in a separate job,
+  downloads the pinned pytest wheel, asserts its sha256 against the manifest's
+  trust anchor, and diffs the extracted tree against `_vendor/` — proving the
+  vendored copy is byte-identical to upstream pytest, not merely internally
+  consistent. This also re-runs weekly to catch drift. The same provenance
+  check is part of the re-vendor procedure in
+  [`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md).
+
+The offline check answers "is my installed pytest core the one that shipped?";
+the provenance check answers "is what shipped really upstream pytest?".
 
 ## Dependency auditing
 

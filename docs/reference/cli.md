@@ -329,6 +329,25 @@ core and doesn't otherwise require an external pytest; if `pytest` isn't on
 PATH, `--try` exits 2. `--migrate-check` and normal runs have no such
 requirement.
 
+### `--verify-vendor`
+
+Prove the vendored pytest tree in your installed rstest is intact. rstest ships
+an unmodified copy of pytest inside its worker package; this rehashes every
+file under `_vendor/` and compares it to the packaged manifest (`vendor.lock`),
+catching an accidentally-edited, corrupted, or partial install. Run-less — it
+verifies and exits without running your suite.
+
+```console
+$ rstest --verify-vendor
+vendored pytest 9.1.1: 84 files verified against vendor.lock
+```
+
+Exit 0 when the tree matches the manifest, non-zero on any drift (each
+offending file is listed). The check is **offline** — it does not contact
+PyPI. Proving the vendored tree matches *upstream* pytest (not just what
+shipped) is a separate CI check; see
+[Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).
+
 ### `--migrate-check`
 
 Parallel-readiness preflight, not a run. Collects the suite **twice** and
