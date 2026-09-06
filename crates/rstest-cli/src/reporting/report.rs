@@ -52,6 +52,10 @@ pub struct TestEntry {
     /// never fatal to the run.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub quarantined: bool,
+    /// Not executed this run: unchanged since the last green run, so its prior
+    /// pass was carried forward (`--incremental`). Still counts as passed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
 
 /// Run-level metadata for the report-json envelope (schema 5).
@@ -152,6 +156,69 @@ impl Run {
 
     pub fn collect_error(&mut self, path: String, longrepr: String) {
         self.collect_errors.push((path, longrepr));
+    }
+
+    /// Carry forward a test that was NOT run this session because it is
+    /// unchanged since it last passed (`--incremental`): record it as a passed,
+    /// cached entry so every artifact (summary, report-json, junit) reflects the
+    /// whole suite, not just the tests that actually ran.
+    pub fn record_cached(&mut self, nodeid: String) {
+        let entry = self.tests.entry(nodeid).or_default();
+        entry.call = Some("passed".into());
+        entry.cached = true;
+    }
+
+    /// How many entries were carried forward as cached passes.
+    pub fn cached_count(&self) -> usize {
+        self.tests.values().filter(|e| e.cached).count()
+    }
+
+    /// The nodeids carried forward as cached passes this run — used to fold their
+    /// prior coverage back into the rewritten index so they stay skippable.
+    pub fn cached_nodeids(&self) -> std::collections::HashSet<String> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| e.cached)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// nodeids that are GREEN in this run (clean passes) — the set to persist as
+    /// the incremental baseline. Includes carried-forward cached passes, since
+    /// they remain green.
+    pub fn green_nodeids(&self) -> std::collections::HashSet<String> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| classify(e) == "passed")
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Source line of every GREEN nodeid that has one — persisted alongside the
+    /// baseline so a future cached (not-run) entry can be restored with its real
+    /// def line instead of a blank. Cached passes backfilled by
+    /// [`Run::backfill_cached_linenos`] are included, so the line survives across
+    /// arbitrarily many skip runs.
+    pub fn green_linenos(&self) -> std::collections::HashMap<String, u64> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| classify(e) == "passed")
+            .filter_map(|(id, e)| e.lineno.map(|l| (id.clone(), l)))
+            .collect()
+    }
+
+    /// Restore each cached (carried-forward) entry's source line from the prior
+    /// baseline: a cached test is not run this session, so pytest reports no
+    /// location, but its def line hasn't moved (an edit to its file would have
+    /// busted the skip). Fills only cached entries still missing a `lineno`.
+    pub fn backfill_cached_linenos(&mut self, lines: &std::collections::HashMap<String, u64>) {
+        for (id, e) in &mut self.tests {
+            if e.cached && e.lineno.is_none() {
+                if let Some(l) = lines.get(id) {
+                    e.lineno = Some(*l);
+                }
+            }
+        }
     }
 
     /// Collection errors as (path, longrepr) pairs, for report renderers.

@@ -143,6 +143,15 @@ pub struct Cli {
     #[arg(long, value_name = "SECS")]
     pub(crate) worker_timeout: Option<u64>,
 
+    /// Per-test timeout: fail any test whose call phase runs longer than SECS.
+    /// Interrupted in-process, so the failure's traceback points at the stuck
+    /// line (pytest-timeout-style; no plugin needed). `@pytest.mark.timeout(N)`
+    /// overrides per test. Fractional seconds allowed. A blocked C extension
+    /// that never returns to Python is caught by the --worker-timeout backstop
+    /// instead (auto-armed from this value when --worker-timeout is unset).
+    #[arg(long, value_name = "SECS")]
+    pub(crate) timeout: Option<f64>,
+
     /// Run only tests affected by changed files (import-graph selection).
     /// Without a value: working tree + untracked vs HEAD. With a value:
     /// vs that git rev (e.g. --changed=origin/main in CI).
@@ -154,6 +163,24 @@ pub struct Cli {
     /// instead of 0. Implies --changed (vs HEAD) when not given.
     #[arg(long)]
     pub(crate) changed_strict: bool,
+
+    /// Incremental testing: run only what changed since the last GREEN run,
+    /// re-using --changed's coverage-aware selection with an auto-managed
+    /// baseline (the commit of the last all-passing run, stored in the cache).
+    /// The baseline advances only when a run is fully green, so a failing test
+    /// keeps being selected until it passes. First run (no baseline) runs
+    /// everything. Ignored when --changed is given explicitly.
+    #[arg(long = "since-green")]
+    pub(crate) since_green: bool,
+
+    /// Dispatch-level incremental testing: collect the whole suite, then SKIP
+    /// running any test that was green last run and whose covered source is
+    /// byte-identical now (content-addressed via the coverage index — no git).
+    /// Skipped tests are carried forward as cached passes. Needs a warm coverage
+    /// index (a prior `--cov-context=test` run); full collection + `--dist load`
+    /// only. A config-file change disables skipping for that run.
+    #[arg(long)]
+    pub(crate) incremental: bool,
 
     /// Collection strategy: "full" (every worker collects the whole suite,
     /// verified by hash) or "lazy" (each file collected by one worker on
@@ -326,7 +353,7 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                 }
             }
             _ if arg.starts_with("--serve=") => own.push(arg),
-            "--reruns-only-known-flaky" => own.push(arg),
+            "--reruns-only-known-flaky" | "--since-green" | "--incremental" => own.push(arg),
             "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
                 own.push(arg)
             }
@@ -369,13 +396,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                 }
             }
             _ if arg.starts_with("--only-rerun=") => own.push(arg),
-            "--worker-timeout" => {
+            "--worker-timeout" | "--timeout" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
                     own.push(v);
                 }
             }
             _ if arg.starts_with("--worker-timeout=") => own.push(arg),
+            _ if arg.starts_with("--timeout=") => own.push(arg),
             "--reruns" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {

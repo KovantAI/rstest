@@ -16,6 +16,9 @@ pub struct WorkerEnv {
     pub run_uid: String,
     /// Enable cpu/fixture instrumentation in the worker's shim plugin.
     pub doctor: bool,
+    /// Per-test timeout in seconds (--timeout): the worker interrupts a test
+    /// whose call phase overruns. None = disabled.
+    pub timeout: Option<f64>,
     /// Enable per-test thread/fd leak measurement (--doctor or --fail-on-leak).
     pub leakcheck: bool,
     /// For a lone worker: ship the full id/location payload from collection
@@ -105,6 +108,9 @@ impl Worker {
             });
         if env.doctor {
             command.env("RSTEST_DOCTOR", "1");
+        }
+        if let Some(secs) = env.timeout {
+            command.env("RSTEST_TIMEOUT", secs.to_string());
         }
         if env.leakcheck {
             command.env("RSTEST_LEAKCHECK", "1");

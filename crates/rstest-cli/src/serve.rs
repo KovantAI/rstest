@@ -139,6 +139,7 @@ fn open_session(python: &Path, args: &[String]) -> Result<(worker::Worker, Vec<S
         run_uid: std::env::var("RSTEST_RUN_UID")
             .unwrap_or_else(|_| format!("serve-{}", std::process::id())),
         doctor: false,
+        timeout: None,
         send_ids: true,
         leakcheck: false,
     };
