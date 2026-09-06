@@ -184,7 +184,9 @@ impl Worker {
     }
 
     /// The worker process id (test-only: assert teardown actually killed it).
-    #[cfg(test)]
+    /// Gated to unix: the only caller is serve.rs's disconnect test, and
+    /// serve.rs is unix-only, so this is dead code on Windows.
+    #[cfg(all(test, unix))]
     pub fn id(&self) -> u32 {
         self.child.id()
     }
