@@ -17,7 +17,11 @@ from __future__ import annotations
 import pytest
 
 from rstest_worker._internal import fixturecompat
-from rstest_worker._internal.dispatch import ItemDispatchPlugin, LazyDispatchPlugin
+from rstest_worker._internal.dispatch import (
+    ItemDispatchPlugin,
+    LazyDispatchPlugin,
+    ServeDispatchPlugin,
+)
 from rstest_worker._internal.stream import StreamPlugin
 
 fixturecompat.install()
@@ -27,9 +31,11 @@ fixturecompat.install()
 __all__ = [
     "ItemDispatchPlugin",
     "LazyDispatchPlugin",
+    "ServeDispatchPlugin",
     "StreamPlugin",
     "run",
     "run_lazy_session",
+    "run_serve_session",
     "run_session",
 ]
 
@@ -37,6 +43,11 @@ __all__ = [
 def run_session(args: list[str], conn) -> int:
     """Item-dispatch session (pool mode)."""
     return _contained(lambda: pytest.main(list(args), plugins=[ItemDispatchPlugin(conn)]), conn)
+
+
+def run_serve_session(args: list[str], conn) -> int:
+    """Serve session: collect once, run nodeid subsets on demand (--serve)."""
+    return _contained(lambda: pytest.main(list(args), plugins=[ServeDispatchPlugin(conn)]), conn)
 
 
 def run_lazy_session(args: list[str], conn) -> int:

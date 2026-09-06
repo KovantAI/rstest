@@ -103,6 +103,12 @@ pub struct Cli {
     #[arg(long)]
     pub(crate) watch: bool,
 
+    /// Run as a warm-pool daemon on a Unix socket: collect once, then serve
+    /// on-demand nodeid-subset runs to a persistent client (e.g. fermut for
+    /// mutation testing). Experimental.
+    #[arg(long, value_name = "SOCK")]
+    pub(crate) serve: Option<PathBuf>,
+
     /// Rerun failed tests up to N times; tests that then pass are
     /// reported flaky (run stays green). Crash-aware: a test that killed
     /// its worker gets retried on the replacement, within this budget.
@@ -340,6 +346,13 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
             "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak" => {
                 own.push(arg)
             }
+            "--serve" => {
+                own.push(arg);
+                if let Some(v) = argv.next() {
+                    own.push(v);
+                }
+            }
+            _ if arg.starts_with("--serve=") => own.push(arg),
             "--reruns-only-known-flaky" | "--since-green" | "--incremental" => own.push(arg),
             "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
                 own.push(arg)
