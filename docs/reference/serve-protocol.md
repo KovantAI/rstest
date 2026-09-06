@@ -63,7 +63,7 @@ after it, so the child imports the mutated source fresh. Absent `patch` (or
 | `session_ready` | `{collected: int}` | collection done, worker warm |
 | `report` | `{id: int, report: {...}}` | one per-phase test report for run `id` (see below) |
 | `run_done` | `{id: int, killed: bool, ran: int}` | run finished. `killed` = any test failed/errored; `ran` = tests executed |
-| `error` | `{code: str, message: str}` | `collect_failed` / `bad_session` / `bad_request` |
+| `error` | `{code: str, message: str}` | `collect_failed` / `bad_session` / `bad_request` (includes an empty `node_ids`) / `bad_frame` |
 | `bye` | `{}` | reply to `close_session` / `shutdown` |
 
 ### Report body
@@ -77,14 +77,21 @@ after it, so the child imports the mutated source fresh. Absent `patch` (or
 ```
 
 `when` is `setup` / `call` / `teardown`; `outcome` is `passed` / `failed` /
-`skipped`; `longrepr` carries the traceback on failure.
+`skipped`; `longrepr` carries the traceback on failure. The report may also
+carry the extra fields rstest attaches elsewhere (`wasxfail`, `skip_reason`,
+`sections`, `cpu`, `thread_delta`, `fd_delta`, `lineno`); a client should read
+the fields it needs and ignore the rest.
 
 ## Isolation contract
 
 Each `run` executes in a `fork()` off the warm template. The child resets its
 imported SUT/test modules to the post-collection framework baseline, so every
 run sees pristine module state and the overlay's mutation — a mutant that kills
-a test in one `run` cannot affect the next.
+a test in one `run` cannot affect the next. A file imported *during* config or
+collection (a `conftest.py`, or any module the root conftest pulls in) lives in
+that baseline; when a `run` overlays such a file, its already-loaded module is
+dropped too, so the child re-imports the mutation rather than reusing the stale
+source.
 
 ## Not yet implemented
 
@@ -92,3 +99,20 @@ a test in one `run` cannot affect the next.
 runs (`max_parallel`), multiple sessions per daemon, and a Windows fallback are
 future work. `stop_on_first_fail` is accepted and passed through, but the run is
 not cancelled from the client side mid-flight.
+
+## Caveats
+
+The per-run `fork()` is a bare fork with no `exec`, so it inherits the classic
+fork-in-a-possibly-threaded-process hazard: if the collected suite's plugins or
+conftests start a background thread (or hold an internal lock) at import time,
+the forked child keeps only the forking thread and can deadlock the first time
+it touches such a lock. Suites whose import side effects are single-threaded —
+the common case for test code — are unaffected; a suite that spins up threads at
+collection time should not be served until an `exec`-based worker lands.
+
+A `run` must name a non-empty `node_ids`; an empty subset is rejected with
+`bad_request` (an empty pytest argument list would otherwise collect and run the
+*whole* suite). Malformed msgpack frames are answered with a `bad_frame` error
+before the session ends, rather than being treated as a clean disconnect. The
+daemon socket is created `0600` (owner-only), since a `run` overlay writes files
+as the serving user.

@@ -425,6 +425,69 @@ def test_child_run_resets_modules_and_runs_requested_ids(monkeypatch):
     assert isinstance(child, _ServeChildPlugin) and child._serve_req_id == 9
 
 
+def test_child_run_drops_overlaid_baseline_module(monkeypatch, tmp_path):
+    # A module imported during config/collection (e.g. a conftest) lives IN the
+    # baseline, so the baseline reset would keep it — but if the overlay mutates
+    # its source file, the child must re-import the mutation, not the stale
+    # module. The overlaid file's module is dropped even though it's baseline.
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text("X = 1\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pytest, "main", lambda args, plugins: 0)
+
+    fake = SimpleNamespace(__file__=str(conftest))
+    monkeypatch.setitem(sys.modules, "_serve_fake_conftest", fake)
+
+    plugin = ServeDispatchPlugin(FakeConn())
+    plugin._baseline = set(sys.modules)  # conftest module is IN the baseline now
+
+    # Overlay names the same file by its relative path (as a client sends it).
+    plugin._child_run(req_id=1, ids=["t.py::a"], stop=False, overlay={"conftest.py": "X = 2\n"})
+
+    assert "_serve_fake_conftest" not in sys.modules  # dropped -> re-imports mutation
+
+
+def test_child_run_keeps_baseline_module_when_not_overlaid(monkeypatch, tmp_path):
+    # The overlaid-file drop must be surgical: a baseline module NOT in the
+    # overlay stays put (dropping all baseline modules would nuke the framework).
+    other = tmp_path / "helper.py"
+    other.write_text("Y = 1\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pytest, "main", lambda args, plugins: 0)
+
+    fake = SimpleNamespace(__file__=str(other))
+    monkeypatch.setitem(sys.modules, "_serve_untouched", fake)
+
+    plugin = ServeDispatchPlugin(FakeConn())
+    plugin._baseline = set(sys.modules)
+
+    plugin._child_run(req_id=1, ids=["t.py::a"], stop=False, overlay={"conftest.py": "X = 2\n"})
+
+    assert "_serve_untouched" in sys.modules  # not overlaid -> retained
+
+
+def test_child_run_same_basename_different_dir_is_not_dropped(monkeypatch, tmp_path):
+    # The cheap basename prefilter must not over-match: a baseline module that
+    # shares a name with an overlaid file but lives in a different directory
+    # (its abspath differs) stays loaded — only the actually-overlaid file goes.
+    (tmp_path / "pkg").mkdir()
+    other_conftest = tmp_path / "pkg" / "conftest.py"  # same basename, other dir
+    other_conftest.write_text("Z = 1\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pytest, "main", lambda args, plugins: 0)
+
+    fake = SimpleNamespace(__file__=str(other_conftest))
+    monkeypatch.setitem(sys.modules, "_serve_other_conftest", fake)
+
+    plugin = ServeDispatchPlugin(FakeConn())
+    plugin._baseline = set(sys.modules)
+
+    # Overlay targets ./conftest.py, NOT ./pkg/conftest.py.
+    plugin._child_run(req_id=1, ids=["t.py::a"], stop=False, overlay={"conftest.py": "X = 2\n"})
+
+    assert "_serve_other_conftest" in sys.modules  # basename collided, abspath didn't
+
+
 def test_child_run_stop_prepends_dash_x(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -448,7 +511,9 @@ def test_forked_run_child_branch_exits_zero_on_success(monkeypatch):
     monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(_Exit(code)))
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
-        ServeDispatchPlugin, "_child_run", lambda self, r, i, s: seen.update(r=r, i=i, s=s)
+        ServeDispatchPlugin,
+        "_child_run",
+        lambda self, r, i, s, ov: seen.update(r=r, i=i, s=s, ov=ov),
     )
 
     plugin = ServeDispatchPlugin(FakeConn())
@@ -457,7 +522,7 @@ def test_forked_run_child_branch_exits_zero_on_success(monkeypatch):
             {"req_id": 5, "ids": ["t.py::a"], "overlay": {}, "stop_on_first_fail": False}
         )
     assert ei.value.code == 0
-    assert seen == {"r": 5, "i": ["t.py::a"], "s": False}
+    assert seen == {"r": 5, "i": ["t.py::a"], "s": False, "ov": {}}
 
 
 def test_forked_run_child_branch_exits_one_when_run_raises(monkeypatch):
@@ -466,7 +531,7 @@ def test_forked_run_child_branch_exits_one_when_run_raises(monkeypatch):
     monkeypatch.setattr(os, "fork", lambda: 0)  # child branch
     monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(_Exit(code)))
 
-    def boom(self, r, i, s):
+    def boom(self, r, i, s, ov):
         raise RuntimeError("child session blew up")
 
     monkeypatch.setattr(ServeDispatchPlugin, "_child_run", boom)

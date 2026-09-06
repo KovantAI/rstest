@@ -329,7 +329,7 @@ class ServeDispatchPlugin(StreamPlugin):
             if pid == 0:  # child
                 code = 0
                 try:
-                    self._child_run(req_id, ids, stop)
+                    self._child_run(req_id, ids, stop, overlay)
                 except BaseException:
                     code = 1
                 finally:
@@ -346,7 +346,7 @@ class ServeDispatchPlugin(StreamPlugin):
         finally:
             _restore_overlay(saved)
 
-    def _child_run(self, req_id: int, ids: list, stop: bool) -> None:
+    def _child_run(self, req_id: int, ids: list, stop: bool, overlay: dict | None = None) -> None:
         import importlib
 
         # Reset to the framework baseline: drop every SUT/test module imported
@@ -355,6 +355,35 @@ class ServeDispatchPlugin(StreamPlugin):
         for name in list(sys.modules):
             if self._baseline is not None and name not in self._baseline:
                 del sys.modules[name]
+        # A file imported *during* config/collection (a conftest, or any module
+        # pulled in by the root conftest) lives in the baseline and would NOT be
+        # dropped above — so an overlay mutating it would be ignored and the
+        # mutant read as a false survivor. Drop any still-loaded module whose
+        # source file is being overlaid, forcing a fresh import of the mutation.
+        #
+        # This runs on every overlaid (i.e. every mutant) run, so it stays out
+        # of the syscall path: a pure-string basename + abspath match handles
+        # every module, and realpath (which stats each path component) is only
+        # consulted for the rare module whose basename collides but whose
+        # abspath didn't match — e.g. a symlinked cwd. That keeps the common
+        # case O(modules) string compares, not O(modules) stat storms.
+        overlaid_abs = {os.path.abspath(p) for p in (overlay or {})}
+        if overlaid_abs:
+            overlaid_names = {os.path.basename(p) for p in overlaid_abs}
+            overlaid_real: set[str] | None = None  # built lazily, only if needed
+            for name, mod in list(sys.modules.items()):
+                src = getattr(mod, "__file__", None)
+                if not src or os.path.basename(src) not in overlaid_names:
+                    continue
+                if os.path.abspath(src) in overlaid_abs:
+                    del sys.modules[name]
+                    continue
+                # Basename matched but abspath didn't: could be a symlinked
+                # cwd/source tree. Confirm via realpath for this candidate only.
+                if overlaid_real is None:
+                    overlaid_real = {os.path.realpath(p) for p in overlaid_abs}
+                if os.path.realpath(src) in overlaid_real:
+                    del sys.modules[name]
         importlib.invalidate_caches()
         # A fresh pytest session over exactly the requested nodeids; -x makes
         # stop_on_first_fail bail after the first failure.

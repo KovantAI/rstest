@@ -14,6 +14,7 @@
 //! multi-session are future work.
 
 use std::io::{BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
@@ -32,6 +33,11 @@ pub fn serve(cli: &Cli, args: &[String], sock: &Path) -> Result<i32> {
     let _ = std::fs::remove_file(sock);
     let listener = UnixListener::bind(sock)
         .with_context(|| format!("binding serve socket {}", sock.display()))?;
+    // Restrict the socket to its owner: a `run.patch` overlay writes arbitrary
+    // files as this user, so another local user must never be able to connect
+    // and drive runs. Default umask can leave a socket group/other-accessible.
+    std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("securing serve socket {}", sock.display()))?;
     eprintln!("rstest: serve listening on {}", sock.display());
 
     warn_unsupported_flags(cli);
@@ -127,9 +133,20 @@ fn serve_session(
     let mut writer = stream.try_clone().context("cloning serve stream")?;
     let mut reader = rmp_serde::Deserializer::new(BufReader::new(stream));
 
-    // Each iteration reads one `{kind, payload}` envelope; a decode error / EOF
-    // (client disconnected) ends the loop.
-    while let Ok(msg) = Value::deserialize(&mut reader) {
+    // Each iteration reads one `{kind, payload}` envelope. A clean EOF (client
+    // hung up at a message boundary) ends the loop silently; a malformed frame
+    // desyncs the stream, so surface it as `bad_frame` rather than exiting as if
+    // the client had disconnected cleanly.
+    loop {
+        let msg = match Value::deserialize(&mut reader) {
+            Ok(m) => m,
+            Err(e) if is_clean_eof(&e) => break,
+            Err(e) => {
+                let payload = json!({"code": "bad_frame", "message": e.to_string()});
+                let _ = write_msg(&mut writer, "error", payload);
+                break;
+            }
+        };
         let kind = msg.get("kind").and_then(Value::as_str).unwrap_or("");
         let payload = msg.get("payload").cloned().unwrap_or(Value::Null);
 
@@ -158,14 +175,27 @@ fn serve_session(
                 }
             }
             "run" => {
+                let id = payload.get("id").and_then(Value::as_u64).unwrap_or(0);
+                let ids = node_ids(&payload);
+                // Validate request shape before session state: an empty subset
+                // would make pytest collect the WHOLE suite (no nodeid args =
+                // run everything), silently turning one mutant's run into a
+                // full-suite run with a bogus killed/ran verdict. Reject it.
+                if ids.is_empty() {
+                    let payload = json!({
+                        "id": id,
+                        "code": "bad_request",
+                        "message": "run requires a non-empty node_ids",
+                    });
+                    write_msg(&mut writer, "error", payload)?;
+                    continue;
+                }
                 let Some(w) = worker.as_mut() else {
                     let payload =
                         json!({"code": "bad_session", "message": "run before open_session"});
                     write_msg(&mut writer, "error", payload)?;
                     continue;
                 };
-                let id = payload.get("id").and_then(Value::as_u64).unwrap_or(0);
-                let ids = node_ids(&payload);
                 let stop = payload
                     .get("stop_on_first_fail")
                     .and_then(Value::as_bool)
@@ -271,6 +301,18 @@ fn run_subset(
             _ => {}
         }
     }
+}
+
+/// A msgpack decode error that is just the stream ending at a message boundary
+/// (client hung up), as opposed to a corrupt/partial frame. Only the former is
+/// a clean disconnect; the latter is surfaced to the client as `bad_frame`.
+fn is_clean_eof(e: &rmp_serde::decode::Error) -> bool {
+    use rmp_serde::decode::Error;
+    matches!(
+        e,
+        Error::InvalidMarkerRead(io) | Error::InvalidDataRead(io)
+            if io.kind() == std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 /// Serialize `{kind, payload}` as msgpack and write it to the socket.
@@ -406,6 +448,75 @@ mod tests {
         assert_eq!(msg["kind"], "error");
         assert_eq!(msg["payload"]["code"], "bad_session");
         h.finish();
+    }
+
+    #[test]
+    fn run_with_empty_node_ids_errors_bad_request() {
+        // An empty subset must be rejected, never forwarded — a forwarded empty
+        // subset makes the worker run the whole suite. Checked before session
+        // state, so no worker (bogus python) is needed to exercise it.
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("run", json!({"id": 7, "node_ids": []}));
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "error");
+        assert_eq!(msg["payload"]["code"], "bad_request");
+        assert_eq!(msg["payload"]["id"], 7);
+        h.finish();
+    }
+
+    #[test]
+    fn run_with_missing_node_ids_errors_bad_request() {
+        // Absent `node_ids` (or all-non-string) collapses to an empty subset;
+        // same rejection, so a malformed request never runs the whole suite.
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("run", json!({"id": 4, "node_ids": [1, 2, null]}));
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "error");
+        assert_eq!(msg["payload"]["code"], "bad_request");
+        h.finish();
+    }
+
+    #[test]
+    fn malformed_frame_replies_bad_frame() {
+        // A corrupt frame must not be mistaken for a clean disconnect: the
+        // server surfaces `bad_frame` before ending the session. 0xc1 is
+        // msgpack's reserved "never used" byte -> a decode error that is NOT
+        // an unexpected-EOF, distinguishing it from a client hang-up.
+        let mut h = Harness::start(bogus_python(), &[]);
+        h.send("hello", json!({"proto": 1}));
+        assert_eq!(h.recv()["kind"], "welcome");
+        h.writer.write_all(&[0xc1]).unwrap();
+        h.writer.flush().unwrap();
+        let msg = h.recv();
+        assert_eq!(msg["kind"], "error");
+        assert_eq!(msg["payload"]["code"], "bad_frame");
+        h.finish();
+    }
+
+    #[test]
+    fn serve_socket_is_owner_only() {
+        // The socket must be chmod 0o600: a `run.patch` overlay writes files as
+        // this user, so another local user must not be able to connect. serve()
+        // binds + chmods before it resolves the interpreter, so a bogus python
+        // (resolve fails, no accept) still leaves the secured socket on disk.
+        use clap::Parser as _;
+        let dir = std::env::temp_dir().join(format!("rstest-serve-perms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("p.sock");
+        let cli = Cli::parse_from(["rstest", "--python", "/nonexistent/definitely-not-a-python"]);
+        let sock_srv = sock.clone();
+        let handle = thread::spawn(move || serve(&cli, &[], &sock_srv));
+        let mut mode = None;
+        for _ in 0..400 {
+            if let Ok(md) = std::fs::metadata(&sock) {
+                mode = Some(md.permissions().mode() & 0o777);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = handle.join().unwrap(); // serve() returned Err(bogus python)
+        let _ = std::fs::remove_file(&sock);
+        assert_eq!(mode, Some(0o600), "serve socket must be owner-only");
     }
 
     #[test]
