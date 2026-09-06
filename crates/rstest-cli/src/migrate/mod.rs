@@ -164,6 +164,26 @@ mod tests {
     }
 
     #[test]
+    fn is_fail_matches_any_failed_or_errored_phase() {
+        use serde_json::json;
+        // Any of setup/call/teardown failing or erroring counts as a failure.
+        assert!(is_fail(&json!({ "call": "failed" })));
+        assert!(is_fail(&json!({ "setup": "error" })));
+        assert!(is_fail(&json!({ "teardown": "failed" })));
+        assert!(is_fail(
+            &json!({ "setup": "passed", "call": "error", "teardown": "passed" })
+        ));
+        // All phases passed (or skipped/absent) -> not a failure.
+        assert!(!is_fail(
+            &json!({ "setup": "passed", "call": "passed", "teardown": "passed" })
+        ));
+        assert!(!is_fail(&json!({ "call": "skipped" })));
+        assert!(!is_fail(&json!({})));
+        // A non-string phase value is ignored, not treated as a failure.
+        assert!(!is_fail(&json!({ "call": 1 })));
+    }
+
+    #[test]
     fn wait_bound_signal() {
         // 1.0s wall, ~0 cpu -> waiting (wall-clock test).
         let waiting = Rec {

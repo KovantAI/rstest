@@ -59,35 +59,12 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
         // Only test files touched -> rerun just those. Source changes go
         // through the import graph; full rerun only when the graph can't
         // answer (config change etc.).
-        let only_tests = changed.iter().all(|p| collect::is_test_file(p, &project));
-        let mut mode = "full selection";
-        let args: Vec<String> = if only_tests {
-            let mut args: Vec<String> = changed
-                .iter()
-                .filter(|p| p.exists())
-                .map(|p| rel(p, &cwd))
-                .collect();
-            if args.is_empty() {
-                continue; // deleted test files only - nothing to run
+        let (args, mode) = match plan_rerun(&changed, &project, &cwd, base_args) {
+            Plan::Skip => {
+                eprintln!("[watch] change affects no tests; waiting");
+                continue;
             }
-            args.extend(flags_only(base_args));
-            mode = "changed files";
-            args
-        } else {
-            match select::affected_tests(&project.rootdir, &project, &changed, false) {
-                Ok(select::Selection::Tests(tests)) if tests.is_empty() => {
-                    eprintln!("[watch] change affects no tests; waiting");
-                    continue;
-                }
-                Ok(select::Selection::Tests(tests)) => {
-                    mode = "affected tests";
-                    let mut args: Vec<String> =
-                        tests.iter().map(|t| t.display().to_string()).collect();
-                    args.extend(flags_only(base_args));
-                    args
-                }
-                _ => base_args.to_vec(),
-            }
+            Plan::Run { args, mode } => (args, mode),
         };
 
         if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -103,6 +80,60 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
             mode
         );
         status = execute(cli, &args)?;
+    }
+}
+
+/// What a change set should trigger. `Skip` = nothing runnable (deleted test
+/// files only, or a source change the import graph maps to no tests).
+enum Plan {
+    Skip,
+    Run {
+        args: Vec<String>,
+        mode: &'static str,
+    },
+}
+
+/// Decide what to rerun for a change set. Pure over the filesystem + import
+/// graph so it's testable without the watcher/executor:
+/// - only test files touched -> rerun exactly those (`changed files`)
+/// - a source change -> import-graph selection (`affected tests`)
+/// - graph can't answer (config/non-Python change) -> `full selection`
+fn plan_rerun(
+    changed: &[PathBuf],
+    project: &config::ProjectConfig,
+    cwd: &Path,
+    base_args: &[String],
+) -> Plan {
+    let only_tests = changed.iter().all(|p| collect::is_test_file(p, project));
+    if only_tests {
+        let mut args: Vec<String> = changed
+            .iter()
+            .filter(|p| p.exists())
+            .map(|p| rel(p, cwd))
+            .collect();
+        if args.is_empty() {
+            return Plan::Skip; // deleted test files only - nothing to run
+        }
+        args.extend(flags_only(base_args));
+        return Plan::Run {
+            args,
+            mode: "changed files",
+        };
+    }
+    match select::affected_tests(&project.rootdir, project, changed, false) {
+        Ok(select::Selection::Tests(tests)) if tests.is_empty() => Plan::Skip,
+        Ok(select::Selection::Tests(tests)) => {
+            let mut args: Vec<String> = tests.iter().map(|t| t.display().to_string()).collect();
+            args.extend(flags_only(base_args));
+            Plan::Run {
+                args,
+                mode: "affected tests",
+            }
+        }
+        _ => Plan::Run {
+            args: base_args.to_vec(),
+            mode: "full selection",
+        },
     }
 }
 
@@ -214,5 +245,98 @@ mod tests {
         assert_eq!(rel(&cwd.join("tests/test_a.py"), cwd), "tests/test_a.py");
         // A path outside cwd is returned unchanged.
         assert_eq!(rel(Path::new("/other/x.py"), cwd), "/other/x.py");
+    }
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rstest-watch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn project_at(root: &Path) -> config::ProjectConfig {
+        config::ProjectConfig {
+            rootdir: root.to_path_buf(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plan_only_test_files_reruns_exactly_those() {
+        // A change set of only test files reruns those files, relative to cwd,
+        // with the user's flags appended.
+        let cwd = fresh_dir("only");
+        let t1 = cwd.join("test_a.py");
+        let t2 = cwd.join("test_b.py");
+        std::fs::write(&t1, "def test_x(): pass\n").unwrap();
+        std::fs::write(&t2, "def test_y(): pass\n").unwrap();
+        let base = vec!["-k".to_string(), "smoke".to_string()];
+        match plan_rerun(&[t1, t2], &project_at(&cwd), &cwd, &base) {
+            Plan::Run { args, mode } => {
+                assert_eq!(mode, "changed files");
+                assert!(args.contains(&"test_a.py".to_string()), "{args:?}");
+                assert!(args.contains(&"test_b.py".to_string()), "{args:?}");
+                assert!(args.contains(&"-k".to_string()));
+                assert!(args.contains(&"smoke".to_string()));
+            }
+            Plan::Skip => panic!("expected a run for changed test files"),
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn plan_only_deleted_test_files_skips() {
+        // Test files matched by name but gone from disk -> nothing to run.
+        let cwd = fresh_dir("deleted");
+        let gone = cwd.join("test_gone.py"); // never created
+        assert!(matches!(
+            plan_rerun(&[gone], &project_at(&cwd), &cwd, &[]),
+            Plan::Skip
+        ));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn plan_config_change_forces_full_selection() {
+        // A non-Python (config) change defeats the import graph -> full rerun
+        // with the base args passed through verbatim (flags NOT filtered).
+        let cwd = fresh_dir("config");
+        let cfg = cwd.join("pyproject.toml");
+        std::fs::write(&cfg, "[tool.pytest.ini_options]\n").unwrap();
+        let base = vec!["-x".to_string()];
+        match plan_rerun(&[cfg], &project_at(&cwd), &cwd, &base) {
+            Plan::Run { args, mode } => {
+                assert_eq!(mode, "full selection");
+                assert_eq!(args, base, "full selection reruns with base args verbatim");
+            }
+            Plan::Skip => panic!("config change should force a full rerun"),
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn plan_source_change_selects_affected_tests() {
+        // A source-file change routes through the import graph: the test that
+        // imports it is selected, and the user's flags are appended.
+        let cwd = fresh_dir("source");
+        std::fs::write(cwd.join("mymod.py"), "VALUE = 1\n").unwrap();
+        std::fs::write(
+            cwd.join("test_uses.py"),
+            "import mymod\ndef test_v():\n    assert mymod.VALUE == 1\n",
+        )
+        .unwrap();
+        let base = vec!["-q".to_string()];
+        match plan_rerun(&[cwd.join("mymod.py")], &project_at(&cwd), &cwd, &base) {
+            Plan::Run { args, mode } => {
+                assert_eq!(mode, "affected tests");
+                assert!(
+                    args.iter().any(|a| a.contains("test_uses.py")),
+                    "the importing test should be selected: {args:?}"
+                );
+                assert!(args.contains(&"-q".to_string()));
+            }
+            Plan::Skip => panic!("a source change reaching a test must run it"),
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 }

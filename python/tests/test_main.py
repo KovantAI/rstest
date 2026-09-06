@@ -1,5 +1,8 @@
 """Unit tests for the worker entrypoint's command loop and dispatch."""
 
+import sys
+import types
+
 import pytest
 from rstest_worker import __main__ as worker_main
 from rstest_worker._internal import runner_pytest
@@ -75,6 +78,42 @@ def test_main_wires_fds_into_connection(monkeypatch):
 
     assert built["fds"] == (3, 4)  # raw fds passed through on posix
     assert served["conn"] == "CONN"
+
+
+def test_main_converts_windows_handles_via_msvcrt(monkeypatch):
+    # On Windows the orchestrator passes HANDLE values; main() converts them to
+    # CRT file descriptors via msvcrt.open_osfhandle. Simulate nt + a fake
+    # msvcrt so this branch is covered on any platform (CI runs on Linux).
+    monkeypatch.setattr(worker_main.sys, "argv", ["prog", "100", "200"])
+    monkeypatch.setattr(worker_main.os, "name", "nt")
+
+    opened = []
+    fake_msvcrt = types.ModuleType("msvcrt")
+
+    def open_osfhandle(handle, flags):
+        opened.append((handle, flags))
+        return 1000 + handle  # a distinct fd per handle
+
+    monkeypatch.setattr(fake_msvcrt, "open_osfhandle", open_osfhandle, raising=False)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    built = {}
+    monkeypatch.setattr(
+        worker_main.protocol,
+        "Connection",
+        lambda cmd_fd, evt_fd: built.setdefault("fds", (cmd_fd, evt_fd)),
+    )
+    monkeypatch.setattr(worker_main, "_serve", lambda conn: None)
+
+    worker_main.main()
+
+    # Each HANDLE converted with the right access flags, in order (cmd, evt).
+    assert opened == [
+        (100, worker_main.os.O_RDONLY),
+        (200, worker_main.os.O_APPEND),
+    ]
+    # The converted fds (not the raw handles) are what Connection receives.
+    assert built["fds"] == (1100, 1200)
 
 
 def test_main_swallows_broken_pipe(monkeypatch):

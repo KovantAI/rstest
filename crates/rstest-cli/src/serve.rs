@@ -506,11 +506,18 @@ mod tests {
         let cli = Cli::parse_from(["rstest", "--python", "/nonexistent/definitely-not-a-python"]);
         let sock_srv = sock.clone();
         let handle = thread::spawn(move || serve(&cli, &[], &sock_srv));
+        // serve() binds then chmods (not atomic), so the socket briefly exists
+        // at the umask default before being tightened. Poll until it settles to
+        // 0o600 rather than reading on first sight, or the check races the chmod
+        // under load and observes the pre-chmod mode.
         let mut mode = None;
         for _ in 0..400 {
             if let Ok(md) = std::fs::metadata(&sock) {
-                mode = Some(md.permissions().mode() & 0o777);
-                break;
+                let m = md.permissions().mode() & 0o777;
+                mode = Some(m);
+                if m == 0o600 {
+                    break;
+                }
             }
             thread::sleep(std::time::Duration::from_millis(5));
         }
