@@ -12,6 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Name of the per-project cache directory (durations, flake history, and the
+/// `--changed` coverage index live here). Committed-tree-relative.
 pub const DIR_NAME: &str = ".rstest_cache";
 
 /// The cache directory for the current working tree.
@@ -33,10 +35,11 @@ pub fn file_in(project: &Path, name: &str) -> PathBuf {
     project.join(DIR_NAME).join(name)
 }
 
-/// Atomic write: a uniquely-named tmp file in the same directory, then rename
-/// over the target. Returns the IO result so callers writing AUTHORITATIVE state
-/// (the shared-cache remote) can react to a failure; the best-effort local caches
-/// ignore it with `let _ =`.
+/// Atomic, crash-durable write: fully write + `fsync` a uniquely-named tmp file
+/// in the same directory, rename it over the target, then best-effort `fsync`
+/// the directory so the rename itself survives a crash. Returns the IO result so
+/// callers writing AUTHORITATIVE state (the shared-cache remote) can react to a
+/// failure; the best-effort local caches ignore it with `let _ =`.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -53,22 +56,44 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // the SAME target (e.g. two hosts compacting base.json on a shared mount,
     // which can share a pid) never land on the same tmp path and tear the file.
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = crate::time::now_epoch_nanos();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(
         ".{fname}.{}.{nanos:x}.{seq:x}.tmp",
         std::process::id()
     ));
-    match std::fs::write(&tmp, bytes) {
-        Ok(()) => std::fs::rename(&tmp, path),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
+    // Any early return past this point must not leak the tmp file.
+    if let Err(e) = write_synced(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    // The data is durable (tmp was fsync'd before the rename); this makes the
+    // rename entry itself durable too. Best-effort: the write already succeeded,
+    // and only a crash in the window before the next dir flush could lose it.
+    sync_dir(parent);
+    Ok(())
+}
+
+/// Write `bytes` to `path` and flush data+metadata to disk before returning, so
+/// a following rename can't expose a name pointing at unflushed (zero/torn)
+/// blocks after a crash.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// Best-effort `fsync` of a directory so a rename into it is durable. Unix only:
+/// Windows has no directory-handle fsync (opening a dir as a file fails), and
+/// NTFS journals the rename, so this is a no-op there.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 #[cfg(test)]

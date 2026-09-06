@@ -42,13 +42,6 @@ fn parse_retention(raw: Option<String>) -> u64 {
     days.saturating_mul(24 * 60 * 60)
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Drop entries whose last event predates the retention window. Pure so the
 /// aging policy is testable without a clock. `max_age == 0` disables aging.
 /// `saturating_sub` means a zeroed/future `last_epoch` (bad clock, skew) is
@@ -65,7 +58,7 @@ pub fn load() -> HashMap<String, FlakeStats> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    retain_recent(&mut log, now(), retention_secs());
+    retain_recent(&mut log, crate::time::now_epoch_secs(), retention_secs());
     log
 }
 
@@ -99,7 +92,7 @@ pub fn record(run: &Run) {
     if events.is_empty() {
         return;
     }
-    let now = now();
+    let now = crate::time::now_epoch_secs();
     // load() has already dropped entries past the retention window, so writing
     // the merged map back garbage-collects the file on any event-bearing run.
     let mut log = load();

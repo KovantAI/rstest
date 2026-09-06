@@ -103,6 +103,23 @@ Total setup time per fixture, with two pieces of advice:
 Test time aggregated by file — where to look first, and the input for
 deciding what to split under `--dist load`.
 
+### RESOURCE LEAKS
+
+Tests that ended with more live threads or open file descriptors than they
+started — a resource opened and never released, its own teardown included.
+
+```text
+RESOURCE LEAKS (net threads/fds still open after teardown):
+  +3 threads  tests/test_pool.py::test_executor
+  +5 fds      tests/test_io.py::test_reader
+```
+
+Only appears when something leaked. A leaked thread/fd is shared state that can
+flake a *later* test, so this is the first place to look for order-dependent
+flakiness. Full model, false-positive cases, and fixes:
+[Resource leaks](resource-leaks.md). To make it a CI gate, use
+[`--fail-on-leak`](../reference/cli.md#-fail-on-leak).
+
 ## Workflow
 
 Doctor is cheap enough to run on a whim and most valuable on a cadence:

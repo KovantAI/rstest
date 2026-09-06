@@ -775,6 +775,58 @@ def gate_lf(g, args, binary):
     )
 
 
+def gate_html_report(g, args, binary):
+    print("== html report ==")
+    hp = g.tmp / "htmlproj"
+    g.write(
+        "htmlproj/test_h.py",
+        "def test_ok(): assert True\n"
+        'def test_bad(): assert 1 == 2, "values <differ> & <script>x</script>"\n',
+    )
+    out = hp / "report.html"
+    # -n 2: the case pytest-html can't do (no writer registered on any worker).
+    r = g.run("test_h.py", "-n", "2", "--html", str(out), cwd=hp, env_extra={"PYTHONPATH": str(hp)})
+    doc = out.read_text() if out.exists() else ""
+    check(
+        "html: written at -n 2 with a valid document",
+        r.returncode == 1 and out.exists() and doc.startswith("<!doctype html>"),
+        f"rc={r.returncode} exists={out.exists()}",
+    )
+    check(
+        "html: summary reflects merged counts",
+        "1 passed" in doc and "1 failed" in doc,
+        doc[:400],
+    )
+    check(
+        "html: failing nodeid + its traceback are present",
+        "test_h.py::test_bad" in doc and "AssertionError" in doc,
+        "",
+    )
+    check(
+        "html: untrusted traceback markup is escaped, not live",
+        "&lt;differ&gt;" in doc
+        and "&lt;script&gt;x&lt;/script&gt;" in doc
+        and "<script>x</script>" not in doc,
+        "escaping breach",
+    )
+    check(
+        "html: self-contained (embedded data, no external asset refs)",
+        'id="data"' in doc and "src=" not in doc and 'href="http' not in doc,
+        "",
+    )
+    # Report write failure must surface as a nonzero exit, not a silent green:
+    # the run completes, then the post-run report writer errors and that error
+    # propagates out of execute() (run.rs write_run_reports `?`). Point --html
+    # into a nonexistent directory so fs::write fails.
+    bad = hp / "nope" / "report.html"
+    r = g.run("test_h.py", "-n", "2", "--html", str(bad), cwd=hp, env_extra={"PYTHONPATH": str(hp)})
+    check(
+        "html: unwritable report path fails the run (error propagated, not swallowed)",
+        r.returncode != 0 and not bad.exists() and "Error:" in r.stderr,
+        f"rc={r.returncode} stderr={r.stderr[-200:]}",
+    )
+
+
 def gate_junitxml(g, args, binary):
     print("== junitxml ==")
     xml_path = g.tmp / "junit.xml"
@@ -1297,6 +1349,98 @@ def gate_warnings(g, args, binary):
     r = g.run("warn", "-n", "2")
     check("warnings summary section", "warnings summary" in r.stdout and "UserWarning" in r.stdout)
     check("warnings in counts", "warnings in" in r.stdout, r.stdout[-120:])
+
+
+def gate_resource_leak_detection(g, args, binary):
+    print("== resource leak detection ==")
+    lp = g.tmp / "leakproj"
+    # test_a is the warm-up (first test, first-touch imports skipped); the
+    # leakers come after so their deltas are attributed.
+    g.write(
+        "leakproj/test_leaks.py",
+        "import threading\n"
+        "def test_a_warmup(): assert True\n"
+        "def test_b_clean(): assert True\n"
+        "def test_c_thread_leak():\n"
+        "    threading.Thread(target=lambda: __import__('time').sleep(30), daemon=True).start()\n"
+        "    assert True\n"
+        "def test_d_fd_leak():\n"
+        "    test_d_fd_leak.f = open('/dev/null')  # never closed\n"
+        "    assert True\n",
+    )
+    # -n 1 keeps collection order deterministic so the warm-up is test_a.
+    r = g.run("test_leaks.py", "-n", "1", "--doctor", cwd=lp, env_extra={"PYTHONPATH": str(lp)})
+    check(
+        "leak: --doctor names the thread + fd leakers",
+        "RESOURCE LEAKS" in r.stdout
+        and "test_c_thread_leak" in r.stdout
+        and "test_d_fd_leak" in r.stdout,
+        r.stdout[-400:],
+    )
+    r = g.run(
+        "test_leaks.py", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)}
+    )
+    check(
+        "leak: --fail-on-leak fails the run (exit 1)",
+        r.returncode == 1 and "leaked threads/fds" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    # A clean suite: no leaks, exit 0.
+    g.write(
+        "leakproj/test_ok.py",
+        "def test_a(): assert True\ndef test_b(): assert True\ndef test_c(): assert True\n",
+    )
+    r = g.run("test_ok.py", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)})
+    check(
+        "leak: clean suite passes the gate (exit 0, warm-up caveat noted)",
+        r.returncode == 0 and "no thread/fd leaks" in r.stderr and "warm-up" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # Warm-up skip: the FIRST test each worker runs is not leak-checked, so a
+    # test that leaks but happens to run first is not flagged (first-touch
+    # imports aren't a per-test leak). test_a leaks + runs first under -n 1.
+    g.write(
+        "leakproj/test_warmup.py",
+        "import threading\n"
+        "def test_a_leaks_but_is_warmup():\n"
+        "    threading.Thread(target=lambda: __import__('time').sleep(30), daemon=True).start()\n"
+        "    assert True\n"
+        "def test_b_clean(): assert True\n",
+    )
+    r = g.run(
+        "test_warmup.py", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)}
+    )
+    check(
+        "leak: first test is an unchecked warm-up (its leak not flagged)",
+        r.returncode == 0 and "no thread/fd leaks" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # --doctor + --fail-on-leak together: the RESOURCE LEAKS table is rendered
+    # once (by doctor), not repeated by the gate; gate still fails the run.
+    r = g.run(
+        "test_leaks.py",
+        "-n",
+        "1",
+        "--doctor",
+        "--fail-on-leak",
+        cwd=lp,
+        env_extra={"PYTHONPATH": str(lp)},
+    )
+    check(
+        "leak: --doctor + --fail-on-leak fails once, no double table",
+        r.returncode == 1
+        and "leaked threads/fds" in r.stderr
+        and (r.stdout + r.stderr).count("test_c_thread_leak") == 1,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+    )
+    # Passthrough (-s): no instrumentation, so --fail-on-leak is ignored with a
+    # warning rather than passing silently (exit reflects the tests, not a gate).
+    r = g.run("test_leaks.py", "-s", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)})
+    check(
+        "leak: --fail-on-leak ignored (with warning) in passthrough mode",
+        "has no effect in passthrough mode" in r.stderr and "leaked threads/fds" not in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
 
 
 def gate_doctor(g, args, binary):
@@ -3050,6 +3194,7 @@ def main():
         gate_x_maxfail,
         gate_lf,
         gate_junitxml,
+        gate_html_report,
         gate_shard_k_n,
         gate_dist_each,
         gate_dist_validation,
@@ -3061,6 +3206,7 @@ def main():
         gate_monorepo,
         gate_warnings,
         gate_doctor,
+        gate_resource_leak_detection,
         gate_auto_worker_capping,
         gate_coverage,
         gate_coverage_contexts_line_test_index_cov_co,

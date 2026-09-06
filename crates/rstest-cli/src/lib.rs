@@ -15,6 +15,8 @@ mod scheduling;
 mod select;
 #[cfg(unix)]
 mod serve;
+mod text;
+mod time;
 mod watch;
 
 use anyhow::Result;

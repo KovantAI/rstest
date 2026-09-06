@@ -1,6 +1,8 @@
 """Neutralization / seeding shims for third-party pytest plugins running
 inside a pool worker (which has no xdist master to coordinate them)."""
 
+from __future__ import annotations
+
 import zlib
 from typing import Any
 

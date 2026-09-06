@@ -12,7 +12,7 @@ use crate::cli::{is_collect_only, needs_passthrough_io, parse_durations, parse_m
 use crate::reporting::ci::{
     buildkite_flaky_annotate, print_azure_annotations, print_github_annotations,
 };
-use crate::reporting::{color, flakes, junit, progress, report, status};
+use crate::reporting::{color, flakes, html, junit, progress, report, status};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
 use crate::{cache, collect, config, discover, doctor, migrate, mono, remote, select};
 
@@ -39,6 +39,7 @@ fn run_collect_discovery(
     let env = worker::WorkerEnv {
         run_uid: run_uid.to_string(),
         doctor: false,
+        leakcheck: false,
         send_ids: true,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
@@ -161,22 +162,53 @@ fn build_run_meta(
     }
 }
 
+/// Write the optional junit/html run reports. Extracted from `execute` so the
+/// report side-effects are covered by in-process unit tests (rust-unit), not
+/// only incidentally by the e2e gate.
+fn write_run_reports(
+    junitxml: Option<&std::path::Path>,
+    html: Option<&std::path::Path>,
+    run: &report::Run,
+    suite_seconds: f64,
+    meta: &report::RunMeta,
+) -> Result<()> {
+    if let Some(path) = junitxml {
+        junit::write(path, run, suite_seconds)?;
+    }
+    if let Some(path) = html {
+        html::write(path, run, meta)?;
+    }
+    Ok(())
+}
+
+/// The merged lastfailed map written into pytest's cache after a pool run.
+/// Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the plain nodeids
+/// (deduped, since a test may fail on several workers). BTreeMap => stable,
+/// deduped keys with no extra pass.
+fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bool> {
+    run.failed_nodeids()
+        .map(|id| {
+            let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
+            (plain.to_string(), true)
+        })
+        .collect()
+}
+
+/// The crate's main entry point for a single (non-watch) run: resolves the
+/// run configuration from `cli` + forwarded pytest `args`, dispatches to the
+/// worker pool (or the monorepo driver), runs post-run reports and gates
+/// (doctor, junit, lastfailed, duration-regression, cache push, report-json),
+/// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let args = args.to_vec();
     let start = Instant::now();
-    let started_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let started_epoch = crate::time::now_epoch_secs();
     // One uid per test run, shared by every worker (xdist's testrun_uid
     // contract). A monorepo child inherits the root's (passed explicitly on the
     // child's command); a top-level run generates one. Held as a typed value and
     // handed to workers via their environment — never process-global set_var.
     let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+        let nanos = crate::time::now_epoch_nanos();
         format!("{nanos:x}{:x}", std::process::id())
     });
     // Shared-cache backend: resolve the remote (flag or env) and, if asked,
@@ -279,15 +311,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         .unwrap_or_else(|| "load".into());
     // Validate once, up front: every run path (byte-exact, lazy, pool) shares
     // this name, so an invalid value must error the same way regardless of
-    // suite size, not slip through the lazy/small-suite path silently.
-    if !matches!(
-        dist_name.as_str(),
-        "load" | "loadfile" | "loadscope" | "loadgroup" | "each"
-    ) {
-        anyhow::bail!(
-            "unknown --dist mode: {dist_name} (use load|loadfile|loadscope|loadgroup|each)"
-        );
-    }
+    // suite size, not slip through the lazy/small-suite path silently. The name
+    // stays a string downstream (lazy/each checks); dispatch_run re-parses it to
+    // the enum via the same `FromStr`.
+    dist_name
+        .parse::<pool::Dist>()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
     // Flaky-aware reruns: when on, load the prior flaky set ONCE so the pool
     // can gate rerun eligibility on it. None = feature off (no gating).
@@ -357,9 +386,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Run-wide worker params (testrun uid + doctor instrumentation) travel via
     // each worker's environment at spawn (thread-safe), never this process's
     // global env.
+    // Leak measurement runs under doctor OR --fail-on-leak (doctor already
+    // instruments; --fail-on-leak needs the deltas without the full report).
+    let leakcheck = doctor || cli.fail_on_leak;
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.clone(),
         doctor,
+        leakcheck,
         send_ids: false,
     };
 
@@ -513,11 +546,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                 );
             }
             let seed = if v == "random" {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0)
-                    ^ u64::from(std::process::id())
+                crate::time::now_epoch_nanos() as u64 ^ u64::from(std::process::id())
             } else {
                 v.parse().map_err(|_| {
                     anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'")
@@ -671,23 +700,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if let Some(path) = &cli.junitxml {
-        junit::write(path, &outcome.run, start.elapsed().as_secs_f64())?;
-    }
+    write_run_reports(
+        cli.junitxml.as_deref(),
+        cli.html.as_deref(),
+        &outcome.run,
+        start.elapsed().as_secs_f64(),
+        &build_run_meta(start, outcome.exitstatus, started_epoch, n),
+    )?;
     // Merged lastfailed: workers' own writes are blocked in pool mode
     // (each knows only its failures); write the union into pytest's cache
     // so a follow-up `--lf` behaves exactly as after a serial run.
     if let Some(cache_dir) = &outcome.cache_dir {
-        // Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the
-        // plain nodeids (deduped, since a test may fail on several workers).
-        let failed: std::collections::BTreeMap<String, bool> = outcome
-            .run
-            .failed_nodeids()
-            .map(|id| {
-                let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
-                (plain.to_string(), true)
-            })
-            .collect();
+        let failed = merged_lastfailed(&outcome.run);
         let dir = std::path::Path::new(cache_dir).join("v/cache");
         // Only write when serialization succeeds: a serialize error must not
         // clobber pytest's lastfailed cache with an empty `{}`.
@@ -811,6 +835,47 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             exitstatus = 1;
         }
     }
+    // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
+    // stderr so --output json/tap keep stdout a pure machine stream.
+    if cli.fail_on_leak && passthrough {
+        // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
+        // deltas are measured. Warn instead of silently exiting 0 (matches the
+        // --quarantine passthrough behavior).
+        eprintln!(
+            "rstest: --fail-on-leak has no effect in passthrough mode \
+             (-s/--pdb/--co); ignoring"
+        );
+    } else if cli.fail_on_leak {
+        let leaks = doctor::detect_leaks(&outcome.run);
+        if leaks.is_empty() {
+            // Note the blind spot: the first test each worker runs is an
+            // unchecked warm-up (first-touch imports aren't a per-test leak),
+            // so a clean gate does not prove those tests are leak-free.
+            eprintln!(
+                "rstest: --fail-on-leak: no thread/fd leaks detected \
+                 (first test per worker runs as an unchecked warm-up)"
+            );
+        } else {
+            // Under --doctor the RESOURCE LEAKS section already listed these;
+            // only gate + summarize here to avoid printing the table twice.
+            if !doctor {
+                eprintln!(
+                    "\n{}",
+                    palette.bold_red("=========== resource leaks ===========")
+                );
+                for l in leaks.iter().take(20) {
+                    eprintln!("  {}  {}", doctor::leak_delta(l), l.nodeid);
+                }
+            }
+            eprintln!(
+                "rstest: --fail-on-leak: {} test(s) leaked threads/fds",
+                leaks.len()
+            );
+            if exitstatus == 0 {
+                exitstatus = 1;
+            }
+        }
+    }
     Ok(exitstatus)
 }
 
@@ -927,18 +992,9 @@ fn dispatch_run(
             worker_env,
         )?
     } else {
-        let dist = match dist_name {
-            "load" => pool::Dist::Load,
-            "loadfile" => pool::Dist::Loadfile,
-            "loadscope" => pool::Dist::Loadscope,
-            "loadgroup" => pool::Dist::Loadgroup,
-            "each" => pool::Dist::Each,
-            other => {
-                anyhow::bail!(
-                    "unknown --dist mode: {other} (use load|loadfile|loadscope|loadgroup|each)"
-                )
-            }
-        };
+        let dist = dist_name
+            .parse::<pool::Dist>()
+            .map_err(|e| anyhow::anyhow!(e))?;
         if dist == pool::Dist::Each && reruns > 0 {
             anyhow::bail!(
                 "--reruns is not supported with --dist each (every worker runs the \
@@ -1334,10 +1390,8 @@ fn execute_monorepo(
         } else {
             root.join(out)
         };
-        let started_at_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs().saturating_sub(start.elapsed().as_secs()))
-            .unwrap_or(0);
+        let started_at_epoch =
+            crate::time::now_epoch_secs().saturating_sub(start.elapsed().as_secs());
         let run_meta = build_run_meta(start, merged, started_at_epoch, budget);
         if let Err(e) = mono::merge_reports(&report_parts, &run_meta, &out) {
             eprintln!("rstest: failed to write merged report: {e}");
@@ -1512,11 +1566,13 @@ fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_run_meta, collect_lazy, head_to_none, merge_fixtures, parse_numprocesses,
-        quarantine_matcher, report_part_path, resolve_changed_base, strip_verbatim,
+        build_run_meta, collect_lazy, head_to_none, merge_fixtures, merged_lastfailed,
+        parse_numprocesses, quarantine_matcher, report_part_path, resolve_changed_base,
+        strip_verbatim, write_run_reports,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
+    use crate::reporting::report::Run;
     use crate::scheduling::proto::FixtureStat;
     use clap::Parser;
     use std::time::Instant;
@@ -1568,6 +1624,38 @@ mod tests {
     }
 
     #[test]
+    fn merged_lastfailed_strips_worker_suffix_and_dedups() {
+        use crate::reporting::report::Run;
+        use crate::scheduling::proto::Report;
+        let fail = |nodeid: &str| Report {
+            nodeid: nodeid.into(),
+            when: "call".into(),
+            outcome: "failed".into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+        };
+        let mut run = Run::default();
+        // Same test failing on two workers => one plain key after merge.
+        run.record(Some(0), fail("t.py::a [gw0]"));
+        run.record(Some(1), fail("t.py::a [gw1]"));
+        run.record(Some(0), fail("t.py::b [gw0]"));
+        // A nodeid with no worker suffix passes through untouched.
+        run.record(None, fail("t.py::c"));
+
+        let merged = merged_lastfailed(&run);
+        let keys: Vec<&String> = merged.keys().collect();
+        assert_eq!(keys, vec!["t.py::a", "t.py::b", "t.py::c"]);
+        assert!(merged.values().all(|&v| v));
+    }
+
+    #[test]
     fn build_run_meta_passes_through_fields() {
         let m = build_run_meta(Instant::now(), 7, 1_700_000_000, 4);
         assert_eq!(m.exitstatus, 7);
@@ -1575,6 +1663,27 @@ mod tests {
         assert_eq!(m.started_at_epoch, 1_700_000_000);
         assert!(m.duration_seconds >= 0.0);
         assert!(!m.argv.is_empty());
+    }
+
+    #[test]
+    fn write_run_reports_writes_requested_formats_only() {
+        let run = Run::default();
+        let meta = build_run_meta(Instant::now(), 0, 1_700_000_000, 2);
+        let base = std::env::temp_dir().join(format!("rstest-reports-{}", std::process::id()));
+        let xml = base.with_extension("xml");
+        let html = base.with_extension("html");
+
+        // Neither requested => no files, no error.
+        write_run_reports(None, None, &run, 1.0, &meta).unwrap();
+        assert!(!xml.exists() && !html.exists());
+
+        // Both requested => both written.
+        write_run_reports(Some(&xml), Some(&html), &run, 1.0, &meta).unwrap();
+        assert!(xml.exists(), "junit report not written");
+        assert!(html.exists(), "html report not written");
+
+        let _ = std::fs::remove_file(&xml);
+        let _ = std::fs::remove_file(&html);
     }
 
     #[test]

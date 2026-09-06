@@ -156,6 +156,12 @@ pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
         .args(["ls-files", "--others", "--exclude-standard"])
         .output()
         .context("running git ls-files")?;
+    if !out.status.success() {
+        bail!(
+            "git ls-files --others failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         files.insert(PathBuf::from(line));
     }
@@ -236,6 +242,12 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
         .args(["ls-files", "--others", "--exclude-standard"])
         .output()
         .context("running git ls-files")?;
+    if !out.status.success() {
+        bail!(
+            "git ls-files --others failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),

@@ -295,8 +295,10 @@ passthrough (`-s`/`--pdb`) modes don't evaluate the gate, so they don't trip it.
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),
 parallel-floor analysis (the tests that cap any `-n`), parallel efficiency
 (realized speedup and per-worker load imbalance, `-n > 1` only), fixture
-hotspots (with scope advice), and slowest files. Adds two cheap measurements
-to the run; outcomes are unaffected.
+hotspots (with scope advice), slowest files, and **resource leaks** (tests
+that ended with more threads / open file descriptors than they started — see
+the [Resource leaks](../guides/resource-leaks.md) guide). Adds a few cheap
+measurements to the run; outcomes are unaffected.
 
 ### `--try`
 
@@ -669,6 +671,31 @@ Actions, `buildkite-agent annotate` on Buildkite — even when you pass only
 `--doctor-fail-on` (no `--doctor`). That is intentional: a failed gate shows
 its report on the run page so you can see *why* it failed. Pass `--doctor-md`
 for a file copy, or run in a CI with no summary surface if you want gate-only.
+
+### `--fail-on-leak`
+
+Fail the run if any test **leaked a resource** — ended with more live threads
+or open file descriptors than it started, its own teardown included. Turns the
+leak signal (see [`--doctor`](#-doctor)) into a CI gate.
+
+```console
+$ rstest -n auto --fail-on-leak
+```
+
+Enables the leak-check instrumentation on its own — you do **not** need
+`--doctor`. Exits `1` when any leak is found (listing the offenders on stderr,
+so `--output json`/`tap` stay pure on stdout); exits `0` and prints
+`no thread/fd leaks detected` on a clean suite. Not evaluated under a
+passthrough-IO flag (`-s`/`--pdb`/`--co`), which has no instrumentation — the
+flag is ignored there with a warning rather than passing silently.
+
+The first test each worker runs is an unchecked **warm-up** (first-touch
+imports are not a per-test leak), so under `-n auto` one test per worker is not
+gated; a clean exit does not prove those tests are leak-free.
+
+A leaked thread or fd is shared state that can flake a *later* test; the guide
+covers what is measured, the false-positive cases (session-scoped fixtures),
+and how to fix a leak: [Resource leaks](../guides/resource-leaks.md).
 
 Exit-code note for machine consumers: the gate affects the **process exit
 code** (1 on breach), which is authoritative. It does **not** rewrite the

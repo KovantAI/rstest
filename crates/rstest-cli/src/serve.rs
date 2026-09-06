@@ -142,6 +142,7 @@ fn open_session(python: &Path, args: &[String]) -> Result<(worker::Worker, Vec<S
             .unwrap_or_else(|_| format!("serve-{}", std::process::id())),
         doctor: false,
         send_ids: true,
+        leakcheck: false,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     w.send(&proto::Command::RunServeSession {

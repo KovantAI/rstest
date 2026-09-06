@@ -7,6 +7,9 @@ use std::time::Instant;
 
 use crate::reporting::color::Palette;
 
+/// The sticky per-worker footer + progress header. All run output must flow
+/// through [`StatusFooter::print_line`]/[`StatusFooter::print_inline`] so the
+/// footer is erased and repainted around it. A no-op off a tty.
 pub struct StatusFooter {
     enabled: bool,
     /// nodeid + start time per worker slot for in-flight items.
@@ -30,6 +33,8 @@ pub struct StatusFooter {
 const BAR_WIDTH: usize = 30;
 
 impl StatusFooter {
+    /// Create a footer for `workers` slots. Disabled automatically when
+    /// stdout is not a terminal.
     pub fn new(workers: usize) -> Self {
         Self {
             enabled: std::io::stdout().is_terminal(),
@@ -43,14 +48,17 @@ impl StatusFooter {
         }
     }
 
+    /// Set the total test count (drives the header counter / bar).
     pub fn set_total(&mut self, total: usize) {
         self.total = Some(total);
     }
 
+    /// Toggle bar-mode header (filled progress bar vs. `[done/total]`).
     pub fn set_bar(&mut self, on: bool) {
         self.bar = on;
     }
 
+    /// Record that `worker` started `nodeid`; repaints the footer.
     pub fn item_started(&mut self, worker: usize, nodeid: String) {
         if let Some(slot) = self.running.get_mut(worker) {
             *slot = Some((nodeid, Instant::now()));
@@ -58,6 +66,8 @@ impl StatusFooter {
         self.refresh();
     }
 
+    /// Record that `worker` finished its test; bumps the done count and
+    /// repaints.
     pub fn item_finished(&mut self, worker: usize) {
         if let Some(slot) = self.running.get_mut(worker) {
             *slot = None;
