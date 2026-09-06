@@ -87,7 +87,18 @@ pub fn env_fingerprint(scope: &Path, python: &Path) -> String {
             h.update(&bytes);
         }
     }
-    format!("{:x}", h.finalize())
+    hex_encode(&h.finalize())
+}
+
+/// Lowercase hex of raw bytes. Replaces the `{:x}` formatting `sha2` 0.11's
+/// `Array` digest output no longer implements.
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// The current `HEAD` commit sha, or `None` outside a git repo (or on an
@@ -117,6 +128,26 @@ mod tests {
     }
 
     const FP: &str = "fp-A";
+
+    #[test]
+    fn hex_encode_pads_and_orders() {
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_encode(&[0x00]), "00");
+        assert_eq!(hex_encode(&[0x0f]), "0f");
+        assert_eq!(hex_encode(&[0xff]), "ff");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn hex_encode_matches_sha256_empty() {
+        // Known SHA-256 of the empty input — guards the digest→hex path.
+        let mut h = Sha256::new();
+        h.update(b"");
+        assert_eq!(
+            hex_encode(&h.finalize()),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     #[test]
     fn baseline_absent_before_any_green_run() {

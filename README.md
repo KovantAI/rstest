@@ -16,7 +16,7 @@ default, with built-in suite diagnostics (`--doctor`) that tell you *where
 your test time actually goes*.
 
 ```text
-aiohttp, 4,469 tests:   pytest 197s  →  rstest 68s
+aiohttp, 4,469 tests:   pytest 197s  →  rstest 68s warm (151s cold)
 ```
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
@@ -47,21 +47,65 @@ parallel (`-n auto`), out of the box.
 - Order-dependent suites → `--dist loadfile`.
 - Want byte-exact pytest semantics → `rstest -n 0` (single pytest session).
 
+## Will rstest speed up *your* suite?
+
+The wins come from suite *shape*, not magic. Quick self-check:
+
+| Your suite | What to expect |
+|---|---|
+| Wait-bound (IO, sleeps, network, timeouts) | **Biggest win** — test-granular dispatch splits the slow files xdist pins to one worker. |
+| CPU-bound, already splits well under xdist | **Parity, not a win** — gain up to core count, same as xdist (pandas: 63s vs 61s). |
+| Gated by one long test | **No win beyond that test** — no worker count beats the long pole. `--doctor` names it. |
+| Small (< ~10s serial) | **Little wall-time change** — value is `--watch`, `--changed`, `--doctor`, not raw speed. |
+| Many tiny per-service suites | Speedup is per-suite; the aggregate CI win depends on your largest suites. |
+
+Two more truths worth knowing before you benchmark:
+
+- **Warm cache matters.** Duration-aware scheduling needs one run of timing
+  data. First run is cold; the win arrives on run two. In ephemeral CI,
+  persist `.rstest_cache` or expect cold-run timing.
+- **Adopting rstest adopts pytest 9.** rstest runs a vendored pytest 9.1.1
+  core. A suite that's warning-clean on recent pytest 8.x is almost always
+  already pytest-9-clean; if not, clear deprecations first (the same upgrade
+  you'd owe pytest anyway). `rstest -n 0` surfaces them.
+
+Fastest way to find out for real: `rstest --try` runs your suite under plain
+pytest and under `rstest -n auto`, then reports whether outcomes match and
+how much faster rstest was — no migration, no config.
+
 ## Benchmarks
 
 Real open-source suites, end-to-end, with per-test outcome diffing against
-the pytest baseline — 100% parity.
+the pytest baseline — 100% parity *on the measured run* (a few tests flake
+under plain pytest itself; those are catalogued in the docs).
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md — keep numbers in sync -->
 | Suite | Tests | pytest | xdist (`-n 8`) | rstest |
 |---|---|---|---|---|
-| aiohttp | 4,469 | 197s | 160s | **68s** |
-| pandas | 193,627 | 182s | 61s | 63s |
+| aiohttp | 4,469 | 197s | 160s | **68s** warm · 151s cold |
+| pandas | 193,627 | 182s | 61s | 63s (parity, not a win) |
 | django-allauth | 2,050 | 22s | 8s | **8s** (`-n 4`) |
 | rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) |
 
-Apple Silicon, CPython 3.13, pytest-xdist 3.8. Full methodology and monorepo
-numbers: [benchmarks](https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/).
+Apple Silicon, CPython 3.13, pytest-xdist 3.8.
+
+**Monorepo** (langchain-ai/langgraph, 6 `libs/*` packages, 4,284 tests, each
+with its own pytest config — a single pytest can't run from the root at all):
+
+<!-- SOURCE OF TRUTH: docs/reference/benchmarks.md — keep numbers in sync -->
+| | wall | parity |
+|---|---|---|
+| pytest — 6 serial invocations | 880.4s | baseline |
+| rstest at the root, cold | **245.7s** (3.6×) | 100% (measured) |
+| rstest at the root, warm | 121–133s (6.6–7.3×) | *projected* |
+
+The cold run is measured. The warm figure is a **projection**, not a
+recorded run — the cold run's per-package duration caches predict where the
+planner lands once warm, so it carries no parity number. Discount it until
+you measure your own.
+
+Full methodology:
+[benchmarks](https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/).
 
 ## Why rstest
 
@@ -89,11 +133,25 @@ numbers: [benchmarks](https://python-rstest.readthedocs.io/en/stable/reference/b
 <details>
 <summary><strong>Compatibility contract</strong></summary>
 
-At `-n 0`, outcomes are byte-exact. In parallel modes, outcomes are
-preserved for parallel-safe tests; tests with hidden
-time/ordering/shared-state assumptions can flake under high concurrency —
-exactly as under pytest-xdist. `rstest --doctor` and lower `-n` values help
-find and contain them; `@pytest.mark.serial` is the escape hatch.
+At `-n 0`, outcomes are byte-exact — one vendored-pytest session; any
+difference at `-n 0` is a bug. In parallel modes, outcomes are preserved for
+parallel-safe tests; tests with hidden time/ordering/shared-state
+assumptions can flake under high concurrency — exactly as under
+pytest-xdist. `rstest --doctor` and lower `-n` values help find and contain
+them; `@pytest.mark.serial` is the escape hatch.
+
+**Vendored pytest 9.** rstest runs a vendored **pytest 9.1.1** core, so
+adopting rstest adopts pytest 9's behavior regardless of the pytest version
+installed. The 8→9 gap is a cleanup major (removes already-deprecated APIs);
+a suite warning-clean on recent pytest 8.x is almost always pytest-9-clean.
+If it isn't, clear the deprecations first — the same upgrade you'd owe pytest
+anyway. There is one vendored core, tracked forward; no older-core build.
+
+**Silent-at-`-n ≥ 2` plugins.** A few plugins that need a single master
+process are no-ops in parallel: `--html` (pytest-html) writes nothing (no
+crash) — generate reports at `-n 0`/`-n 1`. Terminal-UI plugins (pytest-sugar
+and friends) don't paint; data-level behavior is unaffected. Full list:
+[Known gaps](https://python-rstest.readthedocs.io/en/stable/concepts/compatibility/#known-gaps).
 
 </details>
 

@@ -28,3 +28,9 @@
      both the offline integrity and the upstream provenance.
 - Verify anytime: `rstest --verify-vendor` (offline, runs the shipped
   `rstest_worker._internal.verify_vendor`), or the CI checks above.
+- New pytest releases are surfaced daily by
+  `.github/workflows/pytest-upgrade-watch.yml`, which opens a tracking issue.
+- Re-vendor history (which pytest version shipped in which release, with the
+  commit + PR for each bump) is logged in the docs:
+  [Security & supply chain → Re-vendor history](../docs/reference/security.md#re-vendor-history).
+  Add a row there whenever you complete a bump via this procedure.

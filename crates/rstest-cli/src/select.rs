@@ -415,7 +415,7 @@ fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
     }
     let mut h = Sha256::new();
     h.update(normalize_newlines(&out.stdout));
-    Some(format!("{:x}", h.finalize()))
+    Some(crate::incremental::hex_encode(&h.finalize()))
 }
 
 /// Hex SHA-256 of `rel`'s CURRENT working-tree content, normalized the same way
@@ -427,7 +427,7 @@ pub(crate) fn current_sha256(rel: &Path) -> Option<String> {
     let bytes = std::fs::read(rel).ok()?;
     let mut h = Sha256::new();
     h.update(normalize_newlines(&bytes));
-    Some(format!("{:x}", h.finalize()))
+    Some(crate::incremental::hex_encode(&h.finalize()))
 }
 
 /// The single commit `git diff <rev>` uses as its OLD side, which the drift hash

@@ -119,7 +119,7 @@ pub fn config_fingerprint(scope: &Path) -> String {
             h.update(sha.as_bytes());
         }
     }
-    format!("{:x}", h.finalize())
+    crate::incremental::hex_encode(&h.finalize())
 }
 
 /// What to do with one directory entry while hunting for `conftest.py`.
