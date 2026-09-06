@@ -41,6 +41,24 @@ jobs:
         with:
           command: check advisories licenses bans sources
 
+  pip-audit:
+    name: python dependency audit (advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      # Mirrors cargo-deny's advisories check for the Python side: audit the
+      # LOCKED runtime dependency tree (from uv.lock) against the PyPI/OSV
+      # advisory feed. --no-dev excludes dev-only deps (they don't ship to
+      # users); --no-emit-project drops the local package (no PyPI record).
+      - name: export locked runtime deps
+        run: uv export --frozen --no-dev --no-emit-project -o requirements-audit.txt
+
+      - name: pip-audit
+        run: uvx pip-audit@2.7.3 --strict --requirement requirements-audit.txt
+
   gate:
     name: gate (${{ matrix.os }})
     strategy:

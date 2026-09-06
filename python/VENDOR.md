@@ -13,3 +13,9 @@
     pluggy>=1.5, iniconfig, packaging, pygments. We depend on REAL pluggy by design (D2).
 - Update procedure: re-extract from the new wheel verbatim; local
   modifications are forbidden in these two dirs (keep diffs in rstest_worker/).
+  New pytest releases are surfaced daily by
+  `.github/workflows/pytest-upgrade-watch.yml`, which opens a tracking issue.
+- Re-vendor history (which pytest version shipped in which release, with the
+  commit + PR for each bump) is logged in the docs:
+  [Security & supply chain → Re-vendor history](../docs/reference/security.md#re-vendor-history).
+  Add a row there whenever you complete a bump via this procedure.
