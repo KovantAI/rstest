@@ -2,6 +2,8 @@
 WorkerController, plus the introspection needed to invoke node hooks
 (pytest_testnodeready / pytest_testnodedown) with the right arguments."""
 
+from __future__ import annotations
+
 import contextlib
 import inspect
 from collections.abc import Mapping

@@ -156,6 +156,12 @@ pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
         .args(["ls-files", "--others", "--exclude-standard"])
         .output()
         .context("running git ls-files")?;
+    if !out.status.success() {
+        bail!(
+            "git ls-files --others failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         files.insert(PathBuf::from(line));
     }
@@ -236,6 +242,12 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
         .args(["ls-files", "--others", "--exclude-standard"])
         .output()
         .context("running git ls-files")?;
+    if !out.status.success() {
+        bail!(
+            "git ls-files --others failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
@@ -403,6 +415,18 @@ fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
     }
     let mut h = Sha256::new();
     h.update(normalize_newlines(&out.stdout));
+    Some(format!("{:x}", h.finalize()))
+}
+
+/// Hex SHA-256 of `rel`'s CURRENT working-tree content, normalized the same way
+/// as the indexer's stored hash, or `None` if the file is unreadable/absent. Lets
+/// the incremental skip cache compare a covered file's live content against the
+/// hash the coverage index recorded, with no git dependency.
+pub(crate) fn current_sha256(rel: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(rel).ok()?;
+    let mut h = Sha256::new();
+    h.update(normalize_newlines(&bytes));
     Some(format!("{:x}", h.finalize()))
 }
 

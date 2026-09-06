@@ -13,6 +13,8 @@ Mixed required/optional fields use the base-class + `total=False` pattern (rathe
 than `NotRequired`, which is stdlib only on 3.11+; the worker targets 3.10).
 """
 
+from __future__ import annotations
+
 from typing import Literal, TypedDict
 
 # ---- shared structs (mirror the Rust structs of the same name) -------------
@@ -46,6 +48,8 @@ class _ReportRequired(TypedDict):
 class ReportPayload(_ReportRequired, total=False):
     lineno: int  # 0-based source line
     cpu: float  # doctor mode: call-phase CPU time
+    thread_delta: int  # leak-check: net threads after teardown vs before setup
+    fd_delta: int  # leak-check: net open fds after teardown vs before setup
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
 

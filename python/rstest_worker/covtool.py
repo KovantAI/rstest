@@ -15,6 +15,8 @@ coverage-based `--changed` selection.
 Exit code: 0, or 1 when --cov-fail-under is not met (matching pytest-cov).
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging

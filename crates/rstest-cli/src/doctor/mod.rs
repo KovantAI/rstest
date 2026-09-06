@@ -11,6 +11,7 @@ mod gate;
 mod render;
 
 pub use gate::{evaluate, parse_conditions};
+pub(crate) use render::leak_delta;
 pub use render::{append_ci_summary, render, write_markdown};
 
 use std::collections::BTreeMap;
@@ -38,6 +39,21 @@ pub struct DoctorReport {
     parallel_efficiency: Option<ParallelEfficiency>,
     fixtures: Vec<FixtureEntry>,
     slowest_files: Vec<FileEntry>,
+    /// Tests that leaked threads / fds (net positive after teardown). Empty
+    /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaks: Vec<Leak>,
+}
+
+/// A test that ended with more threads / open fds than it started — a resource
+/// it opened and never released (its own teardown included).
+#[derive(Serialize)]
+pub struct Leak {
+    pub nodeid: String,
+    /// Net threads leaked (0 if only fds leaked).
+    pub threads: i64,
+    /// Net open fds leaked (0 if only threads leaked).
+    pub fds: i64,
 }
 
 #[derive(Serialize)]
@@ -247,6 +263,8 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     files.sort_by(|a, b| b.total_seconds.total_cmp(&a.total_seconds));
     files.truncate(20);
 
+    let leaks = detect_leaks(run);
+
     DoctorReport {
         schema: SCHEMA_VERSION,
         rstest_version: env!("CARGO_PKG_VERSION"),
@@ -260,7 +278,36 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
         parallel_efficiency,
         fixtures: fx,
         slowest_files: files,
+        leaks,
     }
+}
+
+/// Tests that leaked threads/fds (net positive after teardown), worst first.
+/// A resource the test opened and never released — its own teardown included.
+/// Empty unless leak-check instrumentation ran. Shared by the doctor report and
+/// the `--fail-on-leak` gate.
+pub fn detect_leaks(run: &Run) -> Vec<Leak> {
+    let mut leaks: Vec<Leak> = run
+        .tests()
+        .iter()
+        .filter_map(|(id, e)| {
+            let threads = e.thread_delta.unwrap_or(0).max(0);
+            let fds = e.fd_delta.unwrap_or(0).max(0);
+            (threads > 0 || fds > 0).then(|| Leak {
+                nodeid: id.clone(),
+                threads,
+                fds,
+            })
+        })
+        .collect();
+    // Worst first: total leaked resources, then threads, then name for stability.
+    leaks.sort_by(|a, b| {
+        (b.threads + b.fds)
+            .cmp(&(a.threads + a.fds))
+            .then(b.threads.cmp(&a.threads))
+            .then(a.nodeid.cmp(&b.nodeid))
+    });
+    leaks
 }
 
 pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Result<()> {
@@ -331,6 +378,7 @@ pub(crate) mod testutil {
                 total_seconds: 20.0,
                 pct: 66.7,
             }],
+            leaks: Vec::new(),
         }
     }
 
@@ -346,6 +394,8 @@ pub(crate) mod testutil {
             wasxfail: false,
             skip_reason: None,
             cpu: None,
+            thread_delta: None,
+            fd_delta: None,
             sections: Vec::new(),
             lineno: None,
         };
@@ -359,6 +409,45 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::record_test;
     use super::*;
+
+    fn teardown_with_leak(run: &mut Run, nodeid: &str, threads: Option<i64>, fds: Option<i64>) {
+        let rep = |when: &str, td: Option<i64>, fd: Option<i64>| crate::scheduling::proto::Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: "passed".into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            thread_delta: td,
+            fd_delta: fd,
+            sections: Vec::new(),
+            lineno: None,
+        };
+        run.record(None, rep("setup", None, None));
+        run.record(None, rep("call", None, None));
+        run.record(None, rep("teardown", threads, fds));
+    }
+
+    #[test]
+    fn detect_leaks_flags_positive_deltas_worst_first() {
+        let mut run = Run::default();
+        teardown_with_leak(&mut run, "t.py::clean", None, None);
+        teardown_with_leak(&mut run, "t.py::released", Some(0), Some(0)); // opened+closed
+        teardown_with_leak(&mut run, "t.py::one_fd", None, Some(1));
+        teardown_with_leak(&mut run, "t.py::big", Some(3), Some(2)); // worst
+        teardown_with_leak(&mut run, "t.py::negative", Some(-1), None); // freed, not a leak
+
+        let leaks = detect_leaks(&run);
+        let ids: Vec<&str> = leaks.iter().map(|l| l.nodeid.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["t.py::big", "t.py::one_fd"],
+            "only real leaks, worst first"
+        );
+        assert_eq!((leaks[0].threads, leaks[0].fds), (3, 2));
+    }
 
     #[test]
     fn all_work_on_one_worker_reports_max_imbalance() {

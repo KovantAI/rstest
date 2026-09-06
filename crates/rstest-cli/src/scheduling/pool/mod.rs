@@ -59,12 +59,44 @@ pub enum Dist {
     Each,
 }
 
+impl std::str::FromStr for Dist {
+    type Err = String;
+
+    /// The single source of truth for the `--dist` name set: parsed once up
+    /// front to validate, and again to map to the enum. `Err` carries the
+    /// user-facing message so both call sites report identically.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "load" => Dist::Load,
+            "loadfile" => Dist::Loadfile,
+            "loadscope" => Dist::Loadscope,
+            "loadgroup" => Dist::Loadgroup,
+            "each" => Dist::Each,
+            other => {
+                return Err(format!(
+                    "unknown --dist mode: {other} (use load|loadfile|loadscope|loadgroup|each)"
+                ))
+            }
+        })
+    }
+}
+
+/// Everything the orchestrator loop produces from one pool run, handed back to
+/// `run.rs` for post-run reporting and gates.
 pub struct PoolOutcome {
+    /// Merged per-test results across all workers.
     pub run: Run,
+    /// The live progress renderer, carried out so the caller can print the
+    /// closing summary in the same style.
     pub prog: Progress,
+    /// Per-fixture setup timings (doctor mode), aggregated across workers.
     pub fixtures: Vec<proto::FixtureStat>,
+    /// Deduplicated session/collect/runtest warnings.
     pub warnings: Vec<proto::WarningEntry>,
+    /// pytest's cache dir (from the designate worker), where the merged
+    /// lastfailed cache is written after the run.
     pub cache_dir: Option<String>,
+    /// Reconciled process exit status for the run.
     pub exitstatus: i32,
 }
 
@@ -120,6 +152,10 @@ pub fn run_pool(
     // Some(set) => --reruns-only-known-flaky: only tests in this set (prior
     // flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     known_flaky: Option<&std::collections::HashSet<String>>,
+    // --incremental: nodeids that were green last run and whose covered source
+    // is unchanged. Collected but never dispatched; carried forward as cached
+    // passes. Empty = feature off.
+    skip_ids: &std::collections::HashSet<String>,
     worker_env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<PoolOutcome> {
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
@@ -171,6 +207,9 @@ pub fn run_pool(
         flaky.get(&i).copied().unwrap_or(reruns)
     };
     let mut fail_count = 0u64;
+    // --incremental: nodeids collected but skipped (unchanged since last green),
+    // injected as cached passes once the run finishes.
+    let mut cached_ids: Vec<String> = Vec::new();
     // Global -x/--maxfail: once tripped, dispatch halts and every alive
     // worker is told no_more_items (it finishes in-flight work and ends;
     // bounded overshoot, same trade xdist makes).
@@ -360,6 +399,34 @@ pub fn run_pool(
                             );
                             idx.into_iter().collect::<HashSet<u64>>()
                         });
+                        // --incremental: fold the skip set into `keep` — an index
+                        // whose nodeid is green+unchanged is deselected. Any such
+                        // index that would otherwise have run becomes a cached
+                        // pass. (run.rs guards this off for shard/shuffle, so
+                        // `keep` here is None unless sharding, which it isn't.)
+                        let keep = if skip_ids.is_empty() {
+                            keep
+                        } else {
+                            let (run_idx, mut cached, skipped_positions) =
+                                partition_skip(&ids, keep.as_ref(), skip_ids);
+                            if !cached.is_empty() {
+                                // Count skipped POSITIONS, not deduped nodeids: a
+                                // nodeid at K collected positions removes K test
+                                // runs. `cached` (deduped) drives carry-forward;
+                                // `skipped_positions` keeps the message and the
+                                // progress total honest against `ids.len()`.
+                                eprintln!(
+                                    "rstest: --incremental: {} of {} test(s) unchanged since \
+                                     last green -> skipped (cached)",
+                                    skipped_positions,
+                                    ids.len()
+                                );
+                                // The progress total tracks only tests that run.
+                                prog.set_total(total_items.saturating_sub(skipped_positions));
+                            }
+                            cached_ids.append(&mut cached);
+                            Some(run_idx)
+                        };
                         dispatch = Some(build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
@@ -550,6 +617,8 @@ pub fn run_pool(
                             wasxfail: false,
                             skip_reason: None,
                             cpu: None,
+                            thread_delta: None,
+                            fd_delta: None,
                             sections: Vec::new(),
                             lineno: None,
                         };
@@ -785,6 +854,12 @@ pub fn run_pool(
     for w in workers {
         let _ = w.wait();
     }
+    // --incremental: carry forward the skipped tests as cached passes so every
+    // artifact reflects the whole suite. They passed last run and their source
+    // is unchanged, so they never affect the exit status.
+    for id in &cached_ids {
+        run.record_cached(id.clone());
+    }
     // Recorded outcomes win over session exit codes both ways: a fabricated
     // crash failure never hits a session (codes read 0), and a flaky test's
     // first attempt fails inside a session (code 1) though it finally passed.
@@ -822,9 +897,75 @@ pub(crate) fn merge_statuses(statuses: &[i32]) -> i32 {
     0
 }
 
+/// Split collected indices into (run, cached, skipped_positions) for
+/// `--incremental`: starting from `keep` (None = every index), deselect any
+/// index whose nodeid is in `skip_ids` and move it to the cached set instead.
+/// Cached nodeids are DEDUPLICATED — parametrized tests can share one nodeid
+/// across positions, and carry-forward records each distinct nodeid once.
+/// `skipped_positions` counts the actual removed indices (not deduped), so the
+/// "N of M" message and the progress total stay honest against `ids.len()`.
+fn partition_skip(
+    ids: &[String],
+    keep: Option<&HashSet<u64>>,
+    skip_ids: &HashSet<String>,
+) -> (HashSet<u64>, Vec<String>, usize) {
+    let mut run_idx = HashSet::new();
+    let mut cached = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut skipped_positions = 0usize;
+    for i in 0..ids.len() as u64 {
+        if !keep.is_none_or(|k| k.contains(&i)) {
+            continue;
+        }
+        let id = ids[i as usize].as_str();
+        if skip_ids.contains(id) {
+            skipped_positions += 1;
+            if seen.insert(id) {
+                cached.push(id.to_string());
+            }
+        } else {
+            run_idx.insert(i);
+        }
+    }
+    (run_idx, cached, skipped_positions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_skip_dedups_and_splits() {
+        // nodeid "a" appears at two positions; both are skippable and must
+        // collapse to a single cached entry, while "b" runs.
+        let ids = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ];
+        let skip: HashSet<String> = ["a".to_string(), "c".to_string()].into_iter().collect();
+        let (run, mut cached, skipped_positions) = partition_skip(&ids, None, &skip);
+        assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
+        cached.sort();
+        assert_eq!(cached, vec!["a".to_string(), "c".to_string()]);
+        // "a" occupies two positions + "c" one: three runs skipped, two cached.
+        assert_eq!(skipped_positions, 3);
+    }
+
+    #[test]
+    fn partition_skip_respects_keep() {
+        // Under a shard `keep` of {0,1}, index 2 ("c") is out of scope entirely;
+        // "a" is skippable (cached), leaving only "b" to run.
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let skip: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let keep: HashSet<u64> = [0u64, 1].into_iter().collect();
+        let (run, cached, skipped_positions) = partition_skip(&ids, Some(&keep), &skip);
+        assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
+        assert_eq!(cached, vec!["a".to_string()]);
+        // Only position 0 ("a") is both in scope and skipped.
+        assert_eq!(skipped_positions, 1);
+    }
 
     #[test]
     fn merge_status_rules() {

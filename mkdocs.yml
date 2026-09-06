@@ -96,6 +96,7 @@ nav:
       - Migrating from pytest-xdist: guides/migrate-from-xdist.md
       - Parallel safety: guides/parallel-safety.md
       - Suite diagnostics: guides/doctor.md
+      - Resource leaks: guides/resource-leaks.md
       - Flaky tests: guides/flaky-tests.md
       - Watch mode: guides/watch-mode.md
       - Selecting changed tests: guides/changed.md

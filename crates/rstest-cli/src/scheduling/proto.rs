@@ -77,6 +77,13 @@ pub struct Report {
     /// the test was waiting, not computing.
     #[serde(default)]
     pub cpu: Option<f64>,
+    /// Leak check: net Python threads after teardown vs before setup (on the
+    /// teardown report; positive = a thread the test never joined).
+    #[serde(default)]
+    pub thread_delta: Option<i64>,
+    /// Leak check: net open file descriptors after teardown vs before setup.
+    #[serde(default)]
+    pub fd_delta: Option<i64>,
     /// Captured stdout/stderr/log sections, present on failed reports only.
     #[serde(default)]
     pub sections: Vec<(String, String)>,

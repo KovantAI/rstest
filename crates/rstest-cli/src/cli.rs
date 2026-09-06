@@ -51,6 +51,12 @@ pub struct Cli {
     #[arg(long = "doctor-fail-on", value_name = "COND")]
     pub(crate) doctor_fail_on: Vec<String>,
 
+    /// Fail the run if any test leaks a thread or file descriptor (net still
+    /// open after its teardown). Turns the leak signal into a CI gate; enables
+    /// the leak-check instrumentation on its own (no --doctor needed).
+    #[arg(long = "fail-on-leak")]
+    pub(crate) fail_on_leak: bool,
+
     /// Parallel-readiness preflight: collect twice and report tests with
     /// unstable ids, then run -n auto and classify any parallel-only failure
     /// (polluter bisected). Exits non-zero on any such finding.
@@ -84,6 +90,12 @@ pub struct Cli {
     /// would clobber a shared file).
     #[arg(long)]
     pub(crate) junitxml: Option<PathBuf>,
+
+    /// Write a self-contained HTML report of the merged run (rendered
+    /// orchestrator-side, so it works under the parallel pool where pytest-html
+    /// produces nothing at -n ≥ 2).
+    #[arg(long)]
+    pub(crate) html: Option<PathBuf>,
 
     /// Watch the project and rerun on change: only-test-file changes rerun
     /// just those files; any other .py change reruns the tests that import
@@ -125,6 +137,15 @@ pub struct Cli {
     #[arg(long, value_name = "SECS")]
     pub(crate) worker_timeout: Option<u64>,
 
+    /// Per-test timeout: fail any test whose call phase runs longer than SECS.
+    /// Interrupted in-process, so the failure's traceback points at the stuck
+    /// line (pytest-timeout-style; no plugin needed). `@pytest.mark.timeout(N)`
+    /// overrides per test. Fractional seconds allowed. A blocked C extension
+    /// that never returns to Python is caught by the --worker-timeout backstop
+    /// instead (auto-armed from this value when --worker-timeout is unset).
+    #[arg(long, value_name = "SECS")]
+    pub(crate) timeout: Option<f64>,
+
     /// Run only tests affected by changed files (import-graph selection).
     /// Without a value: working tree + untracked vs HEAD. With a value:
     /// vs that git rev (e.g. --changed=origin/main in CI).
@@ -136,6 +157,24 @@ pub struct Cli {
     /// instead of 0. Implies --changed (vs HEAD) when not given.
     #[arg(long)]
     pub(crate) changed_strict: bool,
+
+    /// Incremental testing: run only what changed since the last GREEN run,
+    /// re-using --changed's coverage-aware selection with an auto-managed
+    /// baseline (the commit of the last all-passing run, stored in the cache).
+    /// The baseline advances only when a run is fully green, so a failing test
+    /// keeps being selected until it passes. First run (no baseline) runs
+    /// everything. Ignored when --changed is given explicitly.
+    #[arg(long = "since-green")]
+    pub(crate) since_green: bool,
+
+    /// Dispatch-level incremental testing: collect the whole suite, then SKIP
+    /// running any test that was green last run and whose covered source is
+    /// byte-identical now (content-addressed via the coverage index — no git).
+    /// Skipped tests are carried forward as cached passes. Needs a warm coverage
+    /// index (a prior `--cov-context=test` run); full collection + `--dist load`
+    /// only. A config-file change disables skipping for that run.
+    #[arg(long)]
+    pub(crate) incremental: bool,
 
     /// Collection strategy: "full" (every worker collects the whole suite,
     /// verified by hash) or "lazy" (each file collected by one worker on
@@ -298,8 +337,10 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     let mut argv = argv.into_iter().peekable();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
-            "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
-            "--reruns-only-known-flaky" => own.push(arg),
+            "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak" => {
+                own.push(arg)
+            }
+            "--reruns-only-known-flaky" | "--since-green" | "--incremental" => own.push(arg),
             "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
                 own.push(arg)
             }
@@ -342,13 +383,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                 }
             }
             _ if arg.starts_with("--only-rerun=") => own.push(arg),
-            "--worker-timeout" => {
+            "--worker-timeout" | "--timeout" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
                     own.push(v);
                 }
             }
             _ if arg.starts_with("--worker-timeout=") => own.push(arg),
+            _ if arg.starts_with("--timeout=") => own.push(arg),
             "--reruns" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
@@ -384,13 +426,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                 }
             }
             _ if arg.starts_with("--doctor-fail-on=") => own.push(arg),
-            "--junitxml" => {
+            "--junitxml" | "--html" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {
                     own.push(v);
                 }
             }
             _ if arg.starts_with("--junitxml=") => own.push(arg),
+            _ if arg.starts_with("--html=") => own.push(arg),
             "--dist" => {
                 own.push(arg);
                 if let Some(v) = argv.next() {

@@ -125,6 +125,8 @@ pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>>
         run_uid: std::env::var("RSTEST_RUN_UID")
             .unwrap_or_else(|_| format!("migrate-{}", std::process::id())),
         doctor: false,
+        timeout: None,
+        leakcheck: false,
         send_ids: true,
     };
     let mut collect_args = args.to_vec();

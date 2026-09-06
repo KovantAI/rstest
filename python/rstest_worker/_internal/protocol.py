@@ -9,6 +9,8 @@ TODO(M1): vendor msgpack's pure-python fallback so the worker is
 PYTHONPATH-injectable into any venv with zero installs.
 """
 
+from __future__ import annotations
+
 import os
 from collections.abc import Iterator
 from typing import Literal, overload

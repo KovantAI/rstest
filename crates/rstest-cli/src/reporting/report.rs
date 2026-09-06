@@ -28,6 +28,12 @@ pub struct TestEntry {
     pub skip_reason: Option<String>,
     #[serde(skip)]
     pub cpu: Option<f64>,
+    /// Leak check: net threads / open fds after teardown (from the teardown
+    /// report). Doctor-internal; not serialized to report-json.
+    #[serde(skip)]
+    pub thread_delta: Option<i64>,
+    #[serde(skip)]
+    pub fd_delta: Option<i64>,
     /// Passed only after one or more reruns (--reruns).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -46,6 +52,10 @@ pub struct TestEntry {
     /// never fatal to the run.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub quarantined: bool,
+    /// Not executed this run: unchanged since the last green run, so its prior
+    /// pass was carried forward (`--incremental`). Still counts as passed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
 
 /// Run-level metadata for the report-json envelope (schema 5).
@@ -69,13 +79,6 @@ pub enum FailureWrap {
     GitlabSection,
     /// Buildkite `+++` group header, expanded by default.
     BuildkiteGroup,
-}
-
-fn epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[derive(Debug, Default)]
@@ -118,7 +121,7 @@ impl Run {
             // can be huge at pandas scale.
             entry.longrepr = r.longrepr.as_deref().map(|t| {
                 let mut t = t.to_string();
-                t.truncate(20_000);
+                crate::text::truncate_on_boundary(&mut t, 20_000);
                 t
             });
         }
@@ -130,7 +133,16 @@ impl Run {
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
             }
-            "teardown" => entry.teardown = outcome,
+            "teardown" => {
+                entry.teardown = outcome;
+                // Leak deltas ride the teardown report (measured after teardown).
+                if r.thread_delta.is_some() {
+                    entry.thread_delta = r.thread_delta;
+                }
+                if r.fd_delta.is_some() {
+                    entry.fd_delta = r.fd_delta;
+                }
+            }
             _ => {}
         }
         entry.wasxfail |= r.wasxfail;
@@ -144,6 +156,74 @@ impl Run {
 
     pub fn collect_error(&mut self, path: String, longrepr: String) {
         self.collect_errors.push((path, longrepr));
+    }
+
+    /// Carry forward a test that was NOT run this session because it is
+    /// unchanged since it last passed (`--incremental`): record it as a passed,
+    /// cached entry so every artifact (summary, report-json, junit) reflects the
+    /// whole suite, not just the tests that actually ran.
+    pub fn record_cached(&mut self, nodeid: String) {
+        let entry = self.tests.entry(nodeid).or_default();
+        entry.call = Some("passed".into());
+        entry.cached = true;
+    }
+
+    /// How many entries were carried forward as cached passes.
+    pub fn cached_count(&self) -> usize {
+        self.tests.values().filter(|e| e.cached).count()
+    }
+
+    /// The nodeids carried forward as cached passes this run — used to fold their
+    /// prior coverage back into the rewritten index so they stay skippable.
+    pub fn cached_nodeids(&self) -> std::collections::HashSet<String> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| e.cached)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// nodeids that are GREEN in this run (clean passes) — the set to persist as
+    /// the incremental baseline. Includes carried-forward cached passes, since
+    /// they remain green.
+    pub fn green_nodeids(&self) -> std::collections::HashSet<String> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| classify(e) == "passed")
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Source line of every GREEN nodeid that has one — persisted alongside the
+    /// baseline so a future cached (not-run) entry can be restored with its real
+    /// def line instead of a blank. Cached passes backfilled by
+    /// [`Run::backfill_cached_linenos`] are included, so the line survives across
+    /// arbitrarily many skip runs.
+    pub fn green_linenos(&self) -> std::collections::HashMap<String, u64> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| classify(e) == "passed")
+            .filter_map(|(id, e)| e.lineno.map(|l| (id.clone(), l)))
+            .collect()
+    }
+
+    /// Restore each cached (carried-forward) entry's source line from the prior
+    /// baseline: a cached test is not run this session, so pytest reports no
+    /// location, but its def line hasn't moved (an edit to its file would have
+    /// busted the skip). Fills only cached entries still missing a `lineno`.
+    pub fn backfill_cached_linenos(&mut self, lines: &std::collections::HashMap<String, u64>) {
+        for (id, e) in &mut self.tests {
+            if e.cached && e.lineno.is_none() {
+                if let Some(l) = lines.get(id) {
+                    e.lineno = Some(*l);
+                }
+            }
+        }
+    }
+
+    /// Collection errors as (path, longrepr) pairs, for report renderers.
+    pub fn collect_errors(&self) -> &[(String, String)] {
+        &self.collect_errors
     }
 
     /// Flag an entry whose failure was fabricated by the orchestrator
@@ -180,7 +260,7 @@ impl Run {
         if gitlab {
             println!(
                 "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{header}",
-                epoch_secs()
+                crate::time::now_epoch_secs()
             );
         } else {
             println!("\n{header}");
@@ -197,7 +277,10 @@ impl Run {
             );
         }
         if gitlab {
-            println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
+            println!(
+                "\x1b[0Ksection_end:{}:{id}\r\x1b[0K",
+                crate::time::now_epoch_secs()
+            );
         }
     }
 
@@ -300,7 +383,7 @@ impl Run {
                 let id = format!("rstest_fail_{}_{idx}", std::process::id());
                 println!(
                     "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{}",
-                    epoch_secs(),
+                    crate::time::now_epoch_secs(),
                     palette.bold_red(&format!("--- FAILED {header} ---"))
                 );
             }
@@ -313,7 +396,10 @@ impl Run {
         let close = |idx: usize| {
             if wrap == FailureWrap::GitlabSection {
                 let id = format!("rstest_fail_{}_{idx}", std::process::id());
-                println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
+                println!(
+                    "\x1b[0Ksection_end:{}:{id}\r\x1b[0K",
+                    crate::time::now_epoch_secs()
+                );
             }
         };
         let mut idx = 0usize;
@@ -425,41 +511,50 @@ impl Run {
         counts
     }
 
-    pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
-        #[derive(Serialize)]
-        struct Snapshot<'a> {
-            meta: BTreeMap<&'static str, serde_json::Value>,
-            collect_errors: Vec<&'a String>,
-            tests: &'a BTreeMap<String, TestEntry>,
-        }
-        let mut meta = BTreeMap::new();
-        meta.insert("runner", "rstest".into());
+    /// The schema-5 report document as a JSON value: the single source shared by
+    /// the `--report-json` file writer and the HTML report's embedded data blob,
+    /// so the two can never drift.
+    pub fn snapshot_value(&self, run_meta: &RunMeta) -> serde_json::Value {
+        let mut meta = serde_json::Map::new();
+        meta.insert("runner".into(), "rstest".into());
         // Schema history: 2 added longrepr/crashed+version; 3 added the
         // envelope (counts, duration_seconds, started_at_epoch, workers, argv);
         // 4 added per-test lineno; 5 added quarantined.
-        meta.insert("schema", 5.into());
-        meta.insert("exitstatus", run_meta.exitstatus.into());
+        meta.insert("schema".into(), 5.into());
+        meta.insert("exitstatus".into(), run_meta.exitstatus.into());
         meta.insert(
-            "counts",
+            "counts".into(),
             serde_json::to_value(self.counts()).unwrap_or_default(),
         );
         meta.insert(
-            "duration_seconds",
+            "duration_seconds".into(),
             ((run_meta.duration_seconds * 100.0).round() / 100.0).into(),
         );
-        meta.insert("started_at_epoch", run_meta.started_at_epoch.into());
-        meta.insert("workers", run_meta.workers.into());
+        meta.insert("started_at_epoch".into(), run_meta.started_at_epoch.into());
+        meta.insert("workers".into(), run_meta.workers.into());
         meta.insert(
-            "argv",
+            "argv".into(),
             serde_json::to_value(&run_meta.argv).unwrap_or_default(),
         );
-        let snap = Snapshot {
-            meta,
-            collect_errors: self.collect_errors.iter().map(|(p, _)| p).collect(),
-            tests: &self.tests,
-        };
-        std::fs::write(path, serde_json::to_vec(&snap)?)?;
+        let collect_errors: Vec<&String> = self.collect_errors.iter().map(|(p, _)| p).collect();
+        serde_json::json!({
+            "meta": meta,
+            "collect_errors": collect_errors,
+            "tests": &self.tests,
+        })
+    }
+
+    pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
+        std::fs::write(path, serde_json::to_vec(&self.snapshot_value(run_meta))?)?;
         Ok(())
+    }
+}
+
+impl TestEntry {
+    /// The pytest-style outcome bucket for this entry
+    /// (`passed`/`failed`/`errors`/`skipped`/`xfailed`/`xpassed`/`quarantined`).
+    pub fn outcome(&self) -> &'static str {
+        classify(self)
     }
 }
 
@@ -501,6 +596,8 @@ mod tests {
             wasxfail: false,
             skip_reason: None,
             cpu: None,
+            thread_delta: None,
+            fd_delta: None,
             sections: Vec::new(),
             lineno: None,
         }
@@ -531,6 +628,22 @@ mod tests {
         assert!(run.summary_line().contains("2 quarantined"));
         // lastfailed still remembers quarantined failures (--lf must rerun them)
         assert_eq!(run.failed_nodeids().count(), 2);
+    }
+
+    #[test]
+    fn teardown_report_carries_leak_deltas_onto_entry() {
+        let mut run = Run::default();
+        run.record(None, report("a.py::leaker", "setup", "passed"));
+        run.record(None, report("a.py::leaker", "call", "passed"));
+        // Deltas ride the teardown report (measured after teardown runs).
+        let mut td = report("a.py::leaker", "teardown", "passed");
+        td.thread_delta = Some(3);
+        td.fd_delta = Some(2);
+        run.record(None, td);
+
+        let entry = run.tests().get("a.py::leaker").expect("entry recorded");
+        assert_eq!(entry.thread_delta, Some(3));
+        assert_eq!(entry.fd_delta, Some(2));
     }
 
     #[test]
@@ -623,6 +736,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },
@@ -640,6 +755,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },

@@ -58,6 +58,18 @@ Under [`--dist loadgroup`](cli.md#-dist-loadloadfileloadscopeloadgroupeach),
 all tests sharing a group name run on the same worker — across files.
 pytest-xdist-compatible.
 
+## `@pytest.mark.timeout`
+
+```python
+@pytest.mark.timeout(5)
+def test_slow_path(): ...
+```
+
+Per-test deadline in seconds, overriding the global
+[`--timeout`](cli.md#-timeout-secs). The test is interrupted in-process at the
+deadline and fails with a traceback at the stuck line. pytest-timeout-compatible
+marker name; no plugin needed.
+
 ## A note on `@pytest.mark.parametrize` IDs
 
 Not a marker rstest owns, but the one that most often blocks parallelism:
