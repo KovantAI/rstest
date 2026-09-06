@@ -418,6 +418,18 @@ fn old_side_sha256(base: &str, rel: &Path) -> Option<String> {
     Some(format!("{:x}", h.finalize()))
 }
 
+/// Hex SHA-256 of `rel`'s CURRENT working-tree content, normalized the same way
+/// as the indexer's stored hash, or `None` if the file is unreadable/absent. Lets
+/// the incremental skip cache compare a covered file's live content against the
+/// hash the coverage index recorded, with no git dependency.
+pub(crate) fn current_sha256(rel: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(rel).ok()?;
+    let mut h = Sha256::new();
+    h.update(normalize_newlines(&bytes));
+    Some(format!("{:x}", h.finalize()))
+}
+
 /// The single commit `git diff <rev>` uses as its OLD side, which the drift hash
 /// is keyed to. `git show` needs one commit but `--changed` accepts ranges: `A..B`
 /// reduces to `A`, `A...B` to `merge-base(A, B)`; a bare ref is its own old side.

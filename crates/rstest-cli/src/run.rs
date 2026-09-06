@@ -14,7 +14,10 @@ use crate::reporting::ci::{
 };
 use crate::reporting::{color, flakes, html, junit, progress, report, status};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
-use crate::{cache, collect, config, discover, doctor, migrate, mono, remote, select};
+use crate::{
+    cache, collect, config, coverage_skip, discover, doctor, incremental, migrate, mono, remote,
+    select,
+};
 
 fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
     let s = p.to_string_lossy();
@@ -463,7 +466,42 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         println!("rstest {} — {worker_desc}", env!("CARGO_PKG_VERSION"));
     }
     let mut args = args;
-    let effective_changed = resolve_changed_base(cli)?;
+    // Incremental testing: --since-green feeds --changed's selection from the
+    // last green run's commit. An explicit --changed always wins. `head` is
+    // captured up front (it can't change mid-run) so a green run can record it.
+    let since_green = cli.since_green && cli.changed.is_none();
+    // Only shell out to git / hash the env when --since-green is actually
+    // active, so the default run path pays nothing.
+    let head = since_green.then(incremental::head_sha).flatten();
+    let env_fp = if since_green {
+        incremental::env_fingerprint(&scope, &python)
+    } else {
+        String::new()
+    };
+    let mut effective_changed = resolve_changed_base(cli)?;
+    if since_green {
+        // --since-green owns the diff base: its last-green baseline drives
+        // selection, OVERRIDING the "HEAD" base that --changed-strict would
+        // otherwise imply (changed_strict is a gating modifier here, not a base;
+        // an explicit --changed is already excluded by `since_green`). No
+        // baseline yet -> a full run to establish one.
+        match incremental::baseline(&std::env::current_dir()?, &env_fp) {
+            Some(sha) => {
+                eprintln!(
+                    "rstest: --since-green: selecting changes since last green run ({})",
+                    &sha[..sha.len().min(12)]
+                );
+                effective_changed = Some(sha);
+            }
+            None => {
+                eprintln!(
+                    "rstest: --since-green: no prior green run recorded; \
+                     running everything to establish the baseline"
+                );
+                effective_changed = None;
+            }
+        }
+    }
     if let Some(rev) = &effective_changed {
         let rev = head_to_none(rev);
         let cwd = std::env::current_dir()?;
@@ -487,8 +525,17 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                     "rstest: no tests affected by {} changed file(s)",
                     changes.len()
                 );
-                // Strict gating needs to DISTINGUISH "ran nothing" from
-                // "everything passed": pytest's nothing-collected code.
+                // Nothing affected since the last green run is itself a green
+                // outcome: advance the baseline to HEAD so unrelated commits
+                // don't force a re-run next time.
+                if since_green {
+                    if let Some(h) = &head {
+                        incremental::record_green(&cwd, h, &env_fp);
+                    }
+                }
+                // Strict gating still wins on the exit code: it needs to
+                // DISTINGUISH "ran nothing" from "everything passed" (pytest's
+                // nothing-collected code), even under --since-green.
                 std::process::exit(if cli.changed_strict { 5 } else { 0 });
             }
             select::Selection::Tests(tests) => {
@@ -603,6 +650,95 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             }
         }
     };
+    // --incremental: compute the dispatch-level skip set now (before the pool
+    // collects) from the coverage index + last green set, gated by a config
+    // fingerprint. Restricted to the eager pool on --dist load with full
+    // collection; incompatible modes disable it with a note. An explicit
+    // --changed (like --since-green) already narrows selection, so dispatch-level
+    // skipping on top is excluded — it would record a PARTIAL green baseline and
+    // count cached passes against a partial collection.
+    let incremental_active = cli.incremental
+        && !since_green
+        && cli.changed.is_none()
+        && dist_name == "load"
+        && !passthrough
+        && n >= 2
+        && shard.is_none()
+        && shuffle_seed.is_none()
+        && !collect_lazy(cli, &settings, &dist_name, &args)?;
+    // The config fingerprint is only consumed under `incremental_active` (the
+    // skip-set load and the green-baseline record). Computing it unconditionally
+    // would walk the whole project tree for conftests even when the feature is
+    // off (e.g. -n 1, --collect lazy), so gate it on the same condition.
+    let config_fp = if incremental_active {
+        coverage_skip::config_fingerprint(&scope)
+    } else {
+        String::new()
+    };
+    if cli.incremental && since_green {
+        // Both incremental modes select on the same run; --since-green already
+        // narrows to the changed subset, so dispatch-level skipping on top would
+        // account the cached passes against a partial suite. --since-green wins.
+        eprintln!(
+            "rstest: --incremental and --since-green are mutually exclusive; \
+             --since-green takes precedence this run"
+        );
+    } else if cli.incremental && cli.changed.is_some() {
+        // Explicit --changed owns selection: it narrows args to the changed
+        // subset, so dispatch-level skipping on top would clobber the full green
+        // baseline with a partial one and report cached passes against a partial
+        // collection. --changed wins this run.
+        eprintln!(
+            "rstest: --incremental and --changed are mutually exclusive; \
+             --changed owns selection this run"
+        );
+    } else if cli.incremental && !incremental_active {
+        eprintln!(
+            "rstest: --incremental needs the parallel pool with full collection and \
+             --dist load (not -n 0/1, --dist each/affinity, --collect lazy, --shard, or \
+             --shuffle); running everything this time"
+        );
+    }
+    // --incremental relies on the coverage index advancing every run; without
+    // --cov this run covtool never rewrites it, so a changed test re-runs on
+    // every invocation until a coverage run refreshes the index.
+    if incremental_active && !coverage_skip::coverage_requested(&args) {
+        eprintln!(
+            "rstest: --incremental without --cov: the coverage index won't be \
+             refreshed this run, so changed tests keep re-running until a --cov run"
+        );
+    }
+    // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
+    // coverage-invisible: editing it won't bust the skip, so a test depending on
+    // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
+    if incremental_active && coverage_skip::cov_scope_narrowed(&args) {
+        eprintln!(
+            "rstest: --incremental with a scoped --cov: edits to first-party source \
+             outside the coverage scope are undetectable and may leave a test cached \
+             on a stale pass; use --cov=. to cover the whole tree"
+        );
+    }
+    // Snapshot the index BEFORE the run: it drives the skip decision now, and
+    // post-run it supplies the cached tests' coverage to fold back in (covtool
+    // rewrites the index from only the tests that ran).
+    let prev_index = if incremental_active {
+        remote::load_local_cov_index()
+    } else {
+        select::CoverageIndex::default()
+    };
+    // The baseline is loaded once and kept: it drives the skip set now, and its
+    // recorded def lines restore the cached (not-run) entries' source line after
+    // the run (a cached test has no pytest report to supply one).
+    let baseline = if incremental_active {
+        coverage_skip::load(&scope, &config_fp)
+    } else {
+        coverage_skip::Baseline::default()
+    };
+    let skip_ids: std::collections::HashSet<String> = if incremental_active {
+        coverage_skip::skippable_now(&prev_index, &baseline)
+    } else {
+        std::collections::HashSet::new()
+    };
     let mut outcome = dispatch_run(
         cli,
         &settings,
@@ -616,6 +752,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         reruns,
         worker_timeout,
         known_flaky.as_ref(),
+        &skip_ids,
         shuffle_seed,
         shard,
         passthrough,
@@ -843,6 +980,39 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             exitstatus = 1;
         }
     }
+    // Incremental testing: a fully green run advances the baseline to the commit
+    // we ran at, so the next --since-green run only re-selects changes made after
+    // it. Recorded only on green (exitstatus 0) — a failing test keeps being
+    // selected until it passes.
+    if since_green && exitstatus == 0 {
+        if let Some(h) = &head {
+            incremental::record_green(&std::env::current_dir()?, h, &env_fp);
+        }
+    }
+    // --incremental: persist this run's green set (tests that ran green + the
+    // carried-forward cached passes) so the next run skips what stays unchanged.
+    // Recorded regardless of exit status — failures simply aren't in the green
+    // set, so they re-run next time. Best-effort.
+    if incremental_active {
+        // Fold cached tests' prior coverage back into the index covtool just
+        // rewrote (skipped tests produced none), so they stay skippable.
+        let cached = outcome.run.cached_nodeids();
+        if !cached.is_empty() {
+            let mut new_index = remote::load_local_cov_index();
+            coverage_skip::carry_forward(&prev_index, &mut new_index, &cached);
+            coverage_skip::write_index(&new_index);
+        }
+        // Restore cached (not-run) entries' def line from the baseline before
+        // reading it back — so it persists into this run's recorded lines and
+        // every artifact reflects the real line, not a blank.
+        outcome.run.backfill_cached_linenos(&baseline.test_lines);
+        coverage_skip::record(
+            &scope,
+            &config_fp,
+            outcome.run.green_nodeids(),
+            outcome.run.green_linenos(),
+        );
+    }
     // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
     // stderr so --output json/tap keep stdout a pure machine stream.
     if cli.fail_on_leak && passthrough {
@@ -901,6 +1071,7 @@ fn dispatch_run(
     reruns: u32,
     worker_timeout: Option<u64>,
     known_flaky: Option<&std::collections::HashSet<String>>,
+    skip_ids: &std::collections::HashSet<String>,
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
     passthrough: bool,
@@ -1025,6 +1196,7 @@ fn dispatch_run(
             shuffle_seed,
             shard,
             known_flaky,
+            skip_ids,
             worker_env,
         )?
     })
@@ -1101,7 +1273,16 @@ fn finalize_output(
         } else {
             println!();
         }
-        let summary = format!("{}{warn_part} in {elapsed:.2}s", outcome.run.summary_line());
+        let cached = outcome.run.cached_count();
+        let cached_note = if cached > 0 {
+            format!(" ({cached} cached)")
+        } else {
+            String::new()
+        };
+        let summary = format!(
+            "{}{warn_part} in {elapsed:.2}s{cached_note}",
+            outcome.run.summary_line()
+        );
         let summary = if outcome.run.all_passed() {
             palette.green(&summary)
         } else {
