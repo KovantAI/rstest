@@ -188,3 +188,38 @@ def test_main_missing_manifest_takes_precedence_over_missing_vendor(monkeypatch,
     err = capsys.readouterr().err
     assert "vendor.lock not found" in err
     assert "_vendor not found" not in err
+
+
+def test_main_prints_question_mark_when_manifest_omits_version(monkeypatch, tmp_path, capsys):
+    # Manifest has no `pytest_version` key -> the "?" fallback is shown.
+    vendor = tmp_path / "_vendor"
+    vendor.mkdir()
+    (vendor / "a.py").write_bytes(b"k\n")
+    monkeypatch.setattr(verify_vendor, "VENDOR_DIR", vendor)
+
+    manifest = tmp_path / "vendor.lock"
+    manifest.write_text(
+        json.dumps({"files": verify_vendor.hash_tree(vendor)}),  # no pytest_version
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(verify_vendor, "MANIFEST", manifest)
+
+    assert verify_vendor.main() == 0
+    assert "vendored pytest ?:" in capsys.readouterr().out
+
+
+# --- real shipped tree -----------------------------------------------------
+
+
+def test_shipped_vendor_tree_matches_committed_manifest():
+    """The real `_vendor/` on disk is byte-identical to `vendor.lock`.
+
+    Every other test builds a throwaway tree; this one exercises the actual
+    shipped copy so a corrupt/edited/partial vendor commit fails here before
+    it ever ships.
+    """
+    manifest = json.loads(verify_vendor.MANIFEST.read_text(encoding="utf-8"))
+    expected = manifest.get("files", {})
+    actual = verify_vendor.hash_tree(verify_vendor.VENDOR_DIR)
+
+    assert verify_vendor.compare(expected, actual) == []
