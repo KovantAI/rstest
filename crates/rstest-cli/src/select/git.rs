@@ -65,6 +65,24 @@ fn nonempty(key: &str) -> Option<String> {
     }
 }
 
+/// Run `git <args>` and return its stdout on success. A spawn failure is
+/// contextualized; a non-zero exit is an error carrying the argv and git's
+/// stderr. Callers wanting a bespoke hint wrap the error with `.with_context`.
+pub(crate) fn git_stdout(args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Resolve the `--changed` base rev, PR-aware. Bare `--changed` diffs vs HEAD,
 /// which silently skips everything on a CI PR checkout; auto-target the merge-base
 /// with the detected PR base. An unresolvable base is an error, not a HEAD fallback.
@@ -76,22 +94,19 @@ pub fn resolve_base_rev(rev: &str, sink: &mut Sink) -> Result<String> {
         // A CI-provided exact SHA is used verbatim; verify it's present so
         // a shallow clone fails loudly rather than skipping the whole suite.
         Some(CiBase::Sha { sha, env }) => {
-            let out = std::process::Command::new("git")
-                .args([
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("{sha}^{{commit}}"),
-                ])
-                .output()
-                .context("running git rev-parse")?;
-            if !out.status.success() {
-                bail!(
+            git_stdout(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{sha}^{{commit}}"),
+            ])
+            .with_context(|| {
+                format!(
                     "--changed: {env} is '{sha}' but that commit is not in the local \
-                     clone — fetch it first (`git fetch origin {sha}`, or check out with \
-                     full history)"
-                );
-            }
+                         clone — fetch it first (`git fetch origin {sha}`, or check out with \
+                         full history)"
+                )
+            })?;
             sink.warn(&format!(
                 "rstest: --changed auto-targets MR base {} ({env})",
                 &sha[..sha.len().min(12)]
@@ -102,19 +117,14 @@ pub fn resolve_base_rev(rev: &str, sink: &mut Sink) -> Result<String> {
         None => return Ok(rev.to_string()),
     };
     let remote = format!("origin/{target}");
-    let out = std::process::Command::new("git")
-        .args(["merge-base", &remote, "HEAD"])
-        .output()
-        .context("running git merge-base")?;
-    if !out.status.success() {
-        bail!(
+    let sha = git_stdout(&["merge-base", &remote, "HEAD"]).with_context(|| {
+        format!(
             "--changed: {env} is '{target}' but `git merge-base {remote} HEAD` \
              failed — fetch the base branch first (actions/checkout: `fetch-depth: 0`, \
-             or `git fetch origin {target}`): {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+             or `git fetch origin {target}`)"
+        )
+    })?;
+    let sha = sha.trim().to_string();
     sink.warn(&format!(
         "rstest: --changed auto-targets PR base {remote} (merge-base {})",
         &sha[..sha.len().min(12)]
@@ -125,34 +135,16 @@ pub fn resolve_base_rev(rev: &str, sink: &mut Sink) -> Result<String> {
 pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
     let diff_base = rev.unwrap_or("HEAD");
-    let out = std::process::Command::new("git")
-        // --relative: paths relative to the CWD and limited to its subtree -
-        // running from a repo subdirectory (or a monorepo project child) must
-        // see ITS files, not repo-rooted paths.
-        .args(["diff", "--name-only", "--relative", diff_base])
-        .output()
-        .context("running git diff (is this a git repository?)")?;
-    if !out.status.success() {
-        bail!(
-            "git diff --name-only {diff_base} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    // --relative: paths relative to the CWD and limited to its subtree -
+    // running from a repo subdirectory (or a monorepo project child) must
+    // see ITS files, not repo-rooted paths.
+    let out = git_stdout(&["diff", "--name-only", "--relative", diff_base])?;
+    for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
     // Untracked files are changes too.
-    let out = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .output()
-        .context("running git ls-files")?;
-    if !out.status.success() {
-        bail!(
-            "git ls-files --others failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    let out = git_stdout(&["ls-files", "--others", "--exclude-standard"])?;
+    for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
     // Runner artifacts churn on every run and must not defeat selection
@@ -190,37 +182,19 @@ pub type ChangedLines = BTreeMap<PathBuf, FileChange>;
 
 pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     let diff_base = rev.unwrap_or("HEAD");
-    let out = std::process::Command::new("git")
-        // -U0: zero context lines, so every hunk's new-side range is exactly
-        // the changed lines. --relative: paths relative to CWD (monorepo child
-        // safety), matching changed_files_from_git and the index keys.
-        .args(["diff", "-U0", "--relative", diff_base])
-        .output()
-        .context("running git diff -U0 (is this a git repository?)")?;
-    if !out.status.success() {
-        bail!(
-            "git diff -U0 {diff_base} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let mut map: ChangedLines = parse_diff_hunks(&String::from_utf8_lossy(&out.stdout))
+    // -U0: zero context lines, so every hunk's new-side range is exactly
+    // the changed lines. --relative: paths relative to CWD (monorepo child
+    // safety), matching changed_files_from_git and the index keys.
+    let out = git_stdout(&["diff", "-U0", "--relative", diff_base])?;
+    let mut map: ChangedLines = parse_diff_hunks(&out)
         .into_iter()
         .map(|(path, change)| (PathBuf::from(path), change))
         .collect();
     // `git diff -U0` emits no hunks for files without a line-diff (deletions,
     // renames, binary, mode-only), which still affect selection. Union the
     // authoritative `--name-only` set; hunk-parsed keys win, the rest fall back.
-    let out = std::process::Command::new("git")
-        .args(["diff", "--name-only", "--relative", diff_base])
-        .output()
-        .context("running git diff --name-only")?;
-    if !out.status.success() {
-        bail!(
-            "git diff --name-only {diff_base} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    let out = git_stdout(&["diff", "--name-only", "--relative", diff_base])?;
+    for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
             has_new_code: true,
@@ -228,17 +202,8 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     }
     // Untracked files are all-new code with no old-side lines: mark
     // has_new_code so the caller falls back to import-graph for them.
-    let out = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .output()
-        .context("running git ls-files")?;
-    if !out.status.success() {
-        bail!(
-            "git ls-files --others failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    let out = git_stdout(&["ls-files", "--others", "--exclude-standard"])?;
+    for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
             has_new_code: true,

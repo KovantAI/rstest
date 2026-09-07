@@ -31,6 +31,33 @@ pub(super) struct WorkerState {
     pub(super) node_input: Option<serde_json::Value>,
 }
 
+impl crate::scheduling::orchestrator::Slot for WorkerState {
+    fn dead(&self) -> bool {
+        self.dead
+    }
+    fn finishing(&self) -> bool {
+        self.finishing
+    }
+    fn set_finishing(&mut self, v: bool) {
+        self.finishing = v;
+    }
+    fn timeout_killed(&self) -> bool {
+        self.timeout_killed
+    }
+    fn set_timeout_killed(&mut self) {
+        self.timeout_killed = true;
+    }
+    fn running_since(&self) -> Option<std::time::Instant> {
+        self.running_since
+    }
+    fn kill_worker(&mut self) {
+        self.worker.kill();
+    }
+    fn send_no_more_items(&mut self) {
+        let _ = self.worker.send(&proto::Command::NoMoreItems);
+    }
+}
+
 impl WorkerState {
     pub(super) fn fresh(worker: Worker) -> Self {
         Self {
