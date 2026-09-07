@@ -8,6 +8,7 @@ mod gates;
 mod monorepo;
 
 use std::io::{IsTerminal, Write};
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -39,19 +40,20 @@ fn head_to_none(rev: &str) -> Option<&str> {
 
 /// `--changed`/`--since-green` selection: resolve the effective diff base
 /// (`--since-green`'s last-green baseline overrides the `--changed-strict` HEAD
-/// implication), then narrow `args` to the affected test targets. Returns the
-/// original `args` unchanged when no changed-selection is requested or the diff
-/// falls back to a full run. May `exit()` when nothing is affected (advancing
-/// the green baseline first under `--since-green`). `since_green`/`head`/`env_fp`
-/// are computed by the caller (they outlive selection, feeding the post-run
-/// green-baseline record).
+/// implication), then narrow `args` to the affected test targets.
+/// `ControlFlow::Continue(args)` carries the narrowed (or unchanged) args on;
+/// `ControlFlow::Break(code)` means nothing is affected — the caller returns
+/// `code` as the process exit status (advancing the green baseline first under
+/// `--since-green`), so the single `process::exit` stays in `main`.
+/// `since_green`/`head`/`env_fp` are computed by the caller (they outlive
+/// selection, feeding the post-run green-baseline record).
 fn apply_selection(
     cli: &Cli,
     mut args: Vec<String>,
     since_green: bool,
     head: &Option<String>,
     env_fp: &str,
-) -> Result<Vec<String>> {
+) -> Result<ControlFlow<i32, Vec<String>>> {
     let mut effective_changed = resolve_changed_base(cli)?;
     if since_green {
         // --since-green owns the diff base: its last-green baseline drives
@@ -109,8 +111,9 @@ fn apply_selection(
                 }
                 // Strict gating still wins on the exit code: it needs to
                 // DISTINGUISH "ran nothing" from "everything passed" (pytest's
-                // nothing-collected code), even under --since-green.
-                std::process::exit(if cli.changed_strict { 5 } else { 0 });
+                // nothing-collected code), even under --since-green. Break with
+                // the sentinel; main owns the actual process::exit.
+                return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
                 eprintln!(
@@ -131,7 +134,7 @@ fn apply_selection(
             }
         }
     }
-    Ok(args)
+    Ok(ControlFlow::Continue(args))
 }
 
 /// Run-time context threaded into [`run_post_gates`]: the timing/cache/selection
@@ -462,8 +465,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // surface editors/CI consume. Own single-session path (NOT passthrough).
     if is_collect_only(&args) {
         if let Some(out) = &cli.report_json {
-            let code = discovery::run_collect_discovery(&python, &args, out, &run_uid)?;
-            std::process::exit(code);
+            return discovery::run_collect_discovery(&python, &args, out, &run_uid);
         }
     }
     // require-baseline: with the durations-regress gate active, an absent baseline
@@ -509,8 +511,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     } else {
         String::new()
     };
-    // Narrow args to the affected test targets (may exit if nothing is affected).
-    let args = apply_selection(cli, args, since_green, &head, &env_fp)?;
+    // Narrow args to the affected test targets. Nothing affected => Break with
+    // the sentinel exit code, returned up so main owns the single process::exit.
+    let args = match apply_selection(cli, args, since_green, &head, &env_fp)? {
+        ControlFlow::Continue(args) => args,
+        ControlFlow::Break(code) => return Ok(code),
+    };
     if reruns > 0 && passthrough {
         eprintln!(
             "rstest: --reruns is ignored under -s/--pdb/--co \
