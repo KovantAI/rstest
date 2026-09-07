@@ -149,6 +149,103 @@ fn head_to_none(rev: &str) -> Option<&str> {
     (rev != "HEAD").then_some(rev)
 }
 
+/// `--changed`/`--since-green` selection: resolve the effective diff base
+/// (`--since-green`'s last-green baseline overrides the `--changed-strict` HEAD
+/// implication), then narrow `args` to the affected test targets. Returns the
+/// original `args` unchanged when no changed-selection is requested or the diff
+/// falls back to a full run. May `exit()` when nothing is affected (advancing
+/// the green baseline first under `--since-green`). `since_green`/`head`/`env_fp`
+/// are computed by the caller (they outlive selection, feeding the post-run
+/// green-baseline record).
+fn apply_selection(
+    cli: &Cli,
+    mut args: Vec<String>,
+    since_green: bool,
+    head: &Option<String>,
+    env_fp: &str,
+) -> Result<Vec<String>> {
+    let mut effective_changed = resolve_changed_base(cli)?;
+    if since_green {
+        // --since-green owns the diff base: its last-green baseline drives
+        // selection, OVERRIDING the "HEAD" base that --changed-strict would
+        // otherwise imply (changed_strict is a gating modifier here, not a base;
+        // an explicit --changed is already excluded by `since_green`). No
+        // baseline yet -> a full run to establish one.
+        match incremental::baseline(&std::env::current_dir()?, env_fp) {
+            Some(sha) => {
+                eprintln!(
+                    "rstest: --since-green: selecting changes since last green run ({})",
+                    &sha[..sha.len().min(12)]
+                );
+                effective_changed = Some(sha);
+            }
+            None => {
+                eprintln!(
+                    "rstest: --since-green: no prior green run recorded; \
+                     running everything to establish the baseline"
+                );
+                effective_changed = None;
+            }
+        }
+    }
+    if let Some(rev) = &effective_changed {
+        let rev = head_to_none(rev);
+        let cwd = std::env::current_dir()?;
+        let project = config::discover(&cwd);
+        // Coverage-aware selection: uses the line->test index when it is warm
+        // (any --cov-context=test run writes it), else falls back per-file to
+        // import-graph reachability, so --changed only ever gets tighter.
+        let changes = select::changed_line_ranges(rev)?;
+        match select::affected_with_coverage(
+            &project.rootdir,
+            &project,
+            &changes,
+            cli.changed_strict,
+            rev,
+        )? {
+            select::Selection::FullRun(reason) => {
+                eprintln!("rstest: --changed falling back to full run ({reason})");
+            }
+            select::Selection::Tests(tests) if tests.is_empty() => {
+                println!(
+                    "rstest: no tests affected by {} changed file(s)",
+                    changes.len()
+                );
+                // Nothing affected since the last green run is itself a green
+                // outcome: advance the baseline to HEAD so unrelated commits
+                // don't force a re-run next time.
+                if since_green {
+                    if let Some(h) = &head {
+                        incremental::record_green(&cwd, h, env_fp);
+                    }
+                }
+                // Strict gating still wins on the exit code: it needs to
+                // DISTINGUISH "ran nothing" from "everything passed" (pytest's
+                // nothing-collected code), even under --since-green.
+                std::process::exit(if cli.changed_strict { 5 } else { 0 });
+            }
+            select::Selection::Tests(tests) => {
+                eprintln!(
+                    "rstest: {} changed file(s) -> {} affected test target(s)",
+                    changes.len(),
+                    tests.len()
+                );
+                let mut selected: Vec<String> =
+                    tests.iter().map(|t| t.display().to_string()).collect();
+                // Keep the user's flags; drop any explicit path args in
+                // favor of the selection.
+                selected.extend(
+                    args.iter()
+                        .filter(|a| a.starts_with('-') || !std::path::Path::new(a).exists())
+                        .cloned(),
+                );
+                args = selected;
+            }
+        }
+    }
+    Ok(args)
+}
+
 /// Assemble the report-json run metadata; `duration_seconds`/`argv` are the same
 /// for every run path, only exit status / start epoch / worker count vary.
 fn build_run_meta(
@@ -196,6 +293,195 @@ fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bo
             (plain.to_string(), true)
         })
         .collect()
+}
+
+/// Run-time context threaded into [`run_post_gates`]: the timing/cache/selection
+/// state the post-run gates need that isn't part of the up-front [`RunConfig`]
+/// (it depends on the actual run — start time, the resolved cache remote, the
+/// incremental snapshot taken around the run).
+struct PostRun<'a> {
+    start: Instant,
+    started_epoch: u64,
+    run_uid: &'a str,
+    /// Resolved `--cache-remote` (flag or env), already validated non-empty.
+    cache_remote: Option<&'a str>,
+    shard: Option<(usize, usize)>,
+    since_green: bool,
+    head: &'a Option<String>,
+    env_fp: &'a str,
+    incremental_active: bool,
+    config_fp: &'a str,
+    /// Coverage index snapshotted BEFORE the run (drives carry-forward after).
+    prev_index: &'a select::CoverageIndex,
+    baseline: &'a coverage_skip::Baseline,
+}
+
+/// The resolved run configuration for a single (non-watch) run: everything
+/// derived from `cli` + `[tool.rstest]` + the forwarded pytest args, computed
+/// once up front and handed to the dispatch and post-run stages. Selection
+/// (`--changed`/shard/shuffle) and the incremental skip set are computed later,
+/// so they stay out of here.
+struct RunConfig {
+    /// Raw `--numprocesses` value (e.g. "auto"/"4"), kept for banner text.
+    numprocesses: String,
+    /// Resolved worker count (forced to 1 for the single-worker rerun pool).
+    n: usize,
+    /// `--dist` name, validated but kept as a string (lazy/each check it).
+    dist_name: String,
+    reruns: u32,
+    known_flaky: Option<std::collections::HashSet<String>>,
+    worker_timeout: Option<u64>,
+    passthrough: bool,
+    single_worker_reruns: bool,
+    palette: color::Palette,
+    very_verbose: bool,
+    mode: progress::Mode,
+    durations: Option<(usize, f64)>,
+    doctor: bool,
+    doctor_gate: Vec<doctor::GateCondition>,
+    worker_env: worker::WorkerEnv,
+    scope: PathBuf,
+    python: PathBuf,
+}
+
+/// Resolve [`RunConfig`] from the CLI, `[tool.rstest]` settings, and forwarded
+/// pytest args (CLI > settings > built-in defaults). Validates `--dist` and
+/// `--doctor-fail-on` up front and resolves the interpreter, so a bad value or a
+/// missing Python aborts before any worker spawns.
+fn resolve_run_config(
+    cli: &Cli,
+    settings: &config::RstestSettings,
+    args: &[String],
+    run_uid: &str,
+) -> Result<RunConfig> {
+    let numprocesses = cli
+        .numprocesses
+        .clone()
+        .or_else(|| settings.numprocesses.clone())
+        .unwrap_or_else(|| "auto".into());
+    let dist_name = cli
+        .dist
+        .clone()
+        .or_else(|| settings.dist.clone())
+        .unwrap_or_else(|| "load".into());
+    // Validate once, up front: every run path (byte-exact, lazy, pool) shares
+    // this name, so an invalid value must error the same way regardless of
+    // suite size, not slip through the lazy/small-suite path silently. The name
+    // stays a string downstream (lazy/each checks); dispatch_run re-parses it to
+    // the enum via the same `FromStr`.
+    dist_name
+        .parse::<pool::Dist>()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
+    // Flaky-aware reruns: when on, load the prior flaky set ONCE so the pool
+    // can gate rerun eligibility on it. None = feature off (no gating).
+    // Gate on `reruns > 0` deliberately: the gate only ever suppresses the
+    // global `--reruns` budget. @mark.flaky tests always bypass it (see the
+    // pool gate), so a run whose only budget is @mark.flaky needs no set
+    // loaded — loading one would change nothing.
+    let known_flaky: Option<std::collections::HashSet<String>> = if reruns > 0
+        && (cli.reruns_only_known_flaky || settings.reruns_only_known_flaky.unwrap_or(false))
+    {
+        Some(flakes::known_flaky())
+    } else {
+        None
+    };
+    let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
+    warn_windows_timeout(
+        &mut std::io::stderr(),
+        cfg!(windows),
+        cli.timeout,
+        worker_timeout,
+    );
+    let n = parse_numprocesses(&numprocesses)?;
+    let passthrough = needs_passthrough_io(args);
+    // Honor `--reruns` in single-worker mode via a degenerate one-worker pool:
+    // the rerun loop is orchestrator-side (rerunfailures neutralized inside).
+    // Passthrough can't be pooled, so reruns stay inert there.
+    let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
+    // A one-worker rerun pool is 1 worker everywhere downstream (banner,
+    // doctor, report-json meta), never 0.
+    let n = if single_worker_reruns { 1 } else { n };
+    let palette = color::Palette::detect(args);
+    let verbose = args
+        .iter()
+        .any(|a| a == "--verbose" || (a.starts_with("-v") && a.chars().skip(1).all(|c| c == 'v')));
+    // -vv (or more): pytest shows ALL durations, no hidden-cutoff note.
+    let very_verbose = args.iter().filter(|a| *a == "--verbose").count() >= 2
+        || args
+            .iter()
+            .any(|a| a.starts_with("-vv") && a.chars().skip(1).all(|c| c == 'v'));
+    // Output style: --output > [tool.rstest] output > (-v ? verbose : tty ?
+    // bar : dots). Auto-promote to the sugar bar on a tty, stay on plain dots
+    // off-tty so logs stay byte-stable (the live footer self-disables there).
+    let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
+        Some("bar") => progress::Mode::Bar,
+        Some("verbose") => progress::Mode::Verbose,
+        Some("dots") => progress::Mode::Dots,
+        Some("github") => progress::Mode::Github,
+        Some("json") => progress::Mode::Json,
+        Some("tap") => progress::Mode::Tap,
+        Some("teamcity") => progress::Mode::Teamcity,
+        Some("gitlab") => progress::Mode::Gitlab,
+        Some("buildkite") => progress::Mode::Buildkite,
+        Some("azure") => progress::Mode::Azure,
+        Some(other) => {
+            eprintln!(
+                "rstest: unknown --output '{other}' \
+                 (use dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json); using dots"
+            );
+            progress::Mode::Dots
+        }
+        None if verbose => progress::Mode::Verbose,
+        None if std::io::stdout().is_terminal() => progress::Mode::Bar,
+        None => progress::Mode::Dots,
+    };
+    let durations = parse_durations(args);
+    // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
+    // missing operator aborts now, never silently as a gate that can't fire.
+    let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on)?;
+    let doctor = cli.doctor
+        || cli.doctor_json.is_some()
+        || cli.doctor_md.is_some()
+        || !doctor_gate.is_empty();
+    // Run-wide worker params (testrun uid + doctor instrumentation) travel via
+    // each worker's environment at spawn (thread-safe), never this process's
+    // global env.
+    // Leak measurement runs under doctor OR --fail-on-leak (doctor already
+    // instruments; --fail-on-leak needs the deltas without the full report).
+    let leakcheck = doctor || cli.fail_on_leak;
+    let worker_env = worker::WorkerEnv {
+        run_uid: run_uid.to_string(),
+        doctor,
+        timeout: cli.timeout,
+        leakcheck,
+        send_ids: false,
+    };
+
+    // Session args forward verbatim: the vendored core owns ini semantics
+    // (python_files, testpaths, rootdir) and collection, so session
+    // behavior is exactly pytest's.
+    let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let python = discover::resolve(&scope, cli.python.as_deref())?;
+    Ok(RunConfig {
+        numprocesses,
+        n,
+        dist_name,
+        reruns,
+        known_flaky,
+        worker_timeout,
+        passthrough,
+        single_worker_reruns,
+        palette,
+        very_verbose,
+        mode,
+        durations,
+        doctor,
+        doctor_gate,
+        worker_env,
+        scope,
+        python,
+    })
 }
 
 /// The crate's main entry point for a single (non-watch) run: resolves the
@@ -303,115 +589,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         );
         remote::write_local(&merged);
     }
-    let numprocesses = cli
-        .numprocesses
-        .clone()
-        .or_else(|| settings.numprocesses.clone())
-        .unwrap_or_else(|| "auto".into());
-    let dist_name = cli
-        .dist
-        .clone()
-        .or_else(|| settings.dist.clone())
-        .unwrap_or_else(|| "load".into());
-    // Validate once, up front: every run path (byte-exact, lazy, pool) shares
-    // this name, so an invalid value must error the same way regardless of
-    // suite size, not slip through the lazy/small-suite path silently. The name
-    // stays a string downstream (lazy/each checks); dispatch_run re-parses it to
-    // the enum via the same `FromStr`.
-    dist_name
-        .parse::<pool::Dist>()
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let reruns = cli.reruns.or(settings.reruns).unwrap_or(0);
-    // Flaky-aware reruns: when on, load the prior flaky set ONCE so the pool
-    // can gate rerun eligibility on it. None = feature off (no gating).
-    // Gate on `reruns > 0` deliberately: the gate only ever suppresses the
-    // global `--reruns` budget. @mark.flaky tests always bypass it (see the
-    // pool gate), so a run whose only budget is @mark.flaky needs no set
-    // loaded — loading one would change nothing.
-    let known_flaky: Option<std::collections::HashSet<String>> = if reruns > 0
-        && (cli.reruns_only_known_flaky || settings.reruns_only_known_flaky.unwrap_or(false))
-    {
-        Some(flakes::known_flaky())
-    } else {
-        None
-    };
-    let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
-    warn_windows_timeout(
-        &mut std::io::stderr(),
-        cfg!(windows),
-        cli.timeout,
-        worker_timeout,
-    );
-    let n = parse_numprocesses(&numprocesses)?;
-    let passthrough = needs_passthrough_io(&args);
-    // Honor `--reruns` in single-worker mode via a degenerate one-worker pool:
-    // the rerun loop is orchestrator-side (rerunfailures neutralized inside).
-    // Passthrough can't be pooled, so reruns stay inert there.
-    let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
-    // A one-worker rerun pool is 1 worker everywhere downstream (banner,
-    // doctor, report-json meta), never 0.
-    let n = if single_worker_reruns { 1 } else { n };
-    let palette = color::Palette::detect(&args);
-    let verbose = args
-        .iter()
-        .any(|a| a == "--verbose" || (a.starts_with("-v") && a.chars().skip(1).all(|c| c == 'v')));
-    // -vv (or more): pytest shows ALL durations, no hidden-cutoff note.
-    let very_verbose = args.iter().filter(|a| *a == "--verbose").count() >= 2
-        || args
-            .iter()
-            .any(|a| a.starts_with("-vv") && a.chars().skip(1).all(|c| c == 'v'));
-    // Output style: --output > [tool.rstest] output > (-v ? verbose : tty ?
-    // bar : dots). Auto-promote to the sugar bar on a tty, stay on plain dots
-    // off-tty so logs stay byte-stable (the live footer self-disables there).
-    let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
-        Some("bar") => progress::Mode::Bar,
-        Some("verbose") => progress::Mode::Verbose,
-        Some("dots") => progress::Mode::Dots,
-        Some("github") => progress::Mode::Github,
-        Some("json") => progress::Mode::Json,
-        Some("tap") => progress::Mode::Tap,
-        Some("teamcity") => progress::Mode::Teamcity,
-        Some("gitlab") => progress::Mode::Gitlab,
-        Some("buildkite") => progress::Mode::Buildkite,
-        Some("azure") => progress::Mode::Azure,
-        Some(other) => {
-            eprintln!(
-                "rstest: unknown --output '{other}' \
-                 (use dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json); using dots"
-            );
-            progress::Mode::Dots
-        }
-        None if verbose => progress::Mode::Verbose,
-        None if std::io::stdout().is_terminal() => progress::Mode::Bar,
-        None => progress::Mode::Dots,
-    };
-    let durations = parse_durations(&args);
-    // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
-    // missing operator aborts now, never silently as a gate that can't fire.
-    let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on)?;
-    let doctor = cli.doctor
-        || cli.doctor_json.is_some()
-        || cli.doctor_md.is_some()
-        || !doctor_gate.is_empty();
-    // Run-wide worker params (testrun uid + doctor instrumentation) travel via
-    // each worker's environment at spawn (thread-safe), never this process's
-    // global env.
-    // Leak measurement runs under doctor OR --fail-on-leak (doctor already
-    // instruments; --fail-on-leak needs the deltas without the full report).
-    let leakcheck = doctor || cli.fail_on_leak;
-    let worker_env = worker::WorkerEnv {
-        run_uid: run_uid.clone(),
-        doctor,
-        timeout: cli.timeout,
-        leakcheck,
-        send_ids: false,
-    };
-
-    // Session args forward verbatim: the vendored core owns ini semantics
-    // (python_files, testpaths, rootdir) and collection, so session
-    // behavior is exactly pytest's.
-    let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let python = discover::resolve(&scope, cli.python.as_deref())?;
+    let cfg = resolve_run_config(cli, &settings, &args, &run_uid)?;
+    // Lift the resolved config into the local names the rest of the pipeline
+    // reads. Copy fields copy; the few owned fields clone once (cheap) so their
+    // types match the original locals exactly, leaving `cfg` intact to hand to
+    // `dispatch_run` as one bundle. `known_flaky`/`worker_env` are read only via
+    // that bundle, so they stay in `cfg`.
+    let RunConfig {
+        n,
+        reruns,
+        passthrough,
+        single_worker_reruns,
+        palette,
+        very_verbose,
+        mode,
+        durations,
+        ..
+    } = cfg;
+    let numprocesses = cfg.numprocesses.clone();
+    let dist_name = cfg.dist_name.clone();
+    let scope = cfg.scope.clone();
+    let python = cfg.python.clone();
     // Run-less: verify the vendored pytest tree against the packaged manifest.
     if cli.verify_vendor {
         return crate::vendor::run_verify(&python);
@@ -469,7 +667,6 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         };
         println!("rstest {} — {worker_desc}", env!("CARGO_PKG_VERSION"));
     }
-    let mut args = args;
     // Incremental testing: --since-green feeds --changed's selection from the
     // last green run's commit. An explicit --changed always wins. `head` is
     // captured up front (it can't change mid-run) so a green run can record it.
@@ -482,85 +679,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     } else {
         String::new()
     };
-    let mut effective_changed = resolve_changed_base(cli)?;
-    if since_green {
-        // --since-green owns the diff base: its last-green baseline drives
-        // selection, OVERRIDING the "HEAD" base that --changed-strict would
-        // otherwise imply (changed_strict is a gating modifier here, not a base;
-        // an explicit --changed is already excluded by `since_green`). No
-        // baseline yet -> a full run to establish one.
-        match incremental::baseline(&std::env::current_dir()?, &env_fp) {
-            Some(sha) => {
-                eprintln!(
-                    "rstest: --since-green: selecting changes since last green run ({})",
-                    &sha[..sha.len().min(12)]
-                );
-                effective_changed = Some(sha);
-            }
-            None => {
-                eprintln!(
-                    "rstest: --since-green: no prior green run recorded; \
-                     running everything to establish the baseline"
-                );
-                effective_changed = None;
-            }
-        }
-    }
-    if let Some(rev) = &effective_changed {
-        let rev = head_to_none(rev);
-        let cwd = std::env::current_dir()?;
-        let project = config::discover(&cwd);
-        // Coverage-aware selection: uses the line->test index when it is warm
-        // (any --cov-context=test run writes it), else falls back per-file to
-        // import-graph reachability, so --changed only ever gets tighter.
-        let changes = select::changed_line_ranges(rev)?;
-        match select::affected_with_coverage(
-            &project.rootdir,
-            &project,
-            &changes,
-            cli.changed_strict,
-            rev,
-        )? {
-            select::Selection::FullRun(reason) => {
-                eprintln!("rstest: --changed falling back to full run ({reason})");
-            }
-            select::Selection::Tests(tests) if tests.is_empty() => {
-                println!(
-                    "rstest: no tests affected by {} changed file(s)",
-                    changes.len()
-                );
-                // Nothing affected since the last green run is itself a green
-                // outcome: advance the baseline to HEAD so unrelated commits
-                // don't force a re-run next time.
-                if since_green {
-                    if let Some(h) = &head {
-                        incremental::record_green(&cwd, h, &env_fp);
-                    }
-                }
-                // Strict gating still wins on the exit code: it needs to
-                // DISTINGUISH "ran nothing" from "everything passed" (pytest's
-                // nothing-collected code), even under --since-green.
-                std::process::exit(if cli.changed_strict { 5 } else { 0 });
-            }
-            select::Selection::Tests(tests) => {
-                eprintln!(
-                    "rstest: {} changed file(s) -> {} affected test target(s)",
-                    changes.len(),
-                    tests.len()
-                );
-                let mut selected: Vec<String> =
-                    tests.iter().map(|t| t.display().to_string()).collect();
-                // Keep the user's flags; drop any explicit path args in
-                // favor of the selection.
-                selected.extend(
-                    args.iter()
-                        .filter(|a| a.starts_with('-') || !std::path::Path::new(a).exists())
-                        .cloned(),
-                );
-                args = selected;
-            }
-        }
-    }
+    // Narrow args to the affected test targets (may exit if nothing is affected).
+    let args = apply_selection(cli, args, since_green, &head, &env_fp)?;
     if reruns > 0 && passthrough {
         eprintln!(
             "rstest: --reruns is ignored under -s/--pdb/--co \
@@ -743,26 +863,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     } else {
         std::collections::HashSet::new()
     };
-    let mut outcome = dispatch_run(
-        cli,
-        &settings,
-        &python,
-        &args,
-        n,
-        mode,
-        palette,
-        &dist_name,
-        durations,
-        reruns,
-        worker_timeout,
-        known_flaky.as_ref(),
-        &skip_ids,
-        shuffle_seed,
-        shard,
-        passthrough,
-        single_worker_reruns,
-        &worker_env,
-    )?;
+    let mut outcome = dispatch_run(&cfg, cli, &settings, &args, &skip_ids, shuffle_seed, shard)?;
 
     // Quarantine BEFORE any output or exit-code consumer: classification,
     // counts, junit, report-json, and the sessionfinish envelope must all
@@ -791,6 +892,62 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         start,
     );
 
+    let post = PostRun {
+        start,
+        started_epoch,
+        run_uid: &run_uid,
+        cache_remote: cache_remote.as_deref(),
+        shard,
+        since_green,
+        head: &head,
+        env_fp: &env_fp,
+        incremental_active,
+        config_fp: &config_fp,
+        prev_index: &prev_index,
+        baseline: &baseline,
+    };
+    run_post_gates(&cfg, cli, &mut outcome, &args, &post)
+}
+
+/// Post-run gates and side-effects, in order: the doctor report + `--doctor-fail-on`
+/// gate, junit/html reports, merged lastfailed cache, duration-regression gate,
+/// coverage combine/report, duration+flake save, `--cache-push`, report-json,
+/// the `--incremental` green-set record, and the `--fail-on-leak` gate. Returns
+/// the reconciled process exit status (starting from the pool's, raised by any
+/// gate breach).
+fn run_post_gates(
+    cfg: &RunConfig,
+    cli: &Cli,
+    outcome: &mut pool::PoolOutcome,
+    args: &[String],
+    post: &PostRun,
+) -> Result<i32> {
+    let RunConfig {
+        n,
+        passthrough,
+        palette,
+        mode,
+        doctor,
+        ref doctor_gate,
+        ref dist_name,
+        ref python,
+        ref scope,
+        ..
+    } = *cfg;
+    let PostRun {
+        start,
+        started_epoch,
+        run_uid,
+        cache_remote,
+        shard,
+        since_green,
+        head,
+        env_fp,
+        incremental_active,
+        config_fp,
+        prev_index,
+        baseline,
+    } = *post;
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
     if !doctor_gate.is_empty() && passthrough {
@@ -808,7 +965,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     {
         let report = doctor::analyze(
             &outcome.run,
-            &merge_fixtures(outcome.fixtures),
+            &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
             start.elapsed().as_secs_f64(),
             n,
         );
@@ -825,7 +982,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         }
         doctor::append_ci_summary(&report)?;
         if !doctor_gate.is_empty() {
-            let gate = doctor::evaluate(&report, &doctor_gate);
+            let gate = doctor::evaluate(&report, doctor_gate);
             for s in &gate.skipped {
                 eprintln!("rstest: --doctor-fail-on: {s}");
             }
@@ -915,9 +1072,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let mut exitstatus = outcome.exitstatus;
     if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
         println!();
-        let status = std::process::Command::new(&python)
+        let status = std::process::Command::new(python)
             .args(["-m", "rstest_worker.covtool"])
-            .args(&args)
+            .args(args)
             .env("PYTHONPATH", worker::worker_pythonpath())
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
@@ -940,8 +1097,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         // segment (from the in-memory Run, not the merged local cache). A push
         // failure warns but never fails an otherwise-green run.
         if cli.cache_push {
-            let remote = cache_remote.as_deref().unwrap(); // validated at entry
-            let uid = run_uid.clone();
+            let remote = cache_remote.unwrap(); // validated at entry
+            let uid = run_uid;
             let shard_suffix = shard.map(|(k, n)| format!("-{k}of{n}")).unwrap_or_default();
             // This run's coverage slice (covtool wrote it just above); empty for
             // non-coverage runs. Published as the segment's cov_index.
@@ -989,8 +1146,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // it. Recorded only on green (exitstatus 0) — a failing test keeps being
     // selected until it passes.
     if since_green && exitstatus == 0 {
-        if let Some(h) = &head {
-            incremental::record_green(&std::env::current_dir()?, h, &env_fp);
+        if let Some(h) = head {
+            incremental::record_green(&std::env::current_dir()?, h, env_fp);
         }
     }
     // --incremental: persist this run's green set (tests that ran green + the
@@ -1003,7 +1160,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         let cached = outcome.run.cached_nodeids();
         if !cached.is_empty() {
             let mut new_index = remote::load_local_cov_index();
-            coverage_skip::carry_forward(&prev_index, &mut new_index, &cached);
+            coverage_skip::carry_forward(prev_index, &mut new_index, &cached);
             coverage_skip::write_index(&new_index);
         }
         // Restore cached (not-run) entries' def line from the baseline before
@@ -1011,8 +1168,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         // every artifact reflects the real line, not a blank.
         outcome.run.backfill_cached_linenos(&baseline.test_lines);
         coverage_skip::record(
-            &scope,
-            &config_fp,
+            scope,
+            config_fp,
             outcome.run.green_nodeids(),
             outcome.run.green_linenos(),
         );
@@ -1061,28 +1218,54 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     Ok(exitstatus)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dispatch_run(
+    cfg: &RunConfig,
     cli: &Cli,
     settings: &config::RstestSettings,
-    python: &std::path::Path,
     args: &[String],
-    n: usize,
-    mode: progress::Mode,
-    palette: color::Palette,
-    dist_name: &str,
-    durations: Option<(usize, f64)>,
-    reruns: u32,
-    worker_timeout: Option<u64>,
-    known_flaky: Option<&std::collections::HashSet<String>>,
     skip_ids: &std::collections::HashSet<String>,
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
-    passthrough: bool,
-    single_worker_reruns: bool,
-    worker_env: &worker::WorkerEnv,
 ) -> Result<pool::PoolOutcome> {
+    let RunConfig {
+        n,
+        reruns,
+        worker_timeout,
+        passthrough,
+        single_worker_reruns,
+        palette,
+        mode,
+        durations,
+        ref dist_name,
+        ref known_flaky,
+        ref worker_env,
+        ref python,
+        ..
+    } = *cfg;
+    let python = python.as_path();
+    let worker_env: &worker::WorkerEnv = worker_env;
+    let known_flaky = known_flaky.as_ref();
     let watchdog = watchdog_duration(worker_timeout, cli.timeout);
+    // Compiled once and shared by both pool paths (a config-struct field, so it
+    // must outlive the borrow); the passthrough path below ignores it.
+    let only_rerun = cli
+        .only_rerun
+        .iter()
+        .map(|p| regex::Regex::new(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let base_cfg = pool::PoolConfig {
+        python,
+        n,
+        args,
+        mode,
+        palette,
+        maxfail: parse_maxfail(args),
+        reruns,
+        only_rerun: &only_rerun,
+        worker_timeout: watchdog,
+        known_flaky,
+        worker_env,
+    };
     Ok(if passthrough || (n <= 1 && !single_worker_reruns) {
         let io = if passthrough {
             worker::Stdio::Inherit
@@ -1154,26 +1337,17 @@ fn dispatch_run(
                 files.len()
             );
         }
+        let cfg = pool::PoolConfig {
+            n: n.min(files.len().max(1)),
+            ..base_cfg
+        };
         lazy::run_lazy_pool(
-            python,
-            n.min(files.len().max(1)),
-            args,
+            &cfg,
             files,
-            mode,
-            palette,
             // Steal (split files across workers) only on an EXPLICIT --dist
             // load: lazy defaults to strict file affinity, since stealing
             // exposes cross-file/in-file order dependence affinity doesn't.
             cli.dist.as_deref() == Some("load") || settings.dist.as_deref() == Some("load"),
-            parse_maxfail(args),
-            reruns,
-            &cli.only_rerun
-                .iter()
-                .map(|p| regex::Regex::new(p))
-                .collect::<Result<Vec<_>, _>>()?,
-            watchdog,
-            known_flaky,
-            worker_env,
         )?
     } else {
         let dist = dist_name
@@ -1186,25 +1360,12 @@ fn dispatch_run(
             );
         }
         pool::run_pool(
-            python,
-            n,
-            args,
-            mode,
-            durations.is_some(),
-            palette,
+            &base_cfg,
             dist,
-            parse_maxfail(args),
-            reruns,
-            &cli.only_rerun
-                .iter()
-                .map(|p| regex::Regex::new(p))
-                .collect::<Result<Vec<_>, _>>()?,
-            watchdog,
+            durations.is_some(),
             shuffle_seed,
             shard,
-            known_flaky,
             skip_ids,
-            worker_env,
         )?
     })
 }

@@ -81,6 +81,25 @@ impl std::str::FromStr for Dist {
     }
 }
 
+/// Worker-pool parameters common to the eager (`run_pool`) and lazy
+/// (`run_lazy_pool`) orchestrators. Bundled so each entry point takes a handful
+/// of mode-specific args on top rather than one flat ~17-arg list.
+pub struct PoolConfig<'a> {
+    pub python: &'a Path,
+    pub n: usize,
+    pub args: &'a [String],
+    pub mode: crate::reporting::progress::Mode,
+    pub palette: crate::reporting::color::Palette,
+    pub maxfail: Option<u64>,
+    pub reruns: u32,
+    pub only_rerun: &'a [regex::Regex],
+    pub worker_timeout: Option<std::time::Duration>,
+    /// Some(set) => --reruns-only-known-flaky: only tests in this set (prior
+    /// flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
+    pub known_flaky: Option<&'a std::collections::HashSet<String>>,
+    pub worker_env: &'a crate::scheduling::worker::WorkerEnv,
+}
+
 /// Everything the orchestrator loop produces from one pool run, handed back to
 /// `run.rs` for post-run reporting and gates.
 pub struct PoolOutcome {
@@ -134,30 +153,30 @@ fn stop_all(states: &mut [WorkerState]) {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // orchestration entry point; a config struct adds noise for one caller
 pub fn run_pool(
-    python: &Path,
-    n: usize,
-    args: &[String],
-    mode: crate::reporting::progress::Mode,
-    track_durations: bool,
-    palette: crate::reporting::color::Palette,
+    cfg: &PoolConfig,
     dist: Dist,
-    maxfail: Option<u64>,
-    reruns: u32,
-    only_rerun: &[regex::Regex],
-    worker_timeout: Option<std::time::Duration>,
+    track_durations: bool,
     shuffle: Option<u64>,
     shard: Option<(usize, usize)>,
-    // Some(set) => --reruns-only-known-flaky: only tests in this set (prior
-    // flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
-    known_flaky: Option<&std::collections::HashSet<String>>,
     // --incremental: nodeids that were green last run and whose covered source
     // is unchanged. Collected but never dispatched; carried forward as cached
     // passes. Empty = feature off.
     skip_ids: &std::collections::HashSet<String>,
-    worker_env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<PoolOutcome> {
+    let &PoolConfig {
+        python,
+        n,
+        args,
+        mode,
+        palette,
+        maxfail,
+        reruns,
+        only_rerun,
+        worker_timeout,
+        known_flaky,
+        worker_env,
+    } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
     let mut states = Vec::new();
