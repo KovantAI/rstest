@@ -410,7 +410,14 @@ pub fn run_lazy_pool(
                          ({restarts_left} restarts left)"
                     );
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
-                    states[idx] = WorkerState::fresh(worker);
+                    // Reap the old worker before dropping it. This arm also fires
+                    // on a decode error (the child may still be alive, running
+                    // tests against a closed pipe) and on watchdog kills; `Child`'s
+                    // drop neither kills nor waits, so without this an alive child
+                    // is orphaned and an exited one becomes a `<defunct>` zombie.
+                    let mut old = std::mem::replace(&mut states[idx], WorkerState::fresh(worker));
+                    old.worker.kill();
+                    let _ = old.worker.wait();
                 } else {
                     run.collect_error(
                         format!("<worker gw{idx}>"),
@@ -418,6 +425,10 @@ pub fn run_lazy_pool(
                     );
                     statuses.push(3);
                     states[idx].dead = true;
+                    // Reap now (a decode error can leave the child alive) rather
+                    // than letting it linger as a zombie until the end-of-run
+                    // wait(). The slot stays in the vec, so reap in place.
+                    states[idx].worker.reap();
                     done_workers += 1;
                     if idx == designate {
                         if let Some(next) = states.iter().position(|s| !s.dead && !s.finishing) {

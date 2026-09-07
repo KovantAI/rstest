@@ -202,6 +202,16 @@ impl Worker {
         self.child.wait()?;
         Ok(())
     }
+
+    /// Kill (if still running) and reap the child in place. Unlike [`Worker::wait`]
+    /// this borrows `&mut self`, so a state slot that must stay in the pool's vec
+    /// (marked dead, awaiting end-of-run cleanup) can be reaped immediately rather
+    /// than lingering as an orphan / `<defunct>` zombie until then. Idempotent: a
+    /// later `wait()` on the already-reaped child just yields `ECHILD` (ignored).
+    pub fn reap(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// Endpoint values are numeric and platform-meaningful: file descriptors
@@ -342,4 +352,87 @@ pub fn worker_pythonpath() -> String {
     std::env::join_paths(paths)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{Worker, WorkerEnv};
+    use std::path::{Path, PathBuf};
+
+    /// A repo python that can import pytest + rstest_worker, plus the worker
+    /// PYTHONPATH root. None => skip (no suitable interpreter present).
+    fn worker_python() -> Option<(PathBuf, PathBuf)> {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)?
+            .to_path_buf();
+        let worker_path = repo.join("python");
+        let candidates = [
+            std::env::var("RSTEST_TEST_PYTHON").ok().map(PathBuf::from),
+            Some(repo.join(".venv/bin/python")),
+        ];
+        for cand in candidates.into_iter().flatten() {
+            if !cand.exists() {
+                continue;
+            }
+            let ok = std::process::Command::new(&cand)
+                .args(["-c", "import pytest, rstest_worker"])
+                .env("PYTHONPATH", &worker_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return Some((cand, worker_path));
+            }
+        }
+        None
+    }
+
+    /// Whether `pid` still exists. A zombie (killed but un-reaped) still counts
+    /// as alive here — signal 0 succeeds until the parent `wait()`s it away.
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 performs no action; it only probes whether `pid`
+        // is a live, signalable process. Touches no memory.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// Both pools' respawn arm reaps the old worker with `kill()` + `wait()`
+    /// before replacing it: a decode-error respawn can leave the child alive,
+    /// and `Child`'s drop neither kills nor waits. After kill+wait the pid must
+    /// be GONE (ESRCH) — a `<defunct>` zombie would still answer `kill(pid, 0)`,
+    /// so this asserts the reaping `wait()`, not merely the `kill()`.
+    #[test]
+    fn kill_then_wait_reaps_the_worker_child() {
+        let Some((python, worker_path)) = worker_python() else {
+            eprintln!("skipping reap test: no python with pytest found");
+            return;
+        };
+        // SAFETY: edition 2021; single-threaded test setup, no other worker here.
+        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+
+        let env = WorkerEnv {
+            run_uid: format!("reap-{}", std::process::id()),
+            doctor: false,
+            timeout: None,
+            leakcheck: false,
+            send_ids: false,
+        };
+        // A freshly spawned worker blocks on its first command: alive, and never
+        // sent anything — the decode-error/respawn precondition (child still
+        // running against the pipe, not a clean exit).
+        let mut worker = Worker::spawn(&python, None, &env).expect("spawn worker");
+        let pid = worker.id();
+        assert!(alive(pid), "worker should be alive right after spawn");
+
+        // Exactly what the respawn arm now does with the old worker.
+        worker.kill();
+        let _ = worker.wait();
+
+        assert!(
+            !alive(pid),
+            "worker pid {pid} still present after kill+wait -> orphan or <defunct> zombie"
+        );
+    }
 }
