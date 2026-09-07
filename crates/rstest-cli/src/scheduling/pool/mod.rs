@@ -35,6 +35,7 @@ use anyhow::{bail, Result};
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
 use crate::reporting::sink::Sink;
+use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
@@ -144,15 +145,6 @@ fn known_flaky_ok(
     })
 }
 
-/// Tell every still-listening worker the queue is closed (maxfail trip): each
-/// finishes its in-flight work and ends. Bounded overshoot, the trade xdist makes.
-fn stop_all(states: &mut [WorkerState]) {
-    for s in states.iter_mut().filter(|s| !s.dead && !s.finishing) {
-        s.finishing = true;
-        let _ = s.worker.send(&proto::Command::NoMoreItems);
-    }
-}
-
 pub fn run_pool(
     cfg: &PoolConfig,
     dist: Dist,
@@ -240,21 +232,7 @@ pub fn run_pool(
                 prog.tick(sink);
                 // Watchdog tick: kill workers stuck on one item too long.
                 if let Some(limit) = worker_timeout {
-                    for (widx, s) in states.iter_mut().enumerate() {
-                        if s.dead || s.timeout_killed {
-                            continue;
-                        }
-                        if let Some(since) = s.running_since {
-                            if since.elapsed() > limit {
-                                sink.warn(&format!(
-                                    "rstest: worker gw{widx} exceeded --worker-timeout ({}s) on one test; killing it",
-                                    limit.as_secs()
-                                ));
-                                s.timeout_killed = true;
-                                s.worker.kill();
-                            }
-                        }
-                    }
+                    orchestrator::watchdog_tick(sink, &mut states, limit);
                 }
                 continue;
             }
@@ -284,7 +262,7 @@ pub fn run_pool(
                 run.record(Some(idx), r);
                 if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                     stopping = true;
-                    stop_all(&mut states);
+                    orchestrator::stop_all(&mut states);
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => run.collect_error(path, longrepr),
@@ -498,13 +476,7 @@ pub fn run_pool(
                 let item_budget = budget_of(&flaky_budget, index);
                 if item_budget > 0 {
                     // --only-rerun: failures must match a pattern to retry.
-                    let rerun_allowed = only_rerun.is_empty()
-                        || s.attempt.iter().any(|r| {
-                            r.outcome == "failed"
-                                && r.longrepr
-                                    .as_deref()
-                                    .is_some_and(|t| only_rerun.iter().any(|re| re.is_match(t)))
-                        });
+                    let rerun_allowed = orchestrator::rerun_allowed(only_rerun, &s.attempt);
                     // --reruns-only-known-flaky: gate on prior flaky history.
                     // An explicit @mark.flaky (present in flaky_budget) is an
                     // author declaration and always bypasses the gate. Match on
@@ -527,23 +499,25 @@ pub fn run_pool(
                     } else {
                         let attempts = *used;
                         let failed_now = s.attempt_failed;
-                        let nodeid = s.attempt.first().map(|r| r.nodeid.clone());
-                        for r in s.attempt.drain(..) {
-                            if r.outcome == "failed" {
-                                fail_count += 1;
-                            }
-                            prog.on_report(sink, Some(idx), &r);
-                            run.record(Some(idx), r);
-                        }
+                        let flaky_key = s.attempt.first().map(|r| r.nodeid.clone());
+                        let attempt = std::mem::take(&mut s.attempt);
                         s.attempt_failed = false;
-                        if !failed_now && attempts > 0 {
-                            if let Some(nodeid) = nodeid {
-                                run.mark_flaky(nodeid, attempts);
-                            }
-                        }
+                        orchestrator::finalize_attempt(
+                            sink,
+                            &mut run,
+                            &mut prog,
+                            &mut fail_count,
+                            idx,
+                            orchestrator::FinishedAttempt {
+                                attempts_used: attempts,
+                                reports: attempt,
+                                failed: failed_now,
+                                flaky_key,
+                            },
+                        );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
-                            stop_all(&mut states);
+                            orchestrator::stop_all(&mut states);
                         }
                     }
                 }
@@ -616,30 +590,13 @@ pub fn run_pool(
                         if dist == Dist::Each {
                             nodeid.push_str(&format!(" [gw{idx}]"));
                         }
-                        let fab = proto::Report {
+                        let fab = orchestrator::fabricate_crash_report(
                             nodeid,
-                            when: "call".into(),
-                            outcome: "failed".into(),
-                            duration: 0.0,
-                            longrepr: Some(if was_timeout {
-                                format!(
-                                    "test exceeded --worker-timeout ({}s); its worker was killed (reported failed)",
-                                    worker_timeout.map(|d| d.as_secs()).unwrap_or(0)
-                                )
-                            } else {
-                                format!(
-                                    "worker gw{idx} crashed while running this test \
-                                     (reported failed, not retried): {e:#}"
-                                )
-                            }),
-                            wasxfail: false,
-                            skip_reason: None,
-                            cpu: None,
-                            thread_delta: None,
-                            fd_delta: None,
-                            sections: Vec::new(),
-                            lineno: None,
-                        };
+                            was_timeout,
+                            worker_timeout,
+                            idx,
+                            &e,
+                        );
                         let crashed_id = fab.nodeid.clone();
                         prog.on_report(sink, Some(idx), &fab);
                         run.record(Some(idx), fab);
@@ -891,16 +848,7 @@ pub fn run_pool(
     for id in &cached_ids {
         run.record_cached(id.clone());
     }
-    // Recorded outcomes win over session exit codes both ways: a fabricated
-    // crash failure never hits a session (codes read 0), and a flaky test's
-    // first attempt fails inside a session (code 1) though it finally passed.
-    let mut exitstatus = merge_statuses(&statuses);
-    if exitstatus == 0 && !run.all_passed() {
-        exitstatus = 1;
-    }
-    if reruns > 0 && exitstatus == 1 && run.all_passed() {
-        exitstatus = 0;
-    }
+    let exitstatus = orchestrator::finalize_exit(&statuses, run.all_passed(), reruns, false);
     Ok(PoolOutcome {
         run,
         prog,

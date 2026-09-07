@@ -6,6 +6,7 @@
 
 pub mod durations;
 pub mod lazy;
+pub(crate) mod orchestrator;
 pub mod pool;
 pub mod proto;
 pub mod shard;
