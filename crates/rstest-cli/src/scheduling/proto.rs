@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(Clone))]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum Command {
     /// One self-contained pytest session over `args` (single-worker mode).
@@ -63,6 +64,7 @@ pub enum Command {
 /// xdist-shaped per-phase test report (subset; grows toward the full
 /// `_report_to_json` schema as the vendored core lands).
 #[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Report {
     pub nodeid: String,
     pub when: String,
@@ -94,6 +96,7 @@ pub struct Report {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Serialize))]
 pub struct WarningEntry {
     /// pytest phase: "config" / "collect" / "runtest" - config+collect
     /// warnings repeat in every worker session and must be counted once.
@@ -106,6 +109,7 @@ pub struct WarningEntry {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Serialize))]
 pub struct FixtureStat {
     pub name: String,
     pub scope: String,
@@ -114,6 +118,7 @@ pub struct FixtureStat {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Serialize))]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum Event {
     Report(Report),
@@ -344,5 +349,190 @@ mod tests {
             from_python(serde_json::json!({"kind": "stopped", "payload": {"unrun": [1, 2]}})),
             Event::Stopped { .. }
         ));
+    }
+}
+
+/// Property tests: the invariants that must hold across ALL wire values, not
+/// just the hand-picked ones above. Roundtrip guards encode/decode symmetry;
+/// the arbitrary-bytes test is a fuzz-lite crash check that runs in CI; the
+/// command-kind test guards the wire tag set the Python worker matches on.
+#[cfg(test)]
+mod property {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Finite only: NaN would break the roundtrip PartialEq (NaN != NaN),
+    /// and the protocol never carries non-finite durations anyway.
+    fn finite_f64() -> impl Strategy<Value = f64> {
+        -1.0e9f64..1.0e9f64
+    }
+
+    /// Small arbitrary strings (proptest reads the literal as a regex).
+    fn small_str() -> impl Strategy<Value = String> {
+        ".{0,16}"
+    }
+
+    fn small_strs() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(small_str(), 0..4)
+    }
+
+    prop_compose! {
+        fn arb_report()(
+            nodeid in small_str(),
+            when in small_str(),
+            outcome in small_str(),
+            duration in finite_f64(),
+            longrepr in prop::option::of(small_str()),
+            wasxfail in any::<bool>(),
+            skip_reason in prop::option::of(small_str()),
+            cpu in prop::option::of(finite_f64()),
+            thread_delta in prop::option::of(any::<i64>()),
+            fd_delta in prop::option::of(any::<i64>()),
+            sections in prop::collection::vec((small_str(), small_str()), 0..4),
+            lineno in prop::option::of(any::<u64>()),
+        ) -> Report {
+            Report {
+                nodeid, when, outcome, duration, longrepr, wasxfail,
+                skip_reason, cpu, thread_delta, fd_delta, sections, lineno,
+            }
+        }
+    }
+
+    prop_compose! {
+        fn arb_fixture()(
+            name in small_str(), scope in small_str(),
+            count in any::<u64>(), total in finite_f64(),
+        ) -> FixtureStat {
+            FixtureStat { name, scope, count, total }
+        }
+    }
+
+    prop_compose! {
+        fn arb_warning()(
+            when in small_str(), category in small_str(), message in small_str(),
+            filename in small_str(), lineno in any::<u64>(), count in any::<u64>(),
+        ) -> WarningEntry {
+            WarningEntry { when, category, message, filename, lineno, count }
+        }
+    }
+
+    prop_compose! {
+        fn arb_collection_done()(
+            count in any::<u64>(),
+            hash in small_str(),
+            ids in prop::option::of(small_strs()),
+            locations in prop::option::of(prop::collection::vec(
+                (small_str(), prop::option::of(any::<u64>())), 0..4)),
+            marks in prop::option::of(prop::collection::vec(small_strs(), 0..4)),
+            serial in prop::option::of(prop::collection::vec(any::<u64>(), 0..4)),
+            cache_dir in prop::option::of(small_str()),
+            flaky in prop::option::of(prop::collection::hash_map(small_str(), any::<u32>(), 0..4)),
+            groups in prop::option::of(prop::collection::hash_map(small_str(), small_str(), 0..4)),
+        ) -> Event {
+            Event::CollectionDone {
+                count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
+            }
+        }
+    }
+
+    prop_compose! {
+        fn arb_file_collected()(
+            path in small_str(),
+            ids in small_strs(),
+            serial in small_strs(),
+            flaky in prop::collection::hash_map(small_str(), any::<u32>(), 0..4),
+        ) -> Event {
+            Event::FileCollected { path, ids, serial, flaky }
+        }
+    }
+
+    /// A representative Event value. Skips NodeInput/NodeDown: their
+    /// `serde_json::Value` payloads roundtrip through msgpack with ambiguous
+    /// integer typing, which is a Value quirk, not a protocol invariant.
+    fn arb_event() -> impl Strategy<Value = Event> {
+        let group_a = prop_oneof![
+            arb_report().prop_map(Event::Report),
+            (small_str(), small_str())
+                .prop_map(|(path, longrepr)| Event::CollectError { path, longrepr }),
+            small_str().prop_map(|path| Event::CollectSkip { path }),
+            prop::collection::vec(arb_fixture(), 0..4)
+                .prop_map(|fixtures| Event::DoctorFixtures { fixtures }),
+            prop::collection::vec(arb_warning(), 0..4)
+                .prop_map(|entries| Event::Warnings { entries }),
+            arb_collection_done(),
+            prop::option::of(small_str()).prop_map(|cache_dir| Event::LazyReady { cache_dir }),
+            arb_file_collected(),
+        ];
+        let group_b = prop_oneof![
+            small_str().prop_map(|id| Event::ItemStartId { id }),
+            small_str().prop_map(|id| Event::ItemDoneId { id }),
+            small_strs().prop_map(|unrun| Event::StoppedIds { unrun }),
+            any::<u64>().prop_map(|index| Event::ItemStart { index }),
+            any::<u64>().prop_map(|index| Event::ItemDone { index }),
+            prop::collection::vec(any::<u64>(), 0..4).prop_map(|unrun| Event::Stopped { unrun }),
+            any::<i32>().prop_map(|exitstatus| Event::Done { exitstatus }),
+        ];
+        prop_oneof![group_a, group_b]
+    }
+
+    const KNOWN_COMMAND_KINDS: &[&str] = &[
+        "run_tests",
+        "run_items_session",
+        "run_items",
+        "run_lazy_session",
+        "run_files",
+        "run_ids",
+        "no_more_items",
+        "node_down",
+        "end_session",
+        "shutdown",
+    ];
+
+    fn arb_command() -> impl Strategy<Value = Command> {
+        prop_oneof![
+            small_strs().prop_map(|args| Command::RunTests { args }),
+            small_strs().prop_map(|args| Command::RunItemsSession { args }),
+            prop::collection::vec(any::<u64>(), 0..4)
+                .prop_map(|indices| Command::RunItems { indices }),
+            small_strs().prop_map(|args| Command::RunLazySession { args }),
+            small_strs().prop_map(|paths| Command::RunFiles { paths }),
+            small_strs().prop_map(|ids| Command::RunIds { ids }),
+            Just(Command::NoMoreItems),
+            small_str().prop_map(|error| Command::NodeDown {
+                workerinput: serde_json::Value::Null,
+                error,
+            }),
+            Just(Command::EndSession),
+            Just(Command::Shutdown),
+        ]
+    }
+
+    proptest! {
+        /// Encode -> decode is the identity for every event the workers emit.
+        #[test]
+        fn event_roundtrips_through_msgpack(e in arb_event()) {
+            let bytes = rmp_serde::encode::to_vec_named(&e).unwrap();
+            let back: Event = rmp_serde::from_slice(&bytes)
+                .expect("re-decoding our own encoding must succeed");
+            prop_assert_eq!(e, back);
+        }
+
+        /// Hostile/garbage bytes must decode to Ok or Err - never panic, never
+        /// hang. This is the same surface the fuzz target explores, kept in the
+        /// unit suite so regressions surface without the fuzzing toolchain.
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = rmp_serde::from_slice::<Event>(&bytes);
+        }
+
+        /// The `kind` tag is the wire contract the Python worker matches on;
+        /// every command must serialize to one of the known strings.
+        #[test]
+        fn command_kind_is_always_known(c in arb_command()) {
+            let bytes = rmp_serde::encode::to_vec_named(&c).unwrap();
+            let v: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+            let kind = v["kind"].as_str().expect("kind must be a string");
+            prop_assert!(KNOWN_COMMAND_KINDS.contains(&kind), "unknown kind: {kind}");
+        }
     }
 }
