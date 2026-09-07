@@ -274,6 +274,9 @@ const JS: &str = r#"
   var filter = 'all';
   var passedInjected = false;
 
+  // Twin of the Rust `classify()` in report/mod.rs — the SAME decision tree,
+  // kept byte-for-byte in step. Change one, change the other, or the HTML
+  // report will bucket an entry differently from the summary/report-json/junit.
   function outcomeOf(e){
     if (e.quarantined) return 'quarantined';
     if (e.setup==='failed' || e.teardown==='failed') return 'errors';
