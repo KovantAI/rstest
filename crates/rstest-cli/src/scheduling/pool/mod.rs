@@ -665,15 +665,17 @@ pub fn run_pool(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
                     );
+                    // Reap the old worker in place BEFORE spawning its
+                    // replacement. This arm also fires on a decode error (the
+                    // child may still be alive, running tests against a closed
+                    // pipe) and on watchdog kills; `Child`'s drop neither kills
+                    // nor waits, so an alive child would orphan and an exited one
+                    // become a `<defunct>` zombie. Reaping first (not after the
+                    // spawn) means a `spawn_into` error `?`-returning can't leave
+                    // the old child un-reaped.
+                    states[idx].worker.reap();
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
-                    // Reap the old worker before dropping it. This arm also fires
-                    // on a decode error (the child may still be alive, running
-                    // tests against a closed pipe) and on watchdog kills; `Child`'s
-                    // drop neither kills nor waits, so without this an alive child
-                    // is orphaned and an exited one becomes a `<defunct>` zombie.
-                    let mut old = std::mem::replace(&mut states[idx], WorkerState::fresh(worker));
-                    old.worker.kill();
-                    let _ = old.worker.wait();
+                    states[idx] = WorkerState::fresh(worker);
                 } else {
                     run.collect_error(
                         format!("<worker gw{idx}>"),

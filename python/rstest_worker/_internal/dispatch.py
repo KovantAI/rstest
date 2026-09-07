@@ -321,11 +321,23 @@ class ServeDispatchPlugin(StreamPlugin):
         # An un-writable mutation is an infra error, not a caught mutant.
         try:
             saved = _apply_overlay(overlay)
-        except OSError:
+        except Exception:
+            # An un-writable/invalid overlay is an infra error, not a caught
+            # mutant. Catch broadly (not just OSError): a malformed overlay value
+            # - e.g. non-str content whose `.encode` raises AttributeError - must
+            # NOT escape and kill the whole serve session, dropping every queued
+            # request. Report the run finished (ran=0) so the client never blocks.
             self._conn.send("serve_run_done", {"req_id": req_id, "killed": False, "ran": 0})
             return
         try:
-            pid = os.fork()
+            try:
+                pid = os.fork()
+            except OSError:
+                # fork exhaustion (EAGAIN/ENOMEM under load) must not crash the
+                # session either: this mutant can't be tested right now, but the
+                # daemon has to survive and the client must get a terminal event.
+                self._conn.send("serve_run_done", {"req_id": req_id, "killed": False, "ran": 0})
+                return
             if pid == 0:  # child
                 code = 0
                 try:
@@ -348,6 +360,16 @@ class ServeDispatchPlugin(StreamPlugin):
 
     def _child_run(self, req_id: int, ids: list, stop: bool, overlay: dict | None = None) -> None:
         import importlib
+        import importlib.util
+
+        # Never persist bytecode from a forked run. CPython/pytest validate a
+        # cached `.pyc` against the source's (mtime-truncated-to-seconds, size);
+        # many mutation operators preserve size (`<`->`>`, `==`->`!=`, `+`->`-`)
+        # and consecutive fast forks land in the same wall-clock second, so a
+        # child writing bytecode could make the NEXT same-second mutant load THIS
+        # child's stale `.pyc` and silently misreport a killed mutant as a
+        # survivor. Disabling writes keeps children from planting such caches.
+        sys.dont_write_bytecode = True
 
         # Reset to the framework baseline: drop every SUT/test module imported
         # since, so the child re-imports them fresh (seeing the overlay) with
@@ -369,6 +391,18 @@ class ServeDispatchPlugin(StreamPlugin):
         # case O(modules) string compares, not O(modules) stat storms.
         overlaid_abs = {os.path.abspath(p) for p in (overlay or {})}
         if overlaid_abs:
+            # Drop any bytecode the parent (or an earlier same-second run) cached
+            # for an overlaid source. `dont_write_bytecode` stops us adding new
+            # stale caches, but a pre-existing `.pyc` whose (mtime-in-seconds,
+            # size) still matches the freshly-overlaid source would be loaded in
+            # preference to recompiling the mutation. Removing it forces a fresh
+            # compile of the overlaid bytes.
+            for abs_path in overlaid_abs:
+                # Suppress ValueError too: cache_from_source raises it when the
+                # implementation has no cache_tag. Invalidation is best-effort -
+                # it must never crash the run.
+                with contextlib.suppress(OSError, ValueError):
+                    os.unlink(importlib.util.cache_from_source(abs_path))
             overlaid_names = {os.path.basename(p) for p in overlaid_abs}
             overlaid_real: set[str] | None = None  # built lazily, only if needed
             for name, mod in list(sys.modules.items()):

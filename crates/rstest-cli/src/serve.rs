@@ -253,12 +253,31 @@ fn open_session(
         leakcheck: false,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
+    // Any error after spawn MUST reap the worker: `Worker` wraps a
+    // std::process::Child, which is neither killed nor waited on drop, so a bare
+    // `?`/bail here would orphan (or zombify) the just-spawned pytest interpreter
+    // - the exact leak this branch exists to kill. Collect in a helper so a
+    // single error arm reaps on every failure (send, recv, collect error,
+    // premature exit) instead of scattering the cleanup across bails.
+    match collect_session(&mut w, args) {
+        Ok(nodeids) => Ok((w, nodeids)),
+        Err(e) => {
+            w.reap();
+            Err(e)
+        }
+    }
+}
+
+/// Drive one `RunServeSession` to `ServeReady`, returning the collected nodeids.
+/// Split out of [`open_session`] so its caller can reap the worker on any error
+/// (a leaked warm worker would orphan a live pytest interpreter).
+fn collect_session(w: &mut worker::Worker, args: &[String]) -> Result<Vec<String>> {
     w.send(&proto::Command::RunServeSession {
         args: args.to_vec(),
     })?;
     loop {
         match w.recv()? {
-            proto::Event::ServeReady { nodeids } => return Ok((w, nodeids)),
+            proto::Event::ServeReady { nodeids } => return Ok(nodeids),
             proto::Event::CollectError { path, longrepr } => {
                 anyhow::bail!("collection error in {path}: {longrepr}");
             }
@@ -278,14 +297,42 @@ fn run_subset(
     overlay: std::collections::HashMap<String, String>,
     stop: bool,
 ) -> Result<()> {
-    w.send(&proto::Command::ServeRun {
+    if let Err(e) = w.send(&proto::Command::ServeRun {
         req_id: id,
         ids,
         overlay,
         stop_on_first_fail: stop,
-    })?;
+    }) {
+        // The worker died before we could even dispatch the run: frame it so the
+        // client isn't left blocked on a run_done that will never come, then
+        // propagate (the caller reaps the worker).
+        let payload = json!({
+            "id": id,
+            "code": "worker_crashed",
+            "message": format!("worker died before run: {e:#}"),
+        });
+        let _ = write_msg(writer, "error", payload);
+        return Err(e);
+    }
     loop {
-        match w.recv()? {
+        let event = match w.recv() {
+            Ok(event) => event,
+            Err(e) => {
+                // Worker died mid-run (crash, killed by an overlay segfault, or
+                // a hung child that dropped the pipe). Tell the client with an
+                // error frame for this id so a crashed daemon isn't
+                // indistinguishable from a killed mutant, then propagate - the
+                // caller (`serve_client`) reaps the dead worker.
+                let payload = json!({
+                    "id": id,
+                    "code": "worker_crashed",
+                    "message": format!("worker died during run: {e:#}"),
+                });
+                let _ = write_msg(writer, "error", payload);
+                return Err(e);
+            }
+        };
+        match event {
             proto::Event::ServeReport { req_id, report } if req_id == id => {
                 write_msg(writer, "report", json!({"id": id, "report": report}))?;
             }
@@ -687,6 +734,57 @@ mod tests {
         assert_eq!(msg["kind"], "error");
         assert_eq!(msg["payload"]["code"], "collect_failed");
         h.finish();
+    }
+
+    /// Regression: a collection error must NOT leak the warm worker. `open_session`
+    /// spawns the worker, then bails on the `CollectError`; because `Worker` wraps
+    /// a std::process::Child (not killed/waited on drop), that bail has to reap it
+    /// or orphan a live pytest interpreter. This drives the exact spawn +
+    /// `collect_session` the error path takes, captures the pid, then reaps like
+    /// `open_session`'s error arm and asserts the child is GONE (ESRCH) - a
+    /// `<defunct>` zombie would still answer `kill(pid, 0)`.
+    #[test]
+    fn open_session_collect_error_reaps_worker() {
+        let Some((python, worker_path)) = worker_python() else {
+            eprintln!("skipping collect_error reap test: no python with pytest found");
+            return;
+        };
+        // Point production `worker_pythonpath()` at the repo package. SAFETY:
+        // edition 2021; every worker-spawning test writes this same repo path.
+        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let dir =
+            std::env::temp_dir().join(format!("rstest-serve-cerr-reap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("test_broken.py");
+        std::fs::write(&bad, "def test_x(:\n    pass\n").unwrap();
+
+        let env = worker::WorkerEnv {
+            run_uid: format!("serve-cerr-{}", std::process::id()),
+            doctor: false,
+            timeout: None,
+            send_ids: true,
+            leakcheck: false,
+        };
+        let mut w =
+            worker::Worker::spawn_with_io(&python, None, worker::Stdio::Null, &env).expect("spawn");
+        let pid = w.id();
+
+        let arg = bad.to_string_lossy().to_string();
+        let r = collect_session(&mut w, std::slice::from_ref(&arg));
+        assert!(
+            r.is_err(),
+            "syntax-error file must surface a collection error"
+        );
+
+        // Exactly what open_session's error arm now does with the worker.
+        w.reap();
+
+        // SAFETY: signal 0 only probes liveness of `pid`; touches no memory.
+        let gone = unsafe { libc::kill(pid as i32, 0) } != 0;
+        assert!(
+            gone,
+            "worker pid {pid} still present after reap -> orphan or zombie"
+        );
     }
 
     #[test]

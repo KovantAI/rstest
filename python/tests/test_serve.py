@@ -334,6 +334,79 @@ def test_forked_run_reports_when_overlay_apply_fails(monkeypatch):
     assert forked == []  # never forked when the overlay couldn't be applied
 
 
+def test_forked_run_survives_non_oserror_overlay_failure(monkeypatch):
+    # Regression: a malformed overlay value (e.g. non-str content whose `.encode`
+    # raises AttributeError) must NOT escape _forked_run and kill the whole serve
+    # session (dropping every queued request). It's an infra error, not a caught
+    # mutant: report the run finished, killed=False, and never fork.
+    def boom(_overlay):
+        raise AttributeError("'int' object has no attribute 'encode'")
+
+    monkeypatch.setattr(dispatch, "_apply_overlay", boom)
+    forked: list[int] = []
+    monkeypatch.setattr(os, "fork", lambda: forked.append(1))
+
+    conn = FakeConn()
+    plugin = ServeDispatchPlugin(conn)
+    plugin._forked_run({"req_id": 5, "ids": ["t.py::a"], "overlay": {"m.py": 123}})
+
+    assert conn.sent == [("serve_run_done", {"req_id": 5, "killed": False, "ran": 0})]
+    assert forked == []
+
+
+def test_forked_run_survives_fork_exhaustion(monkeypatch):
+    # Regression: os.fork() raising OSError (EAGAIN/ENOMEM under load) must not
+    # crash the session. The overlay is applied then restored, no terminal event
+    # is lost (client gets serve_run_done), and it does not propagate.
+    calls: list[str] = []
+    monkeypatch.setattr(dispatch, "_apply_overlay", lambda ov: ["saved"])
+    monkeypatch.setattr(dispatch, "_restore_overlay", lambda s: calls.append("restored"))
+
+    def eagain() -> int:
+        raise OSError("Resource temporarily unavailable")
+
+    monkeypatch.setattr(os, "fork", eagain)
+
+    conn = FakeConn()
+    plugin = ServeDispatchPlugin(conn)
+    plugin._forked_run({"req_id": 8, "ids": ["t.py::a"], "overlay": {"m.py": "x"}})
+
+    assert conn.sent == [("serve_run_done", {"req_id": 8, "killed": False, "ran": 0})]
+    assert calls == ["restored"]  # overlay still rolled back via finally
+
+
+def test_child_run_disables_bytecode_and_drops_stale_pyc(tmp_path, monkeypatch):
+    # Regression: a forked child must not read a stale .pyc for an overlaid
+    # source. Many mutation operators preserve byte size and consecutive fast
+    # forks land in the same wall-clock second, so a cached pyc whose
+    # (mtime-in-seconds, size) still matches would be loaded in preference to the
+    # freshly-overlaid bytes -> a killed mutant silently misreported as survivor.
+    # Assert the child disables bytecode writes and removes cached pyc for the
+    # overlaid file.
+    import importlib.util
+
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "mod.py"
+    src.write_text("VAL = 1\n")
+    pyc = importlib.util.cache_from_source(str(src.resolve()))
+    os.makedirs(os.path.dirname(pyc), exist_ok=True)
+    with open(pyc, "wb") as fh:
+        fh.write(b"stale-bytecode")
+    assert os.path.exists(pyc)
+
+    # Auto-restored after the test; the child sets it True as a side effect.
+    monkeypatch.setattr(sys, "dont_write_bytecode", False, raising=False)
+    # Skip the real pytest run; we only assert the cache-invalidation seam.
+    monkeypatch.setattr(dispatch.pytest, "main", lambda *a, **k: 0)
+
+    plugin = ServeDispatchPlugin(FakeConn())
+    plugin._baseline = set(sys.modules)  # nothing to drop from sys.modules
+    plugin._child_run(1, ["mod.py::x"], False, overlay={"mod.py": "VAL = 2\n"})
+
+    assert sys.dont_write_bytecode is True
+    assert not os.path.exists(pyc), "stale pyc for an overlaid source must be removed"
+
+
 # ── collection / import failure counts as killed (spec: killed = failed OR
 #    errored) ──────────────────────────────────────────────────────────────
 

@@ -209,7 +209,9 @@ impl Worker {
     /// this borrows `&mut self`, so a state slot that must stay in the pool's vec
     /// (marked dead, awaiting end-of-run cleanup) can be reaped immediately rather
     /// than lingering as an orphan / `<defunct>` zombie until then. Idempotent: a
-    /// later `wait()` on the already-reaped child just yields `ECHILD` (ignored).
+    /// later `wait()` on the already-reaped child returns the cached `ExitStatus`
+    /// (`std::process::Child::wait` stores it on first success and never calls
+    /// `waitpid` again), so the end-of-run cleanup double-wait is safe.
     pub fn reap(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -386,8 +388,19 @@ mod transport {
 /// package in <repo>/python/. Installed wheels ship the package inside
 /// site-packages instead, making this a no-op.
 pub fn worker_pythonpath() -> String {
+    build_pythonpath(
+        std::env::var("RSTEST_WORKER_PATH").ok().as_deref(),
+        std::env::var("PYTHONPATH").ok().as_deref(),
+    )
+}
+
+/// Pure join logic behind [`worker_pythonpath`], split out so tests can exercise
+/// the explicit-override + PYTHONPATH ordering without mutating process-global
+/// env (`set_var` races other tests and is `unsafe` in edition 2024). The
+/// `current_exe`-derived dev path is read-only, so it stays inline.
+fn build_pythonpath(explicit: Option<&str>, existing_pythonpath: Option<&str>) -> String {
     let mut paths: Vec<PathBuf> = Vec::new();
-    if let Ok(explicit) = std::env::var("RSTEST_WORKER_PATH") {
+    if let Some(explicit) = explicit {
         paths.push(PathBuf::from(explicit));
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -398,8 +411,8 @@ pub fn worker_pythonpath() -> String {
             }
         }
     }
-    if let Ok(existing) = std::env::var("PYTHONPATH") {
-        for p in std::env::split_paths(&existing) {
+    if let Some(existing) = existing_pythonpath {
+        for p in std::env::split_paths(existing) {
             paths.push(p);
         }
     }
@@ -423,16 +436,13 @@ mod tests {
 
     #[test]
     fn worker_pythonpath_includes_explicit_override() {
-        // RSTEST_WORKER_PATH is pushed first, so it must appear in the joined
-        // result. Exercises the env-read + join_paths return of worker_pythonpath.
-        let sentinel = format!("/tmp/rstest-pp-{}", std::process::id());
-        // SAFETY: edition 2021; test-only env mutation, value is a private sentinel.
-        std::env::set_var("RSTEST_WORKER_PATH", &sentinel);
-        let pp = super::worker_pythonpath();
-        // SAFETY: same as above; restore so other tests see a clean env.
-        std::env::remove_var("RSTEST_WORKER_PATH");
+        // The explicit override is pushed first, so it must appear in the joined
+        // result. Exercises build_pythonpath directly to avoid mutating the
+        // process-global RSTEST_WORKER_PATH (which would race parallel tests).
+        let sentinel = "/tmp/rstest-pp-sentinel";
+        let pp = super::build_pythonpath(Some(sentinel), None);
         assert!(
-            pp.contains(&sentinel),
+            pp.contains(sentinel),
             "PYTHONPATH {pp:?} missing explicit override {sentinel:?}"
         );
     }
@@ -506,7 +516,10 @@ mod tests {
             eprintln!("skipping reap test: no python with pytest found");
             return;
         };
-        // SAFETY: edition 2021; single-threaded test setup, no other worker here.
+        // Point production `worker_pythonpath()` at the repo package. SAFETY:
+        // edition 2021; every worker-spawning test writes this same repo path,
+        // so concurrent writes converge on one value (no divergent read). Left
+        // set on exit, matching serve.rs's live-worker tests.
         std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
 
         let env = WorkerEnv {
@@ -527,6 +540,11 @@ mod tests {
         worker.kill();
         let _ = worker.wait();
 
+        // wait() returning is itself proof the child was reaped; the alive()
+        // probe is the observable proxy. It can in theory false-fail if the
+        // kernel recycles `pid` to another live process between wait() and the
+        // probe, but this thread spawns nothing after wait(), so that window is
+        // negligible (and reuse can only spuriously fail, never falsely pass).
         assert!(
             !alive(pid),
             "worker pid {pid} still present after kill+wait -> orphan or <defunct> zombie"
