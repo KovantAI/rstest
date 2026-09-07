@@ -93,26 +93,26 @@ fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) ->
     known.into_iter().map(|(f, _)| f).chain(unknown).collect()
 }
 
-#[allow(clippy::too_many_arguments)] // orchestration entry point, same shape as run_pool
 pub fn run_lazy_pool(
-    python: &Path,
-    n: usize,
-    args: &[String],
+    cfg: &crate::scheduling::pool::PoolConfig,
     files: Vec<PathBuf>,
-    mode: crate::reporting::progress::Mode,
-    palette: crate::reporting::color::Palette,
     // --dist loadfile => steal=false: strict file affinity, the remedy
     // for order-dependent suites (same contract as the full pool).
     steal: bool,
-    maxfail: Option<u64>,
-    reruns: u32,
-    only_rerun: &[regex::Regex],
-    worker_timeout: Option<std::time::Duration>,
-    // Some(set) => --reruns-only-known-flaky: gate reruns on prior flaky
-    // history (or an explicit @mark.flaky budget). See run_pool.
-    known_flaky: Option<&std::collections::HashSet<String>>,
-    worker_env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<PoolOutcome> {
+    let &crate::scheduling::pool::PoolConfig {
+        python,
+        n,
+        args,
+        mode,
+        palette,
+        maxfail,
+        reruns,
+        only_rerun,
+        worker_timeout,
+        known_flaky,
+        worker_env,
+    } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();
     for idx in 0..n {

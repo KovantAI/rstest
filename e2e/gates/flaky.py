@@ -373,6 +373,30 @@ def gate_quarantine(g, args, binary):
         "failed 2x before" in r.stdout or "failed 3x before" in r.stdout,
         r.stdout[-400:],
     )
+    # Passthrough mode (-s) hands stdio to pytest and skips the quarantine
+    # matcher entirely; the flag must warn it is being ignored, not silently
+    # demote. Exit 1: the real bug still fails since nothing was demoted.
+    r = g.run(".", "-n", "2", "-s", "--quarantine", "quarantine.txt", cwd=qdir)
+    check(
+        "quarantine: warns + no-op in passthrough mode",
+        "--quarantine has no effect in passthrough mode" in r.stderr
+        and "quarantined" not in r.stdout,
+        f"rc={r.returncode} " + (r.stderr[-300:] or r.stdout[-300:]),
+    )
+
+
+def gate_verify_vendor(g, args, binary):
+    print("== verify-vendor ==")
+    # Run-less integrity check: rehash the installed _vendor/ tree against the
+    # packaged vendor.lock. Exits before any collection, so an empty cwd is fine.
+    vdir = g.tmp / "vv"
+    vdir.mkdir(parents=True, exist_ok=True)
+    r = g.run("--verify-vendor", cwd=vdir)
+    check(
+        "verify-vendor: intact tree verifies + exit 0",
+        r.returncode == 0 and "verified against vendor.lock" in r.stdout,
+        f"rc={r.returncode} " + (r.stdout[-300:] or r.stderr[-300:]),
+    )
 
 
 def gate_flaky_marks_only_rerun(g, args, binary):

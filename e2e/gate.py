@@ -40,6 +40,7 @@ from gates.flaky import (
     gate_flaky_marks_only_rerun,
     gate_flaky_reruns,
     gate_quarantine,
+    gate_verify_vendor,
 )
 from gates.incremental import (
     gate_incremental_dispatch_skip,
@@ -149,6 +150,7 @@ def main():
         gate_flaky_reruns,
         gate_flaky_aware_reruns_reruns_only_known_fla,
         gate_quarantine,
+        gate_verify_vendor,
         gate_loadscope_loadgroup,
         gate_flaky_marks_only_rerun,
         gate_worker_timeout_watchdog,
