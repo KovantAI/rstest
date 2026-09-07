@@ -1,5 +1,5 @@
 """Unit tests for the on-command dispatch plugins: eager (ItemDispatchPlugin)
-and lazy (LazyDispatchPlugin). The serve plugin is covered in test_serve.py."""
+and lazy (LazyDispatchPlugin)."""
 
 from __future__ import annotations
 

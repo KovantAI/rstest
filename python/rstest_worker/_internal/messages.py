@@ -154,9 +154,6 @@ EventKind = Literal[
     "item_done",
     "stopped",
     "done",
-    "serve_ready",
-    "serve_report",
-    "serve_run_done",
 ]
 
 
@@ -256,8 +253,6 @@ CommandKind = Literal[
     "run_ids",
     "node_down",
     "no_more_items",
-    "run_serve_session",
-    "serve_run",
     "end_session",
     "shutdown",
 ]
