@@ -2,11 +2,18 @@
 
 ```
 rstest [RSTEST FLAGS] [PATHS] [PYTEST FLAGS]
+rstest <COMMAND> [OPTIONS]
 ```
 
 rstest owns a small set of flags; **everything else forwards to the test
 session verbatim**, so the entire pytest flag surface — including flags
 added by your plugins — works without translation.
+
+A handful of **run-less commands** don't run your suite —
+[`verify-vendor`](#verify-vendor), [`try`](#try),
+[`migrate-check`](#migrate-check), and [`cache-compact`](#cache-compact). Each
+is a subcommand, given as the first argument (`rstest try`); a path literally
+named after one is disambiguated with `rstest ./try` or `rstest -- try`.
 
 ## rstest-owned flags
 
@@ -271,7 +278,7 @@ Pull/push are **not** supported in [monorepo mode](../guides/monorepo.md) — ea
 project keeps its own `.rstest_cache`, so run rstest per project for shared
 caching there (rstest errors rather than silently no-op).
 
-### `--cache-compact`
+### `cache-compact`
 
 Maintenance: fold all remote segments into a fresh `base.json` and prune them,
 then exit without running tests. Keeps the segment count (and pull size) down;
@@ -287,7 +294,7 @@ hard error instead of the silent "comparison skipped". This closes the
 dead-gate failure mode where a CI run that never restored (or pulled) the cache
 passes regressions green. A *failed* `--cache-pull` is always an error; this
 adds the "*successful* pull returned nothing, but a gate needs it" case. It only
-enforces on an actual gated run — collect-only (`--co`), `--migrate-check`, and
+enforces on an actual gated run — collect-only (`--co`), `migrate-check`, and
 passthrough (`-s`/`--pdb`) modes don't evaluate the gate, so they don't trip it.
 
 ### `--doctor`
@@ -300,7 +307,7 @@ that ended with more threads / open file descriptors than they started — see
 the [Resource leaks](../guides/resource-leaks.md) guide). Adds a few cheap
 measurements to the run; outcomes are unaffected.
 
-### `--try`
+### `try`
 
 The zero-config "should I switch?" proof. Runs your suite once under plain
 `pytest` and once under `rstest -n auto`, then prints the only two things that
@@ -309,8 +316,8 @@ checked against your real pytest) and how much **faster** rstest is, with a
 rough CI-time saving. No flags, no config.
 
 ```console
-$ rstest --try
-================= rstest --try =================
+$ rstest try
+================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
   ⚡ speed:   pytest 96s  →  rstest 21s   (4.6× at -n auto)
 ================================================
@@ -318,18 +325,18 @@ $ rstest --try
 ```
 
 Exit 0 when outcomes are identical, 1 when they differ (it then points you at
-`--migrate-check` to classify the differences — usually an unstable parametrize
+`migrate-check` to classify the differences — usually an unstable parametrize
 id or a parallel-only failure), 2 when it couldn't run pytest or rstest refused
 to dispatch. A pre-existing red pytest run is reported as such, not blamed on
 rstest.
 
-`--try` is the one command that needs **pytest installed on its own** (it runs
+`try` is the one command that needs **pytest installed on its own** (it runs
 your suite under plain `pytest` for the baseline). rstest itself vendors its
 core and doesn't otherwise require an external pytest; if `pytest` isn't on
-PATH, `--try` exits 2. `--migrate-check` and normal runs have no such
+PATH, `try` exits 2. `migrate-check` and normal runs have no such
 requirement.
 
-### `--verify-vendor`
+### `verify-vendor`
 
 Prove the vendored pytest tree in your installed rstest is intact. rstest ships
 an unmodified copy of pytest inside its worker package; this rehashes every
@@ -338,7 +345,7 @@ catching an accidentally-edited, corrupted, or partial install. Run-less — it
 verifies and exits without running your suite.
 
 ```console
-$ rstest --verify-vendor
+$ rstest verify-vendor
 vendored pytest 9.1.1: 84 files verified against vendor.lock
 ```
 
@@ -348,7 +355,7 @@ PyPI. Proving the vendored tree matches *upstream* pytest (not just what
 shipped) is a separate maintainer/CI check (`vendor.yml` provenance job); see
 [Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).
 
-### `--migrate-check`
+### `migrate-check`
 
 Parallel-readiness preflight, not a run. Collects the suite **twice** and
 diffs the id sets; ids present in only one collection are run-to-run unstable.
@@ -397,7 +404,7 @@ form and the known-issue allow-list).
 
 Write the migrate-check findings as a single versioned JSON document (schema
 `1`) — the machine-readable surface for CI gating and trending. Implies
-`--migrate-check`; pass the bare flag too to also print the human report. The
+`migrate-check`; pass the bare flag too to also print the human report. The
 document carries the unstable-id sites and the classified parallel findings,
 each with its verdict, fix, allow-list status, and bisected polluter:
 `{meta, ready, tests_collected, will_bail_count, unstable_ids[], parallel{…}}`.

@@ -391,7 +391,7 @@ def gate_verify_vendor(g, args, binary):
     # packaged vendor.lock. Exits before any collection, so an empty cwd is fine.
     vdir = g.tmp / "vv"
     vdir.mkdir(parents=True, exist_ok=True)
-    r = g.run("--verify-vendor", cwd=vdir)
+    r = g.run("verify-vendor", cwd=vdir)
     check(
         "verify-vendor: intact tree verifies + exit 0",
         r.returncode == 0 and "verified against vendor.lock" in r.stdout,

@@ -4,14 +4,52 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+
+/// Run-less subcommands: modes that do their own thing and exit without the
+/// normal run pipeline. Selected by a leading token (`rstest verify-vendor`),
+/// recognized by [`split_args`] before the flag pre-scan; `None` is the default
+/// (run the suite). The paired option flags (`--migrate-check-json`, etc.) stay
+/// `global` on [`Cli`] so they parse after the subcommand token.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Command {
+    /// Verify the vendored pytest tree is byte-identical to what shipped
+    /// (rehash `_vendor/` against the packaged `vendor.lock`). Prints a report
+    /// and exits 0 if intact, non-zero on any drift.
+    VerifyVendor,
+
+    /// Zero-config proof: run the suite under plain pytest and under rstest
+    /// (-n auto), then report whether outcomes are identical and how much
+    /// faster rstest is. The 30-second "should I switch?" answer.
+    Try,
+
+    /// Parallel-readiness preflight: collect twice and report tests with
+    /// unstable ids, then run -n auto and classify any parallel-only failure
+    /// (polluter bisected). Exits non-zero on any such finding. Combine with
+    /// `--migrate-check-json` / `--migrate-allow`.
+    MigrateCheck,
+
+    /// Maintenance: fold all remote segments into a fresh base and prune them,
+    /// then exit without running tests. Needs `--cache-remote`.
+    CacheCompact,
+}
 
 /// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
 /// to the test session verbatim: clap can't mirror pytest's large,
 /// plugin-extensible flag surface, so we pre-scan argv ourselves.
 #[derive(Parser, Debug, Clone)]
-#[command(name = "rstest", version, disable_help_flag = false)]
+#[command(
+    name = "rstest",
+    version,
+    disable_help_flag = false,
+    disable_help_subcommand = true
+)]
 pub struct Cli {
+    /// Run-less mode selected by a leading subcommand token; `None` runs the
+    /// suite. See [`Command`].
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+
     /// Number of worker processes (logical cores); rstest is parallel by
     /// design. Use 0 or 1 for single-worker mode (byte-exact pytest semantics).
     /// Config: `[tool.rstest] numprocesses`. [default: auto]
@@ -21,7 +59,7 @@ pub struct Cli {
     /// Python interpreter to run workers with: a path, or a version request
     /// (`3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t`). Defaults to the active
     /// venv / a discovered `.venv` / `.python-version` / PATH.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) python: Option<String>,
 
     /// Write a per-test outcome snapshot (compat-harness recorder shape).
@@ -57,34 +95,16 @@ pub struct Cli {
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,
 
-    /// Parallel-readiness preflight: collect twice and report tests with
-    /// unstable ids, then run -n auto and classify any parallel-only failure
-    /// (polluter bisected). Exits non-zero on any such finding.
-    #[arg(long)]
-    pub(crate) migrate_check: bool,
-
     /// Write the migrate-check findings as JSON (stable, versioned schema) for
-    /// CI gating. Implies --migrate-check.
-    #[arg(long)]
+    /// CI gating. Used with the `migrate-check` subcommand.
+    #[arg(long, global = true)]
     pub(crate) migrate_check_json: Option<PathBuf>,
 
     /// Substring of a nodeid/site to accept as a known migrate-check finding
     /// (repeatable): it is still reported (marked "allowed") but does not fail
     /// the exit code, so CI can gate on NEW issues while tolerating known ones.
-    #[arg(long = "migrate-allow")]
+    #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
-
-    /// Zero-config proof: run the suite under plain pytest and under rstest
-    /// (-n auto), then report whether outcomes are identical and how much
-    /// faster rstest is. The 30-second "should I switch?" answer.
-    #[arg(long = "try")]
-    pub(crate) r#try: bool,
-
-    /// Verify the vendored pytest tree is byte-identical to what shipped
-    /// (rehash _vendor/ against the packaged vendor.lock). Run-less: prints a
-    /// report and exits 0 if intact, non-zero on any drift.
-    #[arg(long = "verify-vendor")]
-    pub(crate) verify_vendor: bool,
 
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
@@ -215,8 +235,8 @@ pub struct Cli {
     /// Shared-cache remote: a directory or `file://` path (local, an NFS/EFS
     /// mount, or a dir a CI step materializes via `download-artifact` /
     /// `aws s3 sync`). Also settable via `RSTEST_CACHE_REMOTE`. Enables
-    /// `--cache-pull` / `--cache-push` / `--cache-compact`.
-    #[arg(long, value_name = "URL|DIR")]
+    /// `--cache-pull` / `--cache-push` / the `cache-compact` subcommand.
+    #[arg(long, value_name = "URL|DIR", global = true)]
     pub(crate) cache_remote: Option<String>,
 
     /// Before the run, merge the remote's segments + base into the local
@@ -230,11 +250,6 @@ pub struct Cli {
     /// conflict. Needs `--cache-remote`.
     #[arg(long)]
     pub(crate) cache_push: bool,
-
-    /// Maintenance: fold all remote segments into a fresh base and prune them,
-    /// then exit without running tests. Needs `--cache-remote`.
-    #[arg(long)]
-    pub(crate) cache_compact: bool,
 
     /// With a baseline-dependent gate active (`--durations-regress`), treat a
     /// successful pull that returns NO baseline as a hard error instead of a
@@ -346,16 +361,12 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
 const BOOL_FLAGS: &[&str] = &[
     "--doctor",
     "--watch",
-    "--migrate-check",
-    "--try",
     "--fail-on-leak",
-    "--verify-vendor",
     "--reruns-only-known-flaky",
     "--since-green",
     "--incremental",
     "--cache-pull",
     "--cache-push",
-    "--cache-compact",
     "--require-baseline",
     "--changed-strict",
     "-h",
@@ -363,6 +374,14 @@ const BOOL_FLAGS: &[&str] = &[
     "-V",
     "--version",
 ];
+
+/// Run-less subcommand names (see [`Command`]). Recognized only as the LEADING
+/// argv token by [`split_args`], before the flag pre-scan; everything after the
+/// token is split by the flag tables as usual, so `rstest try -k foo tests/`
+/// still forwards `-k foo tests/` to the session. Kept in kebab-case to match
+/// clap's derived subcommand names. A pytest path literally named after a
+/// subcommand is shadowed (`rstest ./try` / `rstest -- try` disambiguates).
+const SUBCOMMANDS: &[&str] = &["verify-vendor", "try", "migrate-check", "cache-compact"];
 
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
@@ -421,6 +440,15 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     let mut own = vec!["rstest".to_string()];
     let mut session = Vec::new();
     let mut argv = argv.into_iter().peekable();
+    // A run-less subcommand is recognized ONLY as the leading token, so its
+    // paired flags (all `global` on `Cli`) follow it and pytest args still route
+    // to the session below. A non-leading match is treated as a pytest path.
+    if argv
+        .peek()
+        .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
+    {
+        own.push(argv.next().unwrap());
+    }
     while let Some(arg) = argv.next() {
         if arg == "--" {
             session.extend(argv.by_ref());
@@ -514,6 +542,15 @@ mod tests {
                 );
             }
         }
+        // Every clap subcommand must be in SUBCOMMANDS, or split_args would
+        // forward its leading token to the pytest session instead of clap.
+        for sub in Cli::command().get_subcommands() {
+            assert!(
+                SUBCOMMANDS.contains(&sub.get_name()),
+                "clap subcommand {} missing from SUBCOMMANDS",
+                sub.get_name()
+            );
+        }
     }
 
     #[test]
@@ -559,12 +596,39 @@ mod tests {
     }
 
     #[test]
-    fn split_owns_verify_vendor_flag() {
-        // Boolean run-less flag: rstest-owned, consumes no value, and does not
-        // leak into the pytest session args.
-        let (own, session) = split_args(v(&["--verify-vendor", "tests/", "-v"]));
-        assert_eq!(own, v(&["rstest", "--verify-vendor"]));
-        assert_eq!(session, v(&["tests/", "-v"]));
+    fn split_owns_leading_subcommand_and_its_global_flags() {
+        // A leading subcommand token is rstest-owned; its paired global flag
+        // rides along, and pytest args after it still forward to the session.
+        let (own, session) = split_args(v(&[
+            "migrate-check",
+            "--migrate-check-json",
+            "o.json",
+            "-k",
+            "foo",
+            "tests/",
+        ]));
+        assert_eq!(
+            own,
+            v(&["rstest", "migrate-check", "--migrate-check-json", "o.json"])
+        );
+        assert_eq!(session, v(&["-k", "foo", "tests/"]));
+    }
+
+    #[test]
+    fn split_only_recognizes_subcommand_as_leading_token() {
+        // `try` as a non-leading token is a pytest path, not the subcommand.
+        let (own, session) = split_args(v(&["tests/", "try"]));
+        assert_eq!(own, v(&["rstest"]));
+        assert_eq!(session, v(&["tests/", "try"]));
+    }
+
+    #[test]
+    fn clap_parses_leading_subcommand() {
+        use clap::Parser;
+        let (own, _) = split_args(v(&["verify-vendor"]));
+        assert_eq!(Cli::parse_from(&own).command, Some(Command::VerifyVendor));
+        // Default (no subcommand) => a normal run.
+        assert_eq!(Cli::parse_from(["rstest"]).command, None);
     }
 
     #[test]

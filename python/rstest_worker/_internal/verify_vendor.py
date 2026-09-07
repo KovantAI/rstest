@@ -10,7 +10,7 @@ pytest; that stronger provenance check lives in
 ``.github/scripts/vendor_verify.py`` (``--mode provenance``).
 
 Runnable as ``python -m rstest_worker._internal.verify_vendor`` and reused by
-the ``rstest --verify-vendor`` flag and CI.
+the ``rstest verify-vendor`` flag and CI.
 """
 
 from __future__ import annotations

@@ -61,7 +61,7 @@ pub(super) fn run_collect_discovery(
 
     // Absolute rootdir so `file` resolves to an editor-usable URI.
     let cwd = std::env::current_dir()?;
-    let rootdir = config::discover(&cwd).rootdir;
+    let rootdir = config::discover(&cwd, &mut std::io::stderr()).rootdir;
     let rootdir = if rootdir.is_absolute() {
         rootdir
     } else {

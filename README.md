@@ -69,7 +69,7 @@ Two more truths worth knowing before you benchmark:
   already pytest-9-clean; if not, clear deprecations first (the same upgrade
   you'd owe pytest anyway). `rstest -n 0` surfaces them.
 
-Fastest way to find out for real: `rstest --try` runs your suite under plain
+Fastest way to find out for real: `rstest try` runs your suite under plain
 pytest and under `rstest -n auto`, then reports whether outcomes match and
 how much faster rstest was — no migration, no config.
 

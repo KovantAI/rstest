@@ -36,7 +36,7 @@ pub fn plan_shares_with_fixed(
 /// A project's own `[tool.rstest] numprocesses`, when it is a NUMBER
 /// ("auto" or absent leaves the planner in charge).
 pub fn project_fixed_n(project: &Path) -> Option<usize> {
-    let settings = crate::config::rstest_settings(project);
+    let settings = crate::config::rstest_settings(project, &mut std::io::stderr());
     settings.numprocesses.as_deref()?.parse().ok()
 }
 

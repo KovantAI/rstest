@@ -1,5 +1,5 @@
 """pytest plugin: record per-test outcomes to JSON, in rstest's report-json
-shape, so `rstest --try` can diff a plain-pytest baseline against rstest.
+shape, so `rstest try` can diff a plain-pytest baseline against rstest.
 
 Activate (rstest does this for you): run pytest with
 `-p rstest_worker.recorder`; the output path comes from $RSTEST_RECORD.

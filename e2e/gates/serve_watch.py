@@ -80,8 +80,8 @@ def gate_watch_mode(g, args, binary):
 
 
 def gate_try(g, args, binary):
-    print("== --try (pytest-vs-rstest parity proof) ==")
-    # A clean all-pass suite: pytest and rstest -n auto agree, so --try reports
+    print("== try (pytest-vs-rstest parity proof) ==")
+    # A clean all-pass suite: pytest and rstest -n auto agree, so `try` reports
     # identical parity and exits 0. Exercises run_try end-to-end (pytest baseline
     # + rstest run + parity/speed diff). pytest is available via the pytest-cov
     # dep in the gate venv.
@@ -89,11 +89,11 @@ def gate_try(g, args, binary):
         "tryfix/test_t.py",
         "def test_a(): assert True\ndef test_b(): assert True\ndef test_c(): assert True\n",
     )
-    r = g.run("--try", cwd=g.tmp / "tryfix")
+    r = g.run("try", cwd=g.tmp / "tryfix")
     check(
         "try: identical parity + speed line + drop-in verdict, exit 0",
         r.returncode == 0
-        and "rstest --try" in r.stdout
+        and "rstest try" in r.stdout
         and "identical outcomes to pytest" in r.stdout
         and "at -n auto" in r.stdout
         and "drop-in ready" in r.stdout,
@@ -102,7 +102,7 @@ def gate_try(g, args, binary):
 
 
 def gate_migrate_check(g, args, binary):
-    print("== --migrate-check (parallel-readiness preflight) ==")
+    print("== migrate-check (parallel-readiness preflight) ==")
     # Clean suite: stable ids across two collections, no parallel-only failures
     # -> ready at -n auto, exit 0. Drives the full preflight: collect-twice +
     # the -n auto parallel phase + failure classification (with zero failures).
@@ -111,7 +111,7 @@ def gate_migrate_check(g, args, binary):
         "def test_a(): assert True\ndef test_b(): assert True\n"
         "def test_c(): assert True\ndef test_d(): assert True\n",
     )
-    r = g.run("--migrate-check", cwd=g.tmp / "mcclean")
+    r = g.run("migrate-check", cwd=g.tmp / "mcclean")
     check(
         "migrate-check: clean suite is parallel-ready (exit 0)",
         r.returncode == 0
@@ -132,7 +132,7 @@ def gate_migrate_check(g, args, binary):
         "def test_u(x):\n    assert True\n",
     )
     jpath = g.tmp / "mc.json"
-    r = g.run("--migrate-check", "--migrate-check-json", str(jpath), cwd=g.tmp / "mcunstable")
+    r = g.run("migrate-check", "--migrate-check-json", str(jpath), cwd=g.tmp / "mcunstable")
     check(
         "migrate-check: unstable uuid ids force -n 0 (exit 1)",
         r.returncode == 1 and "UNSTABLE NODEIDS:" in r.stdout and "force -n 0" in r.stdout,

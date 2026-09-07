@@ -1,9 +1,9 @@
-//! `--migrate-check` and `--try`: the pytest→rstest onboarding preflights.
+//! `migrate-check` and `try`: the pytest→rstest onboarding preflights.
 //!
 //! This file owns the run-snapshot model (`Outcomes`/`Rec`/`Phase`) and the
 //! child-session runner shared by both commands. [`classify`] owns the two
 //! classifiers (unstable ids, parallel-only failures); [`check`] is the
-//! `--migrate-check` orchestrator; [`try_cmd`] is the `--try` parity+speed run.
+//! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run.
 
 mod check;
 mod classify;

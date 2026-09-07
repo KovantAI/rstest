@@ -1,7 +1,7 @@
 """Unit tests for the offline vendored-tree integrity verifier.
 
 Exercises the hashing core (`hash_tree`), the manifest diff (`compare`), and
-the `main` entrypoint used by `rstest --verify-vendor`. The real `_vendor/`
+the `main` entrypoint used by `rstest verify-vendor`. The real `_vendor/`
 tree and `vendor.lock` are never touched: tests build a throwaway tree under
 `tmp_path` and point the module's globals at it.
 """

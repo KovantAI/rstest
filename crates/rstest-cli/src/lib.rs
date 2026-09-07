@@ -38,6 +38,11 @@ pub use run::execute;
 pub fn run() -> Result<i32> {
     let (own_args, args) = cli::split_argv();
     let cli = Cli::parse_from(&own_args);
+    // Run-less subcommands (verify-vendor / try / migrate-check / cache-compact)
+    // do their own thing and exit before the run pipeline is built.
+    if let Some(code) = run::dispatch_command(&cli, &args)? {
+        return Ok(code);
+    }
     if cli.watch {
         watch::watch_loop(&cli, &args)?;
         return Ok(0);

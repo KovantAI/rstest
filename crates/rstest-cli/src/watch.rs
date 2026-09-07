@@ -19,8 +19,8 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 
 pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let project = config::discover(&cwd);
     let mut sink = Sink::stdio(Palette::detect(base_args));
+    let project = config::discover(&cwd, sink.err());
 
     let (tx, rx) = mpsc::channel::<PathBuf>();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
