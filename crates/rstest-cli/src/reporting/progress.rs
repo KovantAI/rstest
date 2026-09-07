@@ -1,9 +1,8 @@
 //! pytest-style live progress: one status char per test as reports stream
 //! in, wrapped with a running percentage when the total is known.
 
-use std::io::Write;
-
 use crate::reporting::color::Palette;
+use crate::reporting::sink::Sink;
 use crate::reporting::status::StatusFooter;
 use crate::scheduling::proto::Report;
 
@@ -105,7 +104,6 @@ pub struct Progress {
     col: usize,
     total: Option<usize>,
     mode: Mode,
-    palette: Palette,
     footer: Option<StatusFooter>,
 }
 
@@ -129,40 +127,37 @@ impl Progress {
 
     /// Note that `worker` began running `nodeid` (updates the footer's
     /// per-worker current-test line).
-    pub fn item_started(&mut self, worker: usize, nodeid: String) {
+    pub fn item_started(&mut self, sink: &mut Sink, worker: usize, nodeid: String) {
         if let Some(f) = &mut self.footer {
-            f.item_started(worker, nodeid);
+            f.item_started(sink.out(), worker, nodeid);
         }
     }
 
     /// Note that `worker` finished its current test (clears its footer line).
-    pub fn item_finished(&mut self, worker: usize) {
+    pub fn item_finished(&mut self, sink: &mut Sink, worker: usize) {
         if let Some(f) = &mut self.footer {
-            f.item_finished(worker);
+            f.item_finished(sink.out(), worker);
         }
     }
 
     /// Repaint the footer's elapsed timers between reports (tty only).
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self, sink: &mut Sink) {
         if let Some(f) = &mut self.footer {
-            f.tick();
+            f.tick(sink.out());
         }
     }
 
-    fn out_inline(&mut self, text: &str) {
+    fn out_inline(&mut self, sink: &mut Sink, text: &str) {
         match &mut self.footer {
-            Some(f) => f.print_inline(text),
-            None => {
-                print!("{text}");
-                let _ = std::io::stdout().flush();
-            }
+            Some(f) => f.print_inline(sink.out(), text),
+            None => sink.out_inline(text),
         }
     }
 
-    fn out_line(&mut self, text: &str) {
+    fn out_line(&mut self, sink: &mut Sink, text: &str) {
         match &mut self.footer {
-            Some(f) => f.print_line(text),
-            None => println!("{text}"),
+            Some(f) => f.print_line(sink.out(), text),
+            None => sink.out_line(text),
         }
     }
 
@@ -174,30 +169,26 @@ impl Progress {
         }
     }
 
-    /// Set the ANSI palette (color vs. plain) used for glyphs and the bar.
-    pub fn set_palette(&mut self, palette: Palette) {
-        self.palette = palette;
-    }
-
     /// pytest's char per outcome: '.' pass, 'F' fail, 's' skip, 'x' xfail,
     /// 'X' xpass, 'E' setup/teardown error. One char per TEST: on the call
     /// report, a non-passed setup (no call follows), or a failed teardown.
-    pub fn on_report(&mut self, worker: Option<usize>, r: &Report) {
+    pub fn on_report(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
         if self.mode == Mode::Json {
-            return Self::on_report_json(worker, r);
+            return Self::on_report_json(sink, worker, r);
         }
         if self.mode == Mode::Tap {
-            return self.on_report_tap(r);
+            return self.on_report_tap(sink, r);
         }
         if self.mode == Mode::Teamcity {
-            return self.on_report_teamcity(r);
+            return self.on_report_teamcity(sink, r);
         }
         if self.mode == Mode::Verbose {
-            return self.on_report_verbose(worker, r);
+            return self.on_report_verbose(sink, worker, r);
         }
         if self.mode == Mode::Bar {
-            return self.on_report_bar(worker, r);
+            return self.on_report_bar(sink, worker, r);
         }
+        let palette = sink.palette();
         // Github/Gitlab/Buildkite share the dots char stream below; their
         // annotations / fold markers are emitted from the aggregate at
         // end-of-run.
@@ -218,8 +209,8 @@ impl Progress {
         if kind.counts_done() {
             self.done += 1;
         }
-        let painted = self.palette.outcome(&ch.to_string());
-        self.out_inline(&painted);
+        let painted = palette.outcome(&ch.to_string());
+        self.out_inline(sink, &painted);
         self.col += 1;
         if self.col >= WIDTH {
             self.col = 0;
@@ -227,13 +218,13 @@ impl Progress {
                 Some(t) if t > 0 => format!(" [{:3}%]", self.done * 100 / t),
                 _ => format!(" [{}]", self.done),
             };
-            self.out_line(&tail);
+            self.out_line(sink, &tail);
         }
     }
 
     /// pytest -v: `nodeid OUTCOME [ pct%]` per test, ERROR lines for
     /// failed setup/teardown phases.
-    fn on_report_verbose(&mut self, worker: Option<usize>, r: &Report) {
+    fn on_report_verbose(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
         use OutcomeKind::*;
         let Some(kind) = outcome_kind(r) else {
             return;
@@ -254,14 +245,14 @@ impl Progress {
             _ => String::new(),
         };
         let prefix = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-        let line = format!("{prefix}{} {}{pct}", r.nodeid, self.palette.outcome(word));
-        self.out_line(&line);
+        let line = format!("{prefix}{} {}{pct}", r.nodeid, sink.palette().outcome(word));
+        self.out_line(sink, &line);
     }
 
     /// pytest-sugar-style per-test line: `<sym> nodeid  dur [pct%]`, with
     /// the failure repr inlined right under a failing test. Symbol colored
     /// by outcome (green pass / red fail+error / yellow skip+xfail+xpass).
-    fn on_report_bar(&mut self, worker: Option<usize>, r: &Report) {
+    fn on_report_bar(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
         use OutcomeKind::*;
         let Some(kind) = outcome_kind(r) else {
             return;
@@ -288,7 +279,7 @@ impl Progress {
             String::new()
         };
         let prefix = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-        let palette = self.palette; // Copy - avoids borrowing self during out_line
+        let palette = sink.palette(); // Copy - avoids borrowing sink during out_line
         let painted_sym = color(&palette, sym);
         let meta = format!("{dur}{pct}");
         let tail = if meta.is_empty() {
@@ -296,14 +287,14 @@ impl Progress {
         } else {
             palette.dim(&meta)
         };
-        self.out_line(&format!("{prefix}{painted_sym} {}{tail}", r.nodeid));
+        self.out_line(sink, &format!("{prefix}{painted_sym} {}{tail}", r.nodeid));
         // Sugar shows failures the moment they happen - inline the repr.
         if r.outcome == "failed" {
             if let Some(repr) = &r.longrepr {
                 let header = palette.bold_red(&format!("  ── {} ──", r.nodeid));
-                self.out_line(&header);
+                self.out_line(sink, &header);
                 for l in repr.trim_end().lines() {
-                    self.out_line(&format!("  {l}"));
+                    self.out_line(sink, &format!("  {l}"));
                 }
             }
         }
@@ -312,16 +303,16 @@ impl Progress {
     /// One TAP test point per test as it finishes; failure text follows as
     /// `#` diagnostic lines. The trailing plan comes from [`tap_plan`] so
     /// the count always matches the points emitted.
-    fn on_report_tap(&mut self, r: &Report) {
+    fn on_report_tap(&mut self, sink: &mut Sink, r: &Report) {
         let Some(line) = tap_result_line(self.done + 1, r) else {
             return;
         };
         self.done += 1;
-        println!("{line}");
+        sink.out_line(&line);
         if r.outcome == "failed" {
             if let Some(repr) = &r.longrepr {
                 for l in repr.trim_end().lines() {
-                    println!("# {l}");
+                    sink.out_line(&format!("# {l}"));
                 }
             }
         }
@@ -329,27 +320,27 @@ impl Progress {
 
     /// Close a TAP stream: the trailing `1..N` plan (valid TAP when the
     /// plan comes last), N = test points actually emitted.
-    pub fn tap_plan(&self) {
-        println!("1..{}", self.done);
+    pub fn tap_plan(&self, sink: &mut Sink) {
+        sink.out_line(&format!("1..{}", self.done));
     }
 
     /// One TeamCity service-message group per test. Retroactive
     /// `testStarted`/`testFinished` pairs are fine (duration rides on the
     /// attribute); emitting the group at once avoids parallel interleaving.
-    fn on_report_teamcity(&mut self, r: &Report) {
+    fn on_report_teamcity(&mut self, sink: &mut Sink, r: &Report) {
         let Some(messages) = teamcity_messages(r) else {
             return;
         };
         if r.when != "teardown" {
             self.done += 1;
         }
-        println!("{messages}");
+        sink.out_line(&messages);
     }
 
     /// One NDJSON object per phase report, straight to stdout (no footer in
     /// Json mode). `longrepr` rides only on failures (it's large); `worker`
     /// only in pool runs.
-    fn on_report_json(worker: Option<usize>, r: &Report) {
+    fn on_report_json(sink: &mut Sink, worker: Option<usize>, r: &Report) {
         let mut obj = serde_json::json!({
             "event": "testreport",
             "nodeid": r.nodeid,
@@ -369,13 +360,13 @@ impl Progress {
                 obj["longrepr"] = lr.as_str().into();
             }
         }
-        println!("{obj}");
+        sink.out_line(&obj.to_string());
     }
 
     /// Close the dot line before failures/summary print.
-    pub fn finish(&mut self) {
+    pub fn finish(&mut self, sink: &mut Sink) {
         if let Some(f) = &mut self.footer {
-            f.finish();
+            f.finish(sink.out());
         }
         if matches!(
             self.mode,
@@ -385,8 +376,10 @@ impl Progress {
         }
         if self.col > 0 {
             match self.total {
-                Some(t) if t > 0 => println!(" [{:3}%]", (self.done * 100 / t).min(100)),
-                _ => println!(),
+                Some(t) if t > 0 => {
+                    sink.out_line(&format!(" [{:3}%]", (self.done * 100 / t).min(100)))
+                }
+                _ => sink.out_line(""),
             }
         }
     }

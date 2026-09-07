@@ -15,6 +15,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use crate::cli::{is_collect_only, needs_passthrough_io, parse_durations, parse_maxfail, Cli};
+use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
 use crate::{
@@ -24,11 +25,11 @@ use crate::{
 /// Resolve the effective `--changed` base rev: the flag's value, or `HEAD` when
 /// `--changed-strict` implies it, run through git rev resolution. `None` = no
 /// changed-selection requested.
-fn resolve_changed_base(cli: &Cli) -> Result<Option<String>> {
+fn resolve_changed_base(cli: &Cli, sink: &mut Sink) -> Result<Option<String>> {
     cli.changed
         .clone()
         .or_else(|| cli.changed_strict.then(|| "HEAD".to_string()))
-        .map(|rev| select::resolve_base_rev(&rev))
+        .map(|rev| select::resolve_base_rev(&rev, sink))
         .transpose()
 }
 
@@ -53,8 +54,9 @@ fn apply_selection(
     since_green: bool,
     head: &Option<String>,
     env_fp: &str,
+    sink: &mut Sink,
 ) -> Result<ControlFlow<i32, Vec<String>>> {
-    let mut effective_changed = resolve_changed_base(cli)?;
+    let mut effective_changed = resolve_changed_base(cli, sink)?;
     if since_green {
         // --since-green owns the diff base: its last-green baseline drives
         // selection, OVERRIDING the "HEAD" base that --changed-strict would
@@ -63,16 +65,16 @@ fn apply_selection(
         // baseline yet -> a full run to establish one.
         match incremental::baseline(&std::env::current_dir()?, env_fp) {
             Some(sha) => {
-                eprintln!(
+                sink.warn(&format!(
                     "rstest: --since-green: selecting changes since last green run ({})",
                     &sha[..sha.len().min(12)]
-                );
+                ));
                 effective_changed = Some(sha);
             }
             None => {
-                eprintln!(
+                sink.warn(
                     "rstest: --since-green: no prior green run recorded; \
-                     running everything to establish the baseline"
+                     running everything to establish the baseline",
                 );
                 effective_changed = None;
             }
@@ -94,13 +96,15 @@ fn apply_selection(
             rev,
         )? {
             select::Selection::FullRun(reason) => {
-                eprintln!("rstest: --changed falling back to full run ({reason})");
+                sink.warn(&format!(
+                    "rstest: --changed falling back to full run ({reason})"
+                ));
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
-                println!(
+                sink.out_line(&format!(
                     "rstest: no tests affected by {} changed file(s)",
                     changes.len()
-                );
+                ));
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
                 // don't force a re-run next time.
@@ -116,11 +120,11 @@ fn apply_selection(
                 return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
-                eprintln!(
+                sink.warn(&format!(
                     "rstest: {} changed file(s) -> {} affected test target(s)",
                     changes.len(),
                     tests.len()
-                );
+                ));
                 let mut selected: Vec<String> =
                     tests.iter().map(|t| t.display().to_string()).collect();
                 // Keep the user's flags; drop any explicit path args in
@@ -175,7 +179,6 @@ struct RunConfig {
     worker_timeout: Option<u64>,
     passthrough: bool,
     single_worker_reruns: bool,
-    palette: color::Palette,
     very_verbose: bool,
     mode: progress::Mode,
     durations: Option<(usize, f64)>,
@@ -195,6 +198,7 @@ fn resolve_run_config(
     settings: &config::RstestSettings,
     args: &[String],
     run_uid: &str,
+    sink: &mut Sink,
 ) -> Result<RunConfig> {
     let numprocesses = cli
         .numprocesses
@@ -229,12 +233,7 @@ fn resolve_run_config(
         None
     };
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
-    warn_windows_timeout(
-        &mut std::io::stderr(),
-        cfg!(windows),
-        cli.timeout,
-        worker_timeout,
-    );
+    warn_windows_timeout(sink.err(), cfg!(windows), cli.timeout, worker_timeout);
     let n = parse_numprocesses(&numprocesses)?;
     let passthrough = needs_passthrough_io(args);
     // Honor `--reruns` in single-worker mode via a degenerate one-worker pool:
@@ -244,7 +243,6 @@ fn resolve_run_config(
     // A one-worker rerun pool is 1 worker everywhere downstream (banner,
     // doctor, report-json meta), never 0.
     let n = if single_worker_reruns { 1 } else { n };
-    let palette = color::Palette::detect(args);
     let verbose = args
         .iter()
         .any(|a| a == "--verbose" || (a.starts_with("-v") && a.chars().skip(1).all(|c| c == 'v')));
@@ -268,10 +266,10 @@ fn resolve_run_config(
         Some("buildkite") => progress::Mode::Buildkite,
         Some("azure") => progress::Mode::Azure,
         Some(other) => {
-            eprintln!(
+            sink.warn(&format!(
                 "rstest: unknown --output '{other}' \
                  (use dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json); using dots"
-            );
+            ));
             progress::Mode::Dots
         }
         None if verbose => progress::Mode::Verbose,
@@ -281,7 +279,7 @@ fn resolve_run_config(
     let durations = parse_durations(args);
     // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
     // missing operator aborts now, never silently as a gate that can't fire.
-    let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on)?;
+    let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on, sink)?;
     let doctor = cli.doctor
         || cli.doctor_json.is_some()
         || cli.doctor_md.is_some()
@@ -314,7 +312,6 @@ fn resolve_run_config(
         worker_timeout,
         passthrough,
         single_worker_reruns,
-        palette,
         very_verbose,
         mode,
         durations,
@@ -333,6 +330,11 @@ fn resolve_run_config(
 /// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     let args = args.to_vec();
+    // The single output sink for this run: owns stdout/stderr and the resolved
+    // palette. Built up front so every diagnostic below (cache maintenance,
+    // selection, banner) flows through it. `--color` resolution matches
+    // `resolve_run_config`'s (both call `Palette::detect`).
+    let mut sink = Sink::stdio(color::Palette::detect(&args));
     let start = Instant::now();
     let started_epoch = crate::time::now_epoch_secs();
     // One uid per test run, shared by every worker (xdist's testrun_uid
@@ -359,9 +361,11 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     if cli.cache_compact {
         let remote = cache_remote.as_deref().unwrap(); // validated above
         let t = remote::transport_for(remote)?;
-        let folded = remote::compact_remote(t.as_ref())
+        let folded = remote::compact_remote(t.as_ref(), &mut sink)
             .with_context(|| format!("compacting shared cache at {remote}"))?;
-        eprintln!("rstest: cache: compacted {folded} segment(s) into base at {remote}");
+        sink.warn(&format!(
+            "rstest: cache: compacted {folded} segment(s) into base at {remote}"
+        ));
         return Ok(0);
     }
     // An explicit --cache-remote FLAG with no pull/push/compact does nothing;
@@ -370,9 +374,9 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // that don't opt into pull/push must not be nagged every invocation.
     // (cache_compact already returned above, so it can't be the requested action.)
     if cli.cache_remote.is_some() && !cli.cache_pull && !cli.cache_push {
-        eprintln!(
+        sink.warn(
             "rstest: cache: --cache-remote is set but no --cache-pull/--cache-push \
-             (or --cache-compact) was requested; the shared cache is not being used"
+             (or --cache-compact) was requested; the shared cache is not being used",
         );
     }
 
@@ -402,7 +406,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
                          (each project has its own .rstest_cache); run rstest per project"
                     );
                 }
-                return monorepo::execute_monorepo(cli, &args, &cwd, projects, &run_uid);
+                return monorepo::execute_monorepo(cli, &args, &cwd, projects, &run_uid, &mut sink);
             }
         }
     }
@@ -413,16 +417,16 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     if cli.cache_pull {
         let remote = cache_remote.as_deref().unwrap(); // validated at entry
         let t = remote::transport_for(remote)?;
-        let merged = remote::pull(t.as_ref())
+        let merged = remote::pull(t.as_ref(), &mut sink)
             .with_context(|| format!("pulling shared cache from {remote}"))?;
-        eprintln!(
+        sink.warn(&format!(
             "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
             merged.durations.len(),
             merged.flakes.len()
-        );
+        ));
         remote::write_local(&merged);
     }
-    let cfg = resolve_run_config(cli, &settings, &args, &run_uid)?;
+    let cfg = resolve_run_config(cli, &settings, &args, &run_uid, &mut sink)?;
     // Lift the resolved config into the local names the rest of the pipeline
     // reads. Copy fields copy; the few owned fields clone once (cheap) so their
     // types match the original locals exactly, leaving `cfg` intact to hand to
@@ -433,7 +437,6 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         reruns,
         passthrough,
         single_worker_reruns,
-        palette,
         very_verbose,
         mode,
         durations,
@@ -449,7 +452,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     }
     // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
     if cli.r#try {
-        return migrate::run_try(&python, &args);
+        return migrate::run_try(&python, &args, &mut sink);
     }
     // Parallel-readiness preflight: its own collect-twice path, not a run.
     if cli.migrate_check || cli.migrate_check_json.is_some() {
@@ -458,6 +461,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             &args,
             cli.migrate_check_json.as_deref(),
             &cli.migrate_allow,
+            &mut sink,
         );
     }
     // `--collect-only --report-json <p>` writes a structured discovery doc
@@ -487,7 +491,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Json/Tap modes keep stdout a pure machine stream: no banner
     // (TAP gets its version header instead).
     if !passthrough && mode == progress::Mode::Tap {
-        println!("TAP version 13");
+        sink.out_line("TAP version 13");
     }
     if !passthrough && mode != progress::Mode::Json && mode != progress::Mode::Tap {
         let worker_desc = if single_worker_reruns {
@@ -497,7 +501,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         } else {
             format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
         };
-        println!("rstest {} — {worker_desc}", env!("CARGO_PKG_VERSION"));
+        sink.out_line(&format!(
+            "rstest {} — {worker_desc}",
+            env!("CARGO_PKG_VERSION")
+        ));
     }
     // Incremental testing: --since-green feeds --changed's selection from the
     // last green run's commit. An explicit --changed always wins. `head` is
@@ -513,29 +520,29 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     };
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
-    let args = match apply_selection(cli, args, since_green, &head, &env_fp)? {
+    let args = match apply_selection(cli, args, since_green, &head, &env_fp, &mut sink)? {
         ControlFlow::Continue(args) => args,
         ControlFlow::Break(code) => return Ok(code),
     };
     if reruns > 0 && passthrough {
-        eprintln!(
+        sink.warn(
             "rstest: --reruns is ignored under -s/--pdb/--co \
-             (interactive single session); drop those flags to enable reruns"
+             (interactive single session); drop those flags to enable reruns",
         );
     }
     if single_worker_reruns {
         // Not silent: a byte-exact run is now a one-worker pool (dispatch
         // order, gw0 id, rerunfailures neutralized). Say so on stderr so log
         // scrapers and existing configs see the switch, not just the banner.
-        eprintln!(
+        sink.warn(&format!(
             "rstest: --reruns at -n {numprocesses} runs a one-worker rerun pool \
              (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
-        );
+        ));
     }
     // --shuffle reorders the orchestrator's dispatch queue, so it needs
     // the full-collection pool. Refusing (not ignoring) matters: a user
     // probing for order dependence must not get a silently ordered run.
-    let is_lazy = collect_lazy(cli, &settings, &dist_name, &args)?;
+    let is_lazy = collect_lazy(cli, &settings, &dist_name, &args, &mut sink)?;
     let shuffle_seed: Option<u64> = resolve_shuffle_seed(
         cli.shuffle.as_deref(),
         n,
@@ -543,6 +550,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         single_worker_reruns,
         is_lazy,
         &dist_name,
+        &mut sink,
     )?;
     // --shard K/N: partition the suite and keep bucket K. Purely an
     // orchestrator-side node-id (or, in lazy mode, file) filter.
@@ -569,7 +577,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         && n >= 2
         && shard.is_none()
         && shuffle_seed.is_none()
-        && !collect_lazy(cli, &settings, &dist_name, &args)?;
+        && !collect_lazy(cli, &settings, &dist_name, &args, &mut sink)?;
     // The config fingerprint is only consumed under `incremental_active` (the
     // skip-set load and the green-baseline record). Computing it unconditionally
     // would walk the whole project tree for conftests even when the feature is
@@ -580,7 +588,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         String::new()
     };
     warn_incremental_conflicts(
-        &mut std::io::stderr(),
+        sink.err(),
         cli.incremental,
         since_green,
         cli.changed.is_some(),
@@ -590,19 +598,19 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // --cov this run covtool never rewrites it, so a changed test re-runs on
     // every invocation until a coverage run refreshes the index.
     if incremental_active && !coverage_skip::coverage_requested(&args) {
-        eprintln!(
+        sink.warn(
             "rstest: --incremental without --cov: the coverage index won't be \
-             refreshed this run, so changed tests keep re-running until a --cov run"
+             refreshed this run, so changed tests keep re-running until a --cov run",
         );
     }
     // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
     // coverage-invisible: editing it won't bust the skip, so a test depending on
     // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
     if incremental_active && coverage_skip::cov_scope_narrowed(&args) {
-        eprintln!(
+        sink.warn(
             "rstest: --incremental with a scoped --cov: edits to first-party source \
              outside the coverage scope are undetectable and may leave a test cached \
-             on a stale pass; use --cov=. to cover the whole tree"
+             on a stale pass; use --cov=. to cover the whole tree",
         );
     }
     // Snapshot the index BEFORE the run: it drives the skip decision now, and
@@ -626,16 +634,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     } else {
         std::collections::HashSet::new()
     };
-    let mut outcome = dispatch_run(&cfg, cli, &settings, &args, &skip_ids, shuffle_seed, shard)?;
+    let mut outcome = dispatch_run(
+        &cfg,
+        cli,
+        &settings,
+        &args,
+        &skip_ids,
+        DispatchSelection {
+            shuffle_seed,
+            shard,
+        },
+        &mut sink,
+    )?;
 
     // Quarantine BEFORE any output or exit-code consumer: classification,
     // counts, junit, report-json, and the sessionfinish envelope must all
     // see the demoted outcomes consistently.
     if let Some(qpath) = &cli.quarantine {
         if passthrough {
-            warn_quarantine_passthrough(&mut std::io::stderr());
+            warn_quarantine_passthrough(sink.err());
         } else {
-            let matcher = gates::quarantine_matcher(qpath)?;
+            let matcher = gates::quarantine_matcher(qpath, &mut sink)?;
             let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
             // pytest exit 1 = tests failed; if every failure was
             // quarantined the run is green by policy. Exit codes 2+
@@ -649,10 +668,10 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         &mut outcome,
         passthrough,
         mode,
-        palette,
         durations,
         very_verbose,
         start,
+        &mut sink,
     );
 
     let post = PostRun {
@@ -669,7 +688,14 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         prev_index: &prev_index,
         baseline: &baseline,
     };
-    gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post)
+    gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
+}
+
+/// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
+/// the argument budget: the resolved `--shuffle` seed and `--shard` bucket.
+struct DispatchSelection {
+    shuffle_seed: Option<u64>,
+    shard: Option<(usize, usize)>,
 }
 
 fn dispatch_run(
@@ -678,16 +704,19 @@ fn dispatch_run(
     settings: &config::RstestSettings,
     args: &[String],
     skip_ids: &std::collections::HashSet<String>,
-    shuffle_seed: Option<u64>,
-    shard: Option<(usize, usize)>,
+    selection: DispatchSelection,
+    sink: &mut Sink,
 ) -> Result<pool::PoolOutcome> {
+    let DispatchSelection {
+        shuffle_seed,
+        shard,
+    } = selection;
     let RunConfig {
         n,
         reruns,
         worker_timeout,
         passthrough,
         single_worker_reruns,
-        palette,
         mode,
         durations,
         ref dist_name,
@@ -712,7 +741,6 @@ fn dispatch_run(
         n,
         args,
         mode,
-        palette,
         maxfail: parse_maxfail(args),
         reruns,
         only_rerun: &only_rerun,
@@ -733,7 +761,6 @@ fn dispatch_run(
         let mut run = report::Run::default();
         run.track_phase_durations = durations.is_some();
         let mut prog = progress::Progress::default();
-        prog.set_palette(palette);
         prog.set_mode(mode);
         let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
         let mut warnings: Vec<proto::WarningEntry> = Vec::new();
@@ -745,6 +772,7 @@ fn dispatch_run(
                 &mut prog,
                 &mut fixtures,
                 &mut warnings,
+                sink,
             ) {
                 break code;
             }
@@ -758,7 +786,7 @@ fn dispatch_run(
             cache_dir: None,
             exitstatus,
         }
-    } else if collect_lazy(cli, settings, dist_name, args)? {
+    } else if collect_lazy(cli, settings, dist_name, args, sink)? {
         let cwd = std::env::current_dir()?;
         let project = config::discover(&cwd);
         let paths: Vec<PathBuf> = args
@@ -770,10 +798,10 @@ fn dispatch_run(
         if let Some((k, total)) = shard {
             let before = files.len();
             files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
-            eprintln!(
+            sink.warn(&format!(
                 "rstest: shard {k}/{total} -> {} of {before} test file(s)",
                 files.len()
-            );
+            ));
         }
         let cfg = pool::PoolConfig {
             n: n.min(files.len().max(1)),
@@ -786,6 +814,7 @@ fn dispatch_run(
             // load: lazy defaults to strict file affinity, since stealing
             // exposes cross-file/in-file order dependence affinity doesn't.
             lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
+            sink,
         )?
     } else {
         let dist = dist_name
@@ -804,6 +833,7 @@ fn dispatch_run(
             shuffle_seed,
             shard,
             skip_ids,
+            sink,
         )?
     })
 }
@@ -815,6 +845,7 @@ fn collect_lazy(
     settings: &config::RstestSettings,
     dist_name: &str,
     args: &[String],
+    sink: &mut Sink,
 ) -> Result<bool> {
     let mode = cli
         .collect
@@ -834,9 +865,9 @@ fn collect_lazy(
             // --pyargs selects by import path, which the file walk can't
             // see. Both fall back to full collection.
             if args.iter().any(|a| a.contains("::") || a == "--pyargs") {
-                eprintln!(
+                sink.warn(
                     "rstest: nodeid/--pyargs arguments given; --collect lazy falls back \
-                     to full collection"
+                     to full collection",
                 );
                 return Ok(false);
             }
@@ -853,7 +884,7 @@ fn collect_lazy(
 /// off Windows. Takes `is_windows` as a param (not `cfg!`) so both branches are
 /// exercised under coverage on any host.
 fn warn_windows_timeout(
-    w: &mut impl std::io::Write,
+    w: &mut dyn std::io::Write,
     is_windows: bool,
     timeout: Option<f64>,
     worker_timeout: Option<u64>,
@@ -971,6 +1002,7 @@ fn resolve_shuffle_seed(
     single_worker_reruns: bool,
     is_lazy: bool,
     dist_name: &str,
+    sink: &mut Sink,
 ) -> Result<Option<u64>> {
     let Some(v) = shuffle else { return Ok(None) };
     if n <= 1 || passthrough {
@@ -1001,7 +1033,9 @@ fn resolve_shuffle_seed(
         v.parse()
             .map_err(|_| anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'"))?
     };
-    eprintln!("rstest: shuffle seed {seed} (reproduce with --shuffle={seed})");
+    sink.warn(&format!(
+        "rstest: shuffle seed {seed} (reproduce with --shuffle={seed})"
+    ));
     Ok(Some(seed))
 }
 
@@ -1057,7 +1091,7 @@ fn resolve_shard(
 /// pool. At most one note fires (the first applicable), mirroring the
 /// precedence order.
 fn warn_incremental_conflicts(
-    w: &mut impl Write,
+    w: &mut dyn Write,
     incremental: bool,
     since_green: bool,
     changed_some: bool,
@@ -1087,7 +1121,7 @@ fn warn_incremental_conflicts(
 
 /// Note (to `w`) that `--quarantine` is inert under passthrough IO (-s/--pdb/--co):
 /// there is no aggregate Run to demote outcomes in.
-fn warn_quarantine_passthrough(w: &mut impl Write) {
+fn warn_quarantine_passthrough(w: &mut dyn Write) {
     let _ = writeln!(
         w,
         "rstest: --quarantine has no effect in passthrough mode; ignoring"
@@ -1114,11 +1148,12 @@ fn fold_run_event(
     prog: &mut progress::Progress,
     fixtures: &mut Vec<proto::FixtureStat>,
     warnings: &mut Vec<proto::WarningEntry>,
+    sink: &mut Sink,
 ) -> Option<i32> {
     match event {
         proto::Event::Report(r) => {
             if !passthrough {
-                prog.on_report(None, &r);
+                prog.on_report(sink, None, &r);
             }
             run.record(None, r);
             None
@@ -1163,6 +1198,7 @@ mod tests {
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
+    use crate::reporting::sink::Sink;
     use crate::reporting::{progress, report};
     use crate::scheduling::proto;
     use clap::Parser;
@@ -1257,7 +1293,9 @@ mod tests {
     fn resolve_changed_base_is_none_without_request() {
         // No --changed and no --changed-strict => no changed-selection, and
         // crucially no git shell-out (kept hermetic).
-        assert!(resolve_changed_base(&cli()).unwrap().is_none());
+        assert!(resolve_changed_base(&cli(), &mut Sink::captured().0)
+            .unwrap()
+            .is_none());
     }
 
     fn settings_collect(mode: Option<&str>) -> RstestSettings {
@@ -1270,36 +1308,64 @@ mod tests {
     #[test]
     fn collect_lazy_defaults_to_full() {
         // No CLI flag, no setting => "full" => not lazy.
-        assert!(!collect_lazy(&cli(), &settings_collect(None), "load", &[]).unwrap());
+        assert!(!collect_lazy(
+            &cli(),
+            &settings_collect(None),
+            "load",
+            &[],
+            &mut Sink::captured().0
+        )
+        .unwrap());
     }
 
     #[test]
     fn collect_lazy_enabled_for_file_affine_dist() {
         let s = settings_collect(Some("lazy"));
-        assert!(collect_lazy(&cli(), &s, "load", &[]).unwrap());
-        assert!(collect_lazy(&cli(), &s, "loadfile", &[]).unwrap());
+        assert!(collect_lazy(&cli(), &s, "load", &[], &mut Sink::captured().0).unwrap());
+        assert!(collect_lazy(&cli(), &s, "loadfile", &[], &mut Sink::captured().0).unwrap());
     }
 
     #[test]
     fn collect_lazy_rejects_incompatible_dist() {
         let s = settings_collect(Some("lazy"));
         // loadscope/loadgroup need a global id list; lazy is file-affine.
-        assert!(collect_lazy(&cli(), &s, "loadscope", &[]).is_err());
-        assert!(collect_lazy(&cli(), &s, "loadgroup", &[]).is_err());
+        assert!(collect_lazy(&cli(), &s, "loadscope", &[], &mut Sink::captured().0).is_err());
+        assert!(collect_lazy(&cli(), &s, "loadgroup", &[], &mut Sink::captured().0).is_err());
     }
 
     #[test]
     fn collect_lazy_falls_back_on_nodeid_or_pyargs() {
         let s = settings_collect(Some("lazy"));
         // Explicit nodeid selection can't ride the file walk => full.
-        assert!(!collect_lazy(&cli(), &s, "load", &["test_x.py::test_a".to_string()]).unwrap());
+        assert!(!collect_lazy(
+            &cli(),
+            &s,
+            "load",
+            &["test_x.py::test_a".to_string()],
+            &mut Sink::captured().0
+        )
+        .unwrap());
         // --pyargs selects by import path => full.
-        assert!(!collect_lazy(&cli(), &s, "load", &["--pyargs".to_string()]).unwrap());
+        assert!(!collect_lazy(
+            &cli(),
+            &s,
+            "load",
+            &["--pyargs".to_string()],
+            &mut Sink::captured().0
+        )
+        .unwrap());
     }
 
     #[test]
     fn collect_lazy_rejects_unknown_mode() {
-        assert!(collect_lazy(&cli(), &settings_collect(Some("sometimes")), "load", &[]).is_err());
+        assert!(collect_lazy(
+            &cli(),
+            &settings_collect(Some("sometimes")),
+            "load",
+            &[],
+            &mut Sink::captured().0
+        )
+        .is_err());
     }
 
     #[test]
@@ -1325,59 +1391,122 @@ mod tests {
     fn resolve_shuffle_seed_none_and_happy_path() {
         // No flag => no seed, no error.
         assert_eq!(
-            resolve_shuffle_seed(None, 4, false, false, false, "load").unwrap(),
+            resolve_shuffle_seed(
+                None,
+                4,
+                false,
+                false,
+                false,
+                "load",
+                &mut Sink::captured().0
+            )
+            .unwrap(),
             None
         );
         // A numeric seed parses through on the parallel pool.
         assert_eq!(
-            resolve_shuffle_seed(Some("42"), 4, false, false, false, "load").unwrap(),
+            resolve_shuffle_seed(
+                Some("42"),
+                4,
+                false,
+                false,
+                false,
+                "load",
+                &mut Sink::captured().0
+            )
+            .unwrap(),
             Some(42)
         );
         // `random` yields *some* seed (nondeterministic value).
-        assert!(
-            resolve_shuffle_seed(Some("random"), 4, false, false, false, "load")
-                .unwrap()
-                .is_some()
-        );
+        assert!(resolve_shuffle_seed(
+            Some("random"),
+            4,
+            false,
+            false,
+            false,
+            "load",
+            &mut Sink::captured().0
+        )
+        .unwrap()
+        .is_some());
     }
 
     #[test]
     fn resolve_shuffle_seed_rejects_incompatible_modes() {
         // Single-worker rerun pool: its own tailored message.
-        assert!(
-            resolve_shuffle_seed(Some("1"), 1, false, true, false, "load")
-                .unwrap_err()
-                .to_string()
-                .contains("one-worker rerun pool")
-        );
+        assert!(resolve_shuffle_seed(
+            Some("1"),
+            1,
+            false,
+            true,
+            false,
+            "load",
+            &mut Sink::captured().0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("one-worker rerun pool"));
         // Plain single-worker / passthrough.
-        assert!(
-            resolve_shuffle_seed(Some("1"), 1, false, false, false, "load")
-                .unwrap_err()
-                .to_string()
-                .contains("needs the parallel pool")
-        );
-        assert!(resolve_shuffle_seed(Some("1"), 4, true, false, false, "load").is_err());
+        assert!(resolve_shuffle_seed(
+            Some("1"),
+            1,
+            false,
+            false,
+            false,
+            "load",
+            &mut Sink::captured().0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("needs the parallel pool"));
+        assert!(resolve_shuffle_seed(
+            Some("1"),
+            4,
+            true,
+            false,
+            false,
+            "load",
+            &mut Sink::captured().0
+        )
+        .is_err());
         // Lazy collection and --dist each are unsupported.
-        assert!(
-            resolve_shuffle_seed(Some("1"), 4, false, false, true, "load")
-                .unwrap_err()
-                .to_string()
-                .contains("--collect lazy")
-        );
-        assert!(
-            resolve_shuffle_seed(Some("1"), 4, false, false, false, "each")
-                .unwrap_err()
-                .to_string()
-                .contains("--dist each")
-        );
+        assert!(resolve_shuffle_seed(
+            Some("1"),
+            4,
+            false,
+            false,
+            true,
+            "load",
+            &mut Sink::captured().0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("--collect lazy"));
+        assert!(resolve_shuffle_seed(
+            Some("1"),
+            4,
+            false,
+            false,
+            false,
+            "each",
+            &mut Sink::captured().0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("--dist each"));
         // A non-numeric seed is rejected.
-        assert!(
-            resolve_shuffle_seed(Some("abc"), 4, false, false, false, "load")
-                .unwrap_err()
-                .to_string()
-                .contains("must be an unsigned integer")
-        );
+        assert!(resolve_shuffle_seed(
+            Some("abc"),
+            4,
+            false,
+            false,
+            false,
+            "load",
+            &mut Sink::captured().0
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("must be an unsigned integer"));
     }
 
     #[test]
@@ -1489,8 +1618,18 @@ mod tests {
         let mut prog = progress::Progress::default();
         let mut fixtures = Vec::new();
         let mut warnings = Vec::new();
-        let mut fold =
-            |ev| fold_run_event(ev, false, &mut run, &mut prog, &mut fixtures, &mut warnings);
+        let (mut sink, _cap) = Sink::captured();
+        let mut fold = |ev| {
+            fold_run_event(
+                ev,
+                false,
+                &mut run,
+                &mut prog,
+                &mut fixtures,
+                &mut warnings,
+                &mut sink,
+            )
+        };
 
         assert_eq!(
             fold(proto::Event::Report(report("t.py::a", "passed"))),
@@ -1558,6 +1697,7 @@ mod tests {
             &mut prog,
             &mut fixtures,
             &mut warnings,
+            &mut Sink::captured().0,
         );
         assert_eq!(code, None);
         assert_eq!(run.counts()["passed"], 1);
