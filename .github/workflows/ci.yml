@@ -29,6 +29,51 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  miri:
+    name: miri (UB check, pure-logic tests)
+    runs-on: ubuntu-latest
+    env:
+      # Tree Borrows: the stable-but-experimental Stacked Borrows model flags a
+      # false positive inside sha2's hand-written SIMD (config_fingerprint ->
+      # Sha256). Tree Borrows is the newer aliasing model and accepts it.
+      # disable-isolation: the pure-logic tests still read temp files / config
+      # off disk; without it miri denies the open() and they can't run.
+      MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # miri is nightly-only. Pinned so a nightly regression can't silently
+      # break CI; bump the date to pick up newer miri (rustup fetches on demand).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # master
+        with:
+          toolchain: nightly-2026-09-06
+          components: miri
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: miri
+
+      - name: cargo miri setup
+        run: cargo miri setup
+
+      # miri interprets MIR; it CANNOT execute the crate's `unsafe` (all of it is
+      # libc/Win32 FFI: pipe, fcntl, CreatePipe, posix_spawn) nor spawn worker
+      # subprocesses. A single such call aborts the whole test binary, not just
+      # that test -- so this is an explicit allow-list of pure-logic modules
+      # (wire protocol, parsing, fingerprints, reporting) where miri adds value
+      # by catching Rust-level UB. Adding a pure module here is safe; adding one
+      # that spawns/forks/FFIs will abort the run. Impure siblings deliberately
+      # excluded: incremental/select::coverage/select::git (git), discover
+      # probe/doctor/watch/worker/run::mod (spawn), cache (fs watch).
+      - name: cargo miri test
+        run: |
+          cargo miri test -p rstest-cli --lib -- \
+            config:: cli:: collect:: coverage_skip:: remote:: text:: reporting:: \
+            scheduling::proto scheduling::shard scheduling::durations \
+            scheduling::lazy scheduling::pool \
+            migrate::classify mono::changes mono::merge mono::plan select::graph \
+            discover::request discover::candidates run::gates
+
   cargo-deny:
     name: dependency audit (advisories + licenses)
     runs-on: ubuntu-latest
