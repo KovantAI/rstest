@@ -29,6 +29,48 @@ impl OutcomeKind {
     fn counts_done(self) -> bool {
         self != OutcomeKind::TeardownError
     }
+
+    /// pytest's single status char (dots / Github / Gitlab / Buildkite / Azure
+    /// streams): '.' pass, 'X' xpass, 'F' fail, 's' skip, 'x' xfail, 'E' error.
+    fn dot(self) -> char {
+        use OutcomeKind::*;
+        match self {
+            Pass => '.',
+            XPass => 'X',
+            Fail => 'F',
+            Skip => 's',
+            XFail => 'x',
+            // Failed setup/teardown both draw 'E'.
+            SetupError | TeardownError => 'E',
+        }
+    }
+
+    /// The pytest -v outcome word.
+    fn word(self) -> &'static str {
+        use OutcomeKind::*;
+        match self {
+            Pass => "PASSED",
+            XPass => "XPASS",
+            Fail => "FAILED",
+            Skip => "SKIPPED",
+            XFail => "XFAIL",
+            SetupError | TeardownError => "ERROR",
+        }
+    }
+
+    /// The sugar-style bar symbol plus its palette color (green pass /
+    /// red fail+error / yellow skip+xfail+xpass).
+    fn symbol(self) -> (&'static str, fn(&Palette, &str) -> String) {
+        use OutcomeKind::*;
+        match self {
+            Pass => ("✓", Palette::green),
+            XPass => ("X", Palette::yellow),
+            Fail => ("✗", Palette::red),
+            Skip => ("s", Palette::yellow),
+            XFail => ("x", Palette::yellow),
+            SetupError | TeardownError => ("E", Palette::red),
+        }
+    }
 }
 
 /// Classify a phase report, or `None` when it renders nothing. One char per
@@ -161,6 +203,17 @@ impl Progress {
         }
     }
 
+    /// The running-percentage suffix ` [ NN%]`, clamped to 100 — reruns push
+    /// `done` past `total`, so an unclamped `done*100/t` prints `[103%]`. The
+    /// ONE clamp site for every renderer's percentage. `None` when the total is
+    /// unknown, so each caller supplies its own no-total fallback.
+    fn pct_suffix(&self) -> Option<String> {
+        match self.total {
+            Some(t) if t > 0 => Some(format!(" [{:3}%]", (self.done * 100 / t).min(100))),
+            _ => None,
+        }
+    }
+
     /// Select the output style (dots/verbose/bar/json/…).
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
@@ -192,32 +245,21 @@ impl Progress {
         // Github/Gitlab/Buildkite share the dots char stream below; their
         // annotations / fold markers are emitted from the aggregate at
         // end-of-run.
-        use OutcomeKind::*;
         let Some(kind) = outcome_kind(r) else {
             return;
-        };
-        let ch = match kind {
-            Pass => '.',
-            XPass => 'X',
-            Fail => 'F',
-            Skip => 's',
-            XFail => 'x',
-            // A failed teardown gets its own 'E' after the call already
-            // printed - it doesn't advance the counter.
-            SetupError | TeardownError => 'E',
         };
         if kind.counts_done() {
             self.done += 1;
         }
-        let painted = palette.outcome(&ch.to_string());
+        let painted = palette.outcome(&kind.dot().to_string());
         self.out_inline(sink, &painted);
         self.col += 1;
         if self.col >= WIDTH {
             self.col = 0;
-            let tail = match self.total {
-                Some(t) if t > 0 => format!(" [{:3}%]", self.done * 100 / t),
-                _ => format!(" [{}]", self.done),
-            };
+            // No total yet: show the raw done count instead of a percentage.
+            let tail = self
+                .pct_suffix()
+                .unwrap_or_else(|| format!(" [{}]", self.done));
             self.out_line(sink, &tail);
         }
     }
@@ -225,27 +267,19 @@ impl Progress {
     /// pytest -v: `nodeid OUTCOME [ pct%]` per test, ERROR lines for
     /// failed setup/teardown phases.
     fn on_report_verbose(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
-        use OutcomeKind::*;
         let Some(kind) = outcome_kind(r) else {
             return;
-        };
-        let word = match kind {
-            Pass => "PASSED",
-            XPass => "XPASS",
-            Fail => "FAILED",
-            Skip => "SKIPPED",
-            XFail => "XFAIL",
-            SetupError | TeardownError => "ERROR",
         };
         if kind.counts_done() {
             self.done += 1;
         }
-        let pct = match self.total {
-            Some(t) if t > 0 => format!(" [{:3}%]", (self.done * 100 / t).min(100)),
-            _ => String::new(),
-        };
+        let pct = self.pct_suffix().unwrap_or_default();
         let prefix = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-        let line = format!("{prefix}{} {}{pct}", r.nodeid, sink.palette().outcome(word));
+        let line = format!(
+            "{prefix}{} {}{pct}",
+            r.nodeid,
+            sink.palette().outcome(kind.word())
+        );
         self.out_line(sink, &line);
     }
 
@@ -253,26 +287,14 @@ impl Progress {
     /// the failure repr inlined right under a failing test. Symbol colored
     /// by outcome (green pass / red fail+error / yellow skip+xfail+xpass).
     fn on_report_bar(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
-        use OutcomeKind::*;
         let Some(kind) = outcome_kind(r) else {
             return;
         };
-        // symbol + its color (green pass / red fail+error / yellow skip+xfail+xpass)
-        let (sym, color): (&str, fn(&Palette, &str) -> String) = match kind {
-            Pass => ("✓", Palette::green),
-            XPass => ("X", Palette::yellow),
-            Fail => ("✗", Palette::red),
-            Skip => ("s", Palette::yellow),
-            XFail => ("x", Palette::yellow),
-            SetupError | TeardownError => ("E", Palette::red),
-        };
+        let (sym, color) = kind.symbol();
         if kind.counts_done() {
             self.done += 1;
         }
-        let pct = match self.total {
-            Some(t) if t > 0 => format!(" [{:>3}%]", (self.done * 100 / t).min(100)),
-            _ => String::new(),
-        };
+        let pct = self.pct_suffix().unwrap_or_default();
         let dur = if r.duration >= 0.0005 {
             format!("  {:.2}s", r.duration)
         } else {
@@ -375,11 +397,9 @@ impl Progress {
             return;
         }
         if self.col > 0 {
-            match self.total {
-                Some(t) if t > 0 => {
-                    sink.out_line(&format!(" [{:3}%]", (self.done * 100 / t).min(100)))
-                }
-                _ => sink.out_line(""),
+            match self.pct_suffix() {
+                Some(tail) => sink.out_line(&tail),
+                None => sink.out_line(""),
             }
         }
     }
@@ -512,6 +532,38 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+        }
+    }
+
+    #[test]
+    fn pct_suffix_clamps_and_reports_no_total() {
+        let mut p = Progress::default();
+        // No total: no percentage (caller supplies its own fallback).
+        assert_eq!(p.pct_suffix(), None);
+        p.set_total(4);
+        p.done = 2;
+        assert_eq!(p.pct_suffix().as_deref(), Some(" [ 50%]"));
+        // Reruns can push done past total; every renderer must clamp to 100,
+        // never print [150%] (the dots mid-run tail used to skip this clamp).
+        p.done = 6;
+        assert_eq!(p.pct_suffix().as_deref(), Some(" [100%]"));
+    }
+
+    #[test]
+    fn dots_tail_clamps_at_line_wrap() {
+        // Drive the dots stream past a wrap with done > total (reruns) and
+        // assert the wrapped `[NN%]` tail never exceeds 100%.
+        let mut p = Progress::default();
+        p.set_total(1);
+        let (mut sink, buf) = Sink::captured();
+        for _ in 0..WIDTH {
+            p.on_report(&mut sink, None, &report("call", "passed"));
+        }
+        let out = buf.out();
+        assert!(out.contains(" [100%]"), "{out}");
+        // No three-digit-over-100 percentage leaked (unclamped would be 7200%).
+        for bad in [" [101%]", " [102%]", " [150%]", " [7200%]"] {
+            assert!(!out.contains(bad), "leaked {bad}: {out}");
         }
     }
 

@@ -275,12 +275,9 @@ impl Run {
 
     /// nodeids with any failed phase - the merged `lastfailed` truth.
     pub fn failed_nodeids(&self) -> impl Iterator<Item = &String> {
-        self.tests.iter().filter_map(|(id, e)| {
-            let failed = [&e.setup, &e.call, &e.teardown]
-                .iter()
-                .any(|p| p.as_deref() == Some("failed"));
-            failed.then_some(id)
-        })
+        self.tests
+            .iter()
+            .filter_map(|(id, e)| e.any_phase_failed().then_some(id))
     }
 
     /// (nodeid, longrepr) pairs for failed tests (junit rendering).
@@ -291,12 +288,10 @@ impl Run {
 
     pub fn all_passed(&self) -> bool {
         self.collect_errors.is_empty()
-            && self.tests.values().all(|e| {
-                e.quarantined
-                    || (e.setup.as_deref() != Some("failed")
-                        && e.call.as_deref() != Some("failed")
-                        && e.teardown.as_deref() != Some("failed"))
-            })
+            && self
+                .tests
+                .values()
+                .all(|e| e.quarantined || !e.any_phase_failed())
     }
 
     /// Demote failures matching --quarantine: they count as "quarantined",
@@ -305,10 +300,7 @@ impl Run {
     pub fn quarantine(&mut self, matches: impl Fn(&str) -> bool) -> Vec<String> {
         let mut demoted = Vec::new();
         for (nodeid, e) in &mut self.tests {
-            let failed = e.setup.as_deref() == Some("failed")
-                || e.call.as_deref() == Some("failed")
-                || e.teardown.as_deref() == Some("failed");
-            if failed && matches(nodeid) {
+            if e.any_phase_failed() && matches(nodeid) {
                 e.quarantined = true;
                 demoted.push(nodeid.clone());
             }
@@ -398,8 +390,24 @@ impl TestEntry {
     pub fn outcome(&self) -> &'static str {
         classify(self)
     }
+
+    /// Whether any phase (setup/call/teardown) reported `failed`. The raw
+    /// phase-level signal behind `--lf`/quarantine/`all_passed`/CI annotations —
+    /// distinct from `outcome()`, which buckets a setup/teardown failure as
+    /// `errors` and hides a quarantined failure. Callers wanting the truth of
+    /// "did this test fail in any phase" use this; callers wanting the pytest
+    /// display bucket use `outcome()`.
+    pub fn any_phase_failed(&self) -> bool {
+        [&self.setup, &self.call, &self.teardown]
+            .iter()
+            .any(|p| p.as_deref() == Some("failed"))
+    }
 }
 
+/// Bucket a `TestEntry` into its pytest-style outcome. This is the Rust twin of
+/// the `outcomeOf()` function embedded in the HTML report (`html.rs`) — the two
+/// implement the SAME decision tree and MUST be changed together, or the HTML
+/// report will disagree with the summary/report-json/junit for the same entry.
 fn classify(e: &TestEntry) -> &'static str {
     if e.quarantined {
         return "quarantined";
