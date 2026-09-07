@@ -77,7 +77,7 @@ parametrize **IDs must be stable across collections**. rstest collects on
 each worker and refuses to dispatch if the id sets disagree, so an id built
 from a memory address (`repr()` fallback), a uuid, or `now()` forces the
 suite to `-n 0`. Give such a parametrize an explicit stable `ids=` (e.g.
-`ids=[c.name for c in cases]`). [`rstest --migrate-check`](cli.md#-migrate-check)
+`ids=[c.name for c in cases]`). [`rstest migrate-check`](cli.md#migrate-check)
 finds these before your first run and names the exact site.
 
 rstest registers the marker automatically, so `--strict-markers` never

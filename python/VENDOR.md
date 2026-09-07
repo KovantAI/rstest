@@ -26,7 +26,7 @@
      re-extracted tree is byte-identical to upstream. Must pass.
   3. Commit `_vendor/` and `vendor.lock` together. CI (`vendor.yml`) re-checks
      both the offline integrity and the upstream provenance.
-- Verify anytime: `rstest --verify-vendor` (offline, runs the shipped
+- Verify anytime: `rstest verify-vendor` (offline, runs the shipped
   `rstest_worker._internal.verify_vendor`), or the CI checks above.
 - New pytest releases are surfaced daily by
   `.github/workflows/pytest-upgrade-watch.yml`, which opens a tracking issue.

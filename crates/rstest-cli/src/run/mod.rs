@@ -83,7 +83,7 @@ fn apply_selection(
     if let Some(rev) = &effective_changed {
         let rev = head_to_none(rev);
         let cwd = std::env::current_dir()?;
-        let project = config::discover(&cwd);
+        let project = config::discover(&cwd, sink.err());
         // Coverage-aware selection: uses the line->test index when it is warm
         // (any --cov-context=test run writes it), else falls back per-file to
         // import-graph reachability, so --changed only ever gets tighter.
@@ -352,80 +352,23 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         .clone()
         .or_else(|| std::env::var("RSTEST_CACHE_REMOTE").ok())
         .filter(|s| !s.is_empty());
-    validate_cache_flags(
-        cli.cache_pull,
-        cli.cache_push,
-        cli.cache_compact,
-        cache_remote.is_some(),
-    )?;
-    if cli.cache_compact {
-        let remote = cache_remote.as_deref().unwrap(); // validated above
-        let t = remote::transport_for(remote)?;
-        let folded = remote::compact_remote(t.as_ref(), &mut sink)
-            .with_context(|| format!("compacting shared cache at {remote}"))?;
-        sink.warn(&format!(
-            "rstest: cache: compacted {folded} segment(s) into base at {remote}"
-        ));
-        return Ok(0);
-    }
-    // An explicit --cache-remote FLAG with no pull/push/compact does nothing;
-    // warn rather than silently ignore it. Gate on the flag, NOT the env-resolved
-    // value: RSTEST_CACHE_REMOTE is ambient config a CI sets once, and plain runs
-    // that don't opt into pull/push must not be nagged every invocation.
-    // (cache_compact already returned above, so it can't be the requested action.)
-    if cli.cache_remote.is_some() && !cli.cache_pull && !cli.cache_push {
-        sink.warn(
-            "rstest: cache: --cache-remote is set but no --cache-pull/--cache-push \
-             (or --cache-compact) was requested; the shared cache is not being used",
-        );
-    }
+    preflight_cache(cli, &cache_remote, &mut sink)?;
 
     // CLI > [tool.rstest] > built-in defaults.
-    let settings = config::rstest_settings(&std::env::current_dir()?);
+    let settings = config::rstest_settings(&std::env::current_dir()?, sink.err());
 
-    // Monorepo: cwd has no pytest config of its own, subdirectories do.
-    // Each subproject runs as its own session group (cwd switched, so
-    // rootdir/ini/conftest match pytest-in-that-dir). Explicit paths stay single.
-    if std::env::var_os("RSTEST_MONO_PROJECT").is_none() {
-        let cwd = std::env::current_dir()?;
-        let path_args = args
-            .iter()
-            .any(|a| !a.starts_with('-') && std::path::Path::new(a).exists());
-        if !path_args && !config::has_pytest_config(&cwd) {
-            let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
-            let threshold = if settings.projects.is_some() { 1 } else { 2 };
-            if projects.len() >= threshold {
-                // Each project keeps its OWN .rstest_cache (cache::file_in), and
-                // the per-run push/pull wiring lives in the single-project path
-                // that execute_monorepo bypasses — so a cache flag here would
-                // silently no-op (push) or warm the wrong root cache (pull).
-                // Fail loud instead; run rstest per project for shared caching.
-                if cli.cache_pull || cli.cache_push {
-                    anyhow::bail!(
-                        "--cache-pull/--cache-push are not supported in monorepo mode \
-                         (each project has its own .rstest_cache); run rstest per project"
-                    );
-                }
-                return monorepo::execute_monorepo(cli, &args, &cwd, projects, &run_uid, &mut sink);
-            }
-        }
+    // Monorepo: cwd has no pytest config of its own but subdirectories do —
+    // dispatch to the per-project driver and return its exit code.
+    if let ControlFlow::Break(code) =
+        maybe_dispatch_monorepo(cli, &args, &settings, &run_uid, &mut sink)?
+    {
+        return Ok(code);
     }
     // --cache-pull: warm the local cache from the remote BEFORE anything reads
     // it (scheduling, selection, the regression baseline). Placed after the
     // monorepo guard so a monorepo run is rejected rather than pulling into the
     // wrong (root) cache and printing a misleading success line first.
-    if cli.cache_pull {
-        let remote = cache_remote.as_deref().unwrap(); // validated at entry
-        let t = remote::transport_for(remote)?;
-        let merged = remote::pull(t.as_ref(), &mut sink)
-            .with_context(|| format!("pulling shared cache from {remote}"))?;
-        sink.warn(&format!(
-            "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
-            merged.durations.len(),
-            merged.flakes.len()
-        ));
-        remote::write_local(&merged);
-    }
+    pull_shared_cache(cli, &cache_remote, &mut sink)?;
     let cfg = resolve_run_config(cli, &settings, &args, &run_uid, &mut sink)?;
     // Lift the resolved config into the local names the rest of the pipeline
     // reads. Copy fields copy; the few owned fields clone once (cheap) so their
@@ -442,28 +385,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         durations,
         ..
     } = cfg;
-    let numprocesses = cfg.numprocesses.clone();
-    let dist_name = cfg.dist_name.clone();
     let scope = cfg.scope.clone();
     let python = cfg.python.clone();
-    // Run-less: verify the vendored pytest tree against the packaged manifest.
-    if cli.verify_vendor {
-        return crate::vendor::run_verify(&python);
-    }
-    // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
-    if cli.r#try {
-        return migrate::run_try(&python, &args, &mut sink);
-    }
-    // Parallel-readiness preflight: its own collect-twice path, not a run.
-    if cli.migrate_check || cli.migrate_check_json.is_some() {
-        return migrate::run_migrate_check(
-            &python,
-            &args,
-            cli.migrate_check_json.as_deref(),
-            &cli.migrate_allow,
-            &mut sink,
-        );
-    }
     // `--collect-only --report-json <p>` writes a structured discovery doc
     // (nodeid + abs file + 0-based line + markers), the machine-readable
     // surface editors/CI consume. Own single-session path (NOT passthrough).
@@ -472,40 +395,8 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             return discovery::run_collect_discovery(&python, &args, out, &run_uid);
         }
     }
-    // require-baseline: with the durations-regress gate active, an absent baseline
-    // (cold remote, nothing restored/pulled) is a hard error rather than the silent
-    // skip the gate would otherwise do — the dead-gate guard. Placed after the
-    // non-gating early exits (monorepo, migrate-check, collect-only) and gated on
-    // !passthrough, since the regression gate only runs on a real in-process run;
-    // pull (above) has already warmed the baseline it checks.
-    if cli.require_baseline
-        && cli.durations_regress.is_some()
-        && !passthrough
-        && durations::load().is_empty()
-    {
-        anyhow::bail!(
-            "--require-baseline: --durations-regress needs a duration baseline in \
-             .rstest_cache, but none is present (cold cache — nothing restored or pulled)"
-        );
-    }
-    // Json/Tap modes keep stdout a pure machine stream: no banner
-    // (TAP gets its version header instead).
-    if !passthrough && mode == progress::Mode::Tap {
-        sink.out_line("TAP version 13");
-    }
-    if !passthrough && mode != progress::Mode::Json && mode != progress::Mode::Tap {
-        let worker_desc = if single_worker_reruns {
-            "single worker (rerun pool; not byte-exact)".to_string()
-        } else if n <= 1 {
-            "single worker (pytest-exact mode)".to_string()
-        } else {
-            format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
-        };
-        sink.out_line(&format!(
-            "rstest {} — {worker_desc}",
-            env!("CARGO_PKG_VERSION")
-        ));
-    }
+    check_require_baseline(cli, passthrough)?;
+    print_run_banner(mode, passthrough, single_worker_reruns, n, &mut sink);
     // Incremental testing: --since-green feeds --changed's selection from the
     // last green run's commit. An explicit --changed always wins. `head` is
     // captured up front (it can't change mid-run) so a green run can record it.
@@ -524,146 +415,30 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         ControlFlow::Continue(args) => args,
         ControlFlow::Break(code) => return Ok(code),
     };
-    if reruns > 0 && passthrough {
-        sink.warn(
-            "rstest: --reruns is ignored under -s/--pdb/--co \
-             (interactive single session); drop those flags to enable reruns",
-        );
-    }
-    if single_worker_reruns {
-        // Not silent: a byte-exact run is now a one-worker pool (dispatch
-        // order, gw0 id, rerunfailures neutralized). Say so on stderr so log
-        // scrapers and existing configs see the switch, not just the banner.
-        sink.warn(&format!(
-            "rstest: --reruns at -n {numprocesses} runs a one-worker rerun pool \
-             (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
-        ));
-    }
-    // --shuffle reorders the orchestrator's dispatch queue, so it needs
-    // the full-collection pool. Refusing (not ignoring) matters: a user
-    // probing for order dependence must not get a silently ordered run.
-    let is_lazy = collect_lazy(cli, &settings, &dist_name, &args, &mut sink)?;
-    let shuffle_seed: Option<u64> = resolve_shuffle_seed(
-        cli.shuffle.as_deref(),
-        n,
+    warn_run_modes(
+        reruns,
         passthrough,
         single_worker_reruns,
-        is_lazy,
-        &dist_name,
+        &cfg.numprocesses,
         &mut sink,
-    )?;
-    // --shard K/N: partition the suite and keep bucket K. Purely an
-    // orchestrator-side node-id (or, in lazy mode, file) filter.
-    let shard: Option<(usize, usize)> = resolve_shard(
-        cli.shard.as_deref(),
-        n,
-        passthrough,
-        single_worker_reruns,
-        shuffle_seed.is_some(),
-        &dist_name,
-    )?;
-    // --incremental: compute the dispatch-level skip set now (before the pool
-    // collects) from the coverage index + last green set, gated by a config
-    // fingerprint. Restricted to the eager pool on --dist load with full
-    // collection; incompatible modes disable it with a note. An explicit
-    // --changed (like --since-green) already narrows selection, so dispatch-level
-    // skipping on top is excluded — it would record a PARTIAL green baseline and
-    // count cached passes against a partial collection.
-    let incremental_active = cli.incremental
-        && !since_green
-        && cli.changed.is_none()
-        && dist_name == "load"
-        && !passthrough
-        && n >= 2
-        && shard.is_none()
-        && shuffle_seed.is_none()
-        && !collect_lazy(cli, &settings, &dist_name, &args, &mut sink)?;
-    // The config fingerprint is only consumed under `incremental_active` (the
-    // skip-set load and the green-baseline record). Computing it unconditionally
-    // would walk the whole project tree for conftests even when the feature is
-    // off (e.g. -n 1, --collect lazy), so gate it on the same condition.
-    let config_fp = if incremental_active {
-        coverage_skip::config_fingerprint(&scope)
-    } else {
-        String::new()
-    };
-    warn_incremental_conflicts(
-        sink.err(),
-        cli.incremental,
-        since_green,
-        cli.changed.is_some(),
-        incremental_active,
     );
-    // --incremental relies on the coverage index advancing every run; without
-    // --cov this run covtool never rewrites it, so a changed test re-runs on
-    // every invocation until a coverage run refreshes the index.
-    if incremental_active && !coverage_skip::coverage_requested(&args) {
-        sink.warn(
-            "rstest: --incremental without --cov: the coverage index won't be \
-             refreshed this run, so changed tests keep re-running until a --cov run",
-        );
-    }
-    // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
-    // coverage-invisible: editing it won't bust the skip, so a test depending on
-    // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
-    if incremental_active && coverage_skip::cov_scope_narrowed(&args) {
-        sink.warn(
-            "rstest: --incremental with a scoped --cov: edits to first-party source \
-             outside the coverage scope are undetectable and may leave a test cached \
-             on a stale pass; use --cov=. to cover the whole tree",
-        );
-    }
-    // Snapshot the index BEFORE the run: it drives the skip decision now, and
-    // post-run it supplies the cached tests' coverage to fold back in (covtool
-    // rewrites the index from only the tests that ran).
-    let prev_index = if incremental_active {
-        remote::load_local_cov_index()
-    } else {
-        select::CoverageIndex::default()
-    };
-    // The baseline is loaded once and kept: it drives the skip set now, and its
-    // recorded def lines restore the cached (not-run) entries' source line after
-    // the run (a cached test has no pytest report to supply one).
-    let baseline = if incremental_active {
-        coverage_skip::load(&scope, &config_fp)
-    } else {
-        coverage_skip::Baseline::default()
-    };
-    let skip_ids: std::collections::HashSet<String> = if incremental_active {
-        coverage_skip::skippable_now(&prev_index, &baseline)
-    } else {
-        std::collections::HashSet::new()
-    };
+    // Resolve dispatch selection (--shuffle/--shard) and the --incremental skip
+    // set in one phase.
+    let inc = resolve_incremental(&cfg, cli, &settings, &args, since_green, &mut sink)?;
     let mut outcome = dispatch_run(
         &cfg,
         cli,
         &settings,
         &args,
-        &skip_ids,
+        &inc.skip_ids,
         DispatchSelection {
-            shuffle_seed,
-            shard,
+            shuffle_seed: inc.shuffle_seed,
+            shard: inc.shard,
         },
         &mut sink,
     )?;
 
-    // Quarantine BEFORE any output or exit-code consumer: classification,
-    // counts, junit, report-json, and the sessionfinish envelope must all
-    // see the demoted outcomes consistently.
-    if let Some(qpath) = &cli.quarantine {
-        if passthrough {
-            warn_quarantine_passthrough(sink.err());
-        } else {
-            let matcher = gates::quarantine_matcher(qpath, &mut sink)?;
-            let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
-            // pytest exit 1 = tests failed; if every failure was
-            // quarantined the run is green by policy. Exit codes 2+
-            // (usage/internal errors) are never touched.
-            if !demoted.is_empty() && outcome.exitstatus == 1 && outcome.run.all_passed() {
-                outcome.exitstatus = 0;
-            }
-        }
-    }
+    apply_quarantine(cli, &mut outcome, passthrough, &mut sink)?;
     gates::finalize_output(
         &mut outcome,
         passthrough,
@@ -679,16 +454,366 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         started_epoch,
         run_uid: &run_uid,
         cache_remote: cache_remote.as_deref(),
-        shard,
+        shard: inc.shard,
         since_green,
         head: &head,
         env_fp: &env_fp,
-        incremental_active,
-        config_fp: &config_fp,
-        prev_index: &prev_index,
-        baseline: &baseline,
+        incremental_active: inc.active,
+        config_fp: &inc.config_fp,
+        prev_index: &inc.prev_index,
+        baseline: &inc.baseline,
     };
     gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
+}
+
+/// Dispatch a run-less subcommand (`rstest verify-vendor` / `try` /
+/// `migrate-check` / `cache-compact`). Returns `Some(exit)` when a subcommand
+/// ran, `None` for a normal run (the caller falls through to watch/`execute`).
+/// These modes bypass the run pipeline, so the interpreter is resolved here
+/// rather than pulled through [`resolve_run_config`].
+pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
+    use crate::cli::Command;
+    let Some(command) = &cli.command else {
+        return Ok(None);
+    };
+    let mut sink = Sink::stdio(color::Palette::detect(args));
+    // cache-compact is interpreter-free; the rest resolve Python first.
+    if let Command::CacheCompact = command {
+        return Ok(Some(run_cache_compact(cli, &mut sink)?));
+    }
+    let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let python = discover::resolve(&scope, cli.python.as_deref())?;
+    let code = match command {
+        // Verify the vendored pytest tree against the packaged manifest.
+        Command::VerifyVendor => crate::vendor::run_verify(&python)?,
+        // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
+        Command::Try => migrate::run_try(&python, args, &mut sink)?,
+        // Parallel-readiness preflight: its own collect-twice path, not a run.
+        Command::MigrateCheck => migrate::run_migrate_check(
+            &python,
+            args,
+            cli.migrate_check_json.as_deref(),
+            &cli.migrate_allow,
+            &mut sink,
+        )?,
+        Command::CacheCompact => unreachable!("handled above"),
+    };
+    Ok(Some(code))
+}
+
+/// `cache-compact` subcommand: fold all remote segments into a fresh base and
+/// prune them, then exit without running tests. Resolves the remote from the
+/// `--cache-remote` flag or `RSTEST_CACHE_REMOTE`.
+fn run_cache_compact(cli: &Cli, sink: &mut Sink) -> Result<i32> {
+    let remote = cli
+        .cache_remote
+        .clone()
+        .or_else(|| std::env::var("RSTEST_CACHE_REMOTE").ok())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("cache-compact needs --cache-remote (or RSTEST_CACHE_REMOTE)")
+        })?;
+    let t = remote::transport_for(&remote)?;
+    let folded = remote::compact_remote(t.as_ref(), sink)
+        .with_context(|| format!("compacting shared cache at {remote}"))?;
+    sink.warn(&format!(
+        "rstest: cache: compacted {folded} segment(s) into base at {remote}"
+    ));
+    Ok(0)
+}
+
+/// Warm the local cache from the remote (`--cache-pull`) BEFORE anything reads
+/// it (scheduling, selection, the regression baseline). No-op without the flag.
+fn pull_shared_cache(cli: &Cli, cache_remote: &Option<String>, sink: &mut Sink) -> Result<()> {
+    if !cli.cache_pull {
+        return Ok(());
+    }
+    let remote = cache_remote.as_deref().unwrap(); // validated by preflight_cache
+    let t = remote::transport_for(remote)?;
+    let merged = remote::pull(t.as_ref(), sink)
+        .with_context(|| format!("pulling shared cache from {remote}"))?;
+    sink.warn(&format!(
+        "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
+        merged.durations.len(),
+        merged.flakes.len()
+    ));
+    remote::write_local(&merged);
+    Ok(())
+}
+
+/// Monorepo dispatch: when the cwd has no pytest config of its own but
+/// subdirectories do, each subproject runs as its own session group (cwd
+/// switched, so rootdir/ini/conftest match pytest-in-that-dir). Explicit paths
+/// stay single. Returns `Break(code)` when the per-project driver ran, else
+/// `Continue(())` to fall through to the single-project run.
+fn maybe_dispatch_monorepo(
+    cli: &Cli,
+    args: &[String],
+    settings: &config::RstestSettings,
+    run_uid: &str,
+    sink: &mut Sink,
+) -> Result<ControlFlow<i32>> {
+    if std::env::var_os("RSTEST_MONO_PROJECT").is_some() {
+        return Ok(ControlFlow::Continue(()));
+    }
+    let cwd = std::env::current_dir()?;
+    let path_args = args
+        .iter()
+        .any(|a| !a.starts_with('-') && std::path::Path::new(a).exists());
+    if path_args || config::has_pytest_config(&cwd, sink.err()) {
+        return Ok(ControlFlow::Continue(()));
+    }
+    let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
+    let threshold = if settings.projects.is_some() { 1 } else { 2 };
+    if projects.len() < threshold {
+        return Ok(ControlFlow::Continue(()));
+    }
+    // Each project keeps its OWN .rstest_cache (cache::file_in), and the per-run
+    // push/pull wiring lives in the single-project path that execute_monorepo
+    // bypasses — so a cache flag here would silently no-op (push) or warm the
+    // wrong root cache (pull). Fail loud; run rstest per project for shared caching.
+    if cli.cache_pull || cli.cache_push {
+        anyhow::bail!(
+            "--cache-pull/--cache-push are not supported in monorepo mode \
+             (each project has its own .rstest_cache); run rstest per project"
+        );
+    }
+    monorepo::execute_monorepo(cli, args, &cwd, projects, run_uid, sink).map(ControlFlow::Break)
+}
+
+/// require-baseline: with the durations-regress gate active, an absent baseline
+/// (cold remote, nothing restored/pulled) is a hard error rather than the silent
+/// skip the gate would otherwise do — the dead-gate guard. Gated on
+/// `!passthrough`, since the regression gate only runs on a real in-process run;
+/// the cache pull has already warmed the baseline it checks.
+fn check_require_baseline(cli: &Cli, passthrough: bool) -> Result<()> {
+    if cli.require_baseline
+        && cli.durations_regress.is_some()
+        && !passthrough
+        && durations::load().is_empty()
+    {
+        anyhow::bail!(
+            "--require-baseline: --durations-regress needs a duration baseline in \
+             .rstest_cache, but none is present (cold cache — nothing restored or pulled)"
+        );
+    }
+    Ok(())
+}
+
+/// The one-line run banner. Json/Tap keep stdout a pure machine stream: no
+/// banner (TAP gets its version header instead).
+fn print_run_banner(
+    mode: progress::Mode,
+    passthrough: bool,
+    single_worker_reruns: bool,
+    n: usize,
+    sink: &mut Sink,
+) {
+    if passthrough {
+        return;
+    }
+    if mode == progress::Mode::Tap {
+        sink.out_line("TAP version 13");
+        return;
+    }
+    if mode == progress::Mode::Json {
+        return;
+    }
+    let worker_desc = if single_worker_reruns {
+        "single worker (rerun pool; not byte-exact)".to_string()
+    } else if n <= 1 {
+        "single worker (pytest-exact mode)".to_string()
+    } else {
+        format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
+    };
+    sink.out_line(&format!(
+        "rstest {} — {worker_desc}",
+        env!("CARGO_PKG_VERSION")
+    ));
+}
+
+/// Pre-run mode warnings: `--reruns` inert under passthrough, and the byte-exact
+/// -> one-worker-rerun-pool switch (announced so log scrapers see it).
+fn warn_run_modes(
+    reruns: u32,
+    passthrough: bool,
+    single_worker_reruns: bool,
+    numprocesses: &str,
+    sink: &mut Sink,
+) {
+    if reruns > 0 && passthrough {
+        sink.warn(
+            "rstest: --reruns is ignored under -s/--pdb/--co \
+             (interactive single session); drop those flags to enable reruns",
+        );
+    }
+    if single_worker_reruns {
+        sink.warn(&format!(
+            "rstest: --reruns at -n {numprocesses} runs a one-worker rerun pool \
+             (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
+        ));
+    }
+}
+
+/// Resolved dispatch selection (`--shuffle`/`--shard`) plus the `--incremental`
+/// dispatch-level skip set and the state the post-run carry-forward needs.
+struct Incremental {
+    shuffle_seed: Option<u64>,
+    shard: Option<(usize, usize)>,
+    /// `--incremental` is actually in effect this run (all preconditions met).
+    active: bool,
+    config_fp: String,
+    /// Coverage index snapshotted BEFORE the run (drives skip now, carry-forward after).
+    prev_index: select::CoverageIndex,
+    baseline: coverage_skip::Baseline,
+    skip_ids: std::collections::HashSet<String>,
+}
+
+/// Resolve `--shuffle`/`--shard` and compute the `--incremental` skip set in one
+/// phase. `--incremental` skipping is restricted to the eager parallel pool on
+/// `--dist load` with full collection; incompatible modes disable it with a note
+/// (an explicit `--changed`/`--since-green` already narrows selection, so
+/// dispatch-level skipping on top is excluded — it would record a PARTIAL green
+/// baseline). The coverage index / baseline / skip set are loaded only when the
+/// feature is actually active, so the default run path pays nothing.
+fn resolve_incremental(
+    cfg: &RunConfig,
+    cli: &Cli,
+    settings: &config::RstestSettings,
+    args: &[String],
+    since_green: bool,
+    sink: &mut Sink,
+) -> Result<Incremental> {
+    let RunConfig {
+        n,
+        passthrough,
+        single_worker_reruns,
+        ref dist_name,
+        ref scope,
+        ..
+    } = *cfg;
+    // --shuffle reorders the orchestrator's dispatch queue, so it needs the
+    // full-collection pool. Refusing (not ignoring) matters: a user probing for
+    // order dependence must not get a silently ordered run. `is_lazy` is computed
+    // once and reused by the incremental gate below.
+    let is_lazy = collect_lazy(cli, settings, dist_name, args, sink)?;
+    let shuffle_seed = resolve_shuffle_seed(
+        cli.shuffle.as_deref(),
+        n,
+        passthrough,
+        single_worker_reruns,
+        is_lazy,
+        dist_name,
+        sink,
+    )?;
+    // --shard K/N: partition the suite and keep bucket K. Purely an
+    // orchestrator-side node-id (or, in lazy mode, file) filter.
+    let shard = resolve_shard(
+        cli.shard.as_deref(),
+        n,
+        passthrough,
+        single_worker_reruns,
+        shuffle_seed.is_some(),
+        dist_name,
+    )?;
+    let active = cli.incremental
+        && !since_green
+        && cli.changed.is_none()
+        && dist_name.as_str() == "load"
+        && !passthrough
+        && n >= 2
+        && shard.is_none()
+        && shuffle_seed.is_none()
+        && !is_lazy;
+    // The config fingerprint is only consumed under `active`; computing it
+    // unconditionally would walk the whole project tree for conftests.
+    let config_fp = if active {
+        coverage_skip::config_fingerprint(scope)
+    } else {
+        String::new()
+    };
+    warn_incremental_conflicts(
+        sink.err(),
+        cli.incremental,
+        since_green,
+        cli.changed.is_some(),
+        active,
+    );
+    // --incremental relies on the coverage index advancing every run; without
+    // --cov this run covtool never rewrites it, so a changed test re-runs on
+    // every invocation until a coverage run refreshes the index.
+    if active && !coverage_skip::coverage_requested(args) {
+        sink.warn(
+            "rstest: --incremental without --cov: the coverage index won't be \
+             refreshed this run, so changed tests keep re-running until a --cov run",
+        );
+    }
+    // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
+    // coverage-invisible: editing it won't bust the skip, so a test depending on
+    // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
+    if active && coverage_skip::cov_scope_narrowed(args) {
+        sink.warn(
+            "rstest: --incremental with a scoped --cov: edits to first-party source \
+             outside the coverage scope are undetectable and may leave a test cached \
+             on a stale pass; use --cov=. to cover the whole tree",
+        );
+    }
+    // Snapshot the index BEFORE the run: it drives the skip decision now, and
+    // post-run it supplies the cached tests' coverage to fold back in (covtool
+    // rewrites the index from only the tests that ran).
+    let prev_index = if active {
+        remote::load_local_cov_index()
+    } else {
+        select::CoverageIndex::default()
+    };
+    // The baseline is loaded once and kept: it drives the skip set now, and its
+    // recorded def lines restore the cached (not-run) entries' source line after
+    // the run (a cached test has no pytest report to supply one).
+    let baseline = if active {
+        coverage_skip::load(scope, &config_fp)
+    } else {
+        coverage_skip::Baseline::default()
+    };
+    let skip_ids = if active {
+        coverage_skip::skippable_now(&prev_index, &baseline)
+    } else {
+        std::collections::HashSet::new()
+    };
+    Ok(Incremental {
+        shuffle_seed,
+        shard,
+        active,
+        config_fp,
+        prev_index,
+        baseline,
+        skip_ids,
+    })
+}
+
+/// Apply `--quarantine` BEFORE any output or exit-code consumer: classification,
+/// counts, junit, report-json, and the sessionfinish envelope must all see the
+/// demoted outcomes consistently. Inert under passthrough (no aggregate Run).
+fn apply_quarantine(
+    cli: &Cli,
+    outcome: &mut pool::PoolOutcome,
+    passthrough: bool,
+    sink: &mut Sink,
+) -> Result<()> {
+    let Some(qpath) = &cli.quarantine else {
+        return Ok(());
+    };
+    if passthrough {
+        warn_quarantine_passthrough(sink.err());
+        return Ok(());
+    }
+    let matcher = gates::quarantine_matcher(qpath, sink)?;
+    let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
+    // pytest exit 1 = tests failed; if every failure was quarantined the run is
+    // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
+    if !demoted.is_empty() && outcome.exitstatus == 1 && outcome.run.all_passed() {
+        outcome.exitstatus = 0;
+    }
+    Ok(())
 }
 
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
@@ -788,7 +913,7 @@ fn dispatch_run(
         }
     } else if collect_lazy(cli, settings, dist_name, args, sink)? {
         let cwd = std::env::current_dir()?;
-        let project = config::discover(&cwd);
+        let project = config::discover(&cwd, sink.err());
         let paths: Vec<PathBuf> = args
             .iter()
             .filter(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
@@ -939,7 +1064,9 @@ fn auto_workers() -> usize {
     let mut n = cores;
 
     if let Ok(cwd) = std::env::current_dir() {
-        let project = config::discover(&cwd);
+        // Worker-sizing has no run Sink; a malformed-config note here is a dup of
+        // the one the real discover emits through the Sink, so send it to stderr.
+        let project = config::discover(&cwd, &mut std::io::stderr());
         if let Ok(files) = collect::collect_test_files(&[], &project) {
             n = cap_workers_by_files(n, files.len());
         }
@@ -971,20 +1098,28 @@ fn cap_workers_by_time(n: usize, total_secs: f64) -> usize {
     n.min(by_time.max(1))
 }
 
-/// The shared-cache flags need a resolved remote, and `--cache-compact` is a
-/// run-less maintenance mode that can't combine with `--cache-pull/--cache-push`
-/// (it exits before the run, silently skipping them). Both are hard errors.
-fn validate_cache_flags(pull: bool, push: bool, compact: bool, remote_present: bool) -> Result<()> {
-    if (pull || push || compact) && !remote_present {
-        anyhow::bail!(
-            "--cache-pull/--cache-push/--cache-compact need --cache-remote \
-             (or RSTEST_CACHE_REMOTE)"
-        );
+/// The shared-cache flags need a resolved remote. (`cache-compact` is now a
+/// run-less subcommand whose combination with `--cache-pull/--cache-push` is
+/// rejected by clap, since those flags aren't global.)
+fn validate_cache_flags(pull: bool, push: bool, remote_present: bool) -> Result<()> {
+    if (pull || push) && !remote_present {
+        anyhow::bail!("--cache-pull/--cache-push need --cache-remote (or RSTEST_CACHE_REMOTE)");
     }
-    if compact && (pull || push) {
-        anyhow::bail!(
-            "--cache-compact is a run-less maintenance mode; run it on its own, \
-             not combined with --cache-pull/--cache-push"
+    Ok(())
+}
+
+/// Cache-flag preflight for a normal run: validate that `--cache-pull` /
+/// `--cache-push` have a resolved remote, then warn when the `--cache-remote`
+/// FLAG is set with neither requested (it would silently do nothing). Gate the
+/// warn on the flag, NOT the env-resolved value: `RSTEST_CACHE_REMOTE` is
+/// ambient config a CI sets once, and plain runs that don't opt into pull/push
+/// must not be nagged every invocation.
+fn preflight_cache(cli: &Cli, cache_remote: &Option<String>, sink: &mut Sink) -> Result<()> {
+    validate_cache_flags(cli.cache_pull, cli.cache_push, cache_remote.is_some())?;
+    if cli.cache_remote.is_some() && !cli.cache_pull && !cli.cache_push {
+        sink.warn(
+            "rstest: cache: --cache-remote is set but no --cache-pull/--cache-push \
+             was requested; the shared cache is not being used",
         );
     }
     Ok(())
@@ -1369,22 +1504,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_cache_flags_requires_remote_and_rejects_compact_combo() {
+    fn validate_cache_flags_requires_remote() {
         // No cache flags => always fine, remote or not.
-        assert!(validate_cache_flags(false, false, false, false).is_ok());
+        assert!(validate_cache_flags(false, false, false).is_ok());
         // A cache action with a resolved remote => fine.
-        assert!(validate_cache_flags(true, false, false, true).is_ok());
+        assert!(validate_cache_flags(true, false, true).is_ok());
         // A cache action with no remote => hard error.
-        let err = validate_cache_flags(false, true, false, false)
+        let err = validate_cache_flags(false, true, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("need --cache-remote"), "got {err}");
-        assert!(validate_cache_flags(false, false, true, false).is_err());
-        // compact + pull/push is contradictory even with a remote.
-        let err = validate_cache_flags(true, false, true, true)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("run-less maintenance mode"), "got {err}");
     }
 
     #[test]

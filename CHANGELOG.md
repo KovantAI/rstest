@@ -3,6 +3,27 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.0.x releases and are listed here.
 
+## Unreleased
+
+- **BREAKING — run-less modes are now subcommands, not flags.** The four
+  modes that never run your suite are invoked as a leading subcommand:
+  - `rstest --verify-vendor` → `rstest verify-vendor`
+  - `rstest --try` → `rstest try`
+  - `rstest --migrate-check` → `rstest migrate-check`
+  - `rstest --cache-compact` → `rstest cache-compact`
+
+  Their paired options are unchanged and now follow the subcommand token:
+  `rstest migrate-check --migrate-check-json out.json --migrate-allow SUBSTR`
+  and `rstest cache-compact --cache-remote URL`. The subcommand must be the
+  first argument (`rstest verify-vendor --python 3.12`); a path literally named
+  after a subcommand is disambiguated with `rstest ./try` or `rstest -- try`.
+
+  The old flags no longer exist. Passing `--try` / `--migrate-check` /
+  `--verify-vendor` / `--cache-compact` now forwards them to the pytest session
+  (pytest then rejects the unknown argument), so **update CI scripts, aliases,
+  and Makefiles**. Also note `rstest migrate-check` is now required to run the
+  preflight — a bare `--migrate-check-json` no longer triggers it implicitly.
+
 ## 0.5.0 — 2026-09-06
 
 - Incremental testing based on coverage: `--changed` now leans on the

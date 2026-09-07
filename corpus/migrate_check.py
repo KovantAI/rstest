@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prototype: the unstable-nodeid detector for `rstest --migrate-check` (M1).
+"""Prototype: the unstable-nodeid detector for `rstest migrate-check` (M1).
 
 Run a suite's collection TWICE in fresh rstest processes and diff the id sets.
 IDs present in one collection but not the other are run-to-run unstable — the

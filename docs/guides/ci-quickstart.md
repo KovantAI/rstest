@@ -169,7 +169,7 @@ retention gives free segment eviction.
     — `gh run list` resolves the latest successful one above (the REST API `GET
     /repos/{owner}/{repo}/actions/artifacts` is the alternative). One complete
     sharded run is enough: its `N` shard segments union into a full index. To
-    fold *many* runs instead, add a scheduled job that `--cache-compact`s the
+    fold *many* runs instead, add a scheduled job that `cache-compact`s the
     segments into a base and uploads that base as its own artifact for PR jobs to
     pull.
 
@@ -288,7 +288,7 @@ shape (see the self-check table in the
 The [`example-bench.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/example-bench.yml)
 workflow re-runs it on GitHub's runners and posts the table to the job summary,
 so the same measurement is reproducible on standard CI hardware. To get *your*
-real numbers before committing, run [`rstest --try`](migrate-from-pytest.md)
+real numbers before committing, run [`rstest try`](migrate-from-pytest.md)
 locally — it runs your suite under plain pytest and under `rstest -n auto`,
 diffs outcomes, and reports the speedup, with no migration.
 
@@ -742,7 +742,7 @@ Two practical notes:
 
 ## Gating new parallel-unsafe tests with migrate-check
 
-[`--migrate-check`](../reference/cli.md#-migrate-check) exits non-zero when a
+[`migrate-check`](../reference/cli.md#migrate-check) exits non-zero when a
 test has a run-to-run unstable id or fails only under parallelism, so a
 dedicated job keeps a migrating suite from regressing — no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use

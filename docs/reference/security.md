@@ -116,13 +116,13 @@ wheel's PyPI sha256 (the trust anchor), and a sha256 of every file under
 `_vendor/`. The manifest ships in the wheel, so any installed copy can verify
 itself. Two levels of check:
 
-- **Offline integrity — anyone, anytime.** `rstest --verify-vendor` rehashes
+- **Offline integrity — anyone, anytime.** `rstest verify-vendor` rehashes
   the installed `_vendor/` tree and compares it to `vendor.lock`, catching a
   modified, corrupted, or partial vendored copy. It runs without contacting the
   network and exits non-zero on any drift:
 
     ```console
-    $ rstest --verify-vendor
+    $ rstest verify-vendor
     vendored pytest 9.1.1: 84 files verified against vendor.lock
     ```
 

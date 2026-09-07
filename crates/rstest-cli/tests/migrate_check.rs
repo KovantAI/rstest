@@ -1,4 +1,4 @@
-//! End-to-end tests for `rstest --migrate-check`. They build a tiny fixture
+//! End-to-end tests for `rstest migrate-check`. They build a tiny fixture
 //! suite in a temp dir and run the real binary against it, asserting the exit
 //! code (the CI gate) and the human report.
 //!
@@ -71,7 +71,7 @@ fn clean_suite_is_ready() {
         "def test_a():\n    assert True\n\ndef test_b():\n    assert True\n",
     )
     .unwrap();
-    let (code, out) = run(&venv, &dir, &["--migrate-check"]);
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(code, 0, "clean suite should be ready (exit 0)\n{out}");
     assert!(out.contains("ready"), "expected 'ready' in:\n{out}");
@@ -89,7 +89,7 @@ fn try_reports_parity_and_speed_on_a_clean_suite() {
          def test_ok():\n    assert True\n",
     )
     .unwrap();
-    let (code, out) = run(&venv, &dir, &["--try"]);
+    let (code, out) = run(&venv, &dir, &["try"]);
     let _ = std::fs::remove_dir_all(&dir);
     // Clean suite: rstest -n 0 ≡ pytest, so outcomes are identical -> exit 0.
     assert_eq!(
@@ -117,7 +117,7 @@ fn uuid_id_is_a_will_bail_blocker() {
     )
     .unwrap();
 
-    let (code, out) = run(&venv, &dir, &["--migrate-check"]);
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
     assert_eq!(
         code, 1,
         "uuid-id suite should fail the gate (exit 1)\n{out}"
@@ -129,7 +129,11 @@ fn uuid_id_is_a_will_bail_blocker() {
     run(
         &venv,
         &dir,
-        &["--migrate-check-json", jpath.to_str().unwrap()],
+        &[
+            "migrate-check",
+            "--migrate-check-json",
+            jpath.to_str().unwrap(),
+        ],
     );
     let txt = std::fs::read_to_string(&jpath).unwrap_or_default();
     assert!(
@@ -141,7 +145,7 @@ fn uuid_id_is_a_will_bail_blocker() {
     let (allow_code, allow_out) = run(
         &venv,
         &dir,
-        &["--migrate-check", "--migrate-allow", "test_uuid.py"],
+        &["migrate-check", "--migrate-allow", "test_uuid.py"],
     );
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(

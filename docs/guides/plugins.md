@@ -176,7 +176,7 @@ here. Probe one yourself in a minute:
    file not written), it's likely order- or terminal-sensitive — see the
    caveat tiers above for the pattern.
 
-`rstest --try` is a fast first pass: it runs your suite under pytest and
+`rstest try` is a fast first pass: it runs your suite under pytest and
 under `rstest -n auto` and flags outcome differences, plugins included.
 
 ## Known limits

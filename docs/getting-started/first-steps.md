@@ -159,7 +159,7 @@ $ rstest --doctor    # and if the suite feels slow, ask why
 
 !!! tip "Coming from pytest or pytest-xdist?"
     If tests fail *only* under parallelism on a freshly migrated suite, run
-    [`rstest --migrate-check`](../reference/cli.md#-migrate-check) first — it
+    [`rstest migrate-check`](../reference/cli.md#migrate-check) first — it
     classifies each parallel-only failure (order dependency, isolation leak,
     wall-clock timing, unstable id) and names the fix, so you don't triage by
     hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).

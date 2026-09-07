@@ -34,7 +34,7 @@ Both lanes are driven by a self-documenting rstest command that does the
 analysis; this skill is for the judgment around it (which fix vs. stopgap, what
 to leave alone, what to change). Read the matching reference when you reach it:
 
-- `references/fix-playbook.md` — the fix for every `--migrate-check` verdict.
+- `references/fix-playbook.md` — the fix for every `migrate-check` verdict.
 - `references/doctor-playbook.md` — the speed action for every `--doctor` finding.
 - `references/flag-map.md` — pytest/pytest-xdist → rstest flags & `[tool.rstest]`.
 
@@ -45,12 +45,12 @@ reuses pytest, doesn't replace it.
 
 ## Lane A — readiness / migration
 
-1. **Baseline + contract.** Quickest: `rstest --try` runs the suite under both
+1. **Baseline + contract.** Quickest: `rstest try` runs the suite under both
    pytest and `rstest -n auto` and reports parity (identical outcomes?) plus the
    speedup — the whole "is it safe and worth it" answer in one command. (Or do
    it by hand: record `pytest` pass/fail + wall time, then confirm `rstest -n 0`
    matches pytest exactly.) A parity diff is either an unstable id or a real
-   compatibility issue — surface it, don't paper over it; `--migrate-check`
+   compatibility issue — surface it, don't paper over it; `migrate-check`
    classifies it.
 2. **Preflight + fix.** `rstest --migrate-check-json findings.json`. Work each
    finding via `fix-playbook.md`; re-run until it reports **ready**. (It blocks
@@ -67,7 +67,7 @@ reuses pytest, doesn't replace it.
   an ephemeral port (`bind 0`), a mocked clock *remove* the problem; `-n 0` /
   `-n 4` / `@pytest.mark.serial` only cap parallelism. Offer both, recommend the
   fix.
-- **Leave pre-existing failures alone.** Anything `--migrate-check` calls
+- **Leave pre-existing failures alone.** Anything `migrate-check` calls
   NOT-PARALLEL-SPECIFIC or INTRINSIC FLAKE was already failing under pytest — not
   rstest's to fix. Report the count; don't delete/skip it to force green.
   Conflating "already red" with "rstest broke it" is the #1 migration mistake.
@@ -92,7 +92,7 @@ reuses pytest, doesn't replace it.
 3. **Re-measure.** Compare wall time before/after; report the delta.
 
 Note: the *parallel-safety* findings ("which tests aren't parallel-safe", "why
-does -n auto fail") belong to Lane A's `--migrate-check`, not `--doctor` —
+does -n auto fail") belong to Lane A's `migrate-check`, not `--doctor` —
 `--doctor` is purely about where time goes.
 
 ---

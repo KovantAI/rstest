@@ -193,7 +193,7 @@ Three runs usually classify the failure. Order dependencies want
 `loadfile` or a refactor; load sensitivity wants `serial` or a clock mock;
 anything failing at `-n 0` too is a plain bug.
 
-`rstest --migrate-check` runs exactly these discriminators **for you** — over
+`rstest migrate-check` runs exactly these discriminators **for you** — over
 the whole suite, scoped to the files that actually fail — classifies each
 failure into the classes above, and bisects the polluting file for order /
 isolation defects. Reach for it instead of running the three commands by hand;

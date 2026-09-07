@@ -1,4 +1,4 @@
-//! `--migrate-check`: the parallel-readiness preflight (M1) orchestrator.
+//! `migrate-check`: the parallel-readiness preflight (M1) orchestrator.
 //!
 //! Collects the suite twice in fresh sessions and diffs the id sets; ids
 //! present in only one are run-to-run unstable. Per-process-unstable ones

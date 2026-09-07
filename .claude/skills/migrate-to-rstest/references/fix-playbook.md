@@ -1,4 +1,4 @@
-# Fix playbook — one entry per `--migrate-check` finding
+# Fix playbook — one entry per `migrate-check` finding
 
 For each finding rstest reports, this is the root cause, the **upstream fix**
 (removes the problem), and the **rstest stopgap** (caps parallelism but

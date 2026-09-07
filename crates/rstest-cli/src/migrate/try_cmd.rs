@@ -1,4 +1,4 @@
-//! `rstest --try`: run the suite under plain pytest and under rstest (-n auto),
+//! `rstest try`: run the suite under plain pytest and under rstest (-n auto),
 //! report whether outcomes are identical and the speedup. The 30-second
 //! "should I switch?" proof.
 
@@ -48,7 +48,7 @@ fn fmt_secs(s: f64) -> String {
     }
 }
 
-/// `rstest --try`: run the suite under plain pytest and under rstest (-n auto),
+/// `rstest try`: run the suite under plain pytest and under rstest (-n auto),
 /// report whether outcomes are identical and the speedup. The 30-second
 /// "should I switch?" proof.
 pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
@@ -57,7 +57,7 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     let py_json = tmpdir.join(format!("rstest-try-pytest-{pid}.json"));
     let rs_json = tmpdir.join(format!("rstest-try-rstest-{pid}.json"));
 
-    sink.warn("rstest --try: running your suite under pytest…");
+    sink.warn("rstest try: running your suite under pytest…");
     let mut py = std::process::Command::new(python);
     py.args(["-m", "pytest", "-p", "rstest_worker.recorder", "-q"])
         .args(args)
@@ -70,13 +70,13 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
 
     let Some(py_out) = py_out else {
         sink.out_line(
-            "rstest --try: couldn't run pytest (is it installed and your suite collectable?).\n\
-             Try `python -m pytest -q` yourself, then re-run `rstest --try`.",
+            "rstest try: couldn't run pytest (is it installed and your suite collectable?).\n\
+             Try `python -m pytest -q` yourself, then re-run `rstest try`.",
         );
         return Ok(2);
     };
 
-    sink.warn("rstest --try: running it under rstest (-n auto)…");
+    sink.warn("rstest try: running it under rstest (-n auto)…");
     let exe = std::env::current_exe()?;
     let mut rs = std::process::Command::new(exe);
     rs.arg("-n")
@@ -92,8 +92,8 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
 
     let Some(rs_out) = rs_out else {
         sink.out_line(
-            "rstest --try: rstest produced no run (it may have refused to dispatch — \
-             often an unstable parametrize id). Run `rstest --migrate-check` to see why.",
+            "rstest try: rstest produced no run (it may have refused to dispatch — \
+             often an unstable parametrize id). Run `rstest migrate-check` to see why.",
         );
         return Ok(2);
     };
@@ -112,7 +112,7 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     let identical = only_py == 0 && only_rs == 0 && diffs == 0;
     let total = pk.union(&rk).count();
 
-    sink.out_line("\n================= rstest --try =================");
+    sink.out_line("\n================= rstest try =================");
     if identical {
         sink.out_line(&format!(
             "  ✓ parity:  {total} tests — identical outcomes to pytest"
@@ -165,7 +165,7 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     } else {
         sink.out_line(
             "  → some tests differ. Could be a pytest-version difference or a real parallel-only\n\
-             \x20   issue — run `rstest --migrate-check` to classify each and get the fix.",
+             \x20   issue — run `rstest migrate-check` to classify each and get the fix.",
         );
     }
     Ok(if identical { 0 } else { 1 })
