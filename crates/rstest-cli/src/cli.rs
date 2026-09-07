@@ -337,150 +337,102 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
     split_args(std::env::args().skip(1))
 }
 
+/// Single source of truth for the rstest-owned flag surface. Every long/short
+/// flag on the `Cli` clap struct must appear in exactly one of these tables;
+/// the `every_clap_flag_is_covered_by_the_split_tables` test enforces that, so
+/// a new flag can't be silently forwarded to the pytest session.
+///
+/// `BOOL_FLAGS`: switches that consume no value.
+const BOOL_FLAGS: &[&str] = &[
+    "--doctor",
+    "--watch",
+    "--migrate-check",
+    "--try",
+    "--fail-on-leak",
+    "--verify-vendor",
+    "--reruns-only-known-flaky",
+    "--since-green",
+    "--incremental",
+    "--cache-pull",
+    "--cache-push",
+    "--cache-compact",
+    "--require-baseline",
+    "--changed-strict",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+];
+
+/// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
+/// nothing, an attached `--changed=REV` carries its value inline. Never eats
+/// the following argv item (that item is a path / pytest flag).
+const OPT_FLAGS: &[&str] = &["--changed", "--shuffle"];
+
+/// Flags that take a value: either the following argv item (`--dist load`) or
+/// `=`-joined (`--dist=load`). `-n` also accepts the attached short forms
+/// `-n4` / `-n=4`, handled in `owned_without_value`.
+const VALUE_FLAGS: &[&str] = &[
+    "-n",
+    "--numprocesses",
+    "--python",
+    "--report-json",
+    "--output",
+    "--cache-remote",
+    "--migrate-check-json",
+    "--migrate-allow",
+    "--durations-regress",
+    "--only-rerun",
+    "--worker-timeout",
+    "--timeout",
+    "--reruns",
+    "--doctor-json",
+    "--quarantine",
+    "--doctor-md",
+    "--doctor-fail-on",
+    "--junitxml",
+    "--html",
+    "--dist",
+    "--shard",
+    "--collect",
+];
+
+/// True when `arg` is the `=`-joined form of flag `f` (e.g. `--dist=load` for
+/// `--dist`, `-n=4` for `-n`).
+fn is_eq_form(arg: &str, f: &str) -> bool {
+    arg.strip_prefix(f)
+        .is_some_and(|rest| rest.starts_with('='))
+}
+
+/// rstest-owned tokens clap consumes as a single argv item, no following value:
+/// boolean switches, optional-value flags (bare or `=VALUE`), `=`-joined value
+/// flags, and the attached short numprocesses forms `-n4` / `-n=4` (bare `-n`
+/// is a value flag handled by the caller). Exactness matters: `--durations`,
+/// `--durations-min`, `--collect-only`, `--co` are NOT prefixes of any table
+/// entry, so they correctly stay session args.
+fn owned_without_value(arg: &str) -> bool {
+    BOOL_FLAGS.contains(&arg)
+        || OPT_FLAGS.iter().any(|f| arg == *f || is_eq_form(arg, f))
+        || VALUE_FLAGS.iter().any(|f| is_eq_form(arg, f))
+        || (arg.starts_with("-n") && arg != "-n")
+}
+
 pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
     let mut own = vec!["rstest".to_string()];
     let mut session = Vec::new();
     let mut argv = argv.into_iter().peekable();
     while let Some(arg) = argv.next() {
-        match arg.as_str() {
-            "--doctor" | "--watch" | "--migrate-check" | "--try" | "--fail-on-leak"
-            | "--verify-vendor" => own.push(arg),
-            "--reruns-only-known-flaky" | "--since-green" | "--incremental" => own.push(arg),
-            "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
-                own.push(arg)
+        if arg == "--" {
+            session.extend(argv.by_ref());
+        } else if owned_without_value(&arg) {
+            own.push(arg);
+        } else if VALUE_FLAGS.contains(&arg.as_str()) {
+            own.push(arg);
+            if let Some(v) = argv.next() {
+                own.push(v);
             }
-            "--cache-remote" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--cache-remote=") => own.push(arg),
-            "--migrate-check-json" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--migrate-check-json=") => own.push(arg),
-            "--migrate-allow" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--migrate-allow=") => own.push(arg),
-            "--changed" | "--changed-strict" | "--shuffle" => own.push(arg),
-            _ if arg.starts_with("--changed=") => own.push(arg),
-            _ if arg.starts_with("--shuffle=") => own.push(arg),
-            // Exact match only: --durations / --durations-min stay session args.
-            "--durations-regress" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--durations-regress=") => own.push(arg),
-            "--only-rerun" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--only-rerun=") => own.push(arg),
-            "--worker-timeout" | "--timeout" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--worker-timeout=") => own.push(arg),
-            _ if arg.starts_with("--timeout=") => own.push(arg),
-            "--reruns" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--reruns=") => own.push(arg),
-            "--doctor-json" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--doctor-json=") => own.push(arg),
-            "--quarantine" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--quarantine=") => own.push(arg),
-            "--doctor-md" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--doctor-md=") => own.push(arg),
-            "--doctor-fail-on" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--doctor-fail-on=") => own.push(arg),
-            "--junitxml" | "--html" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--junitxml=") => own.push(arg),
-            _ if arg.starts_with("--html=") => own.push(arg),
-            "--dist" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--dist=") => own.push(arg),
-            "--shard" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--shard=") => own.push(arg),
-            // Exact "--collect" only: --collect-only/--co stay session args.
-            "--collect" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--collect=") => own.push(arg),
-            "-n" | "--numprocesses" | "--python" | "--report-json" | "--output" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            // Bare `-n` is caught by the exact arm above, so `starts_with("-n")`
-            // here only matches the attached short forms `-n4` / `-n=4` (clap
-            // accepts both); without this they'd leak to the pytest session.
-            _ if arg.starts_with("--numprocesses=")
-                || arg.starts_with("--python=")
-                || arg.starts_with("--report-json=")
-                || arg.starts_with("--output=")
-                || arg.starts_with("-n") =>
-            {
-                own.push(arg);
-            }
-            "-h" | "--help" | "-V" | "--version" => own.push(arg),
-            "--" => session.extend(argv.by_ref()),
-            _ => session.push(arg),
+        } else {
+            session.push(arg);
         }
     }
     (own, session)
@@ -534,6 +486,34 @@ mod tests {
         assert!(needs_passthrough_io(&v(&["--sw-reset"])));
         assert!(needs_passthrough_io(&v(&["--stepwise-reset"])));
         assert!(!needs_passthrough_io(&v(&["-k", "x", "-v"])));
+    }
+
+    #[test]
+    fn every_clap_flag_is_covered_by_the_split_tables() {
+        // The split tables are the single source of truth for the rstest-owned
+        // flag surface; clap is the other. This asserts they agree, so a flag
+        // added to the `Cli` struct without a table entry fails here instead of
+        // silently leaking to the pytest session.
+        use clap::CommandFactory;
+        let covered = |tok: &str| {
+            BOOL_FLAGS.contains(&tok) || OPT_FLAGS.contains(&tok) || VALUE_FLAGS.contains(&tok)
+        };
+        for arg in Cli::command().get_arguments() {
+            if let Some(long) = arg.get_long() {
+                let tok = format!("--{long}");
+                assert!(
+                    covered(&tok),
+                    "clap flag {tok} missing from split_args tables"
+                );
+            }
+            if let Some(short) = arg.get_short() {
+                let tok = format!("-{short}");
+                assert!(
+                    covered(&tok),
+                    "clap short flag {tok} missing from split_args tables"
+                );
+            }
+        }
     }
 
     #[test]
