@@ -86,6 +86,10 @@ pub struct Run {
     tests: BTreeMap<String, TestEntry>,
     collect_errors: Vec<(String, String)>,
     failures: Vec<Failure>,
+    /// nodeid -> index of its FIRST entry in `failures`, so `failure_text`
+    /// is O(1). Without it junit's per-failure lookup is O(n) each -> O(n²)
+    /// on an all-red suite.
+    failure_by_id: std::collections::HashMap<String, usize>,
     /// Modules/dirs skipped at collection (count into "skipped", as pytest does).
     pub collect_skips: u64,
     /// nodeids that passed only after rerun(s), with attempt counts.
@@ -104,6 +108,9 @@ impl Run {
                 .push((r.duration, r.when.clone(), r.nodeid.clone()));
         }
         if r.outcome == "failed" {
+            self.failure_by_id
+                .entry(r.nodeid.clone())
+                .or_insert(self.failures.len());
             self.failures.push((
                 worker,
                 r.nodeid.clone(),
@@ -441,10 +448,8 @@ impl Run {
 
     /// (nodeid, longrepr) pairs for failed tests (junit rendering).
     pub fn failure_text(&self, nodeid: &str) -> Option<&str> {
-        self.failures
-            .iter()
-            .find(|(_, id, _, _)| id == nodeid)
-            .map(|(_, _, repr, _)| repr.as_str())
+        let idx = *self.failure_by_id.get(nodeid)?;
+        Some(self.failures[idx].2.as_str())
     }
 
     pub fn all_passed(&self) -> bool {
