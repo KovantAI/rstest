@@ -130,11 +130,12 @@ fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
         let content = line.trim_start();
         let is_indented = line.starts_with([' ', '\t']);
 
-        // Blank line closes any open value (configparser semantics).
+        // Blank line: configparser keeps it as part of an open value
+        // (empty_lines_in_values=True is the default), so it does NOT
+        // terminate the key. The value ends at the next un-indented key,
+        // section header, or EOF. For whitespace-split lists a blank line
+        // contributes nothing.
         if content.is_empty() {
-            if let Some((k, v)) = open.take() {
-                apply(&mut cfg, &k, v);
-            }
             continue;
         }
         // Section header (never indented).
@@ -441,6 +442,54 @@ worker-timeout = 120
         let cfg = discover(&d);
         assert_eq!(cfg.testpaths, vec!["tests", "integration"]);
         assert_eq!(cfg.python_files, vec!["check_*.py", "chk_*.py"]);
+    }
+
+    #[test]
+    fn discover_malformed_pyproject_falls_back_to_default() {
+        // Malformed pyproject reached via discover() exercises parse_pyproject's
+        // toml error arm (distinct from rstest_settings' own parse). pytest.ini
+        // absent => probe loop falls through to pyproject.toml => None => default.
+        let d = tmpdir("discover-bad-toml");
+        std::fs::write(d.join("pyproject.toml"), "not [[[ valid = toml").unwrap();
+        let cfg = discover(&d);
+        assert_eq!(cfg.python_files, vec!["test_*.py", "*_test.py"]);
+        assert_eq!(cfg.testpaths, Vec::<String>::new());
+    }
+
+    #[test]
+    fn ini_empty_value_and_section_header_close() {
+        // `testpaths =` with no values opens an empty key; the `[other]` header
+        // closes it via the section-header path, and apply() drops the empty
+        // vec (leaving testpaths at its default) rather than clobbering it.
+        let d = tmpdir("ini-empty-close");
+        std::fs::write(
+            d.join("pytest.ini"),
+            "[pytest]\ntestpaths =\n[other]\npython_files = x_*.py\n",
+        )
+        .unwrap();
+        let cfg = discover(&d);
+        // Empty testpaths not applied => stays default (empty).
+        assert_eq!(cfg.testpaths, Vec::<String>::new());
+        // python_files lives in [other], not [pytest] => default retained.
+        assert_eq!(cfg.python_files, vec!["test_*.py", "*_test.py"]);
+    }
+
+    #[test]
+    fn ini_blank_lines_do_not_truncate_multiline_value() {
+        // Regression: configparser keeps blank lines inside a value
+        // (empty_lines_in_values=True). A blank line right after `key =`
+        // (before the first indented value) OR between continuation lines
+        // must NOT drop the indented values. The value ends only at the
+        // next un-indented key/section/EOF.
+        let d = tmpdir("ini-blank-lines");
+        std::fs::write(
+            d.join("pytest.ini"),
+            "[pytest]\ntestpaths =\n\n    tests\n\n    integration\npython_files = y_*.py\n",
+        )
+        .unwrap();
+        let cfg = discover(&d);
+        assert_eq!(cfg.testpaths, vec!["tests", "integration"]);
+        assert_eq!(cfg.python_files, vec!["y_*.py"]);
     }
 
     #[test]
