@@ -1,3 +1,9 @@
+//! rstest: a fast, parallel, pytest-compatible test runner.
+
+// Every `unsafe` block must carry a `// SAFETY:` justification. All unsafe here
+// is thin FFI (libc / windows-sys) around pipe endpoints and process probes.
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 mod cache;
 mod cli;
 #[allow(dead_code)]
