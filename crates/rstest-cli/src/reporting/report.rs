@@ -70,6 +70,12 @@ pub struct RunMeta {
 /// A recorded failure: (nodeid, longrepr, sections of (header, body)).
 type Failure = (Option<usize>, String, String, Vec<(String, String)>);
 
+/// Byte cap on any failure/collection-error text we persist. junit/html embed
+/// it and the console failures block prints it, so an uncapped copy would let a
+/// multi-MB traceback (pandas scale) land unbounded in those artifacts. One cap
+/// applied at every recording site keeps all persisted failure text bounded.
+const FAILURE_TEXT_CAP: usize = 20_000;
+
 /// How the failures block wraps each failure - CI log UIs fold on
 /// vendor-specific markers.
 #[derive(Clone, Copy, PartialEq)]
@@ -103,27 +109,27 @@ impl Run {
             self.phase_durations
                 .push((r.duration, r.when.clone(), r.nodeid.clone()));
         }
-        if r.outcome == "failed" {
-            self.failures.push((
-                worker,
-                r.nodeid.clone(),
-                r.longrepr.clone().unwrap_or_default(),
-                r.sections.clone(),
-            ));
-        }
+        // Cap once, then reuse for both the `failures` copy (junit/html/console)
+        // and `entry.longrepr` (report-json) — avoids truncating the same text
+        // twice. `Some` iff pytest actually sent a longrepr, so an absent repr
+        // stays `None` on the entry rather than becoming an empty string.
+        let capped_longrepr = if r.outcome == "failed" {
+            let mut repr = r.longrepr.clone().unwrap_or_default();
+            crate::text::truncate_on_boundary(&mut repr, FAILURE_TEXT_CAP);
+            self.failures
+                .push((worker, r.nodeid.clone(), repr.clone(), r.sections.clone()));
+            r.longrepr.as_ref().map(|_| repr)
+        } else {
+            None
+        };
         let entry = self.tests.entry(r.nodeid).or_default();
         if let Some(w) = worker {
             entry.worker = Some(format!("gw{w}"));
         }
         if r.outcome == "failed" && entry.longrepr.is_none() {
             // Machine consumers need the WHY, not just the phase verdict
-            // (the agent-fleet persona's #1 blocker). Capped: longreprs
-            // can be huge at pandas scale.
-            entry.longrepr = r.longrepr.as_deref().map(|t| {
-                let mut t = t.to_string();
-                crate::text::truncate_on_boundary(&mut t, 20_000);
-                t
-            });
+            // (the agent-fleet persona's #1 blocker).
+            entry.longrepr = capped_longrepr;
         }
         let outcome = Some(r.outcome);
         match r.when.as_str() {
@@ -154,7 +160,10 @@ impl Run {
         }
     }
 
-    pub fn collect_error(&mut self, path: String, longrepr: String) {
+    pub fn collect_error(&mut self, path: String, mut longrepr: String) {
+        // Same bound as failure text: html embeds this verbatim, so a giant
+        // collection-error traceback must not land unbounded in the artifact.
+        crate::text::truncate_on_boundary(&mut longrepr, FAILURE_TEXT_CAP);
         self.collect_errors.push((path, longrepr));
     }
 
@@ -711,6 +720,44 @@ mod tests {
         // A later phase without a lineno must not clobber the recorded one.
         run.record(None, report("a.py::t", "call", "passed"));
         assert_eq!(run.tests()["a.py::t"].lineno, Some(11));
+    }
+
+    #[test]
+    fn failure_text_is_truncated_at_source() {
+        // junit/html embed failure_text(); a multi-MB traceback must be capped
+        // there, not just on the report-json (entry.longrepr) path.
+        let mut run = Run::default();
+        let mut r = report("a.py::big", "call", "failed");
+        r.longrepr = Some("x".repeat(50_000));
+        run.record(None, r);
+        assert_eq!(run.failure_text("a.py::big").unwrap().len(), 20_000);
+        // Same cap on the report-json path (entry.longrepr), from the one
+        // truncation now shared by both.
+        assert_eq!(
+            run.tests()["a.py::big"].longrepr.as_deref().unwrap().len(),
+            20_000
+        );
+    }
+
+    #[test]
+    fn failed_report_without_longrepr_leaves_entry_none() {
+        // Capping shares one string, but an absent pytest longrepr must stay
+        // `None` on the entry, not collapse to an empty string.
+        let mut run = Run::default();
+        let mut r = report("a.py::t", "call", "failed");
+        r.longrepr = None;
+        run.record(None, r);
+        assert_eq!(run.tests()["a.py::t"].longrepr, None);
+        assert_eq!(run.failure_text("a.py::t"), Some(""));
+    }
+
+    #[test]
+    fn collect_error_is_truncated_at_source() {
+        // html embeds collect_errors() verbatim, so a giant collection-error
+        // traceback must be capped like failure text.
+        let mut run = Run::default();
+        run.collect_error("a.py".into(), "x".repeat(50_000));
+        assert_eq!(run.collect_errors()[0].1.len(), 20_000);
     }
 
     #[test]
