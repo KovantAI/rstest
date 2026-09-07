@@ -137,6 +137,22 @@ class NodeInputPayload(TypedDict):
     workerinput: dict[str, object]  # _wire_safe'd, arbitrary map
 
 
+# Serve mode (unix-only): mirror the Rust ServeReady/ServeReport/ServeRunDone.
+class ServeReadyPayload(TypedDict):
+    nodeids: list[str]  # full collected id set the client may target
+
+
+class ServeReportPayload(TypedDict):
+    req_id: int  # correlates the streamed reports to their serve_run
+    report: ReportPayload  # the normal Report body
+
+
+class ServeRunDonePayload(TypedDict):
+    req_id: int
+    killed: bool  # any covering test failed/errored
+    ran: int  # tests actually executed (< requested on stop_on_first_fail)
+
+
 EventKind = Literal[
     "report",
     "collect_error",
@@ -154,9 +170,6 @@ EventKind = Literal[
     "item_done",
     "stopped",
     "done",
-    "serve_ready",
-    "serve_report",
-    "serve_run_done",
 ]
 
 
@@ -256,8 +269,6 @@ CommandKind = Literal[
     "run_ids",
     "node_down",
     "no_more_items",
-    "run_serve_session",
-    "serve_run",
     "end_session",
     "shutdown",
 ]

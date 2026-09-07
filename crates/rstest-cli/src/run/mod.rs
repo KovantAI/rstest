@@ -1133,7 +1133,7 @@ fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> boo
 /// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
 /// Reports drive progress (suppressed under passthrough, whose IO is inherited)
 /// and the run record; collect errors/skips, doctor fixtures, and warnings
-/// accumulate. Scheduling / lazy / serve events are no-ops in a single session —
+/// accumulate. Scheduling / lazy events are no-ops in a single session —
 /// enumerated (not `_`) so a new event type forces a decision here.
 fn fold_run_event(
     event: proto::Event,
@@ -1177,10 +1177,7 @@ fn fold_run_event(
         | proto::Event::FileCollected { .. }
         | proto::Event::ItemStartId { .. }
         | proto::Event::ItemDoneId { .. }
-        | proto::Event::StoppedIds { .. }
-        | proto::Event::ServeReady { .. }
-        | proto::Event::ServeReport { .. }
-        | proto::Event::ServeRunDone { .. } => None,
+        | proto::Event::StoppedIds { .. } => None,
         proto::Event::Done { exitstatus } => Some(exitstatus),
     }
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::{is_fail, Outcomes, Phase, Rec};
+use super::{Outcomes, Phase};
 use crate::reporting::sink::Sink;
 use crate::scheduling::worker;
 
@@ -19,19 +19,7 @@ fn time_run(mut cmd: std::process::Command, record_path: &Path) -> (Option<Outco
     let wall = t0.elapsed().as_secs_f64();
     let outcomes = std::fs::read_to_string(record_path).ok().and_then(|txt| {
         let doc: serde_json::Value = serde_json::from_str(&txt).ok()?;
-        let tests = doc.get("tests")?.as_object()?;
-        let mut out = Outcomes::new();
-        for (nodeid, e) in tests {
-            out.insert(
-                nodeid.clone(),
-                Rec {
-                    phase: if is_fail(e) { Phase::Fail } else { Phase::Pass },
-                    wall: e.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                    cpu: None,
-                },
-            );
-        }
-        Some(out)
+        super::parse_outcomes(&doc, false)
     });
     (outcomes, wall, code)
 }

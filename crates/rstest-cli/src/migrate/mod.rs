@@ -43,6 +43,36 @@ pub(super) enum Phase {
     Fail, // failed or errored in any phase
 }
 
+/// Build the per-test [`Outcomes`] map from a run's `--report-json` document
+/// (its top-level `tests` object). `with_cpu` pulls each test's call-phase cpu
+/// time (present only under doctor instrumentation, for the wait-bound signal);
+/// pass `false` when the run carried none. Returns `None` when the document has
+/// no `tests` object.
+pub(super) fn parse_outcomes(doc: &serde_json::Value, with_cpu: bool) -> Option<Outcomes> {
+    let tests = doc.get("tests")?.as_object()?;
+    let mut out = Outcomes::new();
+    for (nodeid, entry) in tests {
+        out.insert(
+            nodeid.clone(),
+            Rec {
+                phase: if is_fail(entry) {
+                    Phase::Fail
+                } else {
+                    Phase::Pass
+                },
+                wall: entry
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                cpu: with_cpu
+                    .then(|| entry.get("cpu").and_then(|v| v.as_f64()))
+                    .flatten(),
+            },
+        );
+    }
+    Some(out)
+}
+
 pub(super) fn is_fail(entry: &serde_json::Value) -> bool {
     ["setup", "call", "teardown"].iter().any(|p| {
         matches!(
@@ -54,7 +84,7 @@ pub(super) fn is_fail(entry: &serde_json::Value) -> bool {
 
 /// The test file of a nodeid (everything before the first `::`).
 pub(super) fn file_of(nodeid: &str) -> &str {
-    nodeid.split("::").next().unwrap_or(nodeid)
+    crate::text::nodeid_file(nodeid)
 }
 
 /// Run one full session in a child rstest process with the given config flags
@@ -83,30 +113,11 @@ pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> 
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     cmd.status()?; // non-zero is expected when tests fail; the snapshot is truth
-    let mut out = Outcomes::new();
-    if let Ok(text) = std::fs::read_to_string(&tmp) {
-        if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(tests) = doc.get("tests").and_then(|t| t.as_object()) {
-                for (nodeid, entry) in tests {
-                    out.insert(
-                        nodeid.clone(),
-                        Rec {
-                            phase: if is_fail(entry) {
-                                Phase::Fail
-                            } else {
-                                Phase::Pass
-                            },
-                            wall: entry
-                                .get("duration")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(0.0),
-                            cpu: entry.get("cpu").and_then(|v| v.as_f64()),
-                        },
-                    );
-                }
-            }
-        }
-    }
+    let out = std::fs::read_to_string(&tmp)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|doc| parse_outcomes(&doc, true))
+        .unwrap_or_default();
     let _ = std::fs::remove_file(&tmp);
     Ok(out)
 }

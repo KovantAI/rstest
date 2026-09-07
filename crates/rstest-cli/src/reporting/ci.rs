@@ -16,7 +16,7 @@ fn mono_prefix() -> Option<String> {
 /// The source file of a nodeid (everything before `::`), prefixed with the
 /// monorepo project path when present.
 fn source_path(nodeid: &str, prefix: &Option<String>) -> String {
-    let rel = nodeid.split("::").next().unwrap_or(nodeid);
+    let rel = crate::text::nodeid_file(nodeid);
     match prefix {
         Some(p) => format!("{p}/{rel}"),
         None => rel.to_string(),

@@ -32,19 +32,16 @@ def test_serve_dispatches_run_tests(monkeypatch):
 def test_serve_dispatches_each_session_kind(monkeypatch):
     monkeypatch.setattr(runner_pytest, "run_session", lambda args, conn: 1)
     monkeypatch.setattr(runner_pytest, "run_lazy_session", lambda args, conn: 2)
-    monkeypatch.setattr(runner_pytest, "run_serve_session", lambda args, conn: 3)
     conn = _FakeConn(
         [
             {"kind": "run_items_session", "payload": {"args": []}},
             {"kind": "run_lazy_session", "payload": {"args": []}},
-            {"kind": "run_serve_session", "payload": {"args": []}},
         ]
     )
     worker_main._serve(conn)
     assert conn.sent == [
         ("done", {"exitstatus": 1}),
         ("done", {"exitstatus": 2}),
-        ("done", {"exitstatus": 3}),
     ]
 
 
