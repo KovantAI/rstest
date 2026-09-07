@@ -107,17 +107,37 @@ fn esc(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\t' | '\n' | '\r' => out.push(c),
-            // Control bytes < 0x20 (NUL, \x0B, \x1B from ANSI-colored capture,
-            // ...) are illegal in XML 1.0 even as numeric char refs, so strict
-            // CI parsers reject the whole file. pytest (junit_family=xunit2)
-            // replaces them with a visible `#xNN` token; do the same.
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "#x{:02X}", c as u32);
+            // Chars illegal in XML 1.0 even as numeric char refs (NUL, \x1B
+            // from ANSI-colored capture, C1 controls, the Unicode
+            // noncharacters, ...) make strict CI parsers reject the whole file.
+            // pytest (junit_family=xunit2) replaces them with a visible `#xNN`
+            // token — `#x{:02X}` up to 0xFF, `#x{:04X}` above — so mirror that.
+            c if is_illegal_xml_char(c as u32) => {
+                let cp = c as u32;
+                if cp <= 0xFF {
+                    let _ = write!(out, "#x{cp:02X}");
+                } else {
+                    let _ = write!(out, "#x{cp:04X}");
+                }
             }
             c => out.push(c),
         }
     }
     out
+}
+
+/// Whether `cp` is illegal in an XML 1.0 document (its `Char` production
+/// forbids it even as a numeric character reference). Mirrors pytest's
+/// `_junitxml.bin_xml_escape` illegal-char set: the C0 controls except
+/// `\t \n \r`, the C1 controls (0x7F-0x84, 0x86-0x9F; 0x85 NEL is legal), and
+/// the per-plane noncharacters (0xFDD0-0xFDEF plus every `*FFFE`/`*FFFF`).
+/// Surrogates (0xD800-0xDFFF) can't occur in a Rust `char`, so aren't checked.
+fn is_illegal_xml_char(cp: u32) -> bool {
+    matches!(cp,
+        0x00..=0x08 | 0x0B | 0x0C | 0x0E..=0x1F
+        | 0x7F..=0x84 | 0x86..=0x9F
+        | 0xFDD0..=0xFDEF
+    ) || (cp & 0xFFFE) == 0xFFFE
 }
 
 #[cfg(test)]
@@ -135,6 +155,20 @@ mod tests {
         // rendered as pytest's visible #xNN token. \t \n \r pass through.
         assert_eq!(esc("a\x00b\x0Bc\x1Bd"), "a#x00b#x0Bc#x1Bd");
         assert_eq!(esc("a\tb\nc\rd"), "a\tb\nc\rd");
+    }
+
+    #[test]
+    fn strips_c1_controls_and_noncharacters() {
+        // C1 controls (DEL 0x7F, 0x9F) are illegal too; 0x85 (NEL) is legal.
+        assert_eq!(esc("a\x7fb\u{9f}c"), "a#x7Fb#x9Fc");
+        assert_eq!(esc("a\u{85}b"), "a\u{85}b");
+        // Unicode noncharacters are illegal in XML 1.0 and, being > 0xFF, use
+        // the 4-hex form — a bare `#x02` here would still be rejected.
+        assert_eq!(esc("a\u{fffe}b\u{ffff}c"), "a#xFFFEb#xFFFFc");
+        assert_eq!(esc("a\u{fdd0}b"), "a#xFDD0b");
+        assert_eq!(esc("a\u{1fffe}b"), "a#x1FFFEb");
+        // Legal astral chars (e.g. emoji) are untouched.
+        assert_eq!(esc("a\u{1f600}b"), "a\u{1f600}b");
     }
 
     #[test]
