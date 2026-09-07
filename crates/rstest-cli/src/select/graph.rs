@@ -251,7 +251,24 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::imports_of;
+    use super::{affected_tests, imports_of, Selection};
+    use crate::config::ProjectConfig;
+    use std::path::{Path, PathBuf};
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rstest-graph-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // Canonicalize: the walker canonicalizes indexed files, so the rootdir
+        // must too or strip_prefix can't make results rootdir-relative.
+        d.canonicalize().unwrap()
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
 
     #[test]
     fn plain_and_comma_imports() {
@@ -279,6 +296,79 @@ mod tests {
         // `from . import sibling`
         let mods = imports_of("from . import sibling\n", "tests.sub.test_a");
         assert!(mods.contains(&"tests.sub.sibling".to_string()), "{mods:?}");
+    }
+
+    #[test]
+    fn from_without_import_keyword_is_skipped() {
+        // `from x` with no ` import ` clause is incomplete: it contributes no
+        // module and must not panic (the split_once returns None -> continue).
+        let mods = imports_of("from x\nfrom y import z\n", "tests.test_x");
+        assert!(!mods.iter().any(|m| m == "x"), "{mods:?}");
+        assert!(mods.contains(&"y".to_string()), "{mods:?}");
+    }
+
+    #[test]
+    fn conftest_change_selects_every_test_in_its_subtree() {
+        // Rule 2: a changed conftest.py affects all tests below its directory,
+        // with no import edge needed (the conftest branch's `continue`).
+        let root = tmp("conftest");
+        write(&root, "pkg/conftest.py", "");
+        write(&root, "pkg/test_a.py", "def test_a():\n    pass\n");
+        write(&root, "pkg/sub/test_b.py", "def test_b():\n    pass\n");
+        write(&root, "other/test_c.py", "def test_c():\n    pass\n");
+
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("pkg/conftest.py")],
+            false,
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(tests) => {
+                assert!(tests.contains(&PathBuf::from("pkg/test_a.py")), "{tests:?}");
+                assert!(
+                    tests.contains(&PathBuf::from("pkg/sub/test_b.py")),
+                    "{tests:?}"
+                );
+                // A test outside the conftest's subtree is not pulled in.
+                assert!(
+                    !tests.contains(&PathBuf::from("other/test_c.py")),
+                    "{tests:?}"
+                );
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    // An unreadable .py file must be walked over (read_to_string errors ->
+    // `continue`) rather than aborting the whole index build.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_source_file_is_skipped_during_build() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("unreadable");
+        write(&root, "pkg/mod.py", "x = 1\n");
+        write(&root, "pkg/test_a.py", "from pkg import mod\n");
+        let bad = root.join("pkg/bad.py");
+        std::fs::write(&bad, "import pkg.mod\n").unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("pkg/mod.py")],
+            false,
+        );
+        // Restore perms so the temp dir can be cleaned up regardless.
+        let _ = std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o644));
+        let sel = sel.unwrap();
+        match sel {
+            Selection::Tests(tests) => {
+                assert!(tests.contains(&PathBuf::from("pkg/test_a.py")), "{tests:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
     }
 
     #[test]

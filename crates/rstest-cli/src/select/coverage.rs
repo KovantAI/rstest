@@ -253,7 +253,143 @@ pub fn affected_with_coverage(
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_old_side, normalize_newlines};
+    use super::{
+        affected_with_coverage, diff_old_side, normalize_newlines, old_side_sha256, CoverageFile,
+        CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA,
+    };
+    use super::{ChangedLines, Selection};
+    use crate::config::ProjectConfig;
+    use crate::select::git::FileChange;
+    use crate::select::GLOBAL_TEST_LOCK as GLOBAL;
+    use std::path::{Path, PathBuf};
+
+    struct Cwd {
+        orig: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for Cwd {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.orig);
+        }
+    }
+    fn enter(dir: &Path) -> Cwd {
+        let lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        Cwd { orig, _lock: lock }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn init_repo(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rstest-cov-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git(&d, &["init", "-q"]);
+        git(&d, &["config", "user.email", "t@example.com"]);
+        git(&d, &["config", "user.name", "t"]);
+        git(&d, &["config", "commit.gpgsign", "false"]);
+        d
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn old_side_sha256_hashes_committed_content_and_none_when_absent() {
+        let repo = init_repo("oldside");
+        write(&repo, "a.py", "x = 1\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let _cwd = enter(&repo);
+        // Present at HEAD: a hash matching the working-tree content (unchanged).
+        let h = old_side_sha256("HEAD", Path::new("a.py")).expect("committed file hashes");
+        assert_eq!(h.len(), 64);
+        assert_eq!(
+            super::current_sha256(Path::new("a.py")).as_deref(),
+            Some(&*h)
+        );
+        // Absent at HEAD: git show fails -> None.
+        assert_eq!(old_side_sha256("HEAD", Path::new("nope.py")), None);
+    }
+
+    #[test]
+    fn diff_old_side_resolves_triple_dot_via_merge_base() {
+        let repo = init_repo("tripledot");
+        write(&repo, "a.py", "x = 1\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let _cwd = enter(&repo);
+        let head = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // `HEAD...HEAD` reduces to merge-base(HEAD, HEAD) == HEAD.
+        assert_eq!(diff_old_side(Some("HEAD...HEAD")), head);
+        // merge-base of two bogus refs fails -> fall back to the left side.
+        assert_eq!(diff_old_side(Some("bad1...bad2")), "bad1");
+        // Empty left side of a `...` range means HEAD before the merge-base call.
+        assert_eq!(diff_old_side(Some("...HEAD")), head);
+    }
+
+    #[test]
+    fn conftest_change_falls_back_to_the_graph_with_a_warm_index() {
+        let _lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("rstest-cov-conftest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Canonical rootdir so graph-fallback results come back rootdir-relative.
+        let root = root.canonicalize().unwrap();
+        write(&root, "pkg/conftest.py", "");
+        write(&root, "pkg/test_a.py", "def test_a():\n    pass\n");
+
+        // Warm (schema-current) index in a private cache dir.
+        let cache_dir = root.join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let index = CoverageIndex {
+            schema: COVERAGE_INDEX_SCHEMA,
+            files: Default::default(),
+        };
+        std::fs::write(
+            cache_dir.join(COVERAGE_INDEX_FILE),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let saved = std::env::var("RSTEST_CACHE").ok();
+        std::env::set_var("RSTEST_CACHE", &cache_dir);
+
+        let mut changes: ChangedLines = ChangedLines::new();
+        changes.insert(PathBuf::from("pkg/conftest.py"), FileChange::default());
+        let sel = affected_with_coverage(&root, &ProjectConfig::default(), &changes, false, None);
+
+        match saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE", v),
+            None => std::env::remove_var("RSTEST_CACHE"),
+        }
+
+        // A changed conftest routes to the graph (Rule 2), selecting its subtree.
+        match sel.unwrap() {
+            Selection::Tests(tests) => {
+                assert!(tests.contains(&PathBuf::from("pkg/test_a.py")), "{tests:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+        // Keep the `_` binding to prove the warm-index CoverageFile type is wired.
+        let _ = CoverageFile::default();
+    }
 
     #[test]
     fn diff_old_side_reduces_ranges_to_a_single_commit() {

@@ -397,3 +397,28 @@ pub fn worker_pythonpath() -> String {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Endpoint;
+
+    #[test]
+    fn endpoint_into_raw_takes_ownership_without_closing() {
+        // A fake, never-opened raw value: raw() reads it, into_raw() hands it
+        // off and defuses Drop (no close of an fd we don't own).
+        let e = Endpoint::new(0xDEAD_BEEF);
+        assert_eq!(e.raw(), 0xDEAD_BEEF);
+        assert_eq!(e.into_raw(), 0xDEAD_BEEF);
+    }
+
+    // fcntl(F_GETFD) on an fd that was never opened fails with EBADF, driving
+    // the parent-end error path. F_SETFD's own failure branch is left uncovered
+    // (no way to make GETFD succeed but SETFD fail on the same live fd).
+    #[cfg(unix)]
+    #[test]
+    fn prepare_parent_end_errors_on_a_bad_fd() {
+        // A high fd number that is not open in the test process.
+        let err = super::transport::prepare_parent_end(1_000_000).unwrap_err();
+        assert!(err.to_string().contains("F_GETFD"), "{err}");
+    }
+}
