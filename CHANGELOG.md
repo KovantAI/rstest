@@ -5,6 +5,8 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-07
+
 - **BREAKING — run-less modes are now subcommands, not flags.** The four
   modes that never run your suite are invoked as a leading subcommand:
   - `rstest --verify-vendor` → `rstest verify-vendor`

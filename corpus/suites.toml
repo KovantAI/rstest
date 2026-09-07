@@ -39,7 +39,7 @@ repo = "https://github.com/pallets/flask"
 install = ["--group tests", "-e ."]
 # This pinned flask checkout's tests/test_cli.py imports
 # `_pytest.monkeypatch.notset`, a sentinel pytest 9.1 removed (renamed to
-# `_pytest.compat.NOTSET`). rstest 0.5.0 vendors 9.1.1 and the baseline pins
+# `_pytest.compat.NOTSET`). rstest 0.6.0 vendors 9.1.1 and the baseline pins
 # 9.1.1, so the bare import errors collection under BOTH. Re-alias it via a
 # rootdir conftest so the import resolves and monkeypatch.undo()'s
 # `value is NOTSET` teardown still deletes the temporarily-set keys. Aliasing
@@ -224,4 +224,4 @@ projects = [
 # ephemeral ReportServer. Verified standalone: checkpoint-sqlite runs at -n auto
 # (108 passed, ~2x vs -n 0) with pytest-retry active. No pin needed.
 # Mono parity verified on the 5-lib subset: 838 tests, 100% per-test outcome
-# parity, 1.45x wall (10-run mean, rstest 0.5.0).
+# parity, 1.45x wall (10-run mean, rstest 0.6.0).
