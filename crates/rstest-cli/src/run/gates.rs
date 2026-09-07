@@ -14,6 +14,7 @@ use crate::cli::Cli;
 use crate::reporting::ci::{
     buildkite_flaky_annotate, print_azure_annotations, print_github_annotations,
 };
+use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, html, junit, progress, report, status};
 use crate::scheduling::{durations, pool, proto, worker};
 use crate::{cache, coverage_skip, doctor, incremental, remote, select};
@@ -71,7 +72,7 @@ fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bo
 /// (-s/--pdb/--co): those run a single interactive session with no doctor
 /// instrumentation, so the gate would silently pass. Fires only when a gate is
 /// set AND the run is passthrough.
-fn warn_doctor_gate_passthrough(w: &mut impl Write, gate_empty: bool, passthrough: bool) {
+fn warn_doctor_gate_passthrough(w: &mut dyn Write, gate_empty: bool, passthrough: bool) {
     if !gate_empty && passthrough {
         let _ = writeln!(
             w,
@@ -94,7 +95,7 @@ fn validate_regress_ratio(ratio: f64) -> Result<()> {
 /// `status` is `Ok(success)` once the child exited, `Err(msg)` if it never ran.
 /// A covtool failure only turns an otherwise-green run red; it never lowers a
 /// non-zero status. A spawn error warns (to `w`) but doesn't fail the run.
-fn reconcile_cov_status(w: &mut impl Write, status: Result<bool, String>, exitstatus: i32) -> i32 {
+fn reconcile_cov_status(w: &mut dyn Write, status: Result<bool, String>, exitstatus: i32) -> i32 {
     match status {
         Ok(false) if exitstatus == 0 => 1,
         Ok(_) => exitstatus,
@@ -108,7 +109,7 @@ fn reconcile_cov_status(w: &mut impl Write, status: Result<bool, String>, exitst
 /// Report a `--cache-push` outcome (to `w`): a success line with the segment's
 /// counts, or a warning on failure. A push failure never fails an otherwise-green
 /// run — it is reported, not gated.
-fn report_push_result(w: &mut impl Write, result: Result<()>, seg: &remote::Segment, remote: &str) {
+fn report_push_result(w: &mut dyn Write, result: Result<()>, seg: &remote::Segment, remote: &str) {
     match result {
         Ok(()) => {
             let _ = writeln!(
@@ -158,7 +159,7 @@ fn results_bar_line(
 
 /// TeamCity flaky service messages (to `w`), one per flaky test; nothing when no
 /// test needed a rerun.
-fn write_teamcity_flaky(w: &mut impl Write, flaky: &[(String, u32)]) {
+fn write_teamcity_flaky(w: &mut dyn Write, flaky: &[(String, u32)]) {
     let msgs = progress::teamcity_flaky_messages(flaky);
     if !msgs.is_empty() {
         let _ = writeln!(w, "{msgs}");
@@ -177,11 +178,11 @@ pub(super) fn run_post_gates(
     outcome: &mut pool::PoolOutcome,
     args: &[String],
     post: &PostRun,
+    sink: &mut Sink,
 ) -> Result<i32> {
     let RunConfig {
         n,
         passthrough,
-        palette,
         mode,
         doctor,
         ref doctor_gate,
@@ -190,6 +191,7 @@ pub(super) fn run_post_gates(
         ref scope,
         ..
     } = *cfg;
+    let palette = sink.palette();
     let PostRun {
         start,
         started_epoch,
@@ -206,7 +208,7 @@ pub(super) fn run_post_gates(
     } = *post;
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
-    warn_doctor_gate_passthrough(&mut std::io::stderr(), doctor_gate.is_empty(), passthrough);
+    warn_doctor_gate_passthrough(sink.err(), doctor_gate.is_empty(), passthrough);
     let mut doctor_gate_failed = false;
     if (cli.doctor
         || cli.doctor_json.is_some()
@@ -223,7 +225,7 @@ pub(super) fn run_post_gates(
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {
-            doctor::render(&report);
+            doctor::render(sink, &report);
         }
         if let Some(path) = &cli.doctor_json {
             doctor::write_json(path, &report)?;
@@ -231,27 +233,27 @@ pub(super) fn run_post_gates(
         if let Some(path) = &cli.doctor_md {
             doctor::write_markdown(path, &report)?;
         }
-        doctor::append_ci_summary(&report)?;
+        doctor::append_ci_summary(sink, &report)?;
         if !doctor_gate.is_empty() {
             let gate = doctor::evaluate(&report, doctor_gate);
             for s in &gate.skipped {
-                eprintln!("rstest: --doctor-fail-on: {s}");
+                sink.warn(&format!("rstest: --doctor-fail-on: {s}"));
             }
             if gate.breaches.is_empty() {
-                eprintln!(
+                sink.warn(&format!(
                     "rstest: --doctor-fail-on: all {} condition(s) passed",
                     doctor_gate.len()
-                );
+                ));
             } else {
                 // stderr, not stdout: --output json/tap keep stdout a pure
                 // machine stream, and the failure block must not corrupt it
                 // (same reason the human doctor render is gated above).
-                eprintln!(
+                sink.warn(&format!(
                     "\n{}",
                     palette.bold_red("=========== doctor gate failures ===========")
-                );
+                ));
                 for b in &gate.breaches {
-                    eprintln!("  {b}");
+                    sink.warn(&format!("  {b}"));
                 }
                 doctor_gate_failed = true;
             }
@@ -283,23 +285,25 @@ pub(super) fn run_post_gates(
         validate_regress_ratio(ratio)?;
         let baseline = durations::load();
         if baseline.is_empty() {
-            eprintln!(
+            sink.warn(
                 "rstest: --durations-regress: no duration baseline yet \
-                 (.rstest_cache/durations.json); comparison skipped"
+                 (.rstest_cache/durations.json); comparison skipped",
             );
         } else {
             let rows = durations::regressions(&outcome.run, &baseline, ratio);
             if rows.is_empty() {
-                eprintln!("rstest: --durations-regress: no regressions (>= {ratio}x baseline)");
+                sink.warn(&format!(
+                    "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
+                ));
             } else {
-                println!(
+                sink.out_line(&format!(
                     "\n{}",
                     palette.bold_red(&format!(
                         "=========== duration regressions (>= {ratio}x baseline) ==========="
                     ))
-                );
+                ));
                 for (nodeid, old, new) in &rows {
-                    println!("  {old:7.2}s -> {new:7.2}s  {nodeid}");
+                    sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
                 }
                 duration_regressions = rows.len();
             }
@@ -320,7 +324,7 @@ pub(super) fn run_post_gates(
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
     if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
-        println!();
+        sink.out_line("");
         let status = std::process::Command::new(python)
             .args(["-m", "rstest_worker.covtool"])
             .args(args)
@@ -330,7 +334,7 @@ pub(super) fn run_post_gates(
             .env("RSTEST_CACHE", cache::dir())
             .status();
         exitstatus = reconcile_cov_status(
-            &mut std::io::stderr(),
+            sink.err(),
             status.map(|s| s.success()).map_err(|e| e.to_string()),
             exitstatus,
         );
@@ -359,7 +363,7 @@ pub(super) fn run_post_gates(
                 cov,
             );
             let result = remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg));
-            report_push_result(&mut std::io::stderr(), result, &seg, remote);
+            report_push_result(sink.err(), result, &seg, remote);
         }
     }
     write_report_json(
@@ -368,16 +372,16 @@ pub(super) fn run_post_gates(
         &build_run_meta(start, outcome.exitstatus, started_epoch, n),
     )?;
     if duration_regressions > 0 {
-        eprintln!(
+        sink.warn(&format!(
             "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
             if duration_regressions > 1 { "s" } else { "" }
-        );
+        ));
         if exitstatus == 0 {
             exitstatus = 1;
         }
     }
     if doctor_gate_failed {
-        eprintln!("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
+        sink.warn("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
         if exitstatus == 0 {
             exitstatus = 1;
         }
@@ -421,9 +425,9 @@ pub(super) fn run_post_gates(
         // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
         // deltas are measured. Warn instead of silently exiting 0 (matches the
         // --quarantine passthrough behavior).
-        eprintln!(
+        sink.warn(
             "rstest: --fail-on-leak has no effect in passthrough mode \
-             (-s/--pdb/--co); ignoring"
+             (-s/--pdb/--co); ignoring",
         );
     } else if cli.fail_on_leak {
         let leaks = doctor::detect_leaks(&outcome.run);
@@ -431,26 +435,26 @@ pub(super) fn run_post_gates(
             // Note the blind spot: the first test each worker runs is an
             // unchecked warm-up (first-touch imports aren't a per-test leak),
             // so a clean gate does not prove those tests are leak-free.
-            eprintln!(
+            sink.warn(
                 "rstest: --fail-on-leak: no thread/fd leaks detected \
-                 (first test per worker runs as an unchecked warm-up)"
+                 (first test per worker runs as an unchecked warm-up)",
             );
         } else {
             // Under --doctor the RESOURCE LEAKS section already listed these;
             // only gate + summarize here to avoid printing the table twice.
             if !doctor {
-                eprintln!(
+                sink.warn(&format!(
                     "\n{}",
                     palette.bold_red("=========== resource leaks ===========")
-                );
+                ));
                 for l in leaks.iter().take(20) {
-                    eprintln!("  {}  {}", doctor::leak_delta(l), l.nodeid);
+                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.nodeid));
                 }
             }
-            eprintln!(
+            sink.warn(&format!(
                 "rstest: --fail-on-leak: {} test(s) leaked threads/fds",
                 leaks.len()
-            );
+            ));
             if exitstatus == 0 {
                 exitstatus = 1;
             }
@@ -463,32 +467,33 @@ pub(super) fn finalize_output(
     outcome: &mut pool::PoolOutcome,
     passthrough: bool,
     mode: progress::Mode,
-    palette: color::Palette,
     durations: Option<(usize, f64)>,
     very_verbose: bool,
     start: Instant,
+    sink: &mut Sink,
 ) {
+    let palette = sink.palette();
     // Loaded before this run's events are recorded, so the history
     // annotations say "before this run".
     let flake_history = flakes::load();
     if !passthrough && mode == progress::Mode::Json {
         // Pure NDJSON: close the stream with a session-finish envelope
         // (counts + duration + exit status). No human summary/failures.
-        outcome.prog.finish();
+        outcome.prog.finish(sink);
         let envelope = serde_json::json!({
             "event": "sessionfinish",
             "exitstatus": outcome.exitstatus,
             "duration": (start.elapsed().as_secs_f64() * 100.0).round() / 100.0,
             "counts": outcome.run.counts(),
         });
-        println!("{envelope}");
+        sink.out_line(&envelope.to_string());
     } else if !passthrough && mode == progress::Mode::Tap {
         // Pure TAP: close the stream with the trailing plan. Failure text
         // already rode along as `#` diagnostics; no human summary.
-        outcome.prog.finish();
-        outcome.prog.tap_plan();
+        outcome.prog.finish(sink);
+        outcome.prog.tap_plan(sink);
     } else if !passthrough {
-        outcome.prog.finish();
+        outcome.prog.finish(sink);
         let wrap = match mode {
             progress::Mode::Gitlab => report::FailureWrap::GitlabSection,
             progress::Mode::Buildkite => report::FailureWrap::BuildkiteGroup,
@@ -497,15 +502,13 @@ pub(super) fn finalize_output(
         // Bar mode already inlines each failure as it happens; re-printing
         // the batched block would duplicate it.
         if mode != progress::Mode::Bar {
-            outcome.run.print_failures(&palette, wrap);
+            outcome.run.print_failures(sink, wrap);
         }
-        outcome.run.print_quarantined(&palette, &flake_history);
-        outcome.run.print_flaky(&palette, &flake_history, wrap);
-        print_warnings_summary(&mut std::io::stdout(), &outcome.warnings, &palette);
+        outcome.run.print_quarantined(sink, &flake_history);
+        outcome.run.print_flaky(sink, &flake_history, wrap);
+        print_warnings_summary(sink.out(), &outcome.warnings, &palette);
         if let Some((dn, dmin)) = durations {
-            outcome
-                .run
-                .print_durations(dn, dmin, very_verbose, &palette);
+            outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
         let warn_part = if warn_total > 0 {
@@ -518,12 +521,10 @@ pub(super) fn finalize_output(
         // the stable summary line (which tooling/CI greps, so keep it intact).
         // The bar gives its own visual break; other modes get a blank line.
         if mode == progress::Mode::Bar && std::io::stdout().is_terminal() {
-            println!(
-                "{}",
-                results_bar_line(&outcome.run.counts(), elapsed, &palette)
-            );
+            let line = results_bar_line(&outcome.run.counts(), elapsed, &palette);
+            sink.out_line(&line);
         } else {
-            println!();
+            sink.out_line("");
         }
         let cached = outcome.run.cached_count();
         let cached_note = if cached > 0 {
@@ -540,17 +541,15 @@ pub(super) fn finalize_output(
         } else {
             palette.red(&summary)
         };
-        println!("{summary}");
+        sink.out_line(&summary);
         // CI-native surfaces emitted from the aggregate at end-of-run. Failures
         // already rode along above, so these add each platform's flake signal
         // (GitHub/Azure annotations here; TeamCity as live service messages).
         match mode {
-            progress::Mode::Github => print_github_annotations(&outcome.run),
-            progress::Mode::Azure => print_azure_annotations(&outcome.run),
-            progress::Mode::Buildkite => buildkite_flaky_annotate(&outcome.run),
-            progress::Mode::Teamcity => {
-                write_teamcity_flaky(&mut std::io::stdout(), &outcome.run.flaky)
-            }
+            progress::Mode::Github => print_github_annotations(sink, &outcome.run),
+            progress::Mode::Azure => print_azure_annotations(sink, &outcome.run),
+            progress::Mode::Buildkite => buildkite_flaky_annotate(sink, &outcome.run),
+            progress::Mode::Teamcity => write_teamcity_flaky(sink.out(), &outcome.run.flaky),
             _ => {}
         }
     }
@@ -576,7 +575,7 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
 /// Writes to `w` (stdout at the call site) so the merge/plural formatting is
 /// unit-testable.
 fn print_warnings_summary(
-    w: &mut impl Write,
+    w: &mut dyn Write,
     warnings: &[proto::WarningEntry],
     palette: &color::Palette,
 ) {
@@ -620,7 +619,10 @@ fn print_warnings_summary(
 
 /// Compile the --quarantine file into one matcher: exact nodeids or `*`
 /// globs, one per line, `#` comments and blanks skipped.
-pub(super) fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
+pub(super) fn quarantine_matcher(
+    path: &std::path::Path,
+    sink: &mut Sink,
+) -> Result<regex::RegexSet> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
     let patterns: Vec<String> = text
@@ -638,7 +640,10 @@ pub(super) fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexS
         })
         .collect();
     if patterns.is_empty() {
-        eprintln!("rstest: --quarantine: {} lists no patterns", path.display());
+        sink.warn(&format!(
+            "rstest: --quarantine: {} lists no patterns",
+            path.display()
+        ));
     }
     Ok(regex::RegexSet::new(patterns)?)
 }
@@ -653,6 +658,7 @@ mod tests {
     };
     use crate::reporting::color::Palette;
     use crate::reporting::report::Run;
+    use crate::reporting::sink::Sink;
     use crate::scheduling::proto::{FixtureStat, WarningEntry};
     use std::time::Instant;
 
@@ -766,7 +772,7 @@ mod tests {
             "mixed",
             "# a comment\n\ntest_foo.py::test_a\ntest_bar.py::*\n",
         );
-        let set = quarantine_matcher(&path).unwrap();
+        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
         assert_eq!(set.len(), 2); // comment + blank line skipped
         assert!(set.is_match("test_foo.py::test_a")); // exact
         assert!(!set.is_match("test_foo.py::test_ab")); // anchored: no substring match
@@ -778,7 +784,7 @@ mod tests {
     #[test]
     fn quarantine_matcher_empty_when_only_comments() {
         let path = write_quarantine("empty", "# nothing here\n\n");
-        let set = quarantine_matcher(&path).unwrap();
+        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
         assert_eq!(set.len(), 0);
         assert!(!set.is_match("test_foo.py::test_a"));
         std::fs::remove_file(&path).ok();
@@ -787,7 +793,7 @@ mod tests {
     #[test]
     fn quarantine_matcher_errors_on_missing_file() {
         let path = std::env::temp_dir().join("rstest-quarantine-does-not-exist-xyz.txt");
-        assert!(quarantine_matcher(&path).is_err());
+        assert!(quarantine_matcher(&path, &mut Sink::captured().0).is_err());
     }
 
     #[test]

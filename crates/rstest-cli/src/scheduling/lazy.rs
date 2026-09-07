@@ -23,6 +23,7 @@ use anyhow::Result;
 
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
+use crate::reporting::sink::Sink;
 use crate::scheduling::orchestrator;
 use crate::scheduling::pool::PoolOutcome;
 use crate::scheduling::proto::{self, Event};
@@ -127,13 +128,13 @@ pub fn run_lazy_pool(
     // --dist loadfile => steal=false: strict file affinity, the remedy
     // for order-dependent suites (same contract as the full pool).
     steal: bool,
+    sink: &mut Sink,
 ) -> Result<PoolOutcome> {
     let &crate::scheduling::pool::PoolConfig {
         python,
         n,
         args,
         mode,
-        palette,
         maxfail,
         reruns,
         only_rerun,
@@ -156,7 +157,6 @@ pub fn run_lazy_pool(
 
     let mut run = Run::default();
     let mut prog = Progress::default();
-    prog.set_palette(palette);
     // Json mode keeps stdout pure NDJSON; the footer would corrupt it.
     if mode != crate::reporting::progress::Mode::Json {
         prog.enable_footer(n);
@@ -186,9 +186,9 @@ pub fn run_lazy_pool(
         let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok(pair) => pair,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                prog.tick();
+                prog.tick(sink);
                 if let Some(limit) = worker_timeout {
-                    orchestrator::watchdog_tick(&mut states, limit);
+                    orchestrator::watchdog_tick(sink, &mut states, limit);
                 }
                 continue;
             }
@@ -206,7 +206,7 @@ pub fn run_lazy_pool(
                 if r.outcome == "failed" {
                     fail_count += 1;
                 }
-                prog.on_report(Some(idx), &r);
+                prog.on_report(sink, Some(idx), &r);
                 run.record(Some(idx), r);
                 if let Some(limit) = maxfail {
                     if !stopping && fail_count >= limit {
@@ -270,10 +270,10 @@ pub fn run_lazy_pool(
             Ok(Event::ItemStartId { id }) => {
                 states[idx].running = Some(id.clone());
                 states[idx].running_since = Some(std::time::Instant::now());
-                prog.item_started(idx, id);
+                prog.item_started(sink, idx, id);
             }
             Ok(Event::ItemDoneId { id }) => {
-                prog.item_finished(idx);
+                prog.item_finished(sink, idx);
                 let s = &mut states[idx];
                 s.running = None;
                 s.running_since = None;
@@ -298,6 +298,7 @@ pub fn run_lazy_pool(
                         let attempt = std::mem::take(&mut s.attempt);
                         s.attempt_failed = false;
                         orchestrator::finalize_attempt(
+                            sink,
                             &mut run,
                             &mut prog,
                             &mut fail_count,
@@ -379,7 +380,7 @@ pub fn run_lazy_pool(
                             idx,
                             &e,
                         );
-                        prog.on_report(Some(idx), &fab);
+                        prog.on_report(sink, Some(idx), &fab);
                         run.record(Some(idx), fab);
                     }
                     requeued.extend(
@@ -387,10 +388,10 @@ pub fn run_lazy_pool(
                             .into_iter()
                             .filter(|id| Some(id) != crashed_orig.as_ref()),
                     );
-                    eprintln!(
+                    sink.warn(&format!(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
-                    );
+                    ));
                     // Reap the old worker in place BEFORE spawning its
                     // replacement. This arm also fires on a decode error (the
                     // child may still be alive, running tests against a closed

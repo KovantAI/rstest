@@ -11,6 +11,8 @@ use std::time::Duration;
 use anyhow::Result;
 use notify::{RecursiveMode, Watcher};
 
+use crate::reporting::color::Palette;
+use crate::reporting::sink::Sink;
 use crate::{collect, config, execute, select, Cli};
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -18,6 +20,7 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project = config::discover(&cwd);
+    let mut sink = Sink::stdio(Palette::detect(base_args));
 
     let (tx, rx) = mpsc::channel::<PathBuf>();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -36,7 +39,9 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
         // initial collection) survive and coalesce with the next edit.
         while rx.try_recv().is_ok() {}
 
-        eprintln!("\n[watch] waiting for changes... (Ctrl+C to quit, last exit: {status})");
+        sink.warn(&format!(
+            "\n[watch] waiting for changes... (Ctrl+C to quit, last exit: {status})"
+        ));
 
         // Block for the first relevant change, then drain the burst.
         let mut changed: Vec<PathBuf> = Vec::new();
@@ -61,16 +66,16 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
         // answer (config change etc.).
         let (args, mode) = match plan_rerun(&changed, &project, &cwd, base_args) {
             Plan::Skip => {
-                eprintln!("[watch] change affects no tests; waiting");
+                sink.warn("[watch] change affects no tests; waiting");
                 continue;
             }
             Plan::Run { args, mode } => (args, mode),
         };
 
         if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            print!("\x1b[2J\x1b[H"); // clear screen, home cursor
+            sink.out_inline("\x1b[2J\x1b[H"); // clear screen, home cursor
         }
-        eprintln!(
+        sink.warn(&format!(
             "[watch] {} changed; rerunning {}",
             changed
                 .iter()
@@ -78,7 +83,7 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", "),
             mode
-        );
+        ));
         status = execute(cli, &args)?;
     }
 }

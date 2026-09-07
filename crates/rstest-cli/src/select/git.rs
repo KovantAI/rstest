@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::reporting::sink::Sink;
+
 /// How a CI exposes the PR/MR base for the current job.
 enum CiBase {
     /// A base branch NAME (GitHub/GitLab/Buildkite). Resolved against
@@ -66,7 +68,7 @@ fn nonempty(key: &str) -> Option<String> {
 /// Resolve the `--changed` base rev, PR-aware. Bare `--changed` diffs vs HEAD,
 /// which silently skips everything on a CI PR checkout; auto-target the merge-base
 /// with the detected PR base. An unresolvable base is an error, not a HEAD fallback.
-pub fn resolve_base_rev(rev: &str) -> Result<String> {
+pub fn resolve_base_rev(rev: &str, sink: &mut Sink) -> Result<String> {
     if rev != "HEAD" {
         return Ok(rev.to_string());
     }
@@ -90,10 +92,10 @@ pub fn resolve_base_rev(rev: &str) -> Result<String> {
                      full history)"
                 );
             }
-            eprintln!(
+            sink.warn(&format!(
                 "rstest: --changed auto-targets MR base {} ({env})",
                 &sha[..sha.len().min(12)]
-            );
+            ));
             return Ok(sha);
         }
         Some(CiBase::Branch { name, env }) => (name, env),
@@ -113,10 +115,10 @@ pub fn resolve_base_rev(rev: &str) -> Result<String> {
         );
     }
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    eprintln!(
+    sink.warn(&format!(
         "rstest: --changed auto-targets PR base {remote} (merge-base {})",
         &sha[..sha.len().min(12)]
-    );
+    ));
     Ok(sha)
 }
 

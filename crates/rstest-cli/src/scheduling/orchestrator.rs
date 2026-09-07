@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
+use crate::reporting::sink::Sink;
 use crate::scheduling::proto;
 
 /// The per-worker behavior the shared loop mechanics touch. Each loop's own
@@ -32,17 +33,17 @@ pub(crate) trait Slot {
 /// Hang watchdog: kill any worker stuck on a single item past `limit`. The
 /// crash machinery (reader thread sees EOF) then reports the in-flight item
 /// failed. Call sites gate on `worker_timeout.is_some()` and pass the limit.
-pub(crate) fn watchdog_tick(states: &mut [impl Slot], limit: Duration) {
+pub(crate) fn watchdog_tick(sink: &mut Sink, states: &mut [impl Slot], limit: Duration) {
     for (widx, s) in states.iter_mut().enumerate() {
         if s.dead() || s.timeout_killed() {
             continue;
         }
         if let Some(since) = s.running_since() {
             if since.elapsed() > limit {
-                eprintln!(
+                sink.warn(&format!(
                     "rstest: worker gw{widx} exceeded --worker-timeout ({}s) on one test; killing it",
                     limit.as_secs()
-                );
+                ));
                 s.set_timeout_killed();
                 s.kill_worker();
             }
@@ -129,6 +130,7 @@ pub(crate) struct FinishedAttempt {
 /// after >0 retries, mark it flaky under `flaky_key`. Called on the terminal
 /// (non-requeued) branch of the ItemDone rerun logic in both loops.
 pub(crate) fn finalize_attempt(
+    sink: &mut Sink,
     run: &mut Run,
     prog: &mut Progress,
     fail_count: &mut u64,
@@ -139,7 +141,7 @@ pub(crate) fn finalize_attempt(
         if r.outcome == "failed" {
             *fail_count += 1;
         }
-        prog.on_report(Some(worker_idx), &r);
+        prog.on_report(sink, Some(worker_idx), &r);
         run.record(Some(worker_idx), r);
     }
     if !attempt.failed && attempt.attempts_used > 0 {
@@ -285,7 +287,8 @@ mod tests {
                 ..Default::default()
             }, // fresh -> under limit
         ];
-        watchdog_tick(&mut states, Duration::from_secs(1));
+        let (mut sink, _cap) = Sink::captured();
+        watchdog_tick(&mut sink, &mut states, Duration::from_secs(1));
         assert!(states[0].killed == 1 && states[0].timeout_killed);
         assert_eq!(states[1].killed, 0);
         assert_eq!(states[2].killed, 0);
@@ -367,9 +370,11 @@ mod tests {
         let mut run = Run::default();
         let mut prog = Progress::default();
         let mut fail_count = 0u64;
+        let (mut sink, _cap) = Sink::captured();
         // Two failed attempts already counted elsewhere; the FINAL buffered
         // attempt passed after 2 retries -> recorded, no new failures, flaky.
         finalize_attempt(
+            &mut sink,
             &mut run,
             &mut prog,
             &mut fail_count,
@@ -390,7 +395,9 @@ mod tests {
         let mut run = Run::default();
         let mut prog = Progress::default();
         let mut fail_count = 0u64;
+        let (mut sink, _cap) = Sink::captured();
         finalize_attempt(
+            &mut sink,
             &mut run,
             &mut prog,
             &mut fail_count,
