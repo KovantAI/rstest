@@ -383,4 +383,100 @@ mod tests {
         let mods = imports_of("def test_x():\n    import lazy_dep\n", "tests.test_x");
         assert!(mods.contains(&"lazy_dep".to_string()));
     }
+
+    #[test]
+    fn source_change_selects_importing_test_across_multiple_hops() {
+        // leaf.py <- mid.py <- test_leaf.py: a change to leaf reaches the test
+        // through two reverse-import BFS hops (leaf -> mid -> test_leaf).
+        let root = tmp("bfs");
+        write(&root, "leaf.py", "VALUE = 1\n");
+        write(&root, "mid.py", "import leaf\n");
+        write(
+            &root,
+            "test_leaf.py",
+            "import mid\ndef test_v():\n    pass\n",
+        );
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("leaf.py")],
+            false,
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(tests) => {
+                assert!(tests.contains(&PathBuf::from("test_leaf.py")), "{tests:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn strict_source_reaching_no_test_forces_a_full_run() {
+        // Under --strict a changed source file that reaches no test via the graph
+        // (dynamic-import target / unused module) forces a full run rather than a
+        // silent empty selection.
+        let root = tmp("strict-none");
+        write(&root, "orphan.py", "x = 1\n");
+        write(&root, "test_unrelated.py", "def test_u():\n    pass\n");
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("orphan.py")],
+            true,
+        )
+        .unwrap();
+        match sel {
+            Selection::FullRun(r) => assert!(r.contains("orphan.py"), "{r}"),
+            Selection::Tests(tests) => panic!("expected full run, got {tests:?}"),
+        }
+    }
+
+    #[test]
+    fn strict_source_that_reaches_a_test_selects_normally() {
+        // The strict reachability gate passes when the source provably reaches a
+        // test, so selection proceeds as usual.
+        let root = tmp("strict-ok");
+        write(&root, "dep.py", "x = 1\n");
+        write(
+            &root,
+            "test_dep.py",
+            "import dep\ndef test_d():\n    pass\n",
+        );
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("dep.py")],
+            true,
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(tests) => {
+                assert!(tests.contains(&PathBuf::from("test_dep.py")), "{tests:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn a_deleted_changed_test_file_is_dropped_from_the_selection() {
+        // A changed test file that no longer exists (git reports deletions) matches
+        // is_test_file by name, but the exists() filter must drop it so pytest is
+        // never handed a missing path.
+        let root = tmp("del-changed");
+        write(&root, "test_real.py", "def test_r():\n    pass\n");
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("test_ghost.py")], // never written to disk
+            false,
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(tests) => {
+                assert!(tests.is_empty(), "deleted test must be dropped: {tests:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
 }

@@ -147,6 +147,25 @@ pub fn affected_with_coverage(
     // warmed source, the diff old-side to this base; they align only when the file's
     // base content still matches (per-file drift check), so a range rev is reduced.
     let base = diff_old_side(rev);
+    select_from_index(rootdir, project, changes, strict, &index, |file| {
+        old_side_sha256(&base, file)
+    })
+}
+
+/// Orchestrate coverage-aware selection against a warm `index`. `hash_of(rel)`
+/// returns the OLD-side content hash of a changed file (`None` = absent/unreadable
+/// base) for the per-file drift guard — matching what the index recorded. Pure
+/// over that closure (no git), for testing; [`affected_with_coverage`] wires it to
+/// `git show`. Everything else (`is_test_file`, existence checks, the graph
+/// fallback) reads the working tree at `rootdir`/cwd as production does.
+fn select_from_index(
+    rootdir: &Path,
+    project: &ProjectConfig,
+    changes: &ChangedLines,
+    strict: bool,
+    index: &CoverageIndex,
+    hash_of: impl Fn(&Path) -> Option<String>,
+) -> Result<Selection> {
     // Changed-file keys/index nodeids are CWD-relative (git `--relative`); graph
     // fallback results are ROOTDIR-relative. Resolve each against its own base so
     // existence checks and the dedup compare real paths when rootdir != cwd.
@@ -181,7 +200,7 @@ pub fn affected_with_coverage(
         let indexed = index
             .files
             .get(&key)
-            .filter(|e| old_side_sha256(&base, file).as_deref() == Some(e.hash.as_str()));
+            .filter(|e| hash_of(file).as_deref() == Some(e.hash.as_str()));
         // A changed old-side line the index has no nodeid for (import-time
         // def/decorator line dropped from the empty context, or a blank/comment)
         // would select ZERO tests: route such a file to the graph instead.
@@ -254,14 +273,57 @@ pub fn affected_with_coverage(
 #[cfg(test)]
 mod tests {
     use super::{
-        affected_with_coverage, diff_old_side, normalize_newlines, old_side_sha256, CoverageFile,
-        CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA,
+        affected_with_coverage, diff_old_side, normalize_newlines, old_side_sha256,
+        select_from_index, CoverageFile, CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA,
     };
     use super::{ChangedLines, Selection};
     use crate::config::ProjectConfig;
     use crate::select::git::FileChange;
     use crate::select::GLOBAL_TEST_LOCK as GLOBAL;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+
+    /// Line -> nodeids that covered it (test fixture shorthand).
+    type LineSpec<'a> = (u32, &'a [&'a str]);
+    /// (file path, content hash, lines) for one file in a test index.
+    type FileSpec<'a> = (&'a str, &'a str, &'a [LineSpec<'a>]);
+
+    /// A warm (schema-current) index from `file -> (hash, [(line, [nodeids])])`.
+    fn cov_index(files: &[FileSpec]) -> CoverageIndex {
+        let mut idx = CoverageIndex {
+            schema: COVERAGE_INDEX_SCHEMA,
+            files: HashMap::new(),
+        };
+        for (path, hash, lines) in files {
+            let mut lm = HashMap::new();
+            for (ln, ids) in *lines {
+                lm.insert(*ln, ids.iter().map(|s| s.to_string()).collect());
+            }
+            idx.files.insert(
+                (*path).to_string(),
+                CoverageFile {
+                    hash: (*hash).to_string(),
+                    lines: lm,
+                },
+            );
+        }
+        idx
+    }
+
+    fn file_change(old_ranges: &[(u32, u32)], has_new_code: bool) -> FileChange {
+        FileChange {
+            old_ranges: old_ranges.to_vec(),
+            has_new_code,
+        }
+    }
+
+    /// A canonical temp fixture dir (used as rootdir; entered as cwd per test).
+    fn fixture(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rstest-cov-sel-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
 
     struct Cwd {
         orig: PathBuf,
@@ -418,5 +480,281 @@ mod tests {
         assert_eq!(normalize_newlines(b"trailing\r"), b"trailing\r");
         // Content difference still survives normalization.
         assert_ne!(normalize_newlines(b"x\r\n"), normalize_newlines(b"y\r\n"));
+    }
+
+    #[test]
+    fn index_hit_selects_the_covered_nodeid_and_skips_the_graph() {
+        // Drift hash matches and the changed old-side line is indexed to a live
+        // test: the exact coverage nodeid is picked, with no graph fallback.
+        let root = fixture("hit");
+        write(&root, "src.py", "x = 1\n");
+        write(
+            &root,
+            "test_src.py",
+            "import src\ndef test_a():\n    assert src.x\n",
+        );
+        let _cwd = enter(&root);
+        let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], false));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| Some("H".to_string()),
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => {
+                assert_eq!(t, vec![PathBuf::from("test_src.py::test_a")], "{t:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn drift_hash_mismatch_routes_the_file_to_the_graph() {
+        // The base content no longer hashes to what the index recorded, so the
+        // index entry is treated as absent and the file goes to the import graph -
+        // which selects the WHOLE test file, not a (possibly wrong) coverage nodeid.
+        let root = fixture("drift");
+        write(&root, "src.py", "x = 1\n");
+        write(
+            &root,
+            "test_src.py",
+            "import src\ndef test_a():\n    assert src.x\n",
+        );
+        let _cwd = enter(&root);
+        let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], false));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| Some("STALE".to_string()),
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => {
+                assert!(t.contains(&PathBuf::from("test_src.py")), "{t:?}");
+                assert!(
+                    !t.iter().any(|p| p.to_string_lossy().contains("::")),
+                    "no coverage nodeid: {t:?}"
+                );
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn a_changed_line_absent_from_the_index_falls_back_to_the_graph() {
+        // Drift hash matches, but the changed old-side line has no nodeid in the
+        // index (a def/decorator/blank line). Selecting from the index would pick
+        // ZERO tests, so the file must fall back to the graph instead.
+        let root = fixture("uncov");
+        write(&root, "src.py", "x = 1\ny = 2\n");
+        write(
+            &root,
+            "test_src.py",
+            "import src\ndef test_a():\n    assert src.x\n",
+        );
+        let _cwd = enter(&root);
+        // The index knows line 1 only; the change touches the uncovered line 2.
+        let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("src.py"), file_change(&[(2, 2)], false));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| Some("H".to_string()),
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => assert!(t.contains(&PathBuf::from("test_src.py")), "{t:?}"),
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn a_stale_nodeid_demotes_its_file_to_the_graph_and_is_not_selected() {
+        // The index points a covered line at a test file that no longer exists
+        // (renamed/deleted since the warm run). Handing that stale nodeid to pytest
+        // would error or skip real coverage, so the file is demoted to the graph
+        // and the stale nodeid is never selected.
+        let root = fixture("stale");
+        write(&root, "src.py", "x = 1\n");
+        write(
+            &root,
+            "test_src.py",
+            "import src\ndef test_a():\n    assert src.x\n",
+        );
+        let _cwd = enter(&root);
+        let index = cov_index(&[("src.py", "H", &[(1, &["gone_test.py::test_dead"])])]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], false));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| Some("H".to_string()),
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => {
+                assert!(
+                    !t.iter().any(|p| p.to_string_lossy().contains("gone_test")),
+                    "stale nodeid must not be selected: {t:?}"
+                );
+                // Demoted to the graph, which finds the real importing test.
+                assert!(t.contains(&PathBuf::from("test_src.py")), "{t:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn new_code_forces_the_graph_and_dedups_the_redundant_nodeid() {
+        // A changed file with an indexed line hit AND brand-new code: the index
+        // hit yields a `file::test` nodeid, but has_new_code also routes it to the
+        // graph, which selects the WHOLE test file. The whole-file result makes the
+        // nodeid redundant (pytest would collect it twice), so it is deduped away.
+        let root = fixture("newcode");
+        write(&root, "src.py", "x = 1\n");
+        write(
+            &root,
+            "test_src.py",
+            "import src\ndef test_a():\n    assert src.x\n",
+        );
+        let _cwd = enter(&root);
+        let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], true));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| Some("H".to_string()),
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => {
+                assert_eq!(t, vec![PathBuf::from("test_src.py")], "{t:?}");
+            }
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn a_changed_test_file_selects_itself_directly() {
+        // A changed test file always runs its own tests (fixtures/assertions may
+        // have changed) - selected directly, never consulting the index.
+        let root = fixture("direct");
+        write(&root, "test_src.py", "def test_a():\n    pass\n");
+        let _cwd = enter(&root);
+        let index = cov_index(&[]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("test_src.py"), file_change(&[(1, 1)], false));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| None,
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => assert_eq!(t, vec![PathBuf::from("test_src.py")]),
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn a_deleted_test_file_is_skipped_not_handed_to_pytest() {
+        // A changed test file whose name matches but is no longer on disk (git
+        // reports deletions) must be skipped rather than dispatched as a missing path.
+        let root = fixture("deleted");
+        let _cwd = enter(&root); // test_gone.py is deliberately never written.
+        let index = cov_index(&[]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("test_gone.py"), file_change(&[(1, 1)], false));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| None,
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => assert!(t.is_empty(), "deleted test must be skipped: {t:?}"),
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn a_direct_test_files_existence_is_checked_against_cwd_not_rootdir() {
+        // rootdir differs from the git cwd: the changed key is cwd-relative and the
+        // file exists only under cwd. Resolving it against rootdir would misjudge it
+        // deleted; it must be selected.
+        let root = fixture("cwd-exist");
+        write(&root, "sub/test_x.py", "def test_x():\n    pass\n");
+        let _cwd = enter(&root.join("sub"));
+        let index = cov_index(&[]);
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("test_x.py"), file_change(&[(1, 1)], false));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            false,
+            &index,
+            |_| None,
+        )
+        .unwrap();
+        match sel {
+            Selection::Tests(t) => assert_eq!(t, vec![PathBuf::from("test_x.py")]),
+            Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn strict_fallback_that_reaches_no_test_propagates_a_full_run() {
+        // A source file no test imports, routed to the graph under --strict: the
+        // graph can't prove reachability, so its FullRun must propagate out rather
+        // than silently selecting nothing (a false skip).
+        let root = fixture("strict");
+        write(&root, "lonely.py", "x = 1\n");
+        write(&root, "test_other.py", "def test_o():\n    pass\n");
+        let _cwd = enter(&root);
+        let index = cov_index(&[]); // cold for lonely.py => graph fallback
+        let mut changes = ChangedLines::new();
+        changes.insert(PathBuf::from("lonely.py"), file_change(&[], true));
+        let sel = select_from_index(
+            &root,
+            &ProjectConfig::default(),
+            &changes,
+            true,
+            &index,
+            |_| None,
+        )
+        .unwrap();
+        match sel {
+            Selection::FullRun(r) => assert!(r.contains("lonely.py"), "{r}"),
+            Selection::Tests(t) => panic!("expected full run, got {t:?}"),
+        }
     }
 }
