@@ -185,14 +185,6 @@ impl Worker {
         Ok(())
     }
 
-    /// The worker process id (test-only: assert teardown actually killed it).
-    /// Gated to unix: the only caller is serve.rs's disconnect test, and
-    /// serve.rs is unix-only, so this is dead code on Windows.
-    #[cfg(all(test, unix))]
-    pub fn id(&self) -> u32 {
-        self.child.id()
-    }
-
     /// Hard-kill the worker process (hang watchdog). The reader thread
     /// sees EOF and the normal crash machinery takes over.
     pub fn kill(&mut self) {
@@ -533,7 +525,7 @@ mod tests {
         // sent anything — the decode-error/respawn precondition (child still
         // running against the pipe, not a clean exit).
         let mut worker = Worker::spawn(&python, None, &env).expect("spawn worker");
-        let pid = worker.id();
+        let pid = worker.child.id();
         assert!(alive(pid), "worker should be alive right after spawn");
 
         // Exactly what the respawn arm now does with the old worker.

@@ -340,10 +340,7 @@ pub fn run_lazy_pool(
             | Ok(Event::NodeInput { .. })
             | Ok(Event::ItemStart { .. })
             | Ok(Event::ItemDone { .. })
-            | Ok(Event::Stopped { .. })
-            | Ok(Event::ServeReady { .. })
-            | Ok(Event::ServeReport { .. })
-            | Ok(Event::ServeRunDone { .. }) => {}
+            | Ok(Event::Stopped { .. }) => {}
             Err(e) => {
                 let was_timeout = states[idx].timeout_killed;
                 let crashed = states[idx].running.take();

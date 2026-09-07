@@ -87,11 +87,6 @@ class StreamPlugin:
         # leak. Measuring from the 2nd test on drops that first-touch noise.
         self._leak_warmed = False
         self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
-        # Serve mode: when a request is in flight, reports are tagged with its
-        # id (serve_report) instead of the plain "report" event, and any
-        # failure flips _serve_failed (the mutant-killed signal).
-        self._serve_req_id: int | None = None
-        self._serve_failed = False
         self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
         # (when, category, message, filename, lineno) -> count; aggregated
         # because big suites emit thousands of duplicate warnings.
@@ -472,20 +467,10 @@ class StreamPlugin:
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
-        if self._serve_req_id is not None:
-            if report.failed:
-                self._serve_failed = True
-            self._conn.send("serve_report", {"req_id": self._serve_req_id, "report": payload})
-        else:
-            self._conn.send("report", payload)
+        self._conn.send("report", payload)
 
     def pytest_collectreport(self, report):
         if report.failed:
-            # Serve mode: a collection/import failure IS the mutant being caught
-            # (spec: killed = any test failed OR errored). Without this, a mutant
-            # that breaks import reports killed=False and reads as a survivor.
-            if self._serve_req_id is not None:
-                self._serve_failed = True
             self._conn.send(
                 "collect_error",
                 {"path": report.nodeid, "longrepr": report.longreprtext},
@@ -494,10 +479,6 @@ class StreamPlugin:
             self._conn.send("collect_skip", {"path": report.nodeid})
 
     def pytest_internalerror(self, excrepr):
-        # Same reasoning as pytest_collectreport: an internal error during a
-        # serve run means the mutant errored the session -> killed.
-        if self._serve_req_id is not None:
-            self._serve_failed = True
         self._conn.send(
             "collect_error",
             {"path": "<internalerror>", "longrepr": str(excrepr)},

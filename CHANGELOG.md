@@ -13,8 +13,6 @@ between 0.0.x releases and are listed here.
 - Native HTML report: an HTML report rendered by the orchestrator that
   works with any worker count (`pytest-html` only supports `-n 1`).
 - Leak detection: fail a test that leaves open file descriptors behind.
-- Mutation testing server: experimental server that serves mutants for
-  mutation testing (Unix only).
 - Cache: refactored to fix corruption and consistency issues.
 
 ## 0.4.0 — 2026-08-31

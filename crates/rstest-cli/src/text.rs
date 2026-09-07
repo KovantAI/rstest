@@ -1,5 +1,12 @@
 //! Small string helpers shared across modules.
 
+/// The test-file portion of a nodeid: everything before the first `::`
+/// (`path/test_x.py::Class::test[param]` -> `path/test_x.py`). A nodeid with
+/// no `::` is already a bare file path and is returned unchanged.
+pub fn nodeid_file(nodeid: &str) -> &str {
+    nodeid.split("::").next().unwrap_or(nodeid)
+}
+
 /// Truncate `s` in place to at most `max` bytes, cutting on a UTF-8 char
 /// boundary. Plain `String::truncate(max)` panics when byte `max` splits a
 /// multibyte char — routine in tracebacks / parametrize-id samples, which
@@ -18,7 +25,17 @@ pub fn truncate_on_boundary(s: &mut String, max: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_on_boundary;
+    use super::{nodeid_file, truncate_on_boundary};
+
+    #[test]
+    fn nodeid_file_strips_at_first_colons() {
+        assert_eq!(
+            nodeid_file("tests/test_x.py::TestC::test_m[a::b]"),
+            "tests/test_x.py"
+        );
+        assert_eq!(nodeid_file("tests/test_x.py"), "tests/test_x.py");
+        assert_eq!(nodeid_file(""), "");
+    }
 
     #[test]
     fn shorter_than_max_untouched() {

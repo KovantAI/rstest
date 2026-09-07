@@ -82,7 +82,6 @@ from gates.reporting import (
 )
 from gates.serve_watch import (
     gate_migrate_check,
-    gate_serve,
     gate_try,
     gate_watch_mode,
 )
@@ -158,7 +157,6 @@ def main():
         gate_try,
         gate_migrate_check,
         gate_watch_mode,
-        gate_serve,
     )
     names = [s.__name__.removeprefix("gate_") for s in sections]
     if args.list:

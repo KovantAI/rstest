@@ -142,8 +142,11 @@ jobs:
       - name: python SBOM
         run: |
           # Inventory the runtime deps actually pulled in by installing the wheel.
+          # Every platform wheel declares the same deps, so install the one that
+          # matches this linux x86_64 runner (an arbitrary wheel like the macOS
+          # one is rejected by pip as "not a supported wheel on this platform").
           python -m venv /tmp/sbom-venv
-          /tmp/sbom-venv/bin/pip install --quiet "$(ls wheels/*.whl | head -1)"
+          /tmp/sbom-venv/bin/pip install --quiet "$(ls wheels/*manylinux*x86_64*.whl | head -1)"
           uvx --from cyclonedx-bom@4.6.1 cyclonedx-py environment /tmp/sbom-venv \
             --outfile sbom.python.cdx.json
 

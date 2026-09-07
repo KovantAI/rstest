@@ -249,7 +249,7 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     // -- Slowest files ------------------------------------------------------
     let mut by_file: BTreeMap<&str, f64> = BTreeMap::new();
     for (id, d, _) in &durations {
-        let file = id.split("::").next().unwrap_or(id);
+        let file = crate::text::nodeid_file(id);
         *by_file.entry(file).or_default() += d;
     }
     let mut files: Vec<FileEntry> = by_file
