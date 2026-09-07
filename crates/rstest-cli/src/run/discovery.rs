@@ -47,26 +47,14 @@ pub(super) fn run_collect_discovery(
     let mut marks: Vec<Vec<String>> = Vec::new();
     let mut collect_errors: Vec<(String, String)> = Vec::new();
     let exitstatus = loop {
-        match w.recv()? {
-            proto::Event::CollectionDone {
-                ids: i,
-                locations: l,
-                marks: m,
-                ..
-            } => {
-                if let Some(i) = i {
-                    ids = i;
-                }
-                if let Some(l) = l {
-                    locations = l;
-                }
-                if let Some(m) = m {
-                    marks = m;
-                }
-            }
-            proto::Event::CollectError { path, longrepr } => collect_errors.push((path, longrepr)),
-            proto::Event::Done { exitstatus } => break exitstatus,
-            _ => {}
+        if let Some(code) = fold_collect_event(
+            w.recv()?,
+            &mut ids,
+            &mut locations,
+            &mut marks,
+            &mut collect_errors,
+        ) {
+            break code;
         }
     };
     w.shutdown()?;
@@ -80,8 +68,75 @@ pub(super) fn run_collect_discovery(
         cwd.join(rootdir)
     };
     let rootdir = strip_verbatim(std::fs::canonicalize(&rootdir).unwrap_or(rootdir));
-    let tests: Vec<serde_json::Value> = ids
-        .iter()
+    let tests = build_tests(&ids, &locations, &marks, &rootdir);
+    let doc = serde_json::json!({
+        "meta": {
+            "runner": "rstest",
+            "kind": "discovery",
+            "schema": 1,
+            "count": ids.len(),
+            "rootdir": rootdir.to_string_lossy(),
+        },
+        "tests": tests,
+        "collect_errors": collect_errors
+            .iter()
+            .map(|(p, l)| serde_json::json!({"path": p, "longrepr": l}))
+            .collect::<Vec<_>>(),
+    });
+    std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
+    Ok(exitstatus)
+}
+
+/// Fold one collect-session event into the discovery accumulators. Returns
+/// `Some(exitstatus)` on `Done` (loop terminator); `None` otherwise. The
+/// designated worker's `CollectionDone` carries the id+location+marker payload;
+/// per-collector `CollectError`s accumulate; every other event is a no-op here
+/// (the collect-only session emits no run events).
+fn fold_collect_event(
+    event: proto::Event,
+    ids: &mut Vec<String>,
+    locations: &mut Vec<(String, Option<u64>)>,
+    marks: &mut Vec<Vec<String>>,
+    collect_errors: &mut Vec<(String, String)>,
+) -> Option<i32> {
+    match event {
+        proto::Event::CollectionDone {
+            ids: i,
+            locations: l,
+            marks: m,
+            ..
+        } => {
+            if let Some(i) = i {
+                *ids = i;
+            }
+            if let Some(l) = l {
+                *locations = l;
+            }
+            if let Some(m) = m {
+                *marks = m;
+            }
+            None
+        }
+        proto::Event::CollectError { path, longrepr } => {
+            collect_errors.push((path, longrepr));
+            None
+        }
+        proto::Event::Done { exitstatus } => Some(exitstatus),
+        _ => None,
+    }
+}
+
+/// Build the per-test discovery docs (nodeid + absolute file + lineno + markers)
+/// aligned to `ids`. An empty `file_rel` means pytest reported no location, so
+/// `file` stays empty; otherwise the rootdir-relative path (with a leading `./`
+/// stripped) is joined onto the absolute rootdir for an editor-usable URI.
+fn build_tests(
+    ids: &[String],
+    locations: &[(String, Option<u64>)],
+    marks: &[Vec<String>],
+    rootdir: &std::path::Path,
+) -> Vec<serde_json::Value> {
+    ids.iter()
         .enumerate()
         .map(|(i, nodeid)| {
             let (file_rel, lineno) = locations.get(i).cloned().unwrap_or_default();
@@ -102,28 +157,13 @@ pub(super) fn run_collect_discovery(
                 "markers": markers,
             })
         })
-        .collect();
-    let doc = serde_json::json!({
-        "meta": {
-            "runner": "rstest",
-            "kind": "discovery",
-            "schema": 1,
-            "count": ids.len(),
-            "rootdir": rootdir.to_string_lossy(),
-        },
-        "tests": tests,
-        "collect_errors": collect_errors
-            .iter()
-            .map(|(p, l)| serde_json::json!({"path": p, "longrepr": l}))
-            .collect::<Vec<_>>(),
-    });
-    std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
-    Ok(exitstatus)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_verbatim;
+    use super::{build_tests, fold_collect_event, strip_verbatim};
+    use crate::scheduling::proto;
 
     #[test]
     fn strip_verbatim_removes_windows_extended_prefix() {
@@ -142,5 +182,136 @@ mod tests {
             strip_verbatim("a/?b".into()),
             std::path::PathBuf::from("a/?b")
         );
+    }
+
+    fn collection_done(
+        ids: Option<Vec<String>>,
+        locations: Option<Vec<(String, Option<u64>)>>,
+        marks: Option<Vec<Vec<String>>>,
+    ) -> proto::Event {
+        proto::Event::CollectionDone {
+            count: ids.as_ref().map(|v| v.len() as u64).unwrap_or(0),
+            hash: String::new(),
+            ids,
+            locations,
+            marks,
+            serial: None,
+            cache_dir: None,
+            flaky: None,
+            groups: None,
+        }
+    }
+
+    #[test]
+    fn fold_collect_event_accumulates_payload_errors_and_ignores_rest() {
+        let mut ids = Vec::new();
+        let mut locations = Vec::new();
+        let mut marks = Vec::new();
+        let mut errors = Vec::new();
+
+        // CollectionDone loads the designated worker's id+location+marker payload.
+        assert_eq!(
+            fold_collect_event(
+                collection_done(
+                    Some(vec!["t.py::a".into()]),
+                    Some(vec![("t.py".into(), Some(3))]),
+                    Some(vec![vec!["slow".into()]]),
+                ),
+                &mut ids,
+                &mut locations,
+                &mut marks,
+                &mut errors,
+            ),
+            None
+        );
+        assert_eq!(ids, vec!["t.py::a".to_string()]);
+        assert_eq!(locations, vec![("t.py".to_string(), Some(3))]);
+        assert_eq!(marks, vec![vec!["slow".to_string()]]);
+
+        // An all-None CollectionDone (older worker sent no payload) leaves the
+        // accumulators untouched — exercises the None branches.
+        assert_eq!(
+            fold_collect_event(
+                collection_done(None, None, None),
+                &mut ids,
+                &mut locations,
+                &mut marks,
+                &mut errors,
+            ),
+            None
+        );
+        assert_eq!(ids, vec!["t.py::a".to_string()]);
+        assert_eq!(locations, vec![("t.py".to_string(), Some(3))]);
+        assert_eq!(marks, vec![vec!["slow".to_string()]]);
+
+        // CollectError accumulates (path, longrepr).
+        assert_eq!(
+            fold_collect_event(
+                proto::Event::CollectError {
+                    path: "bad.py".into(),
+                    longrepr: "boom".into(),
+                },
+                &mut ids,
+                &mut locations,
+                &mut marks,
+                &mut errors,
+            ),
+            None
+        );
+        assert_eq!(errors, vec![("bad.py".to_string(), "boom".to_string())]);
+
+        // A non-discovery event (collect-only emits no run events) is a no-op.
+        assert_eq!(
+            fold_collect_event(
+                proto::Event::ItemStart { index: 0 },
+                &mut ids,
+                &mut locations,
+                &mut marks,
+                &mut errors,
+            ),
+            None
+        );
+
+        // Done terminates the loop with the exit status.
+        assert_eq!(
+            fold_collect_event(
+                proto::Event::Done { exitstatus: 5 },
+                &mut ids,
+                &mut locations,
+                &mut marks,
+                &mut errors,
+            ),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn build_tests_maps_locations_markers_and_empty_files() {
+        let rootdir = std::path::Path::new("/repo");
+        let ids = vec!["t.py::a".to_string(), "t.py::b".to_string()];
+        // First has a `./`-prefixed rel path + lineno + markers; second has an
+        // empty file_rel (pytest gave no location) and no markers row.
+        let locations = vec![("./t.py".to_string(), Some(10)), (String::new(), None)];
+        let marks = vec![vec!["slow".to_string()]];
+
+        let tests = build_tests(&ids, &locations, &marks, rootdir);
+        assert_eq!(tests.len(), 2);
+
+        assert_eq!(tests[0]["nodeid"], "t.py::a");
+        // `./` stripped, joined onto the absolute rootdir.
+        assert_eq!(
+            tests[0]["file"],
+            std::path::Path::new("/repo")
+                .join("t.py")
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert_eq!(tests[0]["lineno"], 10);
+        assert_eq!(tests[0]["markers"][0], "slow");
+
+        // Empty file_rel => empty file string; missing marks row => [].
+        assert_eq!(tests[1]["file"], "");
+        assert!(tests[1]["lineno"].is_null());
+        assert_eq!(tests[1]["markers"].as_array().unwrap().len(), 0);
     }
 }

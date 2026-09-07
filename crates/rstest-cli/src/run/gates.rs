@@ -4,7 +4,7 @@
 //! green-set record, and leak gate ([`run_post_gates`]), plus the closing
 //! summary render ([`finalize_output`]).
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -67,6 +67,104 @@ fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bo
         .collect()
 }
 
+/// Warn (to `w`) that `--doctor-fail-on` can't evaluate under passthrough IO
+/// (-s/--pdb/--co): those run a single interactive session with no doctor
+/// instrumentation, so the gate would silently pass. Fires only when a gate is
+/// set AND the run is passthrough.
+fn warn_doctor_gate_passthrough(w: &mut impl Write, gate_empty: bool, passthrough: bool) {
+    if !gate_empty && passthrough {
+        let _ = writeln!(
+            w,
+            "rstest: --doctor-fail-on is ignored under -s/--pdb/--co \
+             (no doctor instrumentation in an interactive single session)"
+        );
+    }
+}
+
+/// The `--durations-regress` ratio must be strictly > 1.0: a test is a
+/// regression only when it is *slower* than baseline by that factor.
+fn validate_regress_ratio(ratio: f64) -> Result<()> {
+    if ratio <= 1.0 {
+        anyhow::bail!("--durations-regress ratio must be > 1.0, got {ratio}");
+    }
+    Ok(())
+}
+
+/// Reconcile the coverage-reporting subprocess result into the run exit status.
+/// `status` is `Ok(success)` once the child exited, `Err(msg)` if it never ran.
+/// A covtool failure only turns an otherwise-green run red; it never lowers a
+/// non-zero status. A spawn error warns (to `w`) but doesn't fail the run.
+fn reconcile_cov_status(w: &mut impl Write, status: Result<bool, String>, exitstatus: i32) -> i32 {
+    match status {
+        Ok(false) if exitstatus == 0 => 1,
+        Ok(_) => exitstatus,
+        Err(e) => {
+            let _ = writeln!(w, "rstest: coverage reporting failed to run: {e}");
+            exitstatus
+        }
+    }
+}
+
+/// Report a `--cache-push` outcome (to `w`): a success line with the segment's
+/// counts, or a warning on failure. A push failure never fails an otherwise-green
+/// run — it is reported, not gated.
+fn report_push_result(w: &mut impl Write, result: Result<()>, seg: &remote::Segment, remote: &str) {
+    match result {
+        Ok(()) => {
+            let _ = writeln!(
+                w,
+                "rstest: cache: pushed segment ({} duration(s), {} event(s), {} covered file(s)) to {remote}",
+                seg.durations.len(),
+                seg.flake_events.len(),
+                seg.cov_index.files.len()
+            );
+        }
+        Err(e) => {
+            let _ = writeln!(w, "rstest: cache: push failed: {e:#}");
+        }
+    }
+}
+
+/// Write the optional `--report-json` snapshot. Extracted (like
+/// [`write_run_reports`]) so the report side-effect is covered in-process.
+fn write_report_json(
+    path: Option<&std::path::Path>,
+    run: &report::Run,
+    meta: &report::RunMeta,
+) -> Result<()> {
+    if let Some(path) = path {
+        run.write_snapshot(path, meta)?;
+    }
+    Ok(())
+}
+
+/// The bar-mode closing "Results (…s): <bar> n/n" line. Pulls the pass/fail/
+/// other tallies out of `counts` the way pytest-sugar's segmented bar does
+/// (fail = failed+errors+collect_errors; other = skipped+xfailed+xpassed).
+fn results_bar_line(
+    counts: &std::collections::BTreeMap<&'static str, u64>,
+    elapsed: f64,
+    palette: &color::Palette,
+) -> String {
+    let g = counts["passed"];
+    let r = counts["failed"] + counts["errors"] + counts["collect_errors"];
+    let y = counts["skipped"] + counts["xfailed"] + counts["xpassed"];
+    let n = g + r + y;
+    format!(
+        "\nResults ({elapsed:.2}s):\n  {} {n}/{n}",
+        status::summary_bar(g as usize, r as usize, y as usize, palette),
+    )
+}
+
+/// TeamCity flaky service messages (to `w`), one per flaky test; nothing when no
+/// test needed a rerun.
+fn write_teamcity_flaky(w: &mut impl Write, flaky: &[(String, u32)]) {
+    let msgs = progress::teamcity_flaky_messages(flaky);
+    if !msgs.is_empty() {
+        let _ = writeln!(w, "{msgs}");
+    }
+}
+
 /// Post-run gates and side-effects, in order: the doctor report + `--doctor-fail-on`
 /// gate, junit/html reports, merged lastfailed cache, duration-regression gate,
 /// coverage combine/report, duration+flake save, `--cache-push`, report-json,
@@ -108,12 +206,7 @@ pub(super) fn run_post_gates(
     } = *post;
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
-    if !doctor_gate.is_empty() && passthrough {
-        eprintln!(
-            "rstest: --doctor-fail-on is ignored under -s/--pdb/--co \
-             (no doctor instrumentation in an interactive single session)"
-        );
-    }
+    warn_doctor_gate_passthrough(&mut std::io::stderr(), doctor_gate.is_empty(), passthrough);
     let mut doctor_gate_failed = false;
     if (cli.doctor
         || cli.doctor_json.is_some()
@@ -187,9 +280,7 @@ pub(super) fn run_post_gates(
     // overwrites the baseline with this run's times.
     let mut duration_regressions = 0usize;
     if let Some(ratio) = cli.durations_regress {
-        if ratio <= 1.0 {
-            anyhow::bail!("--durations-regress ratio must be > 1.0, got {ratio}");
-        }
+        validate_regress_ratio(ratio)?;
         let baseline = durations::load();
         if baseline.is_empty() {
             eprintln!(
@@ -238,11 +329,11 @@ pub(super) fn run_post_gates(
             // lands where load_coverage_index / --cache-push look for it.
             .env("RSTEST_CACHE", cache::dir())
             .status();
-        match status {
-            Ok(s) if !s.success() && exitstatus == 0 => exitstatus = 1,
-            Ok(_) => {}
-            Err(e) => eprintln!("rstest: coverage reporting failed to run: {e}"),
-        }
+        exitstatus = reconcile_cov_status(
+            &mut std::io::stderr(),
+            status.map(|s| s.success()).map_err(|e| e.to_string()),
+            exitstatus,
+        );
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
@@ -267,23 +358,15 @@ pub(super) fn run_post_gates(
                 &outcome.run,
                 cov,
             );
-            match remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg)) {
-                Ok(()) => eprintln!(
-                    "rstest: cache: pushed segment ({} duration(s), {} event(s), {} covered file(s)) to {remote}",
-                    seg.durations.len(),
-                    seg.flake_events.len(),
-                    seg.cov_index.files.len()
-                ),
-                Err(e) => eprintln!("rstest: cache: push failed: {e:#}"),
-            }
+            let result = remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg));
+            report_push_result(&mut std::io::stderr(), result, &seg, remote);
         }
     }
-    if let Some(path) = &cli.report_json {
-        outcome.run.write_snapshot(
-            path,
-            &build_run_meta(start, outcome.exitstatus, started_epoch, n),
-        )?;
-    }
+    write_report_json(
+        cli.report_json.as_deref(),
+        &outcome.run,
+        &build_run_meta(start, outcome.exitstatus, started_epoch, n),
+    )?;
     if duration_regressions > 0 {
         eprintln!(
             "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
@@ -418,7 +501,7 @@ pub(super) fn finalize_output(
         }
         outcome.run.print_quarantined(&palette, &flake_history);
         outcome.run.print_flaky(&palette, &flake_history, wrap);
-        print_warnings_summary(&outcome.warnings, &palette);
+        print_warnings_summary(&mut std::io::stdout(), &outcome.warnings, &palette);
         if let Some((dn, dmin)) = durations {
             outcome
                 .run
@@ -435,14 +518,9 @@ pub(super) fn finalize_output(
         // the stable summary line (which tooling/CI greps, so keep it intact).
         // The bar gives its own visual break; other modes get a blank line.
         if mode == progress::Mode::Bar && std::io::stdout().is_terminal() {
-            let c = outcome.run.counts();
-            let g = c["passed"];
-            let r = c["failed"] + c["errors"] + c["collect_errors"];
-            let y = c["skipped"] + c["xfailed"] + c["xpassed"];
-            let n = g + r + y;
             println!(
-                "\nResults ({elapsed:.2}s):\n  {} {n}/{n}",
-                status::summary_bar(g as usize, r as usize, y as usize, &palette),
+                "{}",
+                results_bar_line(&outcome.run.counts(), elapsed, &palette)
             );
         } else {
             println!();
@@ -471,10 +549,7 @@ pub(super) fn finalize_output(
             progress::Mode::Azure => print_azure_annotations(&outcome.run),
             progress::Mode::Buildkite => buildkite_flaky_annotate(&outcome.run),
             progress::Mode::Teamcity => {
-                let msgs = progress::teamcity_flaky_messages(&outcome.run.flaky);
-                if !msgs.is_empty() {
-                    println!("{msgs}");
-                }
+                write_teamcity_flaky(&mut std::io::stdout(), &outcome.run.flaky)
             }
             _ => {}
         }
@@ -498,18 +573,30 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
 }
 
 /// pytest-style warnings summary: grouped by location, deduped, counted.
-fn print_warnings_summary(warnings: &[proto::WarningEntry], palette: &color::Palette) {
+/// Writes to `w` (stdout at the call site) so the merge/plural formatting is
+/// unit-testable.
+fn print_warnings_summary(
+    w: &mut impl Write,
+    warnings: &[proto::WarningEntry],
+    palette: &color::Palette,
+) {
     if warnings.is_empty() {
         return;
     }
     use std::collections::BTreeMap;
     let mut merged: BTreeMap<(&str, u64, &str, &str), u64> = BTreeMap::new();
-    for w in warnings {
+    for entry in warnings {
         *merged
-            .entry((&w.filename, w.lineno, &w.category, &w.message))
-            .or_default() += w.count;
+            .entry((
+                &entry.filename,
+                entry.lineno,
+                &entry.category,
+                &entry.message,
+            ))
+            .or_default() += entry.count;
     }
-    println!(
+    let _ = writeln!(
+        w,
         "\n{}",
         palette.yellow("=========== warnings summary ===========")
     );
@@ -519,12 +606,13 @@ fn print_warnings_summary(warnings: &[proto::WarningEntry], palette: &color::Pal
         } else {
             String::new()
         };
-        println!("{filename}:{lineno}: {category}{times}");
+        let _ = writeln!(w, "{filename}:{lineno}: {category}{times}");
         for line in message.lines().take(3) {
-            println!("  {line}");
+            let _ = writeln!(w, "  {line}");
         }
     }
-    println!(
+    let _ = writeln!(
+        w,
         "{}",
         palette.yellow("-- use -W error::... to turn warnings into errors --")
     );
@@ -558,11 +646,24 @@ pub(super) fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexS
 #[cfg(test)]
 mod tests {
     use super::{
-        build_run_meta, merge_fixtures, merged_lastfailed, quarantine_matcher, write_run_reports,
+        build_run_meta, merge_fixtures, merged_lastfailed, print_warnings_summary,
+        quarantine_matcher, reconcile_cov_status, report_push_result, results_bar_line,
+        validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
+        write_teamcity_flaky,
     };
+    use crate::reporting::color::Palette;
     use crate::reporting::report::Run;
-    use crate::scheduling::proto::FixtureStat;
+    use crate::scheduling::proto::{FixtureStat, WarningEntry};
     use std::time::Instant;
+
+    // Color-disabled palette: deterministic strings, no tty/env dependence.
+    fn plain_palette() -> Palette {
+        Palette::detect(&["--color=no".to_string()])
+    }
+
+    fn utf8(buf: Vec<u8>) -> String {
+        String::from_utf8(buf).unwrap()
+    }
 
     #[test]
     fn merged_lastfailed_strips_worker_suffix_and_dedups() {
@@ -687,5 +788,173 @@ mod tests {
     fn quarantine_matcher_errors_on_missing_file() {
         let path = std::env::temp_dir().join("rstest-quarantine-does-not-exist-xyz.txt");
         assert!(quarantine_matcher(&path).is_err());
+    }
+
+    #[test]
+    fn warn_doctor_gate_passthrough_fires_only_when_gated_and_passthrough() {
+        // Gate set + passthrough: the one case that warns.
+        let mut buf = Vec::new();
+        warn_doctor_gate_passthrough(&mut buf, false, true);
+        assert!(utf8(buf).contains("--doctor-fail-on is ignored under -s/--pdb/--co"));
+        // No gate, or not passthrough => silent.
+        let mut buf = Vec::new();
+        warn_doctor_gate_passthrough(&mut buf, true, true);
+        assert!(buf.is_empty());
+        let mut buf = Vec::new();
+        warn_doctor_gate_passthrough(&mut buf, false, false);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn validate_regress_ratio_requires_greater_than_one() {
+        assert!(validate_regress_ratio(1.5).is_ok());
+        // 1.0 and below are rejected (a regression must be strictly slower).
+        assert!(validate_regress_ratio(1.0).is_err());
+        assert!(validate_regress_ratio(0.5).is_err());
+        let err = validate_regress_ratio(0.9).unwrap_err().to_string();
+        assert!(err.contains("must be > 1.0"), "got {err}");
+    }
+
+    #[test]
+    fn reconcile_cov_status_only_raises_a_green_run() {
+        let mut sink = Vec::new();
+        // covtool failed and the run was green => red.
+        assert_eq!(reconcile_cov_status(&mut sink, Ok(false), 0), 1);
+        // covtool failed but the run was already red => unchanged.
+        assert_eq!(reconcile_cov_status(&mut sink, Ok(false), 2), 2);
+        // covtool succeeded => status untouched.
+        assert_eq!(reconcile_cov_status(&mut sink, Ok(true), 0), 0);
+        assert!(sink.is_empty());
+        // Spawn error warns but never fails the run.
+        let mut buf = Vec::new();
+        assert_eq!(
+            reconcile_cov_status(&mut buf, Err("no python".into()), 0),
+            0
+        );
+        assert!(utf8(buf).contains("coverage reporting failed to run: no python"));
+    }
+
+    fn segment(durations: usize, events: usize) -> crate::remote::Segment {
+        use crate::remote::{FlakeEvent, FlakeKind, Segment};
+        Segment {
+            schema: 1,
+            id: "seg".into(),
+            generated_at: 0,
+            durations: (0..durations).map(|i| (format!("t{i}"), 0.1)).collect(),
+            flake_events: (0..events)
+                .map(|i| FlakeEvent {
+                    nodeid: format!("t{i}"),
+                    kind: FlakeKind::Flaky,
+                })
+                .collect(),
+            cov_index: Default::default(),
+        }
+    }
+
+    #[test]
+    fn report_push_result_prints_counts_on_ok_and_warns_on_err() {
+        // Ok: a success line carrying the segment's counts.
+        let mut buf = Vec::new();
+        report_push_result(&mut buf, Ok(()), &segment(2, 1), "s3://bucket");
+        let out = utf8(buf);
+        assert!(out.contains("pushed segment (2 duration(s), 1 event(s), 0 covered file(s))"));
+        assert!(out.contains("s3://bucket"));
+        // Err: a warning, never a panic or gate.
+        let mut buf = Vec::new();
+        report_push_result(
+            &mut buf,
+            Err(anyhow::anyhow!("network down")),
+            &segment(0, 0),
+            "s3://bucket",
+        );
+        assert!(utf8(buf).contains("cache: push failed: network down"));
+    }
+
+    #[test]
+    fn write_report_json_writes_only_when_requested() {
+        let run = Run::default();
+        let meta = build_run_meta(Instant::now(), 0, 1_700_000_000, 2);
+        // None => no write, no error.
+        write_report_json(None, &run, &meta).unwrap();
+        // Some => snapshot written to the path.
+        let path =
+            std::env::temp_dir().join(format!("rstest-reportjson-{}.json", std::process::id()));
+        write_report_json(Some(&path), &run, &meta).unwrap();
+        assert!(path.exists(), "report-json snapshot not written");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn results_bar_line_tallies_pass_fail_other() {
+        let mut counts: std::collections::BTreeMap<&'static str, u64> = [
+            ("passed", 3),
+            ("failed", 1),
+            ("errors", 1),
+            ("collect_errors", 0),
+            ("skipped", 2),
+            ("xfailed", 0),
+            ("xpassed", 0),
+        ]
+        .into();
+        // 3 passed, 2 fail (failed+errors), 2 other (skipped) => 7 total.
+        let line = results_bar_line(&counts, 1.23, &plain_palette());
+        assert!(line.contains("Results (1.23s):"), "got {line}");
+        assert!(line.contains("7/7"), "got {line}");
+        // Zeroing everything gives 0/0 without panicking on the index lookups.
+        for v in counts.values_mut() {
+            *v = 0;
+        }
+        assert!(results_bar_line(&counts, 0.0, &plain_palette()).contains("0/0"));
+    }
+
+    #[test]
+    fn write_teamcity_flaky_emits_only_for_reruns() {
+        // A flaky test => a service message on the stream.
+        let mut buf = Vec::new();
+        write_teamcity_flaky(&mut buf, &[("t.py::a".to_string(), 2)]);
+        let out = utf8(buf);
+        assert!(out.contains("##teamcity[message"), "got {out}");
+        assert!(out.contains("flaky: t.py::a"), "got {out}");
+        // No flaky tests => nothing written.
+        let mut buf = Vec::new();
+        write_teamcity_flaky(&mut buf, &[]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn print_warnings_summary_merges_and_pluralizes() {
+        let warn = |message: &str, count| WarningEntry {
+            when: "runtest".into(),
+            category: "DeprecationWarning".into(),
+            message: message.into(),
+            filename: "t.py".into(),
+            lineno: 12,
+            count,
+        };
+        let mut buf = Vec::new();
+        // Two entries at the same (file,line,category,message) => merged to 3
+        // occurrences; a distinct one prints without the count suffix.
+        print_warnings_summary(
+            &mut buf,
+            &[warn("old api", 2), warn("old api", 1), warn("other", 1)],
+            &plain_palette(),
+        );
+        let out = utf8(buf);
+        assert!(out.contains("warnings summary"), "got {out}");
+        assert!(
+            out.contains("t.py:12: DeprecationWarning  (3 occurrences)"),
+            "got {out}"
+        );
+        // The single-occurrence entry has no "(N occurrences)" suffix.
+        assert!(
+            out.lines().any(|l| l == "t.py:12: DeprecationWarning"),
+            "got {out}"
+        );
+        assert!(out.contains("-- use -W error::"), "got {out}");
+
+        // Empty input => nothing at all.
+        let mut buf = Vec::new();
+        print_warnings_summary(&mut buf, &[], &plain_palette());
+        assert!(buf.is_empty());
     }
 }

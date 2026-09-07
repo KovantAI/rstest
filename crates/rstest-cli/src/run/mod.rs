@@ -7,7 +7,7 @@ mod discovery;
 mod gates;
 mod monorepo;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -347,21 +347,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         .clone()
         .or_else(|| std::env::var("RSTEST_CACHE_REMOTE").ok())
         .filter(|s| !s.is_empty());
-    if (cli.cache_pull || cli.cache_push || cli.cache_compact) && cache_remote.is_none() {
-        anyhow::bail!(
-            "--cache-pull/--cache-push/--cache-compact need --cache-remote \
-             (or RSTEST_CACHE_REMOTE)"
-        );
-    }
-    // --cache-compact is a run-less maintenance mode that exits before the run;
-    // combining it with the run-time cache flags would silently skip them (and
-    // the tests), reporting green having done neither. Reject the combination.
-    if cli.cache_compact && (cli.cache_pull || cli.cache_push) {
-        anyhow::bail!(
-            "--cache-compact is a run-less maintenance mode; run it on its own, \
-             not combined with --cache-pull/--cache-push"
-        );
-    }
+    validate_cache_flags(
+        cli.cache_pull,
+        cli.cache_push,
+        cli.cache_compact,
+        cache_remote.is_some(),
+    )?;
     if cli.cache_compact {
         let remote = cache_remote.as_deref().unwrap(); // validated above
         let t = remote::transport_for(remote)?;
@@ -538,81 +529,25 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // --shuffle reorders the orchestrator's dispatch queue, so it needs
     // the full-collection pool. Refusing (not ignoring) matters: a user
     // probing for order dependence must not get a silently ordered run.
-    let shuffle_seed: Option<u64> = match cli.shuffle.as_deref() {
-        None => None,
-        Some(v) => {
-            if n <= 1 || passthrough {
-                if single_worker_reruns {
-                    anyhow::bail!(
-                        "--shuffle is not supported by the one-worker rerun pool \
-                         (--reruns at -n <= 1); raise -n to 2+ to combine shuffle \
-                         with reruns"
-                    );
-                }
-                anyhow::bail!(
-                    "--shuffle needs the parallel pool (-n >= 2); in single-worker \
-                     mode the session owns its own order (use pytest-randomly there)"
-                );
-            }
-            if collect_lazy(cli, &settings, &dist_name, &args)? {
-                anyhow::bail!("--shuffle is not supported with --collect lazy");
-            }
-            if dist_name == "each" {
-                anyhow::bail!(
-                    "--shuffle is not supported with --dist each (workers run the \
-                     full suite in session order)"
-                );
-            }
-            let seed = if v == "random" {
-                crate::time::now_epoch_nanos() as u64 ^ u64::from(std::process::id())
-            } else {
-                v.parse().map_err(|_| {
-                    anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'")
-                })?
-            };
-            eprintln!("rstest: shuffle seed {seed} (reproduce with --shuffle={seed})");
-            Some(seed)
-        }
-    };
+    let is_lazy = collect_lazy(cli, &settings, &dist_name, &args)?;
+    let shuffle_seed: Option<u64> = resolve_shuffle_seed(
+        cli.shuffle.as_deref(),
+        n,
+        passthrough,
+        single_worker_reruns,
+        is_lazy,
+        &dist_name,
+    )?;
     // --shard K/N: partition the suite and keep bucket K. Purely an
     // orchestrator-side node-id (or, in lazy mode, file) filter.
-    let shard: Option<(usize, usize)> = match cli.shard.as_deref() {
-        None => None,
-        Some(spec) => {
-            let (k, total) = shard::parse_shard(spec)?;
-            if total == 1 {
-                None // 1/1 is the whole suite: no-op.
-            } else {
-                if n <= 1 || passthrough {
-                    if single_worker_reruns {
-                        anyhow::bail!(
-                            "--shard is not supported by the one-worker rerun pool \
-                             (--reruns at -n <= 1); raise -n to 2+ to combine shard \
-                             with reruns"
-                        );
-                    }
-                    anyhow::bail!(
-                        "--shard needs the parallel pool (-n >= 2); the single-worker \
-                         path runs the session's own full suite with no dispatch filter"
-                    );
-                }
-                if shuffle_seed.is_some() {
-                    anyhow::bail!(
-                        "--shard is not supported with --shuffle: shards must partition \
-                         the suite identically on every machine, which a per-run shuffle \
-                         defeats (shuffle within a shard is fine to add later)"
-                    );
-                }
-                if dist_name == "each" {
-                    anyhow::bail!(
-                        "--shard is not supported with --dist each (every worker runs the \
-                         full suite; there is no dispatch queue to partition)"
-                    );
-                }
-                Some((k, total))
-            }
-        }
-    };
+    let shard: Option<(usize, usize)> = resolve_shard(
+        cli.shard.as_deref(),
+        n,
+        passthrough,
+        single_worker_reruns,
+        shuffle_seed.is_some(),
+        &dist_name,
+    )?;
     // --incremental: compute the dispatch-level skip set now (before the pool
     // collects) from the coverage index + last green set, gated by a config
     // fingerprint. Restricted to the eager pool on --dist load with full
@@ -638,30 +573,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     } else {
         String::new()
     };
-    if cli.incremental && since_green {
-        // Both incremental modes select on the same run; --since-green already
-        // narrows to the changed subset, so dispatch-level skipping on top would
-        // account the cached passes against a partial suite. --since-green wins.
-        eprintln!(
-            "rstest: --incremental and --since-green are mutually exclusive; \
-             --since-green takes precedence this run"
-        );
-    } else if cli.incremental && cli.changed.is_some() {
-        // Explicit --changed owns selection: it narrows args to the changed
-        // subset, so dispatch-level skipping on top would clobber the full green
-        // baseline with a partial one and report cached passes against a partial
-        // collection. --changed wins this run.
-        eprintln!(
-            "rstest: --incremental and --changed are mutually exclusive; \
-             --changed owns selection this run"
-        );
-    } else if cli.incremental && !incremental_active {
-        eprintln!(
-            "rstest: --incremental needs the parallel pool with full collection and \
-             --dist load (not -n 0/1, --dist each/affinity, --collect lazy, --shard, or \
-             --shuffle); running everything this time"
-        );
-    }
+    warn_incremental_conflicts(
+        &mut std::io::stderr(),
+        cli.incremental,
+        since_green,
+        cli.changed.is_some(),
+        incremental_active,
+    );
     // --incremental relies on the coverage index advancing every run; without
     // --cov this run covtool never rewrites it, so a changed test re-runs on
     // every invocation until a coverage run refreshes the index.
@@ -709,7 +627,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // see the demoted outcomes consistently.
     if let Some(qpath) = &cli.quarantine {
         if passthrough {
-            eprintln!("rstest: --quarantine has no effect in passthrough mode; ignoring");
+            warn_quarantine_passthrough(&mut std::io::stderr());
         } else {
             let matcher = gates::quarantine_matcher(qpath)?;
             let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
@@ -814,31 +732,15 @@ fn dispatch_run(
         let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
         let mut warnings: Vec<proto::WarningEntry> = Vec::new();
         let exitstatus = loop {
-            match w.recv()? {
-                proto::Event::Report(r) => {
-                    if !passthrough {
-                        prog.on_report(None, &r);
-                    }
-                    run.record(None, r);
-                }
-                proto::Event::CollectError { path, longrepr } => run.collect_error(path, longrepr),
-                proto::Event::CollectSkip { .. } => run.collect_skips += 1,
-                proto::Event::DoctorFixtures { fixtures: fx } => fixtures.extend(fx),
-                proto::Event::Warnings { entries } => warnings.extend(entries),
-                proto::Event::CollectionDone { .. }
-                | proto::Event::NodeInput { .. }
-                | proto::Event::ItemStart { .. }
-                | proto::Event::ItemDone { .. }
-                | proto::Event::Stopped { .. }
-                | proto::Event::LazyReady { .. }
-                | proto::Event::FileCollected { .. }
-                | proto::Event::ItemStartId { .. }
-                | proto::Event::ItemDoneId { .. }
-                | proto::Event::StoppedIds { .. }
-                | proto::Event::ServeReady { .. }
-                | proto::Event::ServeReport { .. }
-                | proto::Event::ServeRunDone { .. } => {}
-                proto::Event::Done { exitstatus } => break exitstatus,
+            if let Some(code) = fold_run_event(
+                w.recv()?,
+                passthrough,
+                &mut run,
+                &mut prog,
+                &mut fixtures,
+                &mut warnings,
+            ) {
+                break code;
             }
         };
         w.shutdown()?;
@@ -877,7 +779,7 @@ fn dispatch_run(
             // Steal (split files across workers) only on an EXPLICIT --dist
             // load: lazy defaults to strict file affinity, since stealing
             // exposes cross-file/in-file order dependence affinity doesn't.
-            cli.dist.as_deref() == Some("load") || settings.dist.as_deref() == Some("load"),
+            lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
         )?
     } else {
         let dist = dist_name
@@ -1002,31 +904,264 @@ fn auto_workers() -> usize {
     if let Ok(cwd) = std::env::current_dir() {
         let project = config::discover(&cwd);
         if let Ok(files) = collect::collect_test_files(&[], &project) {
-            if !files.is_empty() {
-                n = n.min(files.len());
-            }
+            n = cap_workers_by_files(n, files.len());
         }
     }
 
     let cache = durations::load();
     if !cache.is_empty() {
-        let total: f64 = cache.values().sum();
-        // ~2s of test time per worker is plenty to amortize startup.
-        let by_time = (total / 2.0).ceil() as usize;
-        n = n.min(by_time.max(1));
+        n = cap_workers_by_time(n, cache.values().sum());
     }
 
     n.max(1)
 }
 
+/// Cap the worker count by test-file count: never more workers than files. An
+/// empty walk (count 0) leaves `n` unchanged — the other signals still apply.
+fn cap_workers_by_files(n: usize, file_count: usize) -> usize {
+    if file_count > 0 {
+        n.min(file_count)
+    } else {
+        n
+    }
+}
+
+/// Cap by suite time from the duration cache: ~2s of test time amortizes one
+/// worker's startup, so a few-second suite needs only a couple. Never drops
+/// below 1 worker.
+fn cap_workers_by_time(n: usize, total_secs: f64) -> usize {
+    let by_time = (total_secs / 2.0).ceil() as usize;
+    n.min(by_time.max(1))
+}
+
+/// The shared-cache flags need a resolved remote, and `--cache-compact` is a
+/// run-less maintenance mode that can't combine with `--cache-pull/--cache-push`
+/// (it exits before the run, silently skipping them). Both are hard errors.
+fn validate_cache_flags(pull: bool, push: bool, compact: bool, remote_present: bool) -> Result<()> {
+    if (pull || push || compact) && !remote_present {
+        anyhow::bail!(
+            "--cache-pull/--cache-push/--cache-compact need --cache-remote \
+             (or RSTEST_CACHE_REMOTE)"
+        );
+    }
+    if compact && (pull || push) {
+        anyhow::bail!(
+            "--cache-compact is a run-less maintenance mode; run it on its own, \
+             not combined with --cache-pull/--cache-push"
+        );
+    }
+    Ok(())
+}
+
+/// Resolve `--shuffle` into an optional dispatch seed. `--shuffle` needs the
+/// parallel pool (`-n >= 2`, not passthrough), can't ride the file-affine lazy
+/// collector, and is meaningless under `--dist each`; a `random` value stamps a
+/// time+pid seed, otherwise the value must parse as `u64`. Prints the resolved
+/// seed to `w` so a shuffled run is reproducible.
+fn resolve_shuffle_seed(
+    shuffle: Option<&str>,
+    n: usize,
+    passthrough: bool,
+    single_worker_reruns: bool,
+    is_lazy: bool,
+    dist_name: &str,
+) -> Result<Option<u64>> {
+    let Some(v) = shuffle else { return Ok(None) };
+    if n <= 1 || passthrough {
+        if single_worker_reruns {
+            anyhow::bail!(
+                "--shuffle is not supported by the one-worker rerun pool \
+                 (--reruns at -n <= 1); raise -n to 2+ to combine shuffle \
+                 with reruns"
+            );
+        }
+        anyhow::bail!(
+            "--shuffle needs the parallel pool (-n >= 2); in single-worker \
+             mode the session owns its own order (use pytest-randomly there)"
+        );
+    }
+    if is_lazy {
+        anyhow::bail!("--shuffle is not supported with --collect lazy");
+    }
+    if dist_name == "each" {
+        anyhow::bail!(
+            "--shuffle is not supported with --dist each (workers run the \
+             full suite in session order)"
+        );
+    }
+    let seed = if v == "random" {
+        crate::time::now_epoch_nanos() as u64 ^ u64::from(std::process::id())
+    } else {
+        v.parse()
+            .map_err(|_| anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'"))?
+    };
+    eprintln!("rstest: shuffle seed {seed} (reproduce with --shuffle={seed})");
+    Ok(Some(seed))
+}
+
+/// Resolve `--shard K/N` into an optional `(k, total)` dispatch filter. `1/1` is
+/// the whole suite (no-op). Otherwise it needs the parallel pool, can't combine
+/// with `--shuffle` (shards must partition identically on every machine), and is
+/// meaningless under `--dist each`.
+fn resolve_shard(
+    shard: Option<&str>,
+    n: usize,
+    passthrough: bool,
+    single_worker_reruns: bool,
+    has_shuffle: bool,
+    dist_name: &str,
+) -> Result<Option<(usize, usize)>> {
+    let Some(spec) = shard else { return Ok(None) };
+    let (k, total) = shard::parse_shard(spec)?;
+    if total == 1 {
+        return Ok(None); // 1/1 is the whole suite: no-op.
+    }
+    if n <= 1 || passthrough {
+        if single_worker_reruns {
+            anyhow::bail!(
+                "--shard is not supported by the one-worker rerun pool \
+                 (--reruns at -n <= 1); raise -n to 2+ to combine shard \
+                 with reruns"
+            );
+        }
+        anyhow::bail!(
+            "--shard needs the parallel pool (-n >= 2); the single-worker \
+             path runs the session's own full suite with no dispatch filter"
+        );
+    }
+    if has_shuffle {
+        anyhow::bail!(
+            "--shard is not supported with --shuffle: shards must partition \
+             the suite identically on every machine, which a per-run shuffle \
+             defeats (shuffle within a shard is fine to add later)"
+        );
+    }
+    if dist_name == "each" {
+        anyhow::bail!(
+            "--shard is not supported with --dist each (every worker runs the \
+             full suite; there is no dispatch queue to partition)"
+        );
+    }
+    Ok(Some((k, total)))
+}
+
+/// Warn (to `w`) when `--incremental` can't run as requested: both incremental
+/// modes select on the same run, so `--since-green`/`--changed` take precedence,
+/// and dispatch-level skipping needs the parallel full-collection `--dist load`
+/// pool. At most one note fires (the first applicable), mirroring the
+/// precedence order.
+fn warn_incremental_conflicts(
+    w: &mut impl Write,
+    incremental: bool,
+    since_green: bool,
+    changed_some: bool,
+    incremental_active: bool,
+) {
+    if incremental && since_green {
+        let _ = writeln!(
+            w,
+            "rstest: --incremental and --since-green are mutually exclusive; \
+             --since-green takes precedence this run"
+        );
+    } else if incremental && changed_some {
+        let _ = writeln!(
+            w,
+            "rstest: --incremental and --changed are mutually exclusive; \
+             --changed owns selection this run"
+        );
+    } else if incremental && !incremental_active {
+        let _ = writeln!(
+            w,
+            "rstest: --incremental needs the parallel pool with full collection and \
+             --dist load (not -n 0/1, --dist each/affinity, --collect lazy, --shard, or \
+             --shuffle); running everything this time"
+        );
+    }
+}
+
+/// Note (to `w`) that `--quarantine` is inert under passthrough IO (-s/--pdb/--co):
+/// there is no aggregate Run to demote outcomes in.
+fn warn_quarantine_passthrough(w: &mut impl Write) {
+    let _ = writeln!(
+        w,
+        "rstest: --quarantine has no effect in passthrough mode; ignoring"
+    );
+}
+
+/// Steal (split files across workers) only on an EXPLICIT `--dist load`: lazy
+/// collection defaults to strict file affinity, since stealing exposes the
+/// cross-file / in-file order dependence that affinity hides.
+fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> bool {
+    cli_dist == Some("load") || settings_dist == Some("load")
+}
+
+/// Fold one worker event into the single-session accumulators (the byte-exact /
+/// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
+/// Reports drive progress (suppressed under passthrough, whose IO is inherited)
+/// and the run record; collect errors/skips, doctor fixtures, and warnings
+/// accumulate. Scheduling / lazy / serve events are no-ops in a single session —
+/// enumerated (not `_`) so a new event type forces a decision here.
+fn fold_run_event(
+    event: proto::Event,
+    passthrough: bool,
+    run: &mut report::Run,
+    prog: &mut progress::Progress,
+    fixtures: &mut Vec<proto::FixtureStat>,
+    warnings: &mut Vec<proto::WarningEntry>,
+) -> Option<i32> {
+    match event {
+        proto::Event::Report(r) => {
+            if !passthrough {
+                prog.on_report(None, &r);
+            }
+            run.record(None, r);
+            None
+        }
+        proto::Event::CollectError { path, longrepr } => {
+            run.collect_error(path, longrepr);
+            None
+        }
+        proto::Event::CollectSkip { .. } => {
+            run.collect_skips += 1;
+            None
+        }
+        proto::Event::DoctorFixtures { fixtures: fx } => {
+            fixtures.extend(fx);
+            None
+        }
+        proto::Event::Warnings { entries } => {
+            warnings.extend(entries);
+            None
+        }
+        proto::Event::CollectionDone { .. }
+        | proto::Event::NodeInput { .. }
+        | proto::Event::ItemStart { .. }
+        | proto::Event::ItemDone { .. }
+        | proto::Event::Stopped { .. }
+        | proto::Event::LazyReady { .. }
+        | proto::Event::FileCollected { .. }
+        | proto::Event::ItemStartId { .. }
+        | proto::Event::ItemDoneId { .. }
+        | proto::Event::StoppedIds { .. }
+        | proto::Event::ServeReady { .. }
+        | proto::Event::ServeReport { .. }
+        | proto::Event::ServeRunDone { .. } => None,
+        proto::Event::Done { exitstatus } => Some(exitstatus),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_lazy, head_to_none, parse_numprocesses, resolve_changed_base, warn_windows_timeout,
-        watchdog_duration,
+        cap_workers_by_files, cap_workers_by_time, collect_lazy, fold_run_event, head_to_none,
+        lazy_should_steal, parse_numprocesses, resolve_changed_base, resolve_shard,
+        resolve_shuffle_seed, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
+    use crate::reporting::{progress, report};
+    use crate::scheduling::proto;
     use clap::Parser;
 
     fn cli() -> Cli {
@@ -1162,5 +1297,266 @@ mod tests {
     #[test]
     fn collect_lazy_rejects_unknown_mode() {
         assert!(collect_lazy(&cli(), &settings_collect(Some("sometimes")), "load", &[]).is_err());
+    }
+
+    #[test]
+    fn validate_cache_flags_requires_remote_and_rejects_compact_combo() {
+        // No cache flags => always fine, remote or not.
+        assert!(validate_cache_flags(false, false, false, false).is_ok());
+        // A cache action with a resolved remote => fine.
+        assert!(validate_cache_flags(true, false, false, true).is_ok());
+        // A cache action with no remote => hard error.
+        let err = validate_cache_flags(false, true, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("need --cache-remote"), "got {err}");
+        assert!(validate_cache_flags(false, false, true, false).is_err());
+        // compact + pull/push is contradictory even with a remote.
+        let err = validate_cache_flags(true, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("run-less maintenance mode"), "got {err}");
+    }
+
+    #[test]
+    fn resolve_shuffle_seed_none_and_happy_path() {
+        // No flag => no seed, no error.
+        assert_eq!(
+            resolve_shuffle_seed(None, 4, false, false, false, "load").unwrap(),
+            None
+        );
+        // A numeric seed parses through on the parallel pool.
+        assert_eq!(
+            resolve_shuffle_seed(Some("42"), 4, false, false, false, "load").unwrap(),
+            Some(42)
+        );
+        // `random` yields *some* seed (nondeterministic value).
+        assert!(
+            resolve_shuffle_seed(Some("random"), 4, false, false, false, "load")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn resolve_shuffle_seed_rejects_incompatible_modes() {
+        // Single-worker rerun pool: its own tailored message.
+        assert!(
+            resolve_shuffle_seed(Some("1"), 1, false, true, false, "load")
+                .unwrap_err()
+                .to_string()
+                .contains("one-worker rerun pool")
+        );
+        // Plain single-worker / passthrough.
+        assert!(
+            resolve_shuffle_seed(Some("1"), 1, false, false, false, "load")
+                .unwrap_err()
+                .to_string()
+                .contains("needs the parallel pool")
+        );
+        assert!(resolve_shuffle_seed(Some("1"), 4, true, false, false, "load").is_err());
+        // Lazy collection and --dist each are unsupported.
+        assert!(
+            resolve_shuffle_seed(Some("1"), 4, false, false, true, "load")
+                .unwrap_err()
+                .to_string()
+                .contains("--collect lazy")
+        );
+        assert!(
+            resolve_shuffle_seed(Some("1"), 4, false, false, false, "each")
+                .unwrap_err()
+                .to_string()
+                .contains("--dist each")
+        );
+        // A non-numeric seed is rejected.
+        assert!(
+            resolve_shuffle_seed(Some("abc"), 4, false, false, false, "load")
+                .unwrap_err()
+                .to_string()
+                .contains("must be an unsigned integer")
+        );
+    }
+
+    #[test]
+    fn resolve_shard_none_noop_and_happy_path() {
+        assert_eq!(
+            resolve_shard(None, 4, false, false, false, "load").unwrap(),
+            None
+        );
+        // 1/1 is the whole suite => no filter.
+        assert_eq!(
+            resolve_shard(Some("1/1"), 4, false, false, false, "load").unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_shard(Some("2/3"), 4, false, false, false, "load").unwrap(),
+            Some((2, 3))
+        );
+    }
+
+    #[test]
+    fn resolve_shard_rejects_incompatible_modes() {
+        assert!(resolve_shard(Some("2/3"), 1, false, true, false, "load")
+            .unwrap_err()
+            .to_string()
+            .contains("one-worker rerun pool"));
+        assert!(resolve_shard(Some("2/3"), 1, false, false, false, "load")
+            .unwrap_err()
+            .to_string()
+            .contains("needs the parallel pool"));
+        // --shuffle active: shards must be machine-stable.
+        assert!(resolve_shard(Some("2/3"), 4, false, false, true, "load")
+            .unwrap_err()
+            .to_string()
+            .contains("not supported with --shuffle"));
+        assert!(resolve_shard(Some("2/3"), 4, false, false, false, "each")
+            .unwrap_err()
+            .to_string()
+            .contains("--dist each"));
+    }
+
+    #[test]
+    fn warn_incremental_conflicts_picks_the_first_applicable_note() {
+        let note = |inc, sg, ch, active| {
+            let mut buf = Vec::new();
+            warn_incremental_conflicts(&mut buf, inc, sg, ch, active);
+            String::from_utf8(buf).unwrap()
+        };
+        // --since-green wins first.
+        assert!(note(true, true, true, false).contains("--since-green takes precedence"));
+        // Then --changed.
+        assert!(note(true, false, true, false).contains("--changed owns selection"));
+        // Then the not-active fallback.
+        assert!(note(true, false, false, false).contains("needs the parallel pool"));
+        // Active + no conflict => silent; --incremental off => silent.
+        assert!(note(true, false, false, true).is_empty());
+        assert!(note(false, true, true, false).is_empty());
+    }
+
+    #[test]
+    fn warn_quarantine_passthrough_writes_the_note() {
+        let mut buf = Vec::new();
+        warn_quarantine_passthrough(&mut buf);
+        assert!(String::from_utf8(buf)
+            .unwrap()
+            .contains("--quarantine has no effect in passthrough mode"));
+    }
+
+    #[test]
+    fn lazy_should_steal_only_on_explicit_load() {
+        assert!(lazy_should_steal(Some("load"), None));
+        assert!(lazy_should_steal(None, Some("load")));
+        // Default (no explicit load) keeps strict file affinity.
+        assert!(!lazy_should_steal(None, None));
+        assert!(!lazy_should_steal(Some("loadfile"), Some("loadscope")));
+    }
+
+    #[test]
+    fn cap_workers_helpers_shrink_but_never_below_one() {
+        // Files: never more workers than files; an empty walk is a no-op.
+        assert_eq!(cap_workers_by_files(8, 3), 3);
+        assert_eq!(cap_workers_by_files(8, 0), 8);
+        assert_eq!(cap_workers_by_files(2, 5), 2);
+        // Time: ~2s per worker, floored at 1.
+        assert_eq!(cap_workers_by_time(8, 10.0), 5); // ceil(10/2)=5
+        assert_eq!(cap_workers_by_time(8, 1.0), 1); // ceil(0.5)=1, max(1)
+        assert_eq!(cap_workers_by_time(8, 0.0), 1); // never below 1
+    }
+
+    fn report(nodeid: &str, outcome: &str) -> proto::Report {
+        proto::Report {
+            nodeid: nodeid.into(),
+            when: "call".into(),
+            outcome: outcome.into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+        }
+    }
+
+    #[test]
+    fn fold_run_event_records_reports_errors_and_terminates_on_done() {
+        let mut run = report::Run::default();
+        let mut prog = progress::Progress::default();
+        let mut fixtures = Vec::new();
+        let mut warnings = Vec::new();
+        let mut fold =
+            |ev| fold_run_event(ev, false, &mut run, &mut prog, &mut fixtures, &mut warnings);
+
+        assert_eq!(
+            fold(proto::Event::Report(report("t.py::a", "passed"))),
+            None
+        );
+        assert_eq!(
+            fold(proto::Event::CollectError {
+                path: "bad.py".into(),
+                longrepr: "boom".into(),
+            }),
+            None
+        );
+        assert_eq!(
+            fold(proto::Event::CollectSkip {
+                path: "m.py".into()
+            }),
+            None
+        );
+        assert_eq!(
+            fold(proto::Event::DoctorFixtures {
+                fixtures: vec![proto::FixtureStat {
+                    name: "db".into(),
+                    scope: "session".into(),
+                    count: 1,
+                    total: 0.5,
+                }]
+            }),
+            None
+        );
+        assert_eq!(
+            fold(proto::Event::Warnings {
+                entries: vec![proto::WarningEntry {
+                    when: "runtest".into(),
+                    category: "DeprecationWarning".into(),
+                    message: "old".into(),
+                    filename: "t.py".into(),
+                    lineno: 1,
+                    count: 1,
+                }]
+            }),
+            None
+        );
+        // A scheduling-only event is a no-op in a single session.
+        assert_eq!(fold(proto::Event::ItemStart { index: 0 }), None);
+        // Done terminates with the exit status.
+        assert_eq!(fold(proto::Event::Done { exitstatus: 1 }), Some(1));
+
+        assert_eq!(run.collect_skips, 1);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(fixtures.len(), 1);
+    }
+
+    #[test]
+    fn fold_run_event_suppresses_progress_under_passthrough() {
+        // Passthrough owns the tty; a Report must still be recorded but not
+        // drive the progress renderer.
+        let mut run = report::Run::default();
+        let mut prog = progress::Progress::default();
+        let mut fixtures = Vec::new();
+        let mut warnings = Vec::new();
+        let code = fold_run_event(
+            proto::Event::Report(report("t.py::a", "passed")),
+            true,
+            &mut run,
+            &mut prog,
+            &mut fixtures,
+            &mut warnings,
+        );
+        assert_eq!(code, None);
+        assert_eq!(run.counts()["passed"], 1);
     }
 }
