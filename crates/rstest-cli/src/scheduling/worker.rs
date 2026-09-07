@@ -81,18 +81,18 @@ impl Worker {
         // cmd: parent writes -> child reads; evt: child writes -> parent reads.
         let cmd = transport::pipe()?;
         let evt = transport::pipe()?;
-        transport::prepare_parent_end(cmd.write)?;
-        transport::prepare_parent_end(evt.read)?;
-        transport::prepare_child_end(cmd.read)?;
-        transport::prepare_child_end(evt.write)?;
+        transport::prepare_parent_end(cmd.write.raw())?;
+        transport::prepare_parent_end(evt.read.raw())?;
+        transport::prepare_child_end(cmd.read.raw())?;
+        transport::prepare_child_end(evt.write.raw())?;
 
         let mut command = Command::new(python);
         command
             .args([
                 "-m",
                 "rstest_worker",
-                &cmd.read.to_string(),
-                &evt.write.to_string(),
+                &cmd.read.raw().to_string(),
+                &evt.write.raw().to_string(),
             ])
             .env("PYTHONPATH", worker_pythonpath())
             // Run-wide params ride the CHILD's environment (thread-safe), never
@@ -139,11 +139,13 @@ impl Worker {
             .spawn()
             .with_context(|| format!("spawning worker: {}", python.display()))?;
 
-        // Close the child's ends in the parent or EOF detection breaks.
-        transport::close(cmd.read);
-        transport::close(evt.write);
-        let cmd_w = transport::into_file(cmd.write);
-        let evt_r = transport::into_file(evt.read);
+        // Close the child's ends in the parent or EOF detection breaks
+        // (Endpoint::drop calls transport::close). The parent ends become
+        // Files, which own the raw endpoint from here on.
+        drop(cmd.read);
+        drop(evt.write);
+        let cmd_w = transport::into_file(cmd.write.into_raw());
+        let evt_r = transport::into_file(evt.read.into_raw());
         Ok(Self {
             child,
             cmd_w,
@@ -214,11 +216,42 @@ impl Worker {
     }
 }
 
+/// RAII owner for one raw pipe endpoint (a file descriptor on unix, a HANDLE
+/// on Windows). Closes on drop so an early return between `transport::pipe()`
+/// and a successful `spawn()` can't leak the endpoint. Call [`Endpoint::into_raw`]
+/// to defuse it when ownership is deliberately handed off (the child inherits
+/// it, or it becomes a parent-side `File`).
+struct Endpoint(Option<u64>);
+
+impl Endpoint {
+    fn new(raw: u64) -> Self {
+        Endpoint(Some(raw))
+    }
+
+    /// The raw value, without giving up ownership (for fcntl/argv/etc.).
+    fn raw(&self) -> u64 {
+        self.0.expect("endpoint used after into_raw")
+    }
+
+    /// Take ownership of the raw value; drop no longer closes it.
+    fn into_raw(mut self) -> u64 {
+        self.0.take().expect("endpoint already taken")
+    }
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        if let Some(raw) = self.0.take() {
+            transport::close(raw);
+        }
+    }
+}
+
 /// Endpoint values are numeric and platform-meaningful: file descriptors
 /// on unix, HANDLEs on Windows.
 struct Pipe {
-    read: u64,
-    write: u64,
+    read: Endpoint,
+    write: Endpoint,
 }
 
 #[cfg(unix)]
@@ -232,12 +265,14 @@ mod transport {
 
     pub fn pipe() -> Result<Pipe> {
         let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a valid 2-element array; libc::pipe writes exactly
+        // two fds into it. Return value is checked before the fds are read.
         if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
             return Err(std::io::Error::last_os_error()).context("pipe()");
         }
         Ok(Pipe {
-            read: fds[0] as u64,
-            write: fds[1] as u64,
+            read: super::Endpoint::new(fds[0] as u64),
+            write: super::Endpoint::new(fds[1] as u64),
         })
     }
 
@@ -245,8 +280,14 @@ mod transport {
     /// detection breaks.
     pub fn prepare_parent_end(fd: u64) -> Result<()> {
         let fd = fd as i32;
+        // SAFETY: F_GETFD reads the fd's flags; `fd` is a live pipe endpoint
+        // owned by an Endpoint. Result checked for the -1 error sentinel below.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error()).context("fcntl(F_GETFD)");
+        }
+        // SAFETY: F_SETFD writes the flag int back to the same live `fd`.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
             return Err(std::io::Error::last_os_error()).context("fcntl(FD_CLOEXEC)");
         }
         Ok(())
@@ -258,10 +299,14 @@ mod transport {
     }
 
     pub fn close(fd: u64) {
+        // SAFETY: `fd` is a live pipe endpoint whose ownership is being given
+        // up here (the caller is an Endpoint that no longer uses it).
         unsafe { libc::close(fd as i32) };
     }
 
     pub fn into_file(fd: u64) -> File {
+        // SAFETY: `fd` is a live, owned pipe endpoint; ownership transfers to
+        // the returned File (its Drop will close it exactly once).
         unsafe { File::from_raw_fd(fd as i32) }
     }
 }
@@ -287,13 +332,16 @@ mod transport {
     pub fn pipe() -> Result<Pipe> {
         let mut read: HANDLE = std::ptr::null_mut();
         let mut write: HANDLE = std::ptr::null_mut();
+        // SAFETY: `read`/`write` are valid out-pointers; CreatePipe fills them
+        // with two handles. Null security attrs = default. Return value checked
+        // before the handles are used.
         let ok = unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 0) };
         if ok == 0 {
             bail!("CreatePipe failed: {}", std::io::Error::last_os_error());
         }
         Ok(Pipe {
-            read: read as u64,
-            write: write as u64,
+            read: super::Endpoint::new(read as u64),
+            write: super::Endpoint::new(write as u64),
         })
     }
 
@@ -307,6 +355,8 @@ mod transport {
     /// with bInheritHandles=TRUE when stdio is configured (it is: stdout
     /// is always set), so inheritable handles reach the child.
     pub fn prepare_child_end(handle: u64) -> Result<()> {
+        // SAFETY: `handle` is a live pipe endpoint owned by an Endpoint;
+        // SetHandleInformation only flips its inherit flag. Return value checked.
         let ok = unsafe {
             SetHandleInformation(handle as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
         };
@@ -320,10 +370,14 @@ mod transport {
     }
 
     pub fn close(handle: u64) {
+        // SAFETY: `handle` is a live pipe endpoint whose ownership is being
+        // given up here (the Endpoint no longer uses it).
         unsafe { CloseHandle(handle as HANDLE) };
     }
 
     pub fn into_file(handle: u64) -> File {
+        // SAFETY: `handle` is a live, owned pipe endpoint; ownership transfers
+        // to the returned File (its Drop closes it exactly once).
         unsafe { File::from_raw_handle(handle as *mut _) }
     }
 }
@@ -354,13 +408,54 @@ pub fn worker_pythonpath() -> String {
         .unwrap_or_default()
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    use super::Endpoint;
+
+    #[test]
+    fn endpoint_into_raw_takes_ownership_without_closing() {
+        // A fake, never-opened raw value: raw() reads it, into_raw() hands it
+        // off and defuses Drop (no close of an fd we don't own).
+        let e = Endpoint::new(0xDEAD_BEEF);
+        assert_eq!(e.raw(), 0xDEAD_BEEF);
+        assert_eq!(e.into_raw(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn worker_pythonpath_includes_explicit_override() {
+        // RSTEST_WORKER_PATH is pushed first, so it must appear in the joined
+        // result. Exercises the env-read + join_paths return of worker_pythonpath.
+        let sentinel = format!("/tmp/rstest-pp-{}", std::process::id());
+        // SAFETY: edition 2021; test-only env mutation, value is a private sentinel.
+        std::env::set_var("RSTEST_WORKER_PATH", &sentinel);
+        let pp = super::worker_pythonpath();
+        // SAFETY: same as above; restore so other tests see a clean env.
+        std::env::remove_var("RSTEST_WORKER_PATH");
+        assert!(
+            pp.contains(&sentinel),
+            "PYTHONPATH {pp:?} missing explicit override {sentinel:?}"
+        );
+    }
+
+    // fcntl(F_GETFD) on an fd that was never opened fails with EBADF, driving
+    // the parent-end error path. F_SETFD's own failure branch is left uncovered
+    // (no way to make GETFD succeed but SETFD fail on the same live fd).
+    #[cfg(unix)]
+    #[test]
+    fn prepare_parent_end_errors_on_a_bad_fd() {
+        // A high fd number that is not open in the test process.
+        let err = super::transport::prepare_parent_end(1_000_000).unwrap_err();
+        assert!(err.to_string().contains("F_GETFD"), "{err}");
+    }
+
+    #[cfg(unix)]
     use super::{Worker, WorkerEnv};
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
 
     /// A repo python that can import pytest + rstest_worker, plus the worker
     /// PYTHONPATH root. None => skip (no suitable interpreter present).
+    #[cfg(unix)]
     fn worker_python() -> Option<(PathBuf, PathBuf)> {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -392,6 +487,7 @@ mod tests {
 
     /// Whether `pid` still exists. A zombie (killed but un-reaped) still counts
     /// as alive here — signal 0 succeeds until the parent `wait()`s it away.
+    #[cfg(unix)]
     fn alive(pid: u32) -> bool {
         // SAFETY: signal 0 performs no action; it only probes whether `pid`
         // is a live, signalable process. Touches no memory.
@@ -403,6 +499,7 @@ mod tests {
     /// and `Child`'s drop neither kills nor waits. After kill+wait the pid must
     /// be GONE (ESRCH) — a `<defunct>` zombie would still answer `kill(pid, 0)`,
     /// so this asserts the reaping `wait()`, not merely the `kill()`.
+    #[cfg(unix)]
     #[test]
     fn kill_then_wait_reaps_the_worker_child() {
         let Some((python, worker_path)) = worker_python() else {

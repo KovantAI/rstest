@@ -10,7 +10,7 @@
 mod gate;
 mod render;
 
-pub use gate::{evaluate, parse_conditions};
+pub use gate::{evaluate, parse_conditions, GateCondition};
 pub(crate) use render::leak_delta;
 pub use render::{append_ci_summary, render, write_markdown};
 

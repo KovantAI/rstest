@@ -76,7 +76,7 @@ const METRICS: &[&str] = &[
 /// One parsed `--doctor-fail-on` condition. Parsing validates the metric name
 /// and threshold up front (before the run) so a typo fails fast rather than
 /// silently never firing - the exact bug class this feature exists to kill.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GateCondition {
     raw: String,
     metric: String,

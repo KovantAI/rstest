@@ -824,18 +824,17 @@ mod tests {
         // serve_session itself must NOT drain — the guaranteed teardown is the
         // caller's job, so a leak-free path holds regardless of how it exits.
         let pid = w.id();
-        assert!(
-            unsafe { libc::kill(pid as i32, 0) } == 0,
-            "worker should be alive pre-drain"
-        );
+        // SAFETY: kill with signal 0 performs no action; it only probes whether
+        // `pid` is a live, signalable process. No memory is touched.
+        let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+        assert!(alive, "worker should be alive pre-drain");
 
         drain_worker(&mut worker);
         assert!(worker.is_none());
         // ESRCH: the process is gone (killed and reaped), not orphaned.
-        assert!(
-            unsafe { libc::kill(pid as i32, 0) } != 0,
-            "worker pid {pid} still alive after drain -> leaked"
-        );
+        // SAFETY: signal 0 only probes liveness of `pid`; touches no memory.
+        let gone = unsafe { libc::kill(pid as i32, 0) } != 0;
+        assert!(gone, "worker pid {pid} still alive after drain -> leaked");
     }
 
     /// `shutdown` after a warm session must tear the worker down (kill + reap)

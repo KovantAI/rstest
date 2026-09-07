@@ -480,11 +480,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
                     own.push(v);
                 }
             }
+            // Bare `-n` is caught by the exact arm above, so `starts_with("-n")`
+            // here only matches the attached short forms `-n4` / `-n=4` (clap
+            // accepts both); without this they'd leak to the pytest session.
             _ if arg.starts_with("--numprocesses=")
                 || arg.starts_with("--python=")
                 || arg.starts_with("--report-json=")
                 || arg.starts_with("--output=")
-                || arg.starts_with("-n=") =>
+                || arg.starts_with("-n") =>
             {
                 own.push(arg);
             }
@@ -553,6 +556,18 @@ mod tests {
         ]));
         assert_eq!(own, v(&["rstest", "-n", "4", "--dist", "loadfile"]));
         assert_eq!(session, v(&["tests/", "-k", "smoke", "-x"]));
+    }
+
+    #[test]
+    fn split_owns_attached_short_numprocesses() {
+        // Attached `-n4` and `-n=4` are rstest's, not forwarded to pytest.
+        let (own, session) = split_args(v(&["-n4", "tests/"]));
+        assert_eq!(own, v(&["rstest", "-n4"]));
+        assert_eq!(session, v(&["tests/"]));
+
+        let (own, session) = split_args(v(&["-n=4", "tests/"]));
+        assert_eq!(own, v(&["rstest", "-n=4"]));
+        assert_eq!(session, v(&["tests/"]));
     }
 
     #[test]
