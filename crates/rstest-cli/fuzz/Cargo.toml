@@ -1,0 +1,32 @@
+# cargo-fuzz target for the orchestrator<->worker wire protocol.
+# Excluded from the workspace (see root Cargo.toml): it needs nightly +
+# libfuzzer-sys and must not be part of the stable `cargo test` build.
+#
+#   cargo +nightly fuzz run decode_event
+#
+[package]
+name = "rstest-cli-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone: excluded from the parent workspace, so it roots its own.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rmp-serde = "1"
+rstest-cli = { path = ".." }
+
+[[bin]]
+name = "decode_event"
+path = "fuzz_targets/decode_event.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

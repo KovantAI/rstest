@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/rstest-cli"]
-# corpus clones may build rust sdists (pydantic-core); keep them out
-exclude = ["corpus/work"]
+# corpus clones may build rust sdists (pydantic-core); keep them out.
+# `fuzz` is a cargo-fuzz crate (nightly + libfuzzer-sys); out of the stable build.
+exclude = ["corpus/work", "crates/rstest-cli/fuzz"]
 
 [workspace.package]
 version = "0.5.0"
