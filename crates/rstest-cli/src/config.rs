@@ -59,7 +59,7 @@ fn parse_config_file(path: &Path) -> Option<ProjectConfig> {
     let text = std::fs::read_to_string(path).ok()?;
     let name = path.file_name()?.to_str()?;
     match name {
-        "pyproject.toml" => parse_pyproject(&text),
+        "pyproject.toml" => parse_pyproject(&text, path),
         "pytest.ini" => parse_ini(&text, "pytest"),
         "tox.ini" => parse_ini(&text, "pytest"),
         "setup.cfg" => parse_ini(&text, "tool:pytest"),
@@ -67,8 +67,14 @@ fn parse_config_file(path: &Path) -> Option<ProjectConfig> {
     }
 }
 
-fn parse_pyproject(text: &str) -> Option<ProjectConfig> {
-    let doc: toml::Value = toml::from_str(text).ok()?;
+fn parse_pyproject(text: &str, path: &Path) -> Option<ProjectConfig> {
+    let doc: toml::Value = match toml::from_str(text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("rstest: ignoring malformed {}: {e}", path.display());
+            return None;
+        }
+    };
     let ini = doc.get("tool")?.get("pytest")?.get("ini_options")?;
     let mut cfg = ProjectConfig::default();
     if let Some(v) = ini.get("python_files") {
@@ -92,29 +98,85 @@ fn toml_str_list(v: &toml::Value) -> Vec<String> {
     }
 }
 
-/// Just enough INI parsing for `[section] key = v1 v2` pytest configs.
+/// Just enough INI parsing for pytest configs. Handles the single-line
+/// `key = v1 v2` form, configparser's `:` delimiter, and the indented
+/// multi-line form:
+///
+/// ```ini
+/// testpaths =
+///     tests
+///     integration
+/// ```
 fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
+    fn apply(cfg: &mut ProjectConfig, key: &str, values: Vec<String>) {
+        if values.is_empty() {
+            return;
+        }
+        match key {
+            "python_files" => cfg.python_files = values,
+            "testpaths" => cfg.testpaths = values,
+            _ => {}
+        }
+    }
+
     let mut in_section = false;
     let mut cfg = ProjectConfig::default();
     let mut found = false;
-    for line in text.lines() {
-        let line = line.trim_end();
-        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            in_section = name == section;
-            found |= in_section;
+    // The key still accepting indented continuation lines, plus values so far.
+    let mut open: Option<(String, Vec<String>)> = None;
+
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        let content = line.trim_start();
+        let is_indented = line.starts_with([' ', '\t']);
+
+        // Blank line closes any open value (configparser semantics).
+        if content.is_empty() {
+            if let Some((k, v)) = open.take() {
+                apply(&mut cfg, &k, v);
+            }
             continue;
         }
-        if !in_section || line.trim().is_empty() || line.trim_start().starts_with(['#', ';']) {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let values: Vec<String> = value.split_whitespace().map(String::from).collect();
-            match key.trim() {
-                "python_files" if !values.is_empty() => cfg.python_files = values,
-                "testpaths" if !values.is_empty() => cfg.testpaths = values,
-                _ => {}
+        // Section header (never indented).
+        if !is_indented {
+            if let Some(name) = content.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                if let Some((k, v)) = open.take() {
+                    apply(&mut cfg, &k, v);
+                }
+                in_section = name == section;
+                found |= in_section;
+                continue;
             }
         }
+        if !in_section {
+            continue;
+        }
+        if content.starts_with(['#', ';']) {
+            continue;
+        }
+        // Indented continuation of an open key.
+        if is_indented {
+            if let Some((_, v)) = open.as_mut() {
+                v.extend(content.split_whitespace().map(String::from));
+                continue;
+            }
+        }
+        // New key line: close the previous key, open this one. Split on the
+        // first `=` or `:` (configparser accepts either delimiter).
+        if let Some((k, v)) = open.take() {
+            apply(&mut cfg, &k, v);
+        }
+        if let Some(idx) = content.find(['=', ':']) {
+            let key = content[..idx].trim().to_string();
+            let values = content[idx + 1..]
+                .split_whitespace()
+                .map(String::from)
+                .collect();
+            open = Some((key, values));
+        }
+    }
+    if let Some((k, v)) = open.take() {
+        apply(&mut cfg, &k, v);
     }
     found.then_some(cfg)
 }
@@ -145,8 +207,12 @@ pub fn rstest_settings(start: &Path) -> RstestSettings {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(doc) = toml::from_str::<toml::Value>(&text) else {
-            continue;
+        let doc = match toml::from_str::<toml::Value>(&text) {
+            Ok(doc) => doc,
+            Err(e) => {
+                eprintln!("rstest: ignoring malformed {}: {e}", path.display());
+                continue;
+            }
         };
         let Some(tool) = doc.get("tool").and_then(|t| t.get("rstest")) else {
             // pyproject exists but has no [tool.rstest]: stop at the
@@ -155,22 +221,24 @@ pub fn rstest_settings(start: &Path) -> RstestSettings {
         };
         return RstestSettings {
             numprocesses: match tool.get("numprocesses") {
-                Some(toml::Value::Integer(n)) => Some(n.to_string()),
+                // Reject negatives; a `-3` typo must not become the literal "-3".
+                Some(toml::Value::Integer(n)) if *n >= 0 => Some(n.to_string()),
                 Some(toml::Value::String(s)) => Some(s.clone()),
                 _ => None,
             },
             dist: tool.get("dist").and_then(|v| v.as_str()).map(String::from),
+            // `try_from` rejects negatives instead of wrapping to a huge budget.
             reruns: tool
                 .get("reruns")
                 .and_then(|v| v.as_integer())
-                .map(|n| n as u32),
+                .and_then(|n| u32::try_from(n).ok()),
             reruns_only_known_flaky: tool
                 .get("reruns-only-known-flaky")
                 .and_then(|v| v.as_bool()),
             worker_timeout: tool
                 .get("worker-timeout")
                 .and_then(|v| v.as_integer())
-                .map(|n| n as u64),
+                .and_then(|n| u64::try_from(n).ok()),
             projects: tool.get("projects").and_then(|v| v.as_array()).map(|a| {
                 a.iter()
                     .filter_map(|i| i.as_str().map(String::from))
@@ -343,6 +411,36 @@ worker-timeout = 120
         assert_eq!(s.projects, Some(vec!["pkg_a".into(), "pkg_b".into()]));
         assert_eq!(s.collect.as_deref(), Some("lazy"));
         assert_eq!(s.output.as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn settings_reject_negative_ints() {
+        // A `-1`/`-5`/`-3` typo must not wrap to a near-infinite budget or
+        // survive as a literal string; each falls back to None.
+        let d = tmpdir("neg-ints");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nreruns = -1\nworker-timeout = -5\nnumprocesses = -3\n",
+        )
+        .unwrap();
+        let s = rstest_settings(&d);
+        assert_eq!(s.reruns, None);
+        assert_eq!(s.worker_timeout, None);
+        assert_eq!(s.numprocesses, None);
+    }
+
+    #[test]
+    fn ini_reads_multiline_and_colon_values() {
+        // configparser indented multi-line form + `:` delimiter.
+        let d = tmpdir("ini-multiline");
+        std::fs::write(
+            d.join("pytest.ini"),
+            "[pytest]\ntestpaths =\n    tests\n    integration\npython_files:\n    check_*.py\n    chk_*.py\n",
+        )
+        .unwrap();
+        let cfg = discover(&d);
+        assert_eq!(cfg.testpaths, vec!["tests", "integration"]);
+        assert_eq!(cfg.python_files, vec!["check_*.py", "chk_*.py"]);
     }
 
     #[test]
