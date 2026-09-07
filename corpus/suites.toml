@@ -215,13 +215,36 @@ projects = [
 ]
 # checkpoint-sqlite uses pytest-retry, whose master branch
 # (has_plugin("xdist") and getoption("numprocesses")) starts a ReportServer and
-# stashes its port for workers via workerinput["server_port"]. This used to be
-# an rstest gap: rstest nulled numprocesses, so the master branch never ran and
-# the worker branch KeyError'd on the missing port — hence the old
-# serial=[checkpoint-sqlite] + disable_plugins=[pytest-retry] workarounds.
-# Fixed: rstest now keeps numprocesses visible (xdist stays inert via dist="no")
-# and defers/retries configure_node, so each worker self-provisions its own
-# ephemeral ReportServer. Verified standalone: checkpoint-sqlite runs at -n auto
-# (108 passed, ~2x vs -n 0) with pytest-retry active. No pin needed.
+# stashes its port for workers via workerinput["server_port"]. Under rstest the
+# worker branch KeyError's on the missing port at -n>0, so pytest-retry is:
+#   - kept active only on checkpoint-sqlite, pinned serial (-n 0), where it runs
+#     clean (108 passed) and its @pytest.mark.flaky marker stays registered;
+#   - disabled (-p no:pytest-retry) on the other libs, where it would autoload
+#     from the shared venv and crash.
+# NOTE: an earlier self-provision fix (worker re-fires configure_node to set its
+# own server_port) does not hold here — the KeyError reproduces at -n auto on
+# both 0.5.0 and 0.6.0 and both pytest-retry 1.6.3 and 1.7.0. Tracked separately;
+# the workarounds below keep the corpus measurable meanwhile.
+serial = ["libs/checkpoint-sqlite"]
+disable_plugins = ["pytest-retry"]
 # Mono parity verified on the 5-lib subset: 838 tests, 100% per-test outcome
-# parity, 1.45x wall (10-run mean, rstest 0.6.0).
+# parity (10-run mean, rstest 0.6.0).
+
+[langchain]
+# Second monorepo, chosen to exercise mono mode WITHOUT pytest-retry (see the
+# server_port note above): langchain-ai/langchain, PEP 621 libs each with its
+# own pytest config and [dependency-groups] test. Baseline = one serial pytest
+# per lib; candidate = one rstest root pass. Subset pinned to three
+# service-free, fully offline libs — pytest-socket blocks network, so no live
+# APIs or databases are reachable and no per-lib policy is needed. (Other libs
+# like text-splitters/langchain need heavy optional NLP deps — nltk, spacy,
+# sentence-transformers — to collect, so they are left out of the subset.)
+# Listed in dependency order so the editable langchain-core install wins for
+# the libs that depend on it.
+mode = "mono"
+repo = "https://github.com/langchain-ai/langchain"
+projects = [
+    "libs/core",
+    "libs/model-profiles",
+    "libs/langchain_v1",
+]

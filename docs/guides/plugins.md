@@ -179,6 +179,46 @@ here. Probe one yourself in a minute:
 `rstest try` is a fast first pass: it runs your suite under pytest and
 under `rstest -n auto` and flags outcome differences, plugins included.
 
+## Hook coverage
+
+rstest runs a real [pluggy](https://github.com/pytest-dev/pluggy) inside each
+worker, so **every conftest/plugin hook runs per-worker** exactly as in pytest.
+The exceptions are hooks whose result depends on there being a single
+coordinating process — because rstest's coordinator is the Rust orchestrator,
+not a Python master. This table is the precise contract at `-n ≥ 2`:
+
+| Hook | Behavior at `-n ≥ 2` | Why |
+|---|---|---|
+| `pytest_configure` / `pytest_unconfigure` | Runs per worker | Standard per-session hook |
+| `pytest_collection_modifyitems` | Deselection honored; **reordering ignored** | Dispatch is index-into-verified-collection, duration-first — use `-n 0` or an affinity [`--dist`](../reference/cli.md) mode to preserve order ([xdist hooks](../concepts/xdist-hooks.md)) |
+| `pytest_terminal_summary` and other terminal-painting hooks | Runs per worker, but **custom terminal output is not shown** — rstest owns the terminal | The orchestrator renders one merged terminal; use `-n 0` when you want a plugin's own rendering |
+| `pytest_runtest_protocol` (custom replacements) | Runs, but interplay with dispatch only exercised for the plugins listed above | Dispatch owns `nextitem`/phase streaming — report surprises |
+| `pytest_configure_node` | Emulated (called) per worker | xdist master-side hook — [xdist hooks](../concepts/xdist-hooks.md) |
+| `pytest_testnodeready` / `pytest_testnodedown` | Emulated; `testnodedown` for a crashed worker runs on a *survivor* | Best-effort, weaker than xdist |
+| `pytest_xdist_make_scheduler` | Silent no-op | Scheduling lives in Rust, not extensible from Python |
+| `pytest_xdist_auto_num_workers` | Silent no-op | Worker count is rstest's decision |
+| `pytest_handlecrashitem` | Silent no-op | Crash handling lives in Rust |
+| `pytest_xdist_node_collection_finished` | Silent no-op | No master collection phase |
+
+### The silent-no-op class
+
+One failure mode is worth generalizing, because it hits a whole *category* of
+plugins, not just the pytest-html row that documents it above. A plugin that
+decides "am I the xdist master?" with `not hasattr(config, "workerinput")` will
+**silently do nothing** under the rstest pool — every rstest worker carries a
+`workerinput`, so the master-only branch never fires, and nothing crashes to
+tell you.
+
+This is why **pytest-html** writes no report at `-n ≥ 2`, and why
+report-aggregator plugins in general — anything that merges all workers'
+results into one artifact from a central process — go dark under parallelism.
+
+Rule of thumb: if a plugin's job is to *aggregate across workers from the
+master*, assume it needs `-n 0` until proven otherwise. rstest ships native,
+merged-from-the-orchestrator equivalents for the common ones — `--junitxml`,
+`--report-json`, `--cov`, native `--html` — which are whole-suite documents at
+any worker count.
+
 ## Known limits
 
 - Plugins that *render the terminal* (pytest-sugar, pytest-rich and

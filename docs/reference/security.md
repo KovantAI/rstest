@@ -93,6 +93,13 @@ a security release is a release.
 
 ### Re-vendor history
 
+**Why this table is short.** It records changes to the *vendored pytest*, not
+rstest releases. pytest has been on 9.1.1 since rstest 0.1.0 (2026-06-23), so
+there has been nothing to re-vendor since — a short table here means the core
+has been stable, not that the docs are stale. For rstest's own release cadence
+and per-version changes, see the
+[CHANGELOG](https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md).
+
 Every vendored-pytest change, newest first, with the commit that re-extracted
 the tree and the rstest release it shipped in:
 
