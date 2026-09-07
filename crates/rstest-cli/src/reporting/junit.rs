@@ -86,6 +86,8 @@ pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
 /// pytest classname convention: path components + classes joined with dots,
 /// file extension dropped; name = the final component (with params).
 fn split_nodeid(nodeid: &str) -> (String, String) {
+    // Not `nodeid_file`: a bare-file nodeid (collection error, no `::`) must
+    // yield an empty classname here, whereas `nodeid_file` returns the file.
     let mut parts: Vec<&str> = nodeid.split("::").collect();
     let name = parts.pop().unwrap_or(nodeid).to_string();
     let file = parts.first().copied().unwrap_or("");

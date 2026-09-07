@@ -256,7 +256,7 @@ fn test_file_hashes(green: &HashSet<String>) -> HashMap<String, String> {
 
 /// The test-file portion of a nodeid (`path::Class::test` -> `path`).
 fn test_file_of(nodeid: &str) -> &str {
-    nodeid.split("::").next().unwrap_or(nodeid)
+    crate::text::nodeid_file(nodeid)
 }
 
 /// Fold the coverage of cached (skipped) tests from the pre-run index (`old`)

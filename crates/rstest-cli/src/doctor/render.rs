@@ -4,6 +4,28 @@
 
 use super::{DoctorReport, FixtureEntry};
 
+/// The tuning hint a fixture hotspot warrants, from its scope + run profile.
+/// The threshold ladder lived verbatim in both the terminal and markdown
+/// renderers; classify once here, let each surface word it (the wordings
+/// differ, so this returns the category, not the text).
+enum FixtureAdvice {
+    /// A function-scoped fixture that ran often and cost real time.
+    WidenScope,
+    /// A session fixture that ran more than once (once per worker).
+    SessionPerWorker,
+    None,
+}
+
+fn fixture_advice(f: &FixtureEntry) -> FixtureAdvice {
+    if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
+        FixtureAdvice::WidenScope
+    } else if f.scope == "session" && f.count > 1 {
+        FixtureAdvice::SessionPerWorker
+    } else {
+        FixtureAdvice::None
+    }
+}
+
 /// The doctor analysis as GitHub-flavored markdown, shaped for a job
 /// summary: same signals as the terminal report, tables instead of
 /// aligned columns.
@@ -99,12 +121,12 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push_str("### Fixture hotspots (setup time across all workers)\n\n");
         md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
         for f in interesting {
-            let advice = if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
-                "ran many times; widen scope if value is reusable"
-            } else if f.scope == "session" && f.count > 1 {
-                "session fixture ran once per worker; must be safe to duplicate"
-            } else {
-                ""
+            let advice = match fixture_advice(f) {
+                FixtureAdvice::WidenScope => "ran many times; widen scope if value is reusable",
+                FixtureAdvice::SessionPerWorker => {
+                    "session fixture ran once per worker; must be safe to duplicate"
+                }
+                FixtureAdvice::None => "",
             };
             let _ = writeln!(
                 md,
@@ -277,12 +299,12 @@ pub fn render(r: &DoctorReport) {
     if !interesting.is_empty() {
         println!("\nFIXTURE HOTSPOTS (setup time across all workers):");
         for f in interesting {
-            let advice = if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
-                "  <- ran many times; widen scope if value is reusable"
-            } else if f.scope == "session" && f.count > 1 {
-                "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)"
-            } else {
-                ""
+            let advice = match fixture_advice(f) {
+                FixtureAdvice::WidenScope => "  <- ran many times; widen scope if value is reusable",
+                FixtureAdvice::SessionPerWorker => {
+                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)"
+                }
+                FixtureAdvice::None => "",
             };
             println!(
                 "  {:7.2}s {:6}x  scope={:<8} {}{advice}",

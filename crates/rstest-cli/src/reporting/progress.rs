@@ -7,6 +7,58 @@ use crate::reporting::color::Palette;
 use crate::reporting::status::StatusFooter;
 use crate::scheduling::proto::Report;
 
+/// The pytest outcome a phase report represents, decoupled from how any one
+/// renderer draws it. Every renderer (dots, verbose, bar, TAP, TeamCity)
+/// classifies through [`outcome_kind`] so xfail/xpass/skip/error stay
+/// identical across output formats. `None` from `outcome_kind` means the
+/// phase draws nothing (a passed/skipped setup that isn't the decisive
+/// phase, or a passed teardown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutcomeKind {
+    Pass,
+    XPass,
+    Fail,
+    Skip,
+    XFail,
+    SetupError,
+    TeardownError,
+}
+
+impl OutcomeKind {
+    /// Whether this phase advances the finished-test counter. Every kind does
+    /// except a failed teardown - the test already counted at its call phase.
+    fn counts_done(self) -> bool {
+        self != OutcomeKind::TeardownError
+    }
+}
+
+/// Classify a phase report, or `None` when it renders nothing. One char per
+/// TEST: the call report, a non-passed setup (no call follows), or a failed
+/// teardown (its own marker after the call already printed).
+fn outcome_kind(r: &Report) -> Option<OutcomeKind> {
+    use OutcomeKind::*;
+    Some(match (r.when.as_str(), r.outcome.as_str()) {
+        ("call", "passed") => {
+            if r.wasxfail {
+                XPass
+            } else {
+                Pass
+            }
+        }
+        ("call", "failed") => Fail,
+        ("call" | "setup", "skipped") => {
+            if r.wasxfail {
+                XFail
+            } else {
+                Skip
+            }
+        }
+        ("setup", "failed") => SetupError,
+        ("teardown", "failed") => TeardownError,
+        _ => return None,
+    })
+}
+
 #[derive(Default, Clone, Copy, PartialEq)]
 pub enum Mode {
     #[default]
@@ -149,41 +201,24 @@ impl Progress {
         // Github/Gitlab/Buildkite share the dots char stream below; their
         // annotations / fold markers are emitted from the aggregate at
         // end-of-run.
-        let ch = match (r.when.as_str(), r.outcome.as_str()) {
-            ("call", "passed") => {
-                if r.wasxfail {
-                    'X'
-                } else {
-                    '.'
-                }
-            }
-            ("call", "failed") => 'F',
-            ("call", "skipped") => {
-                if r.wasxfail {
-                    'x'
-                } else {
-                    's'
-                }
-            }
-            ("setup", "failed") => 'E',
-            ("setup", "skipped") => {
-                if r.wasxfail {
-                    'x'
-                } else {
-                    's'
-                }
-            }
-            ("teardown", "failed") => 'E',
-            _ => return,
+        use OutcomeKind::*;
+        let Some(kind) = outcome_kind(r) else {
+            return;
         };
-        let painted = if r.when == "teardown" {
-            // The test already printed a char at call time; an error
-            // teardown gets its own marker appended.
-            self.palette.outcome("E")
-        } else {
+        let ch = match kind {
+            Pass => '.',
+            XPass => 'X',
+            Fail => 'F',
+            Skip => 's',
+            XFail => 'x',
+            // A failed teardown gets its own 'E' after the call already
+            // printed - it doesn't advance the counter.
+            SetupError | TeardownError => 'E',
+        };
+        if kind.counts_done() {
             self.done += 1;
-            self.palette.outcome(&ch.to_string())
-        };
+        }
+        let painted = self.palette.outcome(&ch.to_string());
         self.out_inline(&painted);
         self.col += 1;
         if self.col >= WIDTH {
@@ -199,33 +234,19 @@ impl Progress {
     /// pytest -v: `nodeid OUTCOME [ pct%]` per test, ERROR lines for
     /// failed setup/teardown phases.
     fn on_report_verbose(&mut self, worker: Option<usize>, r: &Report) {
-        let word = match (r.when.as_str(), r.outcome.as_str()) {
-            ("call", "passed") => {
-                if r.wasxfail {
-                    "XPASS"
-                } else {
-                    "PASSED"
-                }
-            }
-            ("call", "failed") => "FAILED",
-            ("call", "skipped") => {
-                if r.wasxfail {
-                    "XFAIL"
-                } else {
-                    "SKIPPED"
-                }
-            }
-            ("setup", "failed") | ("teardown", "failed") => "ERROR",
-            ("setup", "skipped") => {
-                if r.wasxfail {
-                    "XFAIL"
-                } else {
-                    "SKIPPED"
-                }
-            }
-            _ => return,
+        use OutcomeKind::*;
+        let Some(kind) = outcome_kind(r) else {
+            return;
         };
-        if r.when != "teardown" {
+        let word = match kind {
+            Pass => "PASSED",
+            XPass => "XPASS",
+            Fail => "FAILED",
+            Skip => "SKIPPED",
+            XFail => "XFAIL",
+            SetupError | TeardownError => "ERROR",
+        };
+        if kind.counts_done() {
             self.done += 1;
         }
         let pct = match self.total {
@@ -241,20 +262,20 @@ impl Progress {
     /// the failure repr inlined right under a failing test. Symbol colored
     /// by outcome (green pass / red fail+error / yellow skip+xfail+xpass).
     fn on_report_bar(&mut self, worker: Option<usize>, r: &Report) {
-        // (symbol, is the symbol green/red/yellow, counts as a finished test)
-        let (sym, color): (&str, fn(&Palette, &str) -> String) =
-            match (r.when.as_str(), r.outcome.as_str()) {
-                ("call", "passed") if r.wasxfail => ("X", Palette::yellow),
-                ("call", "passed") => ("✓", Palette::green),
-                ("call", "failed") => ("✗", Palette::red),
-                ("call", "skipped") if r.wasxfail => ("x", Palette::yellow),
-                ("call", "skipped") => ("s", Palette::yellow),
-                ("setup", "failed") | ("teardown", "failed") => ("E", Palette::red),
-                ("setup", "skipped") if r.wasxfail => ("x", Palette::yellow),
-                ("setup", "skipped") => ("s", Palette::yellow),
-                _ => return,
-            };
-        if r.when != "teardown" {
+        use OutcomeKind::*;
+        let Some(kind) = outcome_kind(r) else {
+            return;
+        };
+        // symbol + its color (green pass / red fail+error / yellow skip+xfail+xpass)
+        let (sym, color): (&str, fn(&Palette, &str) -> String) = match kind {
+            Pass => ("✓", Palette::green),
+            XPass => ("X", Palette::yellow),
+            Fail => ("✗", Palette::red),
+            Skip => ("s", Palette::yellow),
+            XFail => ("x", Palette::yellow),
+            SetupError | TeardownError => ("E", Palette::red),
+        };
+        if kind.counts_done() {
             self.done += 1;
         }
         let pct = match self.total {
@@ -375,37 +396,32 @@ impl Progress {
 /// xfail = `not ok # TODO`, xpass = `ok # TODO`, skip = `ok # SKIP`. A
 /// failed teardown gets its own point so the plan matches points emitted.
 fn tap_result_line(n: usize, r: &Report) -> Option<String> {
-    let directive = |kind: &str, reason: Option<&str>| match reason {
-        Some(why) if !why.is_empty() => format!(" # {kind} {}", why.replace(['\n', '\r'], " ")),
-        _ => format!(" # {kind}"),
+    use OutcomeKind::*;
+    let kind = outcome_kind(r)?;
+    let directive = |tag: &str, reason: Option<&str>| match reason {
+        Some(why) if !why.is_empty() => format!(" # {tag} {}", why.replace(['\n', '\r'], " ")),
+        _ => format!(" # {tag}"),
     };
-    let line = match (r.when.as_str(), r.outcome.as_str()) {
-        ("call", "passed") if r.wasxfail => {
-            format!(
-                "ok {n} - {}{}",
-                r.nodeid,
-                directive("TODO", Some("unexpectedly passed"))
-            )
-        }
-        ("call", "passed") => format!("ok {n} - {}", r.nodeid),
-        ("call", "failed") => format!("not ok {n} - {}", r.nodeid),
-        ("call", "skipped") | ("setup", "skipped") if r.wasxfail => {
-            format!(
-                "not ok {n} - {}{}",
-                r.nodeid,
-                directive("TODO", Some("expected failure"))
-            )
-        }
-        ("call", "skipped") | ("setup", "skipped") => {
-            format!(
-                "ok {n} - {}{}",
-                r.nodeid,
-                directive("SKIP", r.skip_reason.as_deref())
-            )
-        }
-        ("setup", "failed") => format!("not ok {n} - {} # setup error", r.nodeid),
-        ("teardown", "failed") => format!("not ok {n} - {} # teardown error", r.nodeid),
-        _ => return None,
+    let line = match kind {
+        Pass => format!("ok {n} - {}", r.nodeid),
+        XPass => format!(
+            "ok {n} - {}{}",
+            r.nodeid,
+            directive("TODO", Some("unexpectedly passed"))
+        ),
+        Fail => format!("not ok {n} - {}", r.nodeid),
+        XFail => format!(
+            "not ok {n} - {}{}",
+            r.nodeid,
+            directive("TODO", Some("expected failure"))
+        ),
+        Skip => format!(
+            "ok {n} - {}{}",
+            r.nodeid,
+            directive("SKIP", r.skip_reason.as_deref())
+        ),
+        SetupError => format!("not ok {n} - {} # setup error", r.nodeid),
+        TeardownError => format!("not ok {n} - {} # teardown error", r.nodeid),
     };
     Some(line)
 }
@@ -414,15 +430,18 @@ fn tap_result_line(n: usize, r: &Report) -> Option<String> {
 /// emits nothing. `testStarted` precedes every result so output attributes
 /// correctly; duration rides on `testFinished` in milliseconds.
 fn teamcity_messages(r: &Report) -> Option<String> {
+    use OutcomeKind::*;
+    let kind = outcome_kind(r)?;
     let name = tc_escape(&r.nodeid);
     let started = format!("##teamcity[testStarted name='{name}']");
     let finished = format!(
         "##teamcity[testFinished name='{name}' duration='{}']",
         (r.duration * 1000.0).round() as u64
     );
-    let middle = match (r.when.as_str(), r.outcome.as_str()) {
-        ("call", "passed") => None,
-        ("call", "failed") | ("setup", "failed") | ("teardown", "failed") => {
+    let middle = match kind {
+        // xpass rides through as a plain pass (TeamCity has no xpass concept).
+        Pass | XPass => None,
+        Fail | SetupError | TeardownError => {
             let details = r.longrepr.as_deref().unwrap_or("");
             Some(format!(
                 "##teamcity[testFailed name='{name}' message='{} failed' details='{}']",
@@ -430,7 +449,7 @@ fn teamcity_messages(r: &Report) -> Option<String> {
                 tc_escape(details)
             ))
         }
-        ("call", "skipped") | ("setup", "skipped") => {
+        Skip | XFail => {
             let why = if r.wasxfail {
                 "expected failure (xfail)".to_string()
             } else {
@@ -441,7 +460,6 @@ fn teamcity_messages(r: &Report) -> Option<String> {
                 tc_escape(&why)
             ))
         }
-        _ => return None,
     };
     Some(match middle {
         Some(m) => format!("{started}\n{m}\n{finished}"),

@@ -530,7 +530,7 @@ pub fn affected_with_coverage(
                                 // A stale nodeid (test renamed/deleted since warm)
                                 // would error pytest or skip real coverage, so treat
                                 // it as uncovered and fall the file back to the graph.
-                                let file_part = id.split("::").next().unwrap_or(id);
+                                let file_part = crate::text::nodeid_file(id);
                                 if cwd.join(file_part).exists() {
                                     nodeids.insert(id.clone());
                                 } else {
@@ -576,7 +576,7 @@ pub fn affected_with_coverage(
     // nodeids were already checked for existence as they were collected; any
     // stale entry demoted its file to the graph fallback above.
     for id in nodeids {
-        let file_part = id.split("::").next().unwrap_or(&id);
+        let file_part = crate::text::nodeid_file(&id);
         if !whole_files.contains(&abs(&cwd, Path::new(file_part))) {
             selected.insert(PathBuf::from(id));
         }
