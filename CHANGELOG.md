@@ -26,6 +26,16 @@ between 0.0.x releases and are listed here.
   and Makefiles**. Also note `rstest migrate-check` is now required to run the
   preflight — a bare `--migrate-check-json` no longer triggers it implicitly.
 
+- Monorepo worker planning now weights each project by its recorded
+  whole-suite **wall time** (fixture setup/teardown included), not by the sum
+  of test *call* durations. A fixture-bound project — one whose per-test call
+  time is near zero but whose fixtures cost tens of seconds — was rated
+  near-free on the warm run and starved to a single worker, so it serialized
+  and dominated the monorepo wall (a warm run could run *slower* than the
+  cold, cache-less run). Projects that pin their own `numprocesses` are
+  unaffected; caches predating this release fall back to call-duration
+  weighting until their first run under 0.6.0.
+
 ## 0.5.0 — 2026-09-06
 
 - Incremental testing based on coverage: `--changed` now leans on the
