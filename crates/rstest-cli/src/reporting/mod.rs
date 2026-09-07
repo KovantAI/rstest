@@ -12,4 +12,5 @@ pub mod html;
 pub mod junit;
 pub mod progress;
 pub mod report;
+pub mod sink;
 pub mod status;

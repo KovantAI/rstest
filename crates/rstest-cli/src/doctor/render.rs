@@ -3,6 +3,7 @@
 //! annotation). All read-only over a `DoctorReport`.
 
 use super::{DoctorReport, FixtureEntry};
+use crate::reporting::sink::Sink;
 
 /// The doctor analysis as GitHub-flavored markdown, shaped for a job
 /// summary: same signals as the terminal report, tables instead of
@@ -143,7 +144,7 @@ pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::
 /// Publish the markdown report to the CI's job-summary surface, if any:
 /// GitHub Actions appends to `$GITHUB_STEP_SUMMARY`, Buildkite pipes to
 /// `buildkite-agent annotate`. Others: use `--doctor-md` as an artifact.
-pub fn append_ci_summary(report: &DoctorReport) -> anyhow::Result<()> {
+pub fn append_ci_summary(sink: &mut Sink, report: &DoctorReport) -> anyhow::Result<()> {
     // GitHub Actions: append to the step-summary file (hard error on write
     // failure - the path came from the runner, so a failure is real).
     if let Some(path) = std::env::var("GITHUB_STEP_SUMMARY")
@@ -166,14 +167,14 @@ pub fn append_ci_summary(report: &DoctorReport) -> anyhow::Result<()> {
         .filter(|v| !v.is_empty())
         .is_some()
     {
-        buildkite_annotate(&render_markdown(report));
+        buildkite_annotate(sink, &render_markdown(report));
     }
     Ok(())
 }
 
 /// Feed markdown to `buildkite-agent annotate` over stdin. Swallows all
 /// errors (logging to stderr) - see `append_ci_summary`.
-fn buildkite_annotate(md: &str) {
+fn buildkite_annotate(sink: &mut Sink, md: &str) {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let child = Command::new("buildkite-agent")
@@ -184,7 +185,9 @@ fn buildkite_annotate(md: &str) {
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("rstest: skipping Buildkite annotation (buildkite-agent: {e})");
+            sink.warn(&format!(
+                "rstest: skipping Buildkite annotation (buildkite-agent: {e})"
+            ));
             return;
         }
     };
@@ -193,79 +196,79 @@ fn buildkite_annotate(md: &str) {
         let _ = stdin.write_all(md.as_bytes());
     }
     if let Err(e) = child.wait() {
-        eprintln!("rstest: buildkite-agent annotate failed: {e}");
+        sink.warn(&format!("rstest: buildkite-agent annotate failed: {e}"));
     }
 }
 
-pub fn render(r: &DoctorReport) {
+pub fn render(sink: &mut Sink, r: &DoctorReport) {
     if r.tests == 0 {
-        println!("\n== rstest doctor: no timing data collected ==");
+        sink.out_line("\n== rstest doctor: no timing data collected ==");
         return;
     }
-    println!("\n================== rstest doctor ==================");
-    println!(
+    sink.out_line("\n================== rstest doctor ==================");
+    sink.out_line(&format!(
         "{} tests, {:.1}s test time (wall {:.1}s, {} workers)",
         r.tests, r.test_time_seconds, r.wall_seconds, r.workers
-    );
+    ));
 
     if let Some(w) = &r.wait_bound {
-        println!(
+        sink.out_line(&format!(
             "\nWAIT-BOUND: {:.0}% of test time ({:.1}s) is waiting, \
              not computing (sleeps / IO / timeouts).",
             w.wait_pct, w.wait_seconds
-        );
+        ));
         for t in w.tests.iter().take(8) {
-            println!(
+            sink.out_line(&format!(
                 "  {:7.2}s waiting of {:7.2}s  {}",
                 t.wait, t.duration, t.nodeid
-            );
+            ));
         }
         if w.tests.len() > 8 {
-            println!("  ... and {} more", w.tests.len() - 8);
+            sink.out_line(&format!("  ... and {} more", w.tests.len() - 8));
         }
     }
 
     if let Some(p) = &r.parallel_floor {
-        println!(
+        sink.out_line(&format!(
             "\nPARALLEL FLOOR: the longest test ({:.1}s) exceeds the ideal \
              per-worker share ({:.1}s at -n {});\nno worker count can finish \
              faster than its longest test. Gate tests:",
             p.longest_seconds, p.ideal_share_seconds, r.workers
-        );
+        ));
         for t in p.gate_tests.iter().take(5) {
-            println!("  {:7.2}s  {}", t.duration, t.nodeid);
+            sink.out_line(&format!("  {:7.2}s  {}", t.duration, t.nodeid));
         }
     }
 
     if let Some(pe) = &r.parallel_efficiency {
-        println!(
+        sink.out_line(&format!(
             "\nPARALLEL EFFICIENCY: {:.1}x realized of {}x possible ({:.0}%).",
             pe.realized_speedup, pe.ideal_speedup, pe.efficiency_pct
-        );
+        ));
         if pe.efficiency_pct > 105.0 {
-            println!(
+            sink.out_line(
                 "  over 100%: tests overlap beyond core count \
-                 (wait-bound; see WAIT-BOUND above)."
+                 (wait-bound; see WAIT-BOUND above).",
             );
         }
-        println!(
+        sink.out_line(&format!(
             "  long pole: {:.1}s (no worker count finishes faster)",
             pe.long_pole_seconds
-        );
-        println!("  worker load (busy time):");
+        ));
+        sink.out_line("  worker load (busy time):");
         for w in pe.workers_busy.iter().take(8) {
-            println!(
+            sink.out_line(&format!(
                 "    {:<8} {:7.2}s ({} tests)",
                 w.worker, w.busy_seconds, w.tests
-            );
+            ));
         }
         if pe.workers_busy.len() > 8 {
-            println!("    ... and {} more", pe.workers_busy.len() - 8);
+            sink.out_line(&format!("    ... and {} more", pe.workers_busy.len() - 8));
         }
-        println!(
+        sink.out_line(&format!(
             "  imbalance: {:.0}% between busiest and idlest worker",
             pe.imbalance_pct
-        );
+        ));
     }
 
     let interesting: Vec<&FixtureEntry> = r
@@ -275,7 +278,7 @@ pub fn render(r: &DoctorReport) {
         .take(8)
         .collect();
     if !interesting.is_empty() {
-        println!("\nFIXTURE HOTSPOTS (setup time across all workers):");
+        sink.out_line("\nFIXTURE HOTSPOTS (setup time across all workers):");
         for f in interesting {
             let advice = if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
                 "  <- ran many times; widen scope if value is reusable"
@@ -284,32 +287,35 @@ pub fn render(r: &DoctorReport) {
             } else {
                 ""
             };
-            println!(
+            sink.out_line(&format!(
                 "  {:7.2}s {:6}x  scope={:<8} {}{advice}",
                 f.total_seconds, f.count, f.scope, f.name
-            );
+            ));
         }
     }
 
-    println!("\nSLOWEST FILES:");
+    sink.out_line("\nSLOWEST FILES:");
     for f in r.slowest_files.iter().take(5) {
-        println!("  {:7.2}s ({:4.1}%)  {}", f.total_seconds, f.pct, f.file);
+        sink.out_line(&format!(
+            "  {:7.2}s ({:4.1}%)  {}",
+            f.total_seconds, f.pct, f.file
+        ));
     }
 
     if !r.leaks.is_empty() {
-        println!("\nRESOURCE LEAKS (net threads/fds still open after teardown):");
+        sink.out_line("\nRESOURCE LEAKS (net threads/fds still open after teardown):");
         for l in r.leaks.iter().take(10) {
-            println!("  {}  {}", leak_delta(l), l.nodeid);
+            sink.out_line(&format!("  {}  {}", leak_delta(l), l.nodeid));
         }
         if r.leaks.len() > 10 {
-            println!("  ... and {} more", r.leaks.len() - 10);
+            sink.out_line(&format!("  ... and {} more", r.leaks.len() - 10));
         }
-        println!(
+        sink.out_line(
             "  a test opened a thread/fd it never released; leaked state can flake \
-             later tests (reset it, or close in teardown)."
+             later tests (reset it, or close in teardown).",
         );
     }
-    println!("===================================================");
+    sink.out_line("===================================================");
 }
 
 /// `+3 threads`, `+5 fds`, or `+3 threads +5 fds` for a leak entry.
@@ -367,8 +373,8 @@ mod tests {
     // captures stdout) to prove the printing paths don't panic and are covered.
     #[test]
     fn render_terminal_populated_and_empty_dont_panic() {
-        render(&report(12)); // full report: every section printed
-        render(&report(0)); // no timing data: early "no timing" line
+        render(&mut Sink::captured().0, &report(12)); // full report: every section printed
+        render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
     }
 
     #[test]
@@ -411,7 +417,7 @@ mod tests {
             });
         }
 
-        render(&r);
+        render(&mut Sink::captured().0, &r);
         let md = render_markdown(&r);
         assert!(md.contains("... and")); // truncation tail rendered
     }
@@ -450,7 +456,7 @@ mod tests {
                 fds: 5,
             },
         ];
-        render(&r); // exercises the terminal RESOURCE LEAKS branch
+        render(&mut Sink::captured().0, &r); // exercises the terminal RESOURCE LEAKS branch
         let md = render_markdown(&r);
         assert!(md.contains("### Resource leaks"));
         assert!(md.contains("| +3 threads | `tests/test_pool.py::test_executor` |"));
@@ -469,6 +475,6 @@ mod tests {
                 fds: 0,
             })
             .collect();
-        render(&r); // exercises the len > 10 truncation-tail branch
+        render(&mut Sink::captured().0, &r); // exercises the len > 10 truncation-tail branch
     }
 }

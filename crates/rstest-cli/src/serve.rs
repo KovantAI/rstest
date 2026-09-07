@@ -24,6 +24,8 @@ use serde_json::{json, Value};
 
 use crate::cli::Cli;
 use crate::discover;
+use crate::reporting::color::Palette;
+use crate::reporting::sink::Sink;
 use crate::scheduling::{proto, worker};
 
 /// Run the serve daemon until the client sends `shutdown` (or disconnects).
@@ -38,9 +40,10 @@ pub fn serve(cli: &Cli, args: &[String], sock: &Path) -> Result<i32> {
     // and drive runs. Default umask can leave a socket group/other-accessible.
     std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("securing serve socket {}", sock.display()))?;
-    eprintln!("rstest: serve listening on {}", sock.display());
+    let mut sink = Sink::stdio(Palette::detect(args));
+    sink.warn(&format!("rstest: serve listening on {}", sock.display()));
 
-    warn_unsupported_flags(cli);
+    warn_unsupported_flags(cli, &mut sink);
 
     let scope = std::env::current_dir()?;
     let python = discover::resolve(&scope, cli.python.as_deref())?;
@@ -56,7 +59,7 @@ pub fn serve(cli: &Cli, args: &[String], sock: &Path) -> Result<i32> {
 /// inert here (there is no pool, no reporting, no scheduling). Warn rather than
 /// silently drop them, so a caller who passes e.g. `--junitxml` isn't left
 /// wondering why nothing was written.
-fn warn_unsupported_flags(cli: &Cli) {
+fn warn_unsupported_flags(cli: &Cli, sink: &mut Sink) {
     let mut ignored: Vec<&str> = Vec::new();
     if cli.numprocesses.is_some() {
         ignored.push("-n/--numprocesses");
@@ -101,10 +104,10 @@ fn warn_unsupported_flags(cli: &Cli) {
         ignored.push("--worker-timeout");
     }
     if !ignored.is_empty() {
-        eprintln!(
+        sink.warn(&format!(
             "rstest: --serve ignores these flags (no effect in daemon mode): {}",
             ignored.join(", ")
-        );
+        ));
     }
 }
 

@@ -3,6 +3,7 @@
 //! flaky annotations, emitted from an aggregate Run at end-of-run.
 
 use super::report;
+use super::sink::Sink;
 
 /// The `RSTEST_MONO_PROJECT` prefix (root-relative project path), set by the
 /// monorepo parent so child annotations resolve from the repo root, not cwd.
@@ -38,7 +39,7 @@ fn plural(n: u32) -> &'static str {
     }
 }
 
-pub(crate) fn print_github_annotations(run: &report::Run) {
+pub(crate) fn print_github_annotations(sink: &mut Sink, run: &report::Run) {
     // Under a monorepo the parent runs us with cwd=project, so nodeid paths
     // are project-relative; GitHub resolves annotation `file` from the repo
     // root, so prefix the project's root-relative path (set by the parent).
@@ -53,7 +54,7 @@ pub(crate) fn print_github_annotations(run: &report::Run) {
             props.push_str(&format!(",line={}", l + 1));
         }
         let msg = entry.longrepr.as_deref().unwrap_or("test failed");
-        println!("::error {props}::{}", gh_data(msg));
+        sink.out_line(&format!("::error {props}::{}", gh_data(msg)));
     }
     // Flaky-passed tests (green only after reruns) surface as warnings:
     // the run is green, but the flake is visible on the PR without
@@ -67,17 +68,17 @@ pub(crate) fn print_github_annotations(run: &report::Run) {
         if let Some(l) = entry.lineno {
             props.push_str(&format!(",line={}", l + 1));
         }
-        println!(
+        sink.out_line(&format!(
             "::warning {props}::flaky: passed only after {attempts} rerun{}",
             plural(*attempts)
-        );
+        ));
     }
 }
 
 /// Emit Azure Pipelines `##vso[task.logissue ...]` commands per failed test,
 /// which Azure renders as inline issues on the PR (same mapping as GitHub).
 /// Flaky-passed tests follow as `type=warning`; messages collapse to one line.
-pub(crate) fn print_azure_annotations(run: &report::Run) {
+pub(crate) fn print_azure_annotations(sink: &mut Sink, run: &report::Run) {
     let prefix = mono_prefix();
     for (nodeid, entry) in run.tests() {
         if !is_failed(entry) {
@@ -91,7 +92,11 @@ pub(crate) fn print_azure_annotations(run: &report::Run) {
             props.push_str(&format!(";linenumber={}", l + 1));
         }
         let msg = entry.longrepr.as_deref().unwrap_or("test failed");
-        println!("##vso[task.logissue {props}]{}: {}", nodeid, az_line(msg));
+        sink.out_line(&format!(
+            "##vso[task.logissue {props}]{}: {}",
+            nodeid,
+            az_line(msg)
+        ));
     }
     for (nodeid, attempts) in &run.flaky {
         let Some(entry) = run.tests().get(nodeid) else {
@@ -104,10 +109,10 @@ pub(crate) fn print_azure_annotations(run: &report::Run) {
         if let Some(l) = entry.lineno {
             props.push_str(&format!(";linenumber={}", l + 1));
         }
-        println!(
+        sink.out_line(&format!(
             "##vso[task.logissue {props}]{nodeid}: flaky, passed only after {attempts} rerun{}",
             plural(*attempts)
-        );
+        ));
     }
 }
 
@@ -125,7 +130,7 @@ fn az_line(s: &str) -> String {
 /// Buildkite: surface flaky-passed tests as a `warning` annotation on the
 /// build page, best-effort (a missing/failing `buildkite-agent` must not fail
 /// the run). No-op off Buildkite or when nothing flaked.
-pub(crate) fn buildkite_flaky_annotate(run: &report::Run) {
+pub(crate) fn buildkite_flaky_annotate(sink: &mut Sink, run: &report::Run) {
     if run.flaky.is_empty()
         || std::env::var("BUILDKITE")
             .ok()
@@ -157,7 +162,9 @@ pub(crate) fn buildkite_flaky_annotate(run: &report::Run) {
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("rstest: skipping Buildkite flaky annotation (buildkite-agent: {e})");
+            sink.warn(&format!(
+                "rstest: skipping Buildkite flaky annotation (buildkite-agent: {e})"
+            ));
             return;
         }
     };
@@ -165,7 +172,7 @@ pub(crate) fn buildkite_flaky_annotate(run: &report::Run) {
         let _ = stdin.write_all(md.as_bytes());
     }
     if let Err(e) = child.wait() {
-        eprintln!("rstest: buildkite-agent annotate failed: {e}");
+        sink.warn(&format!("rstest: buildkite-agent annotate failed: {e}"));
     }
 }
 
@@ -279,17 +286,17 @@ mod tests {
 
     #[test]
     fn github_annotations_cover_fail_and_flaky_branches() {
-        print_github_annotations(&sample_run());
+        print_github_annotations(&mut Sink::captured().0, &sample_run());
     }
 
     #[test]
     fn azure_annotations_cover_fail_and_flaky_branches() {
-        print_azure_annotations(&sample_run());
+        print_azure_annotations(&mut Sink::captured().0, &sample_run());
     }
 
     #[test]
     fn buildkite_annotate_is_noop_without_flaky() {
         // Empty flaky => early return before any env/agent interaction.
-        buildkite_flaky_annotate(&report::Run::default());
+        buildkite_flaky_annotate(&mut Sink::captured().0, &report::Run::default());
     }
 }

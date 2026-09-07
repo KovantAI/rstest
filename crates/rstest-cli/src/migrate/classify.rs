@@ -9,6 +9,7 @@ use anyhow::Result;
 use regex::Regex;
 
 use super::{file_of, run_session, Outcomes, Phase};
+use crate::reporting::sink::Sink;
 
 /// Why a parametrize id is unstable. `WILL` bail are per-process (differ in
 /// every worker); `MAY` bail depend on collection timing.
@@ -137,7 +138,11 @@ impl Verdict {
 
 /// Classify the parallel-only failures. `par` = -n auto outcomes; the function
 /// runs the discriminators (serial ×2, loadfile) and decides per failing test.
-pub(super) fn classify_failures(args: &[String], par: &Outcomes) -> Result<Vec<(String, Verdict)>> {
+pub(super) fn classify_failures(
+    args: &[String],
+    par: &Outcomes,
+    sink: &mut Sink,
+) -> Result<Vec<(String, Verdict)>> {
     let failed: Vec<&String> = par
         .iter()
         .filter(|(_, r)| r.phase == Phase::Fail)
@@ -152,12 +157,12 @@ pub(super) fn classify_failures(args: &[String], par: &Outcomes) -> Result<Vec<(
     let files: std::collections::BTreeSet<&str> = failed.iter().map(|n| file_of(n)).collect();
     let mut scoped: Vec<String> = files.iter().map(|s| s.to_string()).collect();
     scoped.extend_from_slice(args);
-    eprintln!(
+    sink.warn(&format!(
         "  {} parallel failure(s) in {} file(s); running discriminators (serial ×2, loadfile, \
          scoped to those files)…",
         failed.len(),
         files.len()
-    );
+    ));
     let s1 = run_session(&["-n", "0"], &scoped)?;
     let s2 = run_session(&["-n", "0"], &scoped)?;
     let lf = run_session(&["--dist", "loadfile"], &scoped)?;

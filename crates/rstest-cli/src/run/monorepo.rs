@@ -9,6 +9,7 @@ use anyhow::Result;
 use super::gates::build_run_meta;
 use super::{head_to_none, parse_numprocesses, resolve_changed_base};
 use crate::cli::{needs_passthrough_io, Cli};
+use crate::reporting::sink::Sink;
 use crate::scheduling::pool;
 use crate::{doctor, mono, select};
 
@@ -19,6 +20,7 @@ pub(super) fn execute_monorepo(
     root: &std::path::Path,
     projects: Vec<PathBuf>,
     run_uid: &str,
+    sink: &mut Sink,
 ) -> Result<i32> {
     if needs_passthrough_io(args) {
         anyhow::bail!(
@@ -29,7 +31,7 @@ pub(super) fn execute_monorepo(
     }
     // Validate --doctor-fail-on once here so a malformed condition fails fast
     // at the root, not as N separate child aborts (children re-validate too).
-    doctor::parse_conditions(&cli.doctor_fail_on)?;
+    doctor::parse_conditions(&cli.doctor_fail_on, sink)?;
     validate_monorepo_flags(cli.watch, cli.output.as_deref())?;
     let rels: Vec<String> = projects
         .iter()
@@ -56,22 +58,23 @@ pub(super) fn execute_monorepo(
     // --changed at a monorepo root: classify projects ONCE against the
     // repo-wide changed set. Directly-changed projects keep --changed;
     // dependents run their FULL suite; the rest are skipped.
-    let mono_changed = resolve_changed_base(cli)?;
+    let mono_changed = resolve_changed_base(cli, sink)?;
     let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
         Some(rev) => {
             let rev = head_to_none(rev);
             let changed = select::changed_files_from_git(rev)?;
-            let impacts = mono::classify_changes(root, &projects, &changed, cli.changed_strict);
+            let impacts =
+                mono::classify_changes(root, &projects, &changed, cli.changed_strict, sink);
             let skipped = impacts
                 .iter()
                 .filter(|i| **i == mono::ChangeImpact::Unaffected)
                 .count();
-            eprintln!(
+            sink.warn(&format!(
                 "rstest: --changed: {} changed file(s) -> {} of {} projects affected",
                 changed.len(),
                 projects.len() - skipped,
                 projects.len()
-            );
+            ));
             Some(impacts)
         }
         None => None,
@@ -81,7 +84,7 @@ pub(super) fn execute_monorepo(
     // order-sensitive suite that needs pytest-exact mode) keeps it.
     let fixed: Vec<Option<usize>> = projects.iter().map(|p| mono::project_fixed_n(p)).collect();
     let shares = mono::plan_shares_with_fixed(&costs, &fixed, budget);
-    println!(
+    sink.out_line(&format!(
         "rstest {} — monorepo: {} projects, {budget} workers ({})",
         env!("CARGO_PKG_VERSION"),
         projects.len(),
@@ -90,7 +93,7 @@ pub(super) fn execute_monorepo(
             .map(|(r, s)| format!("{r}:-n{s}"))
             .collect::<Vec<_>>()
             .join(", ")
-    );
+    ));
     let start = Instant::now();
     let exe = std::env::current_exe()?;
 
@@ -146,7 +149,7 @@ pub(super) fn execute_monorepo(
             .stderr(std::process::Stdio::piped())
             .args(build_child_args(&spec))
             .args(args);
-        if spawn_child_stream(cmd, i, rel, &tx) {
+        if spawn_child_stream(cmd, i, rel, &tx, sink.err()) {
             launched += 1;
         }
     }
@@ -154,18 +157,21 @@ pub(super) fn execute_monorepo(
 
     let mut results: Vec<Option<i32>> = vec![None; projects.len()];
     for (i, output, status) in rx {
-        println!("\n=============== project: {} ===============", rels[i]);
-        print!("{output}");
+        sink.out_line(&format!(
+            "\n=============== project: {} ===============",
+            rels[i]
+        ));
+        sink.out_inline(&output);
         results[i] = Some(status);
     }
     let _ = launched;
 
-    println!("\n=============== monorepo summary ===============");
+    sink.out_line("\n=============== monorepo summary ===============");
     let mut report_parts: Vec<(String, Option<PathBuf>, Option<i32>, bool)> = Vec::new();
     let mut statuses = Vec::new();
     for (i, (rel, status)) in rels.iter().zip(&results).enumerate() {
         if skipped_projects.contains(&i) {
-            println!("  {rel:<40} skipped (no changes)");
+            sink.out_line(&format!("  {rel:<40} skipped (no changes)"));
             report_parts.push((rel.clone(), None, None, true));
             continue;
         }
@@ -178,10 +184,10 @@ pub(super) fn execute_monorepo(
             false,
         ));
         statuses.push(status);
-        println!("  {rel:<40} {}", verdict_label(status));
+        sink.out_line(&format!("  {rel:<40} {}", verdict_label(status)));
     }
     if statuses.is_empty() {
-        println!("no projects affected by the change set");
+        sink.out_line("no projects affected by the change set");
         // Strict gating distinguishes "ran nothing" from "all passed".
         statuses.push(if cli.changed_strict { 5 } else { 0 });
     }
@@ -191,13 +197,13 @@ pub(super) fn execute_monorepo(
         let started_at_epoch =
             crate::time::now_epoch_secs().saturating_sub(start.elapsed().as_secs());
         let run_meta = build_run_meta(start, merged, started_at_epoch, budget);
-        write_merged_report(&mut std::io::stderr(), &report_parts, &run_meta, &out);
+        write_merged_report(sink.err(), &report_parts, &run_meta, &out);
     }
-    println!(
+    sink.out_line(&format!(
         "{} projects in {:.2}s (exit {merged})",
         statuses.len(),
         start.elapsed().as_secs_f64()
-    );
+    ));
     Ok(merged)
 }
 
@@ -367,11 +373,12 @@ fn spawn_child_stream(
     i: usize,
     rel: &str,
     tx: &std::sync::mpsc::Sender<(usize, String, i32)>,
+    err: &mut dyn std::io::Write,
 ) -> bool {
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("rstest: failed to launch project {rel}: {e}");
+            let _ = writeln!(err, "rstest: failed to launch project {rel}: {e}");
             let _ = tx.send((i, format!("launch failed: {e}\n"), 3));
             return false;
         }
@@ -421,7 +428,7 @@ fn resolve_report_out(out: &std::path::Path, root: &std::path::Path) -> PathBuf 
 /// merge/write failure warns (to `w`) but never fails the run — the exit code is
 /// already decided by the child statuses.
 fn write_merged_report(
-    w: &mut impl std::io::Write,
+    w: &mut dyn std::io::Write,
     report_parts: &[(String, Option<PathBuf>, Option<i32>, bool)],
     run_meta: &crate::reporting::report::RunMeta,
     out: &std::path::Path,
@@ -636,7 +643,7 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let (tx, rx) = std::sync::mpsc::channel();
-        assert!(spawn_child_stream(cmd, 2, "libs-a", &tx));
+        assert!(spawn_child_stream(cmd, 2, "libs-a", &tx, &mut Vec::new()));
         drop(tx);
         let (i, out, code) = rx.recv().unwrap();
         assert_eq!((i, code), (2, 0));
@@ -655,7 +662,7 @@ mod tests {
         // A binary that cannot exist => spawn fails, project still summarized.
         let cmd = std::process::Command::new("/nonexistent/rstest-child-xyz");
         let (tx, rx) = std::sync::mpsc::channel();
-        let launched = spawn_child_stream(cmd, 7, "libs-a", &tx);
+        let launched = spawn_child_stream(cmd, 7, "libs-a", &tx, &mut Vec::new());
         assert!(!launched);
         drop(tx);
         let (i, out, code) = rx.recv().unwrap();
