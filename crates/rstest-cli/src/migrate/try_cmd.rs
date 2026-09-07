@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::{Outcomes, Phase};
+use crate::reporting::sink::Sink;
 use crate::scheduling::worker;
 
 /// Run a command, return (parsed outcomes from its --report-json/recorder
@@ -50,13 +51,13 @@ fn fmt_secs(s: f64) -> String {
 /// `rstest --try`: run the suite under plain pytest and under rstest (-n auto),
 /// report whether outcomes are identical and the speedup. The 30-second
 /// "should I switch?" proof.
-pub fn run_try(python: &Path, args: &[String]) -> Result<i32> {
+pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     let tmpdir = std::env::temp_dir();
     let pid = std::process::id();
     let py_json = tmpdir.join(format!("rstest-try-pytest-{pid}.json"));
     let rs_json = tmpdir.join(format!("rstest-try-rstest-{pid}.json"));
 
-    eprintln!("rstest --try: running your suite under pytest…");
+    sink.warn("rstest --try: running your suite under pytest…");
     let mut py = std::process::Command::new(python);
     py.args(["-m", "pytest", "-p", "rstest_worker.recorder", "-q"])
         .args(args)
@@ -68,14 +69,14 @@ pub fn run_try(python: &Path, args: &[String]) -> Result<i32> {
     let _ = std::fs::remove_file(&py_json);
 
     let Some(py_out) = py_out else {
-        println!(
+        sink.out_line(
             "rstest --try: couldn't run pytest (is it installed and your suite collectable?).\n\
-             Try `python -m pytest -q` yourself, then re-run `rstest --try`."
+             Try `python -m pytest -q` yourself, then re-run `rstest --try`.",
         );
         return Ok(2);
     };
 
-    eprintln!("rstest --try: running it under rstest (-n auto)…");
+    sink.warn("rstest --try: running it under rstest (-n auto)…");
     let exe = std::env::current_exe()?;
     let mut rs = std::process::Command::new(exe);
     rs.arg("-n")
@@ -90,9 +91,9 @@ pub fn run_try(python: &Path, args: &[String]) -> Result<i32> {
     let _ = std::fs::remove_file(&rs_json);
 
     let Some(rs_out) = rs_out else {
-        println!(
+        sink.out_line(
             "rstest --try: rstest produced no run (it may have refused to dispatch — \
-             often an unstable parametrize id). Run `rstest --migrate-check` to see why."
+             often an unstable parametrize id). Run `rstest --migrate-check` to see why.",
         );
         return Ok(2);
     };
@@ -111,15 +112,17 @@ pub fn run_try(python: &Path, args: &[String]) -> Result<i32> {
     let identical = only_py == 0 && only_rs == 0 && diffs == 0;
     let total = pk.union(&rk).count();
 
-    println!("\n================= rstest --try =================");
+    sink.out_line("\n================= rstest --try =================");
     if identical {
-        println!("  ✓ parity:  {total} tests — identical outcomes to pytest");
+        sink.out_line(&format!(
+            "  ✓ parity:  {total} tests — identical outcomes to pytest"
+        ));
     } else {
-        println!(
+        sink.out_line(&format!(
             "  ⚠ parity:  {} of {total} tests differ ({diffs} different outcome, \
              {only_py} only in pytest, {only_rs} only in rstest)",
             diffs + only_py + only_rs
-        );
+        ));
     }
 
     // ---- speed ----
@@ -128,39 +131,41 @@ pub fn run_try(python: &Path, args: &[String]) -> Result<i32> {
     } else {
         0.0
     };
-    println!(
+    sink.out_line(&format!(
         "  ⚡ speed:   pytest {}  →  rstest {}   ({speedup:.1}× at -n auto)",
         fmt_secs(py_wall),
         fmt_secs(rs_wall)
-    );
+    ));
     let saved = (py_wall - rs_wall).max(0.0);
     if saved >= 1.0 {
         match commits_per_day() {
             // Project over the repo's actual recent activity (commits ≈ CI
             // runs). Monthly total avoids rounding a low cadence to "0/day".
-            Some((_, n)) => println!(
+            Some((_, n)) => sink.out_line(&format!(
                 "  💸 saves   {} per run — ≈ {} over your last 30 days ({n} commits ≈ CI runs)",
                 fmt_secs(saved),
                 fmt_secs(saved * n as f64),
-            ),
-            None => println!("  💸 saves   {} per run", fmt_secs(saved)),
+            )),
+            None => sink.out_line(&format!("  💸 saves   {} per run", fmt_secs(saved))),
         }
     }
-    println!("================================================");
+    sink.out_line("================================================");
 
     if py_code != 0 {
-        println!(
+        sink.out_line(&format!(
             "  note: your pytest run was already red ({} failing) — that's pre-existing, \
              not caused by rstest.",
             py_out.values().filter(|r| r.phase == Phase::Fail).count()
-        );
+        ));
     }
     if identical {
-        println!("  → drop-in ready: `rstest` is `pytest`, in parallel. Switch with confidence.");
+        sink.out_line(
+            "  → drop-in ready: `rstest` is `pytest`, in parallel. Switch with confidence.",
+        );
     } else {
-        println!(
+        sink.out_line(
             "  → some tests differ. Could be a pytest-version difference or a real parallel-only\n\
-             \x20   issue — run `rstest --migrate-check` to classify each and get the fix."
+             \x20   issue — run `rstest --migrate-check` to classify each and get the fix.",
         );
     }
     Ok(if identical { 0 } else { 1 })
