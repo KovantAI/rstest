@@ -58,6 +58,30 @@ def test_contained_returns_session_exit_status():
     assert runner_pytest._contained(lambda: 3, FakeConn()) == 3
 
 
+def test_prime_coverage_core_sets_ctrace_for_cov_context(monkeypatch):
+    monkeypatch.delenv("COVERAGE_CORE", raising=False)
+    runner_pytest._prime_coverage_core(["--cov-context=test"])
+    import os
+
+    assert os.environ["COVERAGE_CORE"] == "ctrace"
+
+
+def test_prime_coverage_core_respects_user_choice(monkeypatch):
+    monkeypatch.setenv("COVERAGE_CORE", "sysmon")
+    runner_pytest._prime_coverage_core(["--cov-context=test"])
+    import os
+
+    assert os.environ["COVERAGE_CORE"] == "sysmon"
+
+
+def test_prime_coverage_core_noop_without_cov_context(monkeypatch):
+    monkeypatch.delenv("COVERAGE_CORE", raising=False)
+    runner_pytest._prime_coverage_core(["t.py"])
+    import os
+
+    assert "COVERAGE_CORE" not in os.environ
+
+
 def test_contained_maps_keyboard_interrupt_to_2():
     # pytest's Interrupted subclasses KeyboardInterrupt -> exit 2, no crash.
     def raise_interrupt():
