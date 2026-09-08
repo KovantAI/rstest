@@ -213,20 +213,13 @@ projects = [
     "libs/prebuilt",
     "libs/cli",
 ]
-# checkpoint-sqlite uses pytest-retry, whose master branch
-# (has_plugin("xdist") and getoption("numprocesses")) starts a ReportServer and
-# stashes its port for workers via workerinput["server_port"]. Under rstest the
-# worker branch KeyError's on the missing port at -n>0, so pytest-retry is:
-#   - kept active only on checkpoint-sqlite, pinned serial (-n 0), where it runs
-#     clean (108 passed) and its @pytest.mark.flaky marker stays registered;
-#   - disabled (-p no:pytest-retry) on the other libs, where it would autoload
-#     from the shared venv and crash.
-# NOTE: an earlier self-provision fix (worker re-fires configure_node to set its
-# own server_port) does not hold here — the KeyError reproduces at -n auto on
-# both 0.5.0 and 0.6.0 and both pytest-retry 1.6.3 and 1.7.0. Tracked separately;
-# the workarounds below keep the corpus measurable meanwhile.
-serial = ["libs/checkpoint-sqlite"]
-disable_plugins = ["pytest-retry"]
+# checkpoint-sqlite uses pytest-retry, whose report channel gates on
+# `has_plugin("xdist") and getoption("numprocesses")`: with xdist not installed
+# (rstest replaces it) that branch never runs, but rstest sets `workerinput`, so
+# the plugin's worker branch reads `workerinput["server_port"]` that no master
+# set and KeyErrors at -n>0. rstest now seeds that port — each worker stands up
+# pytest-retry's own ReportServer (see rstest_worker `_seed_pytest_retry`) — so
+# the plugin runs unmodified at any worker count and NO per-lib policy is needed.
 # Mono parity verified on the 5-lib subset: 838 tests, 100% per-test outcome
 # parity (10-run mean, rstest 0.6.0).
 

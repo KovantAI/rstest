@@ -15,6 +15,7 @@ from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
     _randomly_seed,
+    _seed_pytest_retry,
 )
 from rstest_worker._internal.wire import _wire_safe
 from rstest_worker._internal.xdistnode import (
@@ -118,6 +119,9 @@ class StreamPlugin:
         # the impl list). This only catches a plugin registered after cmdline_main.
         _neutralize_rerunfailures(config)
         self._build_workerinput(config, worker_id)
+        # workerinput now exists; seed pytest-retry's server_port before its own
+        # (non-tryfirst) pytest_configure reads it and KeyErrors.
+        _seed_pytest_retry(config)
         self._set_basetemp(config, worker_id)
         self._init_xdist_node(config, worker_id)
 
