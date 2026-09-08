@@ -1,0 +1,98 @@
+name: corpus speed ramp
+
+# Proves rstest's speedup over pytest on a MINIMAL corpus subset, on a standard
+# public GitHub runner, and posts the measured tables to the job summary. Two
+# views (see corpus/bench.py): a suite spectrum (a sub-1x struggler through a
+# ~4x flat suite up to a monorepo, showing speedup tracks the parallelizable
+# share not raw size) and a worker sweep on one suite (-n 1,2,4, showing the
+# ramp with core count). The default set deliberately mixes strugglers
+# (python-dateutil, httpx), clear gains (fastapi, anyio), and a monorepo
+# (langgraph). Every point is a median of repeated runs; parity is diffed on
+# every run and is the hard gate. Wall time is advisory.
+#
+# Weekly + manual, like example-bench.yml: a fresh measured datapoint on public
+# hardware, never a projection. The only hard failure is a real regression —
+# parity below the floor, or the sweep's best speedup below --floor.
+
+on:
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: "spectrum suites (comma-separated, must be in suites.toml)"
+        default: "python-dateutil,httpx,fastapi,anyio,langgraph"
+      sweep:
+        description: "worker-sweep suite (must be in suites)"
+        default: "anyio"
+      repeat:
+        description: "runs per point (median reported)"
+        default: "2"
+  schedule:
+    - cron: "0 10 * * 1" # Mondays 10:00 UTC (after example-bench at 09:00)
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120 # 5 suites incl. a monorepo + the anyio -n sweep, x3 repeats
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      # uv drives the corpus venvs (corpus/run.py uses `uv venv` / `uv pip`).
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      # Build the wheel once: it provides the rstest_worker package (with its
+      # vendored pytest) installed into every suite venv, and the `rstest` CLI
+      # used as the driver binary. --out target/wheels so the corpus default
+      # glob finds it too.
+      - name: build + install rstest
+        run: |
+          python -m venv .bench-venv
+          . .bench-venv/bin/activate
+          pip install --quiet maturin pytest
+          maturin build --release --manifest-path crates/rstest-cli/Cargo.toml --out target/wheels
+          pip install --quiet target/wheels/rstest-*.whl
+
+      # PREPARE (network): clone the pinned checkouts + build each suite venv.
+      # Fully separate from the measured phase so no install work pollutes wall
+      # time. Uses the system python; suite venvs inherit it via `uv venv`.
+      # Inputs go through env (never interpolated into the shell) to keep
+      # workflow_dispatch values injection-safe.
+      - name: prepare corpus subset
+        env:
+          SUITES: ${{ inputs.suites || 'python-dateutil,httpx,fastapi,anyio,langgraph' }}
+        run: |
+          WHEEL=$(ls target/wheels/rstest-*.whl | head -n1)
+          python corpus/run.py --prepare-only \
+            --only "$SUITES" \
+            --wheel "$WHEEL" \
+            --rstest "$PWD/.bench-venv/bin/rstest"
+
+      # MEASURE (offline): repeated pytest vs rstest runs, median + spread, the
+      # parity diff, and the soft/hard gates. Report also lands in bench.json.
+      - name: measure speed ramp
+        env:
+          SUITES: ${{ inputs.suites || 'python-dateutil,httpx,fastapi,anyio,langgraph' }}
+          SWEEP: ${{ inputs.sweep || 'anyio' }}
+          REPEAT: ${{ inputs.repeat || '2' }}
+        run: |
+          WHEEL=$(ls target/wheels/rstest-*.whl | head -n1)
+          python corpus/bench.py \
+            --only "$SUITES" \
+            --sweep "$SWEEP" \
+            --repeat "$REPEAT" \
+            --wheel "$WHEEL" \
+            --rstest "$PWD/.bench-venv/bin/rstest"
+
+      - name: upload bench.json
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: corpus-bench
+          path: corpus/bench.json
+          if-no-files-found: ignore

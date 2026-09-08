@@ -67,6 +67,20 @@ def sh(args, cwd=None, env=None, timeout=PHASE_TIMEOUT):
     )
 
 
+def _strip_opt(args, opt):
+    """Drop an `--opt value` pair (e.g. `-n 4`) from an args list."""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == opt:
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
 def load_lock():
     return json.loads(LOCK.read_text()) if LOCK.exists() else {}
 
@@ -327,15 +341,22 @@ class Suite:
         merged.write_text(json.dumps(combined, sort_keys=True))
         return merged, total
 
-    def run_rstest(self):
+    def run_rstest(self, workers=None):
         snap = self.dir / "rstest.json"
         # Drop any prior snapshot: rstest exits non-zero and writes nothing on a
         # fatal error (e.g. no usable interpreter). A leftover file would pass
         # the exists() check below and get diffed as bogus parity.
         snap.unlink(missing_ok=True)
-        log(f"  {self.name}: rstest starting (-n auto, --worker-timeout 120)")
+        extra = list(self.cfg.get("rstest_args", []))
+        # `workers` (bench worker-sweep) is authoritative: strip any `-n N` from
+        # the per-suite rstest_args and pin the requested count. Default (None)
+        # keeps the suite's own policy, falling back to rstest's own `-n auto`.
+        if workers is not None:
+            extra = _strip_opt(extra, "-n")
+            extra += ["-n", str(workers)]
+        nlabel = f"-n {workers}" if workers is not None else "-n auto"
+        log(f"  {self.name}: rstest starting ({nlabel}, --worker-timeout 120)")
         t0 = time.monotonic()
-        extra = self.cfg.get("rstest_args", [])
         r = sh(
             [
                 str(self.rstest_bin),

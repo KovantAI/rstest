@@ -30,6 +30,43 @@ Reproducibility measures:
 - run-dependent parametrize IDs (memory addresses, `uuid4()`) are
   normalized and paired before counting missing/extra.
 
+### Speed ramp (`bench.py`)
+
+`run.py` measures a single `-n auto` wall per suite (parity is its job).
+`bench.py` reuses the same prepared venvs to prove the *speedup curve* instead:
+
+```sh
+SUITES=python-dateutil,httpx,fastapi,anyio,langgraph
+python3 corpus/run.py --prepare-only --only $SUITES
+python3 corpus/bench.py --only $SUITES --sweep anyio
+```
+
+Two views: a **spectrum** across suites and a **worker sweep** on one suite
+(`-n 1,2,4`, showing the ramp with core count, plateauing at the runner's
+cores). The default spectrum is picked to span every regime, not just the wins:
+
+| suite | regime | ~speedup |
+|---|---|---|
+| python-dateutil | struggler — tiny suite, rstest startup dominates | 0.94× |
+| httpx | struggler — forced `-n 0` (session fixture, fixed port) | ~1.0× |
+| fastapi | mid gain | 2.6× |
+| anyio | big gain (also the sweep suite) | 3.9× |
+| langgraph | monorepo — N serial per-lib pytest vs one root run | 1.45× |
+
+Speedup tracks the *parallelizable share*, not raw size (a tiny or
+serial-pinned suite can sit at or below 1×). Every point is the **median** of
+`--repeat` runs with the min-max spread shown, since wall time on shared
+runners is noisy. Each rstest run is still diffed against pytest — parity below
+`--parity-floor` fails, so a fast-but-wrong run is never counted as a win (all
+five defaults are documented at 100% parity). Report → stdout +
+`$GITHUB_STEP_SUMMARY`, data → `bench.json`.
+
+Runs weekly (+ manual) on a standard GitHub runner via
+`.github/workflows/corpus-bench.yml` — a fresh measured datapoint on public
+hardware, never a projection. Soft gate: the sweep suite's best speedup must
+clear `--floor` (default 2x). Wall time is otherwise advisory; never gate
+ordinary CI on it.
+
 ## Results (2026-06-13, M-series macOS, wheel 0.0.5)
 
 26/31 suites at 100% per-test outcome parity; every non-100% suite is
