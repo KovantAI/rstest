@@ -141,6 +141,25 @@ def test_build_index_skips_files_outside_tree(tmp_path, monkeypatch):
     assert not index.exists()
 
 
+def test_build_index_skips_files_on_relpath_valueerror(tmp_path, monkeypatch):
+    # os.path.relpath raises ValueError for a path on a different drive (Windows);
+    # such a file isn't in the project tree and must be skipped, not crash.
+    monkeypatch.chdir(tmp_path)
+    index = _index_cache(monkeypatch, tmp_path)
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(covtool.os.path, "relpath", _raise)
+    data = _FakeData(
+        contexts=["c"],
+        files=["D:\\other\\thing.py"],
+        per_file={"D:\\other\\thing.py": {1: ["t.py::a|run"]}},
+    )
+    covtool.build_index(_FakeCov(data))
+    assert not index.exists()
+
+
 def test_build_index_drops_vanished_source(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     index = _index_cache(monkeypatch, tmp_path)

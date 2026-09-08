@@ -195,3 +195,25 @@ def test_seed_pytest_retry_falls_back_to_neutralize_on_import_error(monkeypatch)
     config = _RetryConfig({"pytest-retry": plugin}, {})
     _seed_pytest_retry(config)
     assert config.pluginmanager.unregistered == [plugin]
+
+
+def test_seed_pytest_retry_noop_without_workerinput(monkeypatch):
+    from rstest_worker._internal.plugincompat import _seed_pytest_retry
+
+    calls = _install_fake_report_server(monkeypatch)
+    # no workerinput attr at all -> nothing a master would have staged -> skip
+    config = _RetryConfig({"pytest-retry": object()}, None)
+    _seed_pytest_retry(config)
+    assert calls["created"] == 0
+    assert getattr(config, "_rstest_retry_server", None) is None
+
+
+def test_seed_pytest_retry_noop_when_port_already_set(monkeypatch):
+    from rstest_worker._internal.plugincompat import _seed_pytest_retry
+
+    calls = _install_fake_report_server(monkeypatch)
+    wi = {"server_port": 111}  # already seeded -> don't orphan a second server
+    config = _RetryConfig({"pytest-retry": object()}, wi)
+    _seed_pytest_retry(config)
+    assert wi["server_port"] == 111
+    assert calls["created"] == 0

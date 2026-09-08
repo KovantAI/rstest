@@ -94,3 +94,6 @@ omit = ["*/rstest_worker/_vendor/*"]
 
 [tool.coverage.report]
 omit = ["*/rstest_worker/_vendor/*"]
+# `if __name__ == "__main__":` blocks are thin CLI entry shims (logging setup +
+# sys.exit(main(...))); main() is covered directly, so exclude the shim itself.
+exclude_also = ['if __name__ == "__main__":']
