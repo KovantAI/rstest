@@ -57,6 +57,10 @@ if not hasattr(_mp, "notset"):
 [click]
 repo = "https://github.com/pallets/click"
 install = ["--group tests", "-e ."]
+# pytest 9.1 flags non-Collection iterables passed to @pytest.mark.parametrize
+# (PytestRemovedIn10Warning); the suite's `filterwarnings = error` turns it into
+# a collect error. Ignore just that warning on both runs to keep parity.
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [jinja2]
 repo = "https://github.com/pallets/jinja"
@@ -92,7 +96,16 @@ rstest_args = ["-n", "0"]
 
 [urllib3]
 repo = "https://github.com/urllib3/urllib3"
-install = ["--group dev", "-e ."]
+# quart-trio 0.12.0 (dummyserver dep) declares a too-loose `quart>=0.19`, but
+# quart 0.23 moved `RequestContext` out of `quart.ctx`, so the newest quart
+# breaks conftest import. Pin quart below 0.20 to keep the pair compatible.
+install = ["--group dev", "quart<0.20", "-e ."]
+# urllib3 HEAD's test_util.py passes a non-Collection iterable to
+# @pytest.mark.parametrize, which pytest 9.1 flags PytestRemovedIn10Warning;
+# urllib3's `filterwarnings = error` turns it into a collect error. Ignore that
+# one warning on BOTH runs (via `args`, applied to baseline and rstest alike) so
+# parity is preserved without editing upstream test code.
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 # socket-timeout/EINTR tests are load-sensitive
 rstest_args = ["-n", "4"]
 
@@ -112,6 +125,9 @@ repo = "https://github.com/pytest-dev/pluggy"
 [packaging]
 repo = "https://github.com/pypa/packaging"
 install = ["--group test", "-e ."]
+# pytest 9.1 non-Collection-parametrize deprecation vs `filterwarnings = error`
+# (see click); ignore that one warning on both runs to keep parity.
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [more-itertools]
 repo = "https://github.com/more-itertools/more-itertools"
@@ -120,6 +136,9 @@ install = ["-e .", "pytest"]
 [python-dateutil]
 repo = "https://github.com/dateutil/dateutil"
 install = ["-e .", "pytest-cov", "hypothesis", "freezegun", "six"]
+# pytest 9.1 non-Collection-parametrize deprecation vs `filterwarnings = error`
+# (see click); ignore that one warning on both runs to keep parity.
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [jsonschema]
 repo = "https://github.com/python-jsonschema/jsonschema"
@@ -156,7 +175,7 @@ rstest_args = ["-n", "4"]
 
 [sqlalchemy]
 repo = "https://github.com/sqlalchemy/sqlalchemy"
-install = ["-e .", "pytest", "greenlet", "typing-extensions"]
+install = ["-e .", "pytest", "pytest-xdist", "greenlet", "typing-extensions"]
 # Parallel at -n auto (10x: 533s->53s). xdist is installed, so sqlalchemy
 # registers its XDistHooks (gated on hasplugin("xdist")); rstest's
 # pytest_plugin_registered fires their pytest_configure_node, so every worker
@@ -169,6 +188,9 @@ install = ["-e .", "pytest", "greenlet", "typing-extensions"]
 [pydantic]
 repo = "https://github.com/pydantic/pydantic"
 install = ["--group dev", "-e .", "hypothesis", "email-validator", "inline-snapshot"]
+# pytest 9.1 non-Collection-parametrize deprecation vs `filterwarnings = error`
+# (see click); ignore that one warning on both runs to keep parity.
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 # Permanent 1-test diff: a test parametrizes on sys.path, which inside
 # workers contains the vendored-core entry (by design, D7).
 # parametrize IDs derived from now(): collections differ across workers.
