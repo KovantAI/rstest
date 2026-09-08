@@ -261,10 +261,10 @@ mod tests {
         );
         let (mut sink, cap) = Sink::captured();
         run.print_flaky(&mut sink, &history, FailureWrap::Plain);
+        let out = cap.out();
         assert!(
-            cap.out().contains("flaked 4x before, failed 2x"),
-            "history summary should ride the line:\n{}",
-            cap.out()
+            out.contains("flaked 4x before, failed 2x"),
+            "history summary should ride the line:\n{out}"
         );
     }
 
@@ -403,11 +403,8 @@ mod tests {
         full(&mut run, "a.py::bad", "failed");
         let (mut sink, cap) = Sink::captured();
         run.print_failures(&mut sink, FailureWrap::BuildkiteGroup);
-        assert!(
-            cap.out().contains("+++ "),
-            "buildkite groups with +++:\n{}",
-            cap.out()
-        );
+        let out = cap.out();
+        assert!(out.contains("+++ "), "buildkite groups with +++:\n{out}");
     }
 
     #[test]
