@@ -176,16 +176,21 @@ class _FakeCoverageModule(types.ModuleType):
     class CoverageException(Exception):
         pass
 
-    def __init__(self, report_pct=100.0, raise_on_report=False):
+    def __init__(self, report_pct=100.0, raise_on_report=False, raise_on_combine=False):
         super().__init__("coverage")
         self._report_pct = report_pct
         self._raise_on_report = raise_on_report
+        self._raise_on_combine = raise_on_combine
         self.calls = []
         module = self
 
         class Coverage:
             def combine(self, keep=False):
                 module.calls.append(("combine", keep))
+                if module._raise_on_combine:
+                    # Mirrors coverage.exceptions.NoDataError (a CoverageException
+                    # subclass) when every test was skipped/deselected.
+                    raise module.CoverageException("No data to combine")
 
             def save(self):
                 module.calls.append(("save",))
@@ -261,6 +266,25 @@ def test_main_fail_under_met_returns_0(monkeypatch):
 def test_main_coverage_exception_returns_1(monkeypatch):
     _install_fake_coverage(monkeypatch, raise_on_report=True)
     assert covtool.main(["--cov-report=term"]) == 1
+
+
+def test_main_no_data_to_combine_reports_zero(monkeypatch, capsys):
+    # Every test skipped/deselected -> combine() raises NoDataError. The run
+    # must report 0% and exit 0, not crash with a traceback.
+    fake = _install_fake_coverage(monkeypatch, raise_on_combine=True)
+    status = covtool.main(["--cov-report=term"])
+    assert status == 0
+    assert "0.00%" in capsys.readouterr().out
+    # bailed before ever loading/reporting
+    assert not any(c[0] in ("load", "report") for c in fake.calls)
+
+
+def test_main_no_data_to_combine_trips_fail_under(monkeypatch, capsys):
+    # 0% coverage with a fail-under threshold is a legit failure, not a crash.
+    _install_fake_coverage(monkeypatch, raise_on_combine=True)
+    status = covtool.main(["--cov-report=term", "--cov-fail-under=80"])
+    assert status == 1
+    assert "not reached" in capsys.readouterr().out
 
 
 def test_main_unknown_report_kind_is_skipped(monkeypatch, caplog):
