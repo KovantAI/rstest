@@ -157,3 +157,110 @@ fn uuid_id_is_a_will_bail_blocker() {
         "expected 'gate passes' in:\n{allow_out}"
     );
 }
+
+#[test]
+fn preexisting_failure_is_not_a_parallelism_issue() {
+    // A test that fails deterministically (serial too) is a pre-existing bug,
+    // not a parallelism finding: it drives phase 2 (-n auto), the discriminator
+    // runs, and the NotParallel verdict, then the "ready + preexisting" summary.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("pre");
+    std::fs::write(
+        dir.join("test_pre.py"),
+        "def test_ok():\n    assert True\n\ndef test_bad():\n    assert False\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    // The only failure is pre-existing, so no migration blocker -> gate passes.
+    assert_eq!(code, 0, "pre-existing-only failure should pass gate\n{out}");
+    assert!(out.contains("PARALLEL"), "expected phase-2 output:\n{out}");
+    assert!(
+        out.contains("pre-existing"),
+        "expected a pre-existing summary:\n{out}"
+    );
+}
+
+#[test]
+fn time_stamped_id_is_a_may_bail_not_a_blocker() {
+    // A now()-derived parametrize id is unstable across collections but matches
+    // the time pattern -> MAY bail (timing), not WILL bail. It must NOT force
+    // -n 0; the check proceeds into the parallel phase.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("time");
+    std::fs::write(
+        dir.join("test_time.py"),
+        "import datetime, pytest\n\
+         @pytest.mark.parametrize('d', [datetime.datetime.now().isoformat()])\n\
+         def test_d(d):\n    assert d\n",
+    )
+    .unwrap();
+    let (_code, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.contains("may bail (timing)"),
+        "expected a may-bail (timing) verdict, not WILL bail:\n{out}"
+    );
+    // may-bail does not short-circuit; the parallel phase still runs.
+    assert!(
+        out.contains("PARALLEL"),
+        "may-bail should proceed to the parallel phase:\n{out}"
+    );
+}
+
+#[test]
+fn try_on_a_red_suite_notes_preexisting_failures() {
+    // `try` on a suite with a deterministic failure: pytest and rstest agree
+    // (both red on the same test) -> outcomes identical, exit 0, but the report
+    // must flag the failure as pre-existing rather than caused by rstest.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("tryred");
+    std::fs::write(
+        dir.join("test_red.py"),
+        "def test_a():\n    assert True\n\ndef test_b():\n    assert False\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &dir, &["try"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    // Same failure under both runners -> identical outcomes -> drop-in ready.
+    assert_eq!(
+        code, 0,
+        "identical (both red) outcomes should exit 0\n{out}"
+    );
+    assert!(
+        out.contains("pre-existing"),
+        "a red pytest run should be flagged pre-existing:\n{out}"
+    );
+    assert!(
+        out.contains("drop-in ready"),
+        "identical outcomes should still read drop-in ready:\n{out}"
+    );
+}
+
+#[test]
+fn try_reports_divergent_outcomes() {
+    // A test whose result depends on running inside an rstest worker: it passes
+    // under plain pytest but fails under rstest (the worker sets RSTEST_RUN_UID),
+    // so `try` sees one differing outcome. Drives the non-identical report branch
+    // and the exit-1 "some tests differ" path.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("trydiff");
+    std::fs::write(
+        dir.join("test_div.py"),
+        "import os\n\
+         def test_ok():\n    assert True\n\n\
+         def test_worker_env():\n    assert 'RSTEST_RUN_UID' not in os.environ\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &dir, &["try"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "a differing outcome should exit 1\n{out}");
+    assert!(
+        out.contains("differ"),
+        "expected a divergent parity line:\n{out}"
+    );
+    assert!(
+        out.contains("some tests differ"),
+        "expected the 'some tests differ' guidance:\n{out}"
+    );
+}

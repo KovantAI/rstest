@@ -188,3 +188,244 @@ impl Run {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::reporting::flakes::FlakeStats;
+    use crate::scheduling::proto;
+
+    fn report(nodeid: &str, when: &str, outcome: &str) -> proto::Report {
+        proto::Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: outcome.into(),
+            duration: 0.5,
+            longrepr: (outcome == "failed").then(|| "boom traceback".into()),
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            thread_delta: None,
+            fd_delta: None,
+            sections: Vec::new(),
+            lineno: None,
+        }
+    }
+
+    fn full(run: &mut Run, nodeid: &str, outcome: &str) {
+        run.record(None, report(nodeid, "setup", "passed"));
+        run.record(None, report(nodeid, "call", outcome));
+        run.record(None, report(nodeid, "teardown", "passed"));
+    }
+
+    // ---- print_flaky ----
+
+    #[test]
+    fn print_flaky_empty_writes_nothing() {
+        let run = Run::default();
+        let (mut sink, cap) = Sink::captured();
+        run.print_flaky(&mut sink, &HashMap::new(), FailureWrap::Plain);
+        assert!(cap.out().is_empty(), "no flaky tests -> no section");
+    }
+
+    #[test]
+    fn print_flaky_plain_lists_each_with_rerun_count() {
+        let mut run = Run::default();
+        run.flaky = vec![("a.py::one".into(), 1), ("a.py::two".into(), 3)];
+        let (mut sink, cap) = Sink::captured();
+        run.print_flaky(&mut sink, &HashMap::new(), FailureWrap::Plain);
+        let out = cap.out();
+        assert!(out.contains("flaky tests (passed after rerun)"));
+        // Singular vs plural "rerun(s)".
+        assert!(out.contains("a.py::one  (1 rerun)"), "singular:\n{out}");
+        assert!(out.contains("a.py::two  (3 reruns)"), "plural:\n{out}");
+        // Plain wrap emits no GitLab section markers.
+        assert!(!out.contains("section_start"), "plain has no folds:\n{out}");
+    }
+
+    #[test]
+    fn print_flaky_appends_history_when_present() {
+        let mut run = Run::default();
+        run.flaky = vec![("a.py::one".into(), 1)];
+        let mut history = HashMap::new();
+        history.insert(
+            "a.py::one".to_string(),
+            FlakeStats {
+                flaky: 4,
+                failed: 2,
+                last_epoch: 0,
+            },
+        );
+        let (mut sink, cap) = Sink::captured();
+        run.print_flaky(&mut sink, &history, FailureWrap::Plain);
+        assert!(
+            cap.out().contains("flaked 4x before, failed 2x"),
+            "history summary should ride the line:\n{}",
+            cap.out()
+        );
+    }
+
+    #[test]
+    fn print_flaky_gitlab_wraps_in_a_collapsed_section() {
+        let mut run = Run::default();
+        run.flaky = vec![("a.py::one".into(), 1)];
+        let (mut sink, cap) = Sink::captured();
+        run.print_flaky(&mut sink, &HashMap::new(), FailureWrap::GitlabSection);
+        let out = cap.out();
+        assert!(
+            out.contains("section_start"),
+            "gitlab opens a section:\n{out}"
+        );
+        assert!(out.contains("section_end"), "gitlab closes it:\n{out}");
+    }
+
+    // ---- print_quarantined ----
+
+    #[test]
+    fn print_quarantined_empty_writes_nothing() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::ok", "passed");
+        let (mut sink, cap) = Sink::captured();
+        run.print_quarantined(&mut sink, &HashMap::new());
+        assert!(cap.out().is_empty(), "no quarantined -> no section");
+    }
+
+    #[test]
+    fn print_quarantined_shows_traceback_and_history() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::flake", "failed");
+        run.quarantine(|id| id == "a.py::flake");
+        let mut history = HashMap::new();
+        history.insert(
+            "a.py::flake".to_string(),
+            FlakeStats {
+                flaky: 1,
+                failed: 5,
+                last_epoch: 0,
+            },
+        );
+        let (mut sink, cap) = Sink::captured();
+        run.print_quarantined(&mut sink, &history);
+        let out = cap.out();
+        assert!(out.contains("quarantined failures"), "header:\n{out}");
+        assert!(
+            out.contains("QUARANTINED a.py::flake"),
+            "per-test title:\n{out}"
+        );
+        assert!(
+            out.contains("flaked 1x, failed 5x before"),
+            "history:\n{out}"
+        );
+        assert!(
+            out.contains("boom traceback"),
+            "still prints the repr:\n{out}"
+        );
+    }
+
+    // ---- print_durations ----
+
+    #[test]
+    fn print_durations_untracked_writes_nothing() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::ok", "passed"); // durations not tracked
+        let (mut sink, cap) = Sink::captured();
+        run.print_durations(0, 0.0, false, &mut sink);
+        assert!(cap.out().is_empty(), "no tracking -> no durations block");
+    }
+
+    #[test]
+    fn print_durations_sorts_truncates_and_counts_hidden() {
+        let mut run = Run::default();
+        run.track_phase_durations = true;
+        // Two tests; each records setup/call/teardown at 0.5s.
+        full(&mut run, "a.py::one", "passed");
+        full(&mut run, "a.py::two", "passed");
+        // Slowest-2, with a min above 0.5 so everything shown is hidden instead.
+        let (mut sink, cap) = Sink::captured();
+        run.print_durations(2, 1.0, false, &mut sink);
+        let out = cap.out();
+        assert!(out.contains("slowest 2 durations"), "n>0 header:\n{out}");
+        assert!(
+            out.contains("durations < 1s hidden"),
+            "sub-min rows report a hidden count:\n{out}"
+        );
+    }
+
+    #[test]
+    fn print_durations_vv_shows_all_and_n_zero_header() {
+        let mut run = Run::default();
+        run.track_phase_durations = true;
+        full(&mut run, "a.py::one", "passed");
+        let (mut sink, cap) = Sink::captured();
+        // n==0 -> "slowest durations"; vv -> nothing hidden even below min.
+        run.print_durations(0, 100.0, true, &mut sink);
+        let out = cap.out();
+        assert!(out.contains("slowest durations ="), "n==0 header:\n{out}");
+        assert!(!out.contains("hidden"), "vv shows everything:\n{out}");
+        assert!(out.contains("0.50s"), "prints the row:\n{out}");
+    }
+
+    // ---- print_failures ----
+
+    #[test]
+    fn print_failures_plain_prints_repr_and_sections() {
+        let mut run = Run::default();
+        let mut r = report("a.py::bad", "call", "failed");
+        r.sections = vec![("Captured stdout".into(), "hello\n".into())];
+        run.record(None, report("a.py::bad", "setup", "passed"));
+        run.record(None, r);
+        let (mut sink, cap) = Sink::captured();
+        run.print_failures(&mut sink, FailureWrap::Plain);
+        let out = cap.out();
+        assert!(out.contains("--- FAILED a.py::bad ---"), "header:\n{out}");
+        assert!(out.contains("boom traceback"), "repr body:\n{out}");
+        assert!(out.contains("Captured stdout"), "section header:\n{out}");
+        assert!(out.contains("hello"), "section body:\n{out}");
+    }
+
+    #[test]
+    fn print_failures_gitlab_folds_each_failure() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::bad", "failed");
+        let (mut sink, cap) = Sink::captured();
+        run.print_failures(&mut sink, FailureWrap::GitlabSection);
+        let out = cap.out();
+        assert!(out.contains("section_start"), "opens a fold:\n{out}");
+        assert!(out.contains("section_end"), "closes it:\n{out}");
+    }
+
+    #[test]
+    fn print_failures_buildkite_uses_group_header() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::bad", "failed");
+        let (mut sink, cap) = Sink::captured();
+        run.print_failures(&mut sink, FailureWrap::BuildkiteGroup);
+        assert!(
+            cap.out().contains("+++ "),
+            "buildkite groups with +++:\n{}",
+            cap.out()
+        );
+    }
+
+    #[test]
+    fn print_failures_skips_quarantined_and_shows_collect_errors() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::flake", "failed");
+        full(&mut run, "a.py::real", "failed");
+        run.quarantine(|id| id == "a.py::flake");
+        run.collect_error("c.py".into(), "ImportError: boom".into());
+        let (mut sink, cap) = Sink::captured();
+        run.print_failures(&mut sink, FailureWrap::Plain);
+        let out = cap.out();
+        assert!(out.contains("a.py::real"), "real bug shown:\n{out}");
+        assert!(
+            !out.contains("FAILED a.py::flake"),
+            "quarantined prints elsewhere, not here:\n{out}"
+        );
+        assert!(out.contains("c.py"), "collect error shown:\n{out}");
+        assert!(out.contains("ImportError"), "collect repr shown:\n{out}");
+    }
+}
