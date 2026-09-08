@@ -78,8 +78,15 @@ pub fn plan_shares(costs: &[Option<f64>], budget: usize) -> Vec<usize> {
     shares
 }
 
-/// Sum of a project's duration cache (suite seconds last run), if any.
+/// A project's last-run cost for worker-share weighting. Prefers the recorded
+/// whole-suite wall (fixture setup/teardown included), falling back to the sum
+/// of call durations for caches written before wall tracking existed. Weighting
+/// by call time alone starves a fixture-bound project (near-zero call time, tens
+/// of seconds of fixtures) to a single worker on the warm run.
 pub fn project_cost(project: &Path) -> Option<f64> {
+    if let Some(wall) = crate::scheduling::durations::load_wall_in(project) {
+        return Some(wall);
+    }
     let bytes = std::fs::read(crate::cache::file_in(
         project,
         crate::scheduling::durations::FILE,
@@ -122,6 +129,46 @@ mod share_tests {
     fn more_projects_than_budget_still_one_each() {
         let shares = plan_shares(&[None, None, None], 2);
         assert!(shares.iter().all(|&s| s >= 1));
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::project_cost;
+    use std::path::PathBuf;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rstest_cost_{}_{}", std::process::id(), tag));
+        std::fs::create_dir_all(dir.join(".rstest_cache")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn prefers_wall_over_call_durations() {
+        // A fixture-bound project: near-zero call time, tens of seconds of wall.
+        // The cost must reflect the wall, or the planner starves it.
+        let dir = scratch("wall");
+        std::fs::write(
+            dir.join(".rstest_cache/durations.json"),
+            br#"{"t::a":0.05,"t::b":0.05}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".rstest_cache/wall.json"), b"35.3").unwrap();
+        assert_eq!(project_cost(&dir), Some(35.3));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn falls_back_to_call_durations_without_wall() {
+        // Pre-wall caches (durations.json only) still weight by call-time sum.
+        let dir = scratch("nowall");
+        std::fs::write(
+            dir.join(".rstest_cache/durations.json"),
+            br#"{"t::a":1.5,"t::b":0.5}"#,
+        )
+        .unwrap();
+        assert_eq!(project_cost(&dir), Some(2.0));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

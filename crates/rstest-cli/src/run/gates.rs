@@ -343,6 +343,11 @@ pub(super) fn run_post_gates(
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
         durations::save(&outcome.run);
+        // Whole-suite wall (fixtures included) for the monorepo planner: a
+        // fixture-bound project has near-zero call time in durations.json but
+        // real elapsed cost here, so weighting by call time alone starves it
+        // to one worker on the warm run. See `mono::project_cost`.
+        durations::save_wall(start.elapsed().as_secs_f64());
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);

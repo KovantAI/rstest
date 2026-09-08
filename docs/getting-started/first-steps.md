@@ -4,7 +4,7 @@ Run rstest from your project root, exactly where you would run pytest:
 
 ```console
 $ rstest
-rstest 0.5.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.6.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 48%]
 .....................................................s.................. [ 97%]
 ....                                                                     [100%]
@@ -163,3 +163,60 @@ $ rstest --doctor    # and if the suite feels slow, ask why
     classifies each parallel-only failure (order dependency, isolation leak,
     wall-clock timing, unstable id) and names the fix, so you don't triage by
     hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
+
+## Which command when?
+
+Three commands answer three different questions:
+
+| You want to… | Run | It tells you |
+|---|---|---|
+| Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup — zero risk |
+| Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli.md#migrate-check) | Classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
+| Understand why a passing suite is **slow** | [`rstest --doctor`](../guides/doctor.md) | Plain-English breakdown of where test time goes (wait-bound, a long-pole test, poor parallel balance) |
+
+## A test that isn't parallel-safe
+
+The one thing that can fail after switching to rstest is a test that quietly
+depended on running alone. Concretely — two tests writing the **same file**:
+
+```python
+# Both tests use the same hard-coded path. Serially they take turns;
+# in parallel they clobber each other and one fails intermittently.
+def test_writes_config():
+    Path("output.json").write_text('{"a": 1}')
+    assert json.loads(Path("output.json").read_text())["a"] == 1
+
+
+def test_writes_other_config():
+    Path("output.json").write_text('{"b": 2}')  # same file!
+    assert json.loads(Path("output.json").read_text())["b"] == 2
+```
+
+Two ways out. **Best** — make them independent with `tmp_path`, pytest's
+per-test temp directory, so they never share a file:
+
+```python
+def test_writes_config(tmp_path):
+    p = tmp_path / "output.json"  # unique dir per test
+    p.write_text('{"a": 1}')
+    assert json.loads(p.read_text())["a"] == 1
+```
+
+**Quick fix** — if you can't fix it right now, mark the offending tests
+`serial` so rstest never runs them at the same time as anything else:
+
+```python
+import pytest
+
+
+@pytest.mark.serial  # runs alone, after the parallel tests
+def test_writes_config():
+    Path("output.json").write_text('{"a": 1}')
+    ...
+```
+
+`serial` is the pressure valve, not the goal — it removes the speed win for
+those tests, so fix the sharing when you can. Not sure which tests are
+affected? [`rstest migrate-check`](../reference/cli.md#migrate-check) finds
+and classifies them for you. See [Parallel safety](../guides/parallel-safety.md)
+for the full catalogue of sharing patterns and fixes.

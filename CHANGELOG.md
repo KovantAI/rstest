@@ -5,6 +5,8 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-07
+
 - **BREAKING — run-less modes are now subcommands, not flags.** The four
   modes that never run your suite are invoked as a leading subcommand:
   - `rstest --verify-vendor` → `rstest verify-vendor`
@@ -23,6 +25,26 @@ between 0.0.x releases and are listed here.
   (pytest then rejects the unknown argument), so **update CI scripts, aliases,
   and Makefiles**. Also note `rstest migrate-check` is now required to run the
   preflight — a bare `--migrate-check-json` no longer triggers it implicitly.
+
+- pytest-retry now works under the pool without pytest-xdist installed. The
+  plugin gates its report server on `has_plugin("xdist")` and only reads
+  `workerinput["server_port"]` on the worker side; rstest is not xdist but does
+  set `workerinput`, so each worker fell through to the client branch and
+  `KeyError`'d on a port no master had provisioned (aborting collection at
+  `-n > 1`). Each worker now stands up pytest-retry's own report server and
+  seeds that port, so retries and the `flaky` marker work unmodified at any
+  worker count. (When pytest-xdist *is* installed, the plugin self-provisions
+  as before and rstest stays out of the way.)
+
+- Monorepo worker planning now weights each project by its recorded
+  whole-suite **wall time** (fixture setup/teardown included), not by the sum
+  of test *call* durations. A fixture-bound project — one whose per-test call
+  time is near zero but whose fixtures cost tens of seconds — was rated
+  near-free on the warm run and starved to a single worker, so it serialized
+  and dominated the monorepo wall (a warm run could run *slower* than the
+  cold, cache-less run). Projects that pin their own `numprocesses` are
+  unaffected; caches predating this release fall back to call-duration
+  weighting until their first run under 0.6.0.
 
 ## 0.5.0 — 2026-09-06
 
