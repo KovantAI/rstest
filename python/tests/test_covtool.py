@@ -453,3 +453,34 @@ def test_main_index_build_failure_does_not_fail_run(monkeypatch):
     monkeypatch.setattr(covtool, "build_index", boom)
     # build_index blows up but the run still returns its report status
     assert covtool.main(["--cov-report=term", "--cov-context=test"]) == 0
+
+
+def test_main_runs_diff_coverage_when_flags_present(monkeypatch):
+    _install_fake_coverage(monkeypatch)
+    seen = {}
+
+    def fake_diff(cov, diff_lines, diff_out):
+        seen["args"] = (diff_lines, diff_out)
+
+    monkeypatch.setattr(covtool, "diff_coverage", fake_diff)
+    status = covtool.main(
+        ["--cov-report=term", "--rstest-diff-lines=lines.json", "--rstest-diff-out=out.json"]
+    )
+    assert status == 0
+    assert seen["args"] == ("lines.json", "out.json")
+
+
+def test_main_diff_coverage_failure_does_not_fail_run(monkeypatch):
+    _install_fake_coverage(monkeypatch)
+
+    def boom(cov, diff_lines, diff_out):
+        raise RuntimeError("diff broke")
+
+    monkeypatch.setattr(covtool, "diff_coverage", boom)
+    # diff_coverage blows up but the run still returns its report status
+    assert (
+        covtool.main(
+            ["--cov-report=term", "--rstest-diff-lines=lines.json", "--rstest-diff-out=out.json"]
+        )
+        == 0
+    )
