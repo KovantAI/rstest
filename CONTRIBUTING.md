@@ -13,7 +13,7 @@ result. At `-n 0` rstest is pytest-exact — identical behavior there is the
 compatibility contract, so a divergence is a bug we want to hear about.
 
 For **parallel-only failures**, work through the
-[three-run diagnosis](https://rstest.readthedocs.io/en/latest/guides/parallel-safety/#diagnosing-a-parallel-only-failure)
+[three-run diagnosis](https://python-rstest.readthedocs.io/en/latest/guides/parallel-safety/#diagnosing-a-parallel-only-failure)
 first; it classifies most cases.
 
 ## Development setup

@@ -1,6 +1,6 @@
 site_name: rstest
 site_description: A fast, pytest-compatible test runner — parallel by design, with built-in suite diagnostics
-site_url: https://rstest.readthedocs.io/
+site_url: https://python-rstest.readthedocs.io/
 repo_url: https://github.com/KovantAI/rstest
 repo_name: KovantAI/rstest
 edit_uri: edit/main/docs/
