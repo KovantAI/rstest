@@ -48,6 +48,37 @@ fn fmt_secs(s: f64) -> String {
     }
 }
 
+/// Outcome parity between the pytest and rstest runs: how many tests each side
+/// has that the other doesn't, how many shared tests ended in a different phase,
+/// and whether the two sets are byte-for-byte equivalent.
+struct Parity {
+    total: usize,
+    diffs: usize,
+    only_py: usize,
+    only_rs: usize,
+    identical: bool,
+}
+
+/// Compare the two runs' per-test outcomes. Pure: keys present in only one side
+/// count as divergence, and shared keys diverge when their phases differ.
+fn compute_parity(py: &Outcomes, rs: &Outcomes) -> Parity {
+    let pk: std::collections::BTreeSet<&str> = py.keys().map(String::as_str).collect();
+    let rk: std::collections::BTreeSet<&str> = rs.keys().map(String::as_str).collect();
+    let only_py = pk.difference(&rk).count();
+    let only_rs = rk.difference(&pk).count();
+    let diffs = pk
+        .intersection(&rk)
+        .filter(|id| py[**id].phase != rs[**id].phase)
+        .count();
+    Parity {
+        total: pk.union(&rk).count(),
+        diffs,
+        only_py,
+        only_rs,
+        identical: only_py == 0 && only_rs == 0 && diffs == 0,
+    }
+}
+
 /// `rstest try`: run the suite under plain pytest and under rstest (-n auto),
 /// report whether outcomes are identical and the speedup. The 30-second
 /// "should I switch?" proof.
@@ -99,18 +130,14 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     };
 
     // ---- parity ----
-    let pk: std::collections::BTreeSet<&str> = py_out.keys().map(String::as_str).collect();
-    let rk: std::collections::BTreeSet<&str> = rs_out.keys().map(String::as_str).collect();
-    let only_py = pk.difference(&rk).count();
-    let only_rs = rk.difference(&pk).count();
-    let mut diffs = 0usize;
-    for id in pk.intersection(&rk) {
-        if py_out[*id].phase != rs_out[*id].phase {
-            diffs += 1;
-        }
-    }
-    let identical = only_py == 0 && only_rs == 0 && diffs == 0;
-    let total = pk.union(&rk).count();
+    let parity = compute_parity(&py_out, &rs_out);
+    let Parity {
+        total,
+        diffs,
+        only_py,
+        only_rs,
+        identical,
+    } = parity;
 
     sink.out_line("\n================= rstest try =================");
     if identical {
@@ -173,17 +200,69 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{commits_per_day, fmt_secs};
+    use super::{commits_per_day, compute_parity, fmt_secs};
+    use crate::migrate::{Outcomes, Phase, Rec};
+
+    fn outcomes(entries: &[(&str, Phase)]) -> Outcomes {
+        entries
+            .iter()
+            .map(|(id, phase)| {
+                (
+                    id.to_string(),
+                    Rec {
+                        phase: *phase,
+                        wall: 0.0,
+                        cpu: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compute_parity_identical_when_same_ids_and_phases() {
+        let py = outcomes(&[("a", Phase::Pass), ("b", Phase::Fail)]);
+        let rs = outcomes(&[("a", Phase::Pass), ("b", Phase::Fail)]);
+        let p = compute_parity(&py, &rs);
+        assert!(p.identical);
+        assert_eq!(p.total, 2);
+        assert_eq!(p.diffs, 0);
+        assert_eq!(p.only_py, 0);
+        assert_eq!(p.only_rs, 0);
+    }
+
+    #[test]
+    fn compute_parity_flags_phase_divergence() {
+        // Same id, opposite phase -> one differing outcome, not identical.
+        let py = outcomes(&[("a", Phase::Pass)]);
+        let rs = outcomes(&[("a", Phase::Fail)]);
+        let p = compute_parity(&py, &rs);
+        assert!(!p.identical);
+        assert_eq!(p.diffs, 1);
+        assert_eq!(p.total, 1);
+    }
+
+    #[test]
+    fn compute_parity_counts_ids_unique_to_each_side() {
+        // 'a' shared+agreeing, 'b' only pytest, 'c' only rstest.
+        let py = outcomes(&[("a", Phase::Pass), ("b", Phase::Pass)]);
+        let rs = outcomes(&[("a", Phase::Pass), ("c", Phase::Pass)]);
+        let p = compute_parity(&py, &rs);
+        assert!(!p.identical);
+        assert_eq!(p.diffs, 0, "the shared id agrees");
+        assert_eq!(p.only_py, 1);
+        assert_eq!(p.only_rs, 1);
+        assert_eq!(p.total, 3, "union of a, b, c");
+    }
 
     #[test]
     fn commits_per_day_is_positive_or_none_and_never_panics() {
-        // Runs `git rev-list` over the ambient repo. We can't pin the count, but
-        // the contract holds: Some((per_day, n)) with both > 0, or None (no
-        // recent history / not a repo). It must parse cleanly, never panic.
+        // Runs `git rev-list` over the ambient repo. The count isn't pinned, but
+        // the contract holds: Some((per_day, n)) with both > 0, or None. It must
+        // parse cleanly and never panic.
         if let Some((per_day, n)) = commits_per_day() {
             assert!(n > 0, "Some is only returned when there are commits");
             assert!(per_day > 0.0, "per-day rate derives from n > 0");
-            // per_day is n/30; sanity-check the relation.
             assert!((per_day - n as f64 / 30.0).abs() < 1e-9);
         }
     }
