@@ -209,6 +209,60 @@ fn time_stamped_id_is_a_may_bail_not_a_blocker() {
 }
 
 #[test]
+fn concurrent_resource_race_is_a_parallel_only_finding() {
+    // Several files whose one test each binds the SAME fixed port and holds it
+    // briefly. Serial (-n 0): no overlap, all pass. Under -n auto: files land on
+    // different workers, run concurrently, and collide on the port -> a
+    // parallel-only failure. This exercises the full phase-2 report: the
+    // discriminator runs, the per-test classification, the polluter bisect
+    // (concurrent races are not serially reproducible), the JSON findings doc,
+    // and the allow-list gate. Multiple FILES are required: `-n auto` never uses
+    // more workers than test files, so a one-file suite would stay serial.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("race");
+    let body = "import socket, time\n\
+                def test_bind():\n\
+                \x20   s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n\
+                \x20   try:\n\
+                \x20       s.bind(('127.0.0.1', 55321))\n\
+                \x20       time.sleep(0.15)\n\
+                \x20   finally:\n\
+                \x20       s.close()\n";
+    for i in 0..6 {
+        std::fs::write(dir.join(format!("test_race_{i}.py")), body).unwrap();
+    }
+    let jpath = dir.join("mc.json");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &[
+            "migrate-check",
+            "--migrate-check-json",
+            jpath.to_str().unwrap(),
+        ],
+    );
+    // A single-core box may never run two files at once (no collision); only
+    // assert the report WHEN a parallel-only failure actually surfaced.
+    if out.contains("fail only under parallelism") {
+        assert_eq!(
+            code, 1,
+            "parallel-only findings should fail the gate\n{out}"
+        );
+        // A concurrent-resource race doesn't reproduce under serial replay.
+        assert!(
+            out.contains("not reproducible serially"),
+            "a port collision should read as a non-reproducible race:\n{out}"
+        );
+        let txt = std::fs::read_to_string(&jpath).unwrap_or_default();
+        assert!(
+            txt.contains("\"ready\": false") && txt.contains("\"nodeid\""),
+            "the json doc should record the findings:\n{txt}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn try_on_a_red_suite_notes_preexisting_failures() {
     // `try` on a suite with a deterministic failure: pytest and rstest agree
     // (both red on the same test) -> outcomes identical, exit 0, but the report
@@ -263,4 +317,32 @@ fn try_reports_divergent_outcomes() {
         out.contains("some tests differ"),
         "expected the 'some tests differ' guidance:\n{out}"
     );
+}
+
+#[test]
+fn try_reports_time_saved_when_parallel_wins() {
+    // Several slow, independent files: pytest runs them serially, rstest fans
+    // them across workers. The >1s wall-clock saving drives the "saves … per
+    // run" projection line. The fixture dir is not a git repo, so the commit
+    // cadence is unknown and the plain per-run form is printed.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("saves");
+    for i in 0..6 {
+        std::fs::write(
+            dir.join(format!("test_slow_{i}.py")),
+            "import time\ndef test_slow():\n    time.sleep(0.5)\n    assert True\n",
+        )
+        .unwrap();
+    }
+    let (code, out) = run(&venv, &dir, &["try"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    // Identical outcomes (all pass) -> drop-in ready, exit 0.
+    assert_eq!(code, 0, "clean slow suite should be drop-in ready\n{out}");
+    // Wall-clock parallel win over the serial pytest baseline.
+    if out.contains("saves") {
+        assert!(
+            out.contains("per run"),
+            "the saves line should quote a per-run figure:\n{out}"
+        );
+    }
 }
