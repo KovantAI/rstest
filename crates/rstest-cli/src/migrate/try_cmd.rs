@@ -173,7 +173,20 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_secs;
+    use super::{commits_per_day, fmt_secs};
+
+    #[test]
+    fn commits_per_day_is_positive_or_none_and_never_panics() {
+        // Runs `git rev-list` over the ambient repo. We can't pin the count, but
+        // the contract holds: Some((per_day, n)) with both > 0, or None (no
+        // recent history / not a repo). It must parse cleanly, never panic.
+        if let Some((per_day, n)) = commits_per_day() {
+            assert!(n > 0, "Some is only returned when there are commits");
+            assert!(per_day > 0.0, "per-day rate derives from n > 0");
+            // per_day is n/30; sanity-check the relation.
+            assert!((per_day - n as f64 / 30.0).abs() < 1e-9);
+        }
+    }
 
     #[test]
     fn fmt_secs_sub_minute_is_one_decimal_seconds() {

@@ -6,9 +6,7 @@
 
 mod cache;
 mod cli;
-#[allow(dead_code)]
 mod collect; // D5: single-point collection
-#[allow(dead_code)]
 mod config;
 mod coverage_skip;
 mod discover;

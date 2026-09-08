@@ -4,32 +4,34 @@ The message schema is defined in `rstest_worker._internal.messages` (mirroring t
 Rust `proto.rs`). `Connection.send` is overloaded per event `kind` so a mismatched
 (kind, payload) pair is a type error.
 
-Requires the `msgpack` package in the target interpreter for now.
-TODO(M1): vendor msgpack's pure-python fallback so the worker is
-PYTHONPATH-injectable into any venv with zero installs.
+The msgpack framing itself comes from `rstest_worker._internal.mpack`, a small
+pure-python codec (with the compiled `msgpack` preferred when the venv has it),
+so the worker is PYTHONPATH-injectable into any interpreter with zero installs.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from typing import Literal, overload
+from typing import Literal, cast, overload
 
 from rstest_worker._internal import messages as m
+from rstest_worker._internal import mpack
 
-try:
-    import msgpack
-except ImportError:  # pragma: no cover
-    raise SystemExit(
-        "rstest worker requires the 'msgpack' package in the test environment (pip install msgpack)"
-    ) from None
+# Upper bound on a single buffered frame. Without it a desynced stream (a stray
+# byte claiming a multi-GB map/array) makes the Unpacker buffer unboundedly and
+# OOM silently; capped, it raises mpack.BufferFull so the desync fails loud. The
+# ceiling is deliberately generous: the largest legit frame is CollectionDone
+# carrying ids/locations/marks for the whole suite, which reaches hundreds of MB
+# on large monorepos.
+_MAX_FRAME_BYTES = 512 * 1024 * 1024
 
 
 class Connection:
     def __init__(self, cmd_fd: int, evt_fd: int) -> None:
         self._cmd_fd = cmd_fd
         self._evt_fd = evt_fd
-        self._unpacker = msgpack.Unpacker(raw=False)
+        self._unpacker = mpack.Unpacker(max_buffer_size=_MAX_FRAME_BYTES)
 
     def commands(self) -> Iterator[m.Command]:
         """Yield command messages until EOF."""
@@ -43,7 +45,9 @@ class Connection:
         """Block until one command message is available (None on EOF)."""
         while True:
             for msg in self._unpacker:
-                return msg
+                # The decoder yields a bare object; the {"kind", "payload"}
+                # contract is enforced by the schema (messages.py), not the wire.
+                return cast("m.Command", msg)
             data = os.read(self._cmd_fd, 65536)
             if not data:
                 return None
@@ -95,6 +99,6 @@ class Connection:
         # os.write on a pipe may short-write (a large ids/locations/marks
         # payload can exceed the pipe buffer), so loop until every byte drains;
         # a partial frame would desync the orchestrator's msgpack stream.
-        buf = memoryview(msgpack.packb({"kind": kind, "payload": payload}))
+        buf = memoryview(mpack.packb({"kind": kind, "payload": payload}))
         while buf:
             buf = buf[os.write(self._evt_fd, buf) :]
