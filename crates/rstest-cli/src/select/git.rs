@@ -337,8 +337,8 @@ fn parse_hunk_new_range(hunk: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_files_from_git, changed_line_ranges, detect_ci_base, nonempty, parse_diff_hunks,
-        parse_hunk_new_range, parse_hunk_old_range, CiBase, FileChange,
+        changed_files_from_git, changed_line_ranges, changed_new_lines, detect_ci_base, nonempty,
+        parse_diff_hunks, parse_hunk_new_range, parse_hunk_old_range, CiBase, FileChange,
     };
     use crate::select::GLOBAL_TEST_LOCK as GLOBAL;
     use std::path::{Path, PathBuf};
@@ -587,6 +587,49 @@ mod tests {
         let b = ranges.get(Path::new("b.py")).expect("b.py present");
         assert!(b.has_new_code && b.old_ranges.is_empty(), "{b:?}");
         assert!(!ranges.contains_key(Path::new(".coverage")), "{ranges:?}");
+    }
+
+    #[test]
+    fn changed_new_lines_bails_on_unknown_rev() {
+        let repo = init_repo("newlines-bail");
+        write(&repo, "a.py", "x = 1\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let _cwd = enter(&repo);
+        let err = changed_new_lines(Some("no-such-ref-xyz")).unwrap_err();
+        assert!(err.to_string().contains("git diff -U0"), "{err}");
+    }
+
+    #[test]
+    fn changed_new_lines_over_a_real_repo() {
+        let repo = init_repo("newlines-real");
+        write(&repo, "a.py", "a = 1\nb = 2\nc = 3\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        // Modify line 2 (b) and append a new line 4 (d).
+        write(&repo, "a.py", "a = 1\nb = 20\nc = 3\nd = 4\n");
+        // A brand-new file, staged so `git diff HEAD` reports it (untracked
+        // files never appear in `git diff`).
+        write(&repo, "b.py", "e = 5\nf = 6\n");
+        git(&repo, &["add", "b.py"]);
+
+        let _cwd = enter(&repo);
+
+        let map = changed_new_lines(None).unwrap();
+        // Modified file: new-side line 2 (changed) and line 4 (added).
+        assert_eq!(map.get(Path::new("a.py")), Some(&vec![2u32, 4]), "{map:?}");
+        // New file: every line is new-side.
+        assert_eq!(map.get(Path::new("b.py")), Some(&vec![1u32, 2]), "{map:?}");
+    }
+
+    #[test]
+    fn changed_new_lines_empty_when_nothing_changed() {
+        let repo = init_repo("newlines-empty");
+        write(&repo, "a.py", "x = 1\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let _cwd = enter(&repo);
+        assert!(changed_new_lines(None).unwrap().is_empty());
     }
 
     #[test]

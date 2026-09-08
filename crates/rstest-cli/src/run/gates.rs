@@ -106,6 +106,32 @@ fn reconcile_cov_status(w: &mut dyn Write, status: Result<bool, String>, exitsta
     }
 }
 
+/// Decide the `--cov-diff-fail-under` outcome from covtool's scored diff
+/// coverage. `pct` is the covered-added-lines percentage covtool wrote, or
+/// `None` when there was no result to read (nothing scored / covtool produced
+/// no output). Returns the (possibly raised) exit status and the message to
+/// warn. Like the other gates, it only turns a green run red — never lowers a
+/// non-zero status.
+fn diff_cov_gate(pct: Option<f64>, threshold: f64, exitstatus: i32) -> (i32, String) {
+    match pct {
+        // The 1e-9 slop keeps a value that rounds to the threshold from failing.
+        Some(p) if p + 1e-9 < threshold => (
+            if exitstatus == 0 { 1 } else { exitstatus },
+            format!("rstest: --cov-diff-fail-under: diff coverage {p:.1}% is below {threshold}%"),
+        ),
+        Some(p) => (
+            exitstatus,
+            format!("rstest: --cov-diff-fail-under: diff coverage {p:.1}% meets {threshold}%"),
+        ),
+        None => (
+            exitstatus,
+            "rstest: --cov-diff-fail-under: no added executable lines to score \
+             (nothing changed, or the changed files aren't under --cov)"
+                .to_string(),
+        ),
+    }
+}
+
 /// Report a `--cache-push` outcome (to `w`): a success line with the segment's
 /// counts, or a warning on failure. A push failure never fails an otherwise-green
 /// run — it is reported, not gated.
@@ -384,23 +410,9 @@ pub(super) fn run_post_gates(
                     .ok()
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
                     .and_then(|v| v.get("pct").and_then(|p| p.as_f64()));
-                match pct {
-                    Some(p) if p + 1e-9 < threshold => {
-                        sink.warn(&format!(
-                            "rstest: --cov-diff-fail-under: diff coverage {p:.1}% is below {threshold}%"
-                        ));
-                        if exitstatus == 0 {
-                            exitstatus = 1;
-                        }
-                    }
-                    Some(p) => sink.warn(&format!(
-                        "rstest: --cov-diff-fail-under: diff coverage {p:.1}% meets {threshold}%"
-                    )),
-                    None => sink.warn(
-                        "rstest: --cov-diff-fail-under: no added executable lines to score \
-                         (nothing changed, or the changed files aren't under --cov)",
-                    ),
-                }
+                let (status, msg) = diff_cov_gate(pct, threshold, exitstatus);
+                exitstatus = status;
+                sink.warn(&msg);
             }
             let _ = std::fs::remove_file(&lp);
             let _ = std::fs::remove_file(&op);
@@ -723,7 +735,7 @@ pub(super) fn quarantine_matcher(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_run_meta, merge_fixtures, merged_lastfailed, print_warnings_summary,
+        build_run_meta, diff_cov_gate, merge_fixtures, merged_lastfailed, print_warnings_summary,
         quarantine_matcher, reconcile_cov_status, report_push_result, results_bar_line,
         validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
         write_teamcity_flaky,
@@ -910,6 +922,41 @@ mod tests {
             0
         );
         assert!(utf8(buf).contains("coverage reporting failed to run: no python"));
+    }
+
+    #[test]
+    fn diff_cov_gate_fails_a_green_run_below_threshold() {
+        let (status, msg) = diff_cov_gate(Some(50.0), 80.0, 0);
+        assert_eq!(status, 1);
+        assert!(msg.contains("diff coverage 50.0% is below 80%"), "{msg}");
+    }
+
+    #[test]
+    fn diff_cov_gate_never_lowers_a_red_run() {
+        // Already-failed run stays failed even when the diff meets the bar.
+        let (status, msg) = diff_cov_gate(Some(100.0), 80.0, 2);
+        assert_eq!(status, 2);
+        assert!(msg.contains("meets 80%"), "{msg}");
+        // And a below-threshold diff can't turn a red run into a 1.
+        let (status, _) = diff_cov_gate(Some(10.0), 80.0, 2);
+        assert_eq!(status, 2);
+    }
+
+    #[test]
+    fn diff_cov_gate_meets_threshold_passes() {
+        let (status, msg) = diff_cov_gate(Some(80.0), 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(msg.contains("meets 80%"), "{msg}");
+        // Exactly-at with float slop (e.g. 79.9999996) still counts as meeting.
+        let (status, _) = diff_cov_gate(Some(80.0 - 1e-10), 80.0, 0);
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn diff_cov_gate_none_reports_nothing_scored_without_failing() {
+        let (status, msg) = diff_cov_gate(None, 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(msg.contains("no added executable lines to score"), "{msg}");
     }
 
     fn segment(durations: usize, events: usize) -> crate::remote::Segment {

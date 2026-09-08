@@ -643,3 +643,11 @@ def gate_diff_coverage_gate(g, args, binary):
         r.returncode == 0 and "diff coverage 100.0% meets 100%" in r.stderr,
         f"rc={r.returncode} " + r.stderr[-200:],
     )
+    # Without --cov there's no coverage data to score: the gate is ignored with
+    # a warning and does not fail the run.
+    r = g.run("-n", "2", "--cov-diff-fail-under", "100", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: --cov-diff-fail-under without --cov warns and is ignored",
+        r.returncode == 0 and "needs --cov" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
