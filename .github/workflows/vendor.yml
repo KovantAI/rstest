@@ -2,8 +2,8 @@ name: vendor integrity
 
 # Verifies the vendored pytest tree. `integrity` is a fast offline check on
 # every change (tree == committed vendor.lock). `provenance` is the strong
-# check (vendored == upstream pytest on PyPI) and needs the network, so it runs
-# only when the vendored tree/manifest changes, plus weekly to catch drift.
+# check (vendored == upstream pytest on PyPI) and needs the network. It runs on
+# every change too (cheap, fast to skip-noop) plus weekly to catch drift.
 
 on:
   push:

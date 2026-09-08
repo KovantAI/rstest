@@ -3,7 +3,9 @@
 import os
 
 import msgpack
+import pytest
 from rstest_worker._internal import messages as m
+from rstest_worker._internal import mpack, protocol
 from rstest_worker._internal.protocol import Connection
 
 
@@ -54,6 +56,23 @@ def test_commands_yields_until_eof():
             {"kind": "b", "payload": 2},
         ]
     finally:
+        os.close(r)
+
+
+def test_recv_one_rejects_oversized_frame(monkeypatch):
+    # A frame larger than the buffer cap must fail loud (BufferFull) rather
+    # than buffer unboundedly - the guard against a desynced stream claiming a
+    # giant map/array. Patch the cap small so the test stays cheap.
+    monkeypatch.setattr(protocol, "_MAX_FRAME_BYTES", 128)
+    r, w = os.pipe()
+    packed = msgpack.packb(b"x" * 4096)  # one frame well past the 128-byte cap
+    os.write(w, packed)
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        with pytest.raises(mpack.BufferFull):
+            conn.recv_one()
+    finally:
+        os.close(w)
         os.close(r)
 
 

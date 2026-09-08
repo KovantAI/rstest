@@ -205,9 +205,21 @@ def main(argv: list[str]) -> int:
     cov = coverage.Coverage()
     # Suffixed worker data files exist after a pool run; a single-worker
     # run already wrote a plain .coverage.
-    cov.combine(keep=False)
-    cov.save()
-    cov.load()
+    try:
+        cov.combine(keep=False)
+        cov.save()
+        cov.load()
+    except coverage.CoverageException as exc:
+        # Every test skipped/deselected -> no data files to combine
+        # (NoDataError). Report 0% instead of crashing the whole run.
+        log.warning("no coverage data to combine: %s", exc)
+        print("Total coverage: 0.00%")
+        if fail_under is not None and float(fail_under) > 0.0:
+            print(
+                f"FAIL Required test coverage of {fail_under}% not reached. Total coverage: 0.00%"
+            )
+            return 1
+        return 0
 
     status = 0
     for spec in reports:

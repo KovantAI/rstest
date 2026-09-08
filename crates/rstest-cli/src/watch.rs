@@ -43,23 +43,7 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
             "\n[watch] waiting for changes... (Ctrl+C to quit, last exit: {status})"
         ));
 
-        // Block for the first relevant change, then drain the burst.
-        let mut changed: Vec<PathBuf> = Vec::new();
-        loop {
-            let path = rx.recv()?; // watcher thread lives as long as we do
-            if relevant(&path) {
-                changed.push(path);
-                break;
-            }
-        }
-        std::thread::sleep(DEBOUNCE);
-        while let Ok(path) = rx.try_recv() {
-            if relevant(&path) {
-                changed.push(path);
-            }
-        }
-        changed.sort();
-        changed.dedup();
+        let changed = collect_changes(&rx, DEBOUNCE)?;
 
         // Only test files touched -> rerun just those. Source changes go
         // through the import graph; full rerun only when the graph can't
@@ -86,6 +70,30 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
         ));
         status = execute(cli, &args)?;
     }
+}
+
+/// Block for the first relevant change, sleep `debounce` to let the edit's
+/// burst arrive, then drain and return the deduped, sorted set. Irrelevant
+/// events (caches, non-Python) are filtered out; a change set is only returned
+/// once at least one relevant path has landed.
+fn collect_changes(rx: &mpsc::Receiver<PathBuf>, debounce: Duration) -> Result<Vec<PathBuf>> {
+    let mut changed: Vec<PathBuf> = Vec::new();
+    loop {
+        let path = rx.recv()?; // watcher thread lives as long as we do
+        if relevant(&path) {
+            changed.push(path);
+            break;
+        }
+    }
+    std::thread::sleep(debounce);
+    while let Ok(path) = rx.try_recv() {
+        if relevant(&path) {
+            changed.push(path);
+        }
+    }
+    changed.sort();
+    changed.dedup();
+    Ok(changed)
 }
 
 /// What a change set should trigger. `Skip` = nothing runnable (deleted test
@@ -187,6 +195,53 @@ fn rel(path: &Path, cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NO_DEBOUNCE: Duration = Duration::from_millis(0);
+
+    #[test]
+    fn collect_changes_filters_sorts_and_dedups() {
+        // Irrelevant events are dropped; relevant ones come back sorted and
+        // deduplicated.
+        let (tx, rx) = mpsc::channel();
+        for p in [
+            "__pycache__/x.py", // ignored dir
+            "b/test_b.py",
+            "notes.txt", // wrong extension
+            "a/test_a.py",
+            "b/test_b.py", // duplicate
+        ] {
+            tx.send(PathBuf::from(p)).unwrap();
+        }
+        drop(tx); // close so a final try_recv can't block
+        let got = collect_changes(&rx, NO_DEBOUNCE).unwrap();
+        assert_eq!(
+            got,
+            vec![PathBuf::from("a/test_a.py"), PathBuf::from("b/test_b.py")]
+        );
+    }
+
+    #[test]
+    fn collect_changes_blocks_past_irrelevant_until_first_relevant() {
+        // Leading irrelevant events don't end the wait; the first relevant one
+        // does, and it is included.
+        let (tx, rx) = mpsc::channel();
+        tx.send(PathBuf::from(".git/HEAD")).unwrap();
+        tx.send(PathBuf::from("Cargo.toml")).unwrap();
+        tx.send(PathBuf::from("src/test_real.py")).unwrap();
+        drop(tx);
+        let got = collect_changes(&rx, NO_DEBOUNCE).unwrap();
+        assert_eq!(got, vec![PathBuf::from("src/test_real.py")]);
+    }
+
+    #[test]
+    fn collect_changes_errors_when_channel_closes_before_any_relevant() {
+        // All senders gone with no relevant path -> recv() errors out rather
+        // than looping forever.
+        let (tx, rx) = mpsc::channel();
+        tx.send(PathBuf::from("README.md")).unwrap();
+        drop(tx);
+        assert!(collect_changes(&rx, NO_DEBOUNCE).is_err());
+    }
 
     #[test]
     fn relevant_accepts_python_and_pytest_config_files() {
@@ -315,6 +370,71 @@ mod tests {
                 assert_eq!(args, base, "full selection reruns with base args verbatim");
             }
             Plan::Skip => panic!("config change should force a full rerun"),
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn plan_orphan_source_change_skips() {
+        // A source file no test imports resolves to an empty affected set ->
+        // nothing to rerun.
+        let cwd = fresh_dir("orphan");
+        std::fs::write(cwd.join("orphan.py"), "VALUE = 1\n").unwrap();
+        // A test that imports something else, so the graph maps orphan.py to no test.
+        std::fs::write(
+            cwd.join("test_other.py"),
+            "def test_ok():\n    assert True\n",
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                plan_rerun(&[cwd.join("orphan.py")], &project_at(&cwd), &cwd, &[]),
+                Plan::Skip
+            ),
+            "an orphan source change must skip"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn plan_mixed_test_and_source_routes_through_graph() {
+        // A change set mixing a test file and a source file is NOT "only tests",
+        // so it goes through import-graph selection rather than a direct rerun.
+        let cwd = fresh_dir("mixed");
+        std::fs::write(cwd.join("mymod.py"), "VALUE = 1\n").unwrap();
+        std::fs::write(
+            cwd.join("test_uses.py"),
+            "import mymod\ndef test_v():\n    assert mymod.VALUE == 1\n",
+        )
+        .unwrap();
+        let changed = vec![cwd.join("mymod.py"), cwd.join("test_uses.py")];
+        match plan_rerun(&changed, &project_at(&cwd), &cwd, &[]) {
+            Plan::Run { mode, .. } => {
+                assert_eq!(mode, "affected tests", "mixed set must use the graph");
+            }
+            Plan::Skip => panic!("mixed change reaching a test must run it"),
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn plan_partial_deleted_test_files_runs_survivors() {
+        // Only-test change set where some files are gone: the deleted ones are
+        // filtered out and the survivors still run.
+        let cwd = fresh_dir("partial");
+        let live = cwd.join("test_live.py");
+        let gone = cwd.join("test_gone.py"); // never created
+        std::fs::write(&live, "def test_x(): pass\n").unwrap();
+        match plan_rerun(&[gone, live], &project_at(&cwd), &cwd, &[]) {
+            Plan::Run { args, mode } => {
+                assert_eq!(mode, "changed files");
+                assert!(args.contains(&"test_live.py".to_string()), "{args:?}");
+                assert!(
+                    !args.contains(&"test_gone.py".to_string()),
+                    "deleted file must be dropped: {args:?}"
+                );
+            }
+            Plan::Skip => panic!("a surviving test file must still run"),
         }
         let _ = std::fs::remove_dir_all(&cwd);
     }

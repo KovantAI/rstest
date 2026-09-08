@@ -47,61 +47,21 @@ pub fn run_migrate_check(
         union.len()
     ));
 
-    // Group by site; per site track the worst Kind and a sample param.
-    struct Acc {
-        counts: BTreeMap<&'static str, usize>,
-        worst: Kind,
-        sample: String,
-    }
-    let mut by_site: BTreeMap<&str, Acc> = BTreeMap::new();
-    let mut will_bail_total = 0usize;
-    for id in &unstable {
-        let (site, param) = split_param(id);
-        let kind = classify(param);
-        if kind.will_bail() {
-            will_bail_total += 1;
-        }
-        let acc = by_site.entry(site).or_insert_with(|| Acc {
-            counts: BTreeMap::new(),
-            worst: Kind::Other,
-            sample: param.to_string(),
-        });
-        *acc.counts.entry(kind.label()).or_insert(0) += 1;
-        // worst = a will-bail kind beats a may-bail one; remember its sample.
-        if kind.will_bail() && !acc.worst.will_bail() {
-            acc.worst = kind;
-            acc.sample = param.to_string();
-        }
-    }
-
-    // Structured form of the unstable-id findings (for --migrate-check-json).
-    let json_unstable: Vec<serde_json::Value> = by_site
-        .iter()
-        .map(|(site, acc)| {
-            let will = acc.counts.keys().any(|k| *k == "address" || *k == "uuid");
-            serde_json::json!({
-                "site": site,
-                "kinds": acc.counts.iter().map(|(k, n)| (*k, *n)).collect::<BTreeMap<_, _>>(),
-                "will_bail": will,
-                "allowed": allowed(site),
-                "sample": acc.sample,
-                "fix": acc.worst.fix(),
-            })
-        })
-        .collect();
+    // Group by site (worst Kind + a sample param each) and its structured form.
+    let (by_site, will_bail_total) = accumulate_unstable(&unstable);
+    let json_unstable = unstable_json(&by_site, allowed);
     let tests_total = union.len();
     // Writes the JSON doc (if requested) and returns the exit code. `parallel`
     // is null when the parallel phase was skipped (WILL-bail) or didn't run.
     let finish = |ready: bool, parallel: serde_json::Value, exit: i32| -> Result<i32> {
         if let Some(path) = json_path {
-            let doc = serde_json::json!({
-                "meta": { "runner": "rstest", "kind": "migrate-check", "schema": 1 },
-                "ready": ready,
-                "tests_collected": tests_total,
-                "will_bail_count": will_bail_total,
-                "unstable_ids": json_unstable,
-                "parallel": parallel,
-            });
+            let doc = check_doc(
+                ready,
+                tests_total,
+                will_bail_total,
+                &json_unstable,
+                parallel,
+            );
             std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
         }
         Ok(exit)
@@ -118,7 +78,7 @@ pub fn run_migrate_check(
         ));
         for (site, acc) in &by_site {
             let kinds: Vec<String> = acc.counts.iter().map(|(k, n)| format!("{k}:{n}")).collect();
-            let will = acc.counts.keys().any(|k| *k == "address" || *k == "uuid");
+            let will = acc.will_bail();
             let verdict = if will {
                 "WILL bail"
             } else {
@@ -147,9 +107,7 @@ pub fn run_migrate_check(
         // fail the gate (CI may have accepted them).
         let blocking = by_site
             .iter()
-            .filter(|(site, acc)| {
-                acc.counts.keys().any(|k| *k == "address" || *k == "uuid") && !allowed(site)
-            })
+            .filter(|(site, acc)| acc.will_bail() && !allowed(site))
             .count();
         sink.out_line(&format!(
             "==> {will_bail_total} per-process-unstable id(s) force -n 0. Fix these (stable ids=) \
@@ -274,32 +232,7 @@ pub fn run_migrate_check(
         ));
     }
 
-    let json_findings: Vec<serde_json::Value> = migration
-        .iter()
-        .map(|(nodeid, v)| {
-            let (why, fix) = v.advice();
-            let pol = match polluter.get(nodeid.as_str()) {
-                Some(Polluter::OtherFile(f)) => {
-                    serde_json::json!({ "kind": "other_file", "file": f })
-                }
-                Some(Polluter::SameFile(f)) => {
-                    serde_json::json!({ "kind": "same_file", "file": f })
-                }
-                Some(Polluter::NotReproducible) => {
-                    serde_json::json!({ "kind": "not_reproducible" })
-                }
-                None => serde_json::Value::Null,
-            };
-            serde_json::json!({
-                "nodeid": nodeid,
-                "verdict": v.title(),
-                "why": why,
-                "fix": fix,
-                "allowed": allowed(nodeid),
-                "polluter": pol,
-            })
-        })
-        .collect();
+    let json_findings = findings_json(&migration, &polluter, allowed);
     // Gate: fail only on findings that aren't allow-listed.
     let blocking = migration.iter().filter(|(n, _)| !allowed(n)).count();
     if blocking == 0 {
@@ -318,4 +251,228 @@ pub fn run_migrate_check(
         }),
         if blocking > 0 { 1 } else { 0 },
     )
+}
+
+/// Per-site accumulation of unstable ids: how many of each kind, the worst
+/// (a will-bail kind beats a may-bail one) kind, and a sample param for it.
+struct Acc {
+    counts: BTreeMap<&'static str, usize>,
+    worst: Kind,
+    sample: String,
+}
+
+impl Acc {
+    /// A site is a WILL-bail (per-process) blocker if any of its ids is an
+    /// address or uuid; those force rstest to `-n 0`.
+    fn will_bail(&self) -> bool {
+        self.counts.keys().any(|k| *k == "address" || *k == "uuid")
+    }
+}
+
+/// Group unstable nodeids by their parametrize site, returning the per-site
+/// accumulation and the total count of will-bail (per-process) ids across all
+/// sites. Pure: the classifier decides each id's kind from its param text.
+fn accumulate_unstable<'a>(unstable: &[&'a str]) -> (BTreeMap<&'a str, Acc>, usize) {
+    let mut by_site: BTreeMap<&str, Acc> = BTreeMap::new();
+    let mut will_bail_total = 0usize;
+    for id in unstable {
+        let (site, param) = split_param(id);
+        let kind = classify(param);
+        if kind.will_bail() {
+            will_bail_total += 1;
+        }
+        let acc = by_site.entry(site).or_insert_with(|| Acc {
+            counts: BTreeMap::new(),
+            worst: Kind::Other,
+            sample: param.to_string(),
+        });
+        *acc.counts.entry(kind.label()).or_insert(0) += 1;
+        // worst = a will-bail kind beats a may-bail one; remember its sample.
+        if kind.will_bail() && !acc.worst.will_bail() {
+            acc.worst = kind;
+            acc.sample = param.to_string();
+        }
+    }
+    (by_site, will_bail_total)
+}
+
+/// The structured (`--migrate-check-json`) form of the unstable-id findings.
+fn unstable_json(
+    by_site: &BTreeMap<&str, Acc>,
+    allowed: impl Fn(&str) -> bool,
+) -> Vec<serde_json::Value> {
+    by_site
+        .iter()
+        .map(|(site, acc)| {
+            serde_json::json!({
+                "site": site,
+                "kinds": acc.counts.iter().map(|(k, n)| (*k, *n)).collect::<BTreeMap<_, _>>(),
+                "will_bail": acc.will_bail(),
+                "allowed": allowed(site),
+                "sample": acc.sample,
+                "fix": acc.worst.fix(),
+            })
+        })
+        .collect()
+}
+
+/// The `--migrate-check-json` envelope (schema 5's migrate-check variant).
+/// `parallel` is null when the parallel phase was skipped or didn't run.
+fn check_doc(
+    ready: bool,
+    tests: usize,
+    will_bail: usize,
+    unstable: &[serde_json::Value],
+    parallel: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "meta": { "runner": "rstest", "kind": "migrate-check", "schema": 1 },
+        "ready": ready,
+        "tests_collected": tests,
+        "will_bail_count": will_bail,
+        "unstable_ids": unstable,
+        "parallel": parallel,
+    })
+}
+
+/// The JSON shape of a victim's polluter (null when the bisect found none).
+fn polluter_json(p: Option<&Polluter>) -> serde_json::Value {
+    match p {
+        Some(Polluter::OtherFile(f)) => serde_json::json!({ "kind": "other_file", "file": f }),
+        Some(Polluter::SameFile(f)) => serde_json::json!({ "kind": "same_file", "file": f }),
+        Some(Polluter::NotReproducible) => serde_json::json!({ "kind": "not_reproducible" }),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// The structured form of the parallel-only findings (verdict + advice + the
+/// bisected polluter per test).
+fn findings_json(
+    migration: &[&(String, Verdict)],
+    polluter: &BTreeMap<&str, Polluter>,
+    allowed: impl Fn(&str) -> bool,
+) -> Vec<serde_json::Value> {
+    migration
+        .iter()
+        .map(|(nodeid, v)| {
+            let (why, fix) = v.advice();
+            serde_json::json!({
+                "nodeid": nodeid,
+                "verdict": v.title(),
+                "why": why,
+                "fix": fix,
+                "allowed": allowed(nodeid),
+                "polluter": polluter_json(polluter.get(nodeid.as_str())),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulate_unstable_groups_by_site_and_counts_will_bail() {
+        // Two ids on one site (an address => will-bail, and a plain label), plus
+        // a uuid id on a second site. will_bail_total counts address + uuid.
+        let ids = [
+            "a.py::t[<obj at 0x10ae4e660>]",
+            "a.py::t[plain-label]",
+            "b.py::u[efc8cccd-21d0-45ee-a84e-5b9e5f2ce0fd]",
+        ];
+        let (by_site, will_bail) = accumulate_unstable(&ids);
+        assert_eq!(will_bail, 2, "address + uuid are per-process unstable");
+        assert_eq!(by_site.len(), 2, "grouped into two sites");
+        let a = &by_site["a.py::t"];
+        assert!(a.will_bail(), "the address id makes the site will-bail");
+        assert_eq!(a.counts["address"], 1);
+        assert_eq!(a.counts["other"], 1);
+        // worst tracks the will-bail kind and keeps ITS sample (the address).
+        assert!(a.sample.contains("0x10ae4e660"));
+        let b = &by_site["b.py::u"];
+        assert!(b.will_bail());
+        assert_eq!(b.counts["uuid"], 1);
+    }
+
+    #[test]
+    fn accumulate_unstable_may_bail_site_is_not_will_bail() {
+        let ids = ["a.py::t[2026-09-08]"]; // time -> may bail, not will
+        let (by_site, will_bail) = accumulate_unstable(&ids);
+        assert_eq!(will_bail, 0);
+        assert!(!by_site["a.py::t"].will_bail());
+        assert_eq!(by_site["a.py::t"].counts["time"], 1);
+    }
+
+    #[test]
+    fn unstable_json_carries_site_kinds_and_allow_flag() {
+        let ids = ["a.py::t[<obj at 0x10ae4e660>]", "b.py::u[plain]"];
+        let (by_site, _) = accumulate_unstable(&ids);
+        let docs = unstable_json(&by_site, |s| s == "b.py::u");
+        assert_eq!(docs.len(), 2);
+        let a = docs.iter().find(|d| d["site"] == "a.py::t").unwrap();
+        assert_eq!(a["will_bail"], true);
+        assert_eq!(a["allowed"], false);
+        assert_eq!(a["kinds"]["address"], 1);
+        assert!(a["fix"].as_str().unwrap().contains("repr"));
+        let b = docs.iter().find(|d| d["site"] == "b.py::u").unwrap();
+        assert_eq!(b["will_bail"], false);
+        assert_eq!(b["allowed"], true, "the allow predicate marks this site");
+    }
+
+    #[test]
+    fn check_doc_has_versioned_envelope() {
+        let unstable = vec![serde_json::json!({ "site": "a.py::t" })];
+        let doc = check_doc(false, 12, 3, &unstable, serde_json::Value::Null);
+        assert_eq!(doc["meta"]["schema"], 1);
+        assert_eq!(doc["meta"]["runner"], "rstest");
+        assert_eq!(doc["ready"], false);
+        assert_eq!(doc["tests_collected"], 12);
+        assert_eq!(doc["will_bail_count"], 3);
+        assert_eq!(doc["unstable_ids"][0]["site"], "a.py::t");
+        assert!(doc["parallel"].is_null());
+    }
+
+    #[test]
+    fn polluter_json_maps_each_variant() {
+        assert_eq!(
+            polluter_json(Some(&Polluter::OtherFile("x.py".into()))),
+            serde_json::json!({ "kind": "other_file", "file": "x.py" })
+        );
+        assert_eq!(
+            polluter_json(Some(&Polluter::SameFile("y.py".into()))),
+            serde_json::json!({ "kind": "same_file", "file": "y.py" })
+        );
+        assert_eq!(
+            polluter_json(Some(&Polluter::NotReproducible)),
+            serde_json::json!({ "kind": "not_reproducible" })
+        );
+        assert!(polluter_json(None).is_null());
+    }
+
+    #[test]
+    fn findings_json_joins_verdict_advice_and_polluter() {
+        let migration_owned = [
+            ("a.py::victim".to_string(), Verdict::Isolation),
+            ("b.py::order".to_string(), Verdict::OrderDependency),
+        ];
+        let migration: Vec<&(String, Verdict)> = migration_owned.iter().collect();
+        let mut polluter: BTreeMap<&str, Polluter> = BTreeMap::new();
+        polluter.insert("a.py::victim", Polluter::OtherFile("c.py".into()));
+        let docs = findings_json(&migration, &polluter, |n| n == "b.py::order");
+
+        let v = &docs[0];
+        assert_eq!(v["nodeid"], "a.py::victim");
+        assert_eq!(v["verdict"], Verdict::Isolation.title());
+        assert_eq!(v["allowed"], false);
+        assert_eq!(v["polluter"]["kind"], "other_file");
+        assert_eq!(v["polluter"]["file"], "c.py");
+        let (why, fix) = Verdict::Isolation.advice();
+        assert_eq!(v["why"], why);
+        assert_eq!(v["fix"], fix);
+
+        let o = &docs[1];
+        assert_eq!(o["allowed"], true, "the allow predicate marks this finding");
+        assert!(o["polluter"].is_null(), "no bisect entry -> null polluter");
+    }
 }
