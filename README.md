@@ -16,8 +16,14 @@ default, with built-in suite diagnostics (`--doctor`) that tell you *where
 your test time actually goes*.
 
 ```text
-aiohttp, 4,469 tests:   pytest 197s  →  rstest 68s warm (151s cold)
+aiohttp, 4,469 tests:   pytest 197s  →  rstest 68s warm (126s cold)
 ```
+
+<p align="center">
+  <img src="docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (197s), then rstest (68s, 8 parallel workers), then rstest --doctor pinpointing the wait-bound file that gates the suite" width="820">
+</p>
+
+<p align="center"><sub>Same suite, same outcomes: <b>pytest 197s → rstest 68s</b> (warm, <code>-n 8</code>), then <code>--doctor</code> shows <i>where the time goes</i>. Numbers from <a href="docs/reference/benchmarks.md">benchmarks</a>.</sub></p>
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
 
@@ -82,7 +88,7 @@ under plain pytest itself; those are catalogued in the docs).
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md — keep numbers in sync -->
 | Suite | Tests | pytest | xdist (`-n 8`) | rstest |
 |---|---|---|---|---|
-| aiohttp | 4,469 | 197s | 160s | **68s** warm · 151s cold |
+| aiohttp | 4,469 | 197s | 160s | **68s** warm · 126s cold |
 | pandas | 193,627 | 182s | 61s | 63s (parity, not a win) |
 | django-allauth | 2,050 | 22s | 8s | **8s** (`-n 4`) |
 | rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) |
