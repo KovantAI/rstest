@@ -1,0 +1,46 @@
+name: vendor integrity
+
+# Verifies the vendored pytest tree. `integrity` is a fast offline check on
+# every change (tree == committed vendor.lock). `provenance` is the strong
+# check (vendored == upstream pytest on PyPI) and needs the network, so it runs
+# only when the vendored tree/manifest changes, plus weekly to catch drift.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  integrity:
+    name: local integrity (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      # Runs the SAME check `rstest verify-vendor` ships: rehash _vendor/ and
+      # diff against vendor.lock. No network, no deps.
+      - name: verify vendored tree matches vendor.lock
+        run: PYTHONPATH=python python -m rstest_worker._internal.verify_vendor
+
+  provenance:
+    name: upstream provenance (network)
+    runs-on: ubuntu-latest
+    # Cheap to always run, but the point is drift on vendor changes + the weekly
+    # sweep; PR-path filtering is handled by the job being fast to skip-noop.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      # Downloads the pinned pytest wheel, checks its sha256 against the trust
+      # anchor in vendor.lock, then diffs the extracted tree against _vendor/.
+      - name: verify vendored tree matches upstream pytest
+        run: python .github/scripts/vendor_verify.py --mode provenance

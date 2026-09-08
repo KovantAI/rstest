@@ -3,6 +3,7 @@
 //! so any non-GitHub CI can gate too.
 
 use super::DoctorReport;
+use crate::reporting::sink::Sink;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Op {
@@ -76,7 +77,7 @@ const METRICS: &[&str] = &[
 /// One parsed `--doctor-fail-on` condition. Parsing validates the metric name
 /// and threshold up front (before the run) so a typo fails fast rather than
 /// silently never firing - the exact bug class this feature exists to kill.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GateCondition {
     raw: String,
     metric: String,
@@ -86,11 +87,11 @@ pub struct GateCondition {
 
 /// Parse and validate every `--doctor-fail-on` spec, or return the first
 /// error. Call before running so a bad condition aborts immediately.
-pub fn parse_conditions(specs: &[String]) -> anyhow::Result<Vec<GateCondition>> {
-    specs.iter().map(|s| parse_condition(s)).collect()
+pub fn parse_conditions(specs: &[String], sink: &mut Sink) -> anyhow::Result<Vec<GateCondition>> {
+    specs.iter().map(|s| parse_condition(s, sink)).collect()
 }
 
-fn parse_condition(spec: &str) -> anyhow::Result<GateCondition> {
+fn parse_condition(spec: &str, sink: &mut Sink) -> anyhow::Result<GateCondition> {
     let (op, pos) = Op::parse(spec).ok_or_else(|| {
         anyhow::anyhow!(
             "--doctor-fail-on '{spec}': no comparison operator (use one of < <= > >= == !=), \
@@ -112,11 +113,11 @@ fn parse_condition(spec: &str) -> anyhow::Result<GateCondition> {
     // metric it almost never matches and would silently never fire. Warn
     // rather than reject - someone may still want it on `tests`/`workers`.
     if matches!(op, Op::Eq | Op::Ne) && !matches!(metric.as_str(), "tests" | "workers") {
-        eprintln!(
+        sink.warn(&format!(
             "rstest: --doctor-fail-on '{spec}': exact {} on the floating-point \
              metric '{metric}' rarely matches; a threshold (< / >) is usually meant",
             op.symbol()
-        );
+        ));
     }
     Ok(GateCondition {
         raw: spec.to_string(),
@@ -192,19 +193,21 @@ mod tests {
 
     #[test]
     fn gate_parse_rejects_unknown_metric_and_bad_grammar() {
-        assert!(parse_conditions(&["parallel_efficiency<30".into()]).is_ok());
+        assert!(
+            parse_conditions(&["parallel_efficiency<30".into()], &mut Sink::captured().0).is_ok()
+        );
         // unknown metric
-        let e = parse_conditions(&["bogus<30".into()])
+        let e = parse_conditions(&["bogus<30".into()], &mut Sink::captured().0)
             .unwrap_err()
             .to_string();
         assert!(e.contains("unknown metric 'bogus'"), "{e}");
         // no operator
-        let e = parse_conditions(&["wait_pct 50".into()])
+        let e = parse_conditions(&["wait_pct 50".into()], &mut Sink::captured().0)
             .unwrap_err()
             .to_string();
         assert!(e.contains("no comparison operator"), "{e}");
         // non-numeric threshold
-        let e = parse_conditions(&["wait_pct>lots".into()])
+        let e = parse_conditions(&["wait_pct>lots".into()], &mut Sink::captured().0)
             .unwrap_err()
             .to_string();
         assert!(e.contains("not a number"), "{e}");
@@ -212,7 +215,7 @@ mod tests {
 
     #[test]
     fn gate_parse_handles_two_char_operators() {
-        let c = parse_condition("efficiency_pct<=30").unwrap();
+        let c = parse_condition("efficiency_pct<=30", &mut Sink::captured().0).unwrap();
         assert_eq!(c.metric, "efficiency_pct");
         assert_eq!(c.op, Op::Le);
         assert!((c.threshold - 30.0).abs() < 1e-9);
@@ -221,11 +224,14 @@ mod tests {
     #[test]
     fn gate_breaches_and_passes() {
         let r = report(12); // efficiency_pct 82.5, wait_pct 80.0, wall 9.0
-        let conds = parse_conditions(&[
-            "parallel_efficiency<90".into(), // 82.5 < 90 -> breach
-            "wait_pct>50".into(),            // 80 > 50 -> breach
-            "wall_seconds>100".into(),       // 9 > 100 -> pass
-        ])
+        let conds = parse_conditions(
+            &[
+                "parallel_efficiency<90".into(), // 82.5 < 90 -> breach
+                "wait_pct>50".into(),            // 80 > 50 -> breach
+                "wall_seconds>100".into(),       // 9 > 100 -> pass
+            ],
+            &mut Sink::captured().0,
+        )
         .unwrap();
         let out = evaluate(&r, &conds);
         assert_eq!(out.breaches.len(), 2, "{:?}", out.breaches);
@@ -240,7 +246,7 @@ mod tests {
         // report and silently always-skip. `report(12)` has every section.
         let r = report(12);
         for name in METRICS {
-            let c = parse_condition(&format!("{name}>=0")).unwrap();
+            let c = parse_condition(&format!("{name}>=0"), &mut Sink::captured().0).unwrap();
             let out = evaluate(&r, std::slice::from_ref(&c));
             assert!(
                 out.skipped.is_empty(),
@@ -256,8 +262,11 @@ mod tests {
         let mut r = report(4);
         r.parallel_efficiency = None;
         r.wait_bound = None;
-        let conds =
-            parse_conditions(&["parallel_efficiency<30".into(), "wait_pct>1".into()]).unwrap();
+        let conds = parse_conditions(
+            &["parallel_efficiency<30".into(), "wait_pct>1".into()],
+            &mut Sink::captured().0,
+        )
+        .unwrap();
         let out = evaluate(&r, &conds);
         assert!(out.breaches.is_empty(), "{:?}", out.breaches);
         assert_eq!(out.skipped.len(), 2);

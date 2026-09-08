@@ -1,9 +1,9 @@
-//! `--migrate-check` and `--try`: the pytest→rstest onboarding preflights.
+//! `migrate-check` and `try`: the pytest→rstest onboarding preflights.
 //!
 //! This file owns the run-snapshot model (`Outcomes`/`Rec`/`Phase`) and the
 //! child-session runner shared by both commands. [`classify`] owns the two
 //! classifiers (unstable ids, parallel-only failures); [`check`] is the
-//! `--migrate-check` orchestrator; [`try_cmd`] is the `--try` parity+speed run.
+//! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run.
 
 mod check;
 mod classify;
@@ -43,6 +43,36 @@ pub(super) enum Phase {
     Fail, // failed or errored in any phase
 }
 
+/// Build the per-test [`Outcomes`] map from a run's `--report-json` document
+/// (its top-level `tests` object). `with_cpu` pulls each test's call-phase cpu
+/// time (present only under doctor instrumentation, for the wait-bound signal);
+/// pass `false` when the run carried none. Returns `None` when the document has
+/// no `tests` object.
+pub(super) fn parse_outcomes(doc: &serde_json::Value, with_cpu: bool) -> Option<Outcomes> {
+    let tests = doc.get("tests")?.as_object()?;
+    let mut out = Outcomes::new();
+    for (nodeid, entry) in tests {
+        out.insert(
+            nodeid.clone(),
+            Rec {
+                phase: if is_fail(entry) {
+                    Phase::Fail
+                } else {
+                    Phase::Pass
+                },
+                wall: entry
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                cpu: with_cpu
+                    .then(|| entry.get("cpu").and_then(|v| v.as_f64()))
+                    .flatten(),
+            },
+        );
+    }
+    Some(out)
+}
+
 pub(super) fn is_fail(entry: &serde_json::Value) -> bool {
     ["setup", "call", "teardown"].iter().any(|p| {
         matches!(
@@ -54,7 +84,7 @@ pub(super) fn is_fail(entry: &serde_json::Value) -> bool {
 
 /// The test file of a nodeid (everything before the first `::`).
 pub(super) fn file_of(nodeid: &str) -> &str {
-    nodeid.split("::").next().unwrap_or(nodeid)
+    crate::text::nodeid_file(nodeid)
 }
 
 /// Run one full session in a child rstest process with the given config flags
@@ -83,30 +113,11 @@ pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> 
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     cmd.status()?; // non-zero is expected when tests fail; the snapshot is truth
-    let mut out = Outcomes::new();
-    if let Ok(text) = std::fs::read_to_string(&tmp) {
-        if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(tests) = doc.get("tests").and_then(|t| t.as_object()) {
-                for (nodeid, entry) in tests {
-                    out.insert(
-                        nodeid.clone(),
-                        Rec {
-                            phase: if is_fail(entry) {
-                                Phase::Fail
-                            } else {
-                                Phase::Pass
-                            },
-                            wall: entry
-                                .get("duration")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(0.0),
-                            cpu: entry.get("cpu").and_then(|v| v.as_f64()),
-                        },
-                    );
-                }
-            }
-        }
-    }
+    let out = std::fs::read_to_string(&tmp)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|doc| parse_outcomes(&doc, true))
+        .unwrap_or_default();
     let _ = std::fs::remove_file(&tmp);
     Ok(out)
 }
@@ -125,6 +136,8 @@ pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>>
         run_uid: std::env::var("RSTEST_RUN_UID")
             .unwrap_or_else(|_| format!("migrate-{}", std::process::id())),
         doctor: false,
+        timeout: None,
+        leakcheck: false,
         send_ids: true,
     };
     let mut collect_args = args.to_vec();
@@ -159,6 +172,26 @@ mod tests {
             "tests/test_x.py"
         );
         assert_eq!(file_of("tests/test_x.py"), "tests/test_x.py");
+    }
+
+    #[test]
+    fn is_fail_matches_any_failed_or_errored_phase() {
+        use serde_json::json;
+        // Any of setup/call/teardown failing or erroring counts as a failure.
+        assert!(is_fail(&json!({ "call": "failed" })));
+        assert!(is_fail(&json!({ "setup": "error" })));
+        assert!(is_fail(&json!({ "teardown": "failed" })));
+        assert!(is_fail(
+            &json!({ "setup": "passed", "call": "error", "teardown": "passed" })
+        ));
+        // All phases passed (or skipped/absent) -> not a failure.
+        assert!(!is_fail(
+            &json!({ "setup": "passed", "call": "passed", "teardown": "passed" })
+        ));
+        assert!(!is_fail(&json!({ "call": "skipped" })));
+        assert!(!is_fail(&json!({})));
+        // A non-string phase value is ignored, not treated as a failure.
+        assert!(!is_fail(&json!({ "call": 1 })));
     }
 
     #[test]

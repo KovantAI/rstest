@@ -10,7 +10,7 @@ smarter when persisted between runs.
 
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin a version (`pip install rstest==0.4.0` or `rstest~=0.3`) or install
+    pin a version (`pip install rstest==0.6.0` or `rstest~=0.3`) or install
     from your lockfile.
 
 ## GitHub Actions
@@ -169,7 +169,7 @@ retention gives free segment eviction.
     — `gh run list` resolves the latest successful one above (the REST API `GET
     /repos/{owner}/{repo}/actions/artifacts` is the alternative). One complete
     sharded run is enough: its `N` shard segments union into a full index. To
-    fold *many* runs instead, add a scheduled job that `--cache-compact`s the
+    fold *many* runs instead, add a scheduled job that `cache-compact`s the
     segments into a base and uploads that base as its own artifact for PR jobs to
     pull.
 
@@ -199,6 +199,211 @@ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --duratio
 
 (`actions/cache` is **not** recommended for this: one blob per key, it can't
 list-and-merge every segment — the exact limitation this design removes.)
+
+## Worked example: Django on ephemeral CI
+
+A Django suite is the common case: pytest-django, a real database, ephemeral
+GitHub runners where nothing survives between runs unless you persist it. The
+two things people get wrong are the **cold-vs-warm cache** and **per-worker
+databases** — both are handled below.
+
+pytest-django is exercised continuously in rstest's battery *including
+per-worker test databases under parallelism* (see
+[Plugins](plugins.md#exercised-continuously)): rstest supplies each worker the
+xdist-style worker identity pytest-django keys off, so every worker gets its
+own isolated test DB (`test_app_gw0`, `test_app_gw1`, …) automatically — no
+extra flags, same as under xdist.
+
+```yaml
+# .github/workflows/tests.yml
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: app }
+        ports: ["5432:5432"]
+        # createdb privilege matters: each worker CREATEs its own test DB
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s
+          --health-timeout 5s --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: myapp.settings.test
+      DATABASE_URL: postgres://ci:ci@localhost:5432/app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -r requirements.txt && pip install rstest==0.6.0
+
+      # The cache is what makes run two fast. Unique key per run (actions/cache
+      # never re-saves an existing key); restore-keys picks the newest match.
+      - uses: actions/cache@v4
+        with:
+          path: .rstest_cache
+          key: rstest-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            rstest-${{ github.ref_name }}-
+            rstest-
+
+      # --reuse-db keeps the migrated test DB across runs on a warm workspace;
+      # on ephemeral runners the DB is fresh each time, so it's a no-op there —
+      # harmless to leave in, useful on self-hosted runners.
+      - run: rstest -n auto --reuse-db --output github --junitxml junit.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: junit, path: junit.xml }
+```
+
+**What the two runs look like.** Duration-aware scheduling needs one run of
+timing data, so the first run on a fresh cache key is *cold* — the scheduler
+has no per-test durations and falls back to an even split. The second run
+(and every run after, as long as the cache restores) is *warm*: it starts the
+slowest tests first and packs workers tightly. The shape, for a wait-bound
+Django suite on a 4-core runner:
+
+Cold: no timings, dispatched in collection order — the long pole can start
+last and run while other workers idle. Warm: the slowest tests start first and
+pack tightly.
+
+Concretely, on the runnable
+[`examples/ci-bench`](https://github.com/KovantAI/rstest/tree/main/examples/ci-bench)
+suite (136 wait-bound tests with duration skew) — **measured**, `-n 4`, best of
+3, Apple Silicon / CPython 3.13:
+
+<!-- SOURCE OF TRUTH: examples/ci-bench/README.md — keep numbers in sync -->
+| config | wall | vs pytest |
+|---|---|---|
+| pytest (serial) | 12.1s | 1.0× |
+| rstest cold (`-n 4`, no cache) | 5.3s | 2.3× |
+| rstest warm (`-n 4`, cached durations) | 3.6s | 3.3× |
+
+Cold already wins from parallelism; warm adds ~1.5× on top by scheduling the
+long pole first. That is a **synthetic** wait-bound example, not a Django app —
+rstest ships no canonical Django timing, and a suite's win depends on its own
+shape (see the self-check table in the
+[README](https://github.com/KovantAI/rstest#will-rstest-speed-up-your-suite)).
+The [`example-bench.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/example-bench.yml)
+workflow re-runs it on GitHub's runners and posts the table to the job summary,
+so the same measurement is reproducible on standard CI hardware. To get *your*
+real numbers before committing, run [`rstest try`](migrate-from-pytest.md)
+locally — it runs your suite under plain pytest and under `rstest -n auto`,
+diffs outcomes, and reports the speedup, with no migration.
+
+!!! warning "Ephemeral runners: warm the cache from your default branch"
+    If PR jobs start from a cold cache every time, you only ever pay cold-run
+    cost. Run this workflow on pushes to your default branch too (GitHub lets
+    PR jobs restore the base branch's cache entries), so PRs restore a warm
+    `.rstest_cache` instead of rebuilding timing data from scratch. For a
+    matrix/shard layout, prefer the [shared-cache backend](#shared-cache)
+    above — it sidesteps the `run_id` key dance entirely.
+
+## Worked example: monorepo on ephemeral CI
+
+Two monorepo constraints collide in ephemeral CI, and the fix resolves both
+at once:
+
+1. **Concurrency.** At the root, every project launches concurrently with at
+   least one worker each ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
+   Many packages on a small (2–4 core) runner oversubscribes — 20 packages on
+   a 2-core runner is 20 concurrent single-worker children fighting for 2 cores.
+2. **Shared cache.** `--cache-remote`/`--cache-pull`/`--cache-push` are **not
+   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push)) —
+   each project keeps its own `.rstest_cache`, so the segment-merge shared
+   cache is a per-project feature.
+
+**Both dissolve if you make the project the unit of CI parallelism** — one
+job per package via a matrix, instead of one root job running everything
+concurrently. Each job runs a single project (`rstest libs/core` opts out of
+monorepo mode and runs that package alone, with the runner's *full* core count
+— no oversubscription), and because it's a single-project run it can use the
+shared cache normally:
+
+```yaml
+# .github/workflows/tests.yml
+permissions: { contents: read, actions: read }
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs: { projects: ${{ steps.list.outputs.projects }} }
+    steps:
+      - uses: actions/checkout@v4
+      # Emit the matrix from your project layout. Keep this list in sync with
+      # [tool.rstest] projects in the root pyproject.toml (single source of truth).
+      - id: list
+        run: |
+          echo 'projects=["libs/core","libs/cli","services/api"]' >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: { project: ${{ fromJSON(needs.discover.outputs.projects) }} }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -r requirements.txt && pip install rstest==0.6.0
+
+      # Warm this project's shared cache from the latest successful main run.
+      - name: resolve warm-cache run
+        id: warm
+        env: { GH_TOKEN: ${{ github.token }} }
+        run: |
+          rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                  --workflow "${{ github.workflow }}" --branch main \
+                  --status success --limit 1 \
+                  --json databaseId --jq '.[0].databaseId // ""')
+          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        if: steps.warm.outputs.run-id != ''
+        with:
+          pattern: "rstest-seg-${{ matrix.project }}-*"
+          merge-multiple: true
+          path: ./rcache
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.warm.outputs.run-id }}
+        continue-on-error: true
+
+      # Run ONE project → full runner cores, no oversubscription, shared cache OK.
+      # The junit slug keeps per-package files distinct across matrix legs.
+      - name: test
+        run: |
+          slug=$(echo "${{ matrix.project }}" | tr '/' '-')
+          rstest ${{ matrix.project }} -n auto --output github \
+                 --cache-remote ./rcache --cache-pull --cache-push \
+                 --junitxml "junit.${slug}.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rstest-seg-${{ matrix.project }}-${{ github.run_id }}
+          path: ./rcache/segments/seg-*.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: junit-${{ matrix.project }}, path: "junit.*.xml" }
+```
+
+Each package is its own job: it gets the whole runner, warms its own cache
+segment from the last green main run, and pushes a fresh segment — cold on run
+one, warm from run two, exactly like the single-suite case. Isolation is free
+(matrix jobs don't share a runner), and a slow package no longer steals
+workers from a fast one.
+
+!!! note "When to keep the root run instead"
+    If your packages are **few** (roughly ≤ the runner's core count) the root
+    `cd repo && rstest` from the [Monorepos guide](monorepo.md) is simpler:
+    one job, one merged `--report-json`, per-project `junit.<slug>.xml` (glob
+    `**/junit.*.xml`), and `.rstest_cache` persisted via `actions/cache` on
+    `**/.rstest_cache`. It also keeps `--changed`'s cross-package skip logic in
+    one place. Reach for the matrix above when project count outgrows the
+    runner, or when you want the segment-merge shared cache per package. A
+    project-level concurrency cap for the root case is on the roadmap
+    ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
 
 ## AWS CodeBuild
 
@@ -437,7 +642,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.4.0             # pin a released tag
+    rev: v0.6.0             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```
@@ -537,7 +742,7 @@ Two practical notes:
 
 ## Gating new parallel-unsafe tests with migrate-check
 
-[`--migrate-check`](../reference/cli.md#-migrate-check) exits non-zero when a
+[`migrate-check`](../reference/cli.md#migrate-check) exits non-zero when a
 test has a run-to-run unstable id or fails only under parallelism, so a
 dedicated job keeps a migrating suite from regressing — no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use

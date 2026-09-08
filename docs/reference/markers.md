@@ -58,6 +58,18 @@ Under [`--dist loadgroup`](cli.md#-dist-loadloadfileloadscopeloadgroupeach),
 all tests sharing a group name run on the same worker — across files.
 pytest-xdist-compatible.
 
+## `@pytest.mark.timeout`
+
+```python
+@pytest.mark.timeout(5)
+def test_slow_path(): ...
+```
+
+Per-test deadline in seconds, overriding the global
+[`--timeout`](cli.md#-timeout-secs). The test is interrupted in-process at the
+deadline and fails with a traceback at the stuck line. pytest-timeout-compatible
+marker name; no plugin needed.
+
 ## A note on `@pytest.mark.parametrize` IDs
 
 Not a marker rstest owns, but the one that most often blocks parallelism:
@@ -65,7 +77,7 @@ parametrize **IDs must be stable across collections**. rstest collects on
 each worker and refuses to dispatch if the id sets disagree, so an id built
 from a memory address (`repr()` fallback), a uuid, or `now()` forces the
 suite to `-n 0`. Give such a parametrize an explicit stable `ids=` (e.g.
-`ids=[c.name for c in cases]`). [`rstest --migrate-check`](cli.md#-migrate-check)
+`ids=[c.name for c in cases]`). [`rstest migrate-check`](cli.md#migrate-check)
 finds these before your first run and names the exact site.
 
 rstest registers the marker automatically, so `--strict-markers` never

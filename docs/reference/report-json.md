@@ -210,7 +210,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 2,
-  "rstest_version": "0.4.0",
+  "rstest_version": "0.6.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "tests": 2048,
@@ -313,12 +313,12 @@ consumer. Increment-only: incompatible changes bump `schema`.
 $ rstest --migrate-check-json migrate.json
 ```
 
-writes the [`--migrate-check`](cli.md#-migrate-check) parallel-readiness report
+writes the [`migrate-check`](cli.md#migrate-check) parallel-readiness report
 as a single versioned document — the machine-readable surface for CI gating
 (fail the build when a new parallel-unsafe test appears) and for tooling that
 renders the findings. It is a **separate document** from the run snapshot;
-pass `--migrate-check` too to also print the human report. The flag implies
-`--migrate-check`.
+pass `migrate-check` too to also print the human report. The flag implies
+`migrate-check`.
 
 ```json
 {

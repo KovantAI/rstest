@@ -21,5 +21,5 @@ $ rstest --doctor             # and find out why the suite is slow
 
 Coming from pytest? The
 [migration guide](../guides/migrate-from-pytest.md) is the page to read — or,
-in a project that already has pytest and a suite installed, run `rstest --try`
+in a project that already has pytest and a suite installed, run `rstest try`
 for a 30-second "is it worth switching?" answer.

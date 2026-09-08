@@ -6,6 +6,9 @@ use serde::Serialize;
 
 use crate::scheduling::proto;
 
+/// Terminal rendering (`print_*`) lives here; the data model stays in this module.
+mod render;
+
 /// Per-test phase outcomes, mirroring the compat-harness recorder schema
 /// (rstest-research/harness/recorder.py) so `diff_snapshots.py` can gate
 /// rstest output directly against pytest baselines.
@@ -28,6 +31,12 @@ pub struct TestEntry {
     pub skip_reason: Option<String>,
     #[serde(skip)]
     pub cpu: Option<f64>,
+    /// Leak check: net threads / open fds after teardown (from the teardown
+    /// report). Doctor-internal; not serialized to report-json.
+    #[serde(skip)]
+    pub thread_delta: Option<i64>,
+    #[serde(skip)]
+    pub fd_delta: Option<i64>,
     /// Passed only after one or more reruns (--reruns).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -46,6 +55,10 @@ pub struct TestEntry {
     /// never fatal to the run.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub quarantined: bool,
+    /// Not executed this run: unchanged since the last green run, so its prior
+    /// pass was carried forward (`--incremental`). Still counts as passed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
 
 /// Run-level metadata for the report-json envelope (schema 5).
@@ -60,6 +73,12 @@ pub struct RunMeta {
 /// A recorded failure: (nodeid, longrepr, sections of (header, body)).
 type Failure = (Option<usize>, String, String, Vec<(String, String)>);
 
+/// Byte cap on any failure/collection-error text we persist. junit/html embed
+/// it and the console failures block prints it, so an uncapped copy would let a
+/// multi-MB traceback (pandas scale) land unbounded in those artifacts. One cap
+/// applied at every recording site keeps all persisted failure text bounded.
+const FAILURE_TEXT_CAP: usize = 20_000;
+
 /// How the failures block wraps each failure - CI log UIs fold on
 /// vendor-specific markers.
 #[derive(Clone, Copy, PartialEq)]
@@ -71,18 +90,15 @@ pub enum FailureWrap {
     BuildkiteGroup,
 }
 
-fn epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 #[derive(Debug, Default)]
 pub struct Run {
     tests: BTreeMap<String, TestEntry>,
     collect_errors: Vec<(String, String)>,
     failures: Vec<Failure>,
+    /// nodeid -> index of its FIRST entry in `failures`, so `failure_text`
+    /// is O(1). Without it junit's per-failure lookup is O(n) each -> O(n²)
+    /// on an all-red suite.
+    failure_by_id: std::collections::HashMap<String, usize>,
     /// Modules/dirs skipped at collection (count into "skipped", as pytest does).
     pub collect_skips: u64,
     /// nodeids that passed only after rerun(s), with attempt counts.
@@ -100,27 +116,30 @@ impl Run {
             self.phase_durations
                 .push((r.duration, r.when.clone(), r.nodeid.clone()));
         }
-        if r.outcome == "failed" {
-            self.failures.push((
-                worker,
-                r.nodeid.clone(),
-                r.longrepr.clone().unwrap_or_default(),
-                r.sections.clone(),
-            ));
-        }
+        // Cap once, then reuse for both the `failures` copy (junit/html/console)
+        // and `entry.longrepr` (report-json) — avoids truncating the same text
+        // twice. `Some` iff pytest actually sent a longrepr, so an absent repr
+        // stays `None` on the entry rather than becoming an empty string.
+        let capped_longrepr = if r.outcome == "failed" {
+            self.failure_by_id
+                .entry(r.nodeid.clone())
+                .or_insert(self.failures.len());
+            let mut repr = r.longrepr.clone().unwrap_or_default();
+            crate::text::truncate_on_boundary(&mut repr, FAILURE_TEXT_CAP);
+            self.failures
+                .push((worker, r.nodeid.clone(), repr.clone(), r.sections.clone()));
+            r.longrepr.as_ref().map(|_| repr)
+        } else {
+            None
+        };
         let entry = self.tests.entry(r.nodeid).or_default();
         if let Some(w) = worker {
             entry.worker = Some(format!("gw{w}"));
         }
         if r.outcome == "failed" && entry.longrepr.is_none() {
             // Machine consumers need the WHY, not just the phase verdict
-            // (the agent-fleet persona's #1 blocker). Capped: longreprs
-            // can be huge at pandas scale.
-            entry.longrepr = r.longrepr.as_deref().map(|t| {
-                let mut t = t.to_string();
-                t.truncate(20_000);
-                t
-            });
+            // (the agent-fleet persona's #1 blocker).
+            entry.longrepr = capped_longrepr;
         }
         let outcome = Some(r.outcome);
         match r.when.as_str() {
@@ -130,7 +149,16 @@ impl Run {
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
             }
-            "teardown" => entry.teardown = outcome,
+            "teardown" => {
+                entry.teardown = outcome;
+                // Leak deltas ride the teardown report (measured after teardown).
+                if r.thread_delta.is_some() {
+                    entry.thread_delta = r.thread_delta;
+                }
+                if r.fd_delta.is_some() {
+                    entry.fd_delta = r.fd_delta;
+                }
+            }
             _ => {}
         }
         entry.wasxfail |= r.wasxfail;
@@ -142,8 +170,79 @@ impl Run {
         }
     }
 
-    pub fn collect_error(&mut self, path: String, longrepr: String) {
+    pub fn collect_error(&mut self, path: String, mut longrepr: String) {
+        // Same bound as failure text: html embeds this verbatim, so a giant
+        // collection-error traceback must not land unbounded in the artifact.
+        crate::text::truncate_on_boundary(&mut longrepr, FAILURE_TEXT_CAP);
         self.collect_errors.push((path, longrepr));
+    }
+
+    /// Carry forward a test that was NOT run this session because it is
+    /// unchanged since it last passed (`--incremental`): record it as a passed,
+    /// cached entry so every artifact (summary, report-json, junit) reflects the
+    /// whole suite, not just the tests that actually ran.
+    pub fn record_cached(&mut self, nodeid: String) {
+        let entry = self.tests.entry(nodeid).or_default();
+        entry.call = Some("passed".into());
+        entry.cached = true;
+    }
+
+    /// How many entries were carried forward as cached passes.
+    pub fn cached_count(&self) -> usize {
+        self.tests.values().filter(|e| e.cached).count()
+    }
+
+    /// The nodeids carried forward as cached passes this run — used to fold their
+    /// prior coverage back into the rewritten index so they stay skippable.
+    pub fn cached_nodeids(&self) -> std::collections::HashSet<String> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| e.cached)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// nodeids that are GREEN in this run (clean passes) — the set to persist as
+    /// the incremental baseline. Includes carried-forward cached passes, since
+    /// they remain green.
+    pub fn green_nodeids(&self) -> std::collections::HashSet<String> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| classify(e) == "passed")
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Source line of every GREEN nodeid that has one — persisted alongside the
+    /// baseline so a future cached (not-run) entry can be restored with its real
+    /// def line instead of a blank. Cached passes backfilled by
+    /// [`Run::backfill_cached_linenos`] are included, so the line survives across
+    /// arbitrarily many skip runs.
+    pub fn green_linenos(&self) -> std::collections::HashMap<String, u64> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| classify(e) == "passed")
+            .filter_map(|(id, e)| e.lineno.map(|l| (id.clone(), l)))
+            .collect()
+    }
+
+    /// Restore each cached (carried-forward) entry's source line from the prior
+    /// baseline: a cached test is not run this session, so pytest reports no
+    /// location, but its def line hasn't moved (an edit to its file would have
+    /// busted the skip). Fills only cached entries still missing a `lineno`.
+    pub fn backfill_cached_linenos(&mut self, lines: &std::collections::HashMap<String, u64>) {
+        for (id, e) in &mut self.tests {
+            if e.cached && e.lineno.is_none() {
+                if let Some(l) = lines.get(id) {
+                    e.lineno = Some(*l);
+                }
+            }
+        }
+    }
+
+    /// Collection errors as (path, longrepr) pairs, for report renderers.
+    pub fn collect_errors(&self) -> &[(String, String)] {
+        &self.collect_errors
     }
 
     /// Flag an entry whose failure was fabricated by the orchestrator
@@ -162,118 +261,9 @@ impl Run {
         self.flaky.push((nodeid, attempts));
     }
 
-    pub fn print_flaky(
-        &self,
-        palette: &crate::reporting::color::Palette,
-        history: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
-        wrap: FailureWrap,
-    ) {
-        if self.flaky.is_empty() {
-            return;
-        }
-        let header = palette.yellow("=========== flaky tests (passed after rerun) ===========");
-        // GitLab has no per-line warning command; fold the whole flaky block
-        // into one collapsed section so it's tucked away but greppable - the
-        // CI-native analogue of GitHub's `::warning` flaky annotations.
-        let gitlab = wrap == FailureWrap::GitlabSection;
-        let id = format!("rstest_flaky_{}", std::process::id());
-        if gitlab {
-            println!(
-                "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{header}",
-                epoch_secs()
-            );
-        } else {
-            println!("\n{header}");
-        }
-        for (nodeid, attempts) in &self.flaky {
-            let past = history
-                .get(nodeid)
-                .filter(|h| h.flaky + h.failed > 0)
-                .map(|h| format!("; flaked {}x before, failed {}x", h.flaky, h.failed))
-                .unwrap_or_default();
-            println!(
-                "  {nodeid}  ({attempts} rerun{}{past})",
-                if *attempts > 1 { "s" } else { "" }
-            );
-        }
-        if gitlab {
-            println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
-        }
-    }
-
-    /// The quarantined-failures section: visible (with tracebacks - a
-    /// quarantined test still needs fixing), never fatal.
-    pub fn print_quarantined(
-        &self,
-        palette: &crate::reporting::color::Palette,
-        history: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
-    ) {
-        let quarantined: Vec<(&String, &TestEntry)> =
-            self.tests.iter().filter(|(_, e)| e.quarantined).collect();
-        if quarantined.is_empty() {
-            return;
-        }
-        println!(
-            "\n{}",
-            palette.yellow("=========== quarantined failures (known-flaky, non-fatal) ===========")
-        );
-        for (nodeid, entry) in quarantined {
-            let past = history
-                .get(nodeid)
-                .filter(|h| h.flaky + h.failed > 0)
-                .map(|h| format!("  (flaked {}x, failed {}x before)", h.flaky, h.failed))
-                .unwrap_or_default();
-            println!(
-                "\n{}{past}",
-                palette.yellow(&format!("--- QUARANTINED {nodeid} ---"))
-            );
-            if let Some(repr) = &entry.longrepr {
-                println!("{repr}");
-            }
-        }
-    }
-
     /// All test entries, for doctor analysis.
     pub fn tests(&self) -> &BTreeMap<String, TestEntry> {
         &self.tests
-    }
-
-    /// pytest's "slowest N durations" block (terminal summary_durations):
-    /// every phase, sorted slowest first; below `min` hidden unless `vv`,
-    /// with pytest's hidden-count note. `n == 0` means all.
-    pub fn print_durations(
-        &self,
-        n: usize,
-        min: f64,
-        vv: bool,
-        palette: &crate::reporting::color::Palette,
-    ) {
-        if !self.track_phase_durations {
-            return;
-        }
-        let mut rows: Vec<&(f64, String, String)> = self.phase_durations.iter().collect();
-        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
-        if n > 0 {
-            rows.truncate(n);
-        }
-        let header = if n > 0 {
-            format!("=========== slowest {n} durations ===========")
-        } else {
-            "=========== slowest durations ===========".to_string()
-        };
-        println!("\n{}", palette.yellow(&header));
-        let mut hidden = 0usize;
-        for (duration, when, nodeid) in rows {
-            if !vv && *duration < min {
-                hidden += 1;
-                continue;
-            }
-            println!("{duration:.2}s {when:<8} {nodeid}");
-        }
-        if hidden > 0 {
-            // pytest's exact wording - tooling greps for it.
-            println!("\n({hidden} durations < {min}s hidden.  Use -vv to show these durations.)");
-        }
     }
 
     /// nodeid -> call duration, for the duration cache (LPT scheduling).
@@ -283,92 +273,25 @@ impl Run {
             .filter_map(|(id, e)| e.duration.map(|d| (id, d)))
     }
 
-    /// The failures block, with each failure optionally wrapped in a CI
-    /// log-folding construct so the job UI collapses tracebacks per test.
-    pub fn print_failures(&self, palette: &crate::reporting::color::Palette, wrap: FailureWrap) {
-        let open = |header: &str, idx: usize| match wrap {
-            FailureWrap::Plain => {
-                println!(
-                    "\n{}",
-                    palette.bold_red(&format!("--- FAILED {header} ---"))
-                );
-            }
-            FailureWrap::GitlabSection => {
-                // Section ids must be unique within the job log; the
-                // pid keeps concurrent monorepo children (whose output
-                // the parent reprints) from colliding.
-                let id = format!("rstest_fail_{}_{idx}", std::process::id());
-                println!(
-                    "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{}",
-                    epoch_secs(),
-                    palette.bold_red(&format!("--- FAILED {header} ---"))
-                );
-            }
-            // The `+++` group header IS the headline in the Buildkite log
-            // UI - no extra dashes.
-            FailureWrap::BuildkiteGroup => {
-                println!("\n+++ {}", palette.bold_red(&format!("FAILED {header}")));
-            }
-        };
-        let close = |idx: usize| {
-            if wrap == FailureWrap::GitlabSection {
-                let id = format!("rstest_fail_{}_{idx}", std::process::id());
-                println!("\x1b[0Ksection_end:{}:{id}\r\x1b[0K", epoch_secs());
-            }
-        };
-        let mut idx = 0usize;
-        for (worker, nodeid, longrepr, sections) in &self.failures {
-            // Quarantined failures print in their own section instead.
-            if self.tests.get(nodeid).is_some_and(|e| e.quarantined) {
-                continue;
-            }
-            let attribution = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-            open(&format!("{attribution}{nodeid}"), idx);
-            println!("{longrepr}");
-            for (name, content) in sections {
-                println!(
-                    "{}\n{}",
-                    palette.yellow(&format!("--------- {name} ---------")),
-                    content.trim_end()
-                );
-            }
-            close(idx);
-            idx += 1;
-        }
-        for (nodeid, longrepr) in &self.collect_errors {
-            open(nodeid, idx);
-            println!("{longrepr}");
-            close(idx);
-            idx += 1;
-        }
-    }
-
     /// nodeids with any failed phase - the merged `lastfailed` truth.
     pub fn failed_nodeids(&self) -> impl Iterator<Item = &String> {
-        self.tests.iter().filter_map(|(id, e)| {
-            let failed = [&e.setup, &e.call, &e.teardown]
-                .iter()
-                .any(|p| p.as_deref() == Some("failed"));
-            failed.then_some(id)
-        })
+        self.tests
+            .iter()
+            .filter_map(|(id, e)| e.any_phase_failed().then_some(id))
     }
 
     /// (nodeid, longrepr) pairs for failed tests (junit rendering).
     pub fn failure_text(&self, nodeid: &str) -> Option<&str> {
-        self.failures
-            .iter()
-            .find(|(_, id, _, _)| id == nodeid)
-            .map(|(_, _, repr, _)| repr.as_str())
+        let idx = *self.failure_by_id.get(nodeid)?;
+        Some(self.failures[idx].2.as_str())
     }
 
     pub fn all_passed(&self) -> bool {
         self.collect_errors.is_empty()
-            && self.tests.values().all(|e| {
-                e.quarantined
-                    || (e.setup.as_deref() != Some("failed")
-                        && e.call.as_deref() != Some("failed")
-                        && e.teardown.as_deref() != Some("failed"))
-            })
+            && self
+                .tests
+                .values()
+                .all(|e| e.quarantined || !e.any_phase_failed())
     }
 
     /// Demote failures matching --quarantine: they count as "quarantined",
@@ -377,10 +300,7 @@ impl Run {
     pub fn quarantine(&mut self, matches: impl Fn(&str) -> bool) -> Vec<String> {
         let mut demoted = Vec::new();
         for (nodeid, e) in &mut self.tests {
-            let failed = e.setup.as_deref() == Some("failed")
-                || e.call.as_deref() == Some("failed")
-                || e.teardown.as_deref() == Some("failed");
-            if failed && matches(nodeid) {
+            if e.any_phase_failed() && matches(nodeid) {
                 e.quarantined = true;
                 demoted.push(nodeid.clone());
             }
@@ -425,44 +345,69 @@ impl Run {
         counts
     }
 
-    pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
-        #[derive(Serialize)]
-        struct Snapshot<'a> {
-            meta: BTreeMap<&'static str, serde_json::Value>,
-            collect_errors: Vec<&'a String>,
-            tests: &'a BTreeMap<String, TestEntry>,
-        }
-        let mut meta = BTreeMap::new();
-        meta.insert("runner", "rstest".into());
+    /// The schema-5 report document as a JSON value: the single source shared by
+    /// the `--report-json` file writer and the HTML report's embedded data blob,
+    /// so the two can never drift.
+    pub fn snapshot_value(&self, run_meta: &RunMeta) -> serde_json::Value {
+        let mut meta = serde_json::Map::new();
+        meta.insert("runner".into(), "rstest".into());
         // Schema history: 2 added longrepr/crashed+version; 3 added the
         // envelope (counts, duration_seconds, started_at_epoch, workers, argv);
         // 4 added per-test lineno; 5 added quarantined.
-        meta.insert("schema", 5.into());
-        meta.insert("exitstatus", run_meta.exitstatus.into());
+        meta.insert("schema".into(), 5.into());
+        meta.insert("exitstatus".into(), run_meta.exitstatus.into());
         meta.insert(
-            "counts",
+            "counts".into(),
             serde_json::to_value(self.counts()).unwrap_or_default(),
         );
         meta.insert(
-            "duration_seconds",
+            "duration_seconds".into(),
             ((run_meta.duration_seconds * 100.0).round() / 100.0).into(),
         );
-        meta.insert("started_at_epoch", run_meta.started_at_epoch.into());
-        meta.insert("workers", run_meta.workers.into());
+        meta.insert("started_at_epoch".into(), run_meta.started_at_epoch.into());
+        meta.insert("workers".into(), run_meta.workers.into());
         meta.insert(
-            "argv",
+            "argv".into(),
             serde_json::to_value(&run_meta.argv).unwrap_or_default(),
         );
-        let snap = Snapshot {
-            meta,
-            collect_errors: self.collect_errors.iter().map(|(p, _)| p).collect(),
-            tests: &self.tests,
-        };
-        std::fs::write(path, serde_json::to_vec(&snap)?)?;
+        let collect_errors: Vec<&String> = self.collect_errors.iter().map(|(p, _)| p).collect();
+        serde_json::json!({
+            "meta": meta,
+            "collect_errors": collect_errors,
+            "tests": &self.tests,
+        })
+    }
+
+    pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
+        std::fs::write(path, serde_json::to_vec(&self.snapshot_value(run_meta))?)?;
         Ok(())
     }
 }
 
+impl TestEntry {
+    /// The pytest-style outcome bucket for this entry
+    /// (`passed`/`failed`/`errors`/`skipped`/`xfailed`/`xpassed`/`quarantined`).
+    pub fn outcome(&self) -> &'static str {
+        classify(self)
+    }
+
+    /// Whether any phase (setup/call/teardown) reported `failed`. The raw
+    /// phase-level signal behind `--lf`/quarantine/`all_passed`/CI annotations —
+    /// distinct from `outcome()`, which buckets a setup/teardown failure as
+    /// `errors` and hides a quarantined failure. Callers wanting the truth of
+    /// "did this test fail in any phase" use this; callers wanting the pytest
+    /// display bucket use `outcome()`.
+    pub fn any_phase_failed(&self) -> bool {
+        [&self.setup, &self.call, &self.teardown]
+            .iter()
+            .any(|p| p.as_deref() == Some("failed"))
+    }
+}
+
+/// Bucket a `TestEntry` into its pytest-style outcome. This is the Rust twin of
+/// the `outcomeOf()` function embedded in the HTML report (`html.rs`) — the two
+/// implement the SAME decision tree and MUST be changed together, or the HTML
+/// report will disagree with the summary/report-json/junit for the same entry.
 fn classify(e: &TestEntry) -> &'static str {
     if e.quarantined {
         return "quarantined";
@@ -501,6 +446,8 @@ mod tests {
             wasxfail: false,
             skip_reason: None,
             cpu: None,
+            thread_delta: None,
+            fd_delta: None,
             sections: Vec::new(),
             lineno: None,
         }
@@ -531,6 +478,22 @@ mod tests {
         assert!(run.summary_line().contains("2 quarantined"));
         // lastfailed still remembers quarantined failures (--lf must rerun them)
         assert_eq!(run.failed_nodeids().count(), 2);
+    }
+
+    #[test]
+    fn teardown_report_carries_leak_deltas_onto_entry() {
+        let mut run = Run::default();
+        run.record(None, report("a.py::leaker", "setup", "passed"));
+        run.record(None, report("a.py::leaker", "call", "passed"));
+        // Deltas ride the teardown report (measured after teardown runs).
+        let mut td = report("a.py::leaker", "teardown", "passed");
+        td.thread_delta = Some(3);
+        td.fd_delta = Some(2);
+        run.record(None, td);
+
+        let entry = run.tests().get("a.py::leaker").expect("entry recorded");
+        assert_eq!(entry.thread_delta, Some(3));
+        assert_eq!(entry.fd_delta, Some(2));
     }
 
     #[test]
@@ -601,6 +564,44 @@ mod tests {
     }
 
     #[test]
+    fn failure_text_is_truncated_at_source() {
+        // junit/html embed failure_text(); a multi-MB traceback must be capped
+        // there, not just on the report-json (entry.longrepr) path.
+        let mut run = Run::default();
+        let mut r = report("a.py::big", "call", "failed");
+        r.longrepr = Some("x".repeat(50_000));
+        run.record(None, r);
+        assert_eq!(run.failure_text("a.py::big").unwrap().len(), 20_000);
+        // Same cap on the report-json path (entry.longrepr), from the one
+        // truncation now shared by both.
+        assert_eq!(
+            run.tests()["a.py::big"].longrepr.as_deref().unwrap().len(),
+            20_000
+        );
+    }
+
+    #[test]
+    fn failed_report_without_longrepr_leaves_entry_none() {
+        // Capping shares one string, but an absent pytest longrepr must stay
+        // `None` on the entry, not collapse to an empty string.
+        let mut run = Run::default();
+        let mut r = report("a.py::t", "call", "failed");
+        r.longrepr = None;
+        run.record(None, r);
+        assert_eq!(run.tests()["a.py::t"].longrepr, None);
+        assert_eq!(run.failure_text("a.py::t"), Some(""));
+    }
+
+    #[test]
+    fn collect_error_is_truncated_at_source() {
+        // html embeds collect_errors() verbatim, so a giant collection-error
+        // traceback must be capped like failure text.
+        let mut run = Run::default();
+        run.collect_error("a.py".into(), "x".repeat(50_000));
+        assert_eq!(run.collect_errors()[0].1.len(), 20_000);
+    }
+
+    #[test]
     fn flaky_marks_entry_and_summary() {
         let mut run = Run::default();
         full(&mut run, "a.py::wobbly", "passed");
@@ -623,6 +624,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },
@@ -640,6 +643,8 @@ mod tests {
                 wasxfail: false,
                 skip_reason: None,
                 cpu: None,
+                thread_delta: None,
+                fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
             },

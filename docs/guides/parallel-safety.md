@@ -111,6 +111,76 @@ Containment options, in order of preference:
    not red). Prefer fixing — reruns hide real intermittent bugs as easily
    as test smells.
 
+## Numeric determinism (ML / numerics suites)
+
+Numerics suites assert on exact (or tightly-toleranced) float values, so "same
+inputs → same bits, every run" has to survive parallelism. rstest does not make
+your numbers nondeterministic, but parallel execution can *expose* four things a
+serial run hides. All four are your test's contract to hold — rstest gives you
+the tools to hold it.
+
+**The floor: `-n 0` is bit-for-bit pytest.** Single-worker
+[byte-exact mode](../concepts/glossary.md#byte-exact-mode) is one in-process
+session — identical to running pytest itself. If a value matches under `pytest`
+it matches under `rstest -n 0`. Any divergence there is a bug. Use it as the
+determinism baseline to diff against when a parallel run disagrees.
+
+**1. RNG seeding is per-worker, and yours to set.** Each worker is a separate
+process; a seed set in one does not reach another. rstest does **not** seed
+`numpy`/`torch`/`random` for you (neither does pytest) — but it gives every
+worker a stable identity to derive a reproducible seed from
+([Worker identity](#worker-identity)), plus one run-level uid all workers agree
+on. Seed deterministically in a fixture:
+
+```python
+import os, numpy as np
+
+# Same seed every run; distinct per worker so workers don't draw identical
+# streams. Drop the worker offset if you want every worker identical.
+worker = int((os.environ.get("RSTEST_WORKER_ID") or "gw0").removeprefix("gw"))
+np.random.seed(1234 + worker)
+```
+
+A test that depends on a seed set by an *earlier* test in the same process is
+order-dependent (see point 4), not seeded — fix it to seed itself.
+
+**2. Thread oversubscription can change the last bits.** Float addition isn't
+associative, so a reduction's bit pattern depends on how it's split across
+threads. numpy/torch/BLAS spin their **own** thread pools; rstest does **not**
+pin them. At `-n auto` you get *workers × library-threads* threads competing for
+the cores, and the changed reduction order can shift low bits — a tight
+`assert x == expected` passes at `-n 0` and flips at `-n 8`. Pin the math
+libraries to one thread per worker and let rstest own the parallelism:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+  rstest -n auto
+```
+
+(Or cap `-n` to leave headroom for the internal threads.) This is also usually
+*faster* for a test suite — many small ops, where thread-pool overhead outweighs
+the win.
+
+**3. Reset global numeric state per test.** `np.seterr`, `torch.set_default_dtype`,
+the global RNG, `np.set_printoptions` — a test that mutates one and a test that
+assumes the default pass in serial order and disagree when reordered or split
+across workers. Contain state in fixtures (set-and-restore) so each test starts
+from a known configuration; this is the general
+[isolation](#the-serial-escape-hatch) rule, but for numerics the symptom is a
+*wrong number*, not a crash.
+
+**4. Order sensitivity.** Duration-aware scheduling runs tests in timing order,
+not file order. A numeric group that only holds when run in sequence (shared
+warmup, incremental fixtures) needs its order pinned: keep it on one worker with
+`--dist loadfile` / `loadscope`, mark it `@pytest.mark.serial`, or run the whole
+suite at `-n 0`. If your results also depend on hash ordering, note rstest does
+not set `PYTHONHASHSEED` — pin it yourself (`PYTHONHASHSEED=0`) as you would
+under pytest.
+
+If a value differs between `-n 0` and a parallel run, it is one of the four
+above — start by diffing against the `-n 0` baseline, then check thread pinning
+(2) and per-test state (3) first, as those are the usual culprits for numerics.
+
 ## Diagnosing a parallel-only failure
 
 ```console
@@ -123,7 +193,7 @@ Three runs usually classify the failure. Order dependencies want
 `loadfile` or a refactor; load sensitivity wants `serial` or a clock mock;
 anything failing at `-n 0` too is a plain bug.
 
-`rstest --migrate-check` runs exactly these discriminators **for you** — over
+`rstest migrate-check` runs exactly these discriminators **for you** — over
 the whole suite, scoped to the files that actually fail — classifies each
 failure into the classes above, and bisects the polluting file for order /
 isolation defects. Reach for it instead of running the three commands by hand;

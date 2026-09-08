@@ -45,7 +45,7 @@ PHASE_TIMEOUT = 2400  # seconds, per pytest/rstest run
 # Baseline pytest is PINNED to the version rstest vendors: a newer pytest
 # in the baseline venv produces version-skew collection diffs that look
 # like rstest bugs (seen with packaging/jsonschema on pytest 9.1). rstest
-# 0.4.0 vendors pytest 9.1.1, so the baseline matches it.
+# 0.5.0 vendors pytest 9.1.1, so the baseline matches it.
 PYTEST_PIN = "pytest==9.1.1"
 NET_TIMEOUT = 900  # seconds, per clone / install step
 

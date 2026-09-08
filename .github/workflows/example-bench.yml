@@ -1,0 +1,44 @@
+name: example bench (cold vs warm)
+
+# Runs examples/ci-bench on a standard GitHub runner and posts the measured
+# pytest / rstest-cold / rstest-warm table to the job summary. Manual + weekly,
+# so there's always a fresh measured datapoint on public CI hardware — not a
+# projection. It measures wall time, so it's advisory: never gate CI on it.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # Build + install the wheel: this provides the `rstest` CLI and the
+      # rstest_worker package (with its vendored pytest) in the venv. Add a real
+      # pytest for the serial baseline.
+      - name: build + install rstest
+        run: |
+          python -m venv .bench-venv
+          . .bench-venv/bin/activate
+          pip install --quiet maturin pytest
+          maturin build --release --manifest-path crates/rstest-cli/Cargo.toml --out dist
+          pip install --quiet dist/rstest-*.whl
+
+      - name: measure cold vs warm
+        run: |
+          . .bench-venv/bin/activate
+          cd examples/ci-bench
+          # rstest and pytest both come from the activated venv (same interpreter),
+          # so no --python needed; the worker finds rstest_worker on its own.
+          python measure.py -n 4 --repeat 3 | tee "$GITHUB_STEP_SUMMARY"

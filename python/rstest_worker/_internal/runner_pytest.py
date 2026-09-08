@@ -12,10 +12,15 @@ This module is the session entrypoint. The moving parts live alongside it:
   dispatch      - ItemDispatchPlugin / LazyDispatchPlugin (on-command running)
 """
 
+from __future__ import annotations
+
 import pytest
 
 from rstest_worker._internal import fixturecompat
-from rstest_worker._internal.dispatch import ItemDispatchPlugin, LazyDispatchPlugin
+from rstest_worker._internal.dispatch import (
+    ItemDispatchPlugin,
+    LazyDispatchPlugin,
+)
 from rstest_worker._internal.stream import StreamPlugin
 
 fixturecompat.install()

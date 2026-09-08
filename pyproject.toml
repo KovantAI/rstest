@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rstest"
-version = "0.4.0"
+version = "0.6.0"
 description = "A fast, pytest-compatible test runner: parallel by design, with built-in suite diagnostics"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -94,3 +94,6 @@ omit = ["*/rstest_worker/_vendor/*"]
 
 [tool.coverage.report]
 omit = ["*/rstest_worker/_vendor/*"]
+# `if __name__ == "__main__":` blocks are thin CLI entry shims (logging setup +
+# sys.exit(main(...))); main() is covered directly, so exclude the shim itself.
+exclude_also = ['if __name__ == "__main__":']

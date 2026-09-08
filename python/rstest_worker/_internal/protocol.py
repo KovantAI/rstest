@@ -9,6 +9,8 @@ TODO(M1): vendor msgpack's pure-python fallback so the worker is
 PYTHONPATH-injectable into any venv with zero installs.
 """
 
+from __future__ import annotations
+
 import os
 from collections.abc import Iterator
 from typing import Literal, overload
@@ -82,6 +84,12 @@ class Connection:
     def send(self, kind: Literal["stopped"], payload: m.StoppedPayload) -> None: ...
     @overload
     def send(self, kind: Literal["done"], payload: m.DonePayload) -> None: ...
+    @overload
+    def send(self, kind: Literal["serve_ready"], payload: m.ServeReadyPayload) -> None: ...
+    @overload
+    def send(self, kind: Literal["serve_report"], payload: m.ServeReportPayload) -> None: ...
+    @overload
+    def send(self, kind: Literal["serve_run_done"], payload: m.ServeRunDonePayload) -> None: ...
 
     def send(self, kind: str, payload: object) -> None:
         # os.write on a pipe may short-write (a large ids/locations/marks

@@ -4,14 +4,52 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+
+/// Run-less subcommands: modes that do their own thing and exit without the
+/// normal run pipeline. Selected by a leading token (`rstest verify-vendor`),
+/// recognized by [`split_args`] before the flag pre-scan; `None` is the default
+/// (run the suite). The paired option flags (`--migrate-check-json`, etc.) stay
+/// `global` on [`Cli`] so they parse after the subcommand token.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Command {
+    /// Verify the vendored pytest tree is byte-identical to what shipped
+    /// (rehash `_vendor/` against the packaged `vendor.lock`). Prints a report
+    /// and exits 0 if intact, non-zero on any drift.
+    VerifyVendor,
+
+    /// Zero-config proof: run the suite under plain pytest and under rstest
+    /// (-n auto), then report whether outcomes are identical and how much
+    /// faster rstest is. The 30-second "should I switch?" answer.
+    Try,
+
+    /// Parallel-readiness preflight: collect twice and report tests with
+    /// unstable ids, then run -n auto and classify any parallel-only failure
+    /// (polluter bisected). Exits non-zero on any such finding. Combine with
+    /// `--migrate-check-json` / `--migrate-allow`.
+    MigrateCheck,
+
+    /// Maintenance: fold all remote segments into a fresh base and prune them,
+    /// then exit without running tests. Needs `--cache-remote`.
+    CacheCompact,
+}
 
 /// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
 /// to the test session verbatim: clap can't mirror pytest's large,
 /// plugin-extensible flag surface, so we pre-scan argv ourselves.
 #[derive(Parser, Debug, Clone)]
-#[command(name = "rstest", version, disable_help_flag = false)]
+#[command(
+    name = "rstest",
+    version,
+    disable_help_flag = false,
+    disable_help_subcommand = true
+)]
 pub struct Cli {
+    /// Run-less mode selected by a leading subcommand token; `None` runs the
+    /// suite. See [`Command`].
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+
     /// Number of worker processes (logical cores); rstest is parallel by
     /// design. Use 0 or 1 for single-worker mode (byte-exact pytest semantics).
     /// Config: `[tool.rstest] numprocesses`. [default: auto]
@@ -21,7 +59,7 @@ pub struct Cli {
     /// Python interpreter to run workers with: a path, or a version request
     /// (`3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t`). Defaults to the active
     /// venv / a discovered `.venv` / `.python-version` / PATH.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) python: Option<String>,
 
     /// Write a per-test outcome snapshot (compat-harness recorder shape).
@@ -51,28 +89,22 @@ pub struct Cli {
     #[arg(long = "doctor-fail-on", value_name = "COND")]
     pub(crate) doctor_fail_on: Vec<String>,
 
-    /// Parallel-readiness preflight: collect twice and report tests with
-    /// unstable ids, then run -n auto and classify any parallel-only failure
-    /// (polluter bisected). Exits non-zero on any such finding.
-    #[arg(long)]
-    pub(crate) migrate_check: bool,
+    /// Fail the run if any test leaks a thread or file descriptor (net still
+    /// open after its teardown). Turns the leak signal into a CI gate; enables
+    /// the leak-check instrumentation on its own (no --doctor needed).
+    #[arg(long = "fail-on-leak")]
+    pub(crate) fail_on_leak: bool,
 
     /// Write the migrate-check findings as JSON (stable, versioned schema) for
-    /// CI gating. Implies --migrate-check.
-    #[arg(long)]
+    /// CI gating. Used with the `migrate-check` subcommand.
+    #[arg(long, global = true)]
     pub(crate) migrate_check_json: Option<PathBuf>,
 
     /// Substring of a nodeid/site to accept as a known migrate-check finding
     /// (repeatable): it is still reported (marked "allowed") but does not fail
     /// the exit code, so CI can gate on NEW issues while tolerating known ones.
-    #[arg(long = "migrate-allow")]
+    #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
-
-    /// Zero-config proof: run the suite under plain pytest and under rstest
-    /// (-n auto), then report whether outcomes are identical and how much
-    /// faster rstest is. The 30-second "should I switch?" answer.
-    #[arg(long = "try")]
-    pub(crate) r#try: bool,
 
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
@@ -84,6 +116,12 @@ pub struct Cli {
     /// would clobber a shared file).
     #[arg(long)]
     pub(crate) junitxml: Option<PathBuf>,
+
+    /// Write a self-contained HTML report of the merged run (rendered
+    /// orchestrator-side, so it works under the parallel pool where pytest-html
+    /// produces nothing at -n ≥ 2).
+    #[arg(long)]
+    pub(crate) html: Option<PathBuf>,
 
     /// Watch the project and rerun on change: only-test-file changes rerun
     /// just those files; any other .py change reruns the tests that import
@@ -125,6 +163,15 @@ pub struct Cli {
     #[arg(long, value_name = "SECS")]
     pub(crate) worker_timeout: Option<u64>,
 
+    /// Per-test timeout: fail any test whose call phase runs longer than SECS.
+    /// Interrupted in-process, so the failure's traceback points at the stuck
+    /// line (pytest-timeout-style; no plugin needed). `@pytest.mark.timeout(N)`
+    /// overrides per test. Fractional seconds allowed. A blocked C extension
+    /// that never returns to Python is caught by the --worker-timeout backstop
+    /// instead (auto-armed from this value when --worker-timeout is unset).
+    #[arg(long, value_name = "SECS")]
+    pub(crate) timeout: Option<f64>,
+
     /// Run only tests affected by changed files (import-graph selection).
     /// Without a value: working tree + untracked vs HEAD. With a value:
     /// vs that git rev (e.g. --changed=origin/main in CI).
@@ -142,6 +189,24 @@ pub struct Cli {
     /// below PCT. Requires --cov. Reports the uncovered added lines per file.
     #[arg(long = "cov-diff-fail-under", value_name = "PCT")]
     pub(crate) cov_diff_fail_under: Option<f64>,
+
+    /// Incremental testing: run only what changed since the last GREEN run,
+    /// re-using --changed's coverage-aware selection with an auto-managed
+    /// baseline (the commit of the last all-passing run, stored in the cache).
+    /// The baseline advances only when a run is fully green, so a failing test
+    /// keeps being selected until it passes. First run (no baseline) runs
+    /// everything. Ignored when --changed is given explicitly.
+    #[arg(long = "since-green")]
+    pub(crate) since_green: bool,
+
+    /// Dispatch-level incremental testing: collect the whole suite, then SKIP
+    /// running any test that was green last run and whose covered source is
+    /// byte-identical now (content-addressed via the coverage index — no git).
+    /// Skipped tests are carried forward as cached passes. Needs a warm coverage
+    /// index (a prior `--cov-context=test` run); full collection + `--dist load`
+    /// only. A config-file change disables skipping for that run.
+    #[arg(long)]
+    pub(crate) incremental: bool,
 
     /// Collection strategy: "full" (every worker collects the whole suite,
     /// verified by hash) or "lazy" (each file collected by one worker on
@@ -176,8 +241,8 @@ pub struct Cli {
     /// Shared-cache remote: a directory or `file://` path (local, an NFS/EFS
     /// mount, or a dir a CI step materializes via `download-artifact` /
     /// `aws s3 sync`). Also settable via `RSTEST_CACHE_REMOTE`. Enables
-    /// `--cache-pull` / `--cache-push` / `--cache-compact`.
-    #[arg(long, value_name = "URL|DIR")]
+    /// `--cache-pull` / `--cache-push` / the `cache-compact` subcommand.
+    #[arg(long, value_name = "URL|DIR", global = true)]
     pub(crate) cache_remote: Option<String>,
 
     /// Before the run, merge the remote's segments + base into the local
@@ -191,11 +256,6 @@ pub struct Cli {
     /// conflict. Needs `--cache-remote`.
     #[arg(long)]
     pub(crate) cache_push: bool,
-
-    /// Maintenance: fold all remote segments into a fresh base and prune them,
-    /// then exit without running tests. Needs `--cache-remote`.
-    #[arg(long)]
-    pub(crate) cache_compact: bool,
 
     /// With a baseline-dependent gate active (`--durations-regress`), treat a
     /// successful pull that returns NO baseline as a hard error instead of a
@@ -298,145 +358,116 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
     split_args(std::env::args().skip(1))
 }
 
+/// Single source of truth for the rstest-owned flag surface. Every long/short
+/// flag on the `Cli` clap struct must appear in exactly one of these tables;
+/// the `every_clap_flag_is_covered_by_the_split_tables` test enforces that, so
+/// a new flag can't be silently forwarded to the pytest session.
+///
+/// `BOOL_FLAGS`: switches that consume no value.
+const BOOL_FLAGS: &[&str] = &[
+    "--doctor",
+    "--watch",
+    "--fail-on-leak",
+    "--reruns-only-known-flaky",
+    "--since-green",
+    "--incremental",
+    "--cache-pull",
+    "--cache-push",
+    "--require-baseline",
+    "--changed-strict",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+];
+
+/// Run-less subcommand names (see [`Command`]). Recognized only as the LEADING
+/// argv token by [`split_args`], before the flag pre-scan; everything after the
+/// token is split by the flag tables as usual, so `rstest try -k foo tests/`
+/// still forwards `-k foo tests/` to the session. Kept in kebab-case to match
+/// clap's derived subcommand names. A pytest path literally named after a
+/// subcommand is shadowed (`rstest ./try` / `rstest -- try` disambiguates).
+const SUBCOMMANDS: &[&str] = &["verify-vendor", "try", "migrate-check", "cache-compact"];
+
+/// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
+/// nothing, an attached `--changed=REV` carries its value inline. Never eats
+/// the following argv item (that item is a path / pytest flag).
+const OPT_FLAGS: &[&str] = &["--changed", "--shuffle"];
+
+/// Flags that take a value: either the following argv item (`--dist load`) or
+/// `=`-joined (`--dist=load`). `-n` also accepts the attached short forms
+/// `-n4` / `-n=4`, handled in `owned_without_value`.
+const VALUE_FLAGS: &[&str] = &[
+    "-n",
+    "--numprocesses",
+    "--python",
+    "--report-json",
+    "--output",
+    "--cache-remote",
+    "--migrate-check-json",
+    "--migrate-allow",
+    "--durations-regress",
+    "--only-rerun",
+    "--cov-diff-fail-under",
+    "--worker-timeout",
+    "--timeout",
+    "--reruns",
+    "--doctor-json",
+    "--quarantine",
+    "--doctor-md",
+    "--doctor-fail-on",
+    "--junitxml",
+    "--html",
+    "--dist",
+    "--shard",
+    "--collect",
+];
+
+/// True when `arg` is the `=`-joined form of flag `f` (e.g. `--dist=load` for
+/// `--dist`, `-n=4` for `-n`).
+fn is_eq_form(arg: &str, f: &str) -> bool {
+    arg.strip_prefix(f)
+        .is_some_and(|rest| rest.starts_with('='))
+}
+
+/// rstest-owned tokens clap consumes as a single argv item, no following value:
+/// boolean switches, optional-value flags (bare or `=VALUE`), `=`-joined value
+/// flags, and the attached short numprocesses forms `-n4` / `-n=4` (bare `-n`
+/// is a value flag handled by the caller). Exactness matters: `--durations`,
+/// `--durations-min`, `--collect-only`, `--co` are NOT prefixes of any table
+/// entry, so they correctly stay session args.
+fn owned_without_value(arg: &str) -> bool {
+    BOOL_FLAGS.contains(&arg)
+        || OPT_FLAGS.iter().any(|f| arg == *f || is_eq_form(arg, f))
+        || VALUE_FLAGS.iter().any(|f| is_eq_form(arg, f))
+        || (arg.starts_with("-n") && arg != "-n")
+}
+
 pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
     let mut own = vec!["rstest".to_string()];
     let mut session = Vec::new();
     let mut argv = argv.into_iter().peekable();
+    // A run-less subcommand is recognized ONLY as the leading token, so its
+    // paired flags (all `global` on `Cli`) follow it and pytest args still route
+    // to the session below. A non-leading match is treated as a pytest path.
+    if argv
+        .peek()
+        .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
+    {
+        own.push(argv.next().unwrap());
+    }
     while let Some(arg) = argv.next() {
-        match arg.as_str() {
-            "--doctor" | "--watch" | "--migrate-check" | "--try" => own.push(arg),
-            "--reruns-only-known-flaky" => own.push(arg),
-            "--cache-pull" | "--cache-push" | "--cache-compact" | "--require-baseline" => {
-                own.push(arg)
+        if arg == "--" {
+            session.extend(argv.by_ref());
+        } else if owned_without_value(&arg) {
+            own.push(arg);
+        } else if VALUE_FLAGS.contains(&arg.as_str()) {
+            own.push(arg);
+            if let Some(v) = argv.next() {
+                own.push(v);
             }
-            "--cache-remote" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--cache-remote=") => own.push(arg),
-            "--migrate-check-json" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--migrate-check-json=") => own.push(arg),
-            "--migrate-allow" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--migrate-allow=") => own.push(arg),
-            "--changed" | "--changed-strict" | "--shuffle" => own.push(arg),
-            _ if arg.starts_with("--changed=") => own.push(arg),
-            _ if arg.starts_with("--shuffle=") => own.push(arg),
-            // Exact match only: --durations / --durations-min stay session args.
-            "--durations-regress" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--durations-regress=") => own.push(arg),
-            "--only-rerun" | "--cov-diff-fail-under" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--only-rerun=") => own.push(arg),
-            _ if arg.starts_with("--cov-diff-fail-under=") => own.push(arg),
-            "--worker-timeout" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--worker-timeout=") => own.push(arg),
-            "--reruns" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--reruns=") => own.push(arg),
-            "--doctor-json" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--doctor-json=") => own.push(arg),
-            "--quarantine" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--quarantine=") => own.push(arg),
-            "--doctor-md" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--doctor-md=") => own.push(arg),
-            "--doctor-fail-on" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--doctor-fail-on=") => own.push(arg),
-            "--junitxml" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--junitxml=") => own.push(arg),
-            "--dist" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--dist=") => own.push(arg),
-            "--shard" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--shard=") => own.push(arg),
-            // Exact "--collect" only: --collect-only/--co stay session args.
-            "--collect" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--collect=") => own.push(arg),
-            "-n" | "--numprocesses" | "--python" | "--report-json" | "--output" => {
-                own.push(arg);
-                if let Some(v) = argv.next() {
-                    own.push(v);
-                }
-            }
-            _ if arg.starts_with("--numprocesses=")
-                || arg.starts_with("--python=")
-                || arg.starts_with("--report-json=")
-                || arg.starts_with("--output=")
-                || arg.starts_with("-n=") =>
-            {
-                own.push(arg);
-            }
-            "-h" | "--help" | "-V" | "--version" => own.push(arg),
-            "--" => session.extend(argv.by_ref()),
-            _ => session.push(arg),
+        } else {
+            session.push(arg);
         }
     }
     (own, session)
@@ -493,12 +524,61 @@ mod tests {
     }
 
     #[test]
+    fn every_clap_flag_is_covered_by_the_split_tables() {
+        // The split tables are the single source of truth for the rstest-owned
+        // flag surface; clap is the other. This asserts they agree, so a flag
+        // added to the `Cli` struct without a table entry fails here instead of
+        // silently leaking to the pytest session.
+        use clap::CommandFactory;
+        let covered = |tok: &str| {
+            BOOL_FLAGS.contains(&tok) || OPT_FLAGS.contains(&tok) || VALUE_FLAGS.contains(&tok)
+        };
+        for arg in Cli::command().get_arguments() {
+            if let Some(long) = arg.get_long() {
+                let tok = format!("--{long}");
+                assert!(
+                    covered(&tok),
+                    "clap flag {tok} missing from split_args tables"
+                );
+            }
+            if let Some(short) = arg.get_short() {
+                let tok = format!("-{short}");
+                assert!(
+                    covered(&tok),
+                    "clap short flag {tok} missing from split_args tables"
+                );
+            }
+        }
+        // Every clap subcommand must be in SUBCOMMANDS, or split_args would
+        // forward its leading token to the pytest session instead of clap.
+        for sub in Cli::command().get_subcommands() {
+            assert!(
+                SUBCOMMANDS.contains(&sub.get_name()),
+                "clap subcommand {} missing from SUBCOMMANDS",
+                sub.get_name()
+            );
+        }
+    }
+
+    #[test]
     fn split_owns_rstest_flags_and_forwards_the_rest() {
         let (own, session) = split_args(v(&[
             "-n", "4", "--dist", "loadfile", "tests/", "-k", "smoke", "-x",
         ]));
         assert_eq!(own, v(&["rstest", "-n", "4", "--dist", "loadfile"]));
         assert_eq!(session, v(&["tests/", "-k", "smoke", "-x"]));
+    }
+
+    #[test]
+    fn split_owns_attached_short_numprocesses() {
+        // Attached `-n4` and `-n=4` are rstest's, not forwarded to pytest.
+        let (own, session) = split_args(v(&["-n4", "tests/"]));
+        assert_eq!(own, v(&["rstest", "-n4"]));
+        assert_eq!(session, v(&["tests/"]));
+
+        let (own, session) = split_args(v(&["-n=4", "tests/"]));
+        assert_eq!(own, v(&["rstest", "-n=4"]));
+        assert_eq!(session, v(&["tests/"]));
     }
 
     #[test]
@@ -520,6 +600,42 @@ mod tests {
         let (own, session) = split_args(v(&["--reruns=2", "--junitxml=o.xml", "-v"]));
         assert_eq!(own, v(&["rstest", "--reruns=2", "--junitxml=o.xml"]));
         assert_eq!(session, v(&["-v"]));
+    }
+
+    #[test]
+    fn split_owns_leading_subcommand_and_its_global_flags() {
+        // A leading subcommand token is rstest-owned; its paired global flag
+        // rides along, and pytest args after it still forward to the session.
+        let (own, session) = split_args(v(&[
+            "migrate-check",
+            "--migrate-check-json",
+            "o.json",
+            "-k",
+            "foo",
+            "tests/",
+        ]));
+        assert_eq!(
+            own,
+            v(&["rstest", "migrate-check", "--migrate-check-json", "o.json"])
+        );
+        assert_eq!(session, v(&["-k", "foo", "tests/"]));
+    }
+
+    #[test]
+    fn split_only_recognizes_subcommand_as_leading_token() {
+        // `try` as a non-leading token is a pytest path, not the subcommand.
+        let (own, session) = split_args(v(&["tests/", "try"]));
+        assert_eq!(own, v(&["rstest"]));
+        assert_eq!(session, v(&["tests/", "try"]));
+    }
+
+    #[test]
+    fn clap_parses_leading_subcommand() {
+        use clap::Parser;
+        let (own, _) = split_args(v(&["verify-vendor"]));
+        assert_eq!(Cli::parse_from(&own).command, Some(Command::VerifyVendor));
+        // Default (no subcommand) => a normal run.
+        assert_eq!(Cli::parse_from(["rstest"]).command, None);
     }
 
     #[test]

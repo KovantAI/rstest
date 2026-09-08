@@ -7,6 +7,9 @@ use std::time::Instant;
 
 use crate::reporting::color::Palette;
 
+/// The sticky per-worker footer + progress header. All run output must flow
+/// through [`StatusFooter::print_line`]/[`StatusFooter::print_inline`] so the
+/// footer is erased and repainted around it. A no-op off a tty.
 pub struct StatusFooter {
     enabled: bool,
     /// nodeid + start time per worker slot for in-flight items.
@@ -30,6 +33,8 @@ pub struct StatusFooter {
 const BAR_WIDTH: usize = 30;
 
 impl StatusFooter {
+    /// Create a footer for `workers` slots. Disabled automatically when
+    /// stdout is not a terminal.
     pub fn new(workers: usize) -> Self {
         Self {
             enabled: std::io::stdout().is_terminal(),
@@ -43,80 +48,85 @@ impl StatusFooter {
         }
     }
 
+    /// Set the total test count (drives the header counter / bar).
     pub fn set_total(&mut self, total: usize) {
         self.total = Some(total);
     }
 
+    /// Toggle bar-mode header (filled progress bar vs. `[done/total]`).
     pub fn set_bar(&mut self, on: bool) {
         self.bar = on;
     }
 
-    pub fn item_started(&mut self, worker: usize, nodeid: String) {
+    /// Record that `worker` started `nodeid`; repaints the footer.
+    pub fn item_started(&mut self, w: &mut dyn Write, worker: usize, nodeid: String) {
         if let Some(slot) = self.running.get_mut(worker) {
             *slot = Some((nodeid, Instant::now()));
         }
-        self.refresh();
+        self.refresh(w);
     }
 
-    pub fn item_finished(&mut self, worker: usize) {
+    /// Record that `worker` finished its test; bumps the done count and
+    /// repaints.
+    pub fn item_finished(&mut self, w: &mut dyn Write, worker: usize) {
         if let Some(slot) = self.running.get_mut(worker) {
             *slot = None;
         }
         self.done += 1;
-        self.refresh();
+        self.refresh(w);
     }
 
     /// Periodic tick: refresh elapsed times.
-    pub fn tick(&mut self) {
-        self.refresh();
+    pub fn tick(&mut self, w: &mut dyn Write) {
+        self.refresh(w);
     }
 
     /// Print a full line of run output (failure blocks, verbose lines...).
-    pub fn print_line(&mut self, text: &str) {
-        self.erase();
-        println!("{text}");
+    pub fn print_line(&mut self, w: &mut dyn Write, text: &str) {
+        self.erase(w);
+        let _ = writeln!(w, "{text}");
         self.tail_line.clear();
-        self.repaint();
+        self.repaint(w);
     }
 
     /// Print without newline (progress dots). The text accrues onto the
     /// current real-output line so the rest cursor can be restored after the
     /// footer is repainted.
-    pub fn print_inline(&mut self, text: &str) {
-        self.erase();
-        print!("{text}");
+    pub fn print_inline(&mut self, w: &mut dyn Write, text: &str) {
+        self.erase(w);
+        let _ = write!(w, "{text}");
         if self.enabled {
             self.tail_line.push_str(text);
         }
-        self.repaint();
+        self.repaint(w);
     }
 
     /// Remove the footer for good (before summary/doctor output).
-    pub fn finish(&mut self) {
-        self.erase();
+    pub fn finish(&mut self, w: &mut dyn Write) {
+        self.erase(w);
         self.enabled = false;
-        let _ = std::io::stdout().flush();
+        let _ = w.flush();
     }
 
-    fn refresh(&mut self) {
-        self.erase();
-        self.repaint();
+    fn refresh(&mut self, w: &mut dyn Write) {
+        self.erase(w);
+        self.repaint(w);
     }
 
     /// Clear the footer. Precondition: cursor is at the rest position (end of
     /// real output) with the footer BELOW it, so `CSI 0J` wipes the footer
     /// without touching prior output. Scroll-safe: no absolute cursor used.
-    fn erase(&mut self) {
+    fn erase(&mut self, w: &mut dyn Write) {
         if !self.enabled || self.painted_lines == 0 {
             return;
         }
-        print!("\x1b[0J");
+        let _ = write!(w, "\x1b[0J");
         self.painted_lines = 0;
     }
 
-    fn repaint(&mut self) {
+    fn repaint(&mut self, w: &mut dyn Write) {
         if !self.enabled {
-            let _ = std::io::stdout().flush();
+            let _ = w.flush();
             return;
         }
         // Footer body is built into `out`, each line newline-terminated, with
@@ -158,9 +168,9 @@ impl StatusFooter {
         // scroll the paint triggered), return to column 0, and reprint the
         // pending real-output line so the cursor lands at its true end.
         out.push_str(&format!("\x1b[{lines}A\r{}", self.tail_line));
-        print!("{out}");
+        let _ = write!(w, "{out}");
         self.painted_lines = lines;
-        let _ = std::io::stdout().flush();
+        let _ = w.flush();
     }
 }
 

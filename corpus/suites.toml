@@ -39,7 +39,7 @@ repo = "https://github.com/pallets/flask"
 install = ["--group tests", "-e ."]
 # This pinned flask checkout's tests/test_cli.py imports
 # `_pytest.monkeypatch.notset`, a sentinel pytest 9.1 removed (renamed to
-# `_pytest.compat.NOTSET`). rstest 0.4.0 vendors 9.1.1 and the baseline pins
+# `_pytest.compat.NOTSET`). rstest 0.6.0 vendors 9.1.1 and the baseline pins
 # 9.1.1, so the bare import errors collection under BOTH. Re-alias it via a
 # rootdir conftest so the import resolves and monkeypatch.undo()'s
 # `value is NOTSET` teardown still deletes the temporarily-set keys. Aliasing
@@ -213,15 +213,31 @@ projects = [
     "libs/prebuilt",
     "libs/cli",
 ]
-# checkpoint-sqlite uses pytest-retry, whose master branch
-# (has_plugin("xdist") and getoption("numprocesses")) starts a ReportServer and
-# stashes its port for workers via workerinput["server_port"]. This used to be
-# an rstest gap: rstest nulled numprocesses, so the master branch never ran and
-# the worker branch KeyError'd on the missing port — hence the old
-# serial=[checkpoint-sqlite] + disable_plugins=[pytest-retry] workarounds.
-# Fixed: rstest now keeps numprocesses visible (xdist stays inert via dist="no")
-# and defers/retries configure_node, so each worker self-provisions its own
-# ephemeral ReportServer. Verified standalone: checkpoint-sqlite runs at -n auto
-# (108 passed, ~2x vs -n 0) with pytest-retry active. No pin needed.
+# checkpoint-sqlite uses pytest-retry, whose report channel gates on
+# `has_plugin("xdist") and getoption("numprocesses")`: with xdist not installed
+# (rstest replaces it) that branch never runs, but rstest sets `workerinput`, so
+# the plugin's worker branch reads `workerinput["server_port"]` that no master
+# set and KeyErrors at -n>0. rstest now seeds that port — each worker stands up
+# pytest-retry's own ReportServer (see rstest_worker `_seed_pytest_retry`) — so
+# the plugin runs unmodified at any worker count and NO per-lib policy is needed.
 # Mono parity verified on the 5-lib subset: 838 tests, 100% per-test outcome
-# parity, 1.45x wall (10-run mean, rstest 0.4.0).
+# parity (10-run mean, rstest 0.6.0).
+
+[langchain]
+# Second monorepo, chosen to exercise mono mode WITHOUT pytest-retry (see the
+# server_port note above): langchain-ai/langchain, PEP 621 libs each with its
+# own pytest config and [dependency-groups] test. Baseline = one serial pytest
+# per lib; candidate = one rstest root pass. Subset pinned to three
+# service-free, fully offline libs — pytest-socket blocks network, so no live
+# APIs or databases are reachable and no per-lib policy is needed. (Other libs
+# like text-splitters/langchain need heavy optional NLP deps — nltk, spacy,
+# sentence-transformers — to collect, so they are left out of the subset.)
+# Listed in dependency order so the editable langchain-core install wins for
+# the libs that depend on it.
+mode = "mono"
+repo = "https://github.com/langchain-ai/langchain"
+projects = [
+    "libs/core",
+    "libs/model-profiles",
+    "libs/langchain_v1",
+]

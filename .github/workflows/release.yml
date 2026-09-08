@@ -126,6 +126,41 @@ jobs:
           sha256sum *.whl > SHA256SUMS
           cat SHA256SUMS
 
+      # --- SBOM (CycloneDX) -------------------------------------------------
+      # Two component sets are shipped: the Rust crates compiled into the
+      # orchestrator, and the Python runtime deps a user installs alongside the
+      # wheel. The vendored pytest is inside the wheel (not a declared dep), so
+      # SBOM tools don't see it — its version is documented in python/VENDOR.md.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: python SBOM
+        run: |
+          # Inventory the runtime deps actually pulled in by installing the wheel.
+          # Every platform wheel declares the same deps, so install the one that
+          # matches this linux x86_64 runner (an arbitrary wheel like the macOS
+          # one is rejected by pip as "not a supported wheel on this platform").
+          python -m venv /tmp/sbom-venv
+          /tmp/sbom-venv/bin/pip install --quiet "$(ls wheels/*manylinux*x86_64*.whl | head -1)"
+          uvx --from cyclonedx-bom@4.6.1 cyclonedx-py environment /tmp/sbom-venv \
+            --outfile sbom.python.cdx.json
+
+      - name: rust SBOM
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.7 --locked
+          # Writes <package>.cdx.json next to each crate's manifest.
+          cargo cyclonedx --format json
+          cp "$(find crates -name '*.cdx.json' | head -1)" sbom.rust.cdx.json
+
+      - name: checksum SBOMs
+        run: sha256sum sbom.python.cdx.json sbom.rust.cdx.json >> wheels/SHA256SUMS
+      # ---------------------------------------------------------------------
+
       # Draft release: assets are staged for review; nothing is public
       # until the release is manually published.
       - name: create draft release
@@ -140,5 +175,5 @@ jobs:
           gh release create "$TAG" \
             --draft \
             --title "rstest $TAG" \
-            --notes "Wheels are signed with GitHub artifact attestations. Verify: \`gh attestation verify <wheel> --repo ${GITHUB_REPOSITORY}\`. See CHANGELOG.md." \
-            wheels/*.whl wheels/SHA256SUMS
+            --notes "Wheels are signed with GitHub artifact attestations. Verify: \`gh attestation verify <wheel> --repo ${GITHUB_REPOSITORY}\`. CycloneDX SBOMs (\`sbom.python.cdx.json\`, \`sbom.rust.cdx.json\`) are attached. See CHANGELOG.md." \
+            wheels/*.whl wheels/SHA256SUMS sbom.python.cdx.json sbom.rust.cdx.json

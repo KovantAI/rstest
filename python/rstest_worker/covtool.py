@@ -15,6 +15,8 @@ coverage-based `--changed` selection.
 Exit code: 0, or 1 when --cov-fail-under is not met (matching pytest-cov).
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -57,7 +59,7 @@ def _context_mode(args: list[str]) -> bool:
     return any(a == "--cov-context" or a.startswith("--cov-context=") for a in args)
 
 
-def _arg_value(args: list[str], name: str) -> "str | None":
+def _arg_value(args: list[str], name: str) -> str | None:
     """Value of `--name value` or `--name=value`, or None."""
     it = iter(args)
     for a in it:

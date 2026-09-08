@@ -23,6 +23,8 @@ use anyhow::Result;
 
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
+use crate::reporting::sink::Sink;
+use crate::scheduling::orchestrator;
 use crate::scheduling::pool::PoolOutcome;
 use crate::scheduling::proto::{self, Event};
 use crate::scheduling::worker::Worker;
@@ -45,6 +47,33 @@ struct WorkerState {
     timeout_killed: bool,
     attempt: Vec<proto::Report>,
     attempt_failed: bool,
+}
+
+impl orchestrator::Slot for WorkerState {
+    fn dead(&self) -> bool {
+        self.dead
+    }
+    fn finishing(&self) -> bool {
+        self.finishing
+    }
+    fn set_finishing(&mut self, v: bool) {
+        self.finishing = v;
+    }
+    fn timeout_killed(&self) -> bool {
+        self.timeout_killed
+    }
+    fn set_timeout_killed(&mut self) {
+        self.timeout_killed = true;
+    }
+    fn running_since(&self) -> Option<std::time::Instant> {
+        self.running_since
+    }
+    fn kill_worker(&mut self) {
+        self.worker.kill();
+    }
+    fn send_no_more_items(&mut self) {
+        let _ = self.worker.send(&proto::Command::NoMoreItems);
+    }
 }
 
 impl WorkerState {
@@ -93,26 +122,26 @@ fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) ->
     known.into_iter().map(|(f, _)| f).chain(unknown).collect()
 }
 
-#[allow(clippy::too_many_arguments)] // orchestration entry point, same shape as run_pool
 pub fn run_lazy_pool(
-    python: &Path,
-    n: usize,
-    args: &[String],
+    cfg: &crate::scheduling::pool::PoolConfig,
     files: Vec<PathBuf>,
-    mode: crate::reporting::progress::Mode,
-    palette: crate::reporting::color::Palette,
     // --dist loadfile => steal=false: strict file affinity, the remedy
     // for order-dependent suites (same contract as the full pool).
     steal: bool,
-    maxfail: Option<u64>,
-    reruns: u32,
-    only_rerun: &[regex::Regex],
-    worker_timeout: Option<std::time::Duration>,
-    // Some(set) => --reruns-only-known-flaky: gate reruns on prior flaky
-    // history (or an explicit @mark.flaky budget). See run_pool.
-    known_flaky: Option<&std::collections::HashSet<String>>,
-    worker_env: &crate::scheduling::worker::WorkerEnv,
+    sink: &mut Sink,
 ) -> Result<PoolOutcome> {
+    let &crate::scheduling::pool::PoolConfig {
+        python,
+        n,
+        args,
+        mode,
+        maxfail,
+        reruns,
+        only_rerun,
+        worker_timeout,
+        known_flaky,
+        worker_env,
+    } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();
     for idx in 0..n {
@@ -128,7 +157,6 @@ pub fn run_lazy_pool(
 
     let mut run = Run::default();
     let mut prog = Progress::default();
-    prog.set_palette(palette);
     // Json mode keeps stdout pure NDJSON; the footer would corrupt it.
     if mode != crate::reporting::progress::Mode::Json {
         prog.enable_footer(n);
@@ -158,23 +186,9 @@ pub fn run_lazy_pool(
         let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok(pair) => pair,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                prog.tick();
+                prog.tick(sink);
                 if let Some(limit) = worker_timeout {
-                    for (widx, s) in states.iter_mut().enumerate() {
-                        if s.dead || s.timeout_killed {
-                            continue;
-                        }
-                        if let Some(since) = s.running_since {
-                            if since.elapsed() > limit {
-                                eprintln!(
-                                    "rstest: worker gw{widx} exceeded --worker-timeout ({}s) on one test; killing it",
-                                    limit.as_secs()
-                                );
-                                s.timeout_killed = true;
-                                s.worker.kill();
-                            }
-                        }
-                    }
+                    orchestrator::watchdog_tick(sink, &mut states, limit);
                 }
                 continue;
             }
@@ -192,15 +206,12 @@ pub fn run_lazy_pool(
                 if r.outcome == "failed" {
                     fail_count += 1;
                 }
-                prog.on_report(Some(idx), &r);
+                prog.on_report(sink, Some(idx), &r);
                 run.record(Some(idx), r);
                 if let Some(limit) = maxfail {
                     if !stopping && fail_count >= limit {
                         stopping = true;
-                        for s in states.iter_mut().filter(|s| !s.dead && !s.finishing) {
-                            s.finishing = true;
-                            let _ = s.worker.send(&proto::Command::NoMoreItems);
-                        }
+                        orchestrator::stop_all(&mut states);
                     }
                 }
             }
@@ -212,10 +223,7 @@ pub fn run_lazy_pool(
                     // down (already-final outcomes stay reported).
                     collect_aborted = true;
                     stopping = true;
-                    for s in states.iter_mut().filter(|s| !s.dead && !s.finishing) {
-                        s.finishing = true;
-                        let _ = s.worker.send(&proto::Command::NoMoreItems);
-                    }
+                    orchestrator::stop_all(&mut states);
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
@@ -262,10 +270,10 @@ pub fn run_lazy_pool(
             Ok(Event::ItemStartId { id }) => {
                 states[idx].running = Some(id.clone());
                 states[idx].running_since = Some(std::time::Instant::now());
-                prog.item_started(idx, id);
+                prog.item_started(sink, idx, id);
             }
             Ok(Event::ItemDoneId { id }) => {
-                prog.item_finished(idx);
+                prog.item_finished(sink, idx);
                 let s = &mut states[idx];
                 s.running = None;
                 s.running_since = None;
@@ -274,13 +282,7 @@ pub fn run_lazy_pool(
                 }
                 let item_budget = budget_of(&flaky_budget, &id);
                 if item_budget > 0 {
-                    let rerun_allowed = only_rerun.is_empty()
-                        || s.attempt.iter().any(|r| {
-                            r.outcome == "failed"
-                                && r.longrepr
-                                    .as_deref()
-                                    .is_some_and(|t| only_rerun.iter().any(|re| re.is_match(t)))
-                        });
+                    let rerun_allowed = orchestrator::rerun_allowed(only_rerun, &s.attempt);
                     // --reruns-only-known-flaky: id IS the nodeid in lazy mode.
                     let known_flaky_ok = known_flaky
                         .is_none_or(|set| flaky_budget.contains_key(&id) || set.contains(&id));
@@ -293,23 +295,24 @@ pub fn run_lazy_pool(
                     } else {
                         let attempts = *used;
                         let failed_now = s.attempt_failed;
-                        for r in s.attempt.drain(..) {
-                            if r.outcome == "failed" {
-                                fail_count += 1;
-                            }
-                            prog.on_report(Some(idx), &r);
-                            run.record(Some(idx), r);
-                        }
+                        let attempt = std::mem::take(&mut s.attempt);
                         s.attempt_failed = false;
-                        if !failed_now && attempts > 0 {
-                            run.mark_flaky(id, attempts);
-                        }
+                        orchestrator::finalize_attempt(
+                            sink,
+                            &mut run,
+                            &mut prog,
+                            &mut fail_count,
+                            idx,
+                            orchestrator::FinishedAttempt {
+                                attempts_used: attempts,
+                                reports: attempt,
+                                failed: failed_now,
+                                flaky_key: Some(id),
+                            },
+                        );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
-                            for st in states.iter_mut().filter(|st| !st.dead && !st.finishing) {
-                                st.finishing = true;
-                                let _ = st.worker.send(&proto::Command::NoMoreItems);
-                            }
+                            orchestrator::stop_all(&mut states);
                         }
                     }
                 }
@@ -370,29 +373,14 @@ pub fn run_lazy_pool(
                         }
                     }
                     if let Some(id) = crashed {
-                        let fab = proto::Report {
-                            nodeid: id,
-                            when: "call".into(),
-                            outcome: "failed".into(),
-                            duration: 0.0,
-                            longrepr: Some(if was_timeout {
-                                format!(
-                                    "test exceeded --worker-timeout ({}s); its worker was killed (reported failed)",
-                                    worker_timeout.map(|d| d.as_secs()).unwrap_or(0)
-                                )
-                            } else {
-                                format!(
-                                    "worker gw{idx} crashed while running this test \
-                                     (reported failed, not retried): {e:#}"
-                                )
-                            }),
-                            wasxfail: false,
-                            skip_reason: None,
-                            cpu: None,
-                            sections: Vec::new(),
-                            lineno: None,
-                        };
-                        prog.on_report(Some(idx), &fab);
+                        let fab = orchestrator::fabricate_crash_report(
+                            id,
+                            was_timeout,
+                            worker_timeout,
+                            idx,
+                            &e,
+                        );
+                        prog.on_report(sink, Some(idx), &fab);
                         run.record(Some(idx), fab);
                     }
                     requeued.extend(
@@ -400,10 +388,19 @@ pub fn run_lazy_pool(
                             .into_iter()
                             .filter(|id| Some(id) != crashed_orig.as_ref()),
                     );
-                    eprintln!(
+                    sink.warn(&format!(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
-                    );
+                    ));
+                    // Reap the old worker in place BEFORE spawning its
+                    // replacement. This arm also fires on a decode error (the
+                    // child may still be alive, running tests against a closed
+                    // pipe) and on watchdog kills; `Child`'s drop neither kills
+                    // nor waits, so an alive child would orphan and an exited one
+                    // become a `<defunct>` zombie. Reaping first (not after the
+                    // spawn) means a `spawn_into` error `?`-returning can't leave
+                    // the old child un-reaped.
+                    states[idx].worker.reap();
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
@@ -413,6 +410,10 @@ pub fn run_lazy_pool(
                     );
                     statuses.push(3);
                     states[idx].dead = true;
+                    // Reap now (a decode error can leave the child alive) rather
+                    // than letting it linger as a zombie until the end-of-run
+                    // wait(). The slot stays in the vec, so reap in place.
+                    states[idx].worker.reap();
                     done_workers += 1;
                     if idx == designate {
                         if let Some(next) = states.iter().position(|s| !s.dead && !s.finishing) {
@@ -583,16 +584,8 @@ pub fn run_lazy_pool(
     for w in workers {
         let _ = w.wait();
     }
-    let mut exitstatus = crate::scheduling::pool::merge_statuses(&statuses);
-    if collect_aborted {
-        exitstatus = exitstatus.max(2);
-    }
-    if exitstatus == 0 && !run.all_passed() {
-        exitstatus = 1;
-    }
-    if reruns > 0 && exitstatus == 1 && run.all_passed() {
-        exitstatus = 0;
-    }
+    let exitstatus =
+        orchestrator::finalize_exit(&statuses, run.all_passed(), reruns, collect_aborted);
     Ok(PoolOutcome {
         run,
         prog,

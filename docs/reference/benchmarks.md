@@ -18,7 +18,7 @@ runs, warm caches noted.
 | Suite | Tests | pytest serial | xdist | rstest | Outcome parity |
 |---|---|---|---|---|---|
 | pandas | 193,627 | 182s | 61s (`-n 8`) | 63s (`-n 8`, parity) | 100% |
-| aiohttp | 4,469 | 197s | 160s (`-n 8`) | **68s** (`-n 8`, warm cache; 151s cold) | 100% |
+| aiohttp | 4,469 | 197s | 160s (`-n 8`) | **68s** (`-n 8`, warm cache; 126s cold) | 100% |
 | django-allauth | 2,050 | 22s | 8s (`-n 8`) | **8s** (`-n 4`) | 100%[^parity] |
 | rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) | 100%[^parity] |
 <!-- --8<-- [end:suite-table] -->
@@ -83,7 +83,7 @@ per-test parity exact.
   dominated by one file of 10-second-timeout tests. xdist's file-affinity
   scheduling leaves that file on one worker (160s floor); rstest's
   test-granular dispatch plus duration-cache scheduling splits it (68s).
-  The first, cold-cache run is 151s — the speedup arrives on run two.
+  The first, cold-cache run is 126s — the speedup arrives on run two.
 - **pandas shows parity, not victory**: both runners pay the same
   per-worker collection cost on a 193k-test suite; rstest's wins there are
   startup-path and scheduling refinements, within noise of xdist. (The 182s

@@ -1,6 +1,8 @@
 """Translate pytest report hooks into wire events, and emulate the xdist
 master-side node hooks each pool worker must play for itself."""
 
+from __future__ import annotations
+
 import logging
 import os
 import sys
@@ -13,6 +15,7 @@ from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
     _randomly_seed,
+    _seed_pytest_retry,
 )
 from rstest_worker._internal.wire import _wire_safe
 from rstest_worker._internal.xdistnode import (
@@ -24,12 +27,66 @@ from rstest_worker._internal.xdistnode import (
 log = logging.getLogger("rstest.worker")
 
 
+class Timeout(BaseException):
+    """Raised in the test's own thread when `--timeout` / `@pytest.mark.timeout`
+    fires, so pytest reports it as a failure whose traceback points at the line
+    the test was stuck on.
+
+    Derives from `BaseException`, not `Exception`, so a test's own broad
+    `except Exception` (common in retry loops) can't swallow the deadline —
+    matching pytest-timeout, whose `pytest.fail` raises a `BaseException`.
+    pytest's call-phase protocol still reports it as a failure with traceback."""
+
+
+def _parse_timeout(raw: str | float | None) -> float | None:
+    """Positive float seconds, or None (disabled / unparseable / non-positive)."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _count_threads() -> int:
+    """Live Python thread count (portable). Native C-extension threads that
+    bypass the `threading` module are not counted."""
+    import threading
+
+    return threading.active_count()
+
+
+def _count_fds() -> int | None:
+    """Open file-descriptor count, or None where it can't be read. `/proc/self/fd`
+    on Linux, `/dev/fd` on macOS/BSD; other platforms disable fd tracking."""
+    for d in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(d))
+        except OSError:
+            continue
+    return None
+
+
 class StreamPlugin:
     """Translate pytest report hooks into wire events."""
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
         self._doctor = os.environ.get("RSTEST_DOCTOR") == "1"
+        # Per-test timeout (--timeout): interrupt the call phase in-process at
+        # the deadline. @pytest.mark.timeout(N) overrides per test.
+        self._timeout = _parse_timeout(os.environ.get("RSTEST_TIMEOUT"))
+        # Resource-leak check (--doctor or --fail-on-leak): snapshot threads/fds
+        # before setup and after teardown, ship the net delta on the teardown
+        # report.
+        self._leakcheck = os.environ.get("RSTEST_LEAKCHECK") == "1"
+        self._res_base: dict[str, tuple[int, int | None]] = {}
+        self._res: dict[str, tuple[int, int | None]] = {}
+        # Skip the worker's FIRST test: importing a test module can lazily spin
+        # up a persistent thread / open a cache fd once, which is not a per-test
+        # leak. Measuring from the 2nd test on drops that first-touch noise.
+        self._leak_warmed = False
         self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
         self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
         # (when, category, message, filename, lineno) -> count; aggregated
@@ -52,6 +109,24 @@ class StreamPlugin:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_configure(self, config):
+        self._neutralize_xdist(config)
+        self._register_markers(config)
+        worker_id = os.environ.get("RSTEST_WORKER_ID")
+        if worker_id is None:
+            return  # standalone run: nothing pool-specific to set up
+        # Belt-and-suspenders: rerunfailures is normally neutralized earlier in
+        # pytest_cmdline_main (it must be gone before configure, which snapshots
+        # the impl list). This only catches a plugin registered after cmdline_main.
+        _neutralize_rerunfailures(config)
+        self._build_workerinput(config, worker_id)
+        # workerinput now exists; seed pytest-retry's server_port before its own
+        # (non-tryfirst) pytest_configure reads it and KeyErrors.
+        _seed_pytest_retry(config)
+        self._set_basetemp(config, worker_id)
+        self._init_xdist_node(config, worker_id)
+
+    @staticmethod
+    def _neutralize_xdist(config):
         # Neutralize pytest-xdist if ini/addopts pulls it in: its options must
         # PARSE but not engage (rstest owns parallelism). dist="no" keeps xdist
         # inert; numprocesses stays set so plugins that gate parallel-master
@@ -62,6 +137,9 @@ class StreamPlugin:
         if hasattr(opt, "numprocesses"):
             wc = os.environ.get("RSTEST_WORKER_COUNT")
             opt.numprocesses = int(wc) if (wc and os.environ.get("RSTEST_WORKER_ID")) else None
+
+    @staticmethod
+    def _register_markers(config):
         config.addinivalue_line(
             "markers",
             "serial: rstest — run exclusively on one worker, after all "
@@ -77,64 +155,70 @@ class StreamPlugin:
             "xdist_group(name): tests in the same group run on the same "
             "worker under --dist loadgroup (xdist-compatible)",
         )
-        # Belt-and-suspenders: rerunfailures is normally neutralized earlier in
-        # pytest_cmdline_main (it must be gone before configure, which snapshots
-        # the impl list). This only catches a plugin registered after cmdline_main.
-        if os.environ.get("RSTEST_WORKER_ID") is not None:
-            _neutralize_rerunfailures(config)
+        config.addinivalue_line(
+            "markers",
+            "timeout(seconds): rstest — fail this test if its call phase runs "
+            "longer than N seconds (per-test override of --timeout)",
+        )
+
+    @staticmethod
+    def _build_workerinput(config, worker_id):
         # When part of a pool, announce ourselves the way an xdist worker
         # would: plugins key per-worker resources on `config.workerinput`
         # (pytest-django suffixes test DB names with workerid, others detect
         # "am I running in parallel?"). Research track 2: 5 of the top 50
         # plugins sniff this attribute.
-        worker_id = os.environ.get("RSTEST_WORKER_ID")
-        if worker_id is not None:
-            import socket
+        import socket
 
-            # The most-grepped xdist env vars: plugins (and conftests we
-            # cannot edit) read these directly.
-            os.environ.setdefault("PYTEST_XDIST_WORKER", worker_id)
-            os.environ.setdefault(
-                "PYTEST_XDIST_WORKER_COUNT", os.environ.get("RSTEST_WORKER_COUNT", "1")
-            )
-            run_uid = os.environ.get("RSTEST_RUN_UID", "")
-            config.workerinput = {
-                "workerid": worker_id,
-                "workercount": int(os.environ.get("RSTEST_WORKER_COUNT", "1")),
-                # One uid per run, shared by every worker (xdist's
-                # testrun_uid contract); the orchestrator provides it.
-                "testrun_uid": run_uid,
-                # pytest-randomly's master broadcasts one resolved seed; absent,
-                # the plugin KeyErrors at -n >= 2. rstest has no master, so we
-                # derive one run-level seed from the shared uid (all workers agree).
-                "randomly_seed": _randomly_seed(run_uid),
-                "mainargv": sys.argv,
-                # pytest-cov's worker mode expects these from the xdist master.
-                # Workers are collocated (same host/cwd), so they write suffixed
-                # .coverage.* files and the ORCHESTRATOR combines after the run.
-                "cov_master_host": socket.gethostname(),
-                "cov_master_topdir": os.getcwd(),
-                "cov_master_rsync_roots": [],
-            }
-            # xdist workers expose this channel dict; pytest-cov and others write
-            # into it. Nothing reads it here - provided so plugin paths don't crash.
-            config.workeroutput = {}
-            # Disjoint per-worker tmp roots (xdist popen-gwN pattern);
-            # user-provided --basetemp wins.
-            basetemp = os.environ.get("RSTEST_BASETEMP")
-            if basetemp and not config.option.basetemp:
-                from pathlib import Path
+        # The most-grepped xdist env vars: plugins (and conftests we
+        # cannot edit) read these directly.
+        os.environ.setdefault("PYTEST_XDIST_WORKER", worker_id)
+        os.environ.setdefault(
+            "PYTEST_XDIST_WORKER_COUNT", os.environ.get("RSTEST_WORKER_COUNT", "1")
+        )
+        run_uid = os.environ.get("RSTEST_RUN_UID", "")
+        config.workerinput = {
+            "workerid": worker_id,
+            "workercount": int(os.environ.get("RSTEST_WORKER_COUNT", "1")),
+            # One uid per run, shared by every worker (xdist's
+            # testrun_uid contract); the orchestrator provides it.
+            "testrun_uid": run_uid,
+            # pytest-randomly's master broadcasts one resolved seed; absent,
+            # the plugin KeyErrors at -n >= 2. rstest has no master, so we
+            # derive one run-level seed from the shared uid (all workers agree).
+            "randomly_seed": _randomly_seed(run_uid),
+            "mainargv": sys.argv,
+            # pytest-cov's worker mode expects these from the xdist master.
+            # Workers are collocated (same host/cwd), so they write suffixed
+            # .coverage.* files and the ORCHESTRATOR combines after the run.
+            "cov_master_host": socket.gethostname(),
+            "cov_master_topdir": os.getcwd(),
+            "cov_master_rsync_roots": [],
+        }
+        # xdist workers expose this channel dict; pytest-cov and others write
+        # into it. Nothing reads it here - provided so plugin paths don't crash.
+        config.workeroutput = {}
 
-                # pytest mkdirs option.basetemp with parents=False, so the
-                # shared parent must already exist.
-                os.makedirs(basetemp, exist_ok=True)
-                config.option.basetemp = Path(basetemp) / worker_id
-            # xdist MASTER-side hook emulation: real xdist calls
-            # pytest_configure_node(node) before each worker, filling
-            # node.workerinput. rstest has no master, so each worker plays its own.
-            self._xdist_node = _XdistNodeShim(config, worker_id)
-            for plugin in config.pluginmanager.get_plugins():
-                self._call_configure_node(plugin, lenient=True)
+    @staticmethod
+    def _set_basetemp(config, worker_id):
+        # Disjoint per-worker tmp roots (xdist popen-gwN pattern);
+        # user-provided --basetemp wins.
+        basetemp = os.environ.get("RSTEST_BASETEMP")
+        if basetemp and not config.option.basetemp:
+            from pathlib import Path
+
+            # pytest mkdirs option.basetemp with parents=False, so the
+            # shared parent must already exist.
+            os.makedirs(basetemp, exist_ok=True)
+            config.option.basetemp = Path(basetemp) / worker_id
+
+    def _init_xdist_node(self, config, worker_id):
+        # xdist MASTER-side hook emulation: real xdist calls
+        # pytest_configure_node(node) before each worker, filling
+        # node.workerinput. rstest has no master, so each worker plays its own.
+        self._xdist_node = _XdistNodeShim(config, worker_id)
+        for plugin in config.pluginmanager.get_plugins():
+            self._call_configure_node(plugin, lenient=True)
 
     def _call_configure_node(self, plugin, lenient=False):
         """Direct-call a plugin's pytest_configure_node against our shim.
@@ -240,20 +324,92 @@ class StreamPlugin:
 
             config.cache.set = guarded_set
 
-    @pytest.hookimpl(wrapper=True)
-    def pytest_runtest_call(self, item):
-        # Doctor: cpu-vs-wall per call phase. wall >> cpu = the test is
-        # waiting (sleep / IO / timeout), the #1 suite-content finding in
-        # the research profiling (rich 74%, aiohttp 78% of test time).
-        if not self._doctor:
-            return (yield)
-        import time
+    def _effective_timeout(self, item) -> float | None:
+        """`@pytest.mark.timeout(N)` wins over the global `--timeout`. Accepts
+        the positional `timeout(N)` and keyword `timeout(timeout=N)` forms
+        (pytest-timeout-compatible)."""
+        marker = item.get_closest_marker("timeout")
+        if marker is not None:
+            if marker.args:
+                return _parse_timeout(marker.args[0])
+            kwargs = getattr(marker, "kwargs", {})
+            if "timeout" in kwargs:
+                return _parse_timeout(kwargs["timeout"])
+        return self._timeout
 
-        t0 = time.process_time()
+    @staticmethod
+    def _arm_timeout(secs: float):
+        """Interrupt the CURRENT (main) thread after `secs` via SIGALRM, so a
+        stuck test fails with a traceback at the line it blocked on. Returns a
+        cancel callback, or None where it can't run (no SIGALRM, or the test
+        isn't on the main thread) — the orchestrator watchdog is the backstop
+        there, and for C-extension calls that never return to the interpreter."""
+        import signal
+        import threading
+
+        if (
+            not hasattr(signal, "SIGALRM")
+            or threading.current_thread() is not threading.main_thread()
+        ):
+            return None
+
+        def _fire(signum, frame):
+            raise Timeout(f"test exceeded --timeout ({secs:g}s)")
+
+        old = signal.signal(signal.SIGALRM, _fire)
+        signal.setitimer(signal.ITIMER_REAL, secs)
+
+        def cancel():
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+
+        return cancel
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_setup(self, item):
+        # Leak check: baseline thread/fd counts BEFORE any setup fixture runs.
+        if self._leakcheck:
+            self._res_base[item.nodeid] = (_count_threads(), _count_fds())
+        return (yield)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_teardown(self, item, nextitem):
+        # Leak check: net delta AFTER teardown (a test that opens+closes is 0;
+        # one that never releases shows a positive delta). Stashed for the
+        # teardown report to carry.
         try:
             return (yield)
         finally:
-            self._cpu[item.nodeid] = time.process_time() - t0
+            if self._leakcheck and item.nodeid in self._res_base:
+                bt, bf = self._res_base.pop(item.nodeid)
+                if not self._leak_warmed:
+                    # First test: warm-up, don't attribute first-touch to it.
+                    self._leak_warmed = True
+                else:
+                    at, af = _count_threads(), _count_fds()
+                    fd_delta = (af - bf) if (af is not None and bf is not None) else None
+                    self._res[item.nodeid] = (at - bt, fd_delta)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_call(self, item):
+        # Layers two per-call-phase concerns: the --timeout interrupt (outer)
+        # and doctor's cpu-vs-wall measurement (inner). wall >> cpu = the test
+        # is waiting (sleep / IO), the #1 suite-content finding in the research
+        # profiling (rich 74%, aiohttp 78% of test time).
+        secs = self._effective_timeout(item)
+        if secs is None and not self._doctor:
+            return (yield)
+        import time
+
+        cancel = self._arm_timeout(secs) if secs else None
+        t0 = time.process_time() if self._doctor else 0.0
+        try:
+            return (yield)
+        finally:
+            if cancel is not None:
+                cancel()
+            if self._doctor:
+                self._cpu[item.nodeid] = time.process_time() - t0
 
     @pytest.hookimpl(wrapper=True)
     def pytest_fixture_setup(self, fixturedef, request):
@@ -322,6 +478,12 @@ class StreamPlugin:
             payload["lineno"] = location[1]
         if report.when == "call" and report.nodeid in self._cpu:
             payload["cpu"] = round(self._cpu.pop(report.nodeid), 4)
+        if report.when == "teardown" and report.nodeid in self._res:
+            dt, df = self._res.pop(report.nodeid)
+            if dt:
+                payload["thread_delta"] = dt
+            if df:
+                payload["fd_delta"] = df
         if report.failed and report.sections:
             # Captured stdout/stderr/log; ship only for failures to keep the
             # wire lean.

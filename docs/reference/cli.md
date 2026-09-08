@@ -2,11 +2,18 @@
 
 ```
 rstest [RSTEST FLAGS] [PATHS] [PYTEST FLAGS]
+rstest <COMMAND> [OPTIONS]
 ```
 
 rstest owns a small set of flags; **everything else forwards to the test
 session verbatim**, so the entire pytest flag surface — including flags
 added by your plugins — works without translation.
+
+A handful of **run-less commands** don't run your suite —
+[`verify-vendor`](#verify-vendor), [`try`](#try),
+[`migrate-check`](#migrate-check), and [`cache-compact`](#cache-compact). Each
+is a subcommand, given as the first argument (`rstest try`); a path literally
+named after one is disambiguated with `rstest ./try` or `rstest -- try`.
 
 ## rstest-owned flags
 
@@ -271,7 +278,7 @@ Pull/push are **not** supported in [monorepo mode](../guides/monorepo.md) — ea
 project keeps its own `.rstest_cache`, so run rstest per project for shared
 caching there (rstest errors rather than silently no-op).
 
-### `--cache-compact`
+### `cache-compact`
 
 Maintenance: fold all remote segments into a fresh `base.json` and prune them,
 then exit without running tests. Keeps the segment count (and pull size) down;
@@ -287,7 +294,7 @@ hard error instead of the silent "comparison skipped". This closes the
 dead-gate failure mode where a CI run that never restored (or pulled) the cache
 passes regressions green. A *failed* `--cache-pull` is always an error; this
 adds the "*successful* pull returned nothing, but a gate needs it" case. It only
-enforces on an actual gated run — collect-only (`--co`), `--migrate-check`, and
+enforces on an actual gated run — collect-only (`--co`), `migrate-check`, and
 passthrough (`-s`/`--pdb`) modes don't evaluate the gate, so they don't trip it.
 
 ### `--doctor`
@@ -295,10 +302,12 @@ passthrough (`-s`/`--pdb`) modes don't evaluate the gate, so they don't trip it.
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),
 parallel-floor analysis (the tests that cap any `-n`), parallel efficiency
 (realized speedup and per-worker load imbalance, `-n > 1` only), fixture
-hotspots (with scope advice), and slowest files. Adds two cheap measurements
-to the run; outcomes are unaffected.
+hotspots (with scope advice), slowest files, and **resource leaks** (tests
+that ended with more threads / open file descriptors than they started — see
+the [Resource leaks](../guides/resource-leaks.md) guide). Adds a few cheap
+measurements to the run; outcomes are unaffected.
 
-### `--try`
+### `try`
 
 The zero-config "should I switch?" proof. Runs your suite once under plain
 `pytest` and once under `rstest -n auto`, then prints the only two things that
@@ -307,8 +316,8 @@ checked against your real pytest) and how much **faster** rstest is, with a
 rough CI-time saving. No flags, no config.
 
 ```console
-$ rstest --try
-================= rstest --try =================
+$ rstest try
+================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
   ⚡ speed:   pytest 96s  →  rstest 21s   (4.6× at -n auto)
 ================================================
@@ -316,18 +325,37 @@ $ rstest --try
 ```
 
 Exit 0 when outcomes are identical, 1 when they differ (it then points you at
-`--migrate-check` to classify the differences — usually an unstable parametrize
+`migrate-check` to classify the differences — usually an unstable parametrize
 id or a parallel-only failure), 2 when it couldn't run pytest or rstest refused
 to dispatch. A pre-existing red pytest run is reported as such, not blamed on
 rstest.
 
-`--try` is the one command that needs **pytest installed on its own** (it runs
+`try` is the one command that needs **pytest installed on its own** (it runs
 your suite under plain `pytest` for the baseline). rstest itself vendors its
 core and doesn't otherwise require an external pytest; if `pytest` isn't on
-PATH, `--try` exits 2. `--migrate-check` and normal runs have no such
+PATH, `try` exits 2. `migrate-check` and normal runs have no such
 requirement.
 
-### `--migrate-check`
+### `verify-vendor`
+
+Prove the vendored pytest tree in your installed rstest is intact. rstest ships
+an unmodified copy of pytest inside its worker package; this rehashes every
+file under `_vendor/` and compares it to the packaged manifest (`vendor.lock`),
+catching an accidentally-edited, corrupted, or partial install. Run-less — it
+verifies and exits without running your suite.
+
+```console
+$ rstest verify-vendor
+vendored pytest 9.1.1: 84 files verified against vendor.lock
+```
+
+Exit 0 when the tree matches the manifest, non-zero on any drift (each
+offending file is listed). The check is **offline** — it does not contact
+PyPI. Proving the vendored tree matches *upstream* pytest (not just what
+shipped) is a separate maintainer/CI check (`vendor.yml` provenance job); see
+[Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).
+
+### `migrate-check`
 
 Parallel-readiness preflight, not a run. Collects the suite **twice** and
 diffs the id sets; ids present in only one collection are run-to-run unstable.
@@ -376,7 +404,7 @@ form and the known-issue allow-list).
 
 Write the migrate-check findings as a single versioned JSON document (schema
 `1`) — the machine-readable surface for CI gating and trending. Implies
-`--migrate-check`; pass the bare flag too to also print the human report. The
+`migrate-check`; pass the bare flag too to also print the human report. The
 document carries the unstable-id sites and the classified parallel findings,
 each with its verdict, fix, allow-list status, and bisected polluter:
 `{meta, ready, tests_collected, will_bail_count, unstable_ids[], parallel{…}}`.
@@ -406,13 +434,40 @@ Hang backstop, off by default: a worker stuck on **one test** (any
 phase — setup, call, or teardown) longer than
 SECS is killed — the test is reported failed with a timeout message, the
 worker's other tests redistribute, and a replacement worker joins (the
-crash-recovery machinery, same budgets). Use
-[pytest-timeout](https://pypi.org/project/pytest-timeout/) for ordinary
-per-test limits; `--worker-timeout` catches what in-process timeouts
-can't interrupt — tests hard-blocked inside C extensions or deadlocked
-threads. Under `--reruns`, a timed-out test is retried within the budget
-(deadlocks can be races). Hangs OUTSIDE a test — during collection or
-session config — are not covered by this watchdog.
+crash-recovery machinery, same budgets). This is the coarse hang backstop;
+for ordinary per-test limits use [`--timeout`](#-timeout-secs) (below).
+`--worker-timeout` catches what an in-process timeout can't interrupt —
+tests hard-blocked inside C extensions or deadlocked threads. Under
+`--reruns`, a timed-out test is retried within the budget (deadlocks can be
+races). Hangs OUTSIDE a test — during collection or session config — are not
+covered by this watchdog.
+
+### `--timeout <SECS>`
+
+Per-test deadline: fail any test whose **call phase** runs longer than SECS.
+The test is interrupted **in-process** (a signal in the worker), so the
+failure's traceback points at the exact line it was stuck on — the
+pytest-timeout behaviour, built in, no plugin required and working under the
+parallel pool.
+
+```console
+$ rstest -n auto --timeout 30
+```
+
+Fractional seconds are allowed (`--timeout 0.5`). `@pytest.mark.timeout(N)`
+overrides the global value per test:
+
+```python
+@pytest.mark.timeout(5)
+def test_slow_path(): ...
+```
+
+A test hard-blocked inside a C extension never returns to the interpreter, so
+the signal can't fire — the [`--worker-timeout`](#-worker-timeout-secs)
+watchdog is the backstop for that, and rstest auto-arms it (at a generous
+multiple of `--timeout`) whenever you set `--timeout` without an explicit
+`--worker-timeout`. The interrupt uses a Unix signal on the test's main
+thread; on platforms without it (Windows), the watchdog alone applies.
 
 ### `--changed[=REV]`
 
@@ -697,6 +752,31 @@ Actions, `buildkite-agent annotate` on Buildkite — even when you pass only
 `--doctor-fail-on` (no `--doctor`). That is intentional: a failed gate shows
 its report on the run page so you can see *why* it failed. Pass `--doctor-md`
 for a file copy, or run in a CI with no summary surface if you want gate-only.
+
+### `--fail-on-leak`
+
+Fail the run if any test **leaked a resource** — ended with more live threads
+or open file descriptors than it started, its own teardown included. Turns the
+leak signal (see [`--doctor`](#-doctor)) into a CI gate.
+
+```console
+$ rstest -n auto --fail-on-leak
+```
+
+Enables the leak-check instrumentation on its own — you do **not** need
+`--doctor`. Exits `1` when any leak is found (listing the offenders on stderr,
+so `--output json`/`tap` stay pure on stdout); exits `0` and prints
+`no thread/fd leaks detected` on a clean suite. Not evaluated under a
+passthrough-IO flag (`-s`/`--pdb`/`--co`), which has no instrumentation — the
+flag is ignored there with a warning rather than passing silently.
+
+The first test each worker runs is an unchecked **warm-up** (first-touch
+imports are not a per-test leak), so under `-n auto` one test per worker is not
+gated; a clean exit does not prove those tests are leak-free.
+
+A leaked thread or fd is shared state that can flake a *later* test; the guide
+covers what is measured, the false-positive cases (session-scoped fixtures),
+and how to fix a leak: [Resource leaks](../guides/resource-leaks.md).
 
 Exit-code note for machine consumers: the gate affects the **process exit
 code** (1 on breach), which is authoritative. It does **not** rewrite the

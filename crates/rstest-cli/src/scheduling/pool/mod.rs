@@ -34,6 +34,8 @@ use anyhow::{bail, Result};
 
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
+use crate::reporting::sink::Sink;
+use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
@@ -59,12 +61,62 @@ pub enum Dist {
     Each,
 }
 
+impl std::str::FromStr for Dist {
+    type Err = String;
+
+    /// The single source of truth for the `--dist` name set: parsed once up
+    /// front to validate, and again to map to the enum. `Err` carries the
+    /// user-facing message so both call sites report identically.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "load" => Dist::Load,
+            "loadfile" => Dist::Loadfile,
+            "loadscope" => Dist::Loadscope,
+            "loadgroup" => Dist::Loadgroup,
+            "each" => Dist::Each,
+            other => {
+                return Err(format!(
+                    "unknown --dist mode: {other} (use load|loadfile|loadscope|loadgroup|each)"
+                ))
+            }
+        })
+    }
+}
+
+/// Worker-pool parameters common to the eager (`run_pool`) and lazy
+/// (`run_lazy_pool`) orchestrators. Bundled so each entry point takes a handful
+/// of mode-specific args on top rather than one flat ~17-arg list.
+pub struct PoolConfig<'a> {
+    pub python: &'a Path,
+    pub n: usize,
+    pub args: &'a [String],
+    pub mode: crate::reporting::progress::Mode,
+    pub maxfail: Option<u64>,
+    pub reruns: u32,
+    pub only_rerun: &'a [regex::Regex],
+    pub worker_timeout: Option<std::time::Duration>,
+    /// Some(set) => --reruns-only-known-flaky: only tests in this set (prior
+    /// flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
+    pub known_flaky: Option<&'a std::collections::HashSet<String>>,
+    pub worker_env: &'a crate::scheduling::worker::WorkerEnv,
+}
+
+/// Everything the orchestrator loop produces from one pool run, handed back to
+/// `run.rs` for post-run reporting and gates.
 pub struct PoolOutcome {
+    /// Merged per-test results across all workers.
     pub run: Run,
+    /// The live progress renderer, carried out so the caller can print the
+    /// closing summary in the same style.
     pub prog: Progress,
+    /// Per-fixture setup timings (doctor mode), aggregated across workers.
     pub fixtures: Vec<proto::FixtureStat>,
+    /// Deduplicated session/collect/runtest warnings.
     pub warnings: Vec<proto::WarningEntry>,
+    /// pytest's cache dir (from the designate worker), where the merged
+    /// lastfailed cache is written after the run.
     pub cache_dir: Option<String>,
+    /// Reconciled process exit status for the run.
     pub exitstatus: i32,
 }
 
@@ -93,35 +145,30 @@ fn known_flaky_ok(
     })
 }
 
-/// Tell every still-listening worker the queue is closed (maxfail trip): each
-/// finishes its in-flight work and ends. Bounded overshoot, the trade xdist makes.
-fn stop_all(states: &mut [WorkerState]) {
-    for s in states.iter_mut().filter(|s| !s.dead && !s.finishing) {
-        s.finishing = true;
-        let _ = s.worker.send(&proto::Command::NoMoreItems);
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // orchestration entry point; a config struct adds noise for one caller
 pub fn run_pool(
-    python: &Path,
-    n: usize,
-    args: &[String],
-    mode: crate::reporting::progress::Mode,
-    track_durations: bool,
-    palette: crate::reporting::color::Palette,
+    cfg: &PoolConfig,
     dist: Dist,
-    maxfail: Option<u64>,
-    reruns: u32,
-    only_rerun: &[regex::Regex],
-    worker_timeout: Option<std::time::Duration>,
+    track_durations: bool,
     shuffle: Option<u64>,
     shard: Option<(usize, usize)>,
-    // Some(set) => --reruns-only-known-flaky: only tests in this set (prior
-    // flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
-    known_flaky: Option<&std::collections::HashSet<String>>,
-    worker_env: &crate::scheduling::worker::WorkerEnv,
+    // --incremental: nodeids that were green last run and whose covered source
+    // is unchanged. Collected but never dispatched; carried forward as cached
+    // passes. Empty = feature off.
+    skip_ids: &std::collections::HashSet<String>,
+    sink: &mut Sink,
 ) -> Result<PoolOutcome> {
+    let &PoolConfig {
+        python,
+        n,
+        args,
+        mode,
+        maxfail,
+        reruns,
+        only_rerun,
+        worker_timeout,
+        known_flaky,
+        worker_env,
+    } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
     let mut states = Vec::new();
@@ -136,7 +183,6 @@ pub fn run_pool(
     let mut run = Run::default();
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
-    prog.set_palette(palette);
     // Json mode keeps stdout pure NDJSON: the footer's ANSI repaint would
     // corrupt the stream on a TTY, so skip it.
     if mode != crate::reporting::progress::Mode::Json {
@@ -171,6 +217,9 @@ pub fn run_pool(
         flaky.get(&i).copied().unwrap_or(reruns)
     };
     let mut fail_count = 0u64;
+    // --incremental: nodeids collected but skipped (unchanged since last green),
+    // injected as cached passes once the run finishes.
+    let mut cached_ids: Vec<String> = Vec::new();
     // Global -x/--maxfail: once tripped, dispatch halts and every alive
     // worker is told no_more_items (it finishes in-flight work and ends;
     // bounded overshoot, same trade xdist makes).
@@ -180,24 +229,10 @@ pub fn run_pool(
         let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok(pair) => pair,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                prog.tick();
+                prog.tick(sink);
                 // Watchdog tick: kill workers stuck on one item too long.
                 if let Some(limit) = worker_timeout {
-                    for (widx, s) in states.iter_mut().enumerate() {
-                        if s.dead || s.timeout_killed {
-                            continue;
-                        }
-                        if let Some(since) = s.running_since {
-                            if since.elapsed() > limit {
-                                eprintln!(
-                                    "rstest: worker gw{widx} exceeded --worker-timeout ({}s) on one test; killing it",
-                                    limit.as_secs()
-                                );
-                                s.timeout_killed = true;
-                                s.worker.kill();
-                            }
-                        }
-                    }
+                    orchestrator::watchdog_tick(sink, &mut states, limit);
                 }
                 continue;
             }
@@ -223,11 +258,11 @@ pub fn run_pool(
                 if r.outcome == "failed" {
                     fail_count += 1;
                 }
-                prog.on_report(Some(idx), &r);
+                prog.on_report(sink, Some(idx), &r);
                 run.record(Some(idx), r);
                 if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                     stopping = true;
-                    stop_all(&mut states);
+                    orchestrator::stop_all(&mut states);
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => run.collect_error(path, longrepr),
@@ -353,13 +388,41 @@ pub fn run_pool(
                                     total,
                                 ),
                             };
-                            eprintln!(
+                            sink.warn(&format!(
                                 "rstest: shard {k}/{total} -> {} of {} test(s)",
                                 idx.len(),
                                 ids.len()
-                            );
+                            ));
                             idx.into_iter().collect::<HashSet<u64>>()
                         });
+                        // --incremental: fold the skip set into `keep` — an index
+                        // whose nodeid is green+unchanged is deselected. Any such
+                        // index that would otherwise have run becomes a cached
+                        // pass. (run.rs guards this off for shard/shuffle, so
+                        // `keep` here is None unless sharding, which it isn't.)
+                        let keep = if skip_ids.is_empty() {
+                            keep
+                        } else {
+                            let (run_idx, mut cached, skipped_positions) =
+                                partition_skip(&ids, keep.as_ref(), skip_ids);
+                            if !cached.is_empty() {
+                                // Count skipped POSITIONS, not deduped nodeids: a
+                                // nodeid at K collected positions removes K test
+                                // runs. `cached` (deduped) drives carry-forward;
+                                // `skipped_positions` keeps the message and the
+                                // progress total honest against `ids.len()`.
+                                sink.warn(&format!(
+                                    "rstest: --incremental: {} of {} test(s) unchanged since \
+                                     last green -> skipped (cached)",
+                                    skipped_positions,
+                                    ids.len()
+                                ));
+                                // The progress total tracks only tests that run.
+                                prog.set_total(total_items.saturating_sub(skipped_positions));
+                            }
+                            cached_ids.append(&mut cached);
+                            Some(run_idx)
+                        };
                         dispatch = Some(build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
@@ -383,7 +446,7 @@ pub fn run_pool(
                 let nodeid = nodeid_at(&ids_store, index)
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("<item #{index}>"));
-                prog.item_started(idx, nodeid);
+                prog.item_started(sink, idx, nodeid);
             }
             Ok(Event::Stopped { unrun }) => {
                 // Session-local -x tripped: those items never ran there.
@@ -402,7 +465,7 @@ pub fn run_pool(
                 }
             }
             Ok(Event::ItemDone { index }) => {
-                prog.item_finished(idx);
+                prog.item_finished(sink, idx);
                 let chunk = chunk_size(total_items, states.len());
                 let s = &mut states[idx];
                 s.running = None;
@@ -413,13 +476,7 @@ pub fn run_pool(
                 let item_budget = budget_of(&flaky_budget, index);
                 if item_budget > 0 {
                     // --only-rerun: failures must match a pattern to retry.
-                    let rerun_allowed = only_rerun.is_empty()
-                        || s.attempt.iter().any(|r| {
-                            r.outcome == "failed"
-                                && r.longrepr
-                                    .as_deref()
-                                    .is_some_and(|t| only_rerun.iter().any(|re| re.is_match(t)))
-                        });
+                    let rerun_allowed = orchestrator::rerun_allowed(only_rerun, &s.attempt);
                     // --reruns-only-known-flaky: gate on prior flaky history.
                     // An explicit @mark.flaky (present in flaky_budget) is an
                     // author declaration and always bypasses the gate. Match on
@@ -442,23 +499,25 @@ pub fn run_pool(
                     } else {
                         let attempts = *used;
                         let failed_now = s.attempt_failed;
-                        let nodeid = s.attempt.first().map(|r| r.nodeid.clone());
-                        for r in s.attempt.drain(..) {
-                            if r.outcome == "failed" {
-                                fail_count += 1;
-                            }
-                            prog.on_report(Some(idx), &r);
-                            run.record(Some(idx), r);
-                        }
+                        let flaky_key = s.attempt.first().map(|r| r.nodeid.clone());
+                        let attempt = std::mem::take(&mut s.attempt);
                         s.attempt_failed = false;
-                        if !failed_now && attempts > 0 {
-                            if let Some(nodeid) = nodeid {
-                                run.mark_flaky(nodeid, attempts);
-                            }
-                        }
+                        orchestrator::finalize_attempt(
+                            sink,
+                            &mut run,
+                            &mut prog,
+                            &mut fail_count,
+                            idx,
+                            orchestrator::FinishedAttempt {
+                                attempts_used: attempts,
+                                reports: attempt,
+                                failed: failed_now,
+                                flaky_key,
+                            },
+                        );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
-                            stop_all(&mut states);
+                            orchestrator::stop_all(&mut states);
                         }
                     }
                 }
@@ -480,7 +539,7 @@ pub fn run_pool(
                     break;
                 }
             }
-            // Lazy-mode events; a full-collection session never emits them.
+            // Lazy-mode events; a full-collection pool never emits them.
             Ok(Event::LazyReady { .. })
             | Ok(Event::FileCollected { .. })
             | Ok(Event::ItemStartId { .. })
@@ -531,30 +590,15 @@ pub fn run_pool(
                         if dist == Dist::Each {
                             nodeid.push_str(&format!(" [gw{idx}]"));
                         }
-                        let fab = proto::Report {
+                        let fab = orchestrator::fabricate_crash_report(
                             nodeid,
-                            when: "call".into(),
-                            outcome: "failed".into(),
-                            duration: 0.0,
-                            longrepr: Some(if was_timeout {
-                                format!(
-                                    "test exceeded --worker-timeout ({}s); its worker was killed (reported failed)",
-                                    worker_timeout.map(|d| d.as_secs()).unwrap_or(0)
-                                )
-                            } else {
-                                format!(
-                                    "worker gw{idx} crashed while running this test \
-                                     (reported failed, not retried): {e:#}"
-                                )
-                            }),
-                            wasxfail: false,
-                            skip_reason: None,
-                            cpu: None,
-                            sections: Vec::new(),
-                            lineno: None,
-                        };
+                            was_timeout,
+                            worker_timeout,
+                            idx,
+                            &e,
+                        );
                         let crashed_id = fab.nodeid.clone();
-                        prog.on_report(Some(idx), &fab);
+                        prog.on_report(sink, Some(idx), &fab);
                         run.record(Some(idx), fab);
                         run.mark_crashed(&crashed_id);
                     }
@@ -570,10 +614,19 @@ pub fn run_pool(
                             d.requeued.push_back(i);
                         }
                     }
-                    eprintln!(
+                    sink.warn(&format!(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
-                    );
+                    ));
+                    // Reap the old worker in place BEFORE spawning its
+                    // replacement. This arm also fires on a decode error (the
+                    // child may still be alive, running tests against a closed
+                    // pipe) and on watchdog kills; `Child`'s drop neither kills
+                    // nor waits, so an alive child would orphan and an exited one
+                    // become a `<defunct>` zombie. Reaping first (not after the
+                    // spawn) means a `spawn_into` error `?`-returning can't leave
+                    // the old child un-reaped.
+                    states[idx].worker.reap();
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
@@ -583,6 +636,10 @@ pub fn run_pool(
                     );
                     statuses.push(3); // pytest INTERNAL_ERROR
                     states[idx].dead = true;
+                    // Reap now (a decode error can leave the child alive) rather
+                    // than letting it linger as a zombie until the end-of-run
+                    // wait(). The slot stays in the vec, so reap in place.
+                    states[idx].worker.reap();
                     done_workers += 1;
                     if idx == designate {
                         // Serial phase needs a host; promote the lowest alive
@@ -628,8 +685,8 @@ pub fn run_pool(
                     }
                 }
                 None => {
-                    eprintln!(
-                        "rstest: no surviving worker to run pytest_testnodedown                          for a crashed worker; per-worker resources may leak"
+                    sink.warn(
+                        "rstest: no surviving worker to run pytest_testnodedown                          for a crashed worker; per-worker resources may leak",
                     );
                     break;
                 }
@@ -640,9 +697,9 @@ pub fn run_pool(
         // back to identity order rather than stalling. Serial marks are
         // unknown in that case, so warn.
         if dist != Dist::Each && dispatch.is_none() && reference.is_some() && states[0].dead {
-            eprintln!(
+            sink.warn(
                 "rstest: id-carrier worker died before reporting; \
-                 falling back to collection order (serial marks unknown)"
+                 falling back to collection order (serial marks unknown)",
             );
             dispatch = Some(Dispatch {
                 order: (0..total_items as u64).collect(),
@@ -785,16 +842,13 @@ pub fn run_pool(
     for w in workers {
         let _ = w.wait();
     }
-    // Recorded outcomes win over session exit codes both ways: a fabricated
-    // crash failure never hits a session (codes read 0), and a flaky test's
-    // first attempt fails inside a session (code 1) though it finally passed.
-    let mut exitstatus = merge_statuses(&statuses);
-    if exitstatus == 0 && !run.all_passed() {
-        exitstatus = 1;
+    // --incremental: carry forward the skipped tests as cached passes so every
+    // artifact reflects the whole suite. They passed last run and their source
+    // is unchanged, so they never affect the exit status.
+    for id in &cached_ids {
+        run.record_cached(id.clone());
     }
-    if reruns > 0 && exitstatus == 1 && run.all_passed() {
-        exitstatus = 0;
-    }
+    let exitstatus = orchestrator::finalize_exit(&statuses, run.all_passed(), reruns, false);
     Ok(PoolOutcome {
         run,
         prog,
@@ -822,9 +876,75 @@ pub(crate) fn merge_statuses(statuses: &[i32]) -> i32 {
     0
 }
 
+/// Split collected indices into (run, cached, skipped_positions) for
+/// `--incremental`: starting from `keep` (None = every index), deselect any
+/// index whose nodeid is in `skip_ids` and move it to the cached set instead.
+/// Cached nodeids are DEDUPLICATED — parametrized tests can share one nodeid
+/// across positions, and carry-forward records each distinct nodeid once.
+/// `skipped_positions` counts the actual removed indices (not deduped), so the
+/// "N of M" message and the progress total stay honest against `ids.len()`.
+fn partition_skip(
+    ids: &[String],
+    keep: Option<&HashSet<u64>>,
+    skip_ids: &HashSet<String>,
+) -> (HashSet<u64>, Vec<String>, usize) {
+    let mut run_idx = HashSet::new();
+    let mut cached = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut skipped_positions = 0usize;
+    for i in 0..ids.len() as u64 {
+        if !keep.is_none_or(|k| k.contains(&i)) {
+            continue;
+        }
+        let id = ids[i as usize].as_str();
+        if skip_ids.contains(id) {
+            skipped_positions += 1;
+            if seen.insert(id) {
+                cached.push(id.to_string());
+            }
+        } else {
+            run_idx.insert(i);
+        }
+    }
+    (run_idx, cached, skipped_positions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_skip_dedups_and_splits() {
+        // nodeid "a" appears at two positions; both are skippable and must
+        // collapse to a single cached entry, while "b" runs.
+        let ids = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ];
+        let skip: HashSet<String> = ["a".to_string(), "c".to_string()].into_iter().collect();
+        let (run, mut cached, skipped_positions) = partition_skip(&ids, None, &skip);
+        assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
+        cached.sort();
+        assert_eq!(cached, vec!["a".to_string(), "c".to_string()]);
+        // "a" occupies two positions + "c" one: three runs skipped, two cached.
+        assert_eq!(skipped_positions, 3);
+    }
+
+    #[test]
+    fn partition_skip_respects_keep() {
+        // Under a shard `keep` of {0,1}, index 2 ("c") is out of scope entirely;
+        // "a" is skippable (cached), leaving only "b" to run.
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let skip: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let keep: HashSet<u64> = [0u64, 1].into_iter().collect();
+        let (run, cached, skipped_positions) = partition_skip(&ids, Some(&keep), &skip);
+        assert_eq!(run, [1u64].into_iter().collect::<HashSet<u64>>());
+        assert_eq!(cached, vec!["a".to_string()]);
+        // Only position 0 ("a") is both in scope and skipped.
+        assert_eq!(skipped_positions, 1);
+    }
 
     #[test]
     fn merge_status_rules() {

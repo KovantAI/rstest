@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sys
 
@@ -58,5 +60,5 @@ def _serve(conn) -> None:
 # Guarded like multiprocessing requires: child runtimes (multiprocessing
 # spawn, anyio to_process) re-import this file as __mp_main__ and must
 # not start a second worker loop.
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

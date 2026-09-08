@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::cache;
 use crate::reporting::flakes::FlakeStats;
 use crate::reporting::report::Run;
+use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
 pub const SEGMENT_SCHEMA: u32 = 1;
@@ -334,11 +335,18 @@ pub fn write_local(merged: &Merged) {
 /// immutable segments. Deliberately minimal so filesystem/dir today and
 /// object-store/HTTP later share one merge layer above.
 pub trait Transport {
+    /// List the ids of all segments currently present on the remote.
     fn list_segment_ids(&self) -> Result<Vec<String>>;
+    /// Read one segment's raw bytes by id.
     fn read_segment(&self, id: &str) -> Result<Vec<u8>>;
+    /// Read the `base.json` blob, or `None` if the remote has no base yet.
     fn read_base(&self) -> Result<Option<Vec<u8>>>;
+    /// Write a new immutable segment under `id` (ids are unique per run, so
+    /// concurrent writers never conflict).
     fn write_segment(&self, id: &str, bytes: &[u8]) -> Result<()>;
+    /// Overwrite `base.json` (compaction only).
     fn write_base(&self, bytes: &[u8]) -> Result<()>;
+    /// Delete a segment by id (compaction, after folding it into base).
     fn delete_segment(&self, id: &str) -> Result<()>;
 }
 
@@ -424,7 +432,7 @@ pub fn transport_for(remote: &str) -> Result<Box<dyn Transport>> {
 /// Fetch base + every segment and merge. Unreadable segments are warned and
 /// skipped (a corrupt blob must not fail the whole pull); a corrupt base is an
 /// error (it would silently drop the whole accumulated history).
-pub fn pull(t: &dyn Transport) -> Result<Merged> {
+pub fn pull(t: &dyn Transport, sink: &mut Sink) -> Result<Merged> {
     let base = match t.read_base()? {
         Some(bytes) => Some(serde_json::from_slice::<Base>(&bytes).context("parsing base.json")?),
         None => None,
@@ -434,9 +442,13 @@ pub fn pull(t: &dyn Transport) -> Result<Merged> {
         match t.read_segment(&id) {
             Ok(bytes) => match serde_json::from_slice::<Segment>(&bytes) {
                 Ok(seg) => segments.push(seg),
-                Err(e) => eprintln!("rstest: cache: skipping unreadable segment {id}: {e}"),
+                Err(e) => sink.warn(&format!(
+                    "rstest: cache: skipping unreadable segment {id}: {e}"
+                )),
             },
-            Err(e) => eprintln!("rstest: cache: skipping unreadable segment {id}: {e}"),
+            Err(e) => sink.warn(&format!(
+                "rstest: cache: skipping unreadable segment {id}: {e}"
+            )),
         }
     }
     Ok(merge(base, segments))
@@ -460,7 +472,7 @@ pub fn push(t: &dyn Transport, seg: &Segment) -> Result<()> {
 /// Fold base + all segments into a fresh base, then delete the folded segments.
 /// Returns the number of segments folded. Delete failures are non-fatal (the
 /// absorbed-id set keeps a lingering segment from double-counting anyway).
-pub fn compact_remote(t: &dyn Transport) -> Result<usize> {
+pub fn compact_remote(t: &dyn Transport, sink: &mut Sink) -> Result<usize> {
     let base = match t.read_base()? {
         Some(bytes) => Some(serde_json::from_slice::<Base>(&bytes).context("parsing base.json")?),
         None => None,
@@ -477,7 +489,9 @@ pub fn compact_remote(t: &dyn Transport) -> Result<usize> {
                 segments.push(seg);
                 folded_ids.push(id.clone());
             } else {
-                eprintln!("rstest: cache: compact: keeping unparseable segment {id}");
+                sink.warn(&format!(
+                    "rstest: cache: compact: keeping unparseable segment {id}"
+                ));
             }
         }
     }
@@ -745,7 +759,10 @@ mod tests {
         let root = tmp_dir("roundtrip");
         let t = DirTransport::new(&root);
         // Empty remote -> empty merge.
-        assert_eq!(pull(&t).unwrap(), Merged::default());
+        assert_eq!(
+            pull(&t, &mut Sink::captured().0).unwrap(),
+            Merged::default()
+        );
         // Two "shards" each push their own segment.
         push(
             &t,
@@ -771,7 +788,7 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["shard1".to_string(), "shard2".to_string()]);
         // A third job pulls the merged union.
-        let m = pull(&t).unwrap();
+        let m = pull(&t, &mut Sink::captured().0).unwrap();
         assert_eq!(m.durations.get("t::a"), Some(&1.0));
         assert_eq!(m.durations.get("t::b"), Some(&2.0));
         let f = m.flakes.get("t::f").unwrap();
@@ -793,12 +810,12 @@ mod tests {
             &seg("s2", 20, &[("t::a", 3.0)], &[("t::f", FlakeKind::Flaky)]),
         )
         .unwrap();
-        assert_eq!(compact_remote(&t).unwrap(), 2);
+        assert_eq!(compact_remote(&t, &mut Sink::captured().0).unwrap(), 2);
         // Segments gone, base present.
         assert!(t.list_segment_ids().unwrap().is_empty());
         assert!(t.read_base().unwrap().is_some());
         // Pull off the base alone reproduces the merged state.
-        let m = pull(&t).unwrap();
+        let m = pull(&t, &mut Sink::captured().0).unwrap();
         assert_eq!(m.durations.get("t::a"), Some(&3.0));
         assert_eq!(m.flakes.get("t::f").unwrap().flaky, 2);
         // A lingering copy of an already-folded segment must not double-count.
@@ -807,7 +824,15 @@ mod tests {
             &seg("s1", 10, &[("t::a", 1.0)], &[("t::f", FlakeKind::Flaky)]),
         )
         .unwrap();
-        assert_eq!(pull(&t).unwrap().flakes.get("t::f").unwrap().flaky, 2);
+        assert_eq!(
+            pull(&t, &mut Sink::captured().0)
+                .unwrap()
+                .flakes
+                .get("t::f")
+                .unwrap()
+                .flaky,
+            2
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -828,12 +853,12 @@ mod tests {
             &cov_seg("shard2", 10, &[("mod.py", "H1", &[(2, &["t::b"])])]),
         )
         .unwrap();
-        let m = pull(&t).unwrap();
+        let m = pull(&t, &mut Sink::captured().0).unwrap();
         assert_eq!(cov_lines(&m, "mod.py", 1), vec!["t::a"]);
         assert_eq!(cov_lines(&m, "mod.py", 2), vec!["t::b"]);
         // Compaction folds the slices into the base and survives a re-pull.
-        assert_eq!(compact_remote(&t).unwrap(), 2);
-        let m2 = pull(&t).unwrap();
+        assert_eq!(compact_remote(&t, &mut Sink::captured().0).unwrap(), 2);
+        let m2 = pull(&t, &mut Sink::captured().0).unwrap();
         assert_eq!(cov_lines(&m2, "mod.py", 1), vec!["t::a"]);
         assert_eq!(cov_lines(&m2, "mod.py", 2), vec!["t::b"]);
         let _ = std::fs::remove_dir_all(&root);
@@ -849,10 +874,16 @@ mod tests {
         let corrupt = root.join("segments").join("seg-bad.json");
         std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
         std::fs::write(&corrupt, b"{ not json").unwrap();
-        assert_eq!(compact_remote(&t).unwrap(), 1); // only "good" folded
+        assert_eq!(compact_remote(&t, &mut Sink::captured().0).unwrap(), 1); // only "good" folded
         assert!(corrupt.exists(), "unparseable segment must be kept");
         assert_eq!(t.list_segment_ids().unwrap(), vec!["bad".to_string()]);
-        assert_eq!(pull(&t).unwrap().durations.get("t::a"), Some(&1.0));
+        assert_eq!(
+            pull(&t, &mut Sink::captured().0)
+                .unwrap()
+                .durations
+                .get("t::a"),
+            Some(&1.0)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -941,7 +972,7 @@ mod tests {
             fail: FailAt::Base,
         };
         assert!(
-            compact_remote(&t).is_err(),
+            compact_remote(&t, &mut Sink::captured().0).is_err(),
             "base write failure must fail compaction"
         );
         let mut ids = t.list_segment_ids().unwrap();

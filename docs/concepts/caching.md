@@ -62,7 +62,7 @@ clobber each other.
       that file — still correct, only coarser.
 - **Push** writes just this run's segment (`--cache-push`) — its *slice* of the
   durations, flake events, and coverage index this run measured.
-- **Compact** (`--cache-compact`) folds segments into a new base and prunes
+- **Compact** (`cache-compact`) folds segments into a new base and prunes
   them; a segment already folded is recorded in the base's absorbed-id set, so
   compaction is safe against concurrent pushes.
 

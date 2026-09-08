@@ -93,7 +93,7 @@ nested workers. Remove it at your convenience and pass `-n` to rstest.
   differently ("Different tests were collected..."); rstest verifies by
   hash and refuses BEFORE misassigning — and its error names the cause
   (usually a randomizing plugin without a fixed seed). `rstest
-  --migrate-check` finds this *before* the first run: it collects twice,
+  migrate-check` finds this *before* the first run: it collects twice,
   diffs the id sets, and names the exact `parametrize` site with the
   unstable id (memory address / uuid) — see
   [migrate-check](migrate-from-pytest.md#the-migrate-check-preflight).
@@ -110,3 +110,7 @@ nested workers. Remove it at your convenience and pass `-n` to rstest.
   view (result lines, inline failures, progress bar) *under the pool* —
   pytest-sugar is disabled under xdist because workers can't share the
   terminal; rstest renders it orchestrator-side instead.
+
+Numerics/ML suites carrying over from xdist: the same per-worker RNG seeding and
+BLAS/`OMP_NUM_THREADS` oversubscription concerns apply here as under xdist — see
+[Numeric determinism](parallel-safety.md#numeric-determinism-ml-numerics-suites).

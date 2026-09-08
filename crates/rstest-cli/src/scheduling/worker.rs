@@ -16,6 +16,11 @@ pub struct WorkerEnv {
     pub run_uid: String,
     /// Enable cpu/fixture instrumentation in the worker's shim plugin.
     pub doctor: bool,
+    /// Per-test timeout in seconds (--timeout): the worker interrupts a test
+    /// whose call phase overruns. None = disabled.
+    pub timeout: Option<f64>,
+    /// Enable per-test thread/fd leak measurement (--doctor or --fail-on-leak).
+    pub leakcheck: bool,
     /// For a lone worker: ship the full id/location payload from collection
     /// (pooled workers derive this from their index instead).
     pub send_ids: bool,
@@ -30,11 +35,14 @@ pub struct Worker {
     reader: Option<EventReader>,
 }
 
+/// The read half of a worker's event pipe, split off from [`Worker`] so a
+/// reader thread can own it while the orchestrator keeps the write half.
 pub struct EventReader {
     events: rmp_serde::Deserializer<rmp_serde::decode::ReadReader<BufReader<File>>>,
 }
 
 impl EventReader {
+    /// Block for the next msgpack [`proto::Event`] from the worker.
     pub fn recv(&mut self) -> Result<proto::Event> {
         use serde::Deserialize;
         proto::Event::deserialize(&mut self.events).context("reading worker event")
@@ -46,15 +54,24 @@ impl EventReader {
 /// or inherited (pytest renders: --co, -s, --pdb).
 #[derive(Clone, Copy, PartialEq)]
 pub enum Stdio {
+    /// Suppress worker stdio; the orchestrator renders output itself.
     Null,
+    /// Let the worker inherit stdio so pytest renders directly (`--co`, `-s`,
+    /// `--pdb`).
     Inherit,
 }
 
 impl Worker {
+    /// Spawn a worker with its stdio suppressed (the common case; the
+    /// orchestrator renders output). `worker` is `(index, count)` in a pool,
+    /// or `None` for the lone single-worker session.
     pub fn spawn(python: &Path, worker: Option<(usize, usize)>, env: &WorkerEnv) -> Result<Self> {
         Self::spawn_with_io(python, worker, Stdio::Null, env)
     }
 
+    /// Spawn a worker, choosing whether its stdio is suppressed or inherited
+    /// (see [`Stdio`]). Sets up the two dedicated pipes and the child's
+    /// per-run environment.
     pub fn spawn_with_io(
         python: &Path,
         worker: Option<(usize, usize)>,
@@ -64,18 +81,18 @@ impl Worker {
         // cmd: parent writes -> child reads; evt: child writes -> parent reads.
         let cmd = transport::pipe()?;
         let evt = transport::pipe()?;
-        transport::prepare_parent_end(cmd.write)?;
-        transport::prepare_parent_end(evt.read)?;
-        transport::prepare_child_end(cmd.read)?;
-        transport::prepare_child_end(evt.write)?;
+        transport::prepare_parent_end(cmd.write.raw())?;
+        transport::prepare_parent_end(evt.read.raw())?;
+        transport::prepare_child_end(cmd.read.raw())?;
+        transport::prepare_child_end(evt.write.raw())?;
 
         let mut command = Command::new(python);
         command
             .args([
                 "-m",
                 "rstest_worker",
-                &cmd.read.to_string(),
-                &evt.write.to_string(),
+                &cmd.read.raw().to_string(),
+                &evt.write.raw().to_string(),
             ])
             .env("PYTHONPATH", worker_pythonpath())
             // Run-wide params ride the CHILD's environment (thread-safe), never
@@ -91,6 +108,12 @@ impl Worker {
             });
         if env.doctor {
             command.env("RSTEST_DOCTOR", "1");
+        }
+        if let Some(secs) = env.timeout {
+            command.env("RSTEST_TIMEOUT", secs.to_string());
+        }
+        if env.leakcheck {
+            command.env("RSTEST_LEAKCHECK", "1");
         }
         // Exactly one worker ships the full id list (D5); the rest verify their
         // collection by count+hash. Worker 0 in a pool; the lone worker only
@@ -116,11 +139,13 @@ impl Worker {
             .spawn()
             .with_context(|| format!("spawning worker: {}", python.display()))?;
 
-        // Close the child's ends in the parent or EOF detection breaks.
-        transport::close(cmd.read);
-        transport::close(evt.write);
-        let cmd_w = transport::into_file(cmd.write);
-        let evt_r = transport::into_file(evt.read);
+        // Close the child's ends in the parent or EOF detection breaks
+        // (Endpoint::drop calls transport::close). The parent ends become
+        // Files, which own the raw endpoint from here on.
+        drop(cmd.read);
+        drop(evt.write);
+        let cmd_w = transport::into_file(cmd.write.into_raw());
+        let evt_r = transport::into_file(evt.read.into_raw());
         Ok(Self {
             child,
             cmd_w,
@@ -130,6 +155,7 @@ impl Worker {
         })
     }
 
+    /// Send one msgpack [`proto::Command`] down the worker's command pipe.
     pub fn send(&mut self, cmd: &proto::Command) -> Result<()> {
         let buf = rmp_serde::encode::to_vec_named(cmd)?;
         self.cmd_w.write_all(&buf)?;
@@ -143,6 +169,8 @@ impl Worker {
         self.reader.take().context("event reader already detached")
     }
 
+    /// Block for the next event on the still-attached reader. Errors if the
+    /// reader was detached via [`Worker::take_reader`].
     pub fn recv(&mut self) -> Result<proto::Event> {
         self.reader
             .as_mut()
@@ -150,6 +178,7 @@ impl Worker {
             .recv()
     }
 
+    /// Ask the worker to exit cleanly (send `Shutdown`, then reap it).
     pub fn shutdown(mut self) -> Result<()> {
         self.send(&proto::Command::Shutdown)?;
         self.child.wait()?;
@@ -167,13 +196,56 @@ impl Worker {
         self.child.wait()?;
         Ok(())
     }
+
+    /// Kill (if still running) and reap the child in place. Unlike [`Worker::wait`]
+    /// this borrows `&mut self`, so a state slot that must stay in the pool's vec
+    /// (marked dead, awaiting end-of-run cleanup) can be reaped immediately rather
+    /// than lingering as an orphan / `<defunct>` zombie until then. Idempotent: a
+    /// later `wait()` on the already-reaped child returns the cached `ExitStatus`
+    /// (`std::process::Child::wait` stores it on first success and never calls
+    /// `waitpid` again), so the end-of-run cleanup double-wait is safe.
+    pub fn reap(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// RAII owner for one raw pipe endpoint (a file descriptor on unix, a HANDLE
+/// on Windows). Closes on drop so an early return between `transport::pipe()`
+/// and a successful `spawn()` can't leak the endpoint. Call [`Endpoint::into_raw`]
+/// to defuse it when ownership is deliberately handed off (the child inherits
+/// it, or it becomes a parent-side `File`).
+struct Endpoint(Option<u64>);
+
+impl Endpoint {
+    fn new(raw: u64) -> Self {
+        Endpoint(Some(raw))
+    }
+
+    /// The raw value, without giving up ownership (for fcntl/argv/etc.).
+    fn raw(&self) -> u64 {
+        self.0.expect("endpoint used after into_raw")
+    }
+
+    /// Take ownership of the raw value; drop no longer closes it.
+    fn into_raw(mut self) -> u64 {
+        self.0.take().expect("endpoint already taken")
+    }
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        if let Some(raw) = self.0.take() {
+            transport::close(raw);
+        }
+    }
 }
 
 /// Endpoint values are numeric and platform-meaningful: file descriptors
 /// on unix, HANDLEs on Windows.
 struct Pipe {
-    read: u64,
-    write: u64,
+    read: Endpoint,
+    write: Endpoint,
 }
 
 #[cfg(unix)]
@@ -187,12 +259,14 @@ mod transport {
 
     pub fn pipe() -> Result<Pipe> {
         let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a valid 2-element array; libc::pipe writes exactly
+        // two fds into it. Return value is checked before the fds are read.
         if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
             return Err(std::io::Error::last_os_error()).context("pipe()");
         }
         Ok(Pipe {
-            read: fds[0] as u64,
-            write: fds[1] as u64,
+            read: super::Endpoint::new(fds[0] as u64),
+            write: super::Endpoint::new(fds[1] as u64),
         })
     }
 
@@ -200,8 +274,14 @@ mod transport {
     /// detection breaks.
     pub fn prepare_parent_end(fd: u64) -> Result<()> {
         let fd = fd as i32;
+        // SAFETY: F_GETFD reads the fd's flags; `fd` is a live pipe endpoint
+        // owned by an Endpoint. Result checked for the -1 error sentinel below.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error()).context("fcntl(F_GETFD)");
+        }
+        // SAFETY: F_SETFD writes the flag int back to the same live `fd`.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
             return Err(std::io::Error::last_os_error()).context("fcntl(FD_CLOEXEC)");
         }
         Ok(())
@@ -213,10 +293,14 @@ mod transport {
     }
 
     pub fn close(fd: u64) {
+        // SAFETY: `fd` is a live pipe endpoint whose ownership is being given
+        // up here (the caller is an Endpoint that no longer uses it).
         unsafe { libc::close(fd as i32) };
     }
 
     pub fn into_file(fd: u64) -> File {
+        // SAFETY: `fd` is a live, owned pipe endpoint; ownership transfers to
+        // the returned File (its Drop will close it exactly once).
         unsafe { File::from_raw_fd(fd as i32) }
     }
 }
@@ -242,13 +326,16 @@ mod transport {
     pub fn pipe() -> Result<Pipe> {
         let mut read: HANDLE = std::ptr::null_mut();
         let mut write: HANDLE = std::ptr::null_mut();
+        // SAFETY: `read`/`write` are valid out-pointers; CreatePipe fills them
+        // with two handles. Null security attrs = default. Return value checked
+        // before the handles are used.
         let ok = unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 0) };
         if ok == 0 {
             bail!("CreatePipe failed: {}", std::io::Error::last_os_error());
         }
         Ok(Pipe {
-            read: read as u64,
-            write: write as u64,
+            read: super::Endpoint::new(read as u64),
+            write: super::Endpoint::new(write as u64),
         })
     }
 
@@ -262,6 +349,8 @@ mod transport {
     /// with bInheritHandles=TRUE when stdio is configured (it is: stdout
     /// is always set), so inheritable handles reach the child.
     pub fn prepare_child_end(handle: u64) -> Result<()> {
+        // SAFETY: `handle` is a live pipe endpoint owned by an Endpoint;
+        // SetHandleInformation only flips its inherit flag. Return value checked.
         let ok = unsafe {
             SetHandleInformation(handle as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
         };
@@ -275,10 +364,14 @@ mod transport {
     }
 
     pub fn close(handle: u64) {
+        // SAFETY: `handle` is a live pipe endpoint whose ownership is being
+        // given up here (the Endpoint no longer uses it).
         unsafe { CloseHandle(handle as HANDLE) };
     }
 
     pub fn into_file(handle: u64) -> File {
+        // SAFETY: `handle` is a live, owned pipe endpoint; ownership transfers
+        // to the returned File (its Drop closes it exactly once).
         unsafe { File::from_raw_handle(handle as *mut _) }
     }
 }
@@ -287,8 +380,19 @@ mod transport {
 /// package in <repo>/python/. Installed wheels ship the package inside
 /// site-packages instead, making this a no-op.
 pub fn worker_pythonpath() -> String {
+    build_pythonpath(
+        std::env::var("RSTEST_WORKER_PATH").ok().as_deref(),
+        std::env::var("PYTHONPATH").ok().as_deref(),
+    )
+}
+
+/// Pure join logic behind [`worker_pythonpath`], split out so tests can exercise
+/// the explicit-override + PYTHONPATH ordering without mutating process-global
+/// env (`set_var` races other tests and is `unsafe` in edition 2024). The
+/// `current_exe`-derived dev path is read-only, so it stays inline.
+fn build_pythonpath(explicit: Option<&str>, existing_pythonpath: Option<&str>) -> String {
     let mut paths: Vec<PathBuf> = Vec::new();
-    if let Ok(explicit) = std::env::var("RSTEST_WORKER_PATH") {
+    if let Some(explicit) = explicit {
         paths.push(PathBuf::from(explicit));
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -299,12 +403,143 @@ pub fn worker_pythonpath() -> String {
             }
         }
     }
-    if let Ok(existing) = std::env::var("PYTHONPATH") {
-        for p in std::env::split_paths(&existing) {
+    if let Some(existing) = existing_pythonpath {
+        for p in std::env::split_paths(existing) {
             paths.push(p);
         }
     }
     std::env::join_paths(paths)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Endpoint;
+
+    #[test]
+    fn endpoint_into_raw_takes_ownership_without_closing() {
+        // A fake, never-opened raw value: raw() reads it, into_raw() hands it
+        // off and defuses Drop (no close of an fd we don't own).
+        let e = Endpoint::new(0xDEAD_BEEF);
+        assert_eq!(e.raw(), 0xDEAD_BEEF);
+        assert_eq!(e.into_raw(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn worker_pythonpath_includes_explicit_override() {
+        // The explicit override is pushed first, so it must appear in the joined
+        // result. Exercises build_pythonpath directly to avoid mutating the
+        // process-global RSTEST_WORKER_PATH (which would race parallel tests).
+        let sentinel = "/tmp/rstest-pp-sentinel";
+        let pp = super::build_pythonpath(Some(sentinel), None);
+        assert!(
+            pp.contains(sentinel),
+            "PYTHONPATH {pp:?} missing explicit override {sentinel:?}"
+        );
+    }
+
+    // fcntl(F_GETFD) on an fd that was never opened fails with EBADF, driving
+    // the parent-end error path. F_SETFD's own failure branch is left uncovered
+    // (no way to make GETFD succeed but SETFD fail on the same live fd).
+    #[cfg(unix)]
+    #[test]
+    fn prepare_parent_end_errors_on_a_bad_fd() {
+        // A high fd number that is not open in the test process.
+        let err = super::transport::prepare_parent_end(1_000_000).unwrap_err();
+        assert!(err.to_string().contains("F_GETFD"), "{err}");
+    }
+
+    #[cfg(unix)]
+    use super::{Worker, WorkerEnv};
+    #[cfg(unix)]
+    use std::path::{Path, PathBuf};
+
+    /// A repo python that can import pytest + rstest_worker, plus the worker
+    /// PYTHONPATH root. None => skip (no suitable interpreter present).
+    #[cfg(unix)]
+    fn worker_python() -> Option<(PathBuf, PathBuf)> {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)?
+            .to_path_buf();
+        let worker_path = repo.join("python");
+        let candidates = [
+            std::env::var("RSTEST_TEST_PYTHON").ok().map(PathBuf::from),
+            Some(repo.join(".venv/bin/python")),
+        ];
+        for cand in candidates.into_iter().flatten() {
+            if !cand.exists() {
+                continue;
+            }
+            let ok = std::process::Command::new(&cand)
+                .args(["-c", "import pytest, rstest_worker"])
+                .env("PYTHONPATH", &worker_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return Some((cand, worker_path));
+            }
+        }
+        None
+    }
+
+    /// Whether `pid` still exists. A zombie (killed but un-reaped) still counts
+    /// as alive here — signal 0 succeeds until the parent `wait()`s it away.
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 performs no action; it only probes whether `pid`
+        // is a live, signalable process. Touches no memory.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// Both pools' respawn arm reaps the old worker with `kill()` + `wait()`
+    /// before replacing it: a decode-error respawn can leave the child alive,
+    /// and `Child`'s drop neither kills nor waits. After kill+wait the pid must
+    /// be GONE (ESRCH) — a `<defunct>` zombie would still answer `kill(pid, 0)`,
+    /// so this asserts the reaping `wait()`, not merely the `kill()`.
+    #[cfg(unix)]
+    #[test]
+    fn kill_then_wait_reaps_the_worker_child() {
+        let Some((python, worker_path)) = worker_python() else {
+            eprintln!("skipping reap test: no python with pytest found");
+            return;
+        };
+        // Point production `worker_pythonpath()` at the repo package. SAFETY:
+        // edition 2021; every worker-spawning test writes this same repo path,
+        // so concurrent writes converge on one value (no divergent read). Left
+        // set on exit, matching serve.rs's live-worker tests.
+        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+
+        let env = WorkerEnv {
+            run_uid: format!("reap-{}", std::process::id()),
+            doctor: false,
+            timeout: None,
+            leakcheck: false,
+            send_ids: false,
+        };
+        // A freshly spawned worker blocks on its first command: alive, and never
+        // sent anything — the decode-error/respawn precondition (child still
+        // running against the pipe, not a clean exit).
+        let mut worker = Worker::spawn(&python, None, &env).expect("spawn worker");
+        let pid = worker.child.id();
+        assert!(alive(pid), "worker should be alive right after spawn");
+
+        // Exactly what the respawn arm now does with the old worker.
+        worker.kill();
+        let _ = worker.wait();
+
+        // wait() returning is itself proof the child was reaped; the alive()
+        // probe is the observable proxy. It can in theory false-fail if the
+        // kernel recycles `pid` to another live process between wait() and the
+        // probe, but this thread spawns nothing after wait(), so that window is
+        // negligible (and reuse can only spuriously fail, never falsely pass).
+        assert!(
+            !alive(pid),
+            "worker pid {pid} still present after kill+wait -> orphan or <defunct> zombie"
+        );
+    }
 }

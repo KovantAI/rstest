@@ -1,4 +1,4 @@
-//! `--migrate-check`: the parallel-readiness preflight (M1) orchestrator.
+//! `migrate-check`: the parallel-readiness preflight (M1) orchestrator.
 //!
 //! Collects the suite twice in fresh sessions and diffs the id sets; ids
 //! present in only one are run-to-run unstable. Per-process-unstable ones
@@ -14,6 +14,7 @@ use super::classify::{
     bisect_polluter, classify, classify_failures, split_param, Kind, Polluter, Verdict,
 };
 use super::{collect_ids, run_session};
+use crate::reporting::sink::Sink;
 
 /// Run the migration preflight. Exit code: 0 = ready, 1 = at least one blocker
 /// (WILL-bail id or parallel-only failure). `json_path` writes findings as JSON.
@@ -23,9 +24,10 @@ pub fn run_migrate_check(
     args: &[String],
     json_path: Option<&Path>,
     allow: &[String],
+    sink: &mut Sink,
 ) -> Result<i32> {
     let allowed = |s: &str| allow.iter().any(|p| s.contains(p.as_str()));
-    eprintln!("rstest migrate-check: collecting twice to detect unstable test ids…");
+    sink.warn("rstest migrate-check: collecting twice to detect unstable test ids…");
     let run1 = collect_ids(python, args)?;
     let run2 = collect_ids(python, args)?;
 
@@ -40,10 +42,10 @@ pub fn run_migrate_check(
         .filter(|id| !(set1.contains(id) && set2.contains(id)))
         .collect();
 
-    println!(
+    sink.out_line(&format!(
         "suite: {} tests collected, {stable} stable across both runs",
         union.len()
-    );
+    ));
 
     // Group by site; per site track the worst Kind and a sample param.
     struct Acc {
@@ -106,14 +108,14 @@ pub fn run_migrate_check(
     };
 
     if unstable.is_empty() {
-        println!("  UNSTABLE NODEIDS: none — collection is reproducible.\n");
+        sink.out_line("  UNSTABLE NODEIDS: none — collection is reproducible.\n");
     } else {
-        println!(
+        sink.out_line(&format!(
             "  UNSTABLE NODEIDS: {} across {} sites ({} per-process => WILL bail at -n auto)\n",
             unstable.len(),
             by_site.len(),
             will_bail_total
-        );
+        ));
         for (site, acc) in &by_site {
             let kinds: Vec<String> = acc.counts.iter().map(|(k, n)| format!("{k}:{n}")).collect();
             let will = acc.counts.keys().any(|k| *k == "address" || *k == "uuid");
@@ -123,19 +125,17 @@ pub fn run_migrate_check(
                 "may bail (timing)"
             };
             let mut sample = acc.sample.clone();
-            if sample.len() > 90 {
-                sample.truncate(90);
-            }
-            println!("  {site}");
-            println!("    {}   -> {verdict}", kinds.join(", "));
-            println!("    e.g. [{sample}]");
-            println!("    FIX (upstream): {}", acc.worst.fix());
+            crate::text::truncate_on_boundary(&mut sample, 90);
+            sink.out_line(&format!("  {site}"));
+            sink.out_line(&format!("    {}   -> {verdict}", kinds.join(", ")));
+            sink.out_line(&format!("    e.g. [{sample}]"));
+            sink.out_line(&format!("    FIX (upstream): {}", acc.worst.fix()));
             if will {
-                println!("    STOPGAP (rstest): -n 0\n");
+                sink.out_line("    STOPGAP (rstest): -n 0\n");
             } else {
-                println!(
+                sink.out_line(
                     "    STOPGAP (rstest): usually runs at -n auto (the id is stable enough \
-                     within a run); -n 0 only if it bails\n"
+                     within a run); -n 0 only if it bails\n",
                 );
             }
         }
@@ -151,12 +151,12 @@ pub fn run_migrate_check(
                 acc.counts.keys().any(|k| *k == "address" || *k == "uuid") && !allowed(site)
             })
             .count();
-        println!(
+        sink.out_line(&format!(
             "==> {will_bail_total} per-process-unstable id(s) force -n 0. Fix these (stable ids=) \
              before parallel will run; skipping the parallel check."
-        );
+        ));
         if blocking == 0 {
-            println!("    (all allow-listed — gate passes.)");
+            sink.out_line("    (all allow-listed — gate passes.)");
         }
         return finish(
             false,
@@ -166,15 +166,20 @@ pub fn run_migrate_check(
     }
 
     // Phase 2: run -n auto and classify any parallel-only failures.
-    eprintln!("rstest migrate-check: running -n auto to check parallel behaviour…");
+    sink.warn("rstest migrate-check: running -n auto to check parallel behaviour…");
     let par = run_session(&[], args)?;
     if par.is_empty() {
-        println!("PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.");
+        sink.out_line(
+            "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
+        );
         return finish(false, serde_json::json!({ "ran": false }), 1);
     }
-    let verdicts = classify_failures(args, &par)?;
+    let verdicts = classify_failures(args, &par, sink)?;
     if verdicts.is_empty() {
-        println!("PARALLEL: ready — {} tests pass at -n auto.", par.len());
+        sink.out_line(&format!(
+            "PARALLEL: ready — {} tests pass at -n auto.",
+            par.len()
+        ));
         return finish(
             true,
             serde_json::json!({ "ran": true, "ready": true, "findings": [], "preexisting": 0 }),
@@ -194,12 +199,12 @@ pub fn run_migrate_check(
         .collect();
 
     if migration.is_empty() {
-        println!("PARALLEL: ready — every test that passes at -n 0 also passes at -n auto.");
+        sink.out_line("PARALLEL: ready — every test that passes at -n 0 also passes at -n auto.");
         if preexisting > 0 {
-            println!(
+            sink.out_line(&format!(
                 "  ({preexisting} test(s) already fail at -n 0 — pre-existing, not a parallelism \
                  issue; see `rstest -n 0`.)"
-            );
+            ));
         }
         return finish(
             true,
@@ -219,7 +224,9 @@ pub fn run_migrate_check(
         .collect();
     if !victims.is_empty() {
         let n = victims.len().min(BISECT_CAP);
-        eprintln!("  bisecting the polluting file for {n} victim(s)…");
+        sink.warn(&format!(
+            "  bisecting the polluting file for {n} victim(s)…"
+        ));
         for victim in victims.iter().take(BISECT_CAP) {
             polluter.insert(victim, bisect_polluter(args, victim, &par)?);
         }
@@ -231,40 +238,40 @@ pub fn run_migrate_check(
         by_verdict.entry(v.title()).or_default().push(nodeid);
         advice.entry(v.title()).or_insert_with(|| v.advice());
     }
-    println!(
+    sink.out_line(&format!(
         "PARALLEL: {} test(s) fail only under parallelism, classified:\n",
         migration.len()
-    );
+    ));
     for (title, tests) in &by_verdict {
         let (why, fix) = advice[title];
-        println!("  {title} ({} test(s))", tests.len());
-        println!("    {why}");
-        println!("    FIX: {fix}");
+        sink.out_line(&format!("  {title} ({} test(s))", tests.len()));
+        sink.out_line(&format!("    {why}"));
+        sink.out_line(&format!("    FIX: {fix}"));
         for t in tests.iter().take(8) {
             let tag = if allowed(t) { "  (allowed)" } else { "" };
             match polluter.get(*t) {
                 Some(Polluter::OtherFile(f)) => {
-                    println!("      {t}{tag}\n        POLLUTED BY: {f}")
+                    sink.out_line(&format!("      {t}{tag}\n        POLLUTED BY: {f}"))
                 }
-                Some(Polluter::SameFile(f)) => {
-                    println!("      {t}{tag}\n        SAME-FILE co-location (inspect {f})")
-                }
-                Some(Polluter::NotReproducible) => println!(
+                Some(Polluter::SameFile(f)) => sink.out_line(&format!(
+                    "      {t}{tag}\n        SAME-FILE co-location (inspect {f})"
+                )),
+                Some(Polluter::NotReproducible) => sink.out_line(&format!(
                     "      {t}{tag}\n        (not reproducible serially — likely a \
                      concurrent-resource race, not state pollution)"
-                ),
-                None => println!("      {t}{tag}"),
+                )),
+                None => sink.out_line(&format!("      {t}{tag}")),
             }
         }
         if tests.len() > 8 {
-            println!("      … and {} more", tests.len() - 8);
+            sink.out_line(&format!("      … and {} more", tests.len() - 8));
         }
-        println!();
+        sink.out_line("");
     }
     if preexisting > 0 {
-        println!(
+        sink.out_line(&format!(
             "  (plus {preexisting} test(s) already failing at -n 0 — pre-existing, not shown.)"
-        );
+        ));
     }
 
     let json_findings: Vec<serde_json::Value> = migration
@@ -296,10 +303,10 @@ pub fn run_migrate_check(
     // Gate: fail only on findings that aren't allow-listed.
     let blocking = migration.iter().filter(|(n, _)| !allowed(n)).count();
     if blocking == 0 {
-        println!(
+        sink.out_line(&format!(
             "  (all {} finding(s) allow-listed — gate passes.)",
             migration.len()
-        );
+        ));
     }
     finish(
         false,
