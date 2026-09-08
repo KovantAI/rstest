@@ -14,6 +14,8 @@ This module is the session entrypoint. The moving parts live alongside it:
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from rstest_worker._internal import fixturecompat
@@ -37,13 +39,32 @@ __all__ = [
 ]
 
 
+def _prime_coverage_core(args: list[str]) -> None:
+    """Force coverage's C trace core when per-test contexts are requested.
+
+    Python 3.14 makes `sysmon` (sys.monitoring) coverage's default measurement
+    core. sysmon does NOT support DYNAMIC contexts (`--cov-context=test`): a
+    line executed by two tests keeps only the FIRST test's context and coverage
+    emits a `no-sysmon-context` warning. That silently corrupts the line->test
+    index rstest builds for coverage-based `--changed` selection. The C tracer
+    (`ctrace`, coverage's default before 3.14) supports dynamic contexts, so
+    pin it here unless the user chose a core themselves.
+    """
+    if os.environ.get("COVERAGE_CORE"):
+        return
+    if any(a == "--cov-context" or a.startswith("--cov-context=") for a in args):
+        os.environ["COVERAGE_CORE"] = "ctrace"
+
+
 def run_session(args: list[str], conn) -> int:
     """Item-dispatch session (pool mode)."""
+    _prime_coverage_core(args)
     return _contained(lambda: pytest.main(list(args), plugins=[ItemDispatchPlugin(conn)]), conn)
 
 
 def run_lazy_session(args: list[str], conn) -> int:
     """Lazy-collection session (pool mode, --collect lazy)."""
+    _prime_coverage_core(args)
     return _contained(lambda: pytest.main(list(args), plugins=[LazyDispatchPlugin(conn)]), conn)
 
 
@@ -55,6 +76,7 @@ def run(args: list[str], conn) -> int:
     into (pytest-django, sugar, instafail...). Its output is harmless: worker
     stdout is /dev/null by orchestrator decree.
     """
+    _prime_coverage_core(args)
     return _contained(lambda: pytest.main(list(args), plugins=[StreamPlugin(conn)]), conn)
 
 
