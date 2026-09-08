@@ -367,3 +367,56 @@ def test_logreport_omits_lineno_when_location_lineno_none():
     p = _plugin()
     p.pytest_runtest_logreport(mk_report("call", "passed", location=("t.py", None, "a")))
     assert "lineno" not in p._conn.sent[0][1]
+
+
+# ── _init_xdist_node: per-plugin configure_node sweep ──────────────────────
+
+
+def test_init_xdist_node_configures_each_plugin(monkeypatch):
+    p = _plugin()
+    seen: list[Any] = []
+    monkeypatch.setattr(p, "_call_configure_node", lambda pl, lenient=False: seen.append(pl))
+    a, b = object(), object()
+    config = SimpleNamespace(
+        workerinput={},
+        pluginmanager=SimpleNamespace(get_plugins=lambda: [a, b]),
+    )
+    p._init_xdist_node(config, "gw0")
+    assert seen == [a, b]
+
+
+# ── _call_node_hooks: dist-internal plugins are skipped ────────────────────
+
+
+def test_call_node_hooks_skips_dist_internal(monkeypatch):
+    monkeypatch.setattr(stream, "_is_dist_internal", lambda pl: True)
+    p = _plugin()
+    p._xdist_node = SimpleNamespace(workerid="gw0")
+    plugin = SimpleNamespace(pytest_testnodeready=lambda node: pytest.fail("called"))
+    config = SimpleNamespace(pluginmanager=SimpleNamespace(get_plugins=lambda: [plugin]))
+    p._call_node_hooks(config, "pytest_testnodeready")  # skipped, no call
+
+
+# ── pytest_collectreport / pytest_internalerror: collect wire messages ─────
+
+
+def test_collectreport_ships_error_on_failure():
+    p = _plugin()
+    p.pytest_collectreport(
+        SimpleNamespace(failed=True, skipped=False, nodeid="t.py", longreprtext="boom")
+    )
+    assert p._conn.sent == [("collect_error", {"path": "t.py", "longrepr": "boom"})]
+
+
+def test_collectreport_ships_skip_on_skipped():
+    p = _plugin()
+    p.pytest_collectreport(
+        SimpleNamespace(failed=False, skipped=True, nodeid="t.py", longreprtext="")
+    )
+    assert p._conn.sent == [("collect_skip", {"path": "t.py"})]
+
+
+def test_internalerror_ships_collect_error():
+    p = _plugin()
+    p.pytest_internalerror("kaboom")
+    assert p._conn.sent == [("collect_error", {"path": "<internalerror>", "longrepr": "kaboom"})]
