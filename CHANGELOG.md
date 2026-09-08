@@ -5,6 +5,13 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+## 0.6.1 — 2026-09-08
+
+- The worker record file (`rstest-pytest-record.json`, or the path in
+  `RSTEST_RECORD`) is now written atomically: the recorder writes to a
+  `.tmp` sibling and `os.replace`s it into place, so a concurrent reader
+  never observes a truncated or partially written JSON document.
+
 ## 0.6.0 — 2026-09-07
 
 - **BREAKING — run-less modes are now subcommands, not flags.** The four

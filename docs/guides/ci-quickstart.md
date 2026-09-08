@@ -10,7 +10,7 @@ smarter when persisted between runs.
 
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin a version (`pip install rstest==0.6.0` or `rstest~=0.3`) or install
+    pin a version (`pip install rstest==0.6.1` or `rstest~=0.3`) or install
     from your lockfile.
 
 ## GitHub Actions
@@ -235,7 +235,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
-      - run: pip install -r requirements.txt && pip install rstest==0.6.0
+      - run: pip install -r requirements.txt && pip install rstest==0.6.1
 
       # The cache is what makes run two fast. Unique key per run (actions/cache
       # never re-saves an existing key); restore-keys picks the newest match.
@@ -346,7 +346,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
-      - run: pip install -r requirements.txt && pip install rstest==0.6.0
+      - run: pip install -r requirements.txt && pip install rstest==0.6.1
 
       # Warm this project's shared cache from the latest successful main run.
       - name: resolve warm-cache run
@@ -642,7 +642,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.6.0             # pin a released tag
+    rev: v0.6.1             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```
