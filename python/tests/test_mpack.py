@@ -160,3 +160,93 @@ def test_pure_decoder_reads_float32_and_wide_ints():
     got = list(up)
     assert got[0] == {"a": 1}
     assert isinstance(got[1], float) and abs(got[1] - 3.1415927) < 1e-6
+
+
+# ---- pure codec: bin / wide str / wide containers round-trips ---------------
+# These exercise the encode widths and their matching decode paths the SAMPLE
+# message never reaches: bin*, str32, array16/32, map16/32.
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        b"",  # bin8, empty
+        b"abc",  # bin8
+        b"z" * 300,  # bin16 (crosses 0xFF)
+        b"z" * 70000,  # bin32 (crosses 0xFFFF)
+        bytearray(b"mutable"),  # bytearray takes the same branch, decodes to bytes
+    ],
+)
+def test_pure_roundtrip_binary(value):
+    assert _pure_roundtrip(value) == bytes(value)
+
+
+def test_pure_roundtrip_str32():
+    s = "u" * 70000  # crosses str16 -> str32
+    assert _pure_roundtrip(s) == s
+
+
+def test_pure_roundtrip_array16_and_array32():
+    a16 = list(range(16))  # fixarray -> array16
+    a32 = list(range(0x10000))  # array16 -> array32
+    assert _pure_roundtrip(a16) == a16
+    assert _pure_roundtrip(a32) == a32
+
+
+def test_pure_roundtrip_map16_and_map32():
+    m16 = {str(i): i for i in range(16)}  # fixmap -> map16
+    m32 = {str(i): i for i in range(0x10000)}  # map16 -> map32
+    assert _pure_roundtrip(m16) == m16
+    assert _pure_roundtrip(m32) == m32
+
+
+def test_pure_packb_rejects_oversized_negative_int():
+    with pytest.raises(ValueError):
+        mpack._pure_packb(-(2**63) - 1)  # past int64
+
+
+def test_pack_len_rejects_oversized_length():
+    # The overflow guard can't be reached via a real container (would need a
+    # >4G-element one), so drive the helper directly.
+    with pytest.raises(ValueError):
+        mpack._pack_len(bytearray(), 2**32, 0x90, b"\xdc", b"\xdd", 0x0F)
+
+
+def test_pure_decoder_rejects_unsupported_type_byte():
+    up = mpack._PureUnpacker()
+    up.feed(b"\xc1")  # 0xc1 is reserved; this protocol never emits it
+    with pytest.raises(ValueError):
+        next(iter(up))
+
+
+# ---- msgpack-backed wrappers ------------------------------------------------
+# The compiled backend, when present, is what `packb`/`Unpacker` actually bind
+# to; cover its thin adapter directly (independent of which backend is active).
+
+
+@pytest.mark.skipif(_msgpack is None, reason="msgpack not installed")
+def test_msgpack_packb_and_unpacker_roundtrip():
+    up = mpack._MsgpackUnpacker()
+    up.feed(mpack._msgpack_packb(SAMPLE))
+    assert next(iter(up)) == SAMPLE
+
+
+@pytest.mark.skipif(_msgpack is None, reason="msgpack not installed")
+def test_msgpack_unpacker_feed_translates_bufferfull():
+    up = mpack._MsgpackUnpacker(max_buffer_size=8)
+    with pytest.raises(mpack.BufferFull):
+        up.feed(mpack._msgpack_packb("longer than eight bytes for sure"))
+
+
+@pytest.mark.skipif(_msgpack is None, reason="msgpack not installed")
+def test_msgpack_unpacker_next_translates_bufferfull():
+    # msgpack raises BufferFull from feed, never from __next__, so stub the inner
+    # unpacker to prove the __next__ branch still remaps to our BufferFull.
+    class _Boom:
+        def __next__(self):
+            raise _msgpack.exceptions.BufferFull
+
+    up = mpack._MsgpackUnpacker()
+    up._u = _Boom()
+    with pytest.raises(mpack.BufferFull):
+        next(up)
