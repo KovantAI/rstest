@@ -124,7 +124,7 @@ def _pack(out: bytearray, obj: object) -> None:
         elif n <= 0xFFFFFFFF:
             out += b"\xdb"
             out += _PACK_U32.pack(n)
-        else:
+        else:  # pragma: no cover - a >4GiB str can't be built to exercise this
             raise ValueError("str too long for msgpack")
         out += data
     elif isinstance(obj, (bytes, bytearray)):
@@ -138,7 +138,7 @@ def _pack(out: bytearray, obj: object) -> None:
         elif n <= 0xFFFFFFFF:
             out += b"\xc6"
             out += _PACK_U32.pack(n)
-        else:
+        else:  # pragma: no cover - a >4GiB bytes can't be built to exercise this
             raise ValueError("bytes too long for msgpack")
         out += obj
     elif isinstance(obj, (list, tuple)):
