@@ -15,7 +15,8 @@ already does natively — it just wires it into GitHub Actions:
 | Machine-readable diagnostics | rstest `--doctor-json` / `--doctor-md` (pass via `args`) |
 | Fail CI on a doctor metric threshold | rstest `--doctor-fail-on` (this action's `doctor-fail-on` forwards to it) |
 | No silent skip when `--changed` finds nothing | rstest `--changed-strict` (`changed: strict`) |
-| Persist durations/flakes across runs | **this action** (GitHub cache; rstest has no remote cache yet) |
+| Merge durations/flakes/coverage across shards & PRs (no clobber) | rstest shared-cache backend (`--cache-remote`/`--cache-pull`/`--cache-push`); this action's `cache-backend` wires it turnkey |
+| Persist durations/flakes across runs (single job) | **this action** (`actions/cache`, the default `cache-backend`) |
 | Tolerate N% failures (real-LLM) | **this action** (`fail-under-ratio`) |
 | uv-native install/run | **this action** (`runner: auto`) |
 
@@ -83,8 +84,81 @@ steps:
 
 > Cross-shard JUnit merge (one gate over the whole suite) is a **workflow-level**
 > concern — each shard uploads its own JUnit; merge them in a downstream job.
-> All shards must restore the **same** duration cache to balance; seed it from
-> an authoritative unsharded run (see below).
+> All shards must restore the **same** duration cache to balance — the
+> `artifact` / `remote` cache backend below does this natively (each shard pushes
+> its segment; every job pulls the union), replacing the seed-from-unsharded-run
+> dance.
+
+## Warm cache as a service
+
+Duration-aware scheduling and sharding need warm timing data. In ephemeral CI
+the cache is cold every run unless persisted, so you pay cold-run scheduling
+forever. `cache-backend` productizes the [shared-cache
+backend](https://github.com/KovantAI/rstest/blob/main/docs/concepts/caching.md#shared-cache-backend):
+pull the authoritative baseline before the run, push this run's immutable
+segment after — **merge-on-read**, so concurrent shards and PRs never clobber and
+PR runs read newest-main.
+
+| `cache-backend` | Backend | When |
+|---|---|---|
+| `actions-cache` (default) | one blob per key via `actions/cache` | single unsharded job; no cross-shard merge |
+| `artifact` | GitHub artifacts, no external cloud, no secrets | the turnkey default for sharded / PR suites |
+| `remote` | object store or HTTP endpoint (`cache-remote`) | teams already on S3/GCS/R2 or a shared mount |
+
+### GitHub-native (no cloud, no secrets)
+
+Warms from the latest successful run on `warm-from-branch` (default `main`) and
+publishes each job's segment as an artifact. `actions: read` is what lets the
+warm step reach a **prior** run's artifacts (a plain download sees only the
+current run); `contents: read` is the checkout. No secrets, no external store:
+
+```yaml
+permissions: { contents: read, actions: read }
+strategy: { matrix: { shard: [1, 2, 3, 4] } }
+steps:
+  - uses: actions/checkout@v4
+  - uses: KovantAI/rstest/.github/actions/rstest@v1
+    with:
+      python-version: "3.13"
+      cache-backend: artifact
+      shard: ${{ matrix.shard }}
+      shard-total: 4
+      # optional: --changed reads the unioned coverage index
+      args: "-n auto --cov=<your_package> --cov-context=test --cov-report="
+```
+
+Run it on pushes to your default branch too, so those runs publish the segments
+PR jobs warm from. First run is cold (nothing to union) and seeds the cache.
+
+### Object store (S3 / GCS / HTTP) — OIDC, no secrets in the URL
+
+`cache-remote` drives the `aws` / `gcloud` CLI already on the runner (creds from
+the OIDC role); `http(s)://` uses `cache-remote-token`:
+
+```yaml
+permissions: { id-token: write, contents: read }
+steps:
+  - uses: aws-actions/configure-aws-credentials@v4
+    with: { role-to-assume: arn:aws:iam::…:role/ci, aws-region: us-east-1 }
+  - uses: KovantAI/rstest/.github/actions/rstest@v1
+    with:
+      python-version: "3.13"
+      cache-remote: s3://ci-cache/rstest        # gs://… or https://… too
+      cache-compact-threshold: "500"            # fold segments inline past N
+      shard: ${{ matrix.shard }}
+      shard-total: 4
+```
+
+Setting `cache-remote` selects the `remote` backend automatically. A shared
+mount (`cache-remote: /mnt/ci-cache/rstest`) needs no pull/push bookends beyond
+the flags. Add `durations-regress` + `require-baseline: true` to make a cold or
+failed pull a hard error instead of a silent green.
+
+`id-token: write` is for the OIDC role assumption; the assumed role needs
+`s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix (`Delete` only if
+`cache-compact-threshold` is set or you run a `cache-compact` job) — the
+[full permission table](https://github.com/KovantAI/rstest/blob/main/docs/concepts/caching.md#transports)
+covers GCS / Azure / HTTP.
 
 ## Inputs
 
@@ -96,8 +170,15 @@ steps:
 | `install` | `""` | install override; empty = infer from `runner` |
 | `version` | `""` | pin `rstest==X` (plain runner; uv uses the lockfile) |
 | `working-directory` | `.` | project root (monorepo) |
-| `cache` | `true` | restore/save `.rstest_cache` |
+| `cache` | `true` | restore/save `.rstest_cache` (`actions-cache` backend) |
 | `cache-key-prefix` | `rstest-cache` | bump to invalidate all cached baselines |
+| `cache-backend` | `actions-cache` | `actions-cache` / `artifact` / `remote` — see [Warm cache as a service](#warm-cache-as-a-service) |
+| `cache-remote` | `""` | dir / `file://` / `s3://` / `gs://` / `http(s)://` remote; non-empty ⇒ `remote` backend |
+| `cache-remote-token` | `""` | bearer for an `http(s)://` remote → `RSTEST_CACHE_REMOTE_TOKEN` |
+| `cache-compact-threshold` | `""` | `--cache-compact-threshold N`: fold loose segments inline on push past N (best-effort) |
+| `warm-from-branch` | `main` | artifact backend: branch whose latest successful run seeds the warm cache |
+| `artifact-cache-dir` | `.rstest-rcache` | artifact backend: workspace dir segments materialize into |
+| `github-token` | job token | artifact backend: token for the cross-run resolve + download (needs `actions: read`) |
 | `output` | `github` | `--output` style (`github` gives annotations) |
 | `junit` | `junit.xml` | `--junitxml` path; empty = skip (required for the gate) |
 | `changed` | `false` | `false` / `true` / `strict` |

@@ -100,6 +100,13 @@ to own the cache. rstest's [shared-cache backend](../concepts/caching.md#shared-
 replaces both: every job pushes its own immutable **segment** and pulls the
 union — no single writer, no key hacks.
 
+!!! tip "Turnkey via the composite action"
+    On GitHub, the [`rstest` action](https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest#warm-cache-as-a-service)
+    wires the whole flow below for you: `cache-backend: artifact` does the
+    resolve-run → download-segments → run → upload-segment bookends natively, and
+    `cache-remote: s3://…` drives the object-store path. The hand-wired YAML here
+    is the reference for other CI systems (or if you want full control).
+
 **GitHub-native, no external cloud, no secrets.** `download-artifact@v4`'s
 `pattern` + `merge-multiple` is exactly the merge-all-segments primitive:
 
@@ -208,6 +215,21 @@ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --duratio
 
 (`actions/cache` is **not** recommended for this: one blob per key, it can't
 list-and-merge every segment — the exact limitation this design removes.)
+
+**Permissions.** The remote needs **list + read + write + delete** on the cache
+prefix — delete only when a job compacts (`--cache-compact-threshold` or a
+`cache-compact` step); pull/push-only jobs can drop it. Scope the credential to
+the prefix, not the whole bucket. Per backend
+([full table](../concepts/caching.md#transports)):
+
+| Backend | What to grant |
+|---|---|
+| GitHub `artifact` | workflow `permissions: { contents: read, actions: read }` (`actions: read` reaches the prior run's segments). Object store instead? add `id-token: write` for OIDC. |
+| S3 | role/keys with `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on `bucket/prefix/*` — via CodeBuild role, GitHub/CircleCI OIDC, or GitLab CI vars |
+| GCS | service account with `storage.objects.{list,get,create,delete}` on the bucket/prefix (`roles/storage.objectAdmin`) |
+| Azure Blob | `Storage Blob Data Contributor` on the container (dir-materialize via the `az` CLI) |
+| `http(s)://` | a token in `RSTEST_CACHE_REMOTE_TOKEN`; the endpoint enforces authz |
+| dir / shared mount | filesystem read+write+delete on the directory |
 
 ## Worked example: Django on ephemeral CI
 
@@ -461,6 +483,26 @@ across CodeBuild batch jobs, don't let each shard save: follow the
 read-only; one separate full job saves the fresh one), or the shards will
 race to write divergent duration caches and their partitions will drift.
 
+**Shared cache (sharding, no write race).** Drop the `cache:` block and the
+single-writer discipline entirely: the build's IAM role already reaches S3, so
+point [`--cache-remote`](../concepts/caching.md#shared-cache-backend) at a bucket
+and every batch shard pushes its own immutable segment (no clobber), pulls the
+union:
+
+```yaml
+build:
+  commands:
+    - rstest -n auto --shard "$SHARD/$SHARDS"
+        --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
+        --cache-compact-threshold 500 --junitxml "junit.$SHARD.xml"
+```
+
+`--cache-compact-threshold` folds the loose segments inline once they exceed N,
+so no maintenance job is needed. `gsutil rsync … ./rcache` + `--cache-remote
+./rcache` remains valid if you prefer materializing a dir. The build's service
+role needs `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix
+(`Delete` only for the inline compaction).
+
 ## Google Cloud Build
 
 Cloud Build likewise has no annotation protocol — it streams step logs
@@ -496,6 +538,28 @@ is not retained across builds. Colors auto-disable off-tty, so the log
 stays clean; the JUnit file is the machine-readable surface for any
 downstream test-reporting tool.
 
+**Shared cache (sharding, no rsync bookends).** The build's service account
+already reaches GCS, so point [`--cache-remote`](../concepts/caching.md#shared-cache-backend)
+straight at a `gs://` bucket — rstest drives the `gcloud storage` (or `gsutil`)
+CLI on the step, immutable segments make concurrent shard pushes safe, no
+start/end sync:
+
+```yaml
+steps:
+  - name: python:3.13
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r requirements.txt && pip install rstest
+        rstest -n auto --shard "$_SHARD/$_SHARDS" \
+          --cache-remote gs://$PROJECT_ID-ci-cache/rstest --cache-pull --cache-push \
+          --cache-compact-threshold 500 --junitxml junit.xml
+```
+
+The Cloud Build service account needs `storage.objects.{list,get,create,delete}`
+on the bucket/prefix (`roles/storage.objectAdmin` scoped to it).
+
 ## GitLab CI
 
 GitLab reads JUnit from the `artifacts:reports:junit` key to render the
@@ -529,6 +593,27 @@ test:
 `-n auto` uses the runner's cores; size the runner (or set `-n <k>`) to
 the parallelism you want. For a monorepo root, glob `junit.*.xml` in
 `artifacts:paths` and widen the cache to `**/.rstest_cache/`.
+
+**Shared cache (parallel matrix).** GitLab's `cache:` is one blob per key — it
+can't merge segments across `parallel:` jobs. For a duration-balanced matrix,
+use the [shared-cache backend](../concepts/caching.md#shared-cache-backend)
+against an object store the runner is authed to (S3/GCS/R2) or an authenticated
+`https://` endpoint (`RSTEST_CACHE_REMOTE_TOKEN`):
+
+```yaml
+test:
+  image: python:3.13
+  parallel: 4
+  before_script:
+    - pip install -r requirements.txt && pip install rstest
+  script:
+    - rstest -n auto --shard "$CI_NODE_INDEX/$CI_NODE_TOTAL"
+        --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
+        --cache-compact-threshold 500 --output gitlab --junitxml junit.xml
+  artifacts: { when: always, reports: { junit: junit.xml } }
+```
+
+A shared runner mount (`--cache-remote /cache/rstest`) needs no bookends at all.
 
 ## Azure Pipelines
 
@@ -568,6 +653,30 @@ steps:
       testResultsFormat: JUnit
       testResultsFiles: junit.xml
 ```
+
+**Shared cache (sharding).** rstest has no native Azure Blob transport — an
+`azblob://` remote is rejected loudly rather than silently written to a junk
+dir. Two supported paths:
+
+- **Materialize a dir** (works with any store): download the segments to a local
+  dir before the run, upload them after, and point `--cache-remote` at the dir.
+  The immutable, uniquely-named segments make the up/download safe across shards.
+
+  ```yaml
+  - script: |
+      az storage blob download-batch -d ./rcache -s ci-cache --pattern 'rstest/*' || true
+      rstest -n auto --shard "$(shard)/4" \
+        --cache-remote ./rcache --cache-pull --cache-push --junitxml junit.xml
+      az storage blob upload-batch -d ci-cache/rstest -s ./rcache/segments --overwrite
+    displayName: test (shared cache)
+  ```
+
+  The pipeline's service connection / managed identity needs **Storage Blob Data
+  Contributor** on the container (the `az` batch calls read, write, and delete).
+
+- **Authenticated `https://` endpoint** — front the store with a static file
+  server honoring the [listing contract](../concepts/caching.md#transports) and
+  use `--cache-remote https://… ` with `RSTEST_CACHE_REMOTE_TOKEN`.
 
 ## CircleCI
 
@@ -609,6 +718,19 @@ workflows:
 parallelism. Point `store_test_results` at a directory (not a single
 file) so a monorepo's `junit.*.xml` are all collected.
 
+**Shared cache (parallelism).** `save_cache`/`restore_cache` is one blob per key
+— it can't merge across `parallelism: N` containers. Point
+[`--cache-remote`](../concepts/caching.md#shared-cache-backend) at an object
+store the job is authed to (S3/GCS via a context or OIDC) so each container
+pushes its segment and pulls the union:
+
+```yaml
+- run: |
+    rstest -n auto --shard "$((CIRCLE_NODE_INDEX+1))/$CIRCLE_NODE_TOTAL" \
+      --cache-remote s3://ci-cache/rstest --cache-pull --cache-push \
+      --cache-compact-threshold 500 --junitxml test-results/junit.xml
+```
+
 ## Jenkins
 
 Jenkins renders JUnit via the [JUnit
@@ -642,6 +764,23 @@ Persist `.rstest_cache` between runs to keep scheduling warm — stash/unstash
 it, or use a shared workspace/volume on the agent. If you run a TAP harness
 instead, `--output tap` makes stdout a pure TAP 13 stream for the [TAP
 plugin](https://plugins.jenkins.io/tap/).
+
+**Shared cache (agents, sharding) — zero glue.** Jenkins agents usually share
+an NFS/volume mount, which *is* the [shared-cache
+remote](../concepts/caching.md#shared-cache-backend) — no stash/unstash, no
+pull/push bookends beyond the flags. Parallel stages / matrix shards each push
+their immutable segment to the same mount and pull the union:
+
+```groovy
+sh '''
+  rstest -n auto --shard "${SHARD}/${SHARDS}" \
+    --cache-remote /mnt/ci-cache/rstest --cache-pull --cache-push \
+    --junitxml junit.xml
+'''
+```
+
+No mount? Point `--cache-remote` at `s3://…` / `gs://…` (the agent's cloud CLI
+drives it) instead.
 
 ## Pre-commit
 

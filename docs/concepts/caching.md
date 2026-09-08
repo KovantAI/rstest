@@ -82,6 +82,21 @@ The `s3`/`gs` transports shell out to the cloud CLI already installed and
 authenticated in CI — no SDK, no secrets in the URL. Any other `scheme://` is
 rejected loudly rather than silently written to a junk local directory.
 
+**Permissions.** Every transport needs four operations on the `<root>` prefix:
+**list** and **read** (pull), **write** (push a segment), and **delete** —
+delete only for compaction/retention (`cache-compact`, `--cache-compact-threshold`).
+A pull/push-only job that never compacts can drop delete. Least privilege: scope
+the credential to the cache prefix, not the whole bucket. Concretely:
+
+| Backend | Grant |
+|---|---|
+| S3 (`s3://bucket/prefix`) | `s3:ListBucket` (on the bucket, condition `prefix`), `s3:GetObject`/`s3:PutObject`/`s3:DeleteObject` on `bucket/prefix/*` |
+| GCS (`gs://bucket/prefix`) | `storage.objects.{list,get,create,delete}` — e.g. `roles/storage.objectAdmin` scoped to the bucket/prefix |
+| Azure Blob (dir-materialize) | `Storage Blob Data Contributor` on the container (the `az` CLI needs read+write+delete) |
+| `http(s)://` | endpoint enforces its own authz; rstest sends `Authorization: Bearer $RSTEST_CACHE_REMOTE_TOKEN` |
+| dir / mount (`/path`, `file://`) | filesystem read+write+delete on the directory |
+| GitHub artifacts (the action's `artifact` backend) | workflow `permissions: { contents: read, actions: read }`; `actions: read` reaches a prior run's segments |
+
 **HTTP listing contract.** A bare `GET`/`PUT` can't enumerate a collection, so
 an `http(s)://` remote must answer `GET <root>/segments/` with a JSON array of
 segment names (filenames or full keys/URLs) and support `GET` / `PUT` / `DELETE`

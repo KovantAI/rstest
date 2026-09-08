@@ -237,3 +237,59 @@ jobs:
           set -euo pipefail
           test "${{ steps.strict.outcome }}" = "failure" \
             || { echo "require-baseline:true must fail on a missing baseline, got ${{ steps.strict.outcome }}"; exit 1; }
+
+  shared-cache:
+    name: shared-cache backend (remote, local-dir round-trip)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold suite
+        run: |
+          mkdir -p smoke
+          cat > smoke/test_shared.py <<'EOF'
+          def test_ok():
+              assert True
+
+          def test_two():
+              assert 1 + 1 == 2
+          EOF
+
+      # Cold: nothing in the remote yet. Pulls nothing, runs, pushes this run's
+      # immutable segment into ./rcache/segments/. require-baseline is OFF so the
+      # cold pull is not an error; the run seeds the baseline.
+      - uses: ./.github/actions/rstest
+        id: cold
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          cache-remote: ./rcache          # local dir => remote backend
+          durations-regress: "2.0"
+      - name: assert a segment was pushed
+        run: |
+          set -euo pipefail
+          count=$(ls smoke/rcache/segments/seg-*.json 2>/dev/null | wc -l | tr -d ' ')
+          test "$count" -ge 1 || { echo "expected >=1 pushed segment, found $count"; exit 1; }
+          echo "OK: $count segment(s) in the remote"
+
+      # Warm: the segment from the cold run is now the authoritative baseline.
+      # --cache-pull merges it in DURING the run, so require-baseline:true (strict)
+      # must PASS — proving the pull, not a stale local .rstest_cache, warmed it.
+      - name: prove warmth comes from the remote, not local disk
+        run: rm -rf smoke/.rstest_cache
+      - uses: ./.github/actions/rstest
+        id: warm
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          cache-remote: ./rcache
+          durations-regress: "2.0"
+          require-baseline: "true"        # cold pull would hard-fail; warm must not
+      - name: assert warm run passed under strict baseline
+        run: |
+          set -euo pipefail
+          test "${{ steps.warm.outcome }}" = "success" \
+            || { echo "warm run must pass under require-baseline:true, got ${{ steps.warm.outcome }}"; exit 1; }
