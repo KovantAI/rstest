@@ -29,9 +29,21 @@ pub(crate) enum Command {
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
 
-    /// Maintenance: fold all remote segments into a fresh base and prune them,
-    /// then exit without running tests. Needs `--cache-remote`.
-    CacheCompact,
+    /// Maintenance: fold remote segments into a fresh base and prune them, then
+    /// exit without running tests. Needs `--cache-remote`. With no retention
+    /// flags it folds all; `--keep-last` / `--max-age` leave a recent window so
+    /// the segment set stays bounded without discarding fresh history.
+    CacheCompact {
+        /// Keep the newest N segments loose; fold only older ones into the
+        /// base. Unset folds all. Env: `RSTEST_CACHE_KEEP_LAST`.
+        #[arg(long, value_name = "N")]
+        keep_last: Option<usize>,
+        /// Keep segments younger than this loose; fold older ones. Accepts a
+        /// bare number (seconds) or a `s`/`m`/`h`/`d`/`w` suffix (e.g. `30d`).
+        /// Unset folds all. Env: `RSTEST_CACHE_MAX_AGE`.
+        #[arg(long, value_name = "DURATION")]
+        max_age: Option<String>,
+    },
 }
 
 /// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
@@ -238,10 +250,11 @@ pub struct Cli {
     #[arg(long, value_name = "K/N")]
     pub(crate) shard: Option<String>,
 
-    /// Shared-cache remote: a directory or `file://` path (local, an NFS/EFS
-    /// mount, or a dir a CI step materializes via `download-artifact` /
-    /// `aws s3 sync`). Also settable via `RSTEST_CACHE_REMOTE`. Enables
-    /// `--cache-pull` / `--cache-push` / the `cache-compact` subcommand.
+    /// Shared-cache remote: a directory / `file://` path (local, an NFS/EFS
+    /// mount, or a dir a CI step materializes), or an `s3://` / `gs://` bucket
+    /// URL driven through the `aws` / `gcloud` CLI already on the runner. Also
+    /// settable via `RSTEST_CACHE_REMOTE`. Enables `--cache-pull` /
+    /// `--cache-push` / the `cache-compact` subcommand.
     #[arg(long, value_name = "URL|DIR", global = true)]
     pub(crate) cache_remote: Option<String>,
 
@@ -263,6 +276,15 @@ pub struct Cli {
     /// restored. A failed pull is always an error.
     #[arg(long)]
     pub(crate) require_baseline: bool,
+
+    /// After a `--cache-push`, if the remote holds more than N loose segments,
+    /// fold them into the base inline so the set stays bounded without a
+    /// separate `cache-compact` job. The retention window is taken from
+    /// `RSTEST_CACHE_KEEP_LAST` / `RSTEST_CACHE_MAX_AGE`. Best-effort: any
+    /// failure warns and never fails the run. Env:
+    /// `RSTEST_CACHE_COMPACT_THRESHOLD`.
+    #[arg(long, value_name = "N", global = true)]
+    pub(crate) cache_compact_threshold: Option<usize>,
 }
 
 /// -x / --maxfail=N from the session args (also forwarded: each worker
@@ -421,6 +443,9 @@ const VALUE_FLAGS: &[&str] = &[
     "--dist",
     "--shard",
     "--collect",
+    "--keep-last",
+    "--max-age",
+    "--cache-compact-threshold",
 ];
 
 /// True when `arg` is the `=`-joined form of flag `f` (e.g. `--dist=load` for
@@ -636,6 +661,34 @@ mod tests {
         assert_eq!(Cli::parse_from(&own).command, Some(Command::VerifyVendor));
         // Default (no subcommand) => a normal run.
         assert_eq!(Cli::parse_from(["rstest"]).command, None);
+    }
+
+    #[test]
+    fn cache_compact_retention_flags_are_owned_not_forwarded() {
+        use clap::Parser;
+        // Regression: --keep-last / --max-age are value flags; the pre-scan must
+        // keep them on the rstest side (space AND =-joined), not forward them to
+        // the session, or clap never sees them and the policy silently no-ops.
+        let (own, session) = split_args(v(&[
+            "cache-compact",
+            "--keep-last",
+            "200",
+            "--max-age=30d",
+            "--cache-remote",
+            "./rc",
+        ]));
+        assert!(
+            session.is_empty(),
+            "nothing should forward, got {session:?}"
+        );
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::CacheCompact {
+                keep_last: Some(200),
+                max_age: Some(ref d),
+            }) if d == "30d"
+        ));
     }
 
     #[test]

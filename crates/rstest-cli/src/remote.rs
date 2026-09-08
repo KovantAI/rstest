@@ -420,11 +420,518 @@ impl Transport for DirTransport {
     }
 }
 
-/// Construct a transport from a `--cache-remote` value. Today only a
-/// filesystem path / `file://` URL; object-store schemes are a later add.
+// ---- CliTransport: s3:// / gs:// via the cloud CLI --------------------------
+
+/// A captured cloud-CLI invocation result. `success` is the process exit
+/// status; `stdout` carries object bytes on a read; `stderr` is inspected to
+/// tell a missing object from a real (auth/network) failure.
+pub struct CliOutput {
+    pub success: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+/// Spawns cloud-CLI subprocesses. Behind a trait so `CliTransport` is
+/// unit-testable without a real `aws`/`gcloud` binary or a real bucket.
+pub trait CommandRunner {
+    /// Run `program args...`, feeding `stdin` when present, and capture the
+    /// result. An `Err` is reserved for the spawn itself failing; a non-zero
+    /// exit is reported via `CliOutput::success == false`.
+    fn run(&self, program: &str, args: &[String], stdin: Option<&[u8]>) -> Result<CliOutput>;
+    /// Whether `program` resolves on `PATH` (cheap, no spawn).
+    fn program_exists(&self, program: &str) -> bool;
+}
+
+/// Real runner over `std::process::Command`.
+struct RealRunner;
+
+impl CommandRunner for RealRunner {
+    fn run(&self, program: &str, args: &[String], stdin: Option<&[u8]>) -> Result<CliOutput> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("spawning `{program}`"))?;
+        if let Some(data) = stdin {
+            // Take + drop the handle after writing so the child sees EOF and
+            // wait_with_output (which reads stdout/stderr) can't deadlock.
+            let mut si = child.stdin.take().expect("stdin piped");
+            si.write_all(data).context("writing to cloud CLI stdin")?;
+        }
+        let out = child
+            .wait_with_output()
+            .with_context(|| format!("waiting for `{program}`"))?;
+        Ok(CliOutput {
+            success: out.status.success(),
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+    fn program_exists(&self, program: &str) -> bool {
+        let Some(paths) = std::env::var_os("PATH") else {
+            return false;
+        };
+        std::env::split_paths(&paths).any(|dir| dir.join(program).is_file())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CloudTool {
+    Aws,
+    Gcloud,
+    Gsutil,
+}
+
+/// Object-store transport that drives the cloud CLI already installed and
+/// authenticated on the runner (the same tool a hand-rolled `aws s3 sync` used).
+/// No SDK, no async runtime — credentials come from the process environment.
+pub struct CliTransport {
+    tool: CloudTool,
+    /// Bucket+prefix root, trailing slash trimmed (e.g. `s3://bucket/prefix`).
+    root: String,
+    runner: Box<dyn CommandRunner>,
+}
+
+/// A read either returned bytes or the object was absent.
+enum ReadOutcome {
+    Found(Vec<u8>),
+    Missing,
+}
+
+/// Stderr substrings that mean "no such object" rather than a real failure,
+/// across `aws`/`gcloud`/`gsutil`. Compared case-insensitively.
+fn looks_like_not_found(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    [
+        "nosuchkey",
+        "not found",
+        "404",
+        "does not exist",
+        "matched no objects",
+        "no url matched",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+}
+
+impl CliTransport {
+    /// Build from an `s3://` / `gs://` remote, probing for the needed CLI. For
+    /// `gs://`, `gcloud storage` is preferred with a fallback to `gsutil`.
+    pub fn for_remote(remote: &str) -> Result<Self> {
+        Self::for_remote_with(remote, Box::new(RealRunner))
+    }
+
+    fn for_remote_with(remote: &str, runner: Box<dyn CommandRunner>) -> Result<Self> {
+        let root = remote.trim_end_matches('/').to_string();
+        if remote.starts_with("s3://") {
+            if !runner.program_exists("aws") {
+                anyhow::bail!("cache remote {remote} needs the `aws` CLI on PATH (authenticated)");
+            }
+            Ok(Self {
+                tool: CloudTool::Aws,
+                root,
+                runner,
+            })
+        } else if remote.starts_with("gs://") {
+            let tool = if runner.program_exists("gcloud") {
+                CloudTool::Gcloud
+            } else if runner.program_exists("gsutil") {
+                CloudTool::Gsutil
+            } else {
+                anyhow::bail!(
+                    "cache remote {remote} needs the `gcloud` or `gsutil` CLI on PATH (authenticated)"
+                );
+            };
+            Ok(Self { tool, root, runner })
+        } else {
+            anyhow::bail!("CliTransport: unsupported remote {remote}");
+        }
+    }
+
+    fn program(&self) -> &str {
+        match self.tool {
+            CloudTool::Aws => "aws",
+            CloudTool::Gcloud => "gcloud",
+            CloudTool::Gsutil => "gsutil",
+        }
+    }
+
+    fn base_url(&self) -> String {
+        format!("{}/base.json", self.root)
+    }
+    fn segment_url(&self, id: &str) -> String {
+        format!("{}/segments/seg-{id}.json", self.root)
+    }
+    fn segments_prefix(&self) -> String {
+        format!("{}/segments/", self.root)
+    }
+
+    fn owned(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+    fn list_args(&self, prefix: &str) -> Vec<String> {
+        match self.tool {
+            CloudTool::Aws => Self::owned(&["s3", "ls", prefix]),
+            CloudTool::Gcloud => Self::owned(&["storage", "ls", prefix]),
+            CloudTool::Gsutil => Self::owned(&["ls", prefix]),
+        }
+    }
+    fn read_args(&self, url: &str) -> Vec<String> {
+        match self.tool {
+            CloudTool::Aws => Self::owned(&["s3", "cp", url, "-"]),
+            CloudTool::Gcloud => Self::owned(&["storage", "cat", url]),
+            CloudTool::Gsutil => Self::owned(&["cat", url]),
+        }
+    }
+    fn write_args(&self, url: &str) -> Vec<String> {
+        match self.tool {
+            CloudTool::Aws => Self::owned(&["s3", "cp", "-", url]),
+            CloudTool::Gcloud => Self::owned(&["storage", "cp", "-", url]),
+            CloudTool::Gsutil => Self::owned(&["cp", "-", url]),
+        }
+    }
+    fn delete_args(&self, url: &str) -> Vec<String> {
+        match self.tool {
+            CloudTool::Aws => Self::owned(&["s3", "rm", url]),
+            CloudTool::Gcloud => Self::owned(&["storage", "rm", url]),
+            CloudTool::Gsutil => Self::owned(&["rm", url]),
+        }
+    }
+
+    fn read_url(&self, url: &str) -> Result<ReadOutcome> {
+        let out = self
+            .runner
+            .run(self.program(), &self.read_args(url), None)?;
+        if out.success {
+            Ok(ReadOutcome::Found(out.stdout))
+        } else if looks_like_not_found(&out.stderr) {
+            Ok(ReadOutcome::Missing)
+        } else {
+            anyhow::bail!("reading {url}: {}", out.stderr.trim())
+        }
+    }
+    fn write_url(&self, url: &str, bytes: &[u8]) -> Result<()> {
+        let out = self
+            .runner
+            .run(self.program(), &self.write_args(url), Some(bytes))?;
+        if out.success {
+            Ok(())
+        } else {
+            anyhow::bail!("writing {url}: {}", out.stderr.trim())
+        }
+    }
+}
+
+impl Transport for CliTransport {
+    fn list_segment_ids(&self) -> Result<Vec<String>> {
+        let prefix = self.segments_prefix();
+        let out = self
+            .runner
+            .run(self.program(), &self.list_args(&prefix), None)?;
+        if !out.success {
+            // An empty prefix lists as either exit-0-empty or a not-found /
+            // empty-stderr non-zero (aws `s3 ls` of an absent prefix); treat
+            // both as "no segments yet". A real error carries stderr.
+            let se = out.stderr.trim();
+            if se.is_empty() || looks_like_not_found(se) {
+                return Ok(Vec::new());
+            }
+            anyhow::bail!("listing {prefix}: {se}");
+        }
+        // Whitespace-tokenize the listing (aws `s3 ls` columns, gcloud/gsutil
+        // full URLs) and keep only `seg-<id>.json` basenames — date/size/PRE
+        // tokens never match the prefix filter.
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut ids = Vec::new();
+        for tok in text.split_whitespace() {
+            let name = tok.rsplit('/').next().unwrap_or(tok);
+            if let Some(id) = name
+                .strip_prefix("seg-")
+                .and_then(|s| s.strip_suffix(".json"))
+            {
+                ids.push(id.to_string());
+            }
+        }
+        Ok(ids)
+    }
+    fn read_segment(&self, id: &str) -> Result<Vec<u8>> {
+        let url = self.segment_url(id);
+        match self.read_url(&url)? {
+            ReadOutcome::Found(b) => Ok(b),
+            ReadOutcome::Missing => anyhow::bail!("segment {id} missing at {url}"),
+        }
+    }
+    fn read_base(&self) -> Result<Option<Vec<u8>>> {
+        match self.read_url(&self.base_url())? {
+            ReadOutcome::Found(b) => Ok(Some(b)),
+            ReadOutcome::Missing => Ok(None),
+        }
+    }
+    fn write_segment(&self, id: &str, bytes: &[u8]) -> Result<()> {
+        self.write_url(&self.segment_url(id), bytes)
+    }
+    fn write_base(&self, bytes: &[u8]) -> Result<()> {
+        self.write_url(&self.base_url(), bytes)
+    }
+    fn delete_segment(&self, id: &str) -> Result<()> {
+        let url = self.segment_url(id);
+        let out = self
+            .runner
+            .run(self.program(), &self.delete_args(&url), None)?;
+        if out.success || looks_like_not_found(&out.stderr) {
+            Ok(())
+        } else {
+            anyhow::bail!("deleting {url}: {}", out.stderr.trim())
+        }
+    }
+}
+
+// ---- HttpTransport: http:// / https:// (feature `http-cache`) ---------------
+
+/// One HTTP response reduced to what the transport needs: status + body. A
+/// non-2xx status is data here (e.g. 404 → "no such object"), not an error;
+/// only a connect/transport failure surfaces as `Err`.
+#[cfg(feature = "http-cache")]
+pub struct HttpResp {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// GET/PUT/DELETE over HTTP. Behind a trait so `HttpTransport` is unit-testable
+/// without a live server; `ureq` lives only in `RealHttpClient`.
+#[cfg(feature = "http-cache")]
+pub trait HttpClient {
+    fn get(&self, url: &str) -> Result<HttpResp>;
+    fn put(&self, url: &str, body: &[u8]) -> Result<HttpResp>;
+    fn delete(&self, url: &str) -> Result<HttpResp>;
+}
+
+/// Shared-cache transport over a plain HTTP(S) endpoint. Reads/writes
+/// `<root>/base.json` and `<root>/segments/seg-<id>.json`; **enumeration
+/// requires the endpoint to answer `GET <root>/segments/` with a JSON array of
+/// names** (filenames or full keys/URLs) — the HTTP listing contract, since
+/// bare GET/PUT can't list a collection.
+#[cfg(feature = "http-cache")]
+pub struct HttpTransport {
+    root: String,
+    client: Box<dyn HttpClient>,
+}
+
+#[cfg(feature = "http-cache")]
+impl HttpTransport {
+    pub fn new(remote: &str, client: Box<dyn HttpClient>) -> Self {
+        Self {
+            root: remote.trim_end_matches('/').to_string(),
+            client,
+        }
+    }
+    fn base_url(&self) -> String {
+        format!("{}/base.json", self.root)
+    }
+    fn segment_url(&self, id: &str) -> String {
+        format!("{}/segments/seg-{id}.json", self.root)
+    }
+    fn segments_url(&self) -> String {
+        format!("{}/segments/", self.root)
+    }
+}
+
+#[cfg(feature = "http-cache")]
+fn is_2xx(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+#[cfg(feature = "http-cache")]
+impl Transport for HttpTransport {
+    fn list_segment_ids(&self) -> Result<Vec<String>> {
+        let url = self.segments_url();
+        let r = self.client.get(&url)?;
+        if r.status == 404 {
+            return Ok(Vec::new());
+        }
+        if !is_2xx(r.status) {
+            anyhow::bail!("listing {url}: HTTP {}", r.status);
+        }
+        let names: Vec<String> = serde_json::from_slice(&r.body).with_context(|| {
+            format!(
+                "listing {url}: expected a JSON array of segment names \
+                 (the HTTP cache listing contract)"
+            )
+        })?;
+        let mut ids = Vec::new();
+        for name in names {
+            let base = name.rsplit('/').next().unwrap_or(&name);
+            if let Some(id) = base
+                .strip_prefix("seg-")
+                .and_then(|s| s.strip_suffix(".json"))
+            {
+                ids.push(id.to_string());
+            }
+        }
+        Ok(ids)
+    }
+    fn read_segment(&self, id: &str) -> Result<Vec<u8>> {
+        let url = self.segment_url(id);
+        let r = self.client.get(&url)?;
+        if is_2xx(r.status) {
+            Ok(r.body)
+        } else {
+            anyhow::bail!("reading {url}: HTTP {}", r.status)
+        }
+    }
+    fn read_base(&self) -> Result<Option<Vec<u8>>> {
+        let url = self.base_url();
+        let r = self.client.get(&url)?;
+        match r.status {
+            404 => Ok(None),
+            s if is_2xx(s) => Ok(Some(r.body)),
+            s => anyhow::bail!("reading {url}: HTTP {s}"),
+        }
+    }
+    fn write_segment(&self, id: &str, bytes: &[u8]) -> Result<()> {
+        let url = self.segment_url(id);
+        let r = self.client.put(&url, bytes)?;
+        if is_2xx(r.status) {
+            Ok(())
+        } else {
+            anyhow::bail!("writing {url}: HTTP {}", r.status)
+        }
+    }
+    fn write_base(&self, bytes: &[u8]) -> Result<()> {
+        let url = self.base_url();
+        let r = self.client.put(&url, bytes)?;
+        if is_2xx(r.status) {
+            Ok(())
+        } else {
+            anyhow::bail!("writing {url}: HTTP {}", r.status)
+        }
+    }
+    fn delete_segment(&self, id: &str) -> Result<()> {
+        let url = self.segment_url(id);
+        let r = self.client.delete(&url)?;
+        if is_2xx(r.status) || r.status == 404 {
+            Ok(())
+        } else {
+            anyhow::bail!("deleting {url}: HTTP {}", r.status)
+        }
+    }
+}
+
+/// `ureq`-backed client. Bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` (blank =
+/// none). Blocking, no async runtime.
+#[cfg(feature = "http-cache")]
+struct RealHttpClient {
+    agent: ureq::Agent,
+    auth: Option<String>,
+}
+
+#[cfg(feature = "http-cache")]
+impl RealHttpClient {
+    fn from_env() -> Self {
+        let auth = std::env::var("RSTEST_CACHE_REMOTE_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|t| format!("Bearer {t}"));
+        Self {
+            agent: ureq::agent(),
+            auth,
+        }
+    }
+    fn with_auth(&self, req: ureq::Request) -> ureq::Request {
+        match &self.auth {
+            Some(v) => req.set("Authorization", v),
+            None => req,
+        }
+    }
+    /// Execute a request, folding a non-2xx *status* into `HttpResp` (only a
+    /// transport-level failure is an `Err`).
+    fn exec(req: ureq::Request, body: Option<&[u8]>) -> Result<HttpResp> {
+        use std::io::Read;
+        let outcome = match body {
+            Some(b) => req.send_bytes(b),
+            None => req.call(),
+        };
+        match outcome {
+            Ok(resp) => {
+                let status = resp.status();
+                let mut buf = Vec::new();
+                resp.into_reader()
+                    .read_to_end(&mut buf)
+                    .context("reading HTTP response body")?;
+                Ok(HttpResp { status, body: buf })
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let mut buf = Vec::new();
+                let _ = resp.into_reader().read_to_end(&mut buf);
+                Ok(HttpResp {
+                    status: code,
+                    body: buf,
+                })
+            }
+            Err(e) => Err(anyhow::Error::new(e).context("HTTP request failed")),
+        }
+    }
+}
+
+#[cfg(feature = "http-cache")]
+impl HttpClient for RealHttpClient {
+    fn get(&self, url: &str) -> Result<HttpResp> {
+        Self::exec(self.with_auth(self.agent.get(url)), None)
+    }
+    fn put(&self, url: &str, body: &[u8]) -> Result<HttpResp> {
+        Self::exec(self.with_auth(self.agent.put(url)), Some(body))
+    }
+    fn delete(&self, url: &str) -> Result<HttpResp> {
+        Self::exec(self.with_auth(self.agent.delete(url)), None)
+    }
+}
+
+#[cfg(feature = "http-cache")]
+fn http_transport(remote: &str) -> Result<Box<dyn Transport>> {
+    Ok(Box::new(HttpTransport::new(
+        remote,
+        Box::new(RealHttpClient::from_env()),
+    )))
+}
+
+#[cfg(not(feature = "http-cache"))]
+fn http_transport(remote: &str) -> Result<Box<dyn Transport>> {
+    anyhow::bail!(
+        "cache remote {remote} needs the `http-cache` build feature, \
+         which is not compiled into this binary"
+    )
+}
+
+// ---- transport selection ----------------------------------------------------
+
+/// Construct a transport from a `--cache-remote` value. A bare path or
+/// `file://` is a directory; `s3://` / `gs://` drive the cloud CLI;
+/// `http(s)://` uses the HTTP transport (feature `http-cache`); any other
+/// `scheme://` is rejected loudly (never silently written to a junk local dir).
 pub fn transport_for(remote: &str) -> Result<Box<dyn Transport>> {
-    let path = remote.strip_prefix("file://").unwrap_or(remote);
-    Ok(Box::new(DirTransport::new(path)))
+    if let Some(path) = remote.strip_prefix("file://") {
+        return Ok(Box::new(DirTransport::new(path)));
+    }
+    match remote.split_once("://") {
+        Some(("s3", _)) | Some(("gs", _)) => Ok(Box::new(CliTransport::for_remote(remote)?)),
+        Some(("http", _)) | Some(("https", _)) => http_transport(remote),
+        Some((scheme, _)) => anyhow::bail!(
+            "cache remote scheme `{scheme}://` is not supported \
+             (supported: a directory path, `file://`, `s3://`, `gs://`, \
+             `http(s)://`); for another object store, materialize a directory \
+             first and pass `--cache-remote ./dir`"
+        ),
+        None => Ok(Box::new(DirTransport::new(remote))),
+    }
 }
 
 // ---- pull / push / compact (IO orchestration over a Transport) --------------
@@ -469,30 +976,91 @@ pub fn push(t: &dyn Transport, seg: &Segment) -> Result<()> {
     t.write_segment(&seg.id, &bytes)
 }
 
-/// Fold base + all segments into a fresh base, then delete the folded segments.
-/// Returns the number of segments folded. Delete failures are non-fatal (the
-/// absorbed-id set keeps a lingering segment from double-counting anyway).
-pub fn compact_remote(t: &dyn Transport, sink: &mut Sink) -> Result<usize> {
+/// Segment retention: which loose segments a compaction keeps *un-folded*.
+/// `keep_last`: retain the newest N segments; `max_age`: retain any younger
+/// than this many seconds. A segment retained by either rule stays loose;
+/// everything else is folded into the base and pruned. Both `None` folds all
+/// (the historical behavior).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    pub keep_last: Option<usize>,
+    pub max_age: Option<u64>,
+}
+
+/// Pure policy: from `(id, generated_at)` pairs, return the ids to FOLD into
+/// the base (everything the policy does NOT retain). Recency ranking sorts by
+/// `generated_at` desc, then id desc as a deterministic tiebreak, so two
+/// same-second segments fold the same way regardless of listing order. No IO
+/// / no clock — testable in isolation.
+pub fn select_segments_to_fold(
+    segs: &[(String, u64)],
+    now: u64,
+    policy: &RetentionPolicy,
+) -> Vec<String> {
+    let mut ranked: Vec<&(String, u64)> = segs.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    let keep_n = policy.keep_last.unwrap_or(0);
+    let mut fold = Vec::new();
+    for (rank, (id, ts)) in ranked.iter().enumerate() {
+        let retained_by_count = rank < keep_n;
+        // saturating_sub: a future/zeroed timestamp (clock skew) reads as age 0
+        // and is retained, never force-folded.
+        let retained_by_age = policy
+            .max_age
+            .is_some_and(|max| now.saturating_sub(*ts) <= max);
+        if !(retained_by_count || retained_by_age) {
+            fold.push((*id).clone());
+        }
+    }
+    fold
+}
+
+/// Fold base + the policy-selected segments into a fresh base, then delete just
+/// those folded. Returns `(folded, retained)` counts. `now` stamps the age
+/// window (epoch seconds). Delete failures are non-fatal (the absorbed-id set
+/// keeps a lingering segment from double-counting anyway).
+pub fn compact_remote_with(
+    t: &dyn Transport,
+    sink: &mut Sink,
+    now: u64,
+    policy: &RetentionPolicy,
+) -> Result<(usize, usize)> {
     let base = match t.read_base()? {
         Some(bytes) => Some(serde_json::from_slice::<Base>(&bytes).context("parsing base.json")?),
         None => None,
     };
     let ids = t.list_segment_ids()?;
-    let mut segments = Vec::new();
-    // Only ids we actually parse get folded — and only those get deleted, so a
-    // corrupt / truncated / future-schema segment is left in place rather than
-    // destroyed without ever being folded into the base.
-    let mut folded_ids = Vec::new();
+    // Only ids we actually parse are candidates — and only folded ones get
+    // deleted, so a corrupt / truncated / future-schema segment is left in
+    // place rather than destroyed without ever being folded into the base.
+    let mut parsed: Vec<(String, Segment)> = Vec::new();
     for id in &ids {
         if let Ok(bytes) = t.read_segment(id) {
             if let Ok(seg) = serde_json::from_slice::<Segment>(&bytes) {
-                segments.push(seg);
-                folded_ids.push(id.clone());
+                parsed.push((id.clone(), seg));
             } else {
                 sink.warn(&format!(
                     "rstest: cache: compact: keeping unparseable segment {id}"
                 ));
             }
+        }
+    }
+    let ts_pairs: Vec<(String, u64)> = parsed
+        .iter()
+        .map(|(id, s)| (id.clone(), s.generated_at))
+        .collect();
+    let fold_ids: HashSet<String> = select_segments_to_fold(&ts_pairs, now, policy)
+        .into_iter()
+        .collect();
+    let mut segments = Vec::new();
+    let mut folded_ids = Vec::new();
+    let mut retained = 0usize;
+    for (id, seg) in parsed {
+        if fold_ids.contains(&id) {
+            segments.push(seg);
+            folded_ids.push(id);
+        } else {
+            retained += 1;
         }
     }
     let folded = segments.len();
@@ -501,13 +1069,18 @@ pub fn compact_remote(t: &dyn Transport, sink: &mut Sink) -> Result<usize> {
     for id in &folded_ids {
         let _ = t.delete_segment(id);
     }
-    Ok(folded)
+    Ok((folded, retained))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::select::CoverageFile;
+
+    /// Fold-all compaction (no retention window) — the common case in tests.
+    fn compact_all(t: &dyn Transport, sink: &mut Sink) -> Result<usize> {
+        compact_remote_with(t, sink, 0, &RetentionPolicy::default()).map(|(folded, _)| folded)
+    }
 
     fn seg(id: &str, at: u64, durs: &[(&str, f64)], events: &[(&str, FlakeKind)]) -> Segment {
         Segment {
@@ -810,7 +1383,7 @@ mod tests {
             &seg("s2", 20, &[("t::a", 3.0)], &[("t::f", FlakeKind::Flaky)]),
         )
         .unwrap();
-        assert_eq!(compact_remote(&t, &mut Sink::captured().0).unwrap(), 2);
+        assert_eq!(compact_all(&t, &mut Sink::captured().0).unwrap(), 2);
         // Segments gone, base present.
         assert!(t.list_segment_ids().unwrap().is_empty());
         assert!(t.read_base().unwrap().is_some());
@@ -857,7 +1430,7 @@ mod tests {
         assert_eq!(cov_lines(&m, "mod.py", 1), vec!["t::a"]);
         assert_eq!(cov_lines(&m, "mod.py", 2), vec!["t::b"]);
         // Compaction folds the slices into the base and survives a re-pull.
-        assert_eq!(compact_remote(&t, &mut Sink::captured().0).unwrap(), 2);
+        assert_eq!(compact_all(&t, &mut Sink::captured().0).unwrap(), 2);
         let m2 = pull(&t, &mut Sink::captured().0).unwrap();
         assert_eq!(cov_lines(&m2, "mod.py", 1), vec!["t::a"]);
         assert_eq!(cov_lines(&m2, "mod.py", 2), vec!["t::b"]);
@@ -874,7 +1447,7 @@ mod tests {
         let corrupt = root.join("segments").join("seg-bad.json");
         std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
         std::fs::write(&corrupt, b"{ not json").unwrap();
-        assert_eq!(compact_remote(&t, &mut Sink::captured().0).unwrap(), 1); // only "good" folded
+        assert_eq!(compact_all(&t, &mut Sink::captured().0).unwrap(), 1); // only "good" folded
         assert!(corrupt.exists(), "unparseable segment must be kept");
         assert_eq!(t.list_segment_ids().unwrap(), vec!["bad".to_string()]);
         assert_eq!(
@@ -960,6 +1533,467 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // ---- retention policy ---------------------------------------------------
+
+    fn pairs(v: &[(&str, u64)]) -> Vec<(String, u64)> {
+        v.iter().map(|(id, ts)| (id.to_string(), *ts)).collect()
+    }
+
+    #[test]
+    fn retention_fold_all_when_unset() {
+        let segs = pairs(&[("a", 10), ("b", 20), ("c", 30)]);
+        let mut fold = select_segments_to_fold(&segs, 100, &RetentionPolicy::default());
+        fold.sort();
+        assert_eq!(fold, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn retention_keep_last_retains_newest_n() {
+        let segs = pairs(&[("a", 10), ("b", 20), ("c", 30), ("d", 40)]);
+        let fold = select_segments_to_fold(
+            &segs,
+            100,
+            &RetentionPolicy {
+                keep_last: Some(2),
+                max_age: None,
+            },
+        );
+        // Newest two (d@40, c@30) retained; older folded.
+        let mut fold = fold;
+        fold.sort();
+        assert_eq!(fold, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn retention_max_age_retains_young() {
+        let segs = pairs(&[("old", 10), ("mid", 50), ("new", 90)]);
+        // now=100, max_age=60 -> retain age<=60 (mid@50 age50, new@90 age10);
+        // old@10 age90 folded.
+        let fold = select_segments_to_fold(
+            &segs,
+            100,
+            &RetentionPolicy {
+                keep_last: None,
+                max_age: Some(60),
+            },
+        );
+        assert_eq!(fold, vec!["old"]);
+    }
+
+    #[test]
+    fn retention_count_or_age_union_retains() {
+        // keep_last=1 retains new@90; max_age=15 also retains new; old+mid folded.
+        let segs = pairs(&[("old", 10), ("mid", 50), ("new", 90)]);
+        let mut fold = select_segments_to_fold(
+            &segs,
+            100,
+            &RetentionPolicy {
+                keep_last: Some(1),
+                max_age: Some(15),
+            },
+        );
+        fold.sort();
+        assert_eq!(fold, vec!["mid", "old"]);
+    }
+
+    #[test]
+    fn retention_future_timestamp_is_retained() {
+        // Clock skew: ts>now -> saturating_sub age 0 -> retained by any age rule.
+        let segs = pairs(&[("future", 200)]);
+        let fold = select_segments_to_fold(
+            &segs,
+            100,
+            &RetentionPolicy {
+                keep_last: None,
+                max_age: Some(1),
+            },
+        );
+        assert!(fold.is_empty());
+    }
+
+    #[test]
+    fn compact_remote_with_keeps_recent_folds_old() {
+        // Two old + one new segment; keep_last=1 folds the two old into base and
+        // deletes them, leaving the newest loose. A pull still reproduces all.
+        let root = tmp_dir("compact-retain");
+        let t = DirTransport::new(&root);
+        push(&t, &seg("old1", 10, &[("t::a", 1.0)], &[])).unwrap();
+        push(&t, &seg("old2", 20, &[("t::a", 2.0)], &[])).unwrap();
+        push(&t, &seg("new", 30, &[("t::a", 3.0)], &[])).unwrap();
+        let (folded, retained) = compact_remote_with(
+            &t,
+            &mut Sink::captured().0,
+            100,
+            &RetentionPolicy {
+                keep_last: Some(1),
+                max_age: None,
+            },
+        )
+        .unwrap();
+        assert_eq!((folded, retained), (2, 1));
+        assert_eq!(t.list_segment_ids().unwrap(), vec!["new".to_string()]);
+        // Base (old1+old2) + loose "new" merge back to the newest duration.
+        let m = pull(&t, &mut Sink::captured().0).unwrap();
+        assert_eq!(m.durations.get("t::a"), Some(&3.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- CliTransport (s3:// / gs://) --------------------------------------
+
+    use std::cell::RefCell;
+
+    /// A stubbed cloud CLI: `programs` are the binaries that "exist"; `handler`
+    /// maps each (program, args, stdin) to a canned `CliOutput`; `calls`
+    /// records every invocation for assertions.
+    type StubHandler = Box<dyn Fn(&str, &[String], Option<&[u8]>) -> CliOutput>;
+    type StubCall = (String, Vec<String>, Option<Vec<u8>>);
+    struct StubRunner {
+        programs: Vec<String>,
+        handler: StubHandler,
+        calls: RefCell<Vec<StubCall>>,
+    }
+    impl StubRunner {
+        fn new(
+            programs: &[&str],
+            handler: impl Fn(&str, &[String], Option<&[u8]>) -> CliOutput + 'static,
+        ) -> Box<Self> {
+            Box::new(StubRunner {
+                programs: programs.iter().map(|s| s.to_string()).collect(),
+                handler: Box::new(handler),
+                calls: RefCell::new(Vec::new()),
+            })
+        }
+    }
+    impl CommandRunner for StubRunner {
+        fn run(&self, program: &str, args: &[String], stdin: Option<&[u8]>) -> Result<CliOutput> {
+            self.calls.borrow_mut().push((
+                program.into(),
+                args.to_vec(),
+                stdin.map(|b| b.to_vec()),
+            ));
+            Ok((self.handler)(program, args, stdin))
+        }
+        fn program_exists(&self, program: &str) -> bool {
+            self.programs.iter().any(|p| p == program)
+        }
+    }
+    fn ok_out(stdout: &[u8]) -> CliOutput {
+        CliOutput {
+            success: true,
+            stdout: stdout.to_vec(),
+            stderr: String::new(),
+        }
+    }
+    fn err_out(stderr: &str) -> CliOutput {
+        CliOutput {
+            success: false,
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn transport_for_dispatches_on_scheme() {
+        // Bare path and file:// are directories; unknown schemes bail; http://
+        // is rejected until the HTTP transport lands.
+        assert!(transport_for("/tmp/x").is_ok());
+        assert!(transport_for("file:///tmp/x").is_ok());
+        // Unknown schemes bail loudly rather than silently making a junk dir.
+        let err = match transport_for("azblob://c/x") {
+            Ok(_) => panic!("azblob:// should be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("not supported"), "got {err}");
+    }
+
+    #[test]
+    fn cli_aws_list_parses_ls_columns() {
+        // `aws s3 ls` prints date/time/size/name columns; only seg-*.json
+        // basenames survive the filter.
+        let out = "2024-01-01 12:00:00        42 seg-run1-1of2.json\n\
+                   2024-01-01 12:00:01        42 seg-run1-2of2.json\n\
+                                              PRE nested/\n";
+        let t = CliTransport::for_remote_with(
+            "s3://bucket/prefix",
+            StubRunner::new(&["aws"], move |_p, args, _| {
+                assert_eq!(args, &["s3", "ls", "s3://bucket/prefix/segments/"]);
+                ok_out(out.as_bytes())
+            }),
+        )
+        .unwrap();
+        let mut ids = t.list_segment_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["run1-1of2".to_string(), "run1-2of2".to_string()]);
+    }
+
+    #[test]
+    fn cli_gcloud_list_parses_full_urls() {
+        let out = "gs://bucket/p/segments/seg-a.json\n\
+                   gs://bucket/p/segments/seg-b.json\n";
+        let t = CliTransport::for_remote_with(
+            "gs://bucket/p/",
+            StubRunner::new(&["gcloud"], move |p, args, _| {
+                assert_eq!(p, "gcloud");
+                assert_eq!(args, &["storage", "ls", "gs://bucket/p/segments/"]);
+                ok_out(out.as_bytes())
+            }),
+        )
+        .unwrap();
+        let mut ids = t.list_segment_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn cli_list_empty_prefix_is_not_an_error() {
+        // aws `s3 ls` of an absent prefix: non-zero exit, empty stderr.
+        let t = CliTransport::for_remote_with(
+            "s3://bucket/p",
+            StubRunner::new(&["aws"], |_, _, _| err_out("")),
+        )
+        .unwrap();
+        assert!(t.list_segment_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cli_list_real_error_surfaces() {
+        let t = CliTransport::for_remote_with(
+            "s3://bucket/p",
+            StubRunner::new(&["aws"], |_, _, _| {
+                err_out("An error occurred (AccessDenied) when calling ListObjects")
+            }),
+        )
+        .unwrap();
+        assert!(t.list_segment_ids().is_err());
+    }
+
+    #[test]
+    fn cli_read_base_missing_is_none() {
+        let t = CliTransport::for_remote_with(
+            "s3://bucket/p",
+            StubRunner::new(&["aws"], |_, _, _| {
+                err_out("fatal error: An error occurred (NoSuchKey)")
+            }),
+        )
+        .unwrap();
+        assert_eq!(t.read_base().unwrap(), None);
+    }
+
+    #[test]
+    fn cli_read_base_real_error_surfaces() {
+        let t = CliTransport::for_remote_with(
+            "s3://bucket/p",
+            StubRunner::new(&["aws"], |_, _, _| err_out("Unable to locate credentials")),
+        )
+        .unwrap();
+        assert!(t.read_base().is_err());
+    }
+
+    #[test]
+    fn cli_write_segment_feeds_stdin_and_builds_url() {
+        let t = CliTransport::for_remote_with(
+            "s3://bucket/p",
+            StubRunner::new(&["aws"], |_, args, stdin| {
+                assert_eq!(
+                    args,
+                    &["s3", "cp", "-", "s3://bucket/p/segments/seg-x.json"]
+                );
+                assert_eq!(stdin, Some(b"payload".as_ref()));
+                ok_out(b"")
+            }),
+        )
+        .unwrap();
+        t.write_segment("x", b"payload").unwrap();
+    }
+
+    #[test]
+    fn cli_gs_prefers_gcloud_then_falls_back_to_gsutil() {
+        // gcloud present -> gcloud; only gsutil present -> gsutil verbs (no
+        // "storage" subcommand); neither -> a clear error.
+        let g = CliTransport::for_remote_with(
+            "gs://b/p",
+            StubRunner::new(&["gcloud", "gsutil"], |_, _, _| ok_out(b"")),
+        )
+        .unwrap();
+        assert_eq!(g.program(), "gcloud");
+
+        let s = CliTransport::for_remote_with(
+            "gs://b/p",
+            StubRunner::new(&["gsutil"], |_, args, _| {
+                assert_eq!(args, &["cat", "gs://b/p/base.json"]);
+                err_out("no url matched")
+            }),
+        )
+        .unwrap();
+        assert_eq!(s.program(), "gsutil");
+        assert_eq!(s.read_base().unwrap(), None);
+
+        assert!(CliTransport::for_remote_with(
+            "gs://b/p",
+            StubRunner::new(&[], |_, _, _| ok_out(b""))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cli_delete_tolerates_missing() {
+        let t = CliTransport::for_remote_with(
+            "s3://b/p",
+            StubRunner::new(&["aws"], |_, args, _| {
+                assert_eq!(args, &["s3", "rm", "s3://b/p/segments/seg-x.json"]);
+                err_out("delete failed: does not exist")
+            }),
+        )
+        .unwrap();
+        assert!(t.delete_segment("x").is_ok());
+    }
+
+    // ---- HttpTransport (http:// / https://) --------------------------------
+
+    #[cfg(feature = "http-cache")]
+    type HttpResponder = Box<dyn Fn(&str, &str, Option<&[u8]>) -> HttpResp>;
+    #[cfg(feature = "http-cache")]
+    struct StubHttpClient {
+        responder: HttpResponder,
+        calls: RefCell<Vec<(String, String)>>,
+    }
+    #[cfg(feature = "http-cache")]
+    impl StubHttpClient {
+        fn new(responder: impl Fn(&str, &str, Option<&[u8]>) -> HttpResp + 'static) -> Box<Self> {
+            Box::new(StubHttpClient {
+                responder: Box::new(responder),
+                calls: RefCell::new(Vec::new()),
+            })
+        }
+    }
+    #[cfg(feature = "http-cache")]
+    impl HttpClient for StubHttpClient {
+        fn get(&self, url: &str) -> Result<HttpResp> {
+            self.calls.borrow_mut().push(("GET".into(), url.into()));
+            Ok((self.responder)("GET", url, None))
+        }
+        fn put(&self, url: &str, body: &[u8]) -> Result<HttpResp> {
+            self.calls.borrow_mut().push(("PUT".into(), url.into()));
+            Ok((self.responder)("PUT", url, Some(body)))
+        }
+        fn delete(&self, url: &str) -> Result<HttpResp> {
+            self.calls.borrow_mut().push(("DELETE".into(), url.into()));
+            Ok((self.responder)("DELETE", url, None))
+        }
+    }
+    #[cfg(feature = "http-cache")]
+    fn resp(status: u16, body: &[u8]) -> HttpResp {
+        HttpResp {
+            status,
+            body: body.to_vec(),
+        }
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_list_parses_json_array_and_ignores_non_segments() {
+        let t = HttpTransport::new(
+            "https://cache.example/team/",
+            StubHttpClient::new(|_m, url, _b| {
+                assert_eq!(url, "https://cache.example/team/segments/");
+                // Mix of bare filenames, a full URL, and a non-segment entry.
+                resp(
+                    200,
+                    br#"["seg-run1-1of2.json","https://cache.example/team/segments/seg-run1-2of2.json","index.html"]"#,
+                )
+            }),
+        );
+        let mut ids = t.list_segment_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["run1-1of2".to_string(), "run1-2of2".to_string()]);
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_list_404_is_empty_non_json_errors() {
+        let empty =
+            HttpTransport::new("https://c/x", StubHttpClient::new(|_, _, _| resp(404, b"")));
+        assert!(empty.list_segment_ids().unwrap().is_empty());
+        let bad = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_, _, _| resp(200, b"<html>not json</html>")),
+        );
+        assert!(bad.list_segment_ids().is_err());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_read_base_404_none_2xx_some_5xx_error() {
+        let none = HttpTransport::new("https://c/x", StubHttpClient::new(|_, _, _| resp(404, b"")));
+        assert_eq!(none.read_base().unwrap(), None);
+        let some = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_m, url, _| {
+                assert_eq!(url, "https://c/x/base.json");
+                resp(200, b"{}")
+            }),
+        );
+        assert_eq!(some.read_base().unwrap(), Some(b"{}".to_vec()));
+        let err = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_, _, _| resp(500, b"boom")),
+        );
+        assert!(err.read_base().is_err());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_write_puts_to_segment_url_and_surfaces_failure() {
+        let ok = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|m, url, body| {
+                assert_eq!(m, "PUT");
+                assert_eq!(url, "https://c/x/segments/seg-a.json");
+                assert_eq!(body, Some(b"payload".as_ref()));
+                resp(201, b"")
+            }),
+        );
+        ok.write_segment("a", b"payload").unwrap();
+        let fail = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_, _, _| resp(403, b"denied")),
+        );
+        assert!(fail.write_segment("a", b"x").is_err());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_delete_tolerates_404() {
+        let t = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|m, url, _| {
+                assert_eq!(m, "DELETE");
+                assert_eq!(url, "https://c/x/segments/seg-a.json");
+                resp(404, b"")
+            }),
+        );
+        assert!(t.delete_segment("a").is_ok());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_transport_for_dispatches_and_no_junk_dir() {
+        // http(s):// builds an HttpTransport (no network at construction).
+        assert!(transport_for("https://cache/x").is_ok());
+        assert!(transport_for("http://cache/x").is_ok());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_real_client_reads_bearer_token_from_env() {
+        // The env->Authorization mapping is pure; test it without a server.
+        std::env::set_var("RSTEST_CACHE_REMOTE_TOKEN", "sekret");
+        let c = RealHttpClient::from_env();
+        assert_eq!(c.auth.as_deref(), Some("Bearer sekret"));
+        std::env::remove_var("RSTEST_CACHE_REMOTE_TOKEN");
+        assert_eq!(RealHttpClient::from_env().auth, None);
+    }
+
     #[test]
     fn compact_remote_keeps_segments_when_base_write_fails() {
         // If the base write fails, segments must NOT be deleted — no data loss.
@@ -972,7 +2006,7 @@ mod tests {
             fail: FailAt::Base,
         };
         assert!(
-            compact_remote(&t, &mut Sink::captured().0).is_err(),
+            compact_all(&t, &mut Sink::captured().0).is_err(),
             "base write failure must fail compaction"
         );
         let mut ids = t.list_segment_ids().unwrap();

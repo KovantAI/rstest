@@ -8,6 +8,12 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["http-cache"]
+# HTTP(S) shared-cache transport (`--cache-remote https://…`). Off by default
+# only via `--no-default-features` for a zero-network build.
+http-cache = ["dep:ureq"]
+
 [lib]
 name = "rstest_cli"
 path = "src/lib.rs"
@@ -27,6 +33,7 @@ regex = "1"
 toml = "1.1"
 notify = "8"
 sha2 = "0.11"
+ureq = { version = "2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

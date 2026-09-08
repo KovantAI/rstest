@@ -257,10 +257,22 @@ duration cache on every job so their partitions match — see the
 
 Publish and warm the `.rstest_cache` (durations, flake history, and the
 `--changed` coverage index) to/from a **shared remote** — no hand-rolled
-`actions/cache` glue, no dedicated
-refresh job, no cache-key dance. `--cache-remote` is a directory or `file://`
-path (local, an NFS/EFS mount, or a dir a CI step materializes via
-`download-artifact` / `aws s3 sync`); also settable as `RSTEST_CACHE_REMOTE`.
+`actions/cache` glue, no dedicated refresh job, no cache-key dance. Also
+settable as `RSTEST_CACHE_REMOTE`. `--cache-remote` accepts:
+
+- a **directory** / `file://` path — local, an NFS/EFS mount, or a dir a CI step
+  materializes via `download-artifact` / `aws s3 sync`;
+- an **`s3://` / `gs://`** bucket URL — driven through the `aws` / `gcloud`
+  (falling back to `gsutil`) CLI already installed and authenticated on the
+  runner; credentials come from the process environment (no SDK, no secrets in
+  the URL);
+- an **`http(s)://`** endpoint — the endpoint must serve `GET <root>/segments/`
+  as a JSON array of segment names (the [listing
+  contract](../concepts/caching.md#shared-cache-backend)) and support `GET` /
+  `PUT` / `DELETE`. Bearer auth from `RSTEST_CACHE_REMOTE_TOKEN`.
+
+Any other `scheme://` is rejected loudly — rstest never silently writes to a
+junk local directory named after the URL.
 
 - `--cache-pull` merges the remote into the local cache **before** the run —
   warming scheduling and the regression baseline.
@@ -280,12 +292,34 @@ caching there (rstest errors rather than silently no-op).
 
 ### `cache-compact`
 
-Maintenance: fold all remote segments into a fresh `base.json` and prune them,
-then exit without running tests. Keeps the segment count (and pull size) down;
+Maintenance: fold remote segments into a fresh `base.json` and prune them, then
+exit without running tests. Keeps the segment count (and pull size) down;
 optional — pull/push work without it. Run occasionally (nightly, or on merge to
 main). Needs `--cache-remote`. It is **run-less** — it exits before the run, so
 don't combine it with `--cache-pull`/`--cache-push` (rstest rejects that
 combination rather than silently skipping them).
+
+With no retention flags it folds **all** segments. To keep a recent window loose
+(so the newest history stays merge-on-read while the tail is compacted):
+
+- `--keep-last N` — retain the newest N segments; fold only older ones. Env:
+  `RSTEST_CACHE_KEEP_LAST`.
+- `--max-age DURATION` — retain segments younger than DURATION (a bare number is
+  seconds, or a `s`/`m`/`h`/`d`/`w` suffix, e.g. `30d`); fold older ones. Env:
+  `RSTEST_CACHE_MAX_AGE`.
+
+A segment retained by **either** rule stays loose. A bad flag/env value is a hard
+error, never a silent fold-all.
+
+### `--cache-compact-threshold <N>`
+
+Fold **on push** instead of in a separate job: after a `--cache-push`, if the
+remote holds more than N loose segments, rstest compacts inline (honoring
+`RSTEST_CACHE_KEEP_LAST` / `RSTEST_CACHE_MAX_AGE`). Env:
+`RSTEST_CACHE_COMPACT_THRESHOLD`. Strictly **best-effort** — a listing, config,
+or compaction failure warns and never fails an otherwise-green run. Concurrent
+auto-compactions are safe (the absorbed-id set prevents double-counting), only
+redundant. Leave it unset to keep compaction an explicit `cache-compact` step.
 
 ### `--require-baseline`
 

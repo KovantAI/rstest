@@ -174,18 +174,27 @@ retention gives free segment eviction.
     pull.
 
 **Object store (S3/GCS/R2), OIDC — no secrets.** For teams already on cloud
-storage: sync a prefix around the run (immutable, uniquely-named segments make
-`sync` concurrent-safe):
+storage, point `--cache-remote` straight at the bucket: rstest drives the `aws`
+/ `gcloud` CLI the runner already has, with credentials from the OIDC role — no
+`sync` bookends, no SDK. Immutable, uniquely-named segments make concurrent
+shard pushes safe:
 
 ```yaml
 permissions: { id-token: write, contents: read }
 steps:
   - uses: aws-actions/configure-aws-credentials@v4
     with: { role-to-assume: arn:aws:iam::…:role/ci, aws-region: us-east-1 }
-  - run: aws s3 sync s3://ci-cache/rstest ./rcache
-  - run: rstest -n auto --shard ${{ matrix.shard }}/4 --cache-remote ./rcache --cache-pull --cache-push
-  - run: aws s3 sync ./rcache s3://ci-cache/rstest
+  - run: rstest -n auto --shard ${{ matrix.shard }}/4
+           --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
+           --cache-compact-threshold 500
 ```
+
+`--cache-compact-threshold` folds the segment set inline once it grows past the
+threshold, so no separate maintenance job is needed (or run `rstest cache-compact
+--cache-remote s3://ci-cache/rstest --keep-last 200` on a schedule instead). A
+`gs://` bucket works the same via `gcloud`; an authenticated `https://` endpoint
+via `RSTEST_CACHE_REMOTE_TOKEN`. Still prefer syncing to a local dir? The
+`aws s3 sync … ./rcache` / `--cache-remote ./rcache` form remains valid.
 
 **Self-hosted shared mount — zero glue.** `--cache-remote /mnt/ci-cache/rstest`
 directly; the mount is the remote, no pull/push bookends beyond the flags.

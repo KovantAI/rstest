@@ -199,6 +199,59 @@ fn report_push_result(w: &mut dyn Write, result: Result<()>, seg: &remote::Segme
     }
 }
 
+/// Resolve the auto-compaction threshold: the `--cache-compact-threshold` flag,
+/// else `RSTEST_CACHE_COMPACT_THRESHOLD`, else `None` (feature off).
+fn resolve_compact_threshold(cli: &Cli) -> Option<usize> {
+    cli.cache_compact_threshold.or_else(|| {
+        std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<usize>().ok())
+    })
+}
+
+/// Opt-in auto-compaction: after a successful push, if the remote holds more
+/// than the threshold loose segments, fold per the env retention window inline.
+/// Strictly best-effort — every failure warns and never fails an otherwise-green
+/// run. Concurrent auto-compactions are safe (the absorbed-id set prevents
+/// double-counting), only redundant.
+fn maybe_auto_compact(cli: &Cli, t: &dyn remote::Transport, remote: &str, sink: &mut Sink) {
+    let Some(threshold) = resolve_compact_threshold(cli) else {
+        return;
+    };
+    let count = match t.list_segment_ids() {
+        Ok(ids) => ids.len(),
+        Err(e) => {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact: listing failed (non-fatal): {e:#}"
+            ));
+            return;
+        }
+    };
+    if count <= threshold {
+        return;
+    }
+    // Retention window comes from env on the push path (no per-run flags).
+    let policy = match super::resolve_retention_policy(None, None) {
+        Ok(p) => p,
+        Err(e) => {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact skipped (bad retention env): {e:#}"
+            ));
+            return;
+        }
+    };
+    match remote::compact_remote_with(t, sink, crate::time::now_epoch_secs(), &policy) {
+        Ok((folded, retained)) => sink.warn(&format!(
+            "rstest: cache: auto-compacted {folded} segment(s) into base at {remote} \
+             ({retained} retained; threshold {threshold})"
+        )),
+        Err(e) => sink.warn(&format!(
+            "rstest: cache: auto-compact failed (non-fatal): {e:#}"
+        )),
+    }
+}
+
 /// Write the optional `--report-json` snapshot. Extracted (like
 /// [`write_run_reports`]) so the report side-effect is covered in-process.
 fn write_report_json(
@@ -469,8 +522,19 @@ pub(super) fn run_post_gates(
                 &outcome.run,
                 cov,
             );
-            let result = remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg));
-            report_push_result(sink.err(), result, &seg, remote);
+            // Build the transport once and reuse it for an optional inline
+            // auto-compaction after a successful push.
+            match remote::transport_for(remote) {
+                Ok(t) => {
+                    let result = remote::push(t.as_ref(), &seg);
+                    let pushed = result.is_ok();
+                    report_push_result(sink.err(), result, &seg, remote);
+                    if pushed {
+                        maybe_auto_compact(cli, t.as_ref(), remote, sink);
+                    }
+                }
+                Err(e) => report_push_result(sink.err(), Err(e), &seg, remote),
+            }
         }
     }
     write_report_json(
@@ -758,10 +822,11 @@ pub(super) fn quarantine_matcher(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_diff_cov_gate, build_diff_lines, build_run_meta, diff_cov_gate, merge_fixtures,
-        merged_lastfailed, print_warnings_summary, quarantine_matcher, reconcile_cov_status,
-        report_push_result, results_bar_line, validate_regress_ratio, warn_doctor_gate_passthrough,
-        write_report_json, write_run_reports, write_teamcity_flaky,
+        apply_diff_cov_gate, build_diff_lines, build_run_meta, diff_cov_gate, maybe_auto_compact,
+        merge_fixtures, merged_lastfailed, print_warnings_summary, quarantine_matcher,
+        reconcile_cov_status, report_push_result, resolve_compact_threshold, results_bar_line,
+        validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
+        write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
     use crate::reporting::report::Run;
@@ -1067,6 +1132,92 @@ mod tests {
             "s3://bucket",
         );
         assert!(utf8(buf).contains("cache: push failed: network down"));
+    }
+
+    #[test]
+    fn resolve_compact_threshold_flag_then_env() {
+        use crate::cli::Cli;
+        use clap::Parser;
+        let mut cli = Cli::parse_from(["rstest"]);
+        assert_eq!(resolve_compact_threshold(&cli), None);
+        cli.cache_compact_threshold = Some(7);
+        assert_eq!(resolve_compact_threshold(&cli), Some(7)); // flag wins
+
+        let mut cli2 = Cli::parse_from(["rstest"]);
+        cli2.cache_compact_threshold = None;
+        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "3");
+        assert_eq!(resolve_compact_threshold(&cli2), Some(3)); // env fallback
+        std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD");
+    }
+
+    fn auto_compact_root(label: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("rstest-autocompact-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn seed_segments(t: &crate::remote::DirTransport, n: u64) {
+        for i in 0..n {
+            let mut s = segment(1, 0);
+            s.id = format!("s{i}");
+            s.generated_at = i;
+            crate::remote::push(t, &s).unwrap();
+        }
+    }
+
+    #[test]
+    fn maybe_auto_compact_folds_when_over_threshold() {
+        // 3 loose segments, threshold 2 => compaction fires. No env retention
+        // window, so all fold into a fresh base and are pruned.
+        use crate::cli::Cli;
+        use crate::remote::{DirTransport, Transport};
+        use clap::Parser;
+        let root = auto_compact_root("over");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 3);
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(2);
+        maybe_auto_compact(&cli, &t, "dir", &mut Sink::captured().0);
+        assert!(t.read_base().unwrap().is_some(), "base written");
+        assert!(
+            t.list_segment_ids().unwrap().is_empty(),
+            "all folded (no retention window)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn maybe_auto_compact_noop_at_or_under_threshold() {
+        // 2 segments, threshold 2 => count (2) is not > 2, no compaction.
+        use crate::cli::Cli;
+        use crate::remote::{DirTransport, Transport};
+        use clap::Parser;
+        let root = auto_compact_root("under");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 2);
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(2);
+        maybe_auto_compact(&cli, &t, "dir", &mut Sink::captured().0);
+        assert!(t.read_base().unwrap().is_none(), "no base written");
+        assert_eq!(t.list_segment_ids().unwrap().len(), 2, "segments intact");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn maybe_auto_compact_off_without_threshold() {
+        // No flag, no env => feature off, never touches the remote.
+        use crate::cli::Cli;
+        use crate::remote::{DirTransport, Transport};
+        use clap::Parser;
+        let root = auto_compact_root("off");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 5);
+        let cli = Cli::parse_from(["rstest"]);
+        maybe_auto_compact(&cli, &t, "dir", &mut Sink::captured().0);
+        assert!(t.read_base().unwrap().is_none());
+        assert_eq!(t.list_segment_ids().unwrap().len(), 5);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
