@@ -1,6 +1,7 @@
 """Unit tests for the coverage-combine tool's arg parsing and index helpers."""
 
 import json
+import os
 import types
 
 from rstest_worker import covtool
@@ -83,6 +84,93 @@ def test_file_sha256_normalizes_crlf(tmp_path):
 
 def test_file_sha256_missing_file_returns_none():
     assert covtool._file_sha256("/no/such/file/here.py") is None
+
+
+def test_fmt_ranges_compresses_runs():
+    assert covtool._fmt_ranges([1, 2, 3, 7, 10, 11, 12]) == "1-3, 7, 10-12"
+    assert covtool._fmt_ranges([5]) == "5"
+    assert covtool._fmt_ranges([]) == ""
+
+
+def test_arg_value_reads_space_and_equals_forms():
+    assert covtool._arg_value(["--x", "v"], "--x") == "v"
+    assert covtool._arg_value(["--x=v"], "--x") == "v"
+    assert covtool._arg_value(["--y", "v"], "--x") is None
+
+
+class _FakeAnalysisCov:
+    """Stand-in for coverage.Coverage with analysis2 keyed by abspath.
+
+    `per_file` maps rel path -> (statements, missing). analysis2 raises for any
+    path not present (mirrors coverage.py for unmeasured files)."""
+
+    def __init__(self, per_file):
+        # key by abspath, since diff_coverage calls analysis2(os.path.abspath(rel)).
+        self._by_abs = {os.path.abspath(k): v for k, v in per_file.items()}
+
+    def analysis2(self, abspath):
+        stmts, missing = self._by_abs[abspath]  # KeyError -> caught by diff_coverage
+        return (abspath, stmts, [], missing, "")
+
+
+def _run_diff_cov(tmp_path, cov, diff):
+    lines = tmp_path / "difflines.json"
+    lines.write_text(json.dumps(diff))
+    out = tmp_path / "diffout.json"
+    covtool.diff_coverage(cov, str(lines), str(out))
+    return json.loads(out.read_text())
+
+
+def test_diff_coverage_all_covered(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cov = _FakeAnalysisCov({"a.py": ([1, 2, 3], [])})
+    res = _run_diff_cov(tmp_path, cov, {"a.py": [1, 2, 3]})
+    assert res == {"pct": 100.0, "covered": 3, "uncovered": 0, "files": {}}
+
+
+def test_diff_coverage_partial_reports_uncovered_lines(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Added lines 1,2,3,4; statements are 1,2,3,4; lines 3,4 missing.
+    cov = _FakeAnalysisCov({"a.py": ([1, 2, 3, 4], [3, 4])})
+    res = _run_diff_cov(tmp_path, cov, {"a.py": [1, 2, 3, 4]})
+    assert res["covered"] == 2
+    assert res["uncovered"] == 2
+    assert res["pct"] == 50.0
+    assert res["files"] == {"a.py": [3, 4]}
+
+
+def test_diff_coverage_ignores_non_executable_added_lines(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Added lines 1..5 but only 2 and 4 are executable statements; 4 is missing.
+    cov = _FakeAnalysisCov({"a.py": ([2, 4], [4])})
+    res = _run_diff_cov(tmp_path, cov, {"a.py": [1, 2, 3, 4, 5]})
+    assert res["covered"] == 1  # line 2
+    assert res["uncovered"] == 1  # line 4
+    assert res["files"] == {"a.py": [4]}
+
+
+def test_diff_coverage_skips_unmeasured_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # b.py is not in the cov data -> analysis2 raises -> skipped silently.
+    cov = _FakeAnalysisCov({"a.py": ([1], [])})
+    res = _run_diff_cov(tmp_path, cov, {"a.py": [1], "b.py": [1, 2]})
+    assert res == {"pct": 100.0, "covered": 1, "uncovered": 0, "files": {}}
+
+
+def test_diff_coverage_skips_empty_added_list(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cov = _FakeAnalysisCov({"a.py": ([1], [])})
+    res = _run_diff_cov(tmp_path, cov, {"a.py": []})
+    assert res == {"pct": 100.0, "covered": 0, "uncovered": 0, "files": {}}
+
+
+def test_diff_coverage_no_executable_added_lines(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Added lines are all non-executable (blank/comment): none intersect stmts.
+    cov = _FakeAnalysisCov({"a.py": ([10, 11], [])})
+    res = _run_diff_cov(tmp_path, cov, {"a.py": [1, 2, 3]})
+    # denom == 0 -> pct defaults to 100.0, nothing reported.
+    assert res == {"pct": 100.0, "covered": 0, "uncovered": 0, "files": {}}
 
 
 def _index_cache(monkeypatch, tmp_path):
@@ -365,3 +453,34 @@ def test_main_index_build_failure_does_not_fail_run(monkeypatch):
     monkeypatch.setattr(covtool, "build_index", boom)
     # build_index blows up but the run still returns its report status
     assert covtool.main(["--cov-report=term", "--cov-context=test"]) == 0
+
+
+def test_main_runs_diff_coverage_when_flags_present(monkeypatch):
+    _install_fake_coverage(monkeypatch)
+    seen = {}
+
+    def fake_diff(cov, diff_lines, diff_out):
+        seen["args"] = (diff_lines, diff_out)
+
+    monkeypatch.setattr(covtool, "diff_coverage", fake_diff)
+    status = covtool.main(
+        ["--cov-report=term", "--rstest-diff-lines=lines.json", "--rstest-diff-out=out.json"]
+    )
+    assert status == 0
+    assert seen["args"] == ("lines.json", "out.json")
+
+
+def test_main_diff_coverage_failure_does_not_fail_run(monkeypatch):
+    _install_fake_coverage(monkeypatch)
+
+    def boom(cov, diff_lines, diff_out):
+        raise RuntimeError("diff broke")
+
+    monkeypatch.setattr(covtool, "diff_coverage", boom)
+    # diff_coverage blows up but the run still returns its report status
+    assert (
+        covtool.main(
+            ["--cov-report=term", "--rstest-diff-lines=lines.json", "--rstest-diff-out=out.json"]
+        )
+        == 0
+    )

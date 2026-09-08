@@ -106,6 +106,79 @@ fn reconcile_cov_status(w: &mut dyn Write, status: Result<bool, String>, exitsta
     }
 }
 
+/// Decide the `--cov-diff-fail-under` outcome from covtool's scored diff
+/// coverage. `pct` is the covered-added-lines percentage covtool wrote, or
+/// `None` when there was no result to read (nothing scored / covtool produced
+/// no output). Returns the (possibly raised) exit status and the message to
+/// warn. Like the other gates, it only turns a green run red — never lowers a
+/// non-zero status.
+fn diff_cov_gate(pct: Option<f64>, threshold: f64, exitstatus: i32) -> (i32, String) {
+    match pct {
+        // The 1e-9 slop keeps a value that rounds to the threshold from failing.
+        Some(p) if p + 1e-9 < threshold => (
+            if exitstatus == 0 { 1 } else { exitstatus },
+            format!("rstest: --cov-diff-fail-under: diff coverage {p:.1}% is below {threshold}%"),
+        ),
+        Some(p) => (
+            exitstatus,
+            format!("rstest: --cov-diff-fail-under: diff coverage {p:.1}% meets {threshold}%"),
+        ),
+        None => (
+            exitstatus,
+            "rstest: --cov-diff-fail-under: no added executable lines to score \
+             (nothing changed, or the changed files aren't under --cov)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Prepare covtool's diff-coverage inputs: on the changed-lines map, write the
+/// POSIX-normalized `{path: [lines]}` to a temp file and return that path plus
+/// the path covtool will score into. On a git error, warn (to `w`) and return
+/// `None` so the run continues without the diff gate.
+fn build_diff_lines(
+    w: &mut dyn Write,
+    changed: Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u32>>>,
+) -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+    match changed {
+        Ok(map) => {
+            let pid = std::process::id();
+            let lines_path = std::env::temp_dir().join(format!("rstest-difflines-{pid}.json"));
+            let out_path = std::env::temp_dir().join(format!("rstest-diffcov-{pid}.json"));
+            // JSON object keys are strings; POSIX-normalize the paths.
+            let smap: std::collections::BTreeMap<String, Vec<u32>> = map
+                .into_iter()
+                .map(|(k, v)| (k.to_string_lossy().replace('\\', "/"), v))
+                .collect();
+            let _ = std::fs::write(&lines_path, serde_json::to_vec(&smap)?);
+            Ok(Some((lines_path, out_path)))
+        }
+        Err(e) => {
+            let _ = writeln!(w, "rstest: --cov-diff-fail-under: {e}");
+            Ok(None)
+        }
+    }
+}
+
+/// Apply the diff-coverage gate: read covtool's scored percentage from `out_path`,
+/// gate it against `threshold`, warn the verdict (to `w`), and return the
+/// (possibly raised) exit status. A missing/unreadable result scores as `None`,
+/// which `diff_cov_gate` reports without failing.
+fn apply_diff_cov_gate(
+    w: &mut dyn Write,
+    out_path: &std::path::Path,
+    threshold: f64,
+    exitstatus: i32,
+) -> i32 {
+    let pct = std::fs::read(out_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("pct").and_then(|p| p.as_f64()));
+    let (status, msg) = diff_cov_gate(pct, threshold, exitstatus);
+    let _ = writeln!(w, "{msg}");
+    status
+}
+
 /// Report a `--cache-push` outcome (to `w`): a success line with the segment's
 /// counts, or a warning on failure. A push failure never fails an otherwise-green
 /// run — it is reported, not gated.
@@ -323,21 +396,50 @@ pub(super) fn run_post_gates(
     // Runs BEFORE the cache-push below so this run's coverage-index slice is
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
-    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
+    let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
+    if cli.cov_diff_fail_under.is_some() && !has_cov && !passthrough {
+        sink.warn(
+            "rstest: --cov-diff-fail-under needs --cov (no coverage data to score); ignoring",
+        );
+    }
+    if !passthrough && has_cov {
         sink.out_line("");
-        let status = std::process::Command::new(python)
-            .args(["-m", "rstest_worker.covtool"])
+        // Diff-coverage gate: hand covtool the diff's added lines + a result
+        // path when --cov-diff-fail-under is set; covtool scores them and we
+        // gate on the percentage below.
+        let diff_paths = if cli.cov_diff_fail_under.is_some() {
+            let base = super::resolve_changed_base(cli, sink)?;
+            build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))?
+        } else {
+            None
+        };
+
+        let mut cmd = std::process::Command::new(python);
+        cmd.args(["-m", "rstest_worker.covtool"])
             .args(args)
             .env("PYTHONPATH", worker::worker_pythonpath())
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir())
-            .status();
+            .env("RSTEST_CACHE", cache::dir());
+        if let Some((lp, op)) = &diff_paths {
+            cmd.arg("--rstest-diff-lines")
+                .arg(lp)
+                .arg("--rstest-diff-out")
+                .arg(op);
+        }
         exitstatus = reconcile_cov_status(
             sink.err(),
-            status.map(|s| s.success()).map_err(|e| e.to_string()),
+            cmd.status().map(|s| s.success()).map_err(|e| e.to_string()),
             exitstatus,
         );
+
+        if let Some((lp, op)) = diff_paths {
+            if let Some(threshold) = cli.cov_diff_fail_under {
+                exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
+            }
+            let _ = std::fs::remove_file(&lp);
+            let _ = std::fs::remove_file(&op);
+        }
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
@@ -656,10 +758,10 @@ pub(super) fn quarantine_matcher(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_run_meta, merge_fixtures, merged_lastfailed, print_warnings_summary,
-        quarantine_matcher, reconcile_cov_status, report_push_result, results_bar_line,
-        validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
-        write_teamcity_flaky,
+        apply_diff_cov_gate, build_diff_lines, build_run_meta, diff_cov_gate, merge_fixtures,
+        merged_lastfailed, print_warnings_summary, quarantine_matcher, reconcile_cov_status,
+        report_push_result, results_bar_line, validate_regress_ratio, warn_doctor_gate_passthrough,
+        write_report_json, write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
     use crate::reporting::report::Run;
@@ -843,6 +945,92 @@ mod tests {
             0
         );
         assert!(utf8(buf).contains("coverage reporting failed to run: no python"));
+    }
+
+    #[test]
+    fn diff_cov_gate_fails_a_green_run_below_threshold() {
+        let (status, msg) = diff_cov_gate(Some(50.0), 80.0, 0);
+        assert_eq!(status, 1);
+        assert!(msg.contains("diff coverage 50.0% is below 80%"), "{msg}");
+    }
+
+    #[test]
+    fn diff_cov_gate_never_lowers_a_red_run() {
+        // Already-failed run stays failed even when the diff meets the bar.
+        let (status, msg) = diff_cov_gate(Some(100.0), 80.0, 2);
+        assert_eq!(status, 2);
+        assert!(msg.contains("meets 80%"), "{msg}");
+        // And a below-threshold diff can't turn a red run into a 1.
+        let (status, _) = diff_cov_gate(Some(10.0), 80.0, 2);
+        assert_eq!(status, 2);
+    }
+
+    #[test]
+    fn diff_cov_gate_meets_threshold_passes() {
+        let (status, msg) = diff_cov_gate(Some(80.0), 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(msg.contains("meets 80%"), "{msg}");
+        // Exactly-at with float slop (e.g. 79.9999996) still counts as meeting.
+        let (status, _) = diff_cov_gate(Some(80.0 - 1e-10), 80.0, 0);
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn build_diff_lines_warns_and_yields_none_on_git_error() {
+        let mut buf = Vec::new();
+        let out = build_diff_lines(&mut buf, Err(anyhow::anyhow!("bad rev"))).unwrap();
+        assert!(out.is_none());
+        assert!(utf8(buf).contains("--cov-diff-fail-under: bad rev"));
+    }
+
+    #[test]
+    fn build_diff_lines_writes_normalized_map_on_ok() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(std::path::PathBuf::from("pkg/mod.py"), vec![1u32, 2]);
+        let mut buf = Vec::new();
+        let (lines_path, out_path) = build_diff_lines(&mut buf, Ok(map)).unwrap().unwrap();
+        assert!(buf.is_empty());
+        let written = std::fs::read(&lines_path).unwrap();
+        let smap: std::collections::BTreeMap<String, Vec<u32>> =
+            serde_json::from_slice(&written).unwrap();
+        assert_eq!(smap.get("pkg/mod.py"), Some(&vec![1, 2]));
+        // out_path is only a name for covtool to fill; it must not exist yet.
+        assert!(!out_path.exists());
+        std::fs::remove_file(&lines_path).ok();
+    }
+
+    #[test]
+    fn apply_diff_cov_gate_reads_pct_and_warns() {
+        let path =
+            std::env::temp_dir().join(format!("rstest-diffcov-test-{}.json", std::process::id()));
+        std::fs::write(&path, br#"{"pct": 40.0}"#).unwrap();
+        let mut buf = Vec::new();
+        // 40% below an 80% bar fails a green run.
+        let status = apply_diff_cov_gate(&mut buf, &path, 80.0, 0);
+        assert_eq!(status, 1);
+        assert!(utf8(buf).contains("diff coverage 40.0% is below 80%"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn apply_diff_cov_gate_missing_file_scores_none() {
+        let path = std::env::temp_dir().join(format!(
+            "rstest-diffcov-missing-{}.json",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let mut buf = Vec::new();
+        // No result file => None pct => reported, never failed.
+        let status = apply_diff_cov_gate(&mut buf, &path, 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(utf8(buf).contains("no added executable lines to score"));
+    }
+
+    #[test]
+    fn diff_cov_gate_none_reports_nothing_scored_without_failing() {
+        let (status, msg) = diff_cov_gate(None, 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(msg.contains("no added executable lines to score"), "{msg}");
     }
 
     fn segment(durations: usize, events: usize) -> crate::remote::Segment {

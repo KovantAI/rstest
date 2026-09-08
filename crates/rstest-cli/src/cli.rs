@@ -184,6 +184,12 @@ pub struct Cli {
     #[arg(long)]
     pub(crate) changed_strict: bool,
 
+    /// Diff-coverage gate: fail the run when the percentage of ADDED/CHANGED
+    /// lines (vs the --changed base, else HEAD) that are covered by tests falls
+    /// below PCT. Requires --cov. Reports the uncovered added lines per file.
+    #[arg(long = "cov-diff-fail-under", value_name = "PCT")]
+    pub(crate) cov_diff_fail_under: Option<f64>,
+
     /// Incremental testing: run only what changed since the last GREEN run,
     /// re-using --changed's coverage-aware selection with an auto-managed
     /// baseline (the commit of the last all-passing run, stored in the cache).
@@ -402,6 +408,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--migrate-allow",
     "--durations-regress",
     "--only-rerun",
+    "--cov-diff-fail-under",
     "--worker-timeout",
     "--timeout",
     "--reruns",

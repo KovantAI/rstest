@@ -54,6 +54,30 @@ whose coverage actually executed the changed lines. Warm it by running your
 coverage suite once with `--cov-context=test`; persist `.rstest_cache` across
 CI runs the same way you persist it for scheduling.
 
+## Diff coverage gate
+
+[`--cov-diff-fail-under=PCT`](../reference/cli.md#-cov-diff-fail-under-pct)
+gates a PR on the coverage of **only the lines it added or changed** — the
+"did you test the new code?" check, without a separate `diff-cover` or Codecov
+step. It reuses the run's own coverage data.
+
+```console
+$ rstest -n auto --cov=. --cov-diff-fail-under=90 --changed=origin/main
+```
+
+The diff is taken against the [`--changed`](changed.md) base (else `HEAD`).
+Each added line that coverage.py counts as an executable statement is scored
+covered or missed; non-executable lines (blank, comment) are ignored. Below the
+threshold the run exits `1` and the uncovered added lines are named per file:
+
+```text
+rstest: diff coverage 83.3% (5/6 added lines covered)
+  mymod.py: uncovered added line(s) 7, 12-14
+```
+
+Needs `--cov`. A diff with no added executable lines (or whose files aren't
+under `--cov`) passes — there is nothing to score.
+
 ## Notes
 
 - At `-n 0` pytest-cov runs in its ordinary central mode and produces its
