@@ -409,6 +409,12 @@ def test_logreport_ships_passing_sections_under_stream_output(monkeypatch):
     assert p._conn.sent[0][1]["sections"] == [["Captured stdout call", "hi\n"]]
 
 
+def test_logreport_omits_sections_when_empty():
+    p = _plugin()
+    p.pytest_runtest_logreport(mk_report("call", "passed", sections=[]))
+    assert "sections" not in p._conn.sent[0][1]
+
+
 def test_logreport_extracts_skip_reason():
     p = _plugin()
     p.pytest_runtest_logreport(

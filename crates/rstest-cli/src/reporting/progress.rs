@@ -727,6 +727,41 @@ mod tests {
     }
 
     #[test]
+    fn json_report_emits_sections_on_any_outcome() {
+        // Passing report with captured output: sections ride as {name, text}
+        // objects even though the outcome isn't a failure.
+        let mut r = report("call", "passed");
+        r.sections = vec![
+            ("Captured stdout".into(), "hello\nworld".into()),
+            ("Captured stderr".into(), "boom".into()),
+        ];
+        let (mut sink, buf) = Sink::captured();
+        Progress::on_report_json(&mut sink, Some(1), &r);
+        let obj: serde_json::Value =
+            serde_json::from_str(buf.out().trim()).expect("valid json line");
+        assert_eq!(obj["outcome"], "passed");
+        assert_eq!(obj["worker"], "gw1");
+        assert_eq!(
+            obj["sections"],
+            serde_json::json!([
+                {"name": "Captured stdout", "text": "hello\nworld"},
+                {"name": "Captured stderr", "text": "boom"},
+            ])
+        );
+    }
+
+    #[test]
+    fn json_report_omits_sections_when_empty() {
+        let (mut sink, buf) = Sink::captured();
+        Progress::on_report_json(&mut sink, None, &report("call", "passed"));
+        let obj: serde_json::Value =
+            serde_json::from_str(buf.out().trim()).expect("valid json line");
+        assert!(obj.get("sections").is_none(), "{obj}");
+        // Non-failure keeps longrepr off the wire too.
+        assert!(obj.get("longrepr").is_none(), "{obj}");
+    }
+
+    #[test]
     fn teamcity_flaky_warns_per_test() {
         assert_eq!(teamcity_flaky_messages(&[]), "");
         let flaky = vec![
