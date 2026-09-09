@@ -330,6 +330,23 @@ fn resolve_run_config(
     })
 }
 
+/// Wire up the `--stream-json FILE` side channel: open FILE for truncating
+/// write (creating it if absent) and attach it to `sink`, or warn to stderr if
+/// it can't be opened. FILE may be a regular file or a named pipe the editor
+/// already opened for reading. Open failure is non-fatal — the run continues
+/// without the side channel.
+fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(f) => sink.attach_stream(Box::new(f)),
+        Err(e) => sink.warn(&format!("rstest: --stream-json {}: {e}", path.display())),
+    }
+}
+
 /// The crate's main entry point for a single (non-watch) run: resolves the
 /// run configuration from `cli` + forwarded pytest `args`, dispatches to the
 /// worker pool (or the monorepo driver), runs post-run reports and gates
@@ -346,15 +363,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // may be a regular file or a named pipe the editor already opened for
     // reading (opening a fifo for write blocks until that reader is present).
     if let Some(path) = &cli.stream_json {
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-        {
-            Ok(f) => sink.attach_stream(Box::new(f)),
-            Err(e) => sink.warn(&format!("rstest: --stream-json {}: {e}", path.display())),
-        }
+        attach_stream_json(&mut sink, path);
     }
     let start = Instant::now();
     let started_epoch = crate::time::now_epoch_secs();
@@ -1350,9 +1359,9 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_workers_by_files, cap_workers_by_time, collect_lazy, fold_run_event, head_to_none,
-        lazy_should_steal, parse_numprocesses, resolve_changed_base, resolve_shard,
-        resolve_shuffle_seed, validate_cache_flags, warn_incremental_conflicts,
+        attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
+        fold_run_event, head_to_none, lazy_should_steal, parse_numprocesses, resolve_changed_base,
+        resolve_shard, resolve_shuffle_seed, validate_cache_flags, warn_incremental_conflicts,
         warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration,
     };
     use crate::cli::Cli;
@@ -1898,5 +1907,43 @@ mod tests {
         assert_eq!(events[1]["event"], "collecterror");
         assert_eq!(events[1]["path"], "bad.py");
         assert_eq!(events[1]["longrepr"], "boom");
+    }
+
+    #[test]
+    fn attach_stream_json_opens_file_and_streams_events() {
+        // Happy path: the file opens, gets attached, and emitted NDJSON lands in
+        // it (truncating whatever was there before).
+        let path =
+            std::env::temp_dir().join(format!("rstest-streamjson-{}.ndjson", std::process::id()));
+        std::fs::write(&path, b"stale contents that must be truncated\n").unwrap();
+
+        let (mut sink, captured) = Sink::captured();
+        attach_stream_json(&mut sink, &path);
+        // Open failure would warn to stderr; success must not.
+        assert_eq!(captured.err(), "");
+        sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "{\"event\":\"sessionfinish\"}\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn attach_stream_json_warns_when_open_fails() {
+        // A path under a nonexistent directory can't be created => warn, no panic.
+        let path = std::env::temp_dir()
+            .join(format!("rstest-streamjson-missing-{}", std::process::id()))
+            .join("nope")
+            .join("out.ndjson");
+
+        let (mut sink, captured) = Sink::captured();
+        attach_stream_json(&mut sink, &path);
+
+        let err = captured.err();
+        assert!(err.contains("rstest: --stream-json"), "got: {err}");
+        assert!(err.contains(&path.display().to_string()), "got: {err}");
+        // Nothing was attached, so emitting is a no-op (no panic writing to a
+        // closed/absent stream).
+        sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
     }
 }
