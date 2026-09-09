@@ -190,6 +190,13 @@ pub struct Cli {
     #[arg(long = "cov-diff-fail-under", value_name = "PCT")]
     pub(crate) cov_diff_fail_under: Option<f64>,
 
+    /// Write the diff-coverage report as JSON to PATH:
+    /// {"pct","covered","uncovered","files":{"<path>":[<uncovered line>...]}}.
+    /// Scores coverage of ADDED/CHANGED lines vs the --changed base (else HEAD).
+    /// Requires --cov. Independent of --cov-diff-fail-under (no gate implied).
+    #[arg(long = "cov-diff-json", value_name = "PATH")]
+    pub(crate) cov_diff_json: Option<PathBuf>,
+
     /// Incremental testing: run only what changed since the last GREEN run,
     /// re-using --changed's coverage-aware selection with an auto-managed
     /// baseline (the commit of the last all-passing run, stored in the cache).
@@ -409,6 +416,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--durations-regress",
     "--only-rerun",
     "--cov-diff-fail-under",
+    "--cov-diff-json",
     "--worker-timeout",
     "--timeout",
     "--reruns",

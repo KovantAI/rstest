@@ -344,14 +344,20 @@ def test_logreport_attaches_cpu_on_call(monkeypatch):
     assert "t.py::a" not in p._cpu  # popped
 
 
-def test_logreport_ships_sections_only_on_failure():
+def test_logreport_ships_sections_on_any_outcome():
+    # Sections ride on every outcome now (editors surface a passing test's
+    # output too), not just failures; each is tail-truncated to bound the wire.
     p = _plugin()
     big = "x" * 30000
-    p.pytest_runtest_logreport(
-        mk_report("call", "failed", failed=True, sections=[("Captured stdout", big)])
-    )
+    p.pytest_runtest_logreport(mk_report("call", "passed", sections=[("Captured stdout", big)]))
     payload = p._conn.sent[0][1]
     assert payload["sections"] == [["Captured stdout", big[-20000:]]]  # tail-truncated
+
+
+def test_logreport_omits_sections_when_empty():
+    p = _plugin()
+    p.pytest_runtest_logreport(mk_report("call", "passed", sections=[]))
+    assert "sections" not in p._conn.sent[0][1]
 
 
 def test_logreport_extracts_skip_reason():

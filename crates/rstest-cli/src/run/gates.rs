@@ -397,17 +397,16 @@ pub(super) fn run_post_gates(
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
     let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
-    if cli.cov_diff_fail_under.is_some() && !has_cov && !passthrough {
-        sink.warn(
-            "rstest: --cov-diff-fail-under needs --cov (no coverage data to score); ignoring",
-        );
+    let want_diff = cli.cov_diff_fail_under.is_some() || cli.cov_diff_json.is_some();
+    if want_diff && !has_cov && !passthrough {
+        sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
     }
     if !passthrough && has_cov {
         sink.out_line("");
         // Diff-coverage gate: hand covtool the diff's added lines + a result
         // path when --cov-diff-fail-under is set; covtool scores them and we
         // gate on the percentage below.
-        let diff_paths = if cli.cov_diff_fail_under.is_some() {
+        let diff_paths = if want_diff {
             let base = super::resolve_changed_base(cli, sink)?;
             build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))?
         } else {
@@ -436,6 +435,14 @@ pub(super) fn run_post_gates(
         if let Some((lp, op)) = diff_paths {
             if let Some(threshold) = cli.cov_diff_fail_under {
                 exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
+            }
+            if let Some(dst) = &cli.cov_diff_json {
+                if let Err(e) = std::fs::copy(&op, dst) {
+                    sink.warn(&format!(
+                        "rstest: could not write --cov-diff-json {}: {e}",
+                        dst.display()
+                    ));
+                }
             }
             let _ = std::fs::remove_file(&lp);
             let _ = std::fs::remove_file(&op);
