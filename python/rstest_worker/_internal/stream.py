@@ -484,9 +484,10 @@ class StreamPlugin:
                 payload["thread_delta"] = dt
             if df:
                 payload["fd_delta"] = df
-        if report.failed and report.sections:
-            # Captured stdout/stderr/log; ship only for failures to keep the
-            # wire lean.
+        if report.sections:
+            # Captured stdout/stderr/log for any outcome (each section capped to
+            # the last 20000 chars to bound wire size). The reporter decides
+            # whether to surface them (e.g. only the json stream emits them).
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]

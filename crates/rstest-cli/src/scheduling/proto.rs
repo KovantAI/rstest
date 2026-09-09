@@ -84,7 +84,8 @@ pub struct Report {
     /// Leak check: net open file descriptors after teardown vs before setup.
     #[serde(default)]
     pub fd_delta: Option<i64>,
-    /// Captured stdout/stderr/log sections, present on failed reports only.
+    /// Captured stdout/stderr/log sections (any outcome that produced output);
+    /// empty when the test emitted nothing or capture is disabled.
     #[serde(default)]
     pub sections: Vec<(String, String)>,
     /// Source line of the test (0-based, from pytest's report.location);
