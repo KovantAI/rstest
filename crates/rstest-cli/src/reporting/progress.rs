@@ -363,26 +363,18 @@ impl Progress {
     /// Json mode). `longrepr` rides only on failures (it's large); `worker`
     /// only in pool runs.
     fn on_report_json(sink: &mut Sink, worker: Option<usize>, r: &Report) {
-        let mut obj = serde_json::json!({
-            "event": "testreport",
-            "nodeid": r.nodeid,
-            "when": r.when,
-            "outcome": r.outcome,
-            "duration": (r.duration * 10_000.0).round() / 10_000.0,
-            "wasxfail": r.wasxfail,
-        });
-        if let Some(w) = worker {
-            obj["worker"] = format!("gw{w}").into();
+        sink.out_line(&testreport_json(worker, r).to_string());
+    }
+
+    /// Stream a `collecterror` line to stdout, but only under `--output json`
+    /// (other modes render collection errors in the end-of-run summary, so
+    /// emitting mid-stream would corrupt their human output). The `--stream-json`
+    /// side channel gets the same event independently via
+    /// [`Sink::emit_collect_error`]. No-op in every non-json mode.
+    pub fn on_collect_error(&self, sink: &mut Sink, path: &str, longrepr: &str) {
+        if self.mode == Mode::Json {
+            sink.out_line(&collecterror_json(path, longrepr).to_string());
         }
-        if let Some(l) = r.lineno {
-            obj["lineno"] = l.into();
-        }
-        if r.outcome == "failed" {
-            if let Some(lr) = &r.longrepr {
-                obj["longrepr"] = lr.as_str().into();
-            }
-        }
-        sink.out_line(&obj.to_string());
     }
 
     /// Close the dot line before failures/summary print.
@@ -403,6 +395,63 @@ impl Progress {
             }
         }
     }
+}
+
+/// Serialize one phase [`Report`] as the streaming-JSON `testreport` object —
+/// the single source of truth for that shape, shared by `--output json`
+/// (stdout) and `--stream-json` (side channel), so both stay byte-identical.
+/// `lineno`/`worker` are omitted when absent; `longrepr` rides failures only.
+pub(crate) fn testreport_json(worker: Option<usize>, r: &Report) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "event": "testreport",
+        "nodeid": r.nodeid,
+        "when": r.when,
+        "outcome": r.outcome,
+        "duration": (r.duration * 10_000.0).round() / 10_000.0,
+        "wasxfail": r.wasxfail,
+    });
+    if let Some(w) = worker {
+        obj["worker"] = format!("gw{w}").into();
+    }
+    if let Some(l) = r.lineno {
+        obj["lineno"] = l.into();
+    }
+    // Call-phase CPU time (process_time), present when measured (`--doctor` or a
+    // stream consumer). wall (`duration`) ≫ `cpu` ⇒ the test waited (sleep/IO)
+    // rather than computed — the inline wait-bound signal for editors.
+    if let Some(c) = r.cpu {
+        obj["cpu"] = c.into();
+    }
+    if r.outcome == "failed" {
+        if let Some(lr) = &r.longrepr {
+            obj["longrepr"] = lr.as_str().into();
+        }
+    }
+    // Captured stdout/stderr/log, present when a stream consumer requested it
+    // (`--output json` / `--stream-json` set RSTEST_STREAM_OUTPUT) or on a
+    // failure. Omitted when empty so quiet tests stay one compact line.
+    if !r.sections.is_empty() {
+        obj["sections"] = r
+            .sections
+            .iter()
+            .map(|(name, text)| serde_json::json!({"name": name, "text": text}))
+            .collect::<Vec<_>>()
+            .into();
+    }
+    obj
+}
+
+/// Serialize a collection/import failure as the streaming-JSON `collecterror`
+/// object — shared by `--output json` (stdout) and `--stream-json` (side
+/// channel) so a Test Explorer can mark a failing file red mid-run instead of
+/// waiting for the end-of-run snapshot. `path` is the failing collector
+/// (rootdir-relative file / nodeid); `longrepr` is the traceback.
+pub(crate) fn collecterror_json(path: &str, longrepr: &str) -> serde_json::Value {
+    serde_json::json!({
+        "event": "collecterror",
+        "path": path,
+        "longrepr": longrepr,
+    })
 }
 
 /// The TAP test point for a phase report, or None when it emits nothing.
@@ -565,6 +614,66 @@ mod tests {
         for bad in [" [101%]", " [102%]", " [150%]", " [7200%]"] {
             assert!(!out.contains(bad), "leaked {bad}: {out}");
         }
+    }
+
+    #[test]
+    fn testreport_json_includes_sections_when_present_and_omits_when_empty() {
+        // Empty sections → no `sections` key (quiet tests stay compact).
+        let quiet = testreport_json(Some(0), &report("call", "passed"));
+        assert!(quiet.get("sections").is_none());
+
+        // Populated sections (a stream consumer asked for output) → array of
+        // {name, text}.
+        let mut r = report("call", "passed");
+        r.sections = vec![("Captured stdout call".into(), "hi\n".into())];
+        let obj = testreport_json(Some(0), &r);
+        assert_eq!(obj["sections"][0]["name"], "Captured stdout call");
+        assert_eq!(obj["sections"][0]["text"], "hi\n");
+    }
+
+    #[test]
+    fn on_report_in_json_mode_writes_a_testreport_to_stdout() {
+        // The Mode::Json dispatch renders one NDJSON testreport line on stdout
+        // (the --output json live stream), via the shared serializer.
+        let mut p = Progress::default();
+        p.set_mode(Mode::Json);
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, Some(2), &report("call", "passed"));
+        let obj: serde_json::Value = serde_json::from_str(buf.out().trim()).unwrap();
+        assert_eq!(obj["event"], "testreport");
+        assert_eq!(obj["outcome"], "passed");
+        assert_eq!(obj["worker"], "gw2");
+    }
+
+    #[test]
+    fn testreport_json_includes_cpu_only_when_measured() {
+        // Not measured (plain run) → no `cpu` key.
+        assert!(testreport_json(None, &report("call", "passed"))
+            .get("cpu")
+            .is_none());
+        // Measured → cpu present (wall ≫ cpu is the wait-bound signal).
+        let mut r = report("call", "passed");
+        r.cpu = Some(0.0001);
+        assert_eq!(testreport_json(None, &r)["cpu"], 0.0001);
+    }
+
+    #[test]
+    fn on_collect_error_streams_json_only_in_json_mode() {
+        // Json mode: a collecterror line lands on stdout.
+        let mut p = Progress::default();
+        p.set_mode(Mode::Json);
+        let (mut sink, buf) = Sink::captured();
+        p.on_collect_error(&mut sink, "tests/test_x.py", "ImportError: boom");
+        let obj: serde_json::Value = serde_json::from_str(buf.out().trim()).unwrap();
+        assert_eq!(obj["event"], "collecterror");
+        assert_eq!(obj["path"], "tests/test_x.py");
+
+        // Any other mode: nothing on stdout (the summary renders it at the end).
+        let mut p = Progress::default();
+        p.set_mode(Mode::Dots);
+        let (mut sink, buf) = Sink::captured();
+        p.on_collect_error(&mut sink, "tests/test_x.py", "boom");
+        assert_eq!(buf.out(), "");
     }
 
     #[test]

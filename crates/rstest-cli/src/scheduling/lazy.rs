@@ -207,6 +207,7 @@ pub fn run_lazy_pool(
                     fail_count += 1;
                 }
                 prog.on_report(sink, Some(idx), &r);
+                sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
                 if let Some(limit) = maxfail {
                     if !stopping && fail_count >= limit {
@@ -216,6 +217,8 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => {
+                prog.on_collect_error(sink, &path, &longrepr);
+                sink.emit_collect_error(&path, &longrepr);
                 run.collect_error(path, longrepr);
                 if !continue_on_collect_errors && !stopping {
                     // pytest aborts on collection errors; in lazy mode the
@@ -381,6 +384,7 @@ pub fn run_lazy_pool(
                             &e,
                         );
                         prog.on_report(sink, Some(idx), &fab);
+                        sink.emit_report(Some(idx), &fab);
                         run.record(Some(idx), fab);
                     }
                     requeued.extend(

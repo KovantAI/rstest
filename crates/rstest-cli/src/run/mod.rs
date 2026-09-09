@@ -235,7 +235,10 @@ fn resolve_run_config(
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     warn_windows_timeout(sink.err(), cfg!(windows), cli.timeout, worker_timeout);
     let n = parse_numprocesses(&numprocesses)?;
-    let passthrough = needs_passthrough_io(args);
+    // `--debug` runs one worker with inherited stdio (like --pdb) so debugpy
+    // owns a single process and its console; route it through the passthrough
+    // path regardless of the session flags.
+    let passthrough = needs_passthrough_io(args) || cli.debug.is_some();
     // Honor `--reruns` in single-worker mode via a degenerate one-worker pool:
     // the rerun loop is orchestrator-side (rerunfailures neutralized inside).
     // Passthrough can't be pooled, so reruns stay inert there.
@@ -296,6 +299,10 @@ fn resolve_run_config(
         timeout: cli.timeout,
         leakcheck,
         send_ids: false,
+        debug_port: cli.debug.clone(),
+        // Ship captured stdout/stderr on every report (not just failures) when a
+        // live JSON consumer is attached, so editors get per-passing-test output.
+        stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -335,6 +342,20 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // selection, banner) flows through it. `--color` resolution matches
     // `resolve_run_config`'s (both call `Palette::detect`).
     let mut sink = Sink::stdio(color::Palette::detect(&args));
+    // `--stream-json FILE`: attach the live per-test NDJSON side channel. FILE
+    // may be a regular file or a named pipe the editor already opened for
+    // reading (opening a fifo for write blocks until that reader is present).
+    if let Some(path) = &cli.stream_json {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+        {
+            Ok(f) => sink.attach_stream(Box::new(f)),
+            Err(e) => sink.warn(&format!("rstest: --stream-json {}: {e}", path.display())),
+        }
+    }
     let start = Instant::now();
     let started_epoch = crate::time::now_epoch_secs();
     // One uid per test run, shared by every worker (xdist's testrun_uid
@@ -1290,10 +1311,13 @@ fn fold_run_event(
             if !passthrough {
                 prog.on_report(sink, None, &r);
             }
+            sink.emit_report(None, &r);
             run.record(None, r);
             None
         }
         proto::Event::CollectError { path, longrepr } => {
+            prog.on_collect_error(sink, &path, &longrepr);
+            sink.emit_collect_error(&path, &longrepr);
             run.collect_error(path, longrepr);
             None
         }
@@ -1830,5 +1854,49 @@ mod tests {
         );
         assert_eq!(code, None);
         assert_eq!(run.counts()["passed"], 1);
+    }
+
+    #[test]
+    fn fold_run_event_streams_reports_and_collect_errors() {
+        // With a --stream-json sink attached, a Report and a CollectError each
+        // emit one NDJSON line on the side channel (the wiring behind the live
+        // Test Explorer feed for the single/passthrough path).
+        let mut run = report::Run::default();
+        let mut prog = progress::Progress::default();
+        let mut fixtures = Vec::new();
+        let mut warnings = Vec::new();
+        let (mut sink, _cap) = Sink::captured();
+        let stream = sink.attach_captured_stream();
+        let mut fold = |ev, sink: &mut Sink| {
+            fold_run_event(
+                ev,
+                false,
+                &mut run,
+                &mut prog,
+                &mut fixtures,
+                &mut warnings,
+                sink,
+            )
+        };
+        fold(proto::Event::Report(report("t.py::a", "passed")), &mut sink);
+        fold(
+            proto::Event::CollectError {
+                path: "bad.py".into(),
+                longrepr: "boom".into(),
+            },
+            &mut sink,
+        );
+
+        let text = String::from_utf8(stream.lock().unwrap().clone()).unwrap();
+        let events: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event"], "testreport");
+        assert_eq!(events[0]["nodeid"], "t.py::a");
+        assert_eq!(events[1]["event"], "collecterror");
+        assert_eq!(events[1]["path"], "bad.py");
+        assert_eq!(events[1]["longrepr"], "boom");
     }
 }

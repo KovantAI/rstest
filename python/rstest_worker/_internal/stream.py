@@ -81,6 +81,16 @@ class StreamPlugin:
         # before setup and after teardown, ship the net delta on the teardown
         # report.
         self._leakcheck = os.environ.get("RSTEST_LEAKCHECK") == "1"
+        # A live JSON consumer (--output json / --stream-json) is attached, so
+        # ship captured stdout/stderr/log sections on every report, not only
+        # failures (editors show per-passing-test output).
+        self._stream_output = os.environ.get("RSTEST_STREAM_OUTPUT") == "1"
+        # Measure call-phase CPU (process_time) when doctor asks OR a live JSON
+        # consumer is attached — the latter lets editors flag wait-bound tests
+        # (wall ≫ cpu) inline without a separate --doctor run. Kept off by
+        # default so plain --report-json stays byte-comparable to the pytest
+        # baseline (`rstest try`), whose recorder emits no cpu.
+        self._measure_cpu = self._doctor or self._stream_output
         self._res_base: dict[str, tuple[int, int | None]] = {}
         self._res: dict[str, tuple[int, int | None]] = {}
         # Skip the worker's FIRST test: importing a test module can lazily spin
@@ -397,18 +407,18 @@ class StreamPlugin:
         # is waiting (sleep / IO), the #1 suite-content finding in the research
         # profiling (rich 74%, aiohttp 78% of test time).
         secs = self._effective_timeout(item)
-        if secs is None and not self._doctor:
+        if secs is None and not self._measure_cpu:
             return (yield)
         import time
 
         cancel = self._arm_timeout(secs) if secs else None
-        t0 = time.process_time() if self._doctor else 0.0
+        t0 = time.process_time() if self._measure_cpu else 0.0
         try:
             return (yield)
         finally:
             if cancel is not None:
                 cancel()
-            if self._doctor:
+            if self._measure_cpu:
                 self._cpu[item.nodeid] = time.process_time() - t0
 
     @pytest.hookimpl(wrapper=True)
@@ -484,9 +494,10 @@ class StreamPlugin:
                 payload["thread_delta"] = dt
             if df:
                 payload["fd_delta"] = df
-        if report.failed and report.sections:
-            # Captured stdout/stderr/log; ship only for failures to keep the
-            # wire lean.
+        if report.sections and (report.failed or self._stream_output):
+            # Captured stdout/stderr/log. Shipped for failures always, and for
+            # every outcome when a live JSON consumer asked for it
+            # (RSTEST_STREAM_OUTPUT); otherwise omitted to keep the wire lean.
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]

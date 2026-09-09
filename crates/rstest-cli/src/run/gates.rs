@@ -583,6 +583,19 @@ pub(super) fn finalize_output(
     // Loaded before this run's events are recorded, so the history
     // annotations say "before this run".
     let flake_history = flakes::load();
+    // Close the `--stream-json` side channel (if any) with the same
+    // `sessionfinish` envelope shape as `--output json`, in every human output
+    // mode. No-op under passthrough (no aggregate run) and when no stream is
+    // attached. The Json branch below writes its own copy to stdout.
+    if !passthrough {
+        let envelope = serde_json::json!({
+            "event": "sessionfinish",
+            "exitstatus": outcome.exitstatus,
+            "duration": (start.elapsed().as_secs_f64() * 100.0).round() / 100.0,
+            "counts": outcome.run.counts(),
+        });
+        sink.emit_event(envelope);
+    }
     if !passthrough && mode == progress::Mode::Json {
         // Pure NDJSON: close the stream with a session-finish envelope
         // (counts + duration + exit status). No human summary/failures.
@@ -758,14 +771,16 @@ pub(super) fn quarantine_matcher(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_diff_cov_gate, build_diff_lines, build_run_meta, diff_cov_gate, merge_fixtures,
-        merged_lastfailed, print_warnings_summary, quarantine_matcher, reconcile_cov_status,
-        report_push_result, results_bar_line, validate_regress_ratio, warn_doctor_gate_passthrough,
-        write_report_json, write_run_reports, write_teamcity_flaky,
+        apply_diff_cov_gate, build_diff_lines, build_run_meta, diff_cov_gate, finalize_output,
+        merge_fixtures, merged_lastfailed, print_warnings_summary, quarantine_matcher,
+        reconcile_cov_status, report_push_result, results_bar_line, validate_regress_ratio,
+        warn_doctor_gate_passthrough, write_report_json, write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
+    use crate::reporting::progress;
     use crate::reporting::report::Run;
     use crate::reporting::sink::Sink;
+    use crate::scheduling::pool;
     use crate::scheduling::proto::{FixtureStat, WarningEntry};
     use std::time::Instant;
 
@@ -1104,6 +1119,38 @@ mod tests {
             *v = 0;
         }
         assert!(results_bar_line(&counts, 0.0, &plain_palette()).contains("0/0"));
+    }
+
+    #[test]
+    fn finalize_output_streams_sessionfinish_in_any_mode() {
+        // A --stream-json side channel gets the closing sessionfinish envelope
+        // even under a human output mode (here Dots), independent of the
+        // stdout-facing --output json path.
+        let mut outcome = pool::PoolOutcome {
+            run: Run::default(),
+            prog: progress::Progress::default(),
+            fixtures: vec![],
+            warnings: vec![],
+            cache_dir: None,
+            exitstatus: 0,
+        };
+        let (mut sink, _cap) = Sink::captured();
+        let stream = sink.attach_captured_stream();
+        finalize_output(
+            &mut outcome,
+            false,
+            progress::Mode::Dots,
+            None,
+            false,
+            Instant::now(),
+            &mut sink,
+        );
+        let text = String::from_utf8(stream.lock().unwrap().clone()).unwrap();
+        let last: serde_json::Value =
+            serde_json::from_str(text.lines().next_back().unwrap()).unwrap();
+        assert_eq!(last["event"], "sessionfinish");
+        assert_eq!(last["exitstatus"], 0);
+        assert!(last["counts"].is_object());
     }
 
     #[test]
