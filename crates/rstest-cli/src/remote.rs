@@ -2018,4 +2018,216 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // ---- RealRunner (real subprocess) --------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn real_runner_runs_program_feeds_stdin_and_probes_path() {
+        let r = RealRunner;
+        // program_exists: a shell is always on PATH, a nonsense name is not.
+        assert!(r.program_exists("sh"));
+        assert!(!r.program_exists("rstest-no-such-binary-xyz"));
+        // `cat` echoes stdin to stdout (exercises the stdin-piped branch).
+        let out = r.run("cat", &[], Some(b"hello")).unwrap();
+        assert!(out.success);
+        assert_eq!(out.stdout, b"hello");
+        // A missing program is an Err from the spawn itself.
+        assert!(r.run("rstest-no-such-binary-xyz", &[], None).is_err());
+    }
+
+    // ---- CliTransport construction + gcloud/gsutil verbs -------------------
+
+    #[test]
+    fn cli_for_remote_wrapper_and_construction_errors() {
+        // for_remote wraps RealRunner; result depends on whether `aws` is on
+        // PATH, but either way the wrapper body runs.
+        let _ = CliTransport::for_remote("s3://bucket/p");
+        // s3:// without the aws CLI => a clear error.
+        assert!(CliTransport::for_remote_with(
+            "s3://b/p",
+            StubRunner::new(&[], |_, _, _| ok_out(b""))
+        )
+        .is_err());
+        // A scheme CliTransport doesn't handle => defensive bail.
+        assert!(CliTransport::for_remote_with(
+            "ftp://x",
+            StubRunner::new(&["aws"], |_, _, _| ok_out(b""))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cli_gcloud_read_write_delete_verbs() {
+        let t = CliTransport::for_remote_with(
+            "gs://b/p",
+            StubRunner::new(&["gcloud"], |_, args, _| {
+                match args.get(1).map(String::as_str) {
+                    Some("cat") => ok_out(b"{}"),
+                    Some("cp") | Some("rm") => ok_out(b""),
+                    _ => err_out("unexpected"),
+                }
+            }),
+        )
+        .unwrap();
+        // storage cat -> Found -> Some / read_segment bytes.
+        assert_eq!(t.read_base().unwrap(), Some(b"{}".to_vec()));
+        assert_eq!(t.read_segment("x").unwrap(), b"{}".to_vec());
+        // storage cp - <url> for both base and segment.
+        t.write_base(b"{}").unwrap();
+        t.write_segment("x", b"data").unwrap();
+        // storage rm <url>.
+        t.delete_segment("x").unwrap();
+    }
+
+    #[test]
+    fn cli_read_segment_missing_is_error() {
+        // A not-found stderr maps a read to Missing; read_segment turns that
+        // into a hard error (a segment we listed must exist).
+        let t = CliTransport::for_remote_with(
+            "gs://b/p",
+            StubRunner::new(&["gcloud"], |_, _, _| err_out("not found")),
+        )
+        .unwrap();
+        assert!(t.read_segment("gone").is_err());
+    }
+
+    #[test]
+    fn cli_gsutil_list_write_delete_verbs() {
+        let t = CliTransport::for_remote_with(
+            "gs://b/p",
+            StubRunner::new(&["gsutil"], |_, args, _| {
+                match args.first().map(String::as_str) {
+                    Some("ls") => ok_out(b"gs://b/p/segments/seg-z.json\n"),
+                    Some("cp") | Some("rm") => ok_out(b""),
+                    _ => err_out("unexpected"),
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(t.program(), "gsutil");
+        assert_eq!(t.list_segment_ids().unwrap(), vec!["z".to_string()]);
+        t.write_segment("z", b"d").unwrap();
+        t.delete_segment("z").unwrap();
+    }
+
+    #[test]
+    fn cli_write_and_delete_failures_surface() {
+        // A real (non not-found) failure on write or delete is an error.
+        let t = CliTransport::for_remote_with(
+            "s3://b/p",
+            StubRunner::new(&["aws"], |_, _, _| {
+                err_out("An error occurred (AccessDenied)")
+            }),
+        )
+        .unwrap();
+        assert!(t.write_segment("x", b"d").is_err());
+        assert!(t.delete_segment("x").is_err());
+    }
+
+    // ---- HttpTransport: remaining status branches --------------------------
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_list_non_2xx_surfaces() {
+        let t = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_, _, _| resp(500, b"boom")),
+        );
+        assert!(t.list_segment_ids().is_err());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_read_segment_2xx_bytes_non_2xx_error() {
+        let ok = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_m, url, _| {
+                assert_eq!(url, "https://c/x/segments/seg-a.json");
+                resp(200, b"blob")
+            }),
+        );
+        assert_eq!(ok.read_segment("a").unwrap(), b"blob".to_vec());
+        let miss = HttpTransport::new("https://c/x", StubHttpClient::new(|_, _, _| resp(404, b"")));
+        assert!(miss.read_segment("a").is_err());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_write_base_puts_and_surfaces_failure() {
+        let ok = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|m, url, _| {
+                assert_eq!(m, "PUT");
+                assert_eq!(url, "https://c/x/base.json");
+                resp(200, b"")
+            }),
+        );
+        ok.write_base(b"{}").unwrap();
+        let fail = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_, _, _| resp(500, b"boom")),
+        );
+        assert!(fail.write_base(b"{}").is_err());
+    }
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn http_delete_non_2xx_non_404_surfaces() {
+        let t = HttpTransport::new(
+            "https://c/x",
+            StubHttpClient::new(|_, _, _| resp(500, b"boom")),
+        );
+        assert!(t.delete_segment("a").is_err());
+    }
+
+    // ---- RealHttpClient over a localhost server ----------------------------
+
+    #[cfg(feature = "http-cache")]
+    #[test]
+    fn real_http_client_roundtrips_over_localhost() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Serve 4 requests: GET 200, PUT 200, DELETE 200, GET 404.
+        let handle = std::thread::spawn(move || {
+            for (i, code) in [
+                (0, "200 OK"),
+                (1, "200 OK"),
+                (2, "200 OK"),
+                (3, "404 Not Found"),
+            ] {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let body: &[u8] = if i == 3 { b"" } else { b"ok" };
+                let head = format!(
+                    "HTTP/1.1 {code}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(head.as_bytes());
+                let _ = s.write_all(body);
+            }
+        });
+        // Token set => with_auth attaches Authorization.
+        std::env::set_var("RSTEST_CACHE_REMOTE_TOKEN", "tok");
+        let c = RealHttpClient::from_env();
+        std::env::remove_var("RSTEST_CACHE_REMOTE_TOKEN");
+        let base = format!("http://{addr}");
+        let g = c.get(&format!("{base}/base.json")).unwrap();
+        assert_eq!(g.status, 200);
+        assert_eq!(g.body, b"ok");
+        let p = c.put(&format!("{base}/seg"), b"data").unwrap();
+        assert_eq!(p.status, 200);
+        let d = c.delete(&format!("{base}/seg")).unwrap();
+        assert_eq!(d.status, 200);
+        // A non-2xx status is folded into HttpResp, not an Err.
+        let nf = c.get(&format!("{base}/missing")).unwrap();
+        assert_eq!(nf.status, 404);
+        handle.join().unwrap();
+        // A connection failure (no auth => with_auth None branch) is an Err.
+        let bad = RealHttpClient::from_env().get("http://127.0.0.1:1/x");
+        assert!(bad.is_err());
+    }
 }

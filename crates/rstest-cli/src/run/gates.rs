@@ -1220,6 +1220,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Transport whose failures are toggled per method, to drive the
+    /// best-effort auto-compact error branches without a real remote.
+    struct BrokenTransport {
+        ids: Vec<String>,
+        list_fails: bool,
+        base_fails: bool,
+    }
+
+    impl crate::remote::Transport for BrokenTransport {
+        fn list_segment_ids(&self) -> anyhow::Result<Vec<String>> {
+            if self.list_fails {
+                anyhow::bail!("boom-list");
+            }
+            Ok(self.ids.clone())
+        }
+        fn read_segment(&self, _id: &str) -> anyhow::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn read_base(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            if self.base_fails {
+                anyhow::bail!("boom-base");
+            }
+            Ok(None)
+        }
+        fn write_segment(&self, _id: &str, _bytes: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn write_base(&self, _bytes: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn delete_segment(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn maybe_auto_compact_warns_when_listing_fails() {
+        // A failed segment listing is non-fatal: warn and return, never touch
+        // the retention/compaction path.
+        use crate::cli::Cli;
+        use clap::Parser;
+        let t = BrokenTransport {
+            ids: Vec::new(),
+            list_fails: true,
+            base_fails: false,
+        };
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(0);
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        assert!(cap.err().contains("listing failed"), "got: {}", cap.err());
+    }
+
+    #[test]
+    fn maybe_auto_compact_warns_on_bad_retention_env() {
+        // count over threshold, but RSTEST_CACHE_KEEP_LAST is unparseable =>
+        // skip with a warning rather than fold everything.
+        use crate::cli::Cli;
+        use crate::remote::DirTransport;
+        use clap::Parser;
+        let root = auto_compact_root("badenv");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 3);
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(2);
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert!(
+            cap.err().contains("bad retention env"),
+            "got: {}",
+            cap.err()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn maybe_auto_compact_warns_when_compaction_fails() {
+        // Over threshold, retention env clean, but the compaction read fails =>
+        // non-fatal warning, no panic.
+        use crate::cli::Cli;
+        use clap::Parser;
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let t = BrokenTransport {
+            ids: vec!["a".into(), "b".into()],
+            list_fails: false,
+            base_fails: true,
+        };
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(0);
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        if let Some(v) = saved {
+            std::env::set_var("RSTEST_CACHE_KEEP_LAST", v);
+        }
+        assert!(
+            cap.err().contains("auto-compact failed"),
+            "got: {}",
+            cap.err()
+        );
+    }
+
     #[test]
     fn write_report_json_writes_only_when_requested() {
         let run = Run::default();

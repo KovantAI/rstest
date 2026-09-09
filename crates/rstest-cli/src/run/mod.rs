@@ -1390,11 +1390,11 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_workers_by_files, cap_workers_by_time, collect_lazy, fold_run_event, head_to_none,
-        lazy_should_steal, parse_duration_secs, parse_numprocesses, resolve_changed_base,
-        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, validate_cache_flags,
-        warn_incremental_conflicts, warn_quarantine_passthrough, warn_windows_timeout,
-        watchdog_duration,
+        cap_workers_by_files, cap_workers_by_time, collect_lazy, dispatch_command, fold_run_event,
+        head_to_none, lazy_should_steal, parse_duration_secs, parse_numprocesses,
+        resolve_changed_base, resolve_retention_policy, resolve_shard, resolve_shuffle_seed,
+        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
+        warn_windows_timeout, watchdog_duration,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1606,6 +1606,40 @@ mod tests {
         );
         // A bad duration flag is a hard error, never a silent fold-all.
         assert!(resolve_retention_policy(None, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn resolve_retention_policy_reads_keep_last_env() {
+        // No `keep_last` flag => fall through to RSTEST_CACHE_KEEP_LAST.
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "7");
+        let p = resolve_retention_policy(None, None).unwrap();
+        // A non-numeric env is a hard error, never a silent fold-all.
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let err = resolve_retention_policy(None, None).unwrap_err();
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert_eq!(p.keep_last, Some(7));
+        assert!(err.to_string().contains("invalid RSTEST_CACHE_KEEP_LAST"));
+    }
+
+    #[test]
+    fn dispatch_cache_compact_without_remote_errors() {
+        // cache-compact resolves the remote from the flag or RSTEST_CACHE_REMOTE;
+        // with neither set it fails before touching Python or any transport.
+        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
+        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let cli = Cli::parse_from(["rstest", "cache-compact"]);
+        let err = dispatch_command(&cli, &["rstest".into(), "cache-compact".into()])
+            .expect_err("no remote => error");
+        if let Some(v) = saved {
+            std::env::set_var("RSTEST_CACHE_REMOTE", v);
+        }
+        assert!(err
+            .to_string()
+            .contains("cache-compact needs --cache-remote"));
     }
 
     #[test]
