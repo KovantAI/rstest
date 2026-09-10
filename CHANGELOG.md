@@ -5,6 +5,20 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **Loud about disabled features (`--warn-on-dead-master-path`).** A whole
+  class of pytest plugins branches on "am I the xdist master?" (via
+  `not hasattr(config, "workerinput")`); under the pool every worker carries
+  `workerinput`, so those branches go silently dead. The new flag statically
+  scans registered plugins (a bytecode-token scan — no plugin code runs) and
+  reports each one whose master path is inactive under the pool, as either a
+  **SILENT NO-OP** (report writer that fires nowhere, e.g. pytest-html) or a
+  **CRASH PRECURSOR** (master registration gated on xdist; the worker branch
+  will `KeyError` once xdist is dropped). Advisory; exit code unchanged.
+  `--error-on-dead-master-path` runs the same scan as a CI gate (non-zero on
+  any finding not covered by a repeatable `--dead-master-allow SUBSTR`), and
+  `--warn-on-master-hook-noop` is a kept alias. Vetted plugins, pytest's
+  `_pytest.*` internals, and rstest's own shim are never reported.
+
 ## 0.7.0 — 2026-09-10
 
 - **Live progress while testing.** Runs now report ongoing progress as

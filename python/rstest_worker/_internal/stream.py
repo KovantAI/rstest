@@ -16,6 +16,7 @@ from rstest_worker._internal.plugincompat import (
     _neutralize_rerunfailures,
     _randomly_seed,
     _seed_pytest_retry,
+    scan_dead_master_paths,
 )
 from rstest_worker._internal.wire import _wire_safe
 from rstest_worker._internal.xdistnode import (
@@ -85,6 +86,11 @@ class StreamPlugin:
         # ship captured stdout/stderr/log sections on every report, not only
         # failures (editors show per-passing-test output).
         self._stream_output = os.environ.get("RSTEST_STREAM_OUTPUT") == "1"
+        # --warn-on-dead-master-path / --error-on-dead-master-path: statically
+        # scan registered plugins for xdist-master branches that go dead under
+        # the pool (silent no-op / crash precursor). Worker 0 (or the lone
+        # worker) reports once; the orchestrator renders + applies exit logic.
+        self._warn_dead_master = os.environ.get("RSTEST_WARN_DEAD_MASTER") == "1"
         # Measure call-phase CPU (process_time) when doctor asks OR a live JSON
         # consumer is attached — the latter lets editors flag wait-bound tests
         # (wall ≫ cpu) inline without a separate --doctor run. Kept off by
@@ -122,6 +128,14 @@ class StreamPlugin:
         self._neutralize_xdist(config)
         self._register_markers(config)
         worker_id = os.environ.get("RSTEST_WORKER_ID")
+        # Dead-master-path scan: only the pool's designated worker (gw0), and
+        # only in pool mode. The master path goes dead precisely because pool
+        # workers carry `config.workerinput`; the lone worker (-n 0) has none,
+        # so its master branch runs live and there is nothing to warn about.
+        # Registration is identical across workers, so gw0 reporting once
+        # dedups (see plan's Deduplication note).
+        if self._warn_dead_master and worker_id == "gw0":
+            self._emit_dead_master_paths(config)
         if worker_id is None:
             return  # standalone run: nothing pool-specific to set up
         # Belt-and-suspenders: rerunfailures is normally neutralized earlier in
@@ -134,6 +148,15 @@ class StreamPlugin:
         _seed_pytest_retry(config)
         self._set_basetemp(config, worker_id)
         self._init_xdist_node(config, worker_id)
+
+    def _emit_dead_master_paths(self, config):
+        """Statically classify each non-vetted plugin's xdist-master path and
+        ship any findings to the orchestrator. No plugin code runs - purely a
+        bytecode-token scan (see plugincompat.scan_dead_master_paths)."""
+        findings = scan_dead_master_paths(config.pluginmanager.get_plugins())
+        if findings:
+            payload: m.DeadMasterPathsPayload = {"findings": findings}
+            self._conn.send("dead_master_paths", payload)
 
     @staticmethod
     def _neutralize_xdist(config):

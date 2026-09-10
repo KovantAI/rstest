@@ -7,6 +7,8 @@ import types
 import zlib
 from typing import Any
 
+from rstest_worker._internal import messages as m
+
 
 def _randomly_seed(run_uid: Any) -> int:
     """One run-level seed for pytest-randomly, derived from the shared run uid
@@ -130,6 +132,13 @@ _MASTER_PATH_VETTED = frozenset(
     }
 )
 
+# Never scan pytest's own builtins or rstest's shim. `_pytest.*` internals
+# (junitxml, stepwise, cacheprovider) branch on `workerinput` as core behavior
+# that rstest reimplements natively (--junitxml is an owned flag); rstest's own
+# worker plugins carry the token by construction. Warning on either is a pure
+# false positive - the exact trust-eroding case the plan calls out.
+_MASTER_PATH_SKIP_ROOTS = frozenset({"_pytest", "pytest", "rstest_worker", "rstest"})
+
 # Reading any of these = the plugin is xdist-worker-aware (its master path is
 # the counterpart that goes dead under the pool).
 _WORKERINPUT_TOKENS = frozenset({"workerinput", "slaveinput", "PYTEST_XDIST_WORKER"})
@@ -207,15 +216,18 @@ def _plugin_name(plugin: Any) -> str:
 
 
 def _is_master_path_vetted(plugin: Any) -> bool:
-    return _is_dist_internal(plugin) or _plugin_root(plugin) in _MASTER_PATH_VETTED
+    if _is_dist_internal(plugin):
+        return True
+    root = _plugin_root(plugin)
+    return root in _MASTER_PATH_VETTED or root in _MASTER_PATH_SKIP_ROOTS
 
 
-def scan_dead_master_paths(plugins: Any) -> list[dict[str, Any]]:
+def scan_dead_master_paths(plugins: Any) -> list[m.DeadMasterFinding]:
     """Scan an iterable of registered plugins and return one finding per
     non-vetted plugin whose master path goes dead under the pool. Each finding:
     ``{"plugin", "root", "cls", "hooks"}``. Pure/static - no plugin code runs.
     """
-    findings: list[dict[str, Any]] = []
+    findings: list[m.DeadMasterFinding] = []
     for plugin in plugins:
         if _is_master_path_vetted(plugin):
             continue
@@ -223,12 +235,11 @@ def scan_dead_master_paths(plugins: Any) -> list[dict[str, Any]]:
         if result is None:
             continue
         cls, hooks = result
-        findings.append(
-            {
-                "plugin": _plugin_name(plugin),
-                "root": _plugin_root(plugin),
-                "cls": cls,
-                "hooks": hooks,
-            }
-        )
+        finding: m.DeadMasterFinding = {
+            "plugin": _plugin_name(plugin),
+            "root": _plugin_root(plugin),
+            "cls": cls,
+            "hooks": hooks,
+        }
+        findings.append(finding)
     return findings

@@ -124,6 +124,17 @@ class DoctorFixturesPayload(TypedDict):
     fixtures: list[FixtureStat]
 
 
+class DeadMasterFinding(TypedDict):
+    plugin: str
+    root: str
+    cls: str  # "silent" | "crash"
+    hooks: list[str]
+
+
+class DeadMasterPathsPayload(TypedDict):
+    findings: list[DeadMasterFinding]
+
+
 class CollectErrorPayload(TypedDict):
     path: str
     longrepr: str

@@ -141,6 +141,7 @@ pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>>
         send_ids: true,
         debug_port: None,
         stream_output: false,
+        warn_dead_master: false,
     };
     let mut collect_args = args.to_vec();
     if !collect_args

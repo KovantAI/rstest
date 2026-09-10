@@ -361,3 +361,19 @@ def test_plugin_root_from_name_and_type():
 
     Obj.__module__ = "pkgroot.sub"
     assert _plugin_root(Obj()) == "pkgroot"
+
+
+def test_scan_skips_pytest_core_and_rstest_own():
+    # _pytest.* internals (junitxml/stepwise) and rstest's own worker shim carry
+    # the workerinput token by construction; warning on them is a false positive.
+    def pytest_configure(config):
+        if not hasattr(config, "workerinput"):
+            config._writer = 1
+
+    core = _mod_plugin(pytest_configure, name="_pytest.junitxml")
+    own = _mod_plugin(pytest_configure, name="rstest_worker._internal.stream")
+    # A same-shaped third-party plugin IS still reported (guards over-skipping).
+    third = _mod_plugin(pytest_configure, name="reportilizer.plugin")
+
+    findings = scan_dead_master_paths([core, own, third])
+    assert [f["root"] for f in findings] == ["reportilizer"]

@@ -113,6 +113,8 @@ pub struct PoolOutcome {
     pub fixtures: Vec<proto::FixtureStat>,
     /// Deduplicated session/collect/runtest warnings.
     pub warnings: Vec<proto::WarningEntry>,
+    /// Dead-master-path findings (--warn-on-dead-master-path), from worker 0.
+    pub dead_master: Vec<proto::DeadMasterFinding>,
     /// pytest's cache dir (from the designate worker), where the merged
     /// lastfailed cache is written after the run.
     pub cache_dir: Option<String>,
@@ -191,6 +193,7 @@ pub fn run_pool(
     prog.set_mode(mode);
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+    let mut dead_master: Vec<proto::DeadMasterFinding> = Vec::new();
     let mut statuses = Vec::new();
     // Reference collection: (count, hash) from whichever worker reports first.
     let mut reference: Option<(u64, String)> = None;
@@ -272,6 +275,14 @@ pub fn run_pool(
                 run.collect_error(path, longrepr);
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::DeadMasterPaths { findings }) => {
+                // Worker 0 only emits this (plugin registration is identical
+                // across workers); guard anyway so a future per-worker divergence
+                // can't N-fold the block.
+                if idx == 0 {
+                    dead_master.extend(findings);
+                }
+            }
             Ok(Event::Warnings { entries }) => {
                 // Per-test warnings are disjoint across workers; config and
                 // collection warnings repeat in every session, so count those
@@ -860,6 +871,7 @@ pub fn run_pool(
         prog,
         fixtures,
         warnings,
+        dead_master,
         cache_dir,
         exitstatus,
     })

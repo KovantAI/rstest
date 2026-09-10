@@ -118,6 +118,31 @@ pub struct Cli {
     #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
 
+    /// Warn about plugins whose xdist-master behavior goes silently inactive
+    /// under the pool: a report writer gated on "am I master?" that fires
+    /// nowhere at -n >= 2 (SILENT NO-OP), or a master hook gated on xdist being
+    /// installed whose worker branch will KeyError once xdist is dropped (CRASH
+    /// PRECURSOR). Advisory; exit code unchanged. `--warn-on-master-hook-noop`
+    /// is a kept alias of this (narrower original name).
+    #[arg(
+        long = "warn-on-dead-master-path",
+        visible_alias = "warn-on-master-hook-noop",
+        global = true
+    )]
+    pub(crate) warn_on_dead_master_path: bool,
+
+    /// Same scan as --warn-on-dead-master-path, but exit non-zero on any
+    /// finding not covered by --dead-master-allow. A CI gate that blocks a
+    /// newly-added parallel-blind plugin while tolerating a triaged backlog.
+    #[arg(long = "error-on-dead-master-path", global = true)]
+    pub(crate) error_on_dead_master_path: bool,
+
+    /// Substring of a plugin name/root to accept as a known dead-master-path
+    /// finding (repeatable): still reported (marked "allowed") but does not
+    /// fail --error-on-dead-master-path. Mirrors --migrate-allow.
+    #[arg(long = "dead-master-allow", global = true)]
+    pub(crate) dead_master_allow: Vec<String>,
+
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
     /// (every test on every worker). [default: load]
@@ -413,6 +438,9 @@ const BOOL_FLAGS: &[&str] = &[
     "--watch",
     "--fail-on-leak",
     "--reruns-only-known-flaky",
+    "--warn-on-dead-master-path",
+    "--warn-on-master-hook-noop",
+    "--error-on-dead-master-path",
     "--since-green",
     "--incremental",
     "--cache-pull",
@@ -450,6 +478,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--cache-remote",
     "--migrate-check-json",
     "--migrate-allow",
+    "--dead-master-allow",
     "--durations-regress",
     "--only-rerun",
     "--cov-diff-fail-under",

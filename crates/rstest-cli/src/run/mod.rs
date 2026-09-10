@@ -303,6 +303,9 @@ fn resolve_run_config(
         // Ship captured stdout/stderr on every report (not just failures) when a
         // live JSON consumer is attached, so editors get per-passing-test output.
         stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
+        // Both flags run the same worker-side scan; warn-vs-error is decided by
+        // the orchestrator at render time.
+        warn_dead_master: cli.warn_on_dead_master_path || cli.error_on_dead_master_path,
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -981,18 +984,11 @@ fn dispatch_run(
         run.track_phase_durations = durations.is_some();
         let mut prog = progress::Progress::default();
         prog.set_mode(mode);
-        let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
-        let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+        let mut acc = SessionAccumulators::default();
         let exitstatus = loop {
-            if let Some(code) = fold_run_event(
-                w.recv()?,
-                passthrough,
-                &mut run,
-                &mut prog,
-                &mut fixtures,
-                &mut warnings,
-                sink,
-            ) {
+            if let Some(code) =
+                fold_run_event(w.recv()?, passthrough, &mut run, &mut prog, &mut acc, sink)
+            {
                 break code;
             }
         };
@@ -1000,8 +996,9 @@ fn dispatch_run(
         pool::PoolOutcome {
             run,
             prog,
-            fixtures,
-            warnings,
+            fixtures: acc.fixtures,
+            warnings: acc.warnings,
+            dead_master: acc.dead_master,
             cache_dir: None,
             exitstatus,
         }
@@ -1364,6 +1361,16 @@ fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> boo
     cli_dist == Some("load") || settings_dist == Some("load")
 }
 
+/// Session-finish side channels accumulated across a single worker session
+/// (fixtures/warnings/dead-master), bundled so [`fold_run_event`] takes one
+/// out-param instead of three. Folds straight into [`pool::PoolOutcome`].
+#[derive(Default)]
+struct SessionAccumulators {
+    fixtures: Vec<proto::FixtureStat>,
+    warnings: Vec<proto::WarningEntry>,
+    dead_master: Vec<proto::DeadMasterFinding>,
+}
+
 /// Fold one worker event into the single-session accumulators (the byte-exact /
 /// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
 /// Reports drive progress (suppressed under passthrough, whose IO is inherited)
@@ -1375,8 +1382,7 @@ fn fold_run_event(
     passthrough: bool,
     run: &mut report::Run,
     prog: &mut progress::Progress,
-    fixtures: &mut Vec<proto::FixtureStat>,
-    warnings: &mut Vec<proto::WarningEntry>,
+    acc: &mut SessionAccumulators,
     sink: &mut Sink,
 ) -> Option<i32> {
     match event {
@@ -1399,11 +1405,15 @@ fn fold_run_event(
             None
         }
         proto::Event::DoctorFixtures { fixtures: fx } => {
-            fixtures.extend(fx);
+            acc.fixtures.extend(fx);
             None
         }
         proto::Event::Warnings { entries } => {
-            warnings.extend(entries);
+            acc.warnings.extend(entries);
+            None
+        }
+        proto::Event::DeadMasterPaths { findings } => {
+            acc.dead_master.extend(findings);
             None
         }
         proto::Event::CollectionDone { .. }
@@ -1427,7 +1437,7 @@ mod tests {
         dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
         parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
         resolve_shuffle_seed, run_cache_compact, validate_cache_flags, warn_incremental_conflicts,
-        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration,
+        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration, SessionAccumulators,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1982,20 +1992,9 @@ mod tests {
     fn fold_run_event_records_reports_errors_and_terminates_on_done() {
         let mut run = report::Run::default();
         let mut prog = progress::Progress::default();
-        let mut fixtures = Vec::new();
-        let mut warnings = Vec::new();
+        let mut acc = SessionAccumulators::default();
         let (mut sink, _cap) = Sink::captured();
-        let mut fold = |ev| {
-            fold_run_event(
-                ev,
-                false,
-                &mut run,
-                &mut prog,
-                &mut fixtures,
-                &mut warnings,
-                &mut sink,
-            )
-        };
+        let mut fold = |ev| fold_run_event(ev, false, &mut run, &mut prog, &mut acc, &mut sink);
 
         assert_eq!(
             fold(proto::Event::Report(report("t.py::a", "passed"))),
@@ -2038,14 +2037,26 @@ mod tests {
             }),
             None
         );
+        assert_eq!(
+            fold(proto::Event::DeadMasterPaths {
+                findings: vec![proto::DeadMasterFinding {
+                    plugin: "pytest_html".into(),
+                    root: "pytest_html".into(),
+                    cls: "silent".into(),
+                    hooks: vec!["pytest_sessionfinish".into()],
+                }]
+            }),
+            None
+        );
         // A scheduling-only event is a no-op in a single session.
         assert_eq!(fold(proto::Event::ItemStart { index: 0 }), None);
         // Done terminates with the exit status.
         assert_eq!(fold(proto::Event::Done { exitstatus: 1 }), Some(1));
 
         assert_eq!(run.collect_skips, 1);
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(fixtures.len(), 1);
+        assert_eq!(acc.warnings.len(), 1);
+        assert_eq!(acc.fixtures.len(), 1);
+        assert_eq!(acc.dead_master.len(), 1);
     }
 
     #[test]
@@ -2054,15 +2065,13 @@ mod tests {
         // drive the progress renderer.
         let mut run = report::Run::default();
         let mut prog = progress::Progress::default();
-        let mut fixtures = Vec::new();
-        let mut warnings = Vec::new();
+        let mut acc = SessionAccumulators::default();
         let code = fold_run_event(
             proto::Event::Report(report("t.py::a", "passed")),
             true,
             &mut run,
             &mut prog,
-            &mut fixtures,
-            &mut warnings,
+            &mut acc,
             &mut Sink::captured().0,
         );
         assert_eq!(code, None);
@@ -2076,21 +2085,11 @@ mod tests {
         // Test Explorer feed for the single/passthrough path).
         let mut run = report::Run::default();
         let mut prog = progress::Progress::default();
-        let mut fixtures = Vec::new();
-        let mut warnings = Vec::new();
+        let mut acc = SessionAccumulators::default();
         let (mut sink, _cap) = Sink::captured();
         let stream = sink.attach_captured_stream();
-        let mut fold = |ev, sink: &mut Sink| {
-            fold_run_event(
-                ev,
-                false,
-                &mut run,
-                &mut prog,
-                &mut fixtures,
-                &mut warnings,
-                sink,
-            )
-        };
+        let mut fold =
+            |ev, sink: &mut Sink| fold_run_event(ev, false, &mut run, &mut prog, &mut acc, sink);
         fold(proto::Event::Report(report("t.py::a", "passed")), &mut sink);
         fold(
             proto::Event::CollectError {

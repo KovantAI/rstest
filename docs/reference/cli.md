@@ -455,6 +455,42 @@ findings, and the build only goes red when a fresh one appears.
 
 The first slice of a broader migration assistant.
 
+### `--warn-on-dead-master-path`
+
+Statically scan every non-vetted plugin's registered hooks (a bytecode-token
+scan — no plugin code runs) and report the ones whose xdist-master branch goes
+dead under the pool. Two classes:
+
+- **SILENT NO-OP** — a master-only branch gated on `not hasattr(config,
+  "workerinput")` that fires nowhere at `-n ≥ 2`. Every rstest worker carries
+  `workerinput`, so a report writer behind that check writes nothing (the
+  pytest-html case). Fix: generate the artifact at `-n 0`, or use a native
+  equivalent (`--junitxml` / `--report-json` / `--cov`).
+- **CRASH PRECURSOR** — master-hook registration gated on `has_plugin("xdist")`
+  whose worker branch reads a `workerinput` key. Drop pytest-xdist (the adopted
+  state) and the key is never provisioned → `KeyError` at collection.
+
+Advisory: prints the report on stderr and leaves the exit code unchanged. Only
+fires under the pool (`-n ≥ 2`), where `workerinput` exists — at `-n 0` the
+master branch runs live, so nothing is reported. Vetted plugins rstest fully
+supports, pytest's own `_pytest.*` internals, and rstest's shim are skipped.
+`--warn-on-master-hook-noop` is a kept alias (the narrower original name). See
+[the dead-master-path guide](../guides/plugins.md#detecting-the-dead-master-path-automatically).
+
+### `--error-on-dead-master-path`
+
+The same scan as `--warn-on-dead-master-path`, but exits non-zero on any finding
+not covered by `--dead-master-allow` — a CI gate that blocks a newly-added
+parallel-blind plugin.
+
+### `--dead-master-allow <SUBSTRING>`
+
+Accept a known dead-master-path finding so it does not fail
+`--error-on-dead-master-path` (repeatable). Any finding whose plugin name or
+package root **contains** SUBSTRING is still reported — marked `(allowed)` — but
+excluded from the non-zero gate. Mirrors `--migrate-allow`: gate on **new**
+findings while tolerating a triaged backlog.
+
 ### `--only-rerun <REGEX>`
 
 With reruns active, retry only failures whose error text matches the

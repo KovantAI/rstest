@@ -32,6 +32,11 @@ pub struct WorkerEnv {
     /// the worker ships captured stdout/stderr/log `sections` on **every**
     /// report, not just failures. Off by default to keep the wire lean.
     pub stream_output: bool,
+    /// `--warn-on-dead-master-path` / `--error-on-dead-master-path`: worker 0
+    /// statically scans registered plugins for xdist-master branches that go
+    /// dead under the pool and reports them. Detection is identical for both
+    /// flags; the orchestrator decides warn-vs-error.
+    pub warn_dead_master: bool,
 }
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
@@ -225,6 +230,9 @@ fn build_worker_command(
     }
     if env.stream_output {
         command.env("RSTEST_STREAM_OUTPUT", "1");
+    }
+    if env.warn_dead_master {
+        command.env("RSTEST_WARN_DEAD_MASTER", "1");
     }
     // Exactly one worker ships the full id list (D5); the rest verify their
     // collection by count+hash. Worker 0 in a pool; the lone worker only
@@ -469,6 +477,7 @@ mod tests {
             send_ids: false,
             debug_port: None,
             stream_output: false,
+            warn_dead_master: false,
         }
     }
 
@@ -686,6 +695,7 @@ mod tests {
             send_ids: false,
             debug_port: None,
             stream_output: false,
+            warn_dead_master: false,
         };
         // A freshly spawned worker blocks on its first command: alive, and never
         // sent anything — the decode-error/respawn precondition (child still

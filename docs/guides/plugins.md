@@ -179,6 +179,11 @@ here. Probe one yourself in a minute:
 `rstest try` is a fast first pass: it runs your suite under pytest and
 under `rstest -n auto` and flags outcome differences, plugins included.
 
+For the silent class specifically — plugins that *quietly do nothing* rather
+than crash — a runtime probe can't see the missing behavior. Instead run
+[`--warn-on-dead-master-path`](#detecting-the-dead-master-path-automatically),
+which statically classifies each plugin's xdist-master branch before the run.
+
 ## Hook coverage
 
 rstest runs a real [pluggy](https://github.com/pytest-dev/pluggy) inside each
@@ -218,6 +223,45 @@ master*, assume it needs `-n 0` until proven otherwise. rstest ships native,
 merged-from-the-orchestrator equivalents for the common ones — `--junitxml`,
 `--report-json`, `--cov`, native `--html` — which are whole-suite documents at
 any worker count.
+
+### Detecting the dead-master-path automatically
+
+The negative event — a branch that *did not run* — is invisible at runtime, so
+rstest detects the *condition* statically. Pass **`--warn-on-dead-master-path`**
+and rstest scans every non-vetted plugin's registered hooks (a bytecode-token
+scan; no plugin code runs) and reports the ones whose xdist-master branch goes
+dead under the pool, in two classes:
+
+- **SILENT NO-OP** — a master-only branch gated on `not hasattr(config,
+  "workerinput")` that fires nowhere at `-n ≥ 2` (the pytest-html case). Fix:
+  generate that artifact at `-n 0`, or use a native equivalent.
+- **CRASH PRECURSOR** — master-hook registration gated on `has_plugin("xdist")`
+  whose worker branch reads a `workerinput` key that goes unprovisioned once
+  xdist is uninstalled → `KeyError` at collection. Fix: a native equivalent,
+  the [plugincompat](https://github.com/kovant/rstest) shim, or keep
+  pytest-xdist installed.
+
+The scan only fires under the pool (`-n ≥ 2`), where `workerinput` actually
+exists; at `-n 0` the master branch runs live, so nothing is reported. It is
+advisory — the exit code is unchanged. Vetted plugins rstest fully supports
+(`pytest-cov`, `pytest-randomly`, `pytest-django`, `pytest-asyncio`,
+`hypothesis`, …), pytest's own `_pytest.*` internals, and rstest's shim are
+never reported.
+
+```console
+$ rstest --warn-on-dead-master-path -n 2
+=========== dead master paths ===========
+SILENT NO-OP
+  master-only behavior is inactive at -n >= 2: ...
+    pytest_html [pytest_sessionfinish]
+  fix: if that branch is a report writer, generate the artifact at -n 0 ...
+```
+
+For CI, **`--error-on-dead-master-path`** runs the same scan but exits non-zero
+on any finding not covered by a repeatable `--dead-master-allow SUBSTR` — a gate
+that blocks a newly-added parallel-blind plugin while tolerating a triaged
+backlog (mirrors `--migrate-allow`). `--warn-on-master-hook-noop` is a kept
+alias of `--warn-on-dead-master-path` (its narrower original name).
 
 ## Known limits
 

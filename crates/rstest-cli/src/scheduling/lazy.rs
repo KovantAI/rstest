@@ -164,6 +164,7 @@ pub fn run_lazy_pool(
     prog.set_mode(mode);
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+    let mut dead_master: Vec<proto::DeadMasterFinding> = Vec::new();
     let mut statuses = Vec::new();
     let mut cache_dir: Option<String> = None;
     let mut total_items = 0usize;
@@ -230,6 +231,11 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::DeadMasterPaths { findings }) => {
+                if idx == 0 {
+                    dead_master.extend(findings);
+                }
+            }
             Ok(Event::Warnings { entries }) => {
                 // Files are disjoint across lazy workers, so collect and
                 // runtest warnings are each seen once; only config-phase
@@ -595,6 +601,7 @@ pub fn run_lazy_pool(
         prog,
         fixtures,
         warnings,
+        dead_master,
         cache_dir,
         exitstatus,
     })

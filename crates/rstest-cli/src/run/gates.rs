@@ -677,6 +677,41 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // --warn-on-dead-master-path / --error-on-dead-master-path: report plugins
+    // whose xdist-master branch goes dead under the pool. Rendered to stderr so
+    // --output json/tap keep stdout a pure machine stream. In error mode any
+    // finding not covered by --dead-master-allow flips a green run to exit 1.
+    if !outcome.dead_master.is_empty() {
+        let allow = &cli.dead_master_allow;
+        let is_allowed = |f: &proto::DeadMasterFinding| {
+            allow
+                .iter()
+                .any(|a| f.plugin.contains(a.as_str()) || f.root.contains(a.as_str()))
+        };
+        print_dead_master_paths(
+            sink.err(),
+            &outcome.dead_master,
+            &palette,
+            cli.error_on_dead_master_path,
+            &is_allowed,
+        );
+        if cli.error_on_dead_master_path {
+            let blocking = outcome
+                .dead_master
+                .iter()
+                .filter(|f| !is_allowed(f))
+                .count();
+            if blocking > 0 {
+                sink.warn(&format!(
+                    "rstest: --error-on-dead-master-path: {blocking} plugin(s) with a \
+                     dead xdist-master path (see block above)"
+                ));
+                if exitstatus == 0 {
+                    exitstatus = 1;
+                }
+            }
+        }
+    }
     Ok(exitstatus)
 }
 
@@ -847,6 +882,69 @@ fn print_warnings_summary(
     );
 }
 
+/// Dead-master-path report: plugins whose xdist-master branch is inactive under
+/// the pool, grouped by class (SILENT NO-OP / CRASH PRECURSOR). Writes to `w`
+/// (stderr at the call site) so it stays out of a machine-readable stdout and is
+/// unit-testable. `is_allowed` marks findings tolerated by --dead-master-allow.
+fn print_dead_master_paths(
+    w: &mut dyn Write,
+    findings: &[proto::DeadMasterFinding],
+    palette: &color::Palette,
+    error_mode: bool,
+    is_allowed: &dyn Fn(&proto::DeadMasterFinding) -> bool,
+) {
+    if findings.is_empty() {
+        return;
+    }
+    let header = if error_mode {
+        palette.bold_red("=========== dead master paths ===========")
+    } else {
+        palette.yellow("=========== dead master paths ===========")
+    };
+    let _ = writeln!(w, "\n{header}");
+    // Two classes, each with its own diagnosis + fix. Silent first (the common
+    // pytest-html case); crash precursor second (the KeyError-on-adoption case).
+    for (cls, title, diagnosis, fix) in [
+        (
+            "silent",
+            "SILENT NO-OP",
+            "master-only behavior is inactive at -n >= 2: every rstest worker \
+             carries config.workerinput, so the \"am I master?\" branch fires nowhere.",
+            "if that branch is a report writer, generate the artifact at -n 0 \
+             (or use a native equivalent: --junitxml / --report-json / --cov).",
+        ),
+        (
+            "crash",
+            "CRASH PRECURSOR",
+            "master-hook registration is gated on xdist being installed; drop \
+             xdist (the adopted state) and the worker branch reads an \
+             unprovisioned workerinput key -> KeyError at collection.",
+            "use a native equivalent, the plugincompat shim, or keep pytest-xdist installed.",
+        ),
+    ] {
+        let group: Vec<&proto::DeadMasterFinding> =
+            findings.iter().filter(|f| f.cls == cls).collect();
+        if group.is_empty() {
+            continue;
+        }
+        // Crash precursor is the more severe class (aborts collection once
+        // xdist is dropped), so flag it red even in plain warn mode.
+        let label = if cls == "crash" {
+            palette.bold_red(title)
+        } else {
+            palette.yellow(title)
+        };
+        let _ = writeln!(w, "{label}");
+        let _ = writeln!(w, "  {diagnosis}");
+        for f in &group {
+            let allowed = if is_allowed(f) { "  (allowed)" } else { "" };
+            let hooks = f.hooks.join(", ");
+            let _ = writeln!(w, "    {} [{}]{allowed}", f.plugin, hooks);
+        }
+        let _ = writeln!(w, "  fix: {fix}");
+    }
+}
+
 /// Compile the --quarantine file into one matcher: exact nodeids or `*`
 /// globs, one per line, `#` comments and blanks skipped.
 pub(super) fn quarantine_matcher(
@@ -883,8 +981,8 @@ mod tests {
     use super::{
         apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, diff_cov_gate,
         finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
-        print_warnings_summary, quarantine_matcher, reconcile_cov_status, report_push_result,
-        resolve_compact_threshold, results_bar_line, validate_regress_ratio,
+        print_dead_master_paths, print_warnings_summary, quarantine_matcher, reconcile_cov_status,
+        report_push_result, resolve_compact_threshold, results_bar_line, validate_regress_ratio,
         warn_doctor_gate_passthrough, write_report_json, write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
@@ -892,6 +990,7 @@ mod tests {
     use crate::reporting::report::Run;
     use crate::reporting::sink::Sink;
     use crate::scheduling::pool;
+    use crate::scheduling::proto;
     use crate::scheduling::proto::{FixtureStat, WarningEntry};
     use std::time::Instant;
 
@@ -1541,6 +1640,7 @@ mod tests {
             prog: progress::Progress::default(),
             fixtures: vec![],
             warnings: vec![],
+            dead_master: vec![],
             cache_dir: None,
             exitstatus: 0,
         };
@@ -1611,6 +1711,49 @@ mod tests {
         // Empty input => nothing at all.
         let mut buf = Vec::new();
         print_warnings_summary(&mut buf, &[], &plain_palette());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn print_dead_master_paths_groups_by_class_and_marks_allowed() {
+        let f = |plugin: &str, cls: &str, hook: &str| proto::DeadMasterFinding {
+            plugin: plugin.into(),
+            root: plugin.into(),
+            cls: cls.into(),
+            hooks: vec![hook.into()],
+        };
+        let findings = vec![
+            f("pytest_html", "silent", "pytest_sessionfinish"),
+            f("sqlalchemy_plugin", "crash", "pytest_configure"),
+        ];
+        // Allow the crash one by substring.
+        let allow = ["sqlalchemy".to_string()];
+        let is_allowed =
+            |x: &proto::DeadMasterFinding| allow.iter().any(|a| x.plugin.contains(a.as_str()));
+        let mut buf = Vec::new();
+        print_dead_master_paths(&mut buf, &findings, &plain_palette(), true, &is_allowed);
+        let out = utf8(buf);
+        assert!(out.contains("dead master paths"), "got {out}");
+        assert!(out.contains("SILENT NO-OP"), "got {out}");
+        assert!(out.contains("CRASH PRECURSOR"), "got {out}");
+        assert!(
+            out.contains("pytest_html [pytest_sessionfinish]"),
+            "got {out}"
+        );
+        // The allowed crash finding is tagged, the silent one is not.
+        assert!(
+            out.contains("sqlalchemy_plugin [pytest_configure]  (allowed)"),
+            "got {out}"
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.contains("pytest_html") && !l.contains("(allowed)")),
+            "got {out}"
+        );
+
+        // Empty input => nothing at all.
+        let mut buf = Vec::new();
+        print_dead_master_paths(&mut buf, &[], &plain_palette(), false, &is_allowed);
         assert!(buf.is_empty());
     }
 }

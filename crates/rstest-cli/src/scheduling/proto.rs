@@ -106,6 +106,21 @@ pub struct WarningEntry {
     pub count: u64,
 }
 
+/// One plugin whose xdist-master branch goes dead under the pool
+/// (`--warn-on-dead-master-path`). Reported by worker 0 only.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DeadMasterFinding {
+    /// Plugin object/module name (for display).
+    pub plugin: String,
+    /// Top-level package root (for the allow-substr filter and dedup key).
+    #[allow(dead_code)]
+    pub root: String,
+    /// `"silent"` (no-op) or `"crash"` (precursor). Groups the render block.
+    pub cls: String,
+    /// `pytest_*` hooks whose bytecode carried the signal token.
+    pub hooks: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct FixtureStat {
     pub name: String,
@@ -135,6 +150,12 @@ pub enum Event {
     /// Aggregated warnings, sent at session finish.
     Warnings {
         entries: Vec<WarningEntry>,
+    },
+    /// Dead-master-path findings (--warn-on-dead-master-path), sent at
+    /// configure by worker 0 only. Plugins whose xdist-master branch is
+    /// silently inactive (or a crash precursor) under the pool.
+    DeadMasterPaths {
+        findings: Vec<DeadMasterFinding>,
     },
     /// Item-dispatch mode: collection finished. Workers verify by count+hash;
     /// `ids` (session order) ride from one designated worker only - the
