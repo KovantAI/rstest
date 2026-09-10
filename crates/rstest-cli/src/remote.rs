@@ -2451,8 +2451,42 @@ mod tests {
                 (3, "404 Not Found"),
             ] {
                 let (mut s, _) = listener.accept().unwrap();
+                // Fully drain the request (headers + any Content-Length body)
+                // before replying. On Windows, dropping the socket with
+                // unconsumed inbound bytes triggers an abortive (RST) close,
+                // which races the client's write and surfaces as a transport
+                // error — the source of this test's flakiness.
+                let mut req = Vec::new();
                 let mut buf = [0u8; 2048];
-                let _ = s.read(&mut buf);
+                let (head_end, content_len) = loop {
+                    let n = s.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break (req.len(), 0usize);
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let text = String::from_utf8_lossy(&req[..pos]);
+                        let cl = text
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.trim()
+                                    .eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        break (pos + 4, cl);
+                    }
+                };
+                let mut remaining = content_len.saturating_sub(req.len() - head_end);
+                while remaining > 0 {
+                    let n = s.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    remaining = remaining.saturating_sub(n);
+                }
                 let body: &[u8] = if i == 3 { b"" } else { b"ok" };
                 let head = format!(
                     "HTTP/1.1 {code}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2460,6 +2494,10 @@ mod tests {
                 );
                 let _ = s.write_all(head.as_bytes());
                 let _ = s.write_all(body);
+                let _ = s.flush();
+                // Graceful half-close: signal EOF, let the client finish
+                // reading before the socket drops.
+                let _ = s.shutdown(std::net::Shutdown::Write);
             }
         });
         // Token set => with_auth attaches Authorization.
