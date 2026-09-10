@@ -32,7 +32,10 @@ inputs:
     required: false
     default: "."
   cache:
-    description: "Restore/save .rstest_cache (durations + flake history) across runs."
+    description: >-
+      Restore/save .rstest_cache (durations + flake history) across runs.
+      Global kill switch: cache:false disables caching for EVERY backend
+      (actions-cache, artifact, remote), not just actions-cache.
     required: false
     default: "true"
   cache-key-prefix:
@@ -47,7 +50,8 @@ inputs:
       no secrets): warms from the latest successful run on 'warm-from-branch',
       each job pushes its own immutable segment. 'remote' = point at an object
       store / HTTP endpoint via 'cache-remote'. Setting 'cache-remote' forces
-      'remote' regardless of this value.
+      'remote' regardless of this value. cache:false overrides all of the above
+      and disables caching entirely.
     required: false
     default: "actions-cache"
   cache-remote:
@@ -63,7 +67,7 @@ inputs:
     required: false
     default: ""
   cache-compact-threshold:
-    description: "--cache-compact-threshold N: fold the remote's loose segments inline on push once they exceed N (best-effort; never fails the run). Skips the need for a separate compaction job. Artifact/remote backends only."
+    description: "--cache-compact-threshold N: fold the remote's loose segments into base.json inline on push once they exceed N (best-effort; never fails the run). Skips the need for a separate compaction job. 'remote' backend only — the artifact backend does not publish base.json (it relies on per-run segment artifacts + retention eviction), so this is ignored there."
     required: false
     default: ""
   warm-from-branch:
@@ -213,14 +217,17 @@ runs:
         echo "cache-key=${base}-${GITHUB_RUN_ID}" >>"$GITHUB_OUTPUT"
         echo "cache-restore=${base}-" >>"$GITHUB_OUTPUT"
 
-        # Resolve the cache backend. A non-empty cache-remote forces 'remote'.
-        # 'actions-cache' with cache:false disables caching entirely ('none').
+        # Resolve the cache backend. cache:false is a global kill switch checked
+        # first, so it disables the artifact/remote backends too ('none'), not
+        # just actions-cache. Otherwise a non-empty cache-remote forces 'remote';
+        # cache-backend:artifact materializes a local segment dir.
         backend="${{ inputs.cache-backend }}"
         remote="${{ inputs.cache-remote }}"
-        if [ -n "$remote" ]; then
-          backend="remote"
-        elif [ "$backend" = "actions-cache" ] && [ "${{ inputs.cache }}" != "true" ]; then
+        if [ "${{ inputs.cache }}" != "true" ]; then
           backend="none"
+          remote=""
+        elif [ -n "$remote" ]; then
+          backend="remote"
         elif [ "$backend" = "artifact" ]; then
           # The materialized segment dir IS the remote (a local dir), relative
           # to working-directory so the run step (which cds there) can use it.
@@ -260,13 +267,26 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -uo pipefail
+        # Resolve THIS workflow's file (owner/repo/.github/workflows/<file>@ref)
+        # so gh matches by filename, not the display name (ambiguous when two
+        # workflows share a 'name:' or the name was changed). Fall back to the
+        # display name if the ref env is unset.
+        wf="${GITHUB_WORKFLOW_REF:-}"
+        wf="${wf##*/.github/workflows/}"
+        wf="${wf%%@*}"
+        [ -n "$wf" ] || wf="${GITHUB_WORKFLOW}"
         rid="$(gh run list --repo "$GITHUB_REPOSITORY" \
-                 --workflow "${GITHUB_WORKFLOW}" --branch "${{ inputs.warm-from-branch }}" \
+                 --workflow "$wf" --branch "${{ inputs.warm-from-branch }}" \
                  --status success --limit 1 \
                  --json databaseId --jq '.[0].databaseId // ""' 2>/dev/null || echo "")"
         echo "run-id=$rid" >>"$GITHUB_OUTPUT"
         [ -n "$rid" ] && echo "warming from run $rid" || echo "::notice::no prior successful '${{ inputs.warm-from-branch }}' run yet — cold start, cache will be seeded this run"
 
+    # Land segments under <artifact-cache-dir>/segments/ — that is where rstest
+    # reads them (--cache-remote <dir> looks in <dir>/segments/). upload-artifact
+    # roots each artifact at the LCA of its glob, so the pushed 'segments/' prefix
+    # is stripped to flat seg-*.json; targeting the download path at .../segments
+    # reconstructs the layout rstest expects.
     - name: Pull warm-cache segments
       if: steps.cfg.outputs.backend == 'artifact' && steps.warm.outputs.run-id != ''
       continue-on-error: true    # cold start / expired artifacts: run stays green
@@ -274,9 +294,22 @@ runs:
       with:
         pattern: rstest-seg-*
         merge-multiple: true
-        path: ${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}
+        path: ${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}/segments
         github-token: ${{ inputs.github-token }}
         run-id: ${{ steps.warm.outputs.run-id }}
+
+    # Record which segments came from the warm pull so the push step below
+    # publishes ONLY this run's NEW segment(s), not the whole warmed union
+    # (re-uploading the union under every run's artifact bloats storage and can
+    # collide on merge-multiple).
+    - name: Snapshot warm segments
+      if: steps.cfg.outputs.backend == 'artifact'
+      shell: bash
+      run: |
+        set -uo pipefail
+        base="${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}"
+        mkdir -p "$base/segments"
+        ( cd "$base/segments" && ls seg-*.json 2>/dev/null || true ) | sort > "$base/.warm-segments"
 
     - name: Fetch base ref for --changed
       if: inputs.changed != 'false' && steps.cfg.outputs.base-ref != ''
@@ -397,18 +430,24 @@ runs:
         remote="${{ steps.cfg.outputs.remote }}"
         if [ "$backend" = "artifact" ] || [ "$backend" = "remote" ]; then
           cmd+=(--cache-remote "$remote" --cache-pull --cache-push)
-          [ -n "${{ inputs.cache-compact-threshold }}" ] && cmd+=(--cache-compact-threshold "${{ inputs.cache-compact-threshold }}")
+          # Compaction is REMOTE-only. It folds loose segments into <root>/base.json
+          # and deletes them; the artifact backend never uploads base.json (it
+          # publishes per-run segment artifacts and relies on artifact retention to
+          # evict), so compacting there would silently drop the folded durations.
+          if [ "$backend" = "remote" ] && [ -n "${{ inputs.cache-compact-threshold }}" ]; then
+            cmd+=(--cache-compact-threshold "${{ inputs.cache-compact-threshold }}")
+          fi
           [ "${{ inputs.require-baseline }}" = "true" ] && [ -n "${{ inputs.durations-regress }}" ] && cmd+=(--require-baseline)
         fi
 
-        # Baseline guard (actions-cache backend only). A durations-regress gate
+        # Baseline guard (local-file backends: actions-cache or none). A durations-regress gate
         # with no restored baseline is inert. But the FIRST run legitimately has
         # no baseline (it seeds one), so a cold cache only WARNS (loudly, so an
         # inert gate is never silent — the kat bug). require-baseline:true opts
         # into a hard fail for steady state, where a missing baseline means a
         # broken cache path. Shared-cache backends use native --require-baseline
         # (wired above) since their baseline is pulled during the run.
-        if [ "$backend" = "actions-cache" ] && [ -n "${{ inputs.durations-regress }}" ] && [ ! -f .rstest_cache/durations.json ]; then
+        if { [ "$backend" = "actions-cache" ] || [ "$backend" = "none" ]; } && [ -n "${{ inputs.durations-regress }}" ] && [ ! -f .rstest_cache/durations.json ]; then
           if [ "${{ inputs.require-baseline }}" = "true" ]; then
             echo "::error::--durations-regress set but no duration baseline in .rstest_cache, and require-baseline is true. Seed the baseline from an authoritative run, or set require-baseline: false." >&2
             exit 1
@@ -456,7 +495,26 @@ runs:
         path: ${{ inputs.working-directory }}/.rstest_cache
         key: ${{ steps.cfg.outputs.cache-key }}
 
-    # Artifact backend — publish only THIS job's new segment. The unique name
+    # Stage only the segment(s) this run wrote (present now, absent from the warm
+    # snapshot) into a clean dir, so the push uploads the delta — never the warm
+    # union it pulled in. Compaction is disabled for this backend (it would fold
+    # segments into base.json, which the artifact backend never uploads), so the
+    # staged set is always plain per-run segments.
+    - name: Stage new segments
+      if: always() && steps.cfg.outputs.backend == 'artifact'
+      shell: bash
+      run: |
+        set -uo pipefail
+        base="${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}"
+        stage="$base/.push"
+        rm -rf "$stage"; mkdir -p "$stage"
+        for f in "$base"/segments/seg-*.json; do
+          [ -e "$f" ] || continue
+          name="$(basename "$f")"
+          grep -qxF "$name" "$base/.warm-segments" 2>/dev/null || cp "$f" "$stage/"
+        done
+
+    # Artifact backend — publish only THIS job's new segment(s). The unique name
     # (run id + shard) means concurrent shards never collide, and download's
     # pattern/merge-multiple unions them all on the next warm. if-no-files-found:
     # ignore keeps a run that pushed nothing (e.g. --cache-push no-op) green.
@@ -465,7 +523,7 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: rstest-seg-${{ github.run_id }}-${{ inputs.shard != '' && inputs.shard || '1' }}
-        path: ${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}/segments/seg-*.json
+        path: ${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}/.push/seg-*.json
         if-no-files-found: ignore
         retention-days: 7
 

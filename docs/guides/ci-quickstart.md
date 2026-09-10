@@ -134,15 +134,22 @@ jobs:
                   --json databaseId --jq '.[0].databaseId // ""')
           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
         continue-on-error: true
+      # Land the warmed segments in ./rcache/segments/ — that is where rstest
+      # reads them (--cache-remote <dir> looks in <dir>/segments/). upload-artifact
+      # strips the segments/ prefix from the pushed glob, so aim the download at
+      # .../segments to reconstruct the layout.
       - uses: actions/download-artifact@v4
         if: steps.warm.outputs.run-id != ''
         with:
           pattern: "rstest-seg-*"
           merge-multiple: true
-          path: ./rcache
+          path: ./rcache/segments
           github-token: ${{ github.token }}
           run-id: ${{ steps.warm.outputs.run-id }}
         continue-on-error: true          # cold start: nothing to warm from yet
+      # Record the warmed segment names so the push below uploads only THIS run's
+      # new ones, not the whole warmed union (which would grow every run).
+      - run: ls ./rcache/segments/seg-*.json 2>/dev/null | xargs -rn1 basename | sort > .warm-segs || true
 
       # --cov-context=test rides the segment too: each shard pushes its partial
       # coverage slice, and the next run's pull unions them into a full index
@@ -154,11 +161,22 @@ jobs:
                --cache-remote ./rcache --cache-pull --cache-push
                --junitxml junit.${{ matrix.shard }}.xml
 
-      # Push: upload only THIS job's new segment (unique name = no collision).
+      # Push: stage only the segment(s) this run wrote (absent from .warm-segs),
+      # so each shard's artifact is its own disjoint delta — no collision on the
+      # next merge-multiple, no unbounded re-upload of the warmed union.
+      - run: |
+          mkdir -p ./push
+          for f in ./rcache/segments/seg-*.json; do
+            [ -e "$f" ] || continue
+            grep -qxF "$(basename "$f")" .warm-segs 2>/dev/null || cp "$f" ./push/
+          done
+        if: always()
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: rstest-seg-${{ github.run_id }}-${{ matrix.shard }}
-          path: ./rcache/segments/seg-*.json
+          path: ./push/seg-*.json
+          if-no-files-found: ignore
 ```
 
 No refresh job, no `run_id`/`restore-keys` dance, no single writer — each shard
@@ -390,15 +408,18 @@ jobs:
                   --json databaseId --jq '.[0].databaseId // ""')
           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
         continue-on-error: true
+      # Warm segments land in ./rcache/segments/ (where rstest reads them);
+      # upload-artifact strips that prefix on push, so aim the download at it.
       - uses: actions/download-artifact@v4
         if: steps.warm.outputs.run-id != ''
         with:
           pattern: "rstest-seg-${{ matrix.project }}-*"
           merge-multiple: true
-          path: ./rcache
+          path: ./rcache/segments
           github-token: ${{ github.token }}
           run-id: ${{ steps.warm.outputs.run-id }}
         continue-on-error: true
+      - run: ls ./rcache/segments/seg-*.json 2>/dev/null | xargs -rn1 basename | sort > .warm-segs || true
 
       # Run ONE project → full runner cores, no oversubscription, shared cache OK.
       # The junit slug keeps per-package files distinct across matrix legs.
@@ -409,11 +430,20 @@ jobs:
                  --cache-remote ./rcache --cache-pull --cache-push \
                  --junitxml "junit.${slug}.xml"
 
+      # Upload only this run's new segment(s), not the warmed union.
+      - run: |
+          mkdir -p ./push
+          for f in ./rcache/segments/seg-*.json; do
+            [ -e "$f" ] || continue
+            grep -qxF "$(basename "$f")" .warm-segs 2>/dev/null || cp "$f" ./push/
+          done
+        if: always()
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: rstest-seg-${{ matrix.project }}-${{ github.run_id }}
-          path: ./rcache/segments/seg-*.json
+          path: ./push/seg-*.json
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: junit-${{ matrix.project }}, path: "junit.*.xml" }

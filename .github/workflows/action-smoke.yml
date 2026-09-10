@@ -293,3 +293,48 @@ jobs:
           set -euo pipefail
           test "${{ steps.warm.outcome }}" = "success" \
             || { echo "warm run must pass under require-baseline:true, got ${{ steps.warm.outcome }}"; exit 1; }
+
+  artifact-backend:
+    name: artifact backend (cold start, segment materializes under segments/)
+    runs-on: ubuntu-latest
+    permissions: { contents: read, actions: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold suite
+        run: |
+          mkdir -p smoke
+          cat > smoke/test_art.py <<'EOF'
+          def test_ok():
+              assert True
+
+          def test_two():
+              assert 1 + 1 == 2
+          EOF
+
+      # Cold start: no prior successful run on warm-from-branch, so the warm
+      # resolve returns empty and the pull is skipped — the run must still be
+      # green and seed a segment. Proves the resolve/no-prior path degrades
+      # gracefully and the push-stage layout is correct.
+      - uses: ./.github/actions/rstest
+        id: cold
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: smoke
+          args: "-n 2"
+          cache-backend: artifact
+          durations-regress: "2.0"
+      - name: assert a new segment materialized under segments/
+        run: |
+          set -euo pipefail
+          # rstest reads --cache-remote <dir>/segments/, so the pushed segment
+          # must live there (regression guard: an earlier layout stripped it).
+          count=$(ls smoke/.rstest-rcache/segments/seg-*.json 2>/dev/null | wc -l | tr -d ' ')
+          test "$count" -ge 1 \
+            || { echo "expected >=1 segment under .rstest-rcache/segments/, found $count"; exit 1; }
+          # The push stage must hold exactly the run's NEW segment(s): with no
+          # warm pull, every segment is new, so staged count == segments count.
+          staged=$(ls smoke/.rstest-rcache/.push/seg-*.json 2>/dev/null | wc -l | tr -d ' ')
+          test "$staged" -eq "$count" \
+            || { echo "staged $staged != $count segments; push delta is wrong"; exit 1; }
+          echo "OK: $count segment(s), all staged for push"
