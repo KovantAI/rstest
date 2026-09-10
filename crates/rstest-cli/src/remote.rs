@@ -1416,6 +1416,36 @@ mod tests {
     }
 
     #[test]
+    fn real_runner_spawn_failure_is_an_err() {
+        // A program that can't resolve => spawn fails => Err (reserved for the
+        // spawn itself, distinct from a non-zero exit).
+        let r = RealRunner;
+        let bogus = "rstest-definitely-not-a-real-binary-xyz".to_string();
+        assert!(r.run(&bogus, &[], None).is_err());
+    }
+
+    #[test]
+    fn real_runner_program_exists_probes_path() {
+        // Walks every PATH entry (and, on Windows, every PATHEXT suffix) and
+        // finds no match for a bogus name. Avoids mutating the process-global
+        // PATH, which would race the rest of the parallel suite.
+        let r = RealRunner;
+        assert!(
+            !r.program_exists("rstest-definitely-not-a-real-binary-xyz"),
+            "a missing program must not resolve"
+        );
+    }
+
+    #[test]
+    fn program_extensions_bare_name_on_unix() {
+        // Non-Windows: a single empty suffix, so `aws` probes exactly `aws`.
+        let exts = program_extensions();
+        assert!(exts.contains(&String::new()));
+        #[cfg(not(windows))]
+        assert_eq!(exts.len(), 1);
+    }
+
+    #[test]
     fn dir_transport_push_list_pull_roundtrip() {
         let root = tmp_dir("roundtrip");
         let t = DirTransport::new(&root);
