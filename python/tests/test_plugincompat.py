@@ -217,3 +217,147 @@ def test_seed_pytest_retry_noop_when_port_already_set(monkeypatch):
     _seed_pytest_retry(config)
     assert wi["server_port"] == 111
     assert calls["created"] == 0
+
+
+# ── Dead-master-path detector (scan_dead_master_paths & helpers) ────────────
+
+from rstest_worker._internal.plugincompat import (  # noqa: E402
+    _code_tokens,
+    _is_xdist_gated,
+    _plugin_root,
+    classify_master_path,
+    scan_dead_master_paths,
+)
+
+
+def _mod_plugin(fn, name="thirdparty.plugin"):
+    """Wrap hook functions in a module-like object named `name` so the scanner
+    sees `pytest_*` attributes and a package root (like a real plugin module)."""
+    import types as _t
+
+    mod = _t.ModuleType(name)
+    mod.__name__ = name
+    for hook in fn if isinstance(fn, (list, tuple)) else [fn]:
+        setattr(mod, hook.__name__, hook)
+    return mod
+
+
+# --- code-token scan ---
+
+
+def test_code_tokens_finds_names_and_str_consts():
+    def f(config):
+        return getattr(config, "workerinput", None)  # 'workerinput' is a const
+
+    tokens = _code_tokens(f.__code__)
+    assert "workerinput" in tokens
+    assert "getattr" in tokens  # co_names
+
+
+def test_code_tokens_recurses_into_nested_code():
+    # A token that lives ONLY inside a nested function/const must still surface.
+    def outer():
+        def inner(config):
+            return config.workerinput["PYTEST_XDIST_WORKER"]
+
+        return inner
+
+    tokens = _code_tokens(outer.__code__)
+    assert "workerinput" in tokens  # co_names, nested one level
+    assert "PYTEST_XDIST_WORKER" in tokens  # str const, nested one level
+
+
+def test_is_xdist_gated():
+    assert _is_xdist_gated({"has_plugin", "xdist"})
+    assert _is_xdist_gated({"numprocesses"})
+    # has_plugin naming something other than xdist is not the gate:
+    assert not _is_xdist_gated({"has_plugin", "cacheprovider"})
+    assert not _is_xdist_gated({"workerinput"})
+
+
+# --- classification ---
+
+
+def test_classify_silent_noop_pytest_html_shape():
+    # pytest-html: registers its writer only when NOT a worker; every rstest
+    # worker has workerinput, so the writer never registers. No xdist gate.
+    def pytest_configure(config):
+        if not hasattr(config, "workerinput"):
+            config._html = "register writer"
+
+    plugin = _mod_plugin(pytest_configure, name="pytest_html.plugin")
+    # (rename root off the vetted list to exercise classification directly)
+    plugin.__name__ = "pytest_html_fork.plugin"
+    result = classify_master_path(plugin)
+    assert result == ("silent", ["pytest_configure"])
+
+
+def test_classify_crash_precursor_retry_shape():
+    # pytest-retry shape: master branch gated on has_plugin("xdist"), worker
+    # branch reads workerinput["server_port"].
+    def pytest_configure(config):
+        if config.pluginmanager.has_plugin("xdist"):
+            register = "xdist master hooks"  # noqa: F841
+        elif hasattr(config, "workerinput"):
+            port = config.workerinput["server_port"]  # noqa: F841
+
+    plugin = _mod_plugin(pytest_configure, name="thirdparty_retry.plugin")
+    assert classify_master_path(plugin) == ("crash", ["pytest_configure"])
+
+
+def test_classify_none_when_no_workerinput_read():
+    # xdist gate present but never reads workerinput -> not a dead worker branch.
+    def pytest_configure(config):
+        if config.pluginmanager.has_plugin("xdist"):
+            _ = "something"
+
+    plugin = _mod_plugin(pytest_configure, name="thirdparty_x.plugin")
+    assert classify_master_path(plugin) is None
+
+
+def test_classify_ignores_non_pytest_attrs():
+    def helper(config):
+        return config.workerinput  # not a pytest_* hook -> not scanned
+
+    plugin = _mod_plugin(helper, name="thirdparty.plugin")
+    assert classify_master_path(plugin) is None
+
+
+# --- full scan + allowlist ---
+
+
+def test_scan_reports_silent_and_skips_vetted():
+    def pytest_configure(config):
+        if not hasattr(config, "workerinput"):
+            config._writer = 1
+
+    def pytest_sessionfinish(session):  # vetted plugin, must be skipped
+        _ = session.config.workerinput["cov"]
+
+    offender = _mod_plugin(pytest_configure, name="pytest_html.plugin")
+    offender.__name__ = "reportilizer.plugin"  # non-vetted root
+    vetted = _mod_plugin(pytest_sessionfinish, name="pytest_django.plugin")
+
+    findings = scan_dead_master_paths([offender, vetted])
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["cls"] == "silent"
+    assert f["root"] == "reportilizer"
+    assert f["hooks"] == ["pytest_configure"]
+
+
+def test_scan_empty_for_clean_plugin():
+    def pytest_configure(config):
+        config.addinivalue_line("markers", "slow: mark")
+
+    assert scan_dead_master_paths([_mod_plugin(pytest_configure)]) == []
+
+
+def test_plugin_root_from_name_and_type():
+    assert _plugin_root(_mod_plugin(lambda: None, name="foo.bar.baz")) == "foo"
+
+    class Obj:
+        pass
+
+    Obj.__module__ = "pkgroot.sub"
+    assert _plugin_root(Obj()) == "pkgroot"
