@@ -508,8 +508,13 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     };
     let mut sink = Sink::stdio(color::Palette::detect(args));
     // cache-compact is interpreter-free; the rest resolve Python first.
-    if let Command::CacheCompact = command {
-        return Ok(Some(run_cache_compact(cli, &mut sink)?));
+    if let Command::CacheCompact { keep_last, max_age } = command {
+        return Ok(Some(run_cache_compact(
+            cli,
+            &mut sink,
+            *keep_last,
+            max_age.as_deref(),
+        )?));
     }
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = discover::resolve(&scope, cli.python.as_deref())?;
@@ -526,15 +531,22 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             &cli.migrate_allow,
             &mut sink,
         )?,
-        Command::CacheCompact => unreachable!("handled above"),
+        Command::CacheCompact { .. } => unreachable!("handled above"),
     };
     Ok(Some(code))
 }
 
-/// `cache-compact` subcommand: fold all remote segments into a fresh base and
-/// prune them, then exit without running tests. Resolves the remote from the
-/// `--cache-remote` flag or `RSTEST_CACHE_REMOTE`.
-fn run_cache_compact(cli: &Cli, sink: &mut Sink) -> Result<i32> {
+/// `cache-compact` subcommand: fold policy-selected remote segments into a
+/// fresh base and prune them, then exit without running tests. Resolves the
+/// remote from the `--cache-remote` flag or `RSTEST_CACHE_REMOTE`, and the
+/// retention window from the flags or `RSTEST_CACHE_KEEP_LAST` /
+/// `RSTEST_CACHE_MAX_AGE`.
+fn run_cache_compact(
+    cli: &Cli,
+    sink: &mut Sink,
+    keep_last: Option<usize>,
+    max_age: Option<&str>,
+) -> Result<i32> {
     let remote = cli
         .cache_remote
         .clone()
@@ -543,13 +555,65 @@ fn run_cache_compact(cli: &Cli, sink: &mut Sink) -> Result<i32> {
         .ok_or_else(|| {
             anyhow::anyhow!("cache-compact needs --cache-remote (or RSTEST_CACHE_REMOTE)")
         })?;
+    let policy = resolve_retention_policy(keep_last, max_age)?;
     let t = remote::transport_for(&remote)?;
-    let folded = remote::compact_remote(t.as_ref(), sink)
-        .with_context(|| format!("compacting shared cache at {remote}"))?;
+    let (folded, retained) =
+        remote::compact_remote_with(t.as_ref(), sink, crate::time::now_epoch_secs(), &policy)
+            .with_context(|| format!("compacting shared cache at {remote}"))?;
     sink.warn(&format!(
-        "rstest: cache: compacted {folded} segment(s) into base at {remote}"
+        "rstest: cache: compacted {folded} segment(s) into base at {remote} \
+         ({retained} retained by policy)"
     ));
     Ok(0)
+}
+
+/// Build a [`remote::RetentionPolicy`] from the flags, falling back to
+/// `RSTEST_CACHE_KEEP_LAST` / `RSTEST_CACHE_MAX_AGE`. An unparseable flag/env is
+/// a hard error (silently folding everything would defeat the intent).
+fn resolve_retention_policy(
+    keep_last: Option<usize>,
+    max_age: Option<&str>,
+) -> Result<remote::RetentionPolicy> {
+    let keep_last = match keep_last {
+        Some(n) => Some(n),
+        None => match std::env::var("RSTEST_CACHE_KEEP_LAST") {
+            Ok(s) if !s.is_empty() => Some(
+                s.parse::<usize>()
+                    .with_context(|| format!("invalid RSTEST_CACHE_KEEP_LAST {s:?}"))?,
+            ),
+            _ => None,
+        },
+    };
+    let max_age_raw = max_age.map(str::to_string).or_else(|| {
+        std::env::var("RSTEST_CACHE_MAX_AGE")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
+    let max_age = match max_age_raw {
+        Some(s) => Some(parse_duration_secs(&s)?),
+        None => None,
+    };
+    Ok(remote::RetentionPolicy { keep_last, max_age })
+}
+
+/// Parse a duration: a bare integer is seconds; a trailing `s`/`m`/`h`/`d`/`w`
+/// scales it. Used by `cache-compact --max-age`.
+fn parse_duration_secs(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let n: u64 = num.parse().with_context(|| {
+        format!("invalid duration {s:?} (expected a number, optional s/m/h/d/w)")
+    })?;
+    let mult = match unit {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        "w" => 7 * 24 * 60 * 60,
+        other => anyhow::bail!("invalid duration unit {other:?} in {s:?} (use s/m/h/d/w)"),
+    };
+    Ok(n.saturating_mul(mult))
 }
 
 /// Warm the local cache from the remote (`--cache-pull`) BEFORE anything reads
@@ -1360,12 +1424,14 @@ fn fold_run_event(
 mod tests {
     use super::{
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
-        fold_run_event, head_to_none, lazy_should_steal, parse_numprocesses, resolve_changed_base,
-        resolve_shard, resolve_shuffle_seed, validate_cache_flags, warn_incremental_conflicts,
+        dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
+        parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
+        resolve_shuffle_seed, run_cache_compact, validate_cache_flags, warn_incremental_conflicts,
         warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
+    use crate::remote;
     use crate::reporting::sink::Sink;
     use crate::reporting::{progress, report};
     use crate::scheduling::proto;
@@ -1373,6 +1439,15 @@ mod tests {
 
     fn cli() -> Cli {
         Cli::parse_from(["rstest"])
+    }
+
+    /// Serializes tests touching the process-global `RSTEST_CACHE_*` env.
+    /// Shares the crate-wide lock so it also serializes against the auto-compact
+    /// tests in the `gates` submodule, which read the same env.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::select::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -1547,6 +1622,135 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("need --cache-remote"), "got {err}");
+    }
+
+    #[test]
+    fn parse_duration_secs_units_and_errors() {
+        assert_eq!(parse_duration_secs("45").unwrap(), 45); // bare = seconds
+        assert_eq!(parse_duration_secs("30s").unwrap(), 30);
+        assert_eq!(parse_duration_secs("5m").unwrap(), 300);
+        assert_eq!(parse_duration_secs("2h").unwrap(), 7200);
+        assert_eq!(parse_duration_secs("30d").unwrap(), 30 * 86400);
+        assert_eq!(parse_duration_secs("1w").unwrap(), 7 * 86400);
+        assert!(parse_duration_secs("10y").is_err()); // unknown unit
+        assert!(parse_duration_secs("abc").is_err()); // no number
+    }
+
+    fn compact_segment(id: &str, generated_at: u64) -> remote::Segment {
+        remote::Segment {
+            schema: 1,
+            id: id.into(),
+            generated_at,
+            durations: [(format!("{id}::t"), 0.1)].into_iter().collect(),
+            flake_events: Vec::new(),
+            cov_index: Default::default(),
+        }
+    }
+
+    #[test]
+    fn run_cache_compact_errors_without_a_remote() {
+        // No --cache-remote flag and no RSTEST_CACHE_REMOTE => hard error, never
+        // a silent no-op.
+        let _g = env_guard();
+        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
+        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let mut c = cli();
+        c.cache_remote = None;
+        let (mut sink, _cap) = Sink::captured();
+        let err = run_cache_compact(&c, &mut sink, None, None).unwrap_err();
+        if let Some(v) = saved {
+            std::env::set_var("RSTEST_CACHE_REMOTE", v);
+        }
+        assert!(
+            err.to_string().contains("needs --cache-remote"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn run_cache_compact_folds_a_dir_remote_and_reports() {
+        // A bare directory path resolves to a DirTransport; over-threshold loose
+        // segments fold into a fresh base and are pruned, and the count is
+        // reported. No retention window => fold all.
+        use crate::remote::transport_for;
+        let _g = env_guard();
+        let root = std::env::temp_dir().join(format!("rstest-run-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let remote_str = root.to_str().unwrap().to_string();
+        let t = transport_for(&remote_str).unwrap();
+        remote::push(t.as_ref(), &compact_segment("a", 1)).unwrap();
+        remote::push(t.as_ref(), &compact_segment("b", 2)).unwrap();
+
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let mut c = cli();
+        c.cache_remote = Some(remote_str.clone());
+        let (mut sink, cap) = Sink::captured();
+        let code = run_cache_compact(&c, &mut sink, None, None).unwrap();
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert_eq!(code, 0);
+        assert!(cap.err().contains("compacted"), "got: {}", cap.err());
+
+        let after = transport_for(&remote_str).unwrap();
+        assert!(after.read_base().unwrap().is_some(), "base written");
+        assert!(
+            after.list_segment_ids().unwrap().is_empty(),
+            "all folded (no retention window)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_retention_policy_flags_win_and_parse() {
+        let _g = env_guard();
+        let p = resolve_retention_policy(Some(5), Some("30d")).unwrap();
+        assert_eq!(p.keep_last, Some(5));
+        assert_eq!(p.max_age, Some(30 * 86400));
+        // No flags, no env => fold-all (both None).
+        assert_eq!(
+            resolve_retention_policy(None, None).unwrap(),
+            remote::RetentionPolicy::default()
+        );
+        // A bad duration flag is a hard error, never a silent fold-all.
+        assert!(resolve_retention_policy(None, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn resolve_retention_policy_reads_keep_last_env() {
+        // No `keep_last` flag => fall through to RSTEST_CACHE_KEEP_LAST.
+        let _g = env_guard();
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "7");
+        let p = resolve_retention_policy(None, None).unwrap();
+        // A non-numeric env is a hard error, never a silent fold-all.
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let err = resolve_retention_policy(None, None).unwrap_err();
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert_eq!(p.keep_last, Some(7));
+        assert!(err.to_string().contains("invalid RSTEST_CACHE_KEEP_LAST"));
+    }
+
+    #[test]
+    fn dispatch_cache_compact_without_remote_errors() {
+        // cache-compact resolves the remote from the flag or RSTEST_CACHE_REMOTE;
+        // with neither set it fails before touching Python or any transport.
+        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
+        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let cli = Cli::parse_from(["rstest", "cache-compact"]);
+        let err = dispatch_command(&cli, &["rstest".into(), "cache-compact".into()])
+            .expect_err("no remote => error");
+        if let Some(v) = saved {
+            std::env::set_var("RSTEST_CACHE_REMOTE", v);
+        }
+        assert!(err
+            .to_string()
+            .contains("cache-compact needs --cache-remote"));
     }
 
     #[test]

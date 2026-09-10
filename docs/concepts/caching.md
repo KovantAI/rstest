@@ -66,9 +66,40 @@ clobber each other.
   them; a segment already folded is recorded in the base's absorbed-id set, so
   compaction is safe against concurrent pushes.
 
-The remote is a plain directory — a local path, an NFS/EFS mount, or a dir a CI
-step materializes (GitHub `download-artifact`, `aws s3 sync`). Recipes:
-[CI quickstart → Shared cache](../guides/ci-quickstart.md#shared-cache).
+### Transports
+
+`--cache-remote` (or `RSTEST_CACHE_REMOTE`) selects where the base + segments
+live:
+
+| Value | Backend |
+|-------|---------|
+| a directory path / `file://…` | local dir, NFS/EFS mount, or a dir a CI step materializes (`download-artifact`, `aws s3 sync`) |
+| `s3://bucket/prefix` | the `aws` CLI on the runner (creds from the environment) |
+| `gs://bucket/prefix` | `gcloud storage` (or `gsutil`) on the runner |
+| `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` |
+
+The `s3`/`gs` transports shell out to the cloud CLI already installed and
+authenticated in CI — no SDK, no secrets in the URL. Any other `scheme://` is
+rejected loudly rather than silently written to a junk local directory.
+
+**HTTP listing contract.** A bare `GET`/`PUT` can't enumerate a collection, so
+an `http(s)://` remote must answer `GET <root>/segments/` with a JSON array of
+segment names (filenames or full keys/URLs) and support `GET` / `PUT` / `DELETE`
+on the blobs. A static file server with autoindex-as-JSON, an S3 REST bucket, or
+a tiny custom endpoint all satisfy it.
+
+### Retention
+
+`cache-compact` folds **all** segments by default. To bound the segment set
+without discarding fresh history, keep a recent window loose:
+
+- `cache-compact --keep-last N` / `RSTEST_CACHE_KEEP_LAST` — retain the newest N.
+- `cache-compact --max-age 30d` / `RSTEST_CACHE_MAX_AGE` — retain the young.
+- `--cache-compact-threshold N` / `RSTEST_CACHE_COMPACT_THRESHOLD` — fold **on
+  push** when the loose count exceeds N (honoring the window above), so no
+  separate maintenance job is needed. Best-effort: never fails the run.
+
+Recipes: [CI quickstart → Shared cache](../guides/ci-quickstart.md#shared-cache).
 
 ## `.pytest_cache/` (pytest's, shared)
 
