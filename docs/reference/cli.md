@@ -821,6 +821,44 @@ document instead — node ids, absolute file paths, source lines, and
 markers, without running the suite. See
 [Discovery JSON](report-json.md#discovery-json).
 
+### `--stream-json <FILE>`
+
+Write the live [streaming-JSON](report-json.md#streaming-json) event stream
+(`testreport` per phase, closed by `sessionfinish`) to `FILE` as a **side
+channel**, leaving stdout's human output untouched. This is the same schema
+as `--output json`, but on a separate stream — so an editor can show normal
+terminal output **and** drive a Test Explorer from the events at the same
+time. `FILE` may be a regular file or a named pipe (fifo) the editor opened
+for reading first (opening a fifo for write blocks until a reader is
+present). Works in every run mode. Lines are flushed as they are produced.
+
+### `--debug[=PORT]`
+
+Run under [debugpy](https://github.com/microsoft/debugpy) for editor
+debugging (VS Code and any DAP client). Like `--pdb`, this forces
+single-worker mode with inherited stdio so exactly one Python process hosts
+the debugger; rstest then starts debugpy in that worker and **blocks until a
+client attaches** before collecting, so breakpoints in conftest, collection,
+and tests are all honored. Bare `--debug` listens on `127.0.0.1:5678`;
+`--debug=PORT` overrides the port.
+
+The target interpreter (`--python`) must have `debugpy` installed
+(`pip install debugpy` in the test environment); without it the run proceeds
+without a debugger and prints a hint. The editor attaches with a DAP *attach*
+configuration pointed at the same host/port. `--reruns` and pooling are inert
+here, exactly as under `--pdb`.
+
+When the listener is up, the worker prints a machine-readable ready line to
+**stderr** so an editor can attach deterministically instead of racing the
+port:
+
+```json
+{"event": "debugpy", "host": "127.0.0.1", "port": 5678}
+```
+
+A human-readable `rstest: debugpy listening on …` line follows it; both
+precede the blocking wait for the client.
+
 ### `--python <path-or-version>`
 
 Interpreter for the workers. Accepts either a path to an interpreter or a
@@ -876,7 +914,7 @@ Flags that need pytest's own terminal (or stdin) force single-worker mode
 with inherited stdio, and pytest renders its own output:
 
 ```
---collect-only / --co     -s / --capture=...     --pdb     --trace
+--collect-only / --co     -s / --capture=...     --pdb     --trace     --debug
 ```
 
 This **overrides any `-n` value or `[tool.rstest]` worker count without
