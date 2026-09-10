@@ -139,6 +139,8 @@ pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>>
         timeout: None,
         leakcheck: false,
         send_ids: true,
+        debug_port: None,
+        stream_output: false,
     };
     let mut collect_args = args.to_vec();
     if !collect_args

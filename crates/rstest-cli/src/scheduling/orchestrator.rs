@@ -142,6 +142,7 @@ pub(crate) fn finalize_attempt(
             *fail_count += 1;
         }
         prog.on_report(sink, Some(worker_idx), &r);
+        sink.emit_report(Some(worker_idx), &r);
         run.record(Some(worker_idx), r);
     }
     if !attempt.failed && attempt.attempts_used > 0 {

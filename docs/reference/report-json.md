@@ -43,6 +43,7 @@ Per-test fields (absent when not applicable):
 |---|---|---|
 | `setup` / `call` / `teardown` | `"passed"` / `"failed"` / `"skipped"` | phase outcomes; a skipped test has no `call` |
 | `duration` | seconds | call-phase wall time, 4 decimal places |
+| `cpu` | seconds | call-phase CPU time (`process_time`), 4 decimals. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). **Only present when measured** — a `--doctor` run or a live-stream run (`--output json` / `--stream-json`); omitted on a plain run so the snapshot stays comparable to the pytest baseline |
 | `lineno` | int | 0-based source line of the test (pytest `report.location`); omitted when pytest reports none. The file is the nodeid's path |
 | `wasxfail` | `true` | the test was an expected failure (xfail/xpass) |
 | `skip_reason` | string | first 200 chars |
@@ -62,6 +63,10 @@ walking `tests`), `duration_seconds`, `started_at_epoch`, `workers`,
 and `argv`; `4` added per-test `lineno`; `5` added per-test
 `quarantined` and the `quarantined` counts key. Parse it —
 incompatible changes will bump it.
+
+The per-test `cpu` field arrived **without** a schema bump: it is
+conditional (present only on `--doctor` / live-stream runs), so a plain
+run's document shape is unchanged. Treat it as an added optional field.
 
 `collect_errors` lists the file paths of collectors that failed outright.
 
@@ -150,10 +155,20 @@ single document written at the end. It's built for editors and CI tooling
 that update a test tree incrementally. See
 [`--output`](cli.md#-output-dotsverbosebargithubjson) for the flag.
 
-Two event kinds, discriminated by `event`:
+The same stream is also available as a **side channel** via
+[`--stream-json FILE`](cli.md#-stream-json-file): identical `testreport` /
+`sessionfinish` events, written to `FILE` (a regular file or a fifo) instead
+of stdout, so the human terminal output is preserved. Use `--output json`
+when the process's stdout *is* the machine stream; use `--stream-json` when
+you want normal output on the terminal **and** the events on a separate
+stream at the same time (e.g. a VS Code extension showing a test terminal
+while updating the Test Explorer).
+
+Three event kinds, discriminated by `event`:
 
 ```json
 {"event": "testreport", "nodeid": "tests/test_api.py::test_get", "when": "call", "outcome": "passed", "duration": 0.0123, "wasxfail": false, "lineno": 41, "worker": "gw2"}
+{"event": "collecterror", "path": "tests/test_bad.py", "longrepr": "ImportError while importing test module ..."}
 {"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0, "collect_errors": 0}}
 ```
 
@@ -170,8 +185,25 @@ granularity. Fields:
 | `duration` | float | phase duration in seconds (rounded to 1e-4) |
 | `wasxfail` | bool | the outcome was an expected failure / unexpected pass |
 | `lineno` | int | 0-based source line; **omitted** when pytest reports none |
+| `cpu` | float | call-phase CPU seconds (`process_time`); on the `call` report only. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). Present whenever a stream is active; **omitted** under `-n 0` passthrough |
 | `worker` | string | `gwN` — **pool runs only**; absent under `-n 0` |
 | `longrepr` | string | failure traceback; **present only on `failed`** |
+| `sections` | array | captured output: `[{name, text}]` (e.g. `Captured stdout call`), each tail-capped at 20 000 chars. Present on failures, and on **every** report when this stream is active (so passing-test output shows too); **omitted** when a report captured nothing |
+
+A `collecterror` is emitted when a module fails to import / collect during the
+run, so a tree can mark the file red live rather than waiting for
+`sessionfinish`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | always `"collecterror"` |
+| `path` | string | the failing collector — rootdir-relative file or node id |
+| `longrepr` | string | the collection traceback |
+
+Under full collection (the default) every worker collects the whole suite, so
+the same file's `collecterror` is emitted **once per worker** — dedupe by
+`path` if you need one entry per file (the human summary's `N collect errors`
+counts the same way).
 
 The stream closes with exactly one `sessionfinish`:
 
