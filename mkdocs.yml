@@ -93,6 +93,7 @@ nav:
   - Guides:
       - guides/index.md
       - Migrating from pytest: guides/migrate-from-pytest.md
+      - Onboarding to pytest 9.1.1: guides/upgrade-to-pytest9.md
       - Migrating from pytest-xdist: guides/migrate-from-xdist.md
       - Parallel safety: guides/parallel-safety.md
       - Suite diagnostics: guides/doctor.md

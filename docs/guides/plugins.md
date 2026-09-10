@@ -219,6 +219,58 @@ merged-from-the-orchestrator equivalents for the common ones — `--junitxml`,
 `--report-json`, `--cov`, native `--html` — which are whole-suite documents at
 any worker count.
 
+### Self-audit: catch a silent no-op in your own plugins
+
+The danger of this class is that nothing errors — a home-grown reporter or
+aggregator just stops producing its artifact at `-n ≥ 2`. You can flush it
+out mechanically: run the **same slice** at `-n 0` and at `-n 2`, each into
+its own empty directory, then diff the *files each run produced*. Anything a
+plugin writes at `-n 0` but not at `-n 2` (or writes empty) is a silent
+no-op.
+
+```bash
+#!/usr/bin/env bash
+# silent-noop-audit.sh — flag plugin artifacts that vanish under the pool.
+# Usage: ./silent-noop-audit.sh tests/some_slice
+set -euo pipefail
+slice="${1:-tests}"
+
+audit() {                      # $1 = worker count, $2 = output dir
+  rm -rf "$2"; mkdir -p "$2"
+  # -p no:cacheprovider keeps rstest's own .rstest_cache / .pytest_cache
+  # out of the diff; add your plugin's output flags here if it needs one
+  # (e.g. --html "$2/report.html").
+  ( cd "$2" && rstest -n "$1" -p no:cacheprovider "$OLDPWD/$slice" >stdout.log 2>&1 ) || true
+  ( cd "$2" && find . -type f ! -empty | sort ) >"$2.files"
+}
+
+audit 0 audit-n0
+audit 2 audit-n2
+
+echo "== files present at -n 0 but MISSING or EMPTY at -n 2 (silent no-op suspects) =="
+comm -23 <(sed 's#^audit-n0/##' audit-n0.files) <(sed 's#^audit-n2/##' audit-n2.files)
+
+echo "== plugin lines in -n 0 stdout absent from -n 2 stdout (terminal-owned output) =="
+diff <(grep -v '^$' audit-n0/stdout.log) <(grep -v '^$' audit-n2/stdout.log) | grep '^<' || true
+```
+
+Read the two lists:
+
+- **A file in the first list** — a plugin wrote it serially and not under the
+  pool. That's the silent no-op (pytest-html's `report.html` shows up here).
+  Move that report to a `-n 0`/`-n 1` pass, or switch to a native
+  merged-from-orchestrator artifact (`--junitxml`, `--report-json`).
+- **Lines in the second list** are usually just terminal-painting plugins
+  (rstest owns the terminal) — expected, not a bug — *unless* a line
+  represents a data side effect the plugin only performs on the master. If
+  so, treat it like the first list.
+
+One caveat the diff can't see: a plugin that writes the *same path* at both
+worker counts but with **less** in it at `-n 2` (e.g. only one worker's
+share). For those, compare sizes or contents of the shared artifact, not
+just its presence. When in doubt, the honest fallback is unchanged:
+generate that artifact at `-n 0`.
+
 ## Known limits
 
 - Plugins that *render the terminal* (pytest-sugar, pytest-rich and

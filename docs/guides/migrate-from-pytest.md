@@ -61,6 +61,9 @@ deprecation warnings, plugin version bumps, the usual. `rstest -n 0` is
 the cheap probe: it surfaces exactly what a pytest upgrade would, with
 your installed pytest untouched. Budget the runner switch as
 "pytest upgrade first, then a one-line command change," not one step.
+[Onboarding to pytest 9.1.1](upgrade-to-pytest9.md) is the concrete
+checklist for that first step — the small set of 8→9 removals that actually
+bite, with the grep and the fix for each.
 
 ## The escape hatch
 
