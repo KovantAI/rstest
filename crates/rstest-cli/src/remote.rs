@@ -337,8 +337,11 @@ pub fn write_local(merged: &Merged) {
 pub trait Transport {
     /// List the ids of all segments currently present on the remote.
     fn list_segment_ids(&self) -> Result<Vec<String>>;
-    /// Read one segment's raw bytes by id.
-    fn read_segment(&self, id: &str) -> Result<Vec<u8>>;
+    /// Read one segment's raw bytes by id, or `None` if it is absent (e.g. a
+    /// concurrent compaction pruned it between the list and this read). A
+    /// transport/auth failure is an `Err`, never `None`, so callers can tell a
+    /// benign race from a real error instead of silently dropping history.
+    fn read_segment(&self, id: &str) -> Result<Option<Vec<u8>>>;
     /// Read the `base.json` blob, or `None` if the remote has no base yet.
     fn read_base(&self) -> Result<Option<Vec<u8>>>;
     /// Write a new immutable segment under `id` (ids are unique per run, so
@@ -393,9 +396,13 @@ impl Transport for DirTransport {
         }
         Ok(ids)
     }
-    fn read_segment(&self, id: &str) -> Result<Vec<u8>> {
+    fn read_segment(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let p = self.segment_path(id);
-        std::fs::read(&p).with_context(|| format!("reading segment {}", p.display()))
+        match std::fs::read(&p) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading segment {}", p.display())),
+        }
     }
     fn read_base(&self) -> Result<Option<Vec<u8>>> {
         match std::fs::read(self.base_path()) {
@@ -461,15 +468,25 @@ impl CommandRunner for RealRunner {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawning `{program}`"))?;
-        if let Some(data) = stdin {
-            // Take + drop the handle after writing so the child sees EOF and
-            // wait_with_output (which reads stdout/stderr) can't deadlock.
+        // Feed stdin on a separate thread so a child that writes to stdout
+        // before draining stdin (a payload larger than the pipe buffer) can't
+        // deadlock against a blocking write here. Dropping the handle at the
+        // end signals EOF. A write error (e.g. the CLI exited early and closed
+        // the pipe) surfaces via the child's exit status + stderr, so we don't
+        // propagate it separately.
+        let writer = stdin.map(|data| {
             let mut si = child.stdin.take().expect("stdin piped");
-            si.write_all(data).context("writing to cloud CLI stdin")?;
-        }
+            let data = data.to_vec();
+            std::thread::spawn(move || {
+                let _ = si.write_all(&data);
+            })
+        });
         let out = child
             .wait_with_output()
             .with_context(|| format!("waiting for `{program}`"))?;
+        if let Some(w) = writer {
+            let _ = w.join();
+        }
         Ok(CliOutput {
             success: out.status.success(),
             stdout: out.stdout,
@@ -480,7 +497,32 @@ impl CommandRunner for RealRunner {
         let Some(paths) = std::env::var_os("PATH") else {
             return false;
         };
-        std::env::split_paths(&paths).any(|dir| dir.join(program).is_file())
+        // On Windows the CLIs land as `aws.exe` / `gcloud.cmd` / `gsutil.cmd`, so
+        // a bare-name probe would falsely report them absent; try each PATHEXT
+        // suffix in addition to the bare name.
+        let exts = program_extensions();
+        std::env::split_paths(&paths).any(|dir| {
+            exts.iter()
+                .any(|ext| dir.join(format!("{program}{ext}")).is_file())
+        })
+    }
+}
+
+/// Executable-name suffixes to try when probing `PATH`. On Windows this is the
+/// bare name plus each `PATHEXT` entry (`aws` also matches `aws.exe`); on other
+/// platforms just the bare name.
+fn program_extensions() -> Vec<String> {
+    if cfg!(windows) {
+        let raw = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        let mut exts = vec![String::new()];
+        exts.extend(
+            raw.split(';')
+                .filter(|e| !e.is_empty())
+                .map(|e| e.to_string()),
+        );
+        exts
+    } else {
+        vec![String::new()]
     }
 }
 
@@ -507,20 +549,38 @@ enum ReadOutcome {
     Missing,
 }
 
-/// Stderr substrings that mean "no such object" rather than a real failure,
-/// across `aws`/`gcloud`/`gsutil`. Compared case-insensitively.
+/// Whether stderr means "no such object" rather than a real failure, across
+/// `aws`/`gcloud`/`gsutil`. Compared case-insensitively. A connectivity /
+/// auth / permission failure is never "object absent" — it's checked first so
+/// its message (which may itself contain "not found") can't mask a real error
+/// as a missing object and silently read as an empty cache.
 fn looks_like_not_found(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
-    [
+    const HARD: &[&str] = &[
+        "could not connect",
+        "could not resolve",
+        "connection",
+        "timed out",
+        "timeout",
+        "unable to locate credentials",
+        "access denied",
+        "accessdenied",
+        "forbidden",
+        "unauthorized",
+        "network",
+    ];
+    if HARD.iter().any(|m| s.contains(m)) {
+        return false;
+    }
+    const MISSING: &[&str] = &[
         "nosuchkey",
         "not found",
-        "404",
         "does not exist",
         "matched no objects",
         "no url matched",
-    ]
-    .iter()
-    .any(|m| s.contains(m))
+        "no urls matched",
+    ];
+    MISSING.iter().any(|m| s.contains(m))
 }
 
 impl CliTransport {
@@ -663,11 +723,10 @@ impl Transport for CliTransport {
         }
         Ok(ids)
     }
-    fn read_segment(&self, id: &str) -> Result<Vec<u8>> {
-        let url = self.segment_url(id);
-        match self.read_url(&url)? {
-            ReadOutcome::Found(b) => Ok(b),
-            ReadOutcome::Missing => anyhow::bail!("segment {id} missing at {url}"),
+    fn read_segment(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        match self.read_url(&self.segment_url(id))? {
+            ReadOutcome::Found(b) => Ok(Some(b)),
+            ReadOutcome::Missing => Ok(None),
         }
     }
     fn read_base(&self) -> Result<Option<Vec<u8>>> {
@@ -779,13 +838,13 @@ impl Transport for HttpTransport {
         }
         Ok(ids)
     }
-    fn read_segment(&self, id: &str) -> Result<Vec<u8>> {
+    fn read_segment(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let url = self.segment_url(id);
         let r = self.client.get(&url)?;
-        if is_2xx(r.status) {
-            Ok(r.body)
-        } else {
-            anyhow::bail!("reading {url}: HTTP {}", r.status)
+        match r.status {
+            404 => Ok(None),
+            s if is_2xx(s) => Ok(Some(r.body)),
+            s => anyhow::bail!("reading {url}: HTTP {s}"),
         }
     }
     fn read_base(&self) -> Result<Option<Vec<u8>>> {
@@ -946,16 +1005,19 @@ pub fn pull(t: &dyn Transport, sink: &mut Sink) -> Result<Merged> {
     };
     let mut segments = Vec::new();
     for id in t.list_segment_ids()? {
-        match t.read_segment(&id) {
-            Ok(bytes) => match serde_json::from_slice::<Segment>(&bytes) {
+        // A transport/auth error propagates (a flaky remote must fail loudly,
+        // not silently yield a partial baseline); `None` (segment pruned by a
+        // concurrent compaction mid-pull) and a corrupt blob are skipped.
+        if let Some(bytes) = t
+            .read_segment(&id)
+            .with_context(|| format!("reading segment {id} while pulling shared cache"))?
+        {
+            match serde_json::from_slice::<Segment>(&bytes) {
                 Ok(seg) => segments.push(seg),
                 Err(e) => sink.warn(&format!(
                     "rstest: cache: skipping unreadable segment {id}: {e}"
                 )),
-            },
-            Err(e) => sink.warn(&format!(
-                "rstest: cache: skipping unreadable segment {id}: {e}"
-            )),
+            }
         }
     }
     Ok(merge(base, segments))
@@ -1019,6 +1081,14 @@ pub fn select_segments_to_fold(
 /// those folded. Returns `(folded, retained)` counts. `now` stamps the age
 /// window (epoch seconds). Delete failures are non-fatal (the absorbed-id set
 /// keeps a lingering segment from double-counting anyway).
+///
+/// Compaction is a non-atomic read-modify-write of `base.json`, so two runners
+/// can race (auto-compaction makes this routine). To avoid deleting a segment
+/// whose data a concurrent writer dropped, deletes are gated on the *persisted*
+/// base: after the write we re-read `base.json` and prune only segments its
+/// `absorbed` set actually contains. A segment the winning base didn't absorb
+/// stays loose (harmless — `absorbed` prevents double-counting — where deleting
+/// it would be data loss).
 pub fn compact_remote_with(
     t: &dyn Transport,
     sink: &mut Sink,
@@ -1035,13 +1105,18 @@ pub fn compact_remote_with(
     // place rather than destroyed without ever being folded into the base.
     let mut parsed: Vec<(String, Segment)> = Vec::new();
     for id in &ids {
-        if let Ok(bytes) = t.read_segment(id) {
-            if let Ok(seg) = serde_json::from_slice::<Segment>(&bytes) {
-                parsed.push((id.clone(), seg));
-            } else {
-                sink.warn(&format!(
+        // A transport error propagates (auto-compaction catches it as non-fatal;
+        // manual `cache-compact` exits non-zero). `None` = pruned by a concurrent
+        // compaction between the list and this read; a corrupt blob is kept.
+        if let Some(bytes) = t
+            .read_segment(id)
+            .with_context(|| format!("reading segment {id} while compacting"))?
+        {
+            match serde_json::from_slice::<Segment>(&bytes) {
+                Ok(seg) => parsed.push((id.clone(), seg)),
+                Err(_) => sink.warn(&format!(
                     "rstest: cache: compact: keeping unparseable segment {id}"
-                ));
+                )),
             }
         }
     }
@@ -1066,8 +1141,21 @@ pub fn compact_remote_with(
     let folded = segments.len();
     let new_base = compact(base, segments);
     t.write_base(&serde_json::to_vec(&new_base).context("serializing base.json")?)?;
+    // Re-read the persisted base and prune only segments it absorbed, so a
+    // concurrent compaction that overwrote our base with a different fold set
+    // can't leave a folded segment both deleted here and absent there. On any
+    // read/parse failure, keep everything loose — a lingering segment is safe
+    // (absorbed prevents double-counting), a deleted-but-unabsorbed one is not.
+    let durable: HashSet<String> = match t.read_base() {
+        Ok(Some(bytes)) => serde_json::from_slice::<Base>(&bytes)
+            .map(|b| b.absorbed)
+            .unwrap_or_default(),
+        _ => HashSet::new(),
+    };
     for id in &folded_ids {
-        let _ = t.delete_segment(id);
+        if durable.contains(id) {
+            let _ = t.delete_segment(id);
+        }
     }
     Ok((folded, retained))
 }
@@ -1498,7 +1586,7 @@ mod tests {
         fn list_segment_ids(&self) -> Result<Vec<String>> {
             self.inner.list_segment_ids()
         }
-        fn read_segment(&self, id: &str) -> Result<Vec<u8>> {
+        fn read_segment(&self, id: &str) -> Result<Option<Vec<u8>>> {
             self.inner.read_segment(id)
         }
         fn read_base(&self) -> Result<Option<Vec<u8>>> {
@@ -1638,6 +1726,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn compact_delete_gated_on_persisted_absorbed_set() {
+        // Simulate a concurrent compaction winning the base write: the base
+        // that ends up persisted does NOT list our folded ids in `absorbed`.
+        // Deletes must be withheld so the folded segments stay loose (no data
+        // loss) rather than being pruned into oblivion.
+        struct RewriteBaseTransport {
+            inner: DirTransport,
+        }
+        impl Transport for RewriteBaseTransport {
+            fn list_segment_ids(&self) -> Result<Vec<String>> {
+                self.inner.list_segment_ids()
+            }
+            fn read_segment(&self, id: &str) -> Result<Option<Vec<u8>>> {
+                self.inner.read_segment(id)
+            }
+            fn read_base(&self) -> Result<Option<Vec<u8>>> {
+                self.inner.read_base()
+            }
+            fn write_segment(&self, id: &str, b: &[u8]) -> Result<()> {
+                self.inner.write_segment(id, b)
+            }
+            fn write_base(&self, _b: &[u8]) -> Result<()> {
+                // A concurrent winner overwrote the base with an empty absorbed
+                // set (it folded a different segment set than we did).
+                let empty = compact(None, Vec::new());
+                self.inner.write_base(&serde_json::to_vec(&empty).unwrap())
+            }
+            fn delete_segment(&self, id: &str) -> Result<()> {
+                self.inner.delete_segment(id)
+            }
+        }
+        let root = tmp_dir("compact-race-guard");
+        let t = RewriteBaseTransport {
+            inner: DirTransport::new(&root),
+        };
+        push(&t, &seg("s1", 10, &[("t::a", 1.0)], &[])).unwrap();
+        push(&t, &seg("s2", 20, &[("t::b", 2.0)], &[])).unwrap();
+        let (folded, _) =
+            compact_remote_with(&t, &mut Sink::captured().0, 0, &RetentionPolicy::default())
+                .unwrap();
+        assert_eq!(folded, 2);
+        // Persisted base didn't absorb s1/s2 -> deletes withheld -> both kept.
+        let mut ids = t.list_segment_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["s1".to_string(), "s2".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // ---- CliTransport (s3:// / gs://) --------------------------------------
 
     use std::cell::RefCell;
@@ -1690,6 +1827,66 @@ mod tests {
             stdout: Vec::new(),
             stderr: stderr.into(),
         }
+    }
+
+    #[test]
+    fn pull_fails_on_transport_error_but_skips_missing_and_corrupt() {
+        // A listed segment's read outcome drives pull: a transport/auth error
+        // must fail the pull (no silent partial baseline); a `None` (pruned by a
+        // concurrent compaction mid-pull) or a corrupt blob is skipped.
+        enum Mode {
+            Err,
+            None,
+            Corrupt,
+        }
+        struct Stub(Mode);
+        impl Transport for Stub {
+            fn list_segment_ids(&self) -> Result<Vec<String>> {
+                Ok(vec!["s1".into()])
+            }
+            fn read_segment(&self, _id: &str) -> Result<Option<Vec<u8>>> {
+                match self.0 {
+                    Mode::Err => anyhow::bail!("boom-network"),
+                    Mode::None => Ok(None),
+                    Mode::Corrupt => Ok(Some(b"{ not json".to_vec())),
+                }
+            }
+            fn read_base(&self) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn write_segment(&self, _: &str, _: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn write_base(&self, _: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn delete_segment(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        assert!(pull(&Stub(Mode::Err), &mut Sink::captured().0).is_err());
+        assert!(pull(&Stub(Mode::None), &mut Sink::captured().0).is_ok());
+        assert!(pull(&Stub(Mode::Corrupt), &mut Sink::captured().0).is_ok());
+    }
+
+    #[test]
+    fn not_found_detection_ignores_connectivity_and_auth() {
+        // Genuine object-absent messages across the three CLIs.
+        assert!(looks_like_not_found(
+            "fatal error: An error occurred (NoSuchKey)"
+        ));
+        assert!(looks_like_not_found("CommandException: No URLs matched"));
+        assert!(looks_like_not_found("the object does not exist"));
+        // Connectivity / auth / permission failures are NOT "missing object",
+        // even when the text happens to contain a not-found-ish phrase.
+        assert!(!looks_like_not_found(
+            "Could not connect to the endpoint URL"
+        ));
+        assert!(!looks_like_not_found("Unable to locate credentials"));
+        assert!(!looks_like_not_found("An error occurred (AccessDenied)"));
+        assert!(!looks_like_not_found(
+            "could not resolve host: bucket not found"
+        ));
     }
 
     #[test]
@@ -2021,6 +2218,19 @@ mod tests {
 
     // ---- RealRunner (real subprocess) --------------------------------------
 
+    #[test]
+    fn program_extensions_include_bare_name() {
+        // Every platform tries the bare name; Windows also tries PATHEXT
+        // suffixes so `aws` matches `aws.exe` / `gcloud.cmd`.
+        let exts = program_extensions();
+        assert!(exts.iter().any(|e| e.is_empty()), "bare name always tried");
+        if cfg!(windows) {
+            assert!(exts.len() > 1, "windows adds PATHEXT candidates");
+        } else {
+            assert_eq!(exts, vec![String::new()]);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn real_runner_runs_program_feeds_stdin_and_probes_path() {
@@ -2072,7 +2282,7 @@ mod tests {
         .unwrap();
         // storage cat -> Found -> Some / read_segment bytes.
         assert_eq!(t.read_base().unwrap(), Some(b"{}".to_vec()));
-        assert_eq!(t.read_segment("x").unwrap(), b"{}".to_vec());
+        assert_eq!(t.read_segment("x").unwrap(), Some(b"{}".to_vec()));
         // storage cp - <url> for both base and segment.
         t.write_base(b"{}").unwrap();
         t.write_segment("x", b"data").unwrap();
@@ -2081,15 +2291,24 @@ mod tests {
     }
 
     #[test]
-    fn cli_read_segment_missing_is_error() {
-        // A not-found stderr maps a read to Missing; read_segment turns that
-        // into a hard error (a segment we listed must exist).
+    fn cli_read_segment_missing_is_none() {
+        // A not-found stderr maps a read to Missing -> Ok(None), so a puller can
+        // tell a segment pruned mid-pull from a real transport error.
         let t = CliTransport::for_remote_with(
             "gs://b/p",
             StubRunner::new(&["gcloud"], |_, _, _| err_out("not found")),
         )
         .unwrap();
-        assert!(t.read_segment("gone").is_err());
+        assert_eq!(t.read_segment("gone").unwrap(), None);
+        // A real (non not-found) failure is still an error.
+        let hard = CliTransport::for_remote_with(
+            "gs://b/p",
+            StubRunner::new(&["gcloud"], |_, _, _| {
+                err_out("Unable to locate credentials")
+            }),
+        )
+        .unwrap();
+        assert!(hard.read_segment("gone").is_err());
     }
 
     #[test]
@@ -2139,7 +2358,7 @@ mod tests {
 
     #[cfg(feature = "http-cache")]
     #[test]
-    fn http_read_segment_2xx_bytes_non_2xx_error() {
+    fn http_read_segment_2xx_bytes_404_none_5xx_error() {
         let ok = HttpTransport::new(
             "https://c/x",
             StubHttpClient::new(|_m, url, _| {
@@ -2147,9 +2366,12 @@ mod tests {
                 resp(200, b"blob")
             }),
         );
-        assert_eq!(ok.read_segment("a").unwrap(), b"blob".to_vec());
+        assert_eq!(ok.read_segment("a").unwrap(), Some(b"blob".to_vec()));
+        // 404 -> None (pruned mid-pull), a 5xx -> hard error.
         let miss = HttpTransport::new("https://c/x", StubHttpClient::new(|_, _, _| resp(404, b"")));
-        assert!(miss.read_segment("a").is_err());
+        assert_eq!(miss.read_segment("a").unwrap(), None);
+        let err = HttpTransport::new("https://c/x", StubHttpClient::new(|_, _, _| resp(500, b"")));
+        assert!(err.read_segment("a").is_err());
     }
 
     #[cfg(feature = "http-cache")]

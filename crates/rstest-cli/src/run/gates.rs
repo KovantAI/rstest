@@ -7,7 +7,7 @@
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::{PostRun, RunConfig};
 use crate::cli::Cli;
@@ -212,24 +212,41 @@ fn report_push_result(w: &mut dyn Write, result: Result<()>, seg: &remote::Segme
 }
 
 /// Resolve the auto-compaction threshold: the `--cache-compact-threshold` flag,
-/// else `RSTEST_CACHE_COMPACT_THRESHOLD`, else `None` (feature off).
-fn resolve_compact_threshold(cli: &Cli) -> Option<usize> {
-    cli.cache_compact_threshold.or_else(|| {
-        std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<usize>().ok())
-    })
+/// else `RSTEST_CACHE_COMPACT_THRESHOLD`, else `None` (feature off). An
+/// unparseable env is an `Err`, never a silent `None` — matching
+/// [`super::resolve_retention_policy`], so a typo'd threshold is surfaced (as a
+/// non-fatal warning on the best-effort push path) rather than quietly
+/// disabling auto-compaction.
+fn resolve_compact_threshold(cli: &Cli) -> Result<Option<usize>> {
+    if let Some(n) = cli.cache_compact_threshold {
+        return Ok(Some(n));
+    }
+    match std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD") {
+        Ok(s) if !s.is_empty() => {
+            Ok(Some(s.parse::<usize>().with_context(|| {
+                format!("invalid RSTEST_CACHE_COMPACT_THRESHOLD {s:?}")
+            })?))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Opt-in auto-compaction: after a successful push, if the remote holds more
 /// than the threshold loose segments, fold per the env retention window inline.
 /// Strictly best-effort — every failure warns and never fails an otherwise-green
-/// run. Concurrent auto-compactions are safe (the absorbed-id set prevents
-/// double-counting), only redundant.
+/// run. Concurrent auto-compactions don't lose data: `compact_remote_with`
+/// gates its deletes on the persisted base's absorbed set, so a race at worst
+/// leaves a lingering segment (which `absorbed` de-dupes), never a deleted one.
 fn maybe_auto_compact(cli: &Cli, t: &dyn remote::Transport, remote: &str, sink: &mut Sink) {
-    let Some(threshold) = resolve_compact_threshold(cli) else {
-        return;
+    let threshold = match resolve_compact_threshold(cli) {
+        Ok(Some(t)) => t,
+        Ok(None) => return,
+        Err(e) => {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact skipped (bad threshold): {e:#}"
+            ));
+            return;
+        }
     };
     let count = match t.list_segment_ids() {
         Ok(ids) => ids.len(),
@@ -253,6 +270,21 @@ fn maybe_auto_compact(cli: &Cli, t: &dyn remote::Transport, remote: &str, sink: 
             return;
         }
     };
+    // A keep-last window at or above the threshold pins the loose set above it,
+    // so compaction would fold nothing yet re-list/re-read/re-write the base on
+    // every push. Skip rather than thrash; the window itself already bounds the
+    // set. (max_age can still thrash under a high enough push rate — that's a
+    // genuinely too-small threshold, left to the operator.)
+    if let Some(keep) = policy.keep_last {
+        if keep >= threshold {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact skipped: keep-last window ({keep}) >= threshold \
+                 ({threshold}); the loose set can't drop below the window, so this would run \
+                 every push. Raise --cache-compact-threshold above the retention window."
+            ));
+            return;
+        }
+    }
     match remote::compact_remote_with(t, sink, crate::time::now_epoch_secs(), &policy) {
         Ok((folded, retained)) => sink.warn(&format!(
             "rstest: cache: auto-compacted {folded} segment(s) into base at {remote} \
@@ -1198,14 +1230,17 @@ mod tests {
         use crate::cli::Cli;
         use clap::Parser;
         let mut cli = Cli::parse_from(["rstest"]);
-        assert_eq!(resolve_compact_threshold(&cli), None);
+        assert_eq!(resolve_compact_threshold(&cli).unwrap(), None);
         cli.cache_compact_threshold = Some(7);
-        assert_eq!(resolve_compact_threshold(&cli), Some(7)); // flag wins
+        assert_eq!(resolve_compact_threshold(&cli).unwrap(), Some(7)); // flag wins
 
         let mut cli2 = Cli::parse_from(["rstest"]);
         cli2.cache_compact_threshold = None;
         std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "3");
-        assert_eq!(resolve_compact_threshold(&cli2), Some(3)); // env fallback
+        assert_eq!(resolve_compact_threshold(&cli2).unwrap(), Some(3)); // env fallback
+                                                                        // A non-numeric env is a hard error, never a silent None (feature-off).
+        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        assert!(resolve_compact_threshold(&cli2).is_err());
         std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD");
     }
 
@@ -1294,8 +1329,8 @@ mod tests {
             }
             Ok(self.ids.clone())
         }
-        fn read_segment(&self, _id: &str) -> anyhow::Result<Vec<u8>> {
-            Ok(Vec::new())
+        fn read_segment(&self, _id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(Some(Vec::new()))
         }
         fn read_base(&self) -> anyhow::Result<Option<Vec<u8>>> {
             if self.base_fails {
