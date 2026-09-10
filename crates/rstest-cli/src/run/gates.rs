@@ -179,6 +179,18 @@ fn apply_diff_cov_gate(
     status
 }
 
+/// Copy covtool's scored result at `src` to the `--cov-diff-json` `dst`. A copy
+/// failure warns (to `w`) but never gates — the run's verdict already stands.
+fn copy_diff_cov_json(w: &mut dyn Write, src: &std::path::Path, dst: &std::path::Path) {
+    if let Err(e) = std::fs::copy(src, dst) {
+        let _ = writeln!(
+            w,
+            "rstest: could not write --cov-diff-json {}: {e}",
+            dst.display()
+        );
+    }
+}
+
 /// Report a `--cache-push` outcome (to `w`): a success line with the segment's
 /// counts, or a warning on failure. A push failure never fails an otherwise-green
 /// run — it is reported, not gated.
@@ -450,17 +462,16 @@ pub(super) fn run_post_gates(
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
     let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
-    if cli.cov_diff_fail_under.is_some() && !has_cov && !passthrough {
-        sink.warn(
-            "rstest: --cov-diff-fail-under needs --cov (no coverage data to score); ignoring",
-        );
+    let want_diff = cli.cov_diff_fail_under.is_some() || cli.cov_diff_json.is_some();
+    if want_diff && !has_cov && !passthrough {
+        sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
     }
     if !passthrough && has_cov {
         sink.out_line("");
         // Diff-coverage gate: hand covtool the diff's added lines + a result
         // path when --cov-diff-fail-under is set; covtool scores them and we
         // gate on the percentage below.
-        let diff_paths = if cli.cov_diff_fail_under.is_some() {
+        let diff_paths = if want_diff {
             let base = super::resolve_changed_base(cli, sink)?;
             build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))?
         } else {
@@ -489,6 +500,9 @@ pub(super) fn run_post_gates(
         if let Some((lp, op)) = diff_paths {
             if let Some(threshold) = cli.cov_diff_fail_under {
                 exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
+            }
+            if let Some(dst) = &cli.cov_diff_json {
+                copy_diff_cov_json(sink.err(), &op, dst);
             }
             let _ = std::fs::remove_file(&lp);
             let _ = std::fs::remove_file(&op);
@@ -822,11 +836,11 @@ pub(super) fn quarantine_matcher(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_diff_cov_gate, build_diff_lines, build_run_meta, diff_cov_gate, maybe_auto_compact,
-        merge_fixtures, merged_lastfailed, print_warnings_summary, quarantine_matcher,
-        reconcile_cov_status, report_push_result, resolve_compact_threshold, results_bar_line,
-        validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
-        write_teamcity_flaky,
+        apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, diff_cov_gate,
+        maybe_auto_compact, merge_fixtures, merged_lastfailed, print_warnings_summary,
+        quarantine_matcher, reconcile_cov_status, report_push_result, resolve_compact_threshold,
+        results_bar_line, validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json,
+        write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
     use crate::reporting::report::Run;
@@ -1089,6 +1103,36 @@ mod tests {
         let status = apply_diff_cov_gate(&mut buf, &path, 80.0, 0);
         assert_eq!(status, 0);
         assert!(utf8(buf).contains("no added executable lines to score"));
+    }
+
+    #[test]
+    fn copy_diff_cov_json_copies_result_to_dst() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("rstest-diffcov-src-{}.json", std::process::id()));
+        let dst = dir.join(format!("rstest-diffcov-dst-{}.json", std::process::id()));
+        std::fs::write(&src, br#"{"pct": 90.0}"#).unwrap();
+        std::fs::remove_file(&dst).ok();
+        let mut buf = Vec::new();
+        copy_diff_cov_json(&mut buf, &src, &dst);
+        // Success is silent; the destination now holds the scored result.
+        assert!(utf8(buf).is_empty());
+        assert_eq!(std::fs::read(&dst).unwrap(), br#"{"pct": 90.0}"#);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[test]
+    fn copy_diff_cov_json_missing_src_warns() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("rstest-diffcov-nosrc-{}.json", std::process::id()));
+        let dst = dir.join(format!("rstest-diffcov-nodst-{}.json", std::process::id()));
+        // No source => copy errors => warn, never gate.
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+        let mut buf = Vec::new();
+        copy_diff_cov_json(&mut buf, &src, &dst);
+        assert!(utf8(buf).contains("could not write --cov-diff-json"));
+        assert!(!dst.exists());
     }
 
     #[test]

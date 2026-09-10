@@ -382,6 +382,16 @@ impl Progress {
                 obj["longrepr"] = lr.as_str().into();
             }
         }
+        if !r.sections.is_empty() {
+            // Captured stdout/stderr/log as [title, content] pairs, on any
+            // outcome (editors surface a test's output, not just failures).
+            obj["sections"] = serde_json::Value::Array(
+                r.sections
+                    .iter()
+                    .map(|(name, body)| serde_json::json!([name, body]))
+                    .collect(),
+            );
+        }
         sink.out_line(&obj.to_string());
     }
 
@@ -615,6 +625,41 @@ mod tests {
         let pass = teamcity_messages(&report("call", "passed")).unwrap();
         assert_eq!(pass.lines().count(), 2);
         assert!(teamcity_messages(&report("setup", "passed")).is_none());
+    }
+
+    #[test]
+    fn json_report_emits_sections_on_any_outcome() {
+        // Passing report with captured output: sections ride as [name, body]
+        // pairs even though the outcome isn't a failure.
+        let mut r = report("call", "passed");
+        r.sections = vec![
+            ("Captured stdout".into(), "hello\nworld".into()),
+            ("Captured stderr".into(), "boom".into()),
+        ];
+        let (mut sink, buf) = Sink::captured();
+        Progress::on_report_json(&mut sink, Some(1), &r);
+        let obj: serde_json::Value =
+            serde_json::from_str(buf.out().trim()).expect("valid json line");
+        assert_eq!(obj["outcome"], "passed");
+        assert_eq!(obj["worker"], "gw1");
+        assert_eq!(
+            obj["sections"],
+            serde_json::json!([
+                ["Captured stdout", "hello\nworld"],
+                ["Captured stderr", "boom"],
+            ])
+        );
+    }
+
+    #[test]
+    fn json_report_omits_sections_when_empty() {
+        let (mut sink, buf) = Sink::captured();
+        Progress::on_report_json(&mut sink, None, &report("call", "passed"));
+        let obj: serde_json::Value =
+            serde_json::from_str(buf.out().trim()).expect("valid json line");
+        assert!(obj.get("sections").is_none(), "{obj}");
+        // Non-failure keeps longrepr off the wire too.
+        assert!(obj.get("longrepr").is_none(), "{obj}");
     }
 
     #[test]
