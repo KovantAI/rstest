@@ -128,6 +128,6 @@ dependencies, exactly as you would pytest.
 
 ```console
 $ rstest --version
-rstest 0.6.1
+rstest 0.7.0
 $ rstest --co -q   # list tests without running them
 ```

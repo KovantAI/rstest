@@ -5,6 +5,19 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+## 0.7.0 — 2026-09-10
+
+- **Live progress while testing.** Runs now report ongoing progress as
+  tests complete, so long suites give continuous feedback instead of going
+  silent until the end.
+- **Debugger support (`--debug[=PORT]`).** Run under
+  [debugpy](https://github.com/microsoft/debugpy) for editor debugging
+  (VS Code and any DAP client). Like `--pdb`, this forces the debugger:
+  rstest starts debugpy in the worker and blocks until a client attaches.
+  Bare `--debug` listens on `127.0.0.1:5678`; `--debug=PORT` overrides the
+  port. The target interpreter (`--python`) must have `debugpy` installed;
+  without it the run proceeds without a debugger and prints a hint.
+
 ## 0.6.1 — 2026-09-08
 
 - The worker record file (`rstest-pytest-record.json`, or the path in
