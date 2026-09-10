@@ -14,7 +14,9 @@ This module is the session entrypoint. The moving parts live alongside it:
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 
 import pytest
 
@@ -68,6 +70,66 @@ def run_lazy_session(args: list[str], conn) -> int:
     return _contained(lambda: pytest.main(list(args), plugins=[LazyDispatchPlugin(conn)]), conn)
 
 
+def _maybe_start_debugpy() -> None:
+    """Under `rstest --debug`, block until an editor (VS Code) attaches.
+
+    The orchestrator forces single-worker mode with inherited stdio for a debug
+    run (like --pdb) and sets RSTEST_DEBUGPY_PORT on this worker. We start
+    debugpy's listener and wait for the client BEFORE collection, so breakpoints
+    in conftest, collection, and tests are all honored. No-op when the env var is
+    unset. A missing/failed debugpy degrades to a stderr note rather than killing
+    the worker — the session still runs, just without a debugger attached.
+    """
+    port = os.environ.get("RSTEST_DEBUGPY_PORT")
+    if not port:
+        return
+    # Idempotent across re-imported children (multiprocessing spawn / anyio
+    # to_process re-exec this module): only the first call binds the port.
+    if os.environ.get("RSTEST_DEBUGPY_LISTENING") == port:
+        return
+    # Silence debugpy's pydevd file-validation warning (frozen modules are
+    # already disabled via `-X frozen_modules=off` at worker launch). setdefault
+    # so an explicit user value wins.
+    os.environ.setdefault("PYDEVD_DISABLE_FILE_VALIDATION", "1")
+    try:
+        import debugpy  # ty: ignore[unresolved-import]
+    except ImportError:
+        print(
+            "rstest --debug: the target interpreter has no `debugpy` installed; "
+            "run `pip install debugpy` in the test environment. Continuing "
+            "without a debugger.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    try:
+        debugpy.listen(("127.0.0.1", int(port)))
+        os.environ["RSTEST_DEBUGPY_LISTENING"] = port
+        # Machine-readable ready signal on stderr: the editor watches for this
+        # line and attaches a DAP client deterministically, instead of grepping
+        # human text or polling the port. Emitted before wait_for_client so it
+        # arrives while we block. stderr, not stdout, so it never mixes into the
+        # inherited pytest stdout stream.
+        print(
+            json.dumps({"event": "debugpy", "host": "127.0.0.1", "port": int(port)}),
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            f"rstest: debugpy listening on 127.0.0.1:{port}; waiting for client…",
+            file=sys.stderr,
+            flush=True,
+        )
+        debugpy.wait_for_client()
+    except Exception as exc:
+        print(
+            f"rstest --debug: could not start debugpy on {port}: {exc}. "
+            "Continuing without a debugger.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def run(args: list[str], conn) -> int:
     """One pytest session over `args`. Returns the session exit status.
 
@@ -77,6 +139,9 @@ def run(args: list[str], conn) -> int:
     stdout is /dev/null by orchestrator decree.
     """
     _prime_coverage_core(args)
+    # `rstest --debug` routes here (single-worker passthrough): wait for the
+    # editor to attach before pytest collects, so early breakpoints hold.
+    _maybe_start_debugpy()
     return _contained(lambda: pytest.main(list(args), plugins=[StreamPlugin(conn)]), conn)
 
 

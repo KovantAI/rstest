@@ -4,6 +4,7 @@ sessionfinish emission, the doctor fixture timer, and report payloads."""
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -344,6 +345,38 @@ def test_logreport_attaches_cpu_on_call(monkeypatch):
     assert "t.py::a" not in p._cpu  # popped
 
 
+def _drive_runtest_call(p, item):
+    # Drive the wrapper=True generator: advance to the yield, then resume so its
+    # `finally` (cpu recording) runs.
+    gen = p.pytest_runtest_call(item)
+    next(gen)
+    with contextlib.suppress(StopIteration):
+        gen.send(None)
+
+
+def test_runtest_call_measures_cpu_under_stream_output(monkeypatch):
+    # A live JSON consumer opens cpu measurement even without --doctor.
+    monkeypatch.delenv("RSTEST_DOCTOR", raising=False)
+    monkeypatch.setenv("RSTEST_STREAM_OUTPUT", "1")
+    p = _plugin()
+    assert p._measure_cpu
+    monkeypatch.setattr(p, "_effective_timeout", lambda it: None)
+    _drive_runtest_call(p, SimpleNamespace(nodeid="t.py::a"))
+    assert "t.py::a" in p._cpu
+
+
+def test_runtest_call_skips_cpu_by_default(monkeypatch):
+    # Plain run (no doctor, no stream): no cpu measured, so --report-json stays
+    # byte-comparable to the pytest baseline.
+    monkeypatch.delenv("RSTEST_DOCTOR", raising=False)
+    monkeypatch.delenv("RSTEST_STREAM_OUTPUT", raising=False)
+    p = _plugin()
+    assert not p._measure_cpu
+    monkeypatch.setattr(p, "_effective_timeout", lambda it: None)
+    _drive_runtest_call(p, SimpleNamespace(nodeid="t.py::a"))
+    assert "t.py::a" not in p._cpu
+
+
 def test_logreport_ships_sections_only_on_failure():
     p = _plugin()
     big = "x" * 30000
@@ -352,6 +385,34 @@ def test_logreport_ships_sections_only_on_failure():
     )
     payload = p._conn.sent[0][1]
     assert payload["sections"] == [["Captured stdout", big[-20000:]]]  # tail-truncated
+
+
+def test_logreport_omits_passing_sections_without_stream_output(monkeypatch):
+    # Default (no live JSON consumer): a passing test's captured output is NOT
+    # shipped, keeping the wire lean.
+    monkeypatch.delenv("RSTEST_STREAM_OUTPUT", raising=False)
+    p = _plugin()
+    p.pytest_runtest_logreport(
+        mk_report("call", "passed", sections=[("Captured stdout call", "hi\n")])
+    )
+    assert "sections" not in p._conn.sent[0][1]
+
+
+def test_logreport_ships_passing_sections_under_stream_output(monkeypatch):
+    # With RSTEST_STREAM_OUTPUT=1 (--output json / --stream-json), a passing
+    # test's captured output rides along so editors can show it.
+    monkeypatch.setenv("RSTEST_STREAM_OUTPUT", "1")
+    p = _plugin()
+    p.pytest_runtest_logreport(
+        mk_report("call", "passed", sections=[("Captured stdout call", "hi\n")])
+    )
+    assert p._conn.sent[0][1]["sections"] == [["Captured stdout call", "hi\n"]]
+
+
+def test_logreport_omits_sections_when_empty():
+    p = _plugin()
+    p.pytest_runtest_logreport(mk_report("call", "passed", sections=[]))
+    assert "sections" not in p._conn.sent[0][1]
 
 
 def test_logreport_extracts_skip_reason():

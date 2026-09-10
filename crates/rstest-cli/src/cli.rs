@@ -202,6 +202,13 @@ pub struct Cli {
     #[arg(long = "cov-diff-fail-under", value_name = "PCT")]
     pub(crate) cov_diff_fail_under: Option<f64>,
 
+    /// Write the diff-coverage report as JSON to PATH:
+    /// {"pct","covered","uncovered","files":{"<path>":[<uncovered line>...]}}.
+    /// Scores coverage of ADDED/CHANGED lines vs the --changed base (else HEAD).
+    /// Requires --cov. Independent of --cov-diff-fail-under (no gate implied).
+    #[arg(long = "cov-diff-json", value_name = "PATH")]
+    pub(crate) cov_diff_json: Option<PathBuf>,
+
     /// Incremental testing: run only what changed since the last GREEN run,
     /// re-using --changed's coverage-aware selection with an auto-managed
     /// baseline (the commit of the last all-passing run, stored in the cache).
@@ -285,6 +292,21 @@ pub struct Cli {
     /// `RSTEST_CACHE_COMPACT_THRESHOLD`.
     #[arg(long, value_name = "N", global = true)]
     pub(crate) cache_compact_threshold: Option<usize>,
+
+    /// Run under debugpy for editor (VS Code) debugging: force single-worker
+    /// mode with inherited stdio (like `--pdb`), start debugpy in the worker,
+    /// and block until a client attaches before collecting. Bare `--debug`
+    /// listens on 127.0.0.1:5678; `--debug=PORT` overrides. The target
+    /// interpreter must have `debugpy` installed.
+    #[arg(long, num_args = 0..=1, default_missing_value = "5678", value_name = "PORT")]
+    pub(crate) debug: Option<String>,
+
+    /// Stream per-test results as newline-delimited JSON (one object per test
+    /// phase report) to FILE as the run progresses — the live surface a Test
+    /// Explorer / editor consumes. FILE may be a regular file or a named pipe
+    /// (fifo). Works in every run mode; human output is unaffected.
+    #[arg(long = "stream-json", value_name = "FILE")]
+    pub(crate) stream_json: Option<PathBuf>,
 }
 
 /// -x / --maxfail=N from the session args (also forwarded: each worker
@@ -414,7 +436,7 @@ const SUBCOMMANDS: &[&str] = &["verify-vendor", "try", "migrate-check", "cache-c
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
 /// the following argv item (that item is a path / pytest flag).
-const OPT_FLAGS: &[&str] = &["--changed", "--shuffle"];
+const OPT_FLAGS: &[&str] = &["--changed", "--shuffle", "--debug"];
 
 /// Flags that take a value: either the following argv item (`--dist load`) or
 /// `=`-joined (`--dist=load`). `-n` also accepts the attached short forms
@@ -431,6 +453,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--durations-regress",
     "--only-rerun",
     "--cov-diff-fail-under",
+    "--cov-diff-json",
     "--worker-timeout",
     "--timeout",
     "--reruns",
@@ -446,6 +469,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--keep-last",
     "--max-age",
     "--cache-compact-threshold",
+    "--stream-json",
 ];
 
 /// True when `arg` is the `=`-joined form of flag `f` (e.g. `--dist=load` for
@@ -699,6 +723,38 @@ mod tests {
             v(&["rstest", "--doctor-md", "d.md", "--doctor-md=e.md"])
         );
         assert_eq!(session, v(&["-v"]));
+    }
+
+    #[test]
+    fn split_owns_debug_and_stream_json() {
+        // --debug is optional-value (bare consumes nothing, =PORT inline); it
+        // must never eat the following path. --stream-json takes a value.
+        let (own, session) = split_args(v(&["--debug", "tests/"]));
+        assert_eq!(own, v(&["rstest", "--debug"]));
+        assert_eq!(session, v(&["tests/"]));
+
+        let (own, session) = split_args(v(&["--debug=5678", "tests/"]));
+        assert_eq!(own, v(&["rstest", "--debug=5678"]));
+        assert_eq!(session, v(&["tests/"]));
+
+        let (own, session) = split_args(v(&["--stream-json", "out.ndjson", "-k", "x"]));
+        assert_eq!(own, v(&["rstest", "--stream-json", "out.ndjson"]));
+        assert_eq!(session, v(&["-k", "x"]));
+    }
+
+    #[test]
+    fn clap_parses_debug_and_stream_json() {
+        use clap::Parser;
+        let (own, _) = split_args(v(&["--debug=5678", "--stream-json", "o.ndjson"]));
+        let cli = Cli::parse_from(&own);
+        assert_eq!(cli.debug.as_deref(), Some("5678"));
+        assert_eq!(
+            cli.stream_json.as_deref(),
+            Some(std::path::Path::new("o.ndjson"))
+        );
+        // Bare --debug falls back to the default port.
+        let (own, _) = split_args(v(&["--debug"]));
+        assert_eq!(Cli::parse_from(&own).debug.as_deref(), Some("5678"));
     }
 
     #[test]

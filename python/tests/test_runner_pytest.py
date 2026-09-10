@@ -34,6 +34,111 @@ def test_run_uses_stream_plugin(monkeypatch):
     assert isinstance(captured["plugins"][0], StreamPlugin)
 
 
+class _FakeDebugpy:
+    """Stand-in for the `debugpy` module: records listen/wait calls."""
+
+    def __init__(self) -> None:
+        self.listened: list[tuple[str, int]] = []
+        self.waited = 0
+
+    def listen(self, addr) -> None:
+        self.listened.append(addr)
+
+    def wait_for_client(self) -> None:
+        self.waited += 1
+
+
+def _clear_debug_env(monkeypatch) -> None:
+    monkeypatch.delenv("RSTEST_DEBUGPY_PORT", raising=False)
+    monkeypatch.delenv("RSTEST_DEBUGPY_LISTENING", raising=False)
+
+
+def test_maybe_start_debugpy_noop_without_env(monkeypatch):
+    # No RSTEST_DEBUGPY_PORT: must not import debugpy or block.
+    _clear_debug_env(monkeypatch)
+    import sys
+
+    monkeypatch.setitem(sys.modules, "debugpy", _FakeDebugpy())
+    runner_pytest._maybe_start_debugpy()
+    assert sys.modules["debugpy"].waited == 0  # type: ignore[attr-defined]
+
+
+def test_maybe_start_debugpy_listens_and_waits(monkeypatch, capsys):
+    # With the port set and debugpy present: listen on 127.0.0.1:PORT, wait for
+    # the client, and record that we are listening (idempotency marker).
+    import json
+    import os
+    import sys
+
+    _clear_debug_env(monkeypatch)
+    monkeypatch.setenv("RSTEST_DEBUGPY_PORT", "5678")
+    fake = _FakeDebugpy()
+    monkeypatch.setitem(sys.modules, "debugpy", fake)
+    runner_pytest._maybe_start_debugpy()
+    assert fake.listened == [("127.0.0.1", 5678)]
+    assert fake.waited == 1
+    assert os.environ["RSTEST_DEBUGPY_LISTENING"] == "5678"
+    # A machine-readable ready line rides stderr so the editor attaches
+    # deterministically.
+    ready = next(
+        json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")
+    )
+    assert ready == {"event": "debugpy", "host": "127.0.0.1", "port": 5678}
+
+
+def test_maybe_start_debugpy_idempotent_across_children(monkeypatch):
+    # A re-imported child (multiprocessing spawn) already listening on this port
+    # must not bind again.
+    import sys
+
+    _clear_debug_env(monkeypatch)
+    monkeypatch.setenv("RSTEST_DEBUGPY_PORT", "5678")
+    monkeypatch.setenv("RSTEST_DEBUGPY_LISTENING", "5678")
+    fake = _FakeDebugpy()
+    monkeypatch.setitem(sys.modules, "debugpy", fake)
+    runner_pytest._maybe_start_debugpy()
+    assert fake.listened == []
+    assert fake.waited == 0
+
+
+def test_maybe_start_debugpy_degrades_without_debugpy(monkeypatch, capsys):
+    # No debugpy installed: print a hint to stderr and return (no raise), so the
+    # session still runs without a debugger.
+    import builtins
+    import sys
+
+    _clear_debug_env(monkeypatch)
+    monkeypatch.setenv("RSTEST_DEBUGPY_PORT", "5678")
+    monkeypatch.delitem(sys.modules, "debugpy", raising=False)
+    real_import = builtins.__import__
+
+    def no_debugpy(name, *args, **kwargs):
+        if name == "debugpy":
+            raise ImportError("no debugpy")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_debugpy)
+    runner_pytest._maybe_start_debugpy()  # must not raise
+    assert "debugpy" in capsys.readouterr().err
+
+
+def test_maybe_start_debugpy_swallows_listen_errors(monkeypatch, capsys):
+    # A listen() failure (e.g. port in use) is caught, reported, and never kills
+    # the run.
+    import sys
+
+    _clear_debug_env(monkeypatch)
+    monkeypatch.setenv("RSTEST_DEBUGPY_PORT", "5678")
+
+    class _Boom(_FakeDebugpy):
+        def listen(self, addr):
+            raise RuntimeError("port in use")
+
+    monkeypatch.setitem(sys.modules, "debugpy", _Boom())
+    runner_pytest._maybe_start_debugpy()  # must not raise
+    assert "could not start debugpy" in capsys.readouterr().err
+
+
 def test_run_session_uses_item_dispatch_plugin(monkeypatch):
     captured = _capture_main(monkeypatch)
     runner_pytest.run_session(["t.py"], FakeConn())

@@ -259,13 +259,18 @@ pub fn run_pool(
                     fail_count += 1;
                 }
                 prog.on_report(sink, Some(idx), &r);
+                sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
                 if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                     stopping = true;
                     orchestrator::stop_all(&mut states);
                 }
             }
-            Ok(Event::CollectError { path, longrepr }) => run.collect_error(path, longrepr),
+            Ok(Event::CollectError { path, longrepr }) => {
+                prog.on_collect_error(sink, &path, &longrepr);
+                sink.emit_collect_error(&path, &longrepr);
+                run.collect_error(path, longrepr);
+            }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
             Ok(Event::Warnings { entries }) => {
                 // Per-test warnings are disjoint across workers; config and
@@ -599,6 +604,7 @@ pub fn run_pool(
                         );
                         let crashed_id = fab.nodeid.clone();
                         prog.on_report(sink, Some(idx), &fab);
+                        sink.emit_report(Some(idx), &fab);
                         run.record(Some(idx), fab);
                         run.mark_crashed(&crashed_id);
                     }

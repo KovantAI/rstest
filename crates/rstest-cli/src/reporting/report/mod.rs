@@ -29,7 +29,11 @@ pub struct TestEntry {
     pub worker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
-    #[serde(skip)]
+    /// Call-phase CPU time (process_time), present only when measured
+    /// (`--doctor` or a live-stream run). Serialized when present so a
+    /// report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on
+    /// a plain run so the snapshot stays byte-comparable to the pytest baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<f64>,
     /// Leak check: net threads / open fds after teardown (from the teardown
     /// report). Doctor-internal; not serialized to report-json.
@@ -608,6 +612,32 @@ mod tests {
         run.mark_flaky("a.py::wobbly".into(), 2);
         assert!(run.tests()["a.py::wobbly"].flaky);
         assert!(run.summary_line().contains("1 flaky"));
+    }
+
+    #[test]
+    fn cpu_serialized_in_snapshot_only_when_measured() {
+        let meta = RunMeta {
+            exitstatus: 0,
+            duration_seconds: 0.0,
+            started_at_epoch: 0,
+            workers: 1,
+            argv: vec![],
+        };
+        // Measured (doctor / stream run): cpu rides the call report and lands in
+        // the snapshot entry.
+        let mut run = Run::default();
+        run.record(None, report("a.py::t", "setup", "passed"));
+        let mut call = report("a.py::t", "call", "passed");
+        call.cpu = Some(0.01);
+        run.record(None, call);
+        assert_eq!(run.snapshot_value(&meta)["tests"]["a.py::t"]["cpu"], 0.01);
+
+        // Plain run (cpu None): the key is omitted, so the document stays
+        // byte-comparable to the pytest baseline.
+        let mut plain = Run::default();
+        full(&mut plain, "a.py::t", "passed");
+        let doc = plain.snapshot_value(&meta);
+        assert!(doc["tests"]["a.py::t"].get("cpu").is_none());
     }
 
     #[test]

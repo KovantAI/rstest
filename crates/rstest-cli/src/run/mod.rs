@@ -235,7 +235,10 @@ fn resolve_run_config(
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     warn_windows_timeout(sink.err(), cfg!(windows), cli.timeout, worker_timeout);
     let n = parse_numprocesses(&numprocesses)?;
-    let passthrough = needs_passthrough_io(args);
+    // `--debug` runs one worker with inherited stdio (like --pdb) so debugpy
+    // owns a single process and its console; route it through the passthrough
+    // path regardless of the session flags.
+    let passthrough = needs_passthrough_io(args) || cli.debug.is_some();
     // Honor `--reruns` in single-worker mode via a degenerate one-worker pool:
     // the rerun loop is orchestrator-side (rerunfailures neutralized inside).
     // Passthrough can't be pooled, so reruns stay inert there.
@@ -296,6 +299,10 @@ fn resolve_run_config(
         timeout: cli.timeout,
         leakcheck,
         send_ids: false,
+        debug_port: cli.debug.clone(),
+        // Ship captured stdout/stderr on every report (not just failures) when a
+        // live JSON consumer is attached, so editors get per-passing-test output.
+        stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -323,6 +330,23 @@ fn resolve_run_config(
     })
 }
 
+/// Wire up the `--stream-json FILE` side channel: open FILE for truncating
+/// write (creating it if absent) and attach it to `sink`, or warn to stderr if
+/// it can't be opened. FILE may be a regular file or a named pipe the editor
+/// already opened for reading. Open failure is non-fatal — the run continues
+/// without the side channel.
+fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(f) => sink.attach_stream(Box::new(f)),
+        Err(e) => sink.warn(&format!("rstest: --stream-json {}: {e}", path.display())),
+    }
+}
+
 /// The crate's main entry point for a single (non-watch) run: resolves the
 /// run configuration from `cli` + forwarded pytest `args`, dispatches to the
 /// worker pool (or the monorepo driver), runs post-run reports and gates
@@ -335,6 +359,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // selection, banner) flows through it. `--color` resolution matches
     // `resolve_run_config`'s (both call `Palette::detect`).
     let mut sink = Sink::stdio(color::Palette::detect(&args));
+    // `--stream-json FILE`: attach the live per-test NDJSON side channel. FILE
+    // may be a regular file or a named pipe the editor already opened for
+    // reading (opening a fifo for write blocks until that reader is present).
+    if let Some(path) = &cli.stream_json {
+        attach_stream_json(&mut sink, path);
+    }
     let start = Instant::now();
     let started_epoch = crate::time::now_epoch_secs();
     // One uid per test run, shared by every worker (xdist's testrun_uid
@@ -1354,10 +1384,13 @@ fn fold_run_event(
             if !passthrough {
                 prog.on_report(sink, None, &r);
             }
+            sink.emit_report(None, &r);
             run.record(None, r);
             None
         }
         proto::Event::CollectError { path, longrepr } => {
+            prog.on_collect_error(sink, &path, &longrepr);
+            sink.emit_collect_error(&path, &longrepr);
             run.collect_error(path, longrepr);
             None
         }
@@ -1390,11 +1423,11 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_workers_by_files, cap_workers_by_time, collect_lazy, fold_run_event, head_to_none,
-        lazy_should_steal, parse_duration_secs, parse_numprocesses, resolve_changed_base,
-        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, validate_cache_flags,
-        warn_incremental_conflicts, warn_quarantine_passthrough, warn_windows_timeout,
-        watchdog_duration,
+        attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
+        dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
+        parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
+        resolve_shuffle_seed, run_cache_compact, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1406,6 +1439,15 @@ mod tests {
 
     fn cli() -> Cli {
         Cli::parse_from(["rstest"])
+    }
+
+    /// Serializes tests touching the process-global `RSTEST_CACHE_*` env.
+    /// Shares the crate-wide lock so it also serializes against the auto-compact
+    /// tests in the `gates` submodule, which read the same env.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::select::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -1594,8 +1636,76 @@ mod tests {
         assert!(parse_duration_secs("abc").is_err()); // no number
     }
 
+    fn compact_segment(id: &str, generated_at: u64) -> remote::Segment {
+        remote::Segment {
+            schema: 1,
+            id: id.into(),
+            generated_at,
+            durations: [(format!("{id}::t"), 0.1)].into_iter().collect(),
+            flake_events: Vec::new(),
+            cov_index: Default::default(),
+        }
+    }
+
+    #[test]
+    fn run_cache_compact_errors_without_a_remote() {
+        // No --cache-remote flag and no RSTEST_CACHE_REMOTE => hard error, never
+        // a silent no-op.
+        let _g = env_guard();
+        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
+        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let mut c = cli();
+        c.cache_remote = None;
+        let (mut sink, _cap) = Sink::captured();
+        let err = run_cache_compact(&c, &mut sink, None, None).unwrap_err();
+        if let Some(v) = saved {
+            std::env::set_var("RSTEST_CACHE_REMOTE", v);
+        }
+        assert!(
+            err.to_string().contains("needs --cache-remote"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn run_cache_compact_folds_a_dir_remote_and_reports() {
+        // A bare directory path resolves to a DirTransport; over-threshold loose
+        // segments fold into a fresh base and are pruned, and the count is
+        // reported. No retention window => fold all.
+        use crate::remote::transport_for;
+        let _g = env_guard();
+        let root = std::env::temp_dir().join(format!("rstest-run-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let remote_str = root.to_str().unwrap().to_string();
+        let t = transport_for(&remote_str).unwrap();
+        remote::push(t.as_ref(), &compact_segment("a", 1)).unwrap();
+        remote::push(t.as_ref(), &compact_segment("b", 2)).unwrap();
+
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let mut c = cli();
+        c.cache_remote = Some(remote_str.clone());
+        let (mut sink, cap) = Sink::captured();
+        let code = run_cache_compact(&c, &mut sink, None, None).unwrap();
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert_eq!(code, 0);
+        assert!(cap.err().contains("compacted"), "got: {}", cap.err());
+
+        let after = transport_for(&remote_str).unwrap();
+        assert!(after.read_base().unwrap().is_some(), "base written");
+        assert!(
+            after.list_segment_ids().unwrap().is_empty(),
+            "all folded (no retention window)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn resolve_retention_policy_flags_win_and_parse() {
+        let _g = env_guard();
         let p = resolve_retention_policy(Some(5), Some("30d")).unwrap();
         assert_eq!(p.keep_last, Some(5));
         assert_eq!(p.max_age, Some(30 * 86400));
@@ -1606,6 +1716,41 @@ mod tests {
         );
         // A bad duration flag is a hard error, never a silent fold-all.
         assert!(resolve_retention_policy(None, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn resolve_retention_policy_reads_keep_last_env() {
+        // No `keep_last` flag => fall through to RSTEST_CACHE_KEEP_LAST.
+        let _g = env_guard();
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "7");
+        let p = resolve_retention_policy(None, None).unwrap();
+        // A non-numeric env is a hard error, never a silent fold-all.
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let err = resolve_retention_policy(None, None).unwrap_err();
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert_eq!(p.keep_last, Some(7));
+        assert!(err.to_string().contains("invalid RSTEST_CACHE_KEEP_LAST"));
+    }
+
+    #[test]
+    fn dispatch_cache_compact_without_remote_errors() {
+        // cache-compact resolves the remote from the flag or RSTEST_CACHE_REMOTE;
+        // with neither set it fails before touching Python or any transport.
+        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
+        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let cli = Cli::parse_from(["rstest", "cache-compact"]);
+        let err = dispatch_command(&cli, &["rstest".into(), "cache-compact".into()])
+            .expect_err("no remote => error");
+        if let Some(v) = saved {
+            std::env::set_var("RSTEST_CACHE_REMOTE", v);
+        }
+        assert!(err
+            .to_string()
+            .contains("cache-compact needs --cache-remote"));
     }
 
     #[test]
@@ -1922,5 +2067,87 @@ mod tests {
         );
         assert_eq!(code, None);
         assert_eq!(run.counts()["passed"], 1);
+    }
+
+    #[test]
+    fn fold_run_event_streams_reports_and_collect_errors() {
+        // With a --stream-json sink attached, a Report and a CollectError each
+        // emit one NDJSON line on the side channel (the wiring behind the live
+        // Test Explorer feed for the single/passthrough path).
+        let mut run = report::Run::default();
+        let mut prog = progress::Progress::default();
+        let mut fixtures = Vec::new();
+        let mut warnings = Vec::new();
+        let (mut sink, _cap) = Sink::captured();
+        let stream = sink.attach_captured_stream();
+        let mut fold = |ev, sink: &mut Sink| {
+            fold_run_event(
+                ev,
+                false,
+                &mut run,
+                &mut prog,
+                &mut fixtures,
+                &mut warnings,
+                sink,
+            )
+        };
+        fold(proto::Event::Report(report("t.py::a", "passed")), &mut sink);
+        fold(
+            proto::Event::CollectError {
+                path: "bad.py".into(),
+                longrepr: "boom".into(),
+            },
+            &mut sink,
+        );
+
+        let text = String::from_utf8(stream.lock().unwrap().clone()).unwrap();
+        let events: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event"], "testreport");
+        assert_eq!(events[0]["nodeid"], "t.py::a");
+        assert_eq!(events[1]["event"], "collecterror");
+        assert_eq!(events[1]["path"], "bad.py");
+        assert_eq!(events[1]["longrepr"], "boom");
+    }
+
+    #[test]
+    fn attach_stream_json_opens_file_and_streams_events() {
+        // Happy path: the file opens, gets attached, and emitted NDJSON lands in
+        // it (truncating whatever was there before).
+        let path =
+            std::env::temp_dir().join(format!("rstest-streamjson-{}.ndjson", std::process::id()));
+        std::fs::write(&path, b"stale contents that must be truncated\n").unwrap();
+
+        let (mut sink, captured) = Sink::captured();
+        attach_stream_json(&mut sink, &path);
+        // Open failure would warn to stderr; success must not.
+        assert_eq!(captured.err(), "");
+        sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "{\"event\":\"sessionfinish\"}\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn attach_stream_json_warns_when_open_fails() {
+        // A path under a nonexistent directory can't be created => warn, no panic.
+        let path = std::env::temp_dir()
+            .join(format!("rstest-streamjson-missing-{}", std::process::id()))
+            .join("nope")
+            .join("out.ndjson");
+
+        let (mut sink, captured) = Sink::captured();
+        attach_stream_json(&mut sink, &path);
+
+        let err = captured.err();
+        assert!(err.contains("rstest: --stream-json"), "got: {err}");
+        assert!(err.contains(&path.display().to_string()), "got: {err}");
+        // Nothing was attached, so emitting is a no-op (no panic writing to a
+        // closed/absent stream).
+        sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
     }
 }
