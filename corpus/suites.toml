@@ -83,6 +83,14 @@ install = ["--group tests", "-e ."]
 [fastapi]
 repo = "https://github.com/fastapi/fastapi"
 install = ["--group tests", "-e .[all]"]
+# A newer anyio turned `anyio.abc.BlockingPortal` into a deprecated lazy alias
+# (moved to `anyio.from_thread.BlockingPortal`); the starlette version fastapi
+# pins still imports the old path, so importing starlette's TestClient emits a
+# DeprecationWarning at collection. fastapi's `filterwarnings = ["error"]` turns
+# it into a collect error under BOTH runners (444 collect errors, rc=2 -> parity
+# 0%). Ignore that one message on both runs (via `args`) to keep parity without
+# editing upstream. Drop once fastapi bumps its starlette pin past the alias.
+args = ["-W", "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning"]
 
 [starlette]
 repo = "https://github.com/Kludex/starlette"
