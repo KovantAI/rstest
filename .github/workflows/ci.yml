@@ -111,6 +111,10 @@ jobs:
       - name: worker unit tests (with coverage)
         run: uvx --with msgpack --with coverage --with pytest-cov pytest python/tests --cov --cov-report=xml
 
+      # corpus gate-classification tests: pure logic, no venvs/network needed.
+      - name: corpus bench unit tests
+        run: uvx --python 3.13 --with pytest pytest corpus/test_bench.py
+
       - name: upload python coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:

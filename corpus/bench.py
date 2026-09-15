@@ -27,8 +27,13 @@ This phase is fully offline. Emits a markdown report (stdout +, when set,
 $GITHUB_STEP_SUMMARY) and corpus/bench.json.
 
 Soft gate: exits non-zero if the sweep suite's BEST speedup is below --floor,
-or any measured suite's parity is below --parity-floor. Everything else is
-advisory — never gate ordinary CI on wall time.
+or any measured suite's parity is below --parity-floor. One carve-out: a suite
+whose pytest baseline collected NOTHING (total collection collapse, rc=2 — e.g.
+upstream drift on a HEAD-cloned suite) has no comparable parity, so it is
+surfaced as INVESTIGATE (warning, job stays green) rather than gated. A baseline
+that only partially failed collection but still collected tests IS gated on the
+tests it did collect. Everything else is advisory — never gate ordinary CI on
+wall time.
 
 Reproduce:
     python3 corpus/run.py --prepare-only --only marshmallow,attrs,fastapi,anyio
@@ -83,16 +88,19 @@ def _parity(base_snap, cand_snap):
     return diff(base_snap, cand_snap)["score"]
 
 
-def _collect_errors(snap):
-    """Count collection errors recorded in a snapshot.
+def _snap_health(snap):
+    """(collect-error count, collected-test count) from a snapshot.
 
-    A non-zero count means the runner could not even collect the suite (pytest
-    rc=2 / rstest equivalent) — usually upstream drift on a HEAD-cloned suite
-    (a new dep warning tripping `filterwarnings = error`), not a runner bug.
-    The gate uses this to tell a broken *reference* (investigate, neutral) apart
-    from rstest genuinely diverging from a healthy baseline (fail).
+    A non-zero collect-error count means the runner hit collection failures
+    (pytest rc=2 / rstest equivalent) — usually upstream drift on a HEAD-cloned
+    suite (a new dep warning tripping `filterwarnings = error`), not a runner
+    bug. The gate pairs it with the collected-test count so it can tell a total
+    collapse (broke, collected nothing → investigate, neutral) apart from a
+    partial failure that still collected tests (parity over those IS meaningful,
+    so gate it) and from rstest diverging from a healthy baseline (fail).
     """
-    return len(json.loads(Path(snap).read_text()).get("collect_errors", []))
+    data = json.loads(Path(snap).read_text())
+    return len(data.get("collect_errors", [])), len(data.get("tests", {}))
 
 
 def bench_suite(suite, repeat):
@@ -102,10 +110,10 @@ def bench_suite(suite, repeat):
     py_med, py_band = _spread(py_walls)
     rs_med, rs_band = _spread(rs_walls)
     parity = _parity(py_snap, rs_snap)
-    base_broken = _collect_errors(py_snap)
-    cand_broken = _collect_errors(rs_snap)
+    base_broken, base_tests = _snap_health(py_snap)
+    cand_broken, _ = _snap_health(rs_snap)
     speedup = py_med / rs_med if rs_med else 0.0
-    tag = " [INVESTIGATE: baseline collection broken]" if base_broken else ""
+    tag = " [INVESTIGATE: baseline collection broken]" if (base_broken and not base_tests) else ""
     log(
         f"  {suite.name}: {speedup:.2f}x "
         f"(pytest {py_med:.1f}s -> rstest {rs_med:.1f}s), parity {parity}%{tag}"
@@ -120,6 +128,7 @@ def bench_suite(suite, repeat):
             "speedup": round(speedup, 2),
             "parity": parity,
             "baseline_collect_errors": base_broken,
+            "baseline_tests": base_tests,
             "candidate_collect_errors": cand_broken,
         },
         py_walls,
@@ -130,15 +139,18 @@ def bench_suite(suite, repeat):
 def bench_sweep(suite, repeat, py_walls, py_snap):
     """Worker-scaling rows on one suite, reusing its spectrum pytest baseline."""
     py_med = statistics.median(py_walls)
-    base_broken = _collect_errors(py_snap)  # shared baseline: broken once, broken for all points
+    # shared baseline: its health is measured once, applies to every point
+    base_broken, base_tests = _snap_health(py_snap)
     rows = []
     for n in SWEEP_WORKERS:
         rs_walls, rs_snap = _repeat_rstest(suite, repeat, workers=n)
         rs_med, rs_band = _spread(rs_walls)
         parity = _parity(py_snap, rs_snap)
-        cand_broken = _collect_errors(rs_snap)
+        cand_broken, _ = _snap_health(rs_snap)
         speedup = py_med / rs_med if rs_med else 0.0
-        tag = " [INVESTIGATE: baseline collection broken]" if base_broken else ""
+        tag = (
+            " [INVESTIGATE: baseline collection broken]" if (base_broken and not base_tests) else ""
+        )
         log(f"  {suite.name} -n {n}: {speedup:.2f}x ({rs_med:.1f}s), parity {parity}%{tag}")
         rows.append(
             {
@@ -148,18 +160,34 @@ def bench_sweep(suite, repeat, py_walls, py_snap):
                 "speedup": round(speedup, 2),
                 "parity": parity,
                 "baseline_collect_errors": base_broken,
+                "baseline_tests": base_tests,
                 "candidate_collect_errors": cand_broken,
             }
         )
     return {"suite": suite.name, "pytest_wall": round(py_med, 1), "points": rows}
 
 
+def _baseline_unusable(r):
+    """The baseline is 'unusable' (parity incomparable) only on TOTAL collection
+    collapse: collect errors AND zero tests collected. A baseline with a few
+    collect errors that still collected tests yields a meaningful parity over the
+    intersection — gate it normally, or rstest regressions on the collectible
+    portion go uncaught."""
+    return bool(r.get("baseline_collect_errors")) and not r.get("baseline_tests")
+
+
 def _row_status(r, parity_floor):
-    """Classify a measured row: 'investigate' (reference broken, not gated),
-    'regression' (healthy baseline but rstest broke or diverged), or 'ok'."""
-    if r.get("baseline_collect_errors"):
+    """Classify a measured row: 'investigate' (reference collapsed, not gated),
+    'regression' (usable baseline but rstest broke or diverged), or 'ok'."""
+    if _baseline_unusable(r):
         return "investigate"
-    if r.get("candidate_collect_errors") or r["parity"] < parity_floor:
+    # rstest breaking collection is a standalone fault only when pytest DIDN'T
+    # (healthy baseline). If the same upstream drift broke collection under BOTH
+    # runners, they miss the same modules and agree by absence — parity is the
+    # arbiter, not the raw error count (else identical drift reads as a false
+    # regression).
+    rstest_broke_alone = r.get("candidate_collect_errors") and not r.get("baseline_collect_errors")
+    if rstest_broke_alone or r["parity"] < parity_floor:
         return "regression"
     return "ok"
 
@@ -171,9 +199,11 @@ def render(spectrum, sweep, floor, parity_floor):
     out = ["## rstest speed ramp (median of repeated runs)\n"]
     out.append("Wall time is advisory (noisy shared runners); parity is the hard gate.\n")
     out.append(
-        "🔍 investigate = the pytest *baseline* itself failed collection (upstream "
-        "drift on a HEAD-cloned suite), so parity is not comparable — not an rstest "
-        "regression, and not gated.\n"
+        "🔍 investigate = the pytest *baseline* itself collapsed at collection "
+        "(collect errors and zero tests collected — upstream drift on a HEAD-cloned "
+        "suite), so parity is not comparable — not an rstest regression, and not "
+        "gated. A baseline that only partially failed but still collected tests is "
+        "gated normally on the tests it collected.\n"
     )
 
     out.append("### Spectrum — speedup vs the parallelizable share\n")
@@ -289,19 +319,25 @@ def main():
             fh.write(report)
 
     # ---------- gates ----------
-    # A row is only gated when its pytest baseline actually collected: a broken
-    # baseline (upstream drift on a HEAD-cloned suite) makes parity/speedup
-    # incomparable, so it is surfaced as INVESTIGATE (a warning, job stays green)
-    # rather than counted as an rstest regression. rstest is faulted only when a
-    # *healthy* baseline is beaten wrong: parity below the floor, or rstest alone
-    # failing to collect while pytest could.
-    fails, investigate = [], []
+    # A row is only gated when its pytest baseline is usable: a baseline that
+    # collapsed at collection (upstream drift on a HEAD-cloned suite: collect
+    # errors AND nothing collected) makes parity/speedup incomparable, so it is
+    # surfaced as INVESTIGATE (a warning, job stays green) rather than counted as
+    # an rstest regression. rstest is faulted only when a usable baseline is
+    # beaten wrong: parity below the floor, or rstest alone failing to collect
+    # while pytest could. `investigate` is keyed by suite: the worker sweep
+    # reuses one baseline, so a collapsed sweep baseline is ONE finding, not one
+    # per -n point.
+    fails, investigate = [], {}
 
-    def _classify(row, label):
+    def _classify(row, suite, label):
         status = _row_status(row, args.parity_floor)
         if status == "investigate":
             n = row["baseline_collect_errors"]
-            investigate.append(f"{label}: pytest baseline broke collection ({n} collect errors)")
+            investigate.setdefault(
+                suite,
+                f"{suite}: pytest baseline collapsed at collection ({n} collect errors, 0 tests)",
+            )
         elif status == "regression":
             if row.get("candidate_collect_errors"):
                 fails.append(
@@ -313,21 +349,21 @@ def main():
                 fails.append(f"{label} parity {row['parity']}% < {args.parity_floor}%")
 
     for r in spectrum:
-        _classify(r, r["suite"])
+        _classify(r, r["suite"], r["suite"])
     if sweep:
         for p in sweep["points"]:
-            _classify(p, f"{sweep['suite']} -n {p['workers']}")
-        # Speedup floor only means something against a baseline that ran. If the
-        # sweep suite's baseline is broken, its wall numbers are noise — skip the
-        # floor gate (the investigate marks already flag it).
-        if not any(p.get("baseline_collect_errors") for p in sweep["points"]):
+            _classify(p, sweep["suite"], f"{sweep['suite']} -n {p['workers']}")
+        # Speedup floor only means something against a usable baseline. If the
+        # sweep suite's baseline collapsed, its wall numbers are noise — skip the
+        # floor gate (the investigate mark already flags it).
+        if not any(_baseline_unusable(p) for p in sweep["points"]):
             best = max((p["speedup"] for p in sweep["points"]), default=0.0)
             if best < args.floor:
                 fails.append(f"{sweep['suite']} best speedup {best:.2f}x < floor {args.floor:.1f}x")
 
-    for i in investigate:
-        log(f"INVESTIGATE: {i}")
-        print(f"::warning title=corpus drift::{i}")
+    for msg in investigate.values():
+        log(f"INVESTIGATE: {msg}")
+        print(f"::warning title=corpus drift::{msg}")
     if fails:
         for f in fails:
             log(f"GATE FAIL: {f}")
