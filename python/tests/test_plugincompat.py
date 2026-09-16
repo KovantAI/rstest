@@ -5,6 +5,7 @@ import zlib
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
+    _random_order_seed,
     _randomly_seed,
 )
 
@@ -34,6 +35,42 @@ def test_randomly_seed_deterministic():
 def test_randomly_seed_non_string():
     # A non-str/non-hex value still yields a deterministic 32-bit seed.
     assert _randomly_seed(None) == zlib.crc32(b"None") & 0xFFFFFFFF
+
+
+class _OptConfig:
+    """Minimal config exposing getoption for the random-order seed helper."""
+
+    def __init__(self, opt, raise_on_get=False):
+        self._opt = opt
+        self._raise = raise_on_get
+
+    def getoption(self, name):
+        if self._raise:
+            raise ValueError("unknown option: " + name)
+        return self._opt
+
+
+def test_random_order_seed_derives_shared_default_from_uid():
+    # Default (plugin's per-process "default:<rand>"): replace with a value
+    # derived from the run uid so every worker agrees, keeping the "default:"
+    # prefix so the plugin stays disabled unless the user opts in.
+    seed = _random_order_seed(_OptConfig("default:987654"), "abc123")
+    assert seed == "default:" + str(_randomly_seed("abc123"))
+    assert seed.startswith("default:")
+    # Same uid -> same seed (the cross-worker agreement contract).
+    assert seed == _random_order_seed(_OptConfig("default:111"), "abc123")
+
+
+def test_random_order_seed_honors_explicit_pin():
+    # A user-pinned seed (no "default:" prefix) is passed through verbatim.
+    assert _random_order_seed(_OptConfig("42"), "abc123") == "42"
+
+
+def test_random_order_seed_when_plugin_absent_still_derives():
+    # getoption raising (option not registered / plugin absent) -> derive a
+    # harmless shared default; the key is unused when the plugin isn't loaded.
+    seed = _random_order_seed(_OptConfig(None, raise_on_get=True), "ff")
+    assert seed == "default:" + str(_randomly_seed("ff"))
 
 
 class _Plugin:

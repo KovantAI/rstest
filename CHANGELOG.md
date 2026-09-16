@@ -5,6 +5,16 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **pytest-random-order no longer crashes under the pool.** Its
+  `pytest_configure` reads `workerinput["random_order_seed"]` unconditionally
+  whenever `workerinput` exists (even with reordering disabled — the default),
+  so merely installing the plugin raised `KeyError: 'random_order_seed'` at
+  `-n ≥ 2`. rstest now seeds that key like it does `randomly_seed`: a single
+  run-derived value shared by every worker (so the shuffled collection hashes
+  agree), keeping the plugin's `default:` prefix so order is untouched unless
+  you opt in with `--random-order[-bucket|-seed]`; an explicit
+  `--random-order-seed=<n>` is honored.
+
 ## 0.7.0 — 2026-09-10
 
 - **Live progress while testing.** Runs now report ongoing progress as
