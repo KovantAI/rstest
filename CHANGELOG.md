@@ -5,6 +5,24 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **Heads-up when a parallel run pairs with a "dark" report plugin.** At
+  `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
+  — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
+  `--benchmark*` — now prints a warning before the run naming the plugin and the
+  parallel-safe alternative (native `--report-json` / `--junitxml`, or `-n 0`).
+  Argv-driven, so it never flags rstest's own merged `--html` / `--junitxml` /
+  `--report-json`, and stays silent at `-n 0`.
+- **Plugin compatibility matrix extended to the top 100.** The
+  [compatibility reference](docs/reference/top-100-plugins.md) now classifies
+  the 100 most-downloaded pytest plugins (was 50) for behavior under the
+  parallel pool.
+- **pytest-mypy no longer crashes under the pool.** Its worker branch reads
+  `workerinput["mypy_config_stash_serialized"]` — the mypy results-cache path an
+  xdist controller injects — so merely installing it raised
+  `KeyError: 'mypy_config_stash_serialized'` at `-n ≥ 2` (rstest runs no
+  controller). rstest now seeds a unique per-worker cache path; mypy runs lazily
+  on each worker (`MypyResults.from_session`), so type errors surface identically
+  at `-n auto` and `-n 0`.
 - **pytest-random-order no longer crashes under the pool.** Its
   `pytest_configure` reads `workerinput["random_order_seed"]` unconditionally
   whenever `workerinput` exists (even with reordering disabled — the default),

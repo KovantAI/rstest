@@ -254,3 +254,80 @@ def test_seed_pytest_retry_noop_when_port_already_set(monkeypatch):
     _seed_pytest_retry(config)
     assert wi["server_port"] == 111
     assert calls["created"] == 0
+
+
+# --- pytest-mypy dead-master-path seeding (mypy_config_stash_serialized) ---
+# Reuses _RetryPM/_RetryConfig (a get_plugin/has_plugin/unregister + workerinput
+# stub); pytest-mypy registers under the entrypoint name "mypy".
+
+
+def test_seed_pytest_mypy_seeds_stash_path():
+    from rstest_worker._internal.plugincompat import _seed_pytest_mypy
+
+    wi = {}
+    config = _RetryConfig({"mypy": object()}, wi)
+    _seed_pytest_mypy(config)
+    # A unique per-worker results-cache path string the worker branch can read.
+    assert isinstance(wi["mypy_config_stash_serialized"], str)
+    assert "rstest-mypy-" in wi["mypy_config_stash_serialized"]
+
+
+def test_seed_pytest_mypy_noop_without_plugin():
+    from rstest_worker._internal.plugincompat import _seed_pytest_mypy
+
+    wi = {}
+    config = _RetryConfig({}, wi)  # no pytest-mypy
+    _seed_pytest_mypy(config)
+    assert "mypy_config_stash_serialized" not in wi
+
+
+def test_seed_pytest_mypy_skips_when_xdist_present():
+    from rstest_worker._internal.plugincompat import _seed_pytest_mypy
+
+    wi = {}
+    # real xdist installed -> pytest-mypy self-provisions via its controller
+    config = _RetryConfig({"mypy": object(), "xdist": object()}, wi)
+    _seed_pytest_mypy(config)
+    assert "mypy_config_stash_serialized" not in wi
+
+
+def test_seed_pytest_mypy_respects_module_name():
+    from rstest_worker._internal.plugincompat import _seed_pytest_mypy
+
+    wi = {}
+    config = _RetryConfig({"pytest_mypy": object()}, wi)  # package-name variant
+    _seed_pytest_mypy(config)
+    assert isinstance(wi["mypy_config_stash_serialized"], str)
+
+
+def test_seed_pytest_mypy_noop_when_key_already_set():
+    from rstest_worker._internal.plugincompat import _seed_pytest_mypy
+
+    wi = {"mypy_config_stash_serialized": "/pre/existing/path"}
+    config = _RetryConfig({"mypy": object()}, wi)
+    _seed_pytest_mypy(config)
+    assert wi["mypy_config_stash_serialized"] == "/pre/existing/path"
+
+
+def test_seed_pytest_mypy_noop_without_workerinput():
+    from rstest_worker._internal.plugincompat import _seed_pytest_mypy
+
+    config = _RetryConfig({"mypy": object()}, None)  # no workerinput attr
+    _seed_pytest_mypy(config)  # must not raise
+    assert getattr(config, "workerinput", None) is None
+
+
+def test_seed_pytest_mypy_falls_back_to_neutralize_on_error(monkeypatch):
+    import tempfile
+
+    from rstest_worker._internal.plugincompat import _seed_pytest_mypy
+
+    def _boom(*a, **k):
+        raise OSError("no temp dir")
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", _boom)
+    plugin = object()
+    config = _RetryConfig({"mypy": plugin}, {})
+    _seed_pytest_mypy(config)
+    # reservation failed -> plugin unregistered instead of leaving it to KeyError
+    assert config.pluginmanager.unregistered == [plugin]

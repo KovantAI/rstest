@@ -16,6 +16,7 @@ from rstest_worker._internal.plugincompat import (
     _neutralize_rerunfailures,
     _random_order_seed,
     _randomly_seed,
+    _seed_pytest_mypy,
     _seed_pytest_retry,
 )
 from rstest_worker._internal.wire import _wire_safe
@@ -133,6 +134,10 @@ class StreamPlugin:
         # workerinput now exists; seed pytest-retry's server_port before its own
         # (non-tryfirst) pytest_configure reads it and KeyErrors.
         _seed_pytest_retry(config)
+        # Same dead-master-path: pytest-mypy's worker branch reads
+        # workerinput["mypy_config_stash_serialized"]. This tryfirst configure
+        # runs before the plugin's own, so the key is present when it reads it.
+        _seed_pytest_mypy(config)
         self._set_basetemp(config, worker_id)
         self._init_xdist_node(config, worker_id)
 

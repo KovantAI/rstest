@@ -632,6 +632,133 @@ def gate_pytest_json_ctrf_silent(g, args, binary):
     check("json-ctrf: written at -n 0", j0.exists(), f"file_exists={j0.exists()}")
 
 
+def gate_pytest_mypy(g, args, binary):
+    print("== pytest-mypy (seeded stash path, no dead-master-path crash) ==")
+    # pytest-mypy's worker branch reads workerinput["mypy_config_stash_serialized"]
+    # (top-100 #97), a key only its xdist CONTROLLER sets. Under rstest every
+    # process has workerinput but none is the controller, so the worker branch
+    # read a key nobody set -> KeyError aborting configure at -n>=2 (same
+    # dead-master-path class as random-order). rstest now seeds a unique per-worker
+    # results-cache path; mypy runs lazily per worker (MypyResults.from_session).
+    gm = _plugin_gate(binary, args, "-mypy", ["pytest-mypy"])
+    # A clean file (mypy passes) and one with a return-type error (mypy fails);
+    # both carry a real test so we also see the tests execute alongside the mypy
+    # items under the pool.
+    gm.write(
+        "mp/test_good.py",
+        "def add(a: int, b: int) -> int:\n    return a + b\n\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n",
+    )
+    gm.write(
+        "mp/test_bad.py",
+        # Declared -> str but returns int: mypy reports an incompatible return.
+        "def wrong(a: int) -> str:\n    return a\n\n\n"
+        "def test_wrong_runs():\n    assert wrong(1) == 1\n",
+    )
+    r = gm.run("mp", "-n", "2", "--mypy", timeout=180)
+    out = r.stdout + r.stderr
+    # The dead-master-path signature is a KeyError on the un-seeded stash key and
+    # a dead id-carrier worker. (A plain "KeyError" substring is too broad — the
+    # mypy-status item's expected type-error failure renders pluggy source that
+    # literally contains `except KeyError`.) Assert the SPECIFIC key is gone and
+    # no worker died at collection.
+    check(
+        "mypy: no dead-master-path crash at -n>=2",
+        "mypy_config_stash_serialized" not in out
+        and "died before reporting" not in out
+        and "<internalerror>" not in out.lower(),
+        out[-600:],
+    )
+    check(
+        "mypy: type error surfaced under the pool (mypy actually ran per worker)",
+        r.returncode != 0 and ("error:" in out or "mypy" in out.lower()),
+        f"rc={r.returncode} " + out[-500:],
+    )
+    # Parity: the same type error surfaces at -n 0 (single session, plugin's own
+    # controller branch — the path rstest is standing in for under the pool).
+    r0 = gm.run("mp", "-n", "0", "--mypy", timeout=180)
+    out0 = r0.stdout + r0.stderr
+    check(
+        "mypy: same type error at -n 0 (behavior parity)",
+        r0.returncode != 0 and ("error:" in out0 or "mypy" in out0.lower()),
+        f"rc={r0.returncode} " + out0[-500:],
+    )
+
+
+def gate_report_aggregators_silent(g, args, binary):
+    print("== report aggregators (no dead-master crash; silent at -n>=2) ==")
+    # pytest-reportlog / -md / -nunit / -csv each write ONE whole-suite artifact.
+    # Under the pool there is no master to aggregate: reportlog/nunit write
+    # nothing (🔴 Silent), -md writes an empty "0 tests" report, and -csv writes a
+    # racy per-worker file (⚠️ Caveat) — top-100 #81/#84/#91/#98. The hard,
+    # verified property this gate protects across all four is that merely
+    # installing + invoking them does NOT crash the worker (no KeyError /
+    # traceback) at -n>=2, and the artifact still lands at -n 0. Use rstest's
+    # native --report-json / --junitxml under the pool instead.
+    cases = [
+        ("reportlog", "pytest-reportlog", lambda f: [f"--report-log={f}"]),
+        ("md", "pytest-md", lambda f: [f"--md={f}"]),
+        ("nunit", "pytest-nunit", lambda f: [f"--nunit-xml={f}"]),
+        ("csv", "pytest-csv", lambda f: [f"--csv={f}"]),
+    ]
+    for name, dep, flags in cases:
+        gp = _plugin_gate(binary, args, "-agg-" + name, [dep])
+        gp.write(
+            "ag/test_ag.py",
+            "def test_x():\n    assert True\ndef test_y():\n    assert True\n",
+        )
+        f2 = gp.tmp / f"{name}_n2.out"
+        r = gp.run("ag", "-n", "2", *flags(f2), timeout=90)
+        out = r.stdout + r.stderr
+        check(
+            f"{name}: no crash under the pool (session completes, no KeyError)",
+            "2 passed" in r.stdout and "KeyError" not in out and "Traceback" not in out,
+            out[-500:],
+        )
+        f0 = gp.tmp / f"{name}_n0.out"
+        r0 = gp.run("ag", "-n", "0", *flags(f0), timeout=90)
+        check(
+            f"{name}: artifact written at -n 0",
+            f0.exists(),
+            f"file_exists={f0.exists()} " + (r0.stdout + r0.stderr)[-300:],
+        )
+
+
+def gate_silent_master_warning(g, args, binary):
+    print("== silent-master plugin warning (-n>=2 + dark report flag) ==")
+    # rstest warns before the run when a parallel run pairs with a plugin flag
+    # whose artifact goes dark under the pool (aggregates on the absent xdist
+    # master), pointing at the native parallel-safe path. Argv-driven — fires
+    # whether or not the plugin is installed; here pytest-reportlog is installed
+    # so the session itself also succeeds.
+    gp = _plugin_gate(binary, args, "-agg-reportlog", ["pytest-reportlog"])
+    gp.write("wn/test_wn.py", "def test_a():\n    assert True\n")
+    rl = gp.tmp / "r.jsonl"
+    r = gp.run("wn", "-n", "2", f"--report-log={rl}")
+    out = r.stdout + r.stderr
+    check(
+        "warn: fires at -n>=2, names the plugin + native path",
+        "warning:" in out and "pytest-reportlog" in out and "--report-json" in out,
+        out[-400:],
+    )
+    check("warn: run still completes", "1 passed" in r.stdout, r.stdout[-200:])
+    # Single-worker: the plugin's own master branch runs, so no warning.
+    r0 = gp.run("wn", "-n", "0", f"--report-log={rl}")
+    check(
+        "warn: silent at -n 0 (no false positive)",
+        "warning:" not in (r0.stdout + r0.stderr),
+        (r0.stdout + r0.stderr)[-300:],
+    )
+    # rstest OWNS --junitxml (rendered from merged results) — never warn on it.
+    rx = gp.tmp / "r.xml"
+    r2 = gp.run("wn", "-n", "2", f"--junitxml={rx}")
+    check(
+        "warn: no false positive on rstest-owned --junitxml",
+        "warning:" not in (r2.stdout + r2.stderr) and rx.exists(),
+        f"file_exists={rx.exists()} " + (r2.stdout + r2.stderr)[-300:],
+    )
+
+
 def gate_pytest_random_order(g, args, binary):
     print("== pytest-random-order (seeded workerinput, no dead-master-path crash) ==")
     # pytest-random-order's pytest_configure reads workerinput["random_order_seed"]

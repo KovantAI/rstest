@@ -14,7 +14,7 @@ Plugin command-line flags forward like any pytest flag; plugin ini options
 are read normally.
 
 !!! tip "Looking for a specific plugin?"
-    See the [top-50 plugin compatibility matrix](../reference/top-50-plugins.md)
+    See the [top-100 plugin compatibility matrix](../reference/top-100-plugins.md)
     — how the 50 most-downloaded plugins behave under the pool, each marked
     verified (`V`) or inferred (`i`) — and
     [Plugins exercised by the corpus](../reference/corpus-plugins.md), the
@@ -55,9 +55,9 @@ Beyond the battery above, these common ecosystem plugins were run under both
 parallel; **caveat** = works with a stated limitation; **parallel-unsafe** =
 run it at `-n 0` (or use rstest's native equivalent).
 
-For the broader picture — the 50 most-downloaded plugins, each with a
+For the broader picture — the 100 most-downloaded plugins, each with a
 verified/inferred marker — see the
-[top-50 compatibility matrix](../reference/top-50-plugins.md).
+[top-100 compatibility matrix](../reference/top-100-plugins.md).
 
 | Plugin | Tier | Note |
 |---|---|---|
@@ -70,6 +70,7 @@ verified/inferred marker — see the
 | pytest-order | Caveat | ordering only holds within a worker at `-n ≥ 2`; use `-n 0`, or `--dist loadfile`/`loadscope` to keep an ordered group on one worker |
 | pytest-randomly | Works | rstest synthesizes the `randomly_seed` key xdist's master would inject, derived from the run uid so every worker agrees on one reproducible seed. An explicit `--randomly-seed=<n>` still wins. (rstest's native [`--shuffle`](../reference/cli.md#-shuffleseed) remains available and is also parallel-safe.) |
 | pytest-random-order | Works | its `pytest_configure` reads `workerinput["random_order_seed"]` *unconditionally* whenever `workerinput` exists — even with reordering off (the default) — so merely installing it used to `KeyError` every `-n ≥ 2` run. rstest now seeds that key (shared across workers so the shuffled collection hashes agree), keeping the plugin's own `default:` prefix so order is untouched unless you pass `--random-order[-bucket\|-seed]`; an explicit `--random-order-seed=<n>` is honored. Global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
+| pytest-mypy | Works | its worker branch reads `workerinput["mypy_config_stash_serialized"]` — the mypy results-cache path an xdist **controller** sets — so merely installing it used to `KeyError` every `-n ≥ 2` run (no rstest master runs the controller). rstest now seeds a unique **per-worker** cache path; mypy is run lazily by the first mypy item on each worker (`MypyResults.from_session`, `FileLock`-guarded), so each worker type-checks its own subset and errors surface identically at `-n auto` and `-n 0`. If the seed can't be provisioned the plugin is unregistered (run mypy at `-n 0`). |
 | pytest-rerunfailures | Works | inside pool workers rstest unregisters it *before* `pytest_configure`, so its xdist `sock_port` client branch never fires (the old `KeyError: 'sock_port'` at `-n ≥ 2` with pytest-xdist installed), and rstest owns reruns natively — crash-aware, honoring `@mark.flaky` and [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun`. At `-n 0` the plugin keeps its own behavior. |
 | pytest-html | Parallel-unsafe | at `-n ≥ 2` **no report is written** — a silent no-op, not a crash. pytest-html registers its report writer only on a node *without* `workerinput` (its xdist "am I the master?" check); every rstest pool worker has a `workerinput`, so nothing ever owns report generation. Merging all workers' results into one file needs a single master process, which rstest doesn't run (the Rust orchestrator owns the merge, and workers are isolated sessions). Generate the report at `-n 0`/`-n 1`, or keep the parallel run and emit from merged artifacts — see [HTML & aggregated reporting](#html-aggregated-reporting-under-parallelism). |
 
@@ -80,7 +81,10 @@ synthesized worker-side (`randomly_seed` and `random_order_seed` — one
 run-level value every worker agrees on); **controller-service** keys are handled by each worker playing
 master for itself — pytest-retry's branch self-provisions its own report
 server per worker (so its `server_port` is set locally, no central
-controller needed), and pytest-rerunfailures is unregistered before it can
+controller needed), pytest-mypy is handed a unique per-worker
+`mypy_config_stash_serialized` cache path so each worker type-checks its own
+subset (the controller only ever *displayed* results, and mypy runs lazily
+without it), and pytest-rerunfailures is unregistered before it can
 read `sock_port` (rstest owns reruns instead). The one still-unsupported
 case in this table is pytest-html (see its row). Where a plugin is risky,
 rstest also ships a native equivalent: `--shuffle` (≈pytest-randomly),
@@ -230,6 +234,26 @@ master*, assume it needs `-n 0` until proven otherwise. rstest ships native,
 merged-from-the-orchestrator equivalents for the common ones — `--junitxml`,
 `--report-json`, `--cov`, native `--html` — which are whole-suite documents at
 any worker count.
+
+**rstest warns you automatically.** When a parallel run (`-n ≥ 2`) is invoked
+with a flag whose plugin goes dark under the pool, rstest prints a heads-up
+*before* the run naming the plugin and the parallel-safe alternative — you don't
+have to remember the matrix:
+
+```console
+$ rstest -n auto --report-log run.jsonl
+rstest: warning: --report-log (pytest-reportlog) produces no usable report under
+the parallel pool — it aggregates on the xdist master, which rstest has none of;
+use rstest's native --report-json, or run -n 0. See docs/reference/top-100-plugins.md
+```
+
+Covered flags: `--json-report` (pytest-json-report), `--report-log`
+(pytest-reportlog), `--ctrf` (pytest-json-ctrf), `--nunit-xml` (pytest-nunit),
+`--md` (pytest-md), `--csv` (pytest-csv), and `--benchmark*` (pytest-benchmark,
+which auto-disables). The warning is argv-driven — it fires on the *flag*, so it
+never mistakes rstest's own `--html` / `--junitxml` / `--report-json` (which are
+rendered from merged results and are parallel-safe) for a hazard, and it stays
+silent at `-n 0` where the plugin's own master branch runs.
 
 ### Self-audit: catch a silent no-op in your own plugins
 
