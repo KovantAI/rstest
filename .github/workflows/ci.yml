@@ -158,6 +158,48 @@ jobs:
           python -m pip install -q msgpack coverage pytest pytest-cov
           python -m pytest python/tests
 
+  # Service-backed plugin gates: the three top-50 plugins that need an external
+  # resource (postgres, a playwright browser, the Home Assistant stack) and so
+  # self-skip in the plain `python e2e/gate.py` run above. Provisioned and run
+  # here, gated on RSTEST_GATE_SERVICES=1. Kept off the python-compat matrix so
+  # the heavy setup runs once, not per interpreter.
+  plugin-services:
+    name: plugin gates (services)
+    runs-on: ubuntu-latest
+    env:
+      RSTEST_GATE_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # postgres binaries (initdb/pg_ctl) for pytest-postgresql's postgresql_proc;
+      # ubuntu ships them under /usr/lib/postgresql/<ver>/bin — put that on PATH.
+      - name: install postgres
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql
+          echo "$(ls -d /usr/lib/postgresql/*/bin | head -1)" >> "$GITHUB_PATH"
+
+      - name: build
+        run: cargo build --release
+
+      # Each service gate provisions the rest of what it needs into its own venv
+      # (pytest-postgresql + psycopg, pytest-playwright + `playwright install
+      # chromium`, the Home Assistant test stack) and self-skips if provisioning
+      # fails, so a red here is a real regression, not a flaky download.
+      - name: postgresql / playwright / homeassistant gates
+        run: |
+          python e2e/gate.py --binary target/release/rstest --only pytest_postgresql
+          python e2e/gate.py --binary target/release/rstest --only pytest_playwright
+          python e2e/gate.py --binary target/release/rstest --only pytest_homeassistant
+
   wheel:
     name: wheel builds (${{ matrix.os }})
     strategy:
