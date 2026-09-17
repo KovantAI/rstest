@@ -5,6 +5,10 @@ suites. Every suite runs twice from the same venv — baseline `pytest`
 (pinned to the vendored version) and `rstest` — and per-test outcomes
 are diffed (setup/call/teardown phases plus `wasxfail`).
 
+The plugins these suites load (and pass under rstest) are inventoried in
+[docs/reference/corpus-plugins.md](../docs/reference/corpus-plugins.md);
+regenerate it after a `--prepare` refresh (see that file's footer).
+
 ## Running
 
 ```sh

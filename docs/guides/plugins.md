@@ -13,6 +13,13 @@ re-installation, configuration, or porting.
 Plugin command-line flags forward like any pytest flag; plugin ini options
 are read normally.
 
+!!! tip "Looking for a specific plugin?"
+    See the [top-50 plugin compatibility matrix](../reference/top-50-plugins.md)
+    — how the 50 most-downloaded plugins behave under the pool, each marked
+    verified (`V`) or inferred (`i`) — and
+    [Plugins exercised by the corpus](../reference/corpus-plugins.md), the
+    runtime inventory of plugins real suites load and pass under rstest.
+
 ## Exercised continuously
 
 These load and pass per-test outcome parity against pytest baselines in
@@ -48,6 +55,10 @@ Beyond the battery above, these common ecosystem plugins were run under both
 parallel; **caveat** = works with a stated limitation; **parallel-unsafe** =
 run it at `-n 0` (or use rstest's native equivalent).
 
+For the broader picture — the 50 most-downloaded plugins, each with a
+verified/inferred marker — see the
+[top-50 compatibility matrix](../reference/top-50-plugins.md).
+
 | Plugin | Tier | Note |
 |---|---|---|
 | pytest-timeout | Works | per-test timeout fires in both modes — though rstest has a built-in [`--timeout`](../reference/cli.md#-timeout-secs) (+ `@pytest.mark.timeout`) that needs no plugin; don't run both (two SIGALRM handlers). See also `--worker-timeout` for C-extension deadlocks |
@@ -58,14 +69,15 @@ run it at `-n 0` (or use rstest's native equivalent).
 | pytest-benchmark | Caveat | auto-disables at `-n ≥ 2` (sees the pool as xdist); run benchmarks at `-n 0` and read numbers from `--benchmark-json` (the stats table isn't painted — rstest owns the terminal) |
 | pytest-order | Caveat | ordering only holds within a worker at `-n ≥ 2`; use `-n 0`, or `--dist loadfile`/`loadscope` to keep an ordered group on one worker |
 | pytest-randomly | Works | rstest synthesizes the `randomly_seed` key xdist's master would inject, derived from the run uid so every worker agrees on one reproducible seed. An explicit `--randomly-seed=<n>` still wins. (rstest's native [`--shuffle`](../reference/cli.md#-shuffleseed) remains available and is also parallel-safe.) |
+| pytest-random-order | Works | its `pytest_configure` reads `workerinput["random_order_seed"]` *unconditionally* whenever `workerinput` exists — even with reordering off (the default) — so merely installing it used to `KeyError` every `-n ≥ 2` run. rstest now seeds that key (shared across workers so the shuffled collection hashes agree), keeping the plugin's own `default:` prefix so order is untouched unless you pass `--random-order[-bucket\|-seed]`; an explicit `--random-order-seed=<n>` is honored. Global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
 | pytest-rerunfailures | Works | inside pool workers rstest unregisters it *before* `pytest_configure`, so its xdist `sock_port` client branch never fires (the old `KeyError: 'sock_port'` at `-n ≥ 2` with pytest-xdist installed), and rstest owns reruns natively — crash-aware, honoring `@mark.flaky` and [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun`. At `-n 0` the plugin keeps its own behavior. |
 | pytest-html | Parallel-unsafe | at `-n ≥ 2` **no report is written** — a silent no-op, not a crash. pytest-html registers its report writer only on a node *without* `workerinput` (its xdist "am I the master?" check); every rstest pool worker has a `workerinput`, so nothing ever owns report generation. Merging all workers' results into one file needs a single master process, which rstest doesn't run (the Rust orchestrator owns the merge, and workers are isolated sessions). Generate the report at `-n 0`/`-n 1`, or keep the parallel run and emit from merged artifacts — see [HTML & aggregated reporting](#html-aggregated-reporting-under-parallelism). |
 
 The recurring fault line: plugins that read xdist-**master**-injected
 `workerinput` keys used to crash under the pool when rstest had no master to
 supply them. rstest now closes these per plugin: **derivable** keys are
-synthesized worker-side (`randomly_seed` — one run-level value every worker
-agrees on); **controller-service** keys are handled by each worker playing
+synthesized worker-side (`randomly_seed` and `random_order_seed` — one
+run-level value every worker agrees on); **controller-service** keys are handled by each worker playing
 master for itself — pytest-retry's branch self-provisions its own report
 server per worker (so its `server_port` is set locally, no central
 controller needed), and pytest-rerunfailures is unregistered before it can

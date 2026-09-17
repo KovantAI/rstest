@@ -126,6 +126,8 @@ nav:
       - Report JSON: reference/report-json.md
       - Benchmarks: reference/benchmarks.md
       - Parity divergences: reference/parity-divergences.md
+      - Plugin compatibility (top 50): reference/top-50-plugins.md
+      - Plugins exercised by the corpus: reference/corpus-plugins.md
       - Troubleshooting: reference/troubleshooting.md
       - Security & supply chain: reference/security.md
       - License: reference/license.md

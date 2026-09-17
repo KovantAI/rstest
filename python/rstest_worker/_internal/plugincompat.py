@@ -18,6 +18,32 @@ def _randomly_seed(run_uid: Any) -> int:
         return zlib.crc32(str(run_uid).encode("utf-8")) & 0xFFFFFFFF
 
 
+def _random_order_seed(config: Any, run_uid: Any) -> str:
+    """The `workerinput["random_order_seed"]` an xdist master would broadcast for
+    pytest-random-order.
+
+    Its `pytest_configure` reads that key *unconditionally* whenever
+    `workerinput` exists (even with reordering disabled — the default), so a pool
+    worker KeyErrors at collection unless we seed it (same dead-master-path class
+    as pytest-randomly's `randomly_seed` and pytest-retry's `server_port`).
+
+    All workers must agree on the value: rstest full-collect hash-checks that
+    every worker collected the identical order, and a per-worker seed would
+    reshuffle differently and trip that check. So when the user did not pin a
+    seed (the option is still the plugin's per-process `"default:<rand>"`), derive
+    one shared value from the run uid — keeping the `"default:"` prefix so the
+    plugin's own `is_enabled` stays False and order is untouched unless the user
+    actually asked for `--random-order[-bucket|-seed]`. An explicitly pinned seed
+    (no `"default:"` prefix) is honored verbatim."""
+    try:
+        opt = config.getoption("random_order_seed")
+    except Exception:
+        opt = None
+    if isinstance(opt, str) and not opt.startswith("default:"):
+        return opt
+    return "default:" + str(_randomly_seed(run_uid))
+
+
 def _neutralize_rerunfailures(config: Any) -> None:
     """Unregister pytest-rerunfailures so it neither crashes nor double-reruns
     inside a pool worker. Idempotent - safe to call from both cmdline_main and

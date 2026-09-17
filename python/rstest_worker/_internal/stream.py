@@ -14,6 +14,7 @@ from rstest_worker._internal import messages as m
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
+    _random_order_seed,
     _randomly_seed,
     _seed_pytest_retry,
 )
@@ -197,6 +198,10 @@ class StreamPlugin:
             # the plugin KeyErrors at -n >= 2. rstest has no master, so we
             # derive one run-level seed from the shared uid (all workers agree).
             "randomly_seed": _randomly_seed(run_uid),
+            # pytest-random-order reads this key unconditionally when workerinput
+            # exists (even with reordering off, its default); absent, it KeyErrors
+            # at collection. Shared value so all workers agree (full-collect hash).
+            "random_order_seed": _random_order_seed(config, run_uid),
             "mainargv": sys.argv,
             # pytest-cov's worker mode expects these from the xdist master.
             # Workers are collocated (same host/cwd), so they write suffixed
