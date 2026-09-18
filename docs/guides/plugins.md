@@ -15,7 +15,7 @@ are read normally.
 
 !!! tip "Looking for a specific plugin?"
     See the [top-100 plugin compatibility matrix](../reference/top-100-plugins.md)
-    — how the 50 most-downloaded plugins behave under the pool, each marked
+    — how the 100 most-downloaded plugins behave under the pool, each marked
     verified (`V`) or inferred (`i`) — and
     [Plugins exercised by the corpus](../reference/corpus-plugins.md), the
     runtime inventory of plugins real suites load and pass under rstest.

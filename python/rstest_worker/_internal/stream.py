@@ -158,12 +158,12 @@ class StreamPlugin:
     def _register_markers(config):
         config.addinivalue_line(
             "markers",
-            "serial: rstest — run exclusively on one worker, after all "
+            "serial: rstest - run exclusively on one worker, after all "
             "parallel workers have finished (for tests unsafe to parallelize)",
         )
         config.addinivalue_line(
             "markers",
-            "flaky(reruns=N): rstest — rerun this test up to N times on "
+            "flaky(reruns=N): rstest - rerun this test up to N times on "
             "failure (per-test override of --reruns)",
         )
         config.addinivalue_line(
@@ -173,7 +173,7 @@ class StreamPlugin:
         )
         config.addinivalue_line(
             "markers",
-            "timeout(seconds): rstest — fail this test if its call phase runs "
+            "timeout(seconds): rstest - fail this test if its call phase runs "
             "longer than N seconds (per-test override of --timeout)",
         )
 

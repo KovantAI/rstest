@@ -941,6 +941,9 @@ def gate_pytest_custom_exit_code(g, args, binary):
 
 def gate_pytest_timeouts(g, args, binary):
     print("== pytest-timeouts (coexists; native --timeout/--worker-timeout) ==")
+    if WINDOWS:
+        print("  skip: pytest-timeouts uses signal.SIGALRM (Unix only)")
+        return
     gt = _plugin_gate(binary, args, "-timeouts", ["pytest-timeouts"])
     gt.write("to/test_to.py", "def test_1():\n    assert True\ndef test_2():\n    assert True\n")
     r = gt.run("to", "-n", "2")
