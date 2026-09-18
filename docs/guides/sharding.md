@@ -155,7 +155,7 @@ jobs:
     removes it: every shard runs `--cache-pull --cache-push`, each pushing its
     own immutable segment, and they union on the next pull — no single-writer
     job, no dedicated full run. See
-    [CI quickstart → Shared cache](ci-quickstart.md#shared-cache).
+    [Shared cache across CI jobs](ci-shared-cache.md).
 
 ## GitLab CI
 

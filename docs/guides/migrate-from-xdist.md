@@ -114,3 +114,70 @@ nested workers. Remove it at your convenience and pass `-n` to rstest.
 Numerics/ML suites carrying over from xdist: the same per-worker RNG seeding and
 BLAS/`OMP_NUM_THREADS` oversubscription concerns apply here as under xdist — see
 [Numeric determinism](parallel-safety.md#numeric-determinism-ml-numerics-suites).
+
+## Already fast under xdist? (CPU-bound / parity suites) { #already-fast-cpu-bound }
+
+If your suite is **CPU-bound** — real compute per test, no sleeps or socket
+waits — and it already splits cleanly under xdist (`-n 8` ≈ 8× serial, workers
+stay busy, no single long test gating the run), the honest answer is: **rstest
+lands at parity on raw speed, not a win.** pandas (193,627 tests) runs 61s under
+xdist `-n 8` and 63s under rstest `-n 8`; the [benchmarks](../reference/benchmarks.md)
+file this under *"parity, not victory."* Don't switch for wall-clock alone.
+
+Why: the gains are capped at core count. rstest's headline wins come from
+test-granular dispatch splitting a slow file that xdist's file-affinity
+scheduler pins to one worker — a *wait-bound* pattern. A CPU-bound suite that
+already spreads evenly has no such slack; both runners saturate your cores,
+neither exceeds them. From [Benchmarks](../reference/benchmarks.md): wait-bound
+suites gain most, CPU-bound suites gain up to core count, one-long-test suites
+gain nothing beyond that test.
+
+!!! note "Documentation gap"
+    The "up to core count" claim isn't yet demonstrated with a real
+    *compute-bound* benchmark — the corpus's CPU-bound data point (pandas) is
+    collection-bound. Measure your own suite with `rstest try` rather than
+    relying on a published ratio.
+
+**What's still worth it anyway** (beyond the improvements above):
+
+- [`rstest --doctor`](doctor.md) — fixture hotspots (a function-scoped fixture
+  run hundreds of times is a widen-scope candidate), resource leaks (a leaked
+  thread/fd is the leading cause of order-dependent flakiness; gate with
+  [`--fail-on-leak`](../reference/cli.md#-fail-on-leak)), realized parallel
+  efficiency, and a PR-vs-main health trend from `--doctor-json`.
+- [`rstest --changed`](changed.md) — narrows *which* tests run (xdist only
+  speeds the full run). Its coverage index maps changed *lines* to the
+  individual tests that hit them — tighter than the whole-file import graph, and
+  a bigger inner-loop win than any scheduler tweak when a full run costs
+  cores × time.
+
+**Oversubscription (numpy/BLAS).** The one place a CPU-bound numerics suite can
+get slower *or* flakier under naive parallelism — under xdist too. numpy/torch/
+BLAS spin their own thread pools; at `-n auto` you get *workers × library-threads*
+competing for cores, which both shifts reduction order (a tight `assert x ==
+expected` can flip at `-n 8`) and fights for cores. Pin one thread per worker and
+let rstest own parallelism:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 rstest -n auto
+```
+
+(Or cap `-n`.) See [Numeric determinism](parallel-safety.md#numeric-determinism-ml-numerics-suites).
+
+**Memory.** Each worker is a full OS process, so peak memory scales roughly
+linearly: N workers ≈ N × your serial peak RSS. A suite that holds large
+arrays or models per worker can OOM at `-n auto` where xdist was tuned lower —
+as a first cut, cap `-n ≈ available RAM ÷ per-worker peak RSS`. Note `--doctor`
+does not measure memory (it instruments wall/CPU time and fixture cost), so
+watch actual RSS (e.g. `/usr/bin/time -v`, `psutil`, or your CI's memory graph)
+when sizing.
+
+!!! note "Documentation gap"
+    The linear-RSS rule above is a first-order estimate; there is no measured
+    per-worker memory model, and no concrete worker×thread sweet-spot formula.
+    Measure on your own hardware to tune precisely.
+
+**How to decide for real.** [`rstest try`](migrate-from-pytest.md) runs your own
+suite under plain pytest and under `rstest -n auto`, reporting parity and speed
+before you change any config — confirm the parity-not-a-win call on your tests
+and cores, not on pandas'.
