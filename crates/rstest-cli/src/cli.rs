@@ -56,6 +56,21 @@ pub(crate) enum Command {
         #[arg(value_name = "REPORT_JSON", required = true, num_args = 1..)]
         reports: Vec<PathBuf>,
     },
+
+    /// Print one test's dossier from the caches without running anything:
+    /// last recorded duration, flake/fail history, last-green outcome, and the
+    /// coverage footprint (files it covered). Merges `durations.json`,
+    /// `flakes.json`, `incremental_outcomes.json`, and `coverage_index.json`
+    /// for the given nodeid. Reads only cache files, so it needs no interpreter.
+    Explain {
+        /// The test nodeid to explain, e.g. `tests/test_x.py::test_y`.
+        #[arg(value_name = "NODEID", required = true)]
+        nodeid: String,
+        /// Emit the dossier as JSON (schema-stamped) to stdout for tooling,
+        /// instead of the human-readable report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
@@ -449,6 +464,7 @@ const SUBCOMMANDS: &[&str] = &[
     "migrate-check",
     "cache-compact",
     "shard-verify",
+    "explain",
 ];
 
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
@@ -522,10 +538,11 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
     {
         let sub = argv.next().unwrap();
-        // `shard-verify` runs no pytest session: every token after it is a clap
-        // positional (report-json paths), so route them all to `own` rather than
+        // `shard-verify` and `explain` run no pytest session: every token after
+        // them is a clap positional (report-json paths / the nodeid) or a
+        // subcommand-local flag, so route them all to `own` rather than
         // forwarding non-flag tokens to the (nonexistent) session.
-        let consumes_all = sub == "shard-verify";
+        let consumes_all = sub == "shard-verify" || sub == "explain";
         own.push(sub);
         if consumes_all {
             own.extend(argv.by_ref());
@@ -578,6 +595,21 @@ mod tests {
         let (own, session) = split_args(v(&["shard-verify", "a.json", "b.json"]));
         assert_eq!(own, v(&["rstest", "shard-verify", "a.json", "b.json"]));
         assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn explain_routes_nodeid_and_json_to_clap() {
+        use clap::Parser;
+        // `explain` runs no session: the nodeid positional and `--json` are clap
+        // tokens, not forwarded to pytest, even though the nodeid is a non-flag.
+        let (own, session) = split_args(v(&["explain", "t/x.py::test_a", "--json"]));
+        assert_eq!(own, v(&["rstest", "explain", "t/x.py::test_a", "--json"]));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Explain { ref nodeid, json: true }) if nodeid == "t/x.py::test_a"
+        ));
     }
 
     #[test]
