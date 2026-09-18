@@ -3,7 +3,7 @@
 //! lives in [`monorepo`], the post-run gates/reports in [`gates`], and the
 //! `--collect-only` discovery doc in [`discovery`].
 
-mod discovery;
+pub(crate) mod discovery;
 mod gates;
 mod monorepo;
 
