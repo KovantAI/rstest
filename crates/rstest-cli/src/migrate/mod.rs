@@ -5,10 +5,12 @@
 //! classifiers (unstable ids, parallel-only failures); [`check`] is the
 //! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run.
 
+mod audit;
 mod check;
 mod classify;
 mod try_cmd;
 
+pub use audit::run_audit;
 pub use check::run_migrate_check;
 pub use try_cmd::run_try;
 
