@@ -103,6 +103,24 @@ Total setup time per fixture, with two pieces of advice:
 Test time aggregated by file — where to look first, and the input for
 deciding what to split under `--dist load`.
 
+### COVERAGE WASTE
+
+Slow tests that add **no unique coverage**: every line each one executes is
+also executed by some other test, so it can be deleted or merged without
+dropping a single covered line. This is the "which time is *wasted*"
+counterpart to SLOWEST FILES.
+
+```text
+COVERAGE WASTE: 18.4s across 3 slow test(s) that cover no line another test doesn't also cover (delete/merge candidates):
+    12.10s  240 line(s), all shared with 4 other test(s)  tests/test_api.py::test_end_to_end_slow
+     4.30s   88 line(s), all shared with 2 other test(s)  tests/test_api.py::test_variant_b
+```
+
+It needs a warm per-test coverage index, so run coverage at least once with
+per-test contexts (`--cov --cov-context=test`). Without that index the
+section is simply omitted. Only tests slow enough to matter are flagged (a
+fast redundant test frees no meaningful time when deleted).
+
 ### RESOURCE LEAKS
 
 Tests that ended with more live threads or open file descriptors than they
@@ -135,10 +153,11 @@ $ rstest -n 4 --doctor     # diagnosing parallel scaling
 $ rstest --doctor-json doctor.json
 ```
 
-writes the same analysis as a versioned JSON document (`"schema": 2`):
+writes the same analysis as a versioned JSON document (`"schema": 3`):
 totals (tests, test time, CPU time, wall, workers), the wait-bound test
 list, parallel-floor gate tests, parallel-efficiency (realized speedup and
-per-worker load), fixture timings, and slowest files.
+per-worker load), fixture timings, slowest files, and the coverage-waste
+list (`coverage_waste`, present only when a per-test coverage index is warm).
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.

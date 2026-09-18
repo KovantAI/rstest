@@ -148,6 +148,23 @@ pub fn render_markdown(r: &DoctorReport) -> String {
             );
         }
     }
+    if let Some(cw) = &r.coverage_waste {
+        let _ = writeln!(
+            md,
+            "### Coverage waste\n\n> {:.1}s across {} slow test(s) that cover no \
+             line another test doesn't also cover (delete/merge candidates).\n",
+            cw.wasted_seconds, cw.redundant_tests
+        );
+        md.push_str("| Duration | Lines | Shared with | Test |\n|---:|---:|---:|---|\n");
+        for t in cw.tests.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| {:.2}s | {} | {} | `{}` |",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            );
+        }
+        md.push('\n');
+    }
     if !r.leaks.is_empty() {
         md.push_str("### Resource leaks\n\n> Net threads/fds still open after teardown.\n\n");
         md.push_str("| Leaked | Test |\n|---|---|\n");
@@ -324,6 +341,26 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         ));
     }
 
+    if let Some(cw) = &r.coverage_waste {
+        sink.out_line(&format!(
+            "\nCOVERAGE WASTE: {:.1}s across {} slow test(s) that cover no line \
+             another test doesn't also cover (delete/merge candidates):",
+            cw.wasted_seconds, cw.redundant_tests
+        ));
+        for t in cw.tests.iter().take(8) {
+            sink.out_line(&format!(
+                "  {:7.2}s  {} line(s), all shared with {} other test(s)  {}",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            ));
+        }
+        if cw.redundant_tests > cw.tests.len().min(8) {
+            sink.out_line(&format!(
+                "  ... and {} more",
+                cw.redundant_tests - cw.tests.len().min(8)
+            ));
+        }
+    }
+
     if !r.leaks.is_empty() {
         sink.out_line("\nRESOURCE LEAKS (net threads/fds still open after teardown):");
         for l in r.leaks.iter().take(10) {
@@ -381,6 +418,9 @@ mod tests {
         assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
+        assert!(md.contains("### Coverage waste"));
+        assert!(md.contains("12.0s across 1 slow test(s)"));
+        assert!(md.contains("| 12.00s | 40 | 3 | `tests/test_a.py::test_redundant` |"));
     }
 
     #[test]
@@ -395,7 +435,19 @@ mod tests {
     // captures stdout) to prove the printing paths don't panic and are covered.
     #[test]
     fn render_terminal_populated_and_empty_dont_panic() {
-        render(&mut Sink::captured().0, &report(12)); // full report: every section printed
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &report(12)); // full report: every section printed
+        let out = cap.out();
+        assert!(
+            out.contains("COVERAGE WASTE: 12.0s across 1 slow test(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "40 line(s), all shared with 3 other test(s)  tests/test_a.py::test_redundant"
+            ),
+            "{out}"
+        );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
     }
 

@@ -5,6 +5,24 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **`--doctor` coverage-waste section: slow tests that add no unique coverage.**
+  When a per-test coverage index is warm (any prior `--cov --cov-context=test`
+  run), `--doctor` now flags slow tests whose every executed line is also
+  executed by another test, so they can be deleted or merged without dropping a
+  covered line. Reports the reclaimable time, the count, and per-test detail
+  (lines covered, distinct other tests sharing them). Emitted in the terminal
+  report, the markdown report, and `--doctor-json` as `coverage_waste` (doctor
+  JSON `schema` bumped to `3`). Silent when no coverage index is present.
+- **`--changed` now reports coverage-map health (test impact analysis).**
+  `--changed` has been coverage-aware since 0.4.0 (a warm
+  `.rstest_cache/coverage_index.json` maps changed lines to the exact covering
+  tests); it now makes that observable. With a warm map the selection banner
+  shows the savings ratio — `N changed file(s) -> M of K mapped test target(s)
+  affected`. With a **cold** map and a changed non-test source file — exactly
+  where coverage precision would have narrowed the set — it prints a one-line
+  hint that it fell back to the import graph and that a prior
+  `--cov --cov-context=test` run enables coverage-precise selection. No new
+  flags; the hint is silent for test-only / config / non-Python changes.
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
@@ -99,6 +117,10 @@ between 0.0.x releases and are listed here.
 - Incremental testing based on coverage: `--changed` now leans on the
   recorded coverage index to select only the tests whose coverage touches
   changed lines, falling back to the import graph on a cold cache.
+- Dispatch-level result caching: `--incremental` collects the whole suite,
+  then skips tests that were green last run and whose covered source files
+  (and own test file) are all byte-identical now, injecting them as cached
+  passes. Opt-in; a config or conftest change disables skipping for that run.
 - Native timeout: per-test timeouts enforced by rstest directly, without
   `pytest-timeout`, and honored under parallelism.
 - Native HTML report: an HTML report rendered by the orchestrator that

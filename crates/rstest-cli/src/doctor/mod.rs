@@ -14,15 +14,20 @@ pub use gate::{evaluate, parse_conditions, GateCondition};
 pub(crate) use render::leak_delta;
 pub use render::{append_ci_summary, render, write_markdown};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
 use crate::reporting::report::Run;
 use crate::scheduling::proto::FixtureStat;
+use crate::select::CoverageIndex;
 
 /// Bump when the JSON shape changes incompatibly.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
+
+/// Only tests at least this slow are worth flagging as coverage waste: deleting
+/// a fast redundant test frees no meaningful time.
+const WASTE_MIN_SECONDS: f64 = 0.5;
 
 #[derive(Serialize)]
 pub struct DoctorReport {
@@ -39,10 +44,38 @@ pub struct DoctorReport {
     parallel_efficiency: Option<ParallelEfficiency>,
     fixtures: Vec<FixtureEntry>,
     slowest_files: Vec<FileEntry>,
+    /// Slow tests whose every covered line is also covered by another test -
+    /// delete/merge candidates. `None` unless a per-test coverage index was
+    /// warm (`--cov --cov-context=test`) and at least one test qualified.
+    coverage_waste: Option<CoverageWaste>,
     /// Tests that leaked threads / fds (net positive after teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leaks: Vec<Leak>,
+}
+
+/// Slow tests that add no unique coverage: every line each one executes is also
+/// executed by some other test, so it can be deleted or merged without dropping
+/// any covered line. Pure suite bloat on the time axis.
+#[derive(Serialize)]
+struct CoverageWaste {
+    /// Sum of the durations of every redundant slow test (not just the shown
+    /// ones) - the time reclaimable by pruning them.
+    wasted_seconds: f64,
+    /// Count of redundant slow tests found (`tests` shows the slowest of them).
+    redundant_tests: usize,
+    /// The slowest redundant tests, worst first (capped).
+    tests: Vec<WasteTest>,
+}
+
+#[derive(Serialize)]
+struct WasteTest {
+    nodeid: String,
+    duration: f64,
+    /// Lines this test covered, all shared with at least one other test.
+    covered_lines: u64,
+    /// Distinct OTHER tests that between them also cover those lines.
+    also_covered_by: u64,
 }
 
 /// A test that ended with more threads / open fds than it started — a resource
@@ -126,7 +159,13 @@ struct FileEntry {
     pct: f64,
 }
 
-pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -> DoctorReport {
+pub fn analyze(
+    run: &Run,
+    fixtures: &[FixtureStat],
+    wall: f64,
+    workers: usize,
+    coverage: Option<&CoverageIndex>,
+) -> DoctorReport {
     let tests = run.tests();
     let mut durations: Vec<(&String, f64, Option<f64>)> = tests
         .iter()
@@ -263,6 +302,15 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     files.sort_by(|a, b| b.total_seconds.total_cmp(&a.total_seconds));
     files.truncate(20);
 
+    // -- Coverage waste (slow tests adding no unique coverage) --------------
+    let coverage_waste = coverage.and_then(|index| {
+        let duration_of: HashMap<&str, f64> = durations
+            .iter()
+            .map(|(id, d, _)| (id.as_str(), *d))
+            .collect();
+        coverage_waste(&duration_of, index, WASTE_MIN_SECONDS)
+    });
+
     let leaks = detect_leaks(run);
 
     DoctorReport {
@@ -278,8 +326,111 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
         parallel_efficiency,
         fixtures: fx,
         slowest_files: files,
+        coverage_waste,
         leaks,
     }
+}
+
+/// Slow tests whose every covered line is ALSO covered by another test - pure
+/// redundant suite cost, deletable/mergeable without losing any covered line.
+/// `duration_of` maps nodeid -> call duration; only tests at least `min_seconds`
+/// slow qualify. `None` when the index is empty or nothing qualifies.
+fn coverage_waste(
+    duration_of: &HashMap<&str, f64>,
+    index: &CoverageIndex,
+    min_seconds: f64,
+) -> Option<CoverageWaste> {
+    // Measure redundancy over PRODUCT code only. Under `--cov=.` the index also
+    // records each test's OWN file, whose body lines only that test executes -
+    // counting them would make every test trivially "unique" and hide real
+    // waste. A test file is exactly a file that some nodeid lives in, so the set
+    // of covered test files is derivable from the nodeids with no project config.
+    let mut test_files: HashSet<&str> = HashSet::new();
+    for cov in index.files.values() {
+        for ids in cov.lines.values() {
+            for id in ids {
+                test_files.insert(crate::text::nodeid_file(id));
+            }
+        }
+    }
+    let is_source = |file: &str| !test_files.contains(file);
+
+    // Pass 1, O(total coverage entries): per test, total covered PRODUCT lines
+    // and lines it ALONE covers (a line's coverer list is exactly the tests that
+    // hit it). Lines in test files are skipped (see above).
+    let mut total: HashMap<&str, u64> = HashMap::new();
+    let mut unique: HashMap<&str, u64> = HashMap::new();
+    for (file, cov) in &index.files {
+        if !is_source(file) {
+            continue;
+        }
+        for ids in cov.lines.values() {
+            let solo = ids.len() == 1;
+            for id in ids {
+                *total.entry(id.as_str()).or_default() += 1;
+                if solo {
+                    *unique.entry(id.as_str()).or_default() += 1;
+                }
+            }
+        }
+    }
+    let dur = |id: &str| duration_of.get(id).copied();
+    // Redundant: covered >= 1 line, ZERO unique lines, slow enough to matter.
+    let mut candidates: Vec<&str> = total
+        .iter()
+        .filter(|(id, tot)| **tot > 0 && unique.get(**id).copied().unwrap_or(0) == 0)
+        .filter(|(id, _)| dur(id).is_some_and(|d| d >= min_seconds))
+        .map(|(id, _)| *id)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let redundant_tests = candidates.len();
+    // Headline reclaimable time spans ALL redundant slow tests, not just shown.
+    let wasted_seconds: f64 = candidates.iter().filter_map(|id| dur(id)).sum();
+    // Worst first (duration, then nodeid for stability); keep the slowest for the
+    // detail table and bound the co-coverer pass below.
+    candidates.sort_by(|a, b| {
+        dur(b)
+            .unwrap_or(0.0)
+            .total_cmp(&dur(a).unwrap_or(0.0))
+            .then(a.cmp(b))
+    });
+    candidates.truncate(20);
+    let shown: HashSet<&str> = candidates.iter().copied().collect();
+    // Pass 2, bounded to the shown candidates: distinct OTHER tests sharing each
+    // one's lines - "covers only lines N other tests already hit".
+    let mut co: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (file, cov) in &index.files {
+        if !is_source(file) {
+            continue;
+        }
+        for ids in cov.lines.values() {
+            if ids.len() < 2 {
+                continue; // a solo line has no co-coverer (and no candidate is solo)
+            }
+            for id in ids {
+                if shown.contains(id.as_str()) {
+                    let set = co.entry(id.as_str()).or_default();
+                    set.extend(ids.iter().map(String::as_str).filter(|o| *o != id));
+                }
+            }
+        }
+    }
+    let tests = candidates
+        .iter()
+        .map(|id| WasteTest {
+            nodeid: (*id).to_string(),
+            duration: dur(id).unwrap_or(0.0),
+            covered_lines: total.get(id).copied().unwrap_or(0),
+            also_covered_by: co.get(id).map_or(0, |s| s.len() as u64),
+        })
+        .collect();
+    Some(CoverageWaste {
+        wasted_seconds,
+        redundant_tests,
+        tests,
+    })
 }
 
 /// Tests that leaked threads/fds (net positive after teardown), worst first.
@@ -378,6 +529,16 @@ pub(crate) mod testutil {
                 total_seconds: 20.0,
                 pct: 66.7,
             }],
+            coverage_waste: Some(CoverageWaste {
+                wasted_seconds: 12.0,
+                redundant_tests: 1,
+                tests: vec![WasteTest {
+                    nodeid: "tests/test_a.py::test_redundant".into(),
+                    duration: 12.0,
+                    covered_lines: 40,
+                    also_covered_by: 3,
+                }],
+            }),
             leaks: Vec::new(),
         }
     }
@@ -458,7 +619,7 @@ mod tests {
         for i in 0..4 {
             record_test(&mut run, &format!("t.py::t{i}"), 0, 2.0);
         }
-        let pe = analyze(&run, &[], 8.0, 8)
+        let pe = analyze(&run, &[], 8.0, 8, None)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 1);
@@ -479,7 +640,7 @@ mod tests {
         let mut run = Run::default();
         record_test(&mut run, "t.py::a", 0, 10.0);
         record_test(&mut run, "t.py::b", 1, 10.0);
-        let pe = analyze(&run, &[], 10.0, 2)
+        let pe = analyze(&run, &[], 10.0, 2, None)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 2);
@@ -501,11 +662,129 @@ mod tests {
         record_test(&mut run, "t.py::a", 0, 8.0);
         record_test(&mut run, "t.py::b", 1, 4.0);
         record_test(&mut run, "t.py::c", 2, 4.0);
-        let pe = analyze(&run, &[], 9.0, 4)
+        let pe = analyze(&run, &[], 9.0, 4, None)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 3);
         // max 8.0, min 0.0 (idle gw3) => 100%.
         assert!((pe.imbalance_pct - 100.0).abs() < 1e-6);
+    }
+
+    /// Line -> nodeids that covered it (test fixture shorthand).
+    type LineSpec<'a> = (u32, &'a [&'a str]);
+    /// (file path, lines) for one file in a test index.
+    type FileSpec<'a> = (&'a str, &'a [LineSpec<'a>]);
+
+    /// Build a coverage index from `file -> [(line, [nodeids])]` (hash unused
+    /// by the waste analysis, so a fixed placeholder is fine).
+    fn cov(files: &[FileSpec]) -> CoverageIndex {
+        use crate::select::CoverageFile;
+        let mut idx = CoverageIndex {
+            schema: 1,
+            files: HashMap::new(),
+        };
+        for (path, lines) in files {
+            let mut lm = HashMap::new();
+            for (ln, ids) in *lines {
+                lm.insert(*ln, ids.iter().map(|s| s.to_string()).collect());
+            }
+            idx.files.insert(
+                (*path).to_string(),
+                CoverageFile {
+                    hash: "H".into(),
+                    lines: lm,
+                },
+            );
+        }
+        idx
+    }
+
+    fn durs<'a>(pairs: &[(&'a str, f64)]) -> HashMap<&'a str, f64> {
+        pairs.iter().map(|(id, d)| (*id, *d)).collect()
+    }
+
+    #[test]
+    fn zero_unique_slow_test_is_flagged_as_waste() {
+        // test_dup covers only lines test_keep also covers (mod.py:1-2), so it
+        // adds no unique coverage. test_keep owns a unique line (mod.py:3).
+        let idx = cov(&[(
+            "mod.py",
+            &[
+                (1, &["t.py::test_dup", "t.py::test_keep"]),
+                (2, &["t.py::test_dup", "t.py::test_keep"]),
+                (3, &["t.py::test_keep"]),
+            ],
+        )]);
+        let d = durs(&[("t.py::test_dup", 5.0), ("t.py::test_keep", 5.0)]);
+        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("a waste candidate");
+        assert_eq!(cw.redundant_tests, 1);
+        assert_eq!(cw.tests.len(), 1);
+        assert_eq!(cw.tests[0].nodeid, "t.py::test_dup");
+        assert_eq!(cw.tests[0].covered_lines, 2);
+        // Its two lines are shared with exactly one other test (test_keep).
+        assert_eq!(cw.tests[0].also_covered_by, 1);
+        assert!((cw.wasted_seconds - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_fast_redundant_test_is_below_the_floor() {
+        // Fully redundant, but too fast to be worth deleting for time.
+        let idx = cov(&[("mod.py", &[(1, &["t.py::test_dup", "t.py::test_keep"])])]);
+        let d = durs(&[("t.py::test_dup", 0.1), ("t.py::test_keep", 0.1)]);
+        assert!(coverage_waste(&d, &idx, WASTE_MIN_SECONDS).is_none());
+    }
+
+    #[test]
+    fn a_test_with_any_unique_line_is_not_waste() {
+        // test_a shares line 1 but owns line 2 - not redundant despite being slow.
+        let idx = cov(&[(
+            "mod.py",
+            &[
+                (1, &["t.py::test_a", "t.py::test_b"]),
+                (2, &["t.py::test_a"]),
+            ],
+        )]);
+        let d = durs(&[("t.py::test_a", 9.0), ("t.py::test_b", 9.0)]);
+        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("test_b is redundant");
+        let ids: Vec<&str> = cw.tests.iter().map(|t| t.nodeid.as_str()).collect();
+        assert_eq!(ids, vec!["t.py::test_b"], "only the fully-shared test");
+    }
+
+    #[test]
+    fn a_tests_own_file_lines_dont_count_as_unique_coverage() {
+        // Under `--cov=.` the index also records each test's own body (a line
+        // only that test runs). If those counted, no test would ever look
+        // redundant. Here both tests cover the same product line (mod.py:1) and
+        // each also "covers" its own test-file body line - which must be ignored,
+        // so test_dup still reads as pure product-redundant.
+        let idx = cov(&[
+            ("mod.py", &[(1, &["t.py::test_dup", "t.py::test_keep"])]),
+            // The test file itself, each test's own line (self-only coverage):
+            (
+                "t.py",
+                &[(1, &["t.py::test_dup"]), (2, &["t.py::test_keep"])],
+            ),
+        ]);
+        let d = durs(&[("t.py::test_dup", 5.0), ("t.py::test_keep", 5.0)]);
+        let cw =
+            coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("still redundant on product code");
+        let ids: Vec<&str> = cw.tests.iter().map(|t| t.nodeid.as_str()).collect();
+        // Both are product-redundant (mod.py:1 shared, no unique product line).
+        assert!(ids.contains(&"t.py::test_dup"), "{ids:?}");
+        // covered_lines counts PRODUCT lines only (1), not the test-file body.
+        let dup = cw
+            .tests
+            .iter()
+            .find(|t| t.nodeid == "t.py::test_dup")
+            .unwrap();
+        assert_eq!(dup.covered_lines, 1);
+    }
+
+    #[test]
+    fn no_coverage_index_yields_no_section() {
+        // analyze without an index never produces a waste section.
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::a", 0, 5.0);
+        assert!(analyze(&run, &[], 5.0, 1, None).coverage_waste.is_none());
     }
 }

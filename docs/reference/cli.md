@@ -568,6 +568,15 @@ untracked files. A changed test file always runs its own tests, and any config
 or non-Python change is still a full run. Over-selection is safe; the fallbacks
 never under-select against unknown code.
 
+**Map-health reporting.** With a warm map the selection banner reports the
+savings ratio — `N changed file(s) -> M of K mapped test target(s) affected` —
+so you can see how much was skipped. If the map is **cold** and a non-test
+`.py` file changed (exactly where coverage precision would have helped),
+`--changed` prints a one-line hint that it fell back to the import graph and
+that a prior `--cov --cov-context=test` run enables coverage-precise selection.
+The hint stays silent for test-only, config, or non-Python changes, so it never
+nags a suite that doesn't use coverage.
+
 Conservative by construction: ambiguous module names select every match,
 function-local imports count, a changed `conftest.py` selects its whole
 subtree, and any config or non-Python change falls back to a full run.
