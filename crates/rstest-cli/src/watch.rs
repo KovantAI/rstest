@@ -21,6 +21,12 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let mut sink = Sink::stdio(Palette::detect(base_args));
     let project = config::discover(&cwd, sink.err());
+    // Incremental collection: the import-graph index is rebuilt on every source
+    // change to find affected tests, and its per-file import scan dominates that
+    // latency on large suites. This cache, held for the watch session, lets each
+    // reselection re-read only the files whose mtime moved (see
+    // `select::CollectionCache`).
+    let mut collect_cache = select::CollectionCache::new();
 
     let (tx, rx) = mpsc::channel::<PathBuf>();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -48,7 +54,8 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
         // Only test files touched -> rerun just those. Source changes go
         // through the import graph; full rerun only when the graph can't
         // answer (config change etc.).
-        let (args, mode) = match plan_rerun(&changed, &project, &cwd, base_args) {
+        let (args, mode) = match plan_rerun(&changed, &project, &cwd, base_args, &mut collect_cache)
+        {
             Plan::Skip => {
                 sink.warn("[watch] change affects no tests; waiting");
                 continue;
@@ -116,6 +123,7 @@ fn plan_rerun(
     project: &config::ProjectConfig,
     cwd: &Path,
     base_args: &[String],
+    collect_cache: &mut select::CollectionCache,
 ) -> Plan {
     let only_tests = changed.iter().all(|p| collect::is_test_file(p, project));
     if only_tests {
@@ -133,7 +141,7 @@ fn plan_rerun(
             mode: "changed files",
         };
     }
-    match select::affected_tests(&project.rootdir, project, changed, false) {
+    match select::affected_tests_cached(&project.rootdir, project, changed, false, collect_cache) {
         Ok(select::Selection::Tests(tests)) if tests.is_empty() => Plan::Skip,
         Ok(select::Selection::Tests(tests)) => {
             let mut args: Vec<String> = tests.iter().map(|t| t.display().to_string()).collect();
@@ -331,7 +339,13 @@ mod tests {
         std::fs::write(&t1, "def test_x(): pass\n").unwrap();
         std::fs::write(&t2, "def test_y(): pass\n").unwrap();
         let base = vec!["-k".to_string(), "smoke".to_string()];
-        match plan_rerun(&[t1, t2], &project_at(&cwd), &cwd, &base) {
+        match plan_rerun(
+            &[t1, t2],
+            &project_at(&cwd),
+            &cwd,
+            &base,
+            &mut select::CollectionCache::new(),
+        ) {
             Plan::Run { args, mode } => {
                 assert_eq!(mode, "changed files");
                 assert!(args.contains(&"test_a.py".to_string()), "{args:?}");
@@ -350,7 +364,13 @@ mod tests {
         let cwd = fresh_dir("deleted");
         let gone = cwd.join("test_gone.py"); // never created
         assert!(matches!(
-            plan_rerun(&[gone], &project_at(&cwd), &cwd, &[]),
+            plan_rerun(
+                &[gone],
+                &project_at(&cwd),
+                &cwd,
+                &[],
+                &mut select::CollectionCache::new()
+            ),
             Plan::Skip
         ));
         let _ = std::fs::remove_dir_all(&cwd);
@@ -364,7 +384,13 @@ mod tests {
         let cfg = cwd.join("pyproject.toml");
         std::fs::write(&cfg, "[tool.pytest.ini_options]\n").unwrap();
         let base = vec!["-x".to_string()];
-        match plan_rerun(&[cfg], &project_at(&cwd), &cwd, &base) {
+        match plan_rerun(
+            &[cfg],
+            &project_at(&cwd),
+            &cwd,
+            &base,
+            &mut select::CollectionCache::new(),
+        ) {
             Plan::Run { args, mode } => {
                 assert_eq!(mode, "full selection");
                 assert_eq!(args, base, "full selection reruns with base args verbatim");
@@ -388,7 +414,13 @@ mod tests {
         .unwrap();
         assert!(
             matches!(
-                plan_rerun(&[cwd.join("orphan.py")], &project_at(&cwd), &cwd, &[]),
+                plan_rerun(
+                    &[cwd.join("orphan.py")],
+                    &project_at(&cwd),
+                    &cwd,
+                    &[],
+                    &mut select::CollectionCache::new()
+                ),
                 Plan::Skip
             ),
             "an orphan source change must skip"
@@ -408,7 +440,13 @@ mod tests {
         )
         .unwrap();
         let changed = vec![cwd.join("mymod.py"), cwd.join("test_uses.py")];
-        match plan_rerun(&changed, &project_at(&cwd), &cwd, &[]) {
+        match plan_rerun(
+            &changed,
+            &project_at(&cwd),
+            &cwd,
+            &[],
+            &mut select::CollectionCache::new(),
+        ) {
             Plan::Run { mode, .. } => {
                 assert_eq!(mode, "affected tests", "mixed set must use the graph");
             }
@@ -425,7 +463,13 @@ mod tests {
         let live = cwd.join("test_live.py");
         let gone = cwd.join("test_gone.py"); // never created
         std::fs::write(&live, "def test_x(): pass\n").unwrap();
-        match plan_rerun(&[gone, live], &project_at(&cwd), &cwd, &[]) {
+        match plan_rerun(
+            &[gone, live],
+            &project_at(&cwd),
+            &cwd,
+            &[],
+            &mut select::CollectionCache::new(),
+        ) {
             Plan::Run { args, mode } => {
                 assert_eq!(mode, "changed files");
                 assert!(args.contains(&"test_live.py".to_string()), "{args:?}");
@@ -451,7 +495,13 @@ mod tests {
         )
         .unwrap();
         let base = vec!["-q".to_string()];
-        match plan_rerun(&[cwd.join("mymod.py")], &project_at(&cwd), &cwd, &base) {
+        match plan_rerun(
+            &[cwd.join("mymod.py")],
+            &project_at(&cwd),
+            &cwd,
+            &base,
+            &mut select::CollectionCache::new(),
+        ) {
             Plan::Run { args, mode } => {
                 assert_eq!(mode, "affected tests");
                 assert!(

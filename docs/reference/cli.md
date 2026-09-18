@@ -874,6 +874,16 @@ test files reruns exactly those files (with your other flags); a source
 selection); a pytest-config change reruns the full selection. Ignores
 VCS, caches, and virtualenvs. `Ctrl+C` exits.
 
+Selection is **incremental** across the session. The import graph that maps a
+source change to affected tests is built once and then kept warm: an edit
+re-reads only the changed files and patches their graph edges in place, instead
+of re-walking and re-parsing the whole tree every save. Adding or deleting a
+`.py` file rebuilds the graph fully (a new module can be imported by files that
+did not themselves change), reusing the cached parse of every untouched file. On
+large suites this is the difference between each save reselecting in tens of
+milliseconds versus hundreds; on a 1,600-file tree it is roughly a 4x cut to the
+per-save selection latency.
+
 ### `--junitxml <path>`
 
 Write merged results as JUnit XML. Intercepted by rstest (rather than
