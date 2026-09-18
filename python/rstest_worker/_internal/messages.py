@@ -34,6 +34,9 @@ class FixtureStat(TypedDict):
     scope: str
     count: int
     total: float
+    # Scope-promotion advisor: function-scoped, called >1x, and value-identical
+    # on every call in this worker session.
+    constant: bool
 
 
 class _ReportRequired(TypedDict):

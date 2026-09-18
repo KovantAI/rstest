@@ -804,6 +804,9 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
             .and_modify(|m| {
                 m.count += f.count;
                 m.total += f.total;
+                // A promotion candidate only if constant in EVERY worker that
+                // ran it: one worker seeing a varying value vetoes the advice.
+                m.constant &= f.constant;
             })
             .or_insert(f);
     }
@@ -988,25 +991,32 @@ mod tests {
 
     #[test]
     fn merge_fixtures_sums_by_name_and_scope() {
-        let stat = |name: &str, scope: &str, count, total| FixtureStat {
+        let stat = |name: &str, scope: &str, count, total, constant| FixtureStat {
             name: name.into(),
             scope: scope.into(),
             count,
             total,
+            constant,
         };
         let merged = merge_fixtures(vec![
-            stat("db", "session", 2, 1.0),
-            stat("db", "session", 3, 0.5),   // same key => summed
-            stat("db", "function", 1, 0.25), // different scope => distinct
-            stat("cache", "session", 4, 2.0),
+            stat("db", "session", 2, 1.0, false),
+            stat("db", "session", 3, 0.5, false), // same key => summed
+            stat("db", "function", 1, 0.25, true), // different scope => distinct
+            stat("cache", "session", 4, 2.0, false),
+            // constant in one worker, NOT in another => merged non-constant.
+            stat("cfg", "function", 5, 0.5, true),
+            stat("cfg", "function", 5, 0.5, false),
         ]);
-        assert_eq!(merged.len(), 3);
+        assert_eq!(merged.len(), 4);
         let db_session = merged
             .iter()
             .find(|f| f.name == "db" && f.scope == "session")
             .unwrap();
         assert_eq!(db_session.count, 5);
         assert!((db_session.total - 1.5).abs() < 1e-9);
+        // One dissenting worker vetoes the promotion candidacy.
+        let cfg = merged.iter().find(|f| f.name == "cfg").unwrap();
+        assert!(!cfg.constant);
     }
 
     fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {

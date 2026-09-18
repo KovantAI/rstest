@@ -10,7 +10,11 @@ use crate::reporting::sink::Sink;
 /// renderers; classify once here, let each surface word it (the wordings
 /// differ, so this returns the category, not the text).
 enum FixtureAdvice {
-    /// A function-scoped fixture that ran often and cost real time.
+    /// A function-scoped fixture proven value-identical every call: promoting
+    /// it to session scope is safe on value grounds and saves real time.
+    PromoteScope,
+    /// A function-scoped fixture that ran often and cost real time, but whose
+    /// value we did not verify constant (heuristic only).
     WidenScope,
     /// A session fixture that ran more than once (once per worker).
     SessionPerWorker,
@@ -18,7 +22,9 @@ enum FixtureAdvice {
 }
 
 fn fixture_advice(f: &FixtureEntry) -> FixtureAdvice {
-    if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
+    if f.constant && f.projected_saving_seconds > 0.0 {
+        FixtureAdvice::PromoteScope
+    } else if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
         FixtureAdvice::WidenScope
     } else if f.scope == "session" && f.count > 1 {
         FixtureAdvice::SessionPerWorker
@@ -123,16 +129,49 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
         for f in interesting {
             let advice = match fixture_advice(f) {
-                FixtureAdvice::WidenScope => "ran many times; widen scope if value is reusable",
-                FixtureAdvice::SessionPerWorker => {
-                    "session fixture ran once per worker; must be safe to duplicate"
+                FixtureAdvice::PromoteScope => format!(
+                    "same value every call; promote to `scope=\"session\"` to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "ran many times; widen scope if value is reusable".to_string()
                 }
-                FixtureAdvice::None => "",
+                FixtureAdvice::SessionPerWorker => {
+                    "session fixture ran once per worker; must be safe to duplicate".to_string()
+                }
+                FixtureAdvice::None => String::new(),
             };
             let _ = writeln!(
                 md,
                 "| `{}` | {} | {} | {:.1}s | {advice} |",
                 f.name, f.scope, f.count, f.total_seconds
+            );
+        }
+        md.push('\n');
+    }
+
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| f.constant && f.projected_saving_seconds > 0.0)
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        md.push_str("### Scope-promotion candidates\n\n");
+        md.push_str(
+            "> Function-scoped fixtures that produced the same value on every call. \
+             Promoting to `scope=\"session\"` skips the redundant re-setups \
+             (verify the value is safe to share first).\n\n",
+        );
+        md.push_str("| Fixture | Runs | Projected saving |\n|---|---:|---:|\n");
+        for f in candidates.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| `{}` | {} | ~{:.2}s |",
+                f.name, f.count, f.projected_saving_seconds
             );
         }
         md.push('\n');
@@ -303,17 +342,49 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         sink.out_line("\nFIXTURE HOTSPOTS (setup time across all workers):");
         for f in interesting {
             let advice = match fixture_advice(f) {
-                FixtureAdvice::WidenScope => "  <- ran many times; widen scope if value is reusable",
-                FixtureAdvice::SessionPerWorker => {
-                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)"
+                FixtureAdvice::PromoteScope => format!(
+                    "  <- same value every call; promote to scope=\"session\" to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "  <- ran many times; widen scope if value is reusable".to_string()
                 }
-                FixtureAdvice::None => "",
+                FixtureAdvice::SessionPerWorker => {
+                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)".to_string()
+                }
+                FixtureAdvice::None => String::new(),
             };
             sink.out_line(&format!(
                 "  {:7.2}s {:6}x  scope={:<8} {}{advice}",
                 f.total_seconds, f.count, f.scope, f.name
             ));
         }
+    }
+
+    // Scope-promotion advisor: candidates verified value-constant, listed even
+    // when below the hotspot threshold, sorted by projected saving.
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| f.constant && f.projected_saving_seconds > 0.0)
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        sink.out_line(
+            "\nSCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):",
+        );
+        for f in candidates.iter().take(8) {
+            sink.out_line(&format!(
+                "  ~{:6.2}s saved  {:6}x  {}  <- @pytest.fixture(scope=\"session\")",
+                f.projected_saving_seconds, f.count, f.name
+            ));
+        }
+        sink.out_line(
+            "  (verify the value is safe to share - not mutated per test - before promoting)",
+        );
     }
 
     sink.out_line("\nSLOWEST FILES:");
@@ -379,6 +450,12 @@ mod tests {
         assert!(md.contains("| `gw0` | 16.00s | 6 |"));
         assert!(md.contains("### Fixture hotspots"));
         assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
+        // The constant function-scoped `settings` fixture surfaces as a
+        // promotion candidate with its projected saving, and its hotspot row
+        // carries the promote advice.
+        assert!(md.contains("### Scope-promotion candidates"));
+        assert!(md.contains("| `settings` | 40 | ~3.60s |"));
+        assert!(md.contains("promote to `scope=\"session\"` to save ~3.60s"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
     }

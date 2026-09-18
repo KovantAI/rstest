@@ -5,6 +5,17 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **Fixture scope-promotion advisor in `--doctor`.** Doctor already flags hot
+  function-scoped fixtures; it now *verifies* the case for promoting them. Under
+  `--doctor` each function-scoped fixture's produced value is fingerprinted on
+  every call, and a fixture that returned the same value every time (in every
+  worker) is reported as a `scope="session"` candidate with a projected saving —
+  `(calls − workers) × mean setup time`, the redundant re-setups removed. New
+  terminal "SCOPE-PROMOTION CANDIDATES" section and markdown table; the
+  `--doctor-json` document (now `schema: 3`) carries `constant` and
+  `projected_saving_seconds` per fixture. Conservative: a value that can't be
+  compared across calls is never flagged. See
+  [doctor guide](docs/guides/doctor.md#scope-promotion-candidates).
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
