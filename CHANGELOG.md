@@ -5,6 +5,17 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **`--collect` now defaults to auto.** With neither the `--collect` flag nor
+  `[tool.rstest] collect` set, rstest picks `lazy` collection for a big-enough
+  parallel run — at least 2000 known tests (from `.rstest_cache/durations.json`)
+  and a `tests × workers` product of at least 16 000, on a file-affine dist
+  (`--dist load`/`loadfile`) — and `full` otherwise. This drops the
+  `(workers − 1)` redundant full collections large parallel runs paid before,
+  without touching small suites (which keep full collection's locality). A cold
+  cache counts as zero tests, so the first run of a suite stays `full`; a banner
+  reports the choice when auto picks `lazy`. Force either with `--collect full`
+  / `--collect lazy`. See
+  [Lazy collection](docs/concepts/lazy-collection.md#auto-default).
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

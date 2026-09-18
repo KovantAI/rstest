@@ -208,7 +208,7 @@ run, so a tree can mark the file red live rather than waiting for
 | `path` | string | the failing collector — rootdir-relative file or node id |
 | `longrepr` | string | the collection traceback |
 
-Under full collection (the default) every worker collects the whole suite, so
+Under full collection every worker collects the whole suite, so
 the same file's `collecterror` is emitted **once per worker** — dedupe by
 `path` if you need one entry per file (the human summary's `N collect errors`
 counts the same way).

@@ -185,7 +185,7 @@ other test. `--doctest-glob` and friends forward the same way.
 
 ### `--collect <full|lazy>`
 
-Collection strategy. Default `full`: every worker collects the whole
+Collection strategy. `full`: every worker collects the whole
 suite (identical sessions, hash-verified). `lazy`: each test file is
 collected exactly once, on one worker, on demand — a distributed single
 collection pass. Big win for narrow `-k`/`-m` selections on large
@@ -194,8 +194,19 @@ suites; full runs of suites with a few giant files prefer `full` (or
 See [Lazy collection](../concepts/lazy-collection.md) for semantics and
 the compatibility trade. Configurable via `[tool.rstest] collect`.
 
-With `--collect lazy`, `--dist loadscope|loadgroup` are rejected, and
-nodeid/`--pyargs` arguments fall back to full collection.
+**Default: auto.** When you set neither the flag nor `[tool.rstest]
+collect`, rstest picks `lazy` automatically for a big-enough parallel run
+— at least 2000 known tests (from the duration cache) and a
+`tests × workers` product of at least 16 000, on a file-affine dist
+(`--dist load`/`loadfile`) — otherwise `full`. A cold cache (no
+`.rstest_cache/durations.json` yet) counts as zero tests, so the first
+run of a suite stays `full`; warm runs of large suites flip to `lazy`.
+When auto picks `lazy`, a banner line reports it. Pass `--collect full`
+to force eager collection or `--collect lazy` to force it on.
+
+With an explicit `--collect lazy`, `--dist loadscope|loadgroup` are
+rejected, and nodeid/`--pyargs` arguments fall back to full collection.
+Auto never rejects: on any of those it simply stays `full`.
 
 ### `--durations-regress <RATIO>`
 
