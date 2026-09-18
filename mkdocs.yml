@@ -95,7 +95,7 @@ nav:
       - Local dev / inner loop: guides/local-dev.md
       - Your plugin stack: guides/plugin-stack.md
       - Migrating from xdist (support matrix): reference/xdist-support.md
-      - Already fast under xdist? (CPU-bound): guides/migrate-from-xdist.md#already-fast-cpu-bound
+      - Already fast under xdist? (CPU-bound): guides/migrate-from-xdist.md
   - Guides:
       - guides/index.md
       - Migrating from pytest: guides/migrate-from-pytest.md
