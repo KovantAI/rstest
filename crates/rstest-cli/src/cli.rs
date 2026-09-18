@@ -241,7 +241,9 @@ pub struct Cli {
 
     /// Collection strategy: "full" (every worker collects the whole suite,
     /// verified by hash) or "lazy" (each file collected by one worker on
-    /// demand). Config `[tool.rstest] collect`. [default: full]
+    /// demand). Config `[tool.rstest] collect`. [default: auto — lazy for a
+    /// big-enough parallel run (>=2000 known tests and tests*workers>=16000 on
+    /// a file-affine dist), else full; first/cold-cache run stays full]
     #[arg(long, value_name = "MODE")]
     pub(crate) collect: Option<String>,
 

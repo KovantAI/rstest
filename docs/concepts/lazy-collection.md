@@ -1,11 +1,31 @@
 # Lazy collection
 
-`--collect lazy` is an opt-in collection strategy. The default
-(`--collect full`) has every worker collect the whole suite — identical
-sessions, outcomes verified by count and hash. Lazy mode collects each
-test file **exactly once, on one worker, on demand**: the orchestrator
-walks test files (the same `python_files` rules pytest uses), assigns
-them to workers, and the collecting worker streams back the test ids.
+Collection has two strategies. `--collect full` has every worker collect
+the whole suite — identical sessions, outcomes verified by count and
+hash. Lazy mode collects each test file **exactly once, on one worker, on
+demand**: the orchestrator walks test files (the same `python_files`
+rules pytest uses), assigns them to workers, and the collecting worker
+streams back the test ids.
+
+## Auto-default
+
+Setting neither `--collect` nor `[tool.rstest] collect` selects the
+strategy automatically. rstest picks `lazy` for a big-enough parallel
+run — at least **2000** known tests (counted from the duration cache) and
+a **`tests × workers` ≥ 16 000** product, on a file-affine dist
+(`--dist load`/`loadfile`) — and `full` otherwise. Rationale: lazy's win
+is dropping the `(workers − 1)` redundant full collections, which only
+pays off once the suite and the worker count are both large; smaller
+suites keep full collection's locality.
+
+The estimate reads `.rstest_cache/durations.json`, so a **cold cache
+counts as zero tests** and the first run of a suite stays `full`; a warm
+run of a large suite flips to `lazy`. When auto picks `lazy` it prints a
+banner naming the test and worker counts. Force either strategy with an
+explicit `--collect full` / `--collect lazy` (explicit `lazy` also
+work-steals under `--dist load`; auto does not). Auto never *rejects* a
+config — on `--dist loadscope|loadgroup`, a nodeid, or `--pyargs` it just
+stays `full`.
 
 ```console
 $ rstest --collect lazy
