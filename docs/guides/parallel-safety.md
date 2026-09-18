@@ -46,6 +46,23 @@ variants for expensive shared fixtures. All are xdist-compatible.
 The default (`--dist load`) distributes at test granularity, which
 balances better and splits slow files across workers.
 
+## Choosing the worker count
+
+`-n auto` is the safe default. It never exceeds your logical cores, and caps
+further by file count and cached runtime, so it will not oversubscribe. Two
+reasons to override it with an explicit `-n`, in opposite directions:
+
+- **Wait-bound suites want *more* workers than cores.** When tests mostly
+  wait (IO, network, sleeps, timeouts) a worker holds no core while it waits,
+  so running `-n` above the core count overlaps more waits and cuts wall time.
+  `auto` will not do this for you. The [wait-bound playbook](wait-bound.md)
+  covers how to find the sweet spot.
+- **Load-sensitive suites want fewer.** Tests asserting on timing or shared
+  machine state (see [below](#time-sensitive-tests-at-high-concurrency)) can
+  need `-n` capped to stay green under a busy machine.
+
+An explicit `-n <k>` is exact: the `auto` caps do not apply.
+
 ## Session-scoped fixtures duplicate
 
 A session-scoped fixture runs **once per worker**, not once per run — N
@@ -93,6 +110,57 @@ worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", ... ; unset at -n 0 or -n 
 
 Plugins that check xdist's `workerinput` get the same answer — the
 attribute is provided for compatibility.
+
+### A worked non-Django example
+
+pytest-django gets per-worker databases for free. The same pattern works for
+any backend: derive the resource name or port from the worker id in a
+session-scoped fixture, which runs once per worker. Raw SQLAlchemy / psycopg
+against a per-worker database:
+
+```python
+import os
+import pytest
+from sqlalchemy import create_engine
+
+
+@pytest.fixture(scope="session")
+def db_engine():
+    # gw0, gw1, ...; "main" at -n 0/1 where there is a single session
+    worker = os.environ.get("RSTEST_WORKER_ID", "main")
+    url = f"postgresql+psycopg://ci:ci@localhost:5432/app_{worker}"
+    # create the database `app_{worker}` if it does not exist, then:
+    engine = create_engine(url)
+    yield engine
+    engine.dispose()
+```
+
+Each worker gets its own `app_gw0`, `app_gw1`, ... database, so nothing
+collides. rstest exercises exactly this shape in its own battery with
+pytest-postgresql, where each worker spins up its own server on an
+OS-assigned free port.
+
+Testcontainers follows the same rule, one container per worker:
+
+```python
+import pytest
+from testcontainers.postgres import PostgresContainer
+
+
+@pytest.fixture(scope="session")
+def pg_url():
+    # Session scope runs this once per worker, so each worker gets its own
+    # container on its own random host port. Nothing needs the worker id here
+    # because the container assigns the port; reach for RSTEST_WORKER_ID only
+    # when you name a shared external resource that would otherwise collide.
+    with PostgresContainer("postgres:16") as container:
+        yield container.get_connection_url()
+```
+
+The rule generalizes: any fixed name or port a serial suite hard-coded (a
+database, a schema, a bound port, a temp directory) must become per-worker
+under parallelism. Bind port `0` to let the OS assign one, or key the name on
+`RSTEST_WORKER_ID`.
 
 ## Time-sensitive tests at high concurrency
 
