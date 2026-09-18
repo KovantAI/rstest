@@ -19,7 +19,7 @@
       "id": 2,
       "name": "is-it-ready",
       "prompt": "Is this test suite ready to run in parallel? I'd like to know before I commit to switching runners.",
-      "expected_output": "Runs rstest --migrate-check (the preflight), reports that the suite is NOT ready due to the uuid unstable id, names the offending parametrize site and the fix (stable ids=). Diagnosis-first; may offer to apply the fix but the core is an accurate readiness report.",
+      "expected_output": "Runs rstest migrate-check (the preflight), reports that the suite is NOT ready due to the uuid unstable id, names the offending parametrize site and the fix (stable ids=). Diagnosis-first; may offer to apply the fix but the core is an accurate readiness report.",
       "files": ["fixture-repo"]
     }
   ]

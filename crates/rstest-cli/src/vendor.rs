@@ -1,4 +1,4 @@
-//! `--verify-vendor`: prove the installed vendored pytest tree is intact.
+//! `verify-vendor`: prove the installed vendored pytest tree is intact.
 //!
 //! Delegates to the worker package's offline verifier
 //! (`rstest_worker._internal.verify_vendor`), run under the resolved

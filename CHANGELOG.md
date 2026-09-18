@@ -3,6 +3,97 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.0.x releases and are listed here.
 
+## Unreleased
+
+- **Heads-up when a parallel run pairs with a "dark" report plugin.** At
+  `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
+  — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
+  `--benchmark*` — now prints a warning before the run naming the plugin and the
+  parallel-safe alternative (native `--report-json` / `--junitxml`, or `-n 0`).
+  Argv-driven, so it never flags rstest's own merged `--html` / `--junitxml` /
+  `--report-json`, and stays silent at `-n 0`.
+- **Plugin compatibility matrix extended to the top 100.** The
+  [compatibility reference](docs/reference/top-100-plugins.md) now classifies
+  the 100 most-downloaded pytest plugins (was 50) for behavior under the
+  parallel pool.
+- **pytest-mypy no longer crashes under the pool.** Its worker branch reads
+  `workerinput["mypy_config_stash_serialized"]` — the mypy results-cache path an
+  xdist controller injects — so merely installing it raised
+  `KeyError: 'mypy_config_stash_serialized'` at `-n ≥ 2` (rstest runs no
+  controller). rstest now seeds a unique per-worker cache path; mypy runs lazily
+  on each worker (`MypyResults.from_session`), so type errors surface identically
+  at `-n auto` and `-n 0`.
+- **pytest-random-order no longer crashes under the pool.** Its
+  `pytest_configure` reads `workerinput["random_order_seed"]` unconditionally
+  whenever `workerinput` exists (even with reordering disabled — the default),
+  so merely installing the plugin raised `KeyError: 'random_order_seed'` at
+  `-n ≥ 2`. rstest now seeds that key like it does `randomly_seed`: a single
+  run-derived value shared by every worker (so the shuffled collection hashes
+  agree), keeping the plugin's `default:` prefix so order is untouched unless
+  you opt in with `--random-order[-bucket|-seed]`; an explicit
+  `--random-order-seed=<n>` is honored.
+
+## 0.7.0 — 2026-09-10
+
+- **Live progress while testing.** Runs now report ongoing progress as
+  tests complete, so long suites give continuous feedback instead of going
+  silent until the end.
+- **Debugger support (`--debug[=PORT]`).** Run under
+  [debugpy](https://github.com/microsoft/debugpy) for editor debugging
+  (VS Code and any DAP client). Like `--pdb`, this forces the debugger:
+  rstest starts debugpy in the worker and blocks until a client attaches.
+  Bare `--debug` listens on `127.0.0.1:5678`; `--debug=PORT` overrides the
+  port. The target interpreter (`--python`) must have `debugpy` installed;
+  without it the run proceeds without a debugger and prints a hint.
+
+## 0.6.1 — 2026-09-08
+
+- The worker record file (`rstest-pytest-record.json`, or the path in
+  `RSTEST_RECORD`) is now written atomically: the recorder writes to a
+  `.tmp` sibling and `os.replace`s it into place, so a concurrent reader
+  never observes a truncated or partially written JSON document.
+
+## 0.6.0 — 2026-09-07
+
+- **BREAKING — run-less modes are now subcommands, not flags.** The four
+  modes that never run your suite are invoked as a leading subcommand:
+  - `rstest --verify-vendor` → `rstest verify-vendor`
+  - `rstest --try` → `rstest try`
+  - `rstest --migrate-check` → `rstest migrate-check`
+  - `rstest --cache-compact` → `rstest cache-compact`
+
+  Their paired options are unchanged and now follow the subcommand token:
+  `rstest migrate-check --migrate-check-json out.json --migrate-allow SUBSTR`
+  and `rstest cache-compact --cache-remote URL`. The subcommand must be the
+  first argument (`rstest verify-vendor --python 3.12`); a path literally named
+  after a subcommand is disambiguated with `rstest ./try` or `rstest -- try`.
+
+  The old flags no longer exist. Passing `--try` / `--migrate-check` /
+  `--verify-vendor` / `--cache-compact` now forwards them to the pytest session
+  (pytest then rejects the unknown argument), so **update CI scripts, aliases,
+  and Makefiles**. Also note `rstest migrate-check` is now required to run the
+  preflight — a bare `--migrate-check-json` no longer triggers it implicitly.
+
+- pytest-retry now works under the pool without pytest-xdist installed. The
+  plugin gates its report server on `has_plugin("xdist")` and only reads
+  `workerinput["server_port"]` on the worker side; rstest is not xdist but does
+  set `workerinput`, so each worker fell through to the client branch and
+  `KeyError`'d on a port no master had provisioned (aborting collection at
+  `-n > 1`). Each worker now stands up pytest-retry's own report server and
+  seeds that port, so retries and the `flaky` marker work unmodified at any
+  worker count. (When pytest-xdist *is* installed, the plugin self-provisions
+  as before and rstest stays out of the way.)
+
+- Monorepo worker planning now weights each project by its recorded
+  whole-suite **wall time** (fixture setup/teardown included), not by the sum
+  of test *call* durations. A fixture-bound project — one whose per-test call
+  time is near zero but whose fixtures cost tens of seconds — was rated
+  near-free on the warm run and starved to a single worker, so it serialized
+  and dominated the monorepo wall (a warm run could run *slower* than the
+  cold, cache-less run). Projects that pin their own `numprocesses` are
+  unaffected; caches predating this release fall back to call-duration
+  weighting until their first run under 0.6.0.
+
 ## 0.5.0 — 2026-09-06
 
 - Incremental testing based on coverage: `--changed` now leans on the

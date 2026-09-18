@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::reporting::sink::Sink;
+
 /// `[project].name` from a project's pyproject, PEP-503-normalized
 /// (lowercase, runs of `-_.` collapse to `-`) so dependency strings and
 /// project names compare reliably.
@@ -97,6 +99,7 @@ pub fn classify_changes(
     projects: &[PathBuf],
     changed: &[PathBuf],
     strict: bool,
+    sink: &mut Sink,
 ) -> Vec<ChangeImpact> {
     let n = projects.len();
     let mut impact = vec![ChangeImpact::Unaffected; n];
@@ -135,12 +138,12 @@ pub fn classify_changes(
         for (i, sibs) in scanned_sibling_edges(projects).into_iter().enumerate() {
             for j in sibs {
                 if !edges[i][j] {
-                    eprintln!(
+                    sink.warn(&format!(
                         "rstest: --changed-strict: {} imports code provided by {} \
                          without declaring it; counting the edge",
                         projects[i].display(),
                         projects[j].display()
-                    );
+                    ));
                     edges[i][j] = true;
                 }
             }
@@ -305,7 +308,7 @@ mod change_tests {
         let d = proj(&root, "libs/d", "pkg-d", &["pkg-b"]);
         let projects = vec![a, b, c, d];
         let changed = vec![PathBuf::from("libs/a/src/x.py")];
-        let impacts = classify_changes(&root, &projects, &changed, false);
+        let impacts = classify_changes(&root, &projects, &changed, false, &mut Sink::captured().0);
         assert_eq!(
             impacts,
             vec![
@@ -322,7 +325,13 @@ mod change_tests {
         let root = tmp("orphan");
         let a = proj(&root, "libs/a", "pkg-a", &[]);
         let b = proj(&root, "libs/b", "pkg-b", &[]);
-        let impacts = classify_changes(&root, &[a, b], &[PathBuf::from("shared/util.py")], false);
+        let impacts = classify_changes(
+            &root,
+            &[a, b],
+            &[PathBuf::from("shared/util.py")],
+            false,
+            &mut Sink::captured().0,
+        );
         // full runs, no narrowing: the change is invisible to
         // project-local import graphs
         assert!(impacts.iter().all(|i| *i == ChangeImpact::Dependent));
@@ -332,7 +341,7 @@ mod change_tests {
     fn no_changes_no_projects_run() {
         let root = tmp("none");
         let a = proj(&root, "libs/a", "pkg-a", &[]);
-        let impacts = classify_changes(&root, &[a], &[], false);
+        let impacts = classify_changes(&root, &[a], &[], false, &mut Sink::captured().0);
         assert_eq!(impacts, vec![ChangeImpact::Unaffected]);
     }
 }
@@ -380,13 +389,13 @@ mod strict_tests {
         let b = proj_with_code(&root, "libs/b", "pkg-b", "pkg_b", "import pkg_a\n");
         let projects = vec![a, b];
         let changed = vec![PathBuf::from("libs/a/pkg_a/__init__.py")];
-        let lax = classify_changes(&root, &projects, &changed, false);
+        let lax = classify_changes(&root, &projects, &changed, false, &mut Sink::captured().0);
         assert_eq!(
             lax[1],
             ChangeImpact::Unaffected,
             "lax misses undeclared import"
         );
-        let strict = classify_changes(&root, &projects, &changed, true);
+        let strict = classify_changes(&root, &projects, &changed, true, &mut Sink::captured().0);
         assert_eq!(strict[1], ChangeImpact::Dependent, "strict catches it");
     }
 }

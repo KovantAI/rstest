@@ -67,6 +67,20 @@ def sh(args, cwd=None, env=None, timeout=PHASE_TIMEOUT):
     )
 
 
+def _strip_opt(args, opt):
+    """Drop an `--opt value` pair (e.g. `-n 4`) from an args list."""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == opt:
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
 def load_lock():
     return json.loads(LOCK.read_text()) if LOCK.exists() else {}
 
@@ -310,7 +324,14 @@ class Suite:
             snap.unlink(missing_ok=True)  # never diff against a stale snapshot
             log(f"  {self.name}: pytest baseline starting ({proj})")
             t0 = time.monotonic()
-            r = sh([py, "-m", "pytest", "-p", "recorder", "-q"], cwd=proj_dir, env=env)
+            # target_args() (the suite's `args`, e.g. a `-W` filter) must ride
+            # the mono baseline too, or it diverges from the rstest candidate
+            # (which always forwards them) and reads as a false parity drop.
+            r = sh(
+                [py, "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
+                cwd=proj_dir,
+                env=env,
+            )
             wall = time.monotonic() - t0
             total += wall
             log(f"  {self.name}: pytest {proj} done in {wall:.1f}s (rc={r.returncode})")
@@ -327,15 +348,22 @@ class Suite:
         merged.write_text(json.dumps(combined, sort_keys=True))
         return merged, total
 
-    def run_rstest(self):
+    def run_rstest(self, workers=None):
         snap = self.dir / "rstest.json"
         # Drop any prior snapshot: rstest exits non-zero and writes nothing on a
         # fatal error (e.g. no usable interpreter). A leftover file would pass
         # the exists() check below and get diffed as bogus parity.
         snap.unlink(missing_ok=True)
-        log(f"  {self.name}: rstest starting (-n auto, --worker-timeout 120)")
+        extra = list(self.cfg.get("rstest_args", []))
+        # `workers` (bench worker-sweep) is authoritative: strip any `-n N` from
+        # the per-suite rstest_args and pin the requested count. Default (None)
+        # keeps the suite's own policy, falling back to rstest's own `-n auto`.
+        if workers is not None:
+            extra = _strip_opt(extra, "-n")
+            extra += ["-n", str(workers)]
+        nlabel = f"-n {workers}" if workers is not None else "-n auto"
+        log(f"  {self.name}: rstest starting ({nlabel}, --worker-timeout 120)")
         t0 = time.monotonic()
-        extra = self.cfg.get("rstest_args", [])
         r = sh(
             [
                 str(self.rstest_bin),
@@ -378,8 +406,12 @@ def _norm(nodeid):
 
 
 def diff(baseline_path, candidate_path):
-    a = json.loads(Path(baseline_path).read_text())["tests"]
-    b = json.loads(Path(candidate_path).read_text())["tests"]
+    # Read each snapshot ONCE: the bench's gate needs collect-error counts too,
+    # so surface them here rather than re-parsing the same files downstream.
+    da = json.loads(Path(baseline_path).read_text())
+    db = json.loads(Path(candidate_path).read_text())
+    a = da["tests"]
+    b = db["tests"]
     keys = ("setup", "call", "teardown", "wasxfail")
     only_a = sorted(set(a) - set(b))
     only_b = sorted(set(b) - set(a))
@@ -412,6 +444,13 @@ def diff(baseline_path, candidate_path):
     only_b = [nid for c in norm_b.values() for nid in c]
     agree = len(set(a) & set(b)) - len(mismatch) + unstable_pairs
     denom = max(len(set(a) | set(b)) - unstable_pairs, 1)
+    # Of the candidate-only ("extra") tests, how many come from a module the
+    # BASELINE failed to collect? Those are explained: rstest rescued a module
+    # the drifting baseline dropped. Any extra from a module the baseline DID
+    # collect is unexplained — phantom over-collection, a real rstest fault. The
+    # bench's superset carve-out keys off this so it can't waive that fault.
+    base_ce_modules = {c.split("::", 1)[0] for c in da.get("collect_errors", [])}
+    extra_unexplained = sum(1 for nid in only_b if nid.split("::", 1)[0] not in base_ce_modules)
     return {
         "baseline_tests": len(a),
         "candidate_tests": len(b),
@@ -422,6 +461,9 @@ def diff(baseline_path, candidate_path):
         "mismatch": sorted(mismatch)[:20],
         "mismatch_count": len(mismatch),
         "unstable_id_pairs": unstable_pairs,
+        "baseline_collect_errors": len(da.get("collect_errors", [])),
+        "candidate_collect_errors": len(db.get("collect_errors", [])),
+        "extra_unexplained_count": extra_unexplained,
         "score": round(100.0 * agree / denom, 2),
     }
 

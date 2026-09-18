@@ -207,6 +207,12 @@ CRASHFLAKY = fx("crashflaky.py")
 CRASHLOOP = fx("crashloop.py")
 
 
+CRASHMANY = fx("crashmany.py")
+
+
+EACH_CRASH = fx("each_crash.py")
+
+
 DISCO = fx("disco.py")
 
 
@@ -241,6 +247,18 @@ MARKS = fx("marks.py")
 
 
 MAXFAIL = fx("maxfail.py")
+
+
+MAXFAIL_MANY = fx("maxfail_many.py")
+
+
+SERIAL_CRASH = fx("serial_crash.py")
+
+
+STEAL = fx("steal.py")
+
+
+STEAL_SMALL = fx("steal_small.py")
 
 
 MP_SPAWN = fx("mp_spawn.py")

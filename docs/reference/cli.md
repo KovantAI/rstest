@@ -2,11 +2,18 @@
 
 ```
 rstest [RSTEST FLAGS] [PATHS] [PYTEST FLAGS]
+rstest <COMMAND> [OPTIONS]
 ```
 
 rstest owns a small set of flags; **everything else forwards to the test
 session verbatim**, so the entire pytest flag surface — including flags
 added by your plugins — works without translation.
+
+A handful of **run-less commands** don't run your suite —
+[`verify-vendor`](#verify-vendor), [`try`](#try),
+[`migrate-check`](#migrate-check), and [`cache-compact`](#cache-compact). Each
+is a subcommand, given as the first argument (`rstest try`); a path literally
+named after one is disambiguated with `rstest ./try` or `rstest -- try`.
 
 ## rstest-owned flags
 
@@ -250,10 +257,22 @@ duration cache on every job so their partitions match — see the
 
 Publish and warm the `.rstest_cache` (durations, flake history, and the
 `--changed` coverage index) to/from a **shared remote** — no hand-rolled
-`actions/cache` glue, no dedicated
-refresh job, no cache-key dance. `--cache-remote` is a directory or `file://`
-path (local, an NFS/EFS mount, or a dir a CI step materializes via
-`download-artifact` / `aws s3 sync`); also settable as `RSTEST_CACHE_REMOTE`.
+`actions/cache` glue, no dedicated refresh job, no cache-key dance. Also
+settable as `RSTEST_CACHE_REMOTE`. `--cache-remote` accepts:
+
+- a **directory** / `file://` path — local, an NFS/EFS mount, or a dir a CI step
+  materializes via `download-artifact` / `aws s3 sync`;
+- an **`s3://` / `gs://`** bucket URL — driven through the `aws` / `gcloud`
+  (falling back to `gsutil`) CLI already installed and authenticated on the
+  runner; credentials come from the process environment (no SDK, no secrets in
+  the URL);
+- an **`http(s)://`** endpoint — the endpoint must serve `GET <root>/segments/`
+  as a JSON array of segment names (the [listing
+  contract](../concepts/caching.md#shared-cache-backend)) and support `GET` /
+  `PUT` / `DELETE`. Bearer auth from `RSTEST_CACHE_REMOTE_TOKEN`.
+
+Any other `scheme://` is rejected loudly — rstest never silently writes to a
+junk local directory named after the URL.
 
 - `--cache-pull` merges the remote into the local cache **before** the run —
   warming scheduling and the regression baseline.
@@ -271,14 +290,36 @@ Pull/push are **not** supported in [monorepo mode](../guides/monorepo.md) — ea
 project keeps its own `.rstest_cache`, so run rstest per project for shared
 caching there (rstest errors rather than silently no-op).
 
-### `--cache-compact`
+### `cache-compact`
 
-Maintenance: fold all remote segments into a fresh `base.json` and prune them,
-then exit without running tests. Keeps the segment count (and pull size) down;
+Maintenance: fold remote segments into a fresh `base.json` and prune them, then
+exit without running tests. Keeps the segment count (and pull size) down;
 optional — pull/push work without it. Run occasionally (nightly, or on merge to
 main). Needs `--cache-remote`. It is **run-less** — it exits before the run, so
 don't combine it with `--cache-pull`/`--cache-push` (rstest rejects that
 combination rather than silently skipping them).
+
+With no retention flags it folds **all** segments. To keep a recent window loose
+(so the newest history stays merge-on-read while the tail is compacted):
+
+- `--keep-last N` — retain the newest N segments; fold only older ones. Env:
+  `RSTEST_CACHE_KEEP_LAST`.
+- `--max-age DURATION` — retain segments younger than DURATION (a bare number is
+  seconds, or a `s`/`m`/`h`/`d`/`w` suffix, e.g. `30d`); fold older ones. Env:
+  `RSTEST_CACHE_MAX_AGE`.
+
+A segment retained by **either** rule stays loose. A bad flag/env value is a hard
+error, never a silent fold-all.
+
+### `--cache-compact-threshold <N>`
+
+Fold **on push** instead of in a separate job: after a `--cache-push`, if the
+remote holds more than N loose segments, rstest compacts inline (honoring
+`RSTEST_CACHE_KEEP_LAST` / `RSTEST_CACHE_MAX_AGE`). Env:
+`RSTEST_CACHE_COMPACT_THRESHOLD`. Strictly **best-effort** — a listing, config,
+or compaction failure warns and never fails an otherwise-green run. Concurrent
+auto-compactions are safe (the absorbed-id set prevents double-counting), only
+redundant. Leave it unset to keep compaction an explicit `cache-compact` step.
 
 ### `--require-baseline`
 
@@ -287,7 +328,7 @@ hard error instead of the silent "comparison skipped". This closes the
 dead-gate failure mode where a CI run that never restored (or pulled) the cache
 passes regressions green. A *failed* `--cache-pull` is always an error; this
 adds the "*successful* pull returned nothing, but a gate needs it" case. It only
-enforces on an actual gated run — collect-only (`--co`), `--migrate-check`, and
+enforces on an actual gated run — collect-only (`--co`), `migrate-check`, and
 passthrough (`-s`/`--pdb`) modes don't evaluate the gate, so they don't trip it.
 
 ### `--doctor`
@@ -300,7 +341,7 @@ that ended with more threads / open file descriptors than they started — see
 the [Resource leaks](../guides/resource-leaks.md) guide). Adds a few cheap
 measurements to the run; outcomes are unaffected.
 
-### `--try`
+### `try`
 
 The zero-config "should I switch?" proof. Runs your suite once under plain
 `pytest` and once under `rstest -n auto`, then prints the only two things that
@@ -309,8 +350,8 @@ checked against your real pytest) and how much **faster** rstest is, with a
 rough CI-time saving. No flags, no config.
 
 ```console
-$ rstest --try
-================= rstest --try =================
+$ rstest try
+================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
   ⚡ speed:   pytest 96s  →  rstest 21s   (4.6× at -n auto)
 ================================================
@@ -318,18 +359,18 @@ $ rstest --try
 ```
 
 Exit 0 when outcomes are identical, 1 when they differ (it then points you at
-`--migrate-check` to classify the differences — usually an unstable parametrize
+`migrate-check` to classify the differences — usually an unstable parametrize
 id or a parallel-only failure), 2 when it couldn't run pytest or rstest refused
 to dispatch. A pre-existing red pytest run is reported as such, not blamed on
 rstest.
 
-`--try` is the one command that needs **pytest installed on its own** (it runs
+`try` is the one command that needs **pytest installed on its own** (it runs
 your suite under plain `pytest` for the baseline). rstest itself vendors its
 core and doesn't otherwise require an external pytest; if `pytest` isn't on
-PATH, `--try` exits 2. `--migrate-check` and normal runs have no such
+PATH, `try` exits 2. `migrate-check` and normal runs have no such
 requirement.
 
-### `--verify-vendor`
+### `verify-vendor`
 
 Prove the vendored pytest tree in your installed rstest is intact. rstest ships
 an unmodified copy of pytest inside its worker package; this rehashes every
@@ -338,7 +379,7 @@ catching an accidentally-edited, corrupted, or partial install. Run-less — it
 verifies and exits without running your suite.
 
 ```console
-$ rstest --verify-vendor
+$ rstest verify-vendor
 vendored pytest 9.1.1: 84 files verified against vendor.lock
 ```
 
@@ -348,7 +389,7 @@ PyPI. Proving the vendored tree matches *upstream* pytest (not just what
 shipped) is a separate maintainer/CI check (`vendor.yml` provenance job); see
 [Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).
 
-### `--migrate-check`
+### `migrate-check`
 
 Parallel-readiness preflight, not a run. Collects the suite **twice** and
 diffs the id sets; ids present in only one collection are run-to-run unstable.
@@ -397,7 +438,7 @@ form and the known-issue allow-list).
 
 Write the migrate-check findings as a single versioned JSON document (schema
 `1`) — the machine-readable surface for CI gating and trending. Implies
-`--migrate-check`; pass the bare flag too to also print the human report. The
+`migrate-check`; pass the bare flag too to also print the human report. The
 document carries the unstable-id sites and the classified parallel findings,
 each with its verdict, fix, allow-list status, and bisected polluter:
 `{meta, ready, tests_collected, will_bail_count, unstable_ids[], parallel{…}}`.
@@ -535,6 +576,34 @@ Residual risk it cannot remove: imports constructed at runtime from
 strings the scanner can't see (`importlib.import_module(f"plugins.{name}")`)
 still produce no edges — name such modules in a test file import, or
 keep full runs on the gating path.
+
+### `--cov-diff-fail-under <PCT>`
+
+Diff-coverage gate: fail the run when fewer than PCT% of the **lines added or
+changed in this diff** are covered by tests. The classic PR gate — "you added
+code with no test exercising it" — computed from the run's own coverage data,
+no `diff-cover`/Codecov round-trip.
+
+```console
+$ rstest -n auto --cov=. --cov-diff-fail-under=90 --changed=origin/main
+```
+
+Requires `--cov` (there must be coverage data to score). The diff is taken
+against the [`--changed`](#-changedrev) base when given, otherwise `HEAD`. Only
+**executable** added lines count — blank lines, comments, and lines coverage.py
+doesn't treat as statements are ignored — and the report names the uncovered
+added lines per file:
+
+```text
+rstest: diff coverage 83.3% (5/6 added lines covered)
+  mymod.py: uncovered added line(s) 7, 12-14
+rstest: --cov-diff-fail-under: diff coverage 83.3% is below 90%
+```
+
+Exits `1` when below the threshold (the gate line prints to stderr, keeping
+`--output json`/`tap` stdout pure). A diff with no added executable lines — or
+whose changed files aren't under `--cov` — passes (nothing to score). See the
+[Coverage guide](../guides/coverage.md#diff-coverage-gate).
 
 ### `--reruns <N>`
 
@@ -786,6 +855,44 @@ document instead — node ids, absolute file paths, source lines, and
 markers, without running the suite. See
 [Discovery JSON](report-json.md#discovery-json).
 
+### `--stream-json <FILE>`
+
+Write the live [streaming-JSON](report-json.md#streaming-json) event stream
+(`testreport` per phase, closed by `sessionfinish`) to `FILE` as a **side
+channel**, leaving stdout's human output untouched. This is the same schema
+as `--output json`, but on a separate stream — so an editor can show normal
+terminal output **and** drive a Test Explorer from the events at the same
+time. `FILE` may be a regular file or a named pipe (fifo) the editor opened
+for reading first (opening a fifo for write blocks until a reader is
+present). Works in every run mode. Lines are flushed as they are produced.
+
+### `--debug[=PORT]`
+
+Run under [debugpy](https://github.com/microsoft/debugpy) for editor
+debugging (VS Code and any DAP client). Like `--pdb`, this forces
+single-worker mode with inherited stdio so exactly one Python process hosts
+the debugger; rstest then starts debugpy in that worker and **blocks until a
+client attaches** before collecting, so breakpoints in conftest, collection,
+and tests are all honored. Bare `--debug` listens on `127.0.0.1:5678`;
+`--debug=PORT` overrides the port.
+
+The target interpreter (`--python`) must have `debugpy` installed
+(`pip install debugpy` in the test environment); without it the run proceeds
+without a debugger and prints a hint. The editor attaches with a DAP *attach*
+configuration pointed at the same host/port. `--reruns` and pooling are inert
+here, exactly as under `--pdb`.
+
+When the listener is up, the worker prints a machine-readable ready line to
+**stderr** so an editor can attach deterministically instead of racing the
+port:
+
+```json
+{"event": "debugpy", "host": "127.0.0.1", "port": 5678}
+```
+
+A human-readable `rstest: debugpy listening on …` line follows it; both
+precede the blocking wait for the client.
+
 ### `--python <path-or-version>`
 
 Interpreter for the workers. Accepts either a path to an interpreter or a
@@ -841,7 +948,7 @@ Flags that need pytest's own terminal (or stdin) force single-worker mode
 with inherited stdio, and pytest renders its own output:
 
 ```
---collect-only / --co     -s / --capture=...     --pdb     --trace
+--collect-only / --co     -s / --capture=...     --pdb     --trace     --debug
 ```
 
 This **overrides any `-n` value or `[tool.rstest]` worker count without

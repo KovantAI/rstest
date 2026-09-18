@@ -1,5 +1,5 @@
 """pytest plugin: record per-test outcomes to JSON, in rstest's report-json
-shape, so `rstest --try` can diff a plain-pytest baseline against rstest.
+shape, so `rstest try` can diff a plain-pytest baseline against rstest.
 
 Activate (rstest does this for you): run pytest with
 `-p rstest_worker.recorder`; the output path comes from $RSTEST_RECORD.
@@ -55,8 +55,10 @@ class _Recorder:
             "tests": self.tests,
         }
         path = os.environ.get("RSTEST_RECORD", "rstest-pytest-record.json")
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(doc, f, sort_keys=True)
+        os.replace(tmp, path)  # atomic swap so a reader never sees a partial file
 
 
 def pytest_configure(config) -> None:

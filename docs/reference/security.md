@@ -93,6 +93,13 @@ a security release is a release.
 
 ### Re-vendor history
 
+**Why this table is short.** It records changes to the *vendored pytest*, not
+rstest releases. pytest has been on 9.1.1 since rstest 0.1.0 (2026-06-23), so
+there has been nothing to re-vendor since — a short table here means the core
+has been stable, not that the docs are stale. For rstest's own release cadence
+and per-version changes, see the
+[CHANGELOG](https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md).
+
 Every vendored-pytest change, newest first, with the commit that re-extracted
 the tree and the rstest release it shipped in:
 
@@ -116,13 +123,13 @@ wheel's PyPI sha256 (the trust anchor), and a sha256 of every file under
 `_vendor/`. The manifest ships in the wheel, so any installed copy can verify
 itself. Two levels of check:
 
-- **Offline integrity — anyone, anytime.** `rstest --verify-vendor` rehashes
+- **Offline integrity — anyone, anytime.** `rstest verify-vendor` rehashes
   the installed `_vendor/` tree and compares it to `vendor.lock`, catching a
   modified, corrupted, or partial vendored copy. It runs without contacting the
   network and exits non-zero on any drift:
 
     ```console
-    $ rstest --verify-vendor
+    $ rstest verify-vendor
     vendored pytest 9.1.1: 84 files verified against vendor.lock
     ```
 
@@ -214,7 +221,7 @@ lockfile — e.g. pip:
 $ pip install --require-hashes -r requirements.txt
 ```
 
-or pin an exact version (`pip install rstest==0.5.0`). See
+or pin an exact version (`pip install rstest==0.7.0`). See
 [Installation](../getting-started/installation.md#verifying-a-downloaded-wheel)
 for the `SHA256SUMS` file and building from source.
 

@@ -62,13 +62,59 @@ clobber each other.
       that file — still correct, only coarser.
 - **Push** writes just this run's segment (`--cache-push`) — its *slice* of the
   durations, flake events, and coverage index this run measured.
-- **Compact** (`--cache-compact`) folds segments into a new base and prunes
+- **Compact** (`cache-compact`) folds segments into a new base and prunes
   them; a segment already folded is recorded in the base's absorbed-id set, so
   compaction is safe against concurrent pushes.
 
-The remote is a plain directory — a local path, an NFS/EFS mount, or a dir a CI
-step materializes (GitHub `download-artifact`, `aws s3 sync`). Recipes:
-[CI quickstart → Shared cache](../guides/ci-quickstart.md#shared-cache).
+### Transports
+
+`--cache-remote` (or `RSTEST_CACHE_REMOTE`) selects where the base + segments
+live:
+
+| Value | Backend |
+|-------|---------|
+| a directory path / `file://…` | local dir, NFS/EFS mount, or a dir a CI step materializes (`download-artifact`, `aws s3 sync`) |
+| `s3://bucket/prefix` | the `aws` CLI on the runner (creds from the environment) |
+| `gs://bucket/prefix` | `gcloud storage` (or `gsutil`) on the runner |
+| `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` |
+
+The `s3`/`gs` transports shell out to the cloud CLI already installed and
+authenticated in CI — no SDK, no secrets in the URL. Any other `scheme://` is
+rejected loudly rather than silently written to a junk local directory.
+
+**Permissions.** Every transport needs four operations on the `<root>` prefix:
+**list** and **read** (pull), **write** (push a segment), and **delete** —
+delete only for compaction/retention (`cache-compact`, `--cache-compact-threshold`).
+A pull/push-only job that never compacts can drop delete. Least privilege: scope
+the credential to the cache prefix, not the whole bucket. Concretely:
+
+| Backend | Grant |
+|---|---|
+| S3 (`s3://bucket/prefix`) | `s3:ListBucket` (on the bucket, condition `prefix`), `s3:GetObject`/`s3:PutObject`/`s3:DeleteObject` on `bucket/prefix/*` |
+| GCS (`gs://bucket/prefix`) | `storage.objects.{list,get,create,delete}` — e.g. `roles/storage.objectAdmin` scoped to the bucket/prefix |
+| Azure Blob (dir-materialize) | `Storage Blob Data Contributor` on the container (the `az` CLI needs read+write+delete) |
+| `http(s)://` | endpoint enforces its own authz; rstest sends `Authorization: Bearer $RSTEST_CACHE_REMOTE_TOKEN` |
+| dir / mount (`/path`, `file://`) | filesystem read+write+delete on the directory |
+| GitHub artifacts (the action's `artifact` backend) | workflow `permissions: { contents: read, actions: read }`; `actions: read` reaches a prior run's segments |
+
+**HTTP listing contract.** A bare `GET`/`PUT` can't enumerate a collection, so
+an `http(s)://` remote must answer `GET <root>/segments/` with a JSON array of
+segment names (filenames or full keys/URLs) and support `GET` / `PUT` / `DELETE`
+on the blobs. A static file server with autoindex-as-JSON, an S3 REST bucket, or
+a tiny custom endpoint all satisfy it.
+
+### Retention
+
+`cache-compact` folds **all** segments by default. To bound the segment set
+without discarding fresh history, keep a recent window loose:
+
+- `cache-compact --keep-last N` / `RSTEST_CACHE_KEEP_LAST` — retain the newest N.
+- `cache-compact --max-age 30d` / `RSTEST_CACHE_MAX_AGE` — retain the young.
+- `--cache-compact-threshold N` / `RSTEST_CACHE_COMPACT_THRESHOLD` — fold **on
+  push** when the loose count exceeds N (honoring the window above), so no
+  separate maintenance job is needed. Best-effort: never fails the run.
+
+Recipes: [CI quickstart → Shared cache](../guides/ci-quickstart.md#shared-cache).
 
 ## `.pytest_cache/` (pytest's, shared)
 

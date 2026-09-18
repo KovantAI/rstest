@@ -41,9 +41,9 @@ def test_node_impl_params_uninspectable_returns_none_and_caches():
     assert _node_impl_params(range) is None
 
 
-def test_call_node_impl_cfunc_passes_node_positionally(monkeypatch):
-    # No introspectable signature -> the impl is called with node positional and
-    # the extra kwargs; a hook that accepts them binds on the first try.
+def test_call_node_impl_cfunc_passes_node_only(monkeypatch):
+    # No introspectable signature -> the impl is called with node ONLY; extra
+    # kwargs (error=) are dropped because we can't tell which the impl accepts.
     monkeypatch.setattr(xdistnode.inspect, "signature", _no_signature)
     seen = {}
 
@@ -54,12 +54,12 @@ def test_call_node_impl_cfunc_passes_node_positionally(monkeypatch):
 
     result = _call_node_impl(hook, "N", error="boom")
     assert result == "ok"
-    assert seen == {"node": "N", "error": "boom"}
+    assert seen == {"node": "N", "error": None}
 
 
-def test_call_node_impl_cfunc_retries_node_only_when_kwargs_dont_bind(monkeypatch):
-    # C-hook path, one-arg impl: impl(node, error=...) fails to BIND (impl body
-    # never entered), so we retry impl(node) — running the body exactly once.
+def test_call_node_impl_cfunc_one_arg_impl_runs_once(monkeypatch):
+    # C-hook path, one-arg impl: called impl(node) directly (kwargs dropped),
+    # so the one-arg hook binds and runs its body exactly once.
     monkeypatch.setattr(xdistnode.inspect, "signature", _no_signature)
     calls = []
 
@@ -73,9 +73,8 @@ def test_call_node_impl_cfunc_retries_node_only_when_kwargs_dont_bind(monkeypatc
 
 
 def test_call_node_impl_cfunc_reraises_when_impl_body_raises(monkeypatch):
-    # C-hook path where binding SUCCEEDS and the body itself raises TypeError:
-    # the impl already ran (side effects happened), so we must NOT retry — the
-    # error propagates and the body runs exactly once.
+    # C-hook path: impl(node) runs and its body raises TypeError. The error
+    # propagates and the body runs exactly once (no retry).
     monkeypatch.setattr(xdistnode.inspect, "signature", _no_signature)
     calls = []
 

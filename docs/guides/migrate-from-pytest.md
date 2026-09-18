@@ -61,6 +61,9 @@ deprecation warnings, plugin version bumps, the usual. `rstest -n 0` is
 the cheap probe: it surfaces exactly what a pytest upgrade would, with
 your installed pytest untouched. Budget the runner switch as
 "pytest upgrade first, then a one-line command change," not one step.
+[Onboarding to pytest 9.1.1](upgrade-to-pytest9.md) is the concrete
+checklist for that first step — the small set of 8→9 removals that actually
+bite, with the grep and the fix for each.
 
 ## The escape hatch
 
@@ -85,17 +88,17 @@ rstest neutralizes xdist inside its workers automatically — an `addopts =
 ## Just want to know if it's worth it?
 
 ```console
-$ rstest --try
+$ rstest try
 ```
 
 runs your suite under plain pytest and under `rstest -n auto` and tells you, in
 one shot, whether the results are identical and how much faster rstest is — the
 30-second answer before you commit to anything. If it flags differences, it
-points you at `--migrate-check` (below).
+points you at `migrate-check` (below).
 
 ## A migration checklist
 
-0. `rstest --migrate-check` — **the preflight that does the triage for you.**
+0. `rstest migrate-check` — **the preflight that does the triage for you.**
    It is the front door of the migration: run it first, fix what it names,
    and steps 2–3 below usually become a formality. See
    [The migrate-check preflight](#the-migrate-check-preflight) just below for
@@ -103,7 +106,7 @@ points you at `--migrate-check` (below).
 1. `rstest -n 0` — confirm identical results to pytest (this is the
    contract; report a bug if not).
 2. `rstest` — run parallel. Green? You're done.
-3. A few tests fail only in parallel? `--migrate-check` already classified
+3. A few tests fail only in parallel? `migrate-check` already classified
    each one and named its fix; [Parallel safety](parallel-safety.md) is the
    reference for the remedies (`@pytest.mark.serial`, `--dist loadfile`, or
    fixing the shared state).
@@ -116,7 +119,7 @@ rstest ships a Claude Code skill that runs this whole checklist for you:
 `.claude/skills/migrate-to-rstest/`. Open the rstest repo (or copy that
 directory into your own project's `.claude/skills/`) and ask Claude to
 "migrate my suite to rstest" or "parallelize my tests". It has two lanes:
-**readiness** drives `--migrate-check`, applies the right fix per verdict, and
+**readiness** drives `migrate-check`, applies the right fix per verdict, and
 wires up `[tool.rstest]` config + a CI gate; **speed** drives `--doctor` to find
 the slowest tests, wait-bound (sleep/timeout) tests, the parallel-floor gate
 test, and expensive fixtures, with the action for each. It asks before editing
@@ -124,7 +127,7 @@ your tests or CI.
 
 ## The migrate-check preflight
 
-`rstest --migrate-check` is not a test run — it is a parallel-readiness
+`rstest migrate-check` is not a test run — it is a parallel-readiness
 report. It turns the manual triage of step 3 ("a few tests fail in parallel,
 read the guide, classify each by hand") into one command. It works in two
 stages, stopping as early as it can:
@@ -179,4 +182,4 @@ tooling and trending. `--migrate-allow <substr>` accepts known findings by
 nodeid/site substring — they're still reported (marked `(allowed)`) but don't
 fail the build, so the gate goes red only on **new** issues while you work
 through the backlog. Full flag reference:
-[`--migrate-check`](../reference/cli.md#-migrate-check).
+[`migrate-check`](../reference/cli.md#migrate-check).

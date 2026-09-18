@@ -33,6 +33,8 @@ pub(super) fn run_collect_discovery(
         timeout: None,
         leakcheck: false,
         send_ids: true,
+        debug_port: None,
+        stream_output: false,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     // Item-dispatch session: its `pytest_collection_finish` emits the
@@ -61,7 +63,7 @@ pub(super) fn run_collect_discovery(
 
     // Absolute rootdir so `file` resolves to an editor-usable URI.
     let cwd = std::env::current_dir()?;
-    let rootdir = config::discover(&cwd).rootdir;
+    let rootdir = config::discover(&cwd, &mut std::io::stderr()).rootdir;
     let rootdir = if rootdir.is_absolute() {
         rootdir
     } else {

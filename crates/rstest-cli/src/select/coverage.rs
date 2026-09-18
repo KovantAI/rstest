@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::git::ChangedLines;
+use super::git::{git_stdout, ChangedLines};
 use super::graph::affected_tests;
 use super::{rule1_full_run, Selection};
 use crate::cache;
@@ -104,15 +104,10 @@ fn diff_old_side(rev: Option<&str>) -> String {
     if let Some((left, right)) = rev.split_once("...") {
         let left = if left.is_empty() { "HEAD" } else { left };
         let right = if right.is_empty() { "HEAD" } else { right };
-        if let Ok(out) = std::process::Command::new("git")
-            .args(["merge-base", left, right])
-            .output()
-        {
-            if out.status.success() {
-                let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !mb.is_empty() {
-                    return mb;
-                }
+        if let Ok(out) = git_stdout(&["merge-base", left, right]) {
+            let mb = out.trim().to_string();
+            if !mb.is_empty() {
+                return mb;
             }
         }
         // merge-base unavailable - fall back to the left side; a mismatched

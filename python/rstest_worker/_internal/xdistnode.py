@@ -46,19 +46,16 @@ def _call_node_impl(impl: Any, node: Any, **kwargs: Any) -> Any:
     positionally for positional-only params and un-introspectable C hooks."""
     params = _node_impl_params(impl)
     if params is None:
-        # No introspectable signature (builtin / C hook). Pass node
-        # positionally (C funcs often reject keywords), then retry node-only if
-        # the extra kwargs don't bind (a one-arg impl would TypeError on error=).
-        try:
-            return impl(node, **kwargs)
-        except TypeError as exc:
-            # Retry ONLY when the impl was never entered (arg-binding failure:
-            # no inner traceback frame). If the impl body itself raised, its
-            # side effects already ran, so a retry would double-execute them.
-            tb = exc.__traceback__
-            if tb is not None and tb.tb_next is not None:
-                raise
-            return impl(node)
+        # No introspectable signature (builtin / C hook). We can't tell which
+        # kwargs it accepts, and probing by call-then-retry is unsafe: a
+        # TypeError from arg-binding and one raised inside the impl body are
+        # indistinguishable without traceback introspection, which decorator /
+        # C frames make unreliable (a false "already ran" would either double-
+        # execute side effects on retry or wrongly propagate a binding error).
+        # Pass node ONLY — the universal one-arg xdist node-hook form every
+        # such hook accepts. A C hook that genuinely wants error= is
+        # vanishingly rare and simply doesn't receive it.
+        return impl(node)
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return impl(node=node, **kwargs)
     accepted = {k: v for k, v in kwargs.items() if k in params}

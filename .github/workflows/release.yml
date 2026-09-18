@@ -135,15 +135,18 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: python SBOM
         run: |
           # Inventory the runtime deps actually pulled in by installing the wheel.
+          # Every platform wheel declares the same deps, so install the one that
+          # matches this linux x86_64 runner (an arbitrary wheel like the macOS
+          # one is rejected by pip as "not a supported wheel on this platform").
           python -m venv /tmp/sbom-venv
-          /tmp/sbom-venv/bin/pip install --quiet "$(ls wheels/*.whl | head -1)"
+          /tmp/sbom-venv/bin/pip install --quiet "$(ls wheels/*manylinux*x86_64*.whl | head -1)"
           uvx --from cyclonedx-bom@4.6.1 cyclonedx-py environment /tmp/sbom-venv \
             --outfile sbom.python.cdx.json
 

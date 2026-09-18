@@ -82,6 +82,8 @@ What that means in practice:
 If your suite is *not* yet warning-clean on pytest 8.x, treat the rstest
 switch as "clear pytest deprecations first, then change one command" — the
 same upgrade you'd owe pytest itself within a release or two anyway.
+[Onboarding to pytest 9.1.1](../guides/upgrade-to-pytest9.md) is the
+step-by-step for clearing them, including the tiny 9.0.x → 9.1.1 delta.
 
 ## Measured at scale
 

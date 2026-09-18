@@ -1,9 +1,12 @@
 """e2e gate sections: dispatch."""
 
+import re
 import shutil
 import xml.etree.ElementTree as ET
 
 from _harness import (
+    CRASHMANY,
+    EACH_CRASH,
     FLAKY,
     HANG,
     LAZY_CONFTEST,
@@ -11,10 +14,14 @@ from _harness import (
     LAZY_SESSION_B,
     LF,
     MAXFAIL,
+    MAXFAIL_MANY,
     SCOPE_A,
     SCOPE_B,
     SCOPE_C,
     SERIAL,
+    SERIAL_CRASH,
+    STEAL,
+    STEAL_SMALL,
     WINDOWS,
     check,
     clear_e2e_log,
@@ -438,4 +445,173 @@ def gate_worker_timeout_watchdog(g, args, binary):
         "hung test killed and attributed",
         r.returncode == 1 and "exceeded --worker-timeout" in r.stdout and "2 passed" in r.stdout,
         r.stdout[-300:],
+    )
+
+
+def _count(stdout, word):
+    """Parse the 'N word' figure from the summary line (0 if absent). Uses the
+    LAST match so a traceback mentioning the word can't shadow the summary."""
+    matches = re.findall(rf"(\d+) {word}\b", stdout)
+    return int(matches[-1]) if matches else 0
+
+
+def gate_maxfail_bound(g, args, binary):
+    # Precision beyond gate_x_maxfail's "< 8": at -n 1 there is no second
+    # worker to overshoot, so --maxfail=K reports EXACTLY K failures and leaves
+    # the rest unrun; at -n 2 the overshoot stays bounded (never the full suite).
+    print("== maxfail bound ==")
+    g.write("mfmany/test_mf.py", MAXFAIL_MANY)
+    r = g.run("mfmany", "-n", "1", "--maxfail", "3", timeout=60)
+    check(
+        "maxfail: -n1 stops at exactly K",
+        _count(r.stdout, "failed") == 3 and r.returncode == 1,
+        r.stdout[-200:],
+    )
+    r = g.run("mfmany", "-n", "2", "--maxfail", "2", timeout=60)
+    failed = _count(r.stdout, "failed")
+    # >= maxfail (the trip), but bounded: two workers can overshoot by at most
+    # their in-flight items, never the whole 6-fail suite.
+    check(
+        "maxfail: -n2 overshoot bounded",
+        r.returncode == 1 and 2 <= failed < 6,
+        f"failed={failed} " + r.stdout[-200:],
+    )
+
+
+def gate_lazy_work_stealing(g, args, binary):
+    # One 30-item file, more workers than files. --dist load (steal ON) forces
+    # idle workers to steal from the collector's own_queue -> work spreads across
+    # >=2 workers. --dist loadfile (steal OFF) pins the whole file to its
+    # collecting worker -> exactly one worker runs it. The contrast proves both
+    # the steal branch AND its affinity guard.
+    print("== lazy work stealing ==")
+    g.write("steal/test_big.py", STEAL)
+    g.write("steal/test_small.py", STEAL_SMALL)
+    log = g.tmp / "steal_on.jsonl"
+    clear_e2e_log(log)
+    r = g.run(
+        "steal",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "--dist",
+        "load",
+        env_extra={"RSTEST_E2E_LOG": str(log)},
+        timeout=60,
+    )
+    workers_on = {row["worker"] for row in read_e2e_rows(log)}
+    check(
+        "steal ON: all 41 run and big file spreads across workers",
+        "41 passed" in r.stdout and len(workers_on) >= 2,
+        f"workers={workers_on} " + r.stdout[-150:],
+    )
+    log = g.tmp / "steal_off.jsonl"
+    clear_e2e_log(log)
+    r = g.run(
+        "steal",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "--dist",
+        "loadfile",
+        env_extra={"RSTEST_E2E_LOG": str(log)},
+        timeout=60,
+    )
+    workers_off = {row["worker"] for row in read_e2e_rows(log)}
+    check(
+        "steal OFF: affinity pins the big file to one worker",
+        "41 passed" in r.stdout and len(workers_off) == 1,
+        f"workers={workers_off} " + r.stdout[-150:],
+    )
+
+
+def gate_dist_each_crash_remnant(g, args, binary):
+    # --dist each + a crash: gw0 dies once on test_crashes_once; its replacement
+    # must run only the REMAINING item (test_other) from each_remnant, while gw1
+    # runs the full suite. Net: the crashed item fails once [gw0], the other
+    # three cells pass. Guards the each-mode remnant reseed path.
+    print("== dist each crash remnant ==")
+    g.write("eachcrash/test_ec.py", EACH_CRASH)
+    marker = g.tmp / "each_crash_marker"
+    marker.unlink(missing_ok=True)
+    r = g.run(
+        "eachcrash",
+        "-n",
+        "2",
+        "--dist",
+        "each",
+        env_extra={"CRASH_MARKER": str(marker)},
+        timeout=60,
+    )
+    # 4 cells (2 workers x 2 tests): the crashed one fails once, the other three
+    # pass -> proves gw1 ran the full suite AND gw0's replacement ran the remnant.
+    check(
+        "each+crash: 1 failed, 3 passed",
+        _count(r.stdout, "failed") == 1 and _count(r.stdout, "passed") == 3,
+        r.stdout[-250:],
+    )
+    # Only failures print their nodeid in default output; the crash is keyed to
+    # the worker that died and attributed. (Passing cells don't echo [gwN].)
+    check(
+        "each+crash: crash keyed to its worker and attributed",
+        "[gw0]" in r.stdout and "crashed while running" in r.stdout,
+        r.stdout[-400:],
+    )
+    check("each+crash: exit 1", r.returncode == 1)
+
+
+def gate_serial_after_crash(g, args, binary):
+    # A non-designate worker (gw1) crashes during the parallel phase. The
+    # designate (gw0) survives, so the serial phase must still activate once all
+    # parallel work resolves and run the serial tests exclusively, after parallel.
+    print("== serial after crash ==")
+    g.write("serialcrash/test_sc.py", SERIAL_CRASH)
+    log = g.tmp / "serial_crash.jsonl"
+    clear_e2e_log(log)
+    marker = g.tmp / "serial_crash_marker"
+    marker.unlink(missing_ok=True)
+    r = g.run(
+        "serialcrash",
+        "-n",
+        "2",
+        env_extra={"RSTEST_E2E_LOG": str(log), "CRASH_MARKER": str(marker)},
+        timeout=60,
+    )
+    check(
+        "serial-after-crash: crash attributed, others green",
+        _count(r.stdout, "failed") == 1 and "crashed while running" in r.stdout,
+        r.stdout[-250:],
+    )
+    rows = read_e2e_rows(log)
+    serial = [x for x in rows if x["name"].startswith("serial")]
+    par = [x for x in rows if x["name"].startswith("par")]
+    overlap = any(
+        s["start"] < o["end"] and o["start"] < s["end"] for s in serial for o in rows if o is not s
+    )
+    check(
+        "serial-after-crash: both serial ran, exclusive, on one worker",
+        len(serial) == 2 and not overlap and len({s["worker"] for s in serial}) == 1,
+        f"serial={serial}",
+    )
+    check(
+        "serial-after-crash: serial runs after all parallel",
+        bool(serial)
+        and bool(par)
+        and min(s["start"] for s in serial) >= max(p["end"] for p in par),
+    )
+
+
+def gate_crash_restart_exhaustion(g, args, binary):
+    # Ten crashers, restart budget is n.max(4)=4. Once the budget is spent a
+    # further crash is non-restartable: the worker is recorded as an internal
+    # error (pytest exit 3), not respawned. Guards the else (give-up) crash arm.
+    print("== crash restart exhaustion ==")
+    g.write("crashmany/test_cm.py", CRASHMANY)
+    r = g.run("crashmany", "-n", "2", timeout=90)
+    check(
+        "restart budget exhausts -> internal error exit 3",
+        r.returncode == 3 and "terminated unexpectedly" in (r.stdout + r.stderr),
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
     )

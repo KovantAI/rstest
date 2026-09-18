@@ -77,7 +77,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       # Mirrors cargo-deny's advisories check for the Python side: audit the
       # LOCKED runtime dependency tree (from uv.lock) against the PyPI/OSV
@@ -124,7 +124,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - name: uv lock --check
         run: uv lock --check
@@ -141,6 +141,10 @@ jobs:
       - name: worker unit tests (with coverage)
         run: uvx --with msgpack --with coverage --with pytest-cov pytest python/tests --cov --cov-report=xml
 
+      # corpus gate-classification tests: pure logic, no venvs/network needed.
+      - name: corpus bench unit tests
+        run: uvx --python 3.13 --with pytest pytest corpus/test_bench.py
+
       - name: upload python coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
@@ -148,6 +152,83 @@ jobs:
           flags: python
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  python-compat:
+    name: python compat (${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # The interpreter the whole compat check runs under. gate.py builds its own
+      # venv from sys.executable (find_python), and pytest below runs directly,
+      # so this version is what actually exercises the worker end to end.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: build
+        run: cargo build --release
+
+      # e2e gate: drives the built binary, which spawns the worker under this
+      # python. The real cross-version compatibility signal.
+      - name: test gate
+        run: python e2e/gate.py --binary target/release/rstest
+
+      # Worker unit tests under the matrix interpreter (pure-python helpers).
+      - name: worker unit tests
+        run: |
+          python -m pip install -q msgpack coverage pytest pytest-cov
+          python -m pytest python/tests
+
+  # Service-backed plugin gates: the three top-50 plugins that need an external
+  # resource (postgres, a playwright browser, the Home Assistant stack) and so
+  # self-skip in the plain `python e2e/gate.py` run above. Provisioned and run
+  # here, gated on RSTEST_GATE_SERVICES=1. Kept off the python-compat matrix so
+  # the heavy setup runs once, not per interpreter.
+  plugin-services:
+    name: plugin gates (services)
+    runs-on: ubuntu-latest
+    env:
+      RSTEST_GATE_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # postgres binaries (initdb/pg_ctl) for pytest-postgresql's postgresql_proc;
+      # ubuntu ships them under /usr/lib/postgresql/<ver>/bin — put that on PATH.
+      - name: install postgres
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql
+          echo "$(ls -d /usr/lib/postgresql/*/bin | head -1)" >> "$GITHUB_PATH"
+
+      - name: build
+        run: cargo build --release
+
+      # Each service gate provisions the rest of what it needs into its own venv
+      # (pytest-postgresql + psycopg, pytest-playwright + `playwright install
+      # chromium`, the Home Assistant test stack) and self-skips if provisioning
+      # fails, so a red here is a real regression, not a flaky download.
+      - name: postgresql / playwright / homeassistant gates
+        run: |
+          python e2e/gate.py --binary target/release/rstest --only pytest_postgresql
+          python e2e/gate.py --binary target/release/rstest --only pytest_playwright
+          python e2e/gate.py --binary target/release/rstest --only pytest_homeassistant
 
   wheel:
     name: wheel builds (${{ matrix.os }})
@@ -212,7 +293,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2.87.5
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
         with:
           tool: cargo-llvm-cov
 

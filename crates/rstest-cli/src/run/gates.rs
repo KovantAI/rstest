@@ -7,13 +7,14 @@
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::{PostRun, RunConfig};
 use crate::cli::Cli;
 use crate::reporting::ci::{
     buildkite_flaky_annotate, print_azure_annotations, print_github_annotations,
 };
+use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, html, junit, progress, report, status};
 use crate::scheduling::{durations, pool, proto, worker};
 use crate::{cache, coverage_skip, doctor, incremental, remote, select};
@@ -71,7 +72,7 @@ fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bo
 /// (-s/--pdb/--co): those run a single interactive session with no doctor
 /// instrumentation, so the gate would silently pass. Fires only when a gate is
 /// set AND the run is passthrough.
-fn warn_doctor_gate_passthrough(w: &mut impl Write, gate_empty: bool, passthrough: bool) {
+fn warn_doctor_gate_passthrough(w: &mut dyn Write, gate_empty: bool, passthrough: bool) {
     if !gate_empty && passthrough {
         let _ = writeln!(
             w,
@@ -94,7 +95,7 @@ fn validate_regress_ratio(ratio: f64) -> Result<()> {
 /// `status` is `Ok(success)` once the child exited, `Err(msg)` if it never ran.
 /// A covtool failure only turns an otherwise-green run red; it never lowers a
 /// non-zero status. A spawn error warns (to `w`) but doesn't fail the run.
-fn reconcile_cov_status(w: &mut impl Write, status: Result<bool, String>, exitstatus: i32) -> i32 {
+fn reconcile_cov_status(w: &mut dyn Write, status: Result<bool, String>, exitstatus: i32) -> i32 {
     match status {
         Ok(false) if exitstatus == 0 => 1,
         Ok(_) => exitstatus,
@@ -105,10 +106,95 @@ fn reconcile_cov_status(w: &mut impl Write, status: Result<bool, String>, exitst
     }
 }
 
+/// Decide the `--cov-diff-fail-under` outcome from covtool's scored diff
+/// coverage. `pct` is the covered-added-lines percentage covtool wrote, or
+/// `None` when there was no result to read (nothing scored / covtool produced
+/// no output). Returns the (possibly raised) exit status and the message to
+/// warn. Like the other gates, it only turns a green run red — never lowers a
+/// non-zero status.
+fn diff_cov_gate(pct: Option<f64>, threshold: f64, exitstatus: i32) -> (i32, String) {
+    match pct {
+        // The 1e-9 slop keeps a value that rounds to the threshold from failing.
+        Some(p) if p + 1e-9 < threshold => (
+            if exitstatus == 0 { 1 } else { exitstatus },
+            format!("rstest: --cov-diff-fail-under: diff coverage {p:.1}% is below {threshold}%"),
+        ),
+        Some(p) => (
+            exitstatus,
+            format!("rstest: --cov-diff-fail-under: diff coverage {p:.1}% meets {threshold}%"),
+        ),
+        None => (
+            exitstatus,
+            "rstest: --cov-diff-fail-under: no added executable lines to score \
+             (nothing changed, or the changed files aren't under --cov)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Prepare covtool's diff-coverage inputs: on the changed-lines map, write the
+/// POSIX-normalized `{path: [lines]}` to a temp file and return that path plus
+/// the path covtool will score into. On a git error, warn (to `w`) and return
+/// `None` so the run continues without the diff gate.
+fn build_diff_lines(
+    w: &mut dyn Write,
+    changed: Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u32>>>,
+) -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+    match changed {
+        Ok(map) => {
+            let pid = std::process::id();
+            let lines_path = std::env::temp_dir().join(format!("rstest-difflines-{pid}.json"));
+            let out_path = std::env::temp_dir().join(format!("rstest-diffcov-{pid}.json"));
+            // JSON object keys are strings; POSIX-normalize the paths.
+            let smap: std::collections::BTreeMap<String, Vec<u32>> = map
+                .into_iter()
+                .map(|(k, v)| (k.to_string_lossy().replace('\\', "/"), v))
+                .collect();
+            let _ = std::fs::write(&lines_path, serde_json::to_vec(&smap)?);
+            Ok(Some((lines_path, out_path)))
+        }
+        Err(e) => {
+            let _ = writeln!(w, "rstest: --cov-diff-fail-under: {e}");
+            Ok(None)
+        }
+    }
+}
+
+/// Apply the diff-coverage gate: read covtool's scored percentage from `out_path`,
+/// gate it against `threshold`, warn the verdict (to `w`), and return the
+/// (possibly raised) exit status. A missing/unreadable result scores as `None`,
+/// which `diff_cov_gate` reports without failing.
+fn apply_diff_cov_gate(
+    w: &mut dyn Write,
+    out_path: &std::path::Path,
+    threshold: f64,
+    exitstatus: i32,
+) -> i32 {
+    let pct = std::fs::read(out_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("pct").and_then(|p| p.as_f64()));
+    let (status, msg) = diff_cov_gate(pct, threshold, exitstatus);
+    let _ = writeln!(w, "{msg}");
+    status
+}
+
+/// Copy covtool's scored result at `src` to the `--cov-diff-json` `dst`. A copy
+/// failure warns (to `w`) but never gates — the run's verdict already stands.
+fn copy_diff_cov_json(w: &mut dyn Write, src: &std::path::Path, dst: &std::path::Path) {
+    if let Err(e) = std::fs::copy(src, dst) {
+        let _ = writeln!(
+            w,
+            "rstest: could not write --cov-diff-json {}: {e}",
+            dst.display()
+        );
+    }
+}
+
 /// Report a `--cache-push` outcome (to `w`): a success line with the segment's
 /// counts, or a warning on failure. A push failure never fails an otherwise-green
 /// run — it is reported, not gated.
-fn report_push_result(w: &mut impl Write, result: Result<()>, seg: &remote::Segment, remote: &str) {
+fn report_push_result(w: &mut dyn Write, result: Result<()>, seg: &remote::Segment, remote: &str) {
     match result {
         Ok(()) => {
             let _ = writeln!(
@@ -122,6 +208,91 @@ fn report_push_result(w: &mut impl Write, result: Result<()>, seg: &remote::Segm
         Err(e) => {
             let _ = writeln!(w, "rstest: cache: push failed: {e:#}");
         }
+    }
+}
+
+/// Resolve the auto-compaction threshold: the `--cache-compact-threshold` flag,
+/// else `RSTEST_CACHE_COMPACT_THRESHOLD`, else `None` (feature off). An
+/// unparseable env is an `Err`, never a silent `None` — matching
+/// [`super::resolve_retention_policy`], so a typo'd threshold is surfaced (as a
+/// non-fatal warning on the best-effort push path) rather than quietly
+/// disabling auto-compaction.
+fn resolve_compact_threshold(cli: &Cli) -> Result<Option<usize>> {
+    if let Some(n) = cli.cache_compact_threshold {
+        return Ok(Some(n));
+    }
+    match std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD") {
+        Ok(s) if !s.is_empty() => {
+            Ok(Some(s.parse::<usize>().with_context(|| {
+                format!("invalid RSTEST_CACHE_COMPACT_THRESHOLD {s:?}")
+            })?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Opt-in auto-compaction: after a successful push, if the remote holds more
+/// than the threshold loose segments, fold per the env retention window inline.
+/// Strictly best-effort — every failure warns and never fails an otherwise-green
+/// run. Concurrent auto-compactions don't lose data: `compact_remote_with`
+/// gates its deletes on the persisted base's absorbed set, so a race at worst
+/// leaves a lingering segment (which `absorbed` de-dupes), never a deleted one.
+fn maybe_auto_compact(cli: &Cli, t: &dyn remote::Transport, remote: &str, sink: &mut Sink) {
+    let threshold = match resolve_compact_threshold(cli) {
+        Ok(Some(t)) => t,
+        Ok(None) => return,
+        Err(e) => {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact skipped (bad threshold): {e:#}"
+            ));
+            return;
+        }
+    };
+    let count = match t.list_segment_ids() {
+        Ok(ids) => ids.len(),
+        Err(e) => {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact: listing failed (non-fatal): {e:#}"
+            ));
+            return;
+        }
+    };
+    if count <= threshold {
+        return;
+    }
+    // Retention window comes from env on the push path (no per-run flags).
+    let policy = match super::resolve_retention_policy(None, None) {
+        Ok(p) => p,
+        Err(e) => {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact skipped (bad retention env): {e:#}"
+            ));
+            return;
+        }
+    };
+    // A keep-last window at or above the threshold pins the loose set above it,
+    // so compaction would fold nothing yet re-list/re-read/re-write the base on
+    // every push. Skip rather than thrash; the window itself already bounds the
+    // set. (max_age can still thrash under a high enough push rate — that's a
+    // genuinely too-small threshold, left to the operator.)
+    if let Some(keep) = policy.keep_last {
+        if keep >= threshold {
+            sink.warn(&format!(
+                "rstest: cache: auto-compact skipped: keep-last window ({keep}) >= threshold \
+                 ({threshold}); the loose set can't drop below the window, so this would run \
+                 every push. Raise --cache-compact-threshold above the retention window."
+            ));
+            return;
+        }
+    }
+    match remote::compact_remote_with(t, sink, crate::time::now_epoch_secs(), &policy) {
+        Ok((folded, retained)) => sink.warn(&format!(
+            "rstest: cache: auto-compacted {folded} segment(s) into base at {remote} \
+             ({retained} retained; threshold {threshold})"
+        )),
+        Err(e) => sink.warn(&format!(
+            "rstest: cache: auto-compact failed (non-fatal): {e:#}"
+        )),
     }
 }
 
@@ -158,7 +329,7 @@ fn results_bar_line(
 
 /// TeamCity flaky service messages (to `w`), one per flaky test; nothing when no
 /// test needed a rerun.
-fn write_teamcity_flaky(w: &mut impl Write, flaky: &[(String, u32)]) {
+fn write_teamcity_flaky(w: &mut dyn Write, flaky: &[(String, u32)]) {
     let msgs = progress::teamcity_flaky_messages(flaky);
     if !msgs.is_empty() {
         let _ = writeln!(w, "{msgs}");
@@ -177,11 +348,11 @@ pub(super) fn run_post_gates(
     outcome: &mut pool::PoolOutcome,
     args: &[String],
     post: &PostRun,
+    sink: &mut Sink,
 ) -> Result<i32> {
     let RunConfig {
         n,
         passthrough,
-        palette,
         mode,
         doctor,
         ref doctor_gate,
@@ -190,6 +361,7 @@ pub(super) fn run_post_gates(
         ref scope,
         ..
     } = *cfg;
+    let palette = sink.palette();
     let PostRun {
         start,
         started_epoch,
@@ -206,7 +378,7 @@ pub(super) fn run_post_gates(
     } = *post;
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
-    warn_doctor_gate_passthrough(&mut std::io::stderr(), doctor_gate.is_empty(), passthrough);
+    warn_doctor_gate_passthrough(sink.err(), doctor_gate.is_empty(), passthrough);
     let mut doctor_gate_failed = false;
     if (cli.doctor
         || cli.doctor_json.is_some()
@@ -223,7 +395,7 @@ pub(super) fn run_post_gates(
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {
-            doctor::render(&report);
+            doctor::render(sink, &report);
         }
         if let Some(path) = &cli.doctor_json {
             doctor::write_json(path, &report)?;
@@ -231,27 +403,27 @@ pub(super) fn run_post_gates(
         if let Some(path) = &cli.doctor_md {
             doctor::write_markdown(path, &report)?;
         }
-        doctor::append_ci_summary(&report)?;
+        doctor::append_ci_summary(sink, &report)?;
         if !doctor_gate.is_empty() {
             let gate = doctor::evaluate(&report, doctor_gate);
             for s in &gate.skipped {
-                eprintln!("rstest: --doctor-fail-on: {s}");
+                sink.warn(&format!("rstest: --doctor-fail-on: {s}"));
             }
             if gate.breaches.is_empty() {
-                eprintln!(
+                sink.warn(&format!(
                     "rstest: --doctor-fail-on: all {} condition(s) passed",
                     doctor_gate.len()
-                );
+                ));
             } else {
                 // stderr, not stdout: --output json/tap keep stdout a pure
                 // machine stream, and the failure block must not corrupt it
                 // (same reason the human doctor render is gated above).
-                eprintln!(
+                sink.warn(&format!(
                     "\n{}",
                     palette.bold_red("=========== doctor gate failures ===========")
-                );
+                ));
                 for b in &gate.breaches {
-                    eprintln!("  {b}");
+                    sink.warn(&format!("  {b}"));
                 }
                 doctor_gate_failed = true;
             }
@@ -283,23 +455,25 @@ pub(super) fn run_post_gates(
         validate_regress_ratio(ratio)?;
         let baseline = durations::load();
         if baseline.is_empty() {
-            eprintln!(
+            sink.warn(
                 "rstest: --durations-regress: no duration baseline yet \
-                 (.rstest_cache/durations.json); comparison skipped"
+                 (.rstest_cache/durations.json); comparison skipped",
             );
         } else {
             let rows = durations::regressions(&outcome.run, &baseline, ratio);
             if rows.is_empty() {
-                eprintln!("rstest: --durations-regress: no regressions (>= {ratio}x baseline)");
+                sink.warn(&format!(
+                    "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
+                ));
             } else {
-                println!(
+                sink.out_line(&format!(
                     "\n{}",
                     palette.bold_red(&format!(
                         "=========== duration regressions (>= {ratio}x baseline) ==========="
                     ))
-                );
+                ));
                 for (nodeid, old, new) in &rows {
-                    println!("  {old:7.2}s -> {new:7.2}s  {nodeid}");
+                    sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
                 }
                 duration_regressions = rows.len();
             }
@@ -319,26 +493,62 @@ pub(super) fn run_post_gates(
     // Runs BEFORE the cache-push below so this run's coverage-index slice is
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
-    if !passthrough && args.iter().any(|a| a == "--cov" || a.starts_with("--cov=")) {
-        println!();
-        let status = std::process::Command::new(python)
-            .args(["-m", "rstest_worker.covtool"])
+    let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
+    let want_diff = cli.cov_diff_fail_under.is_some() || cli.cov_diff_json.is_some();
+    if want_diff && !has_cov && !passthrough {
+        sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
+    }
+    if !passthrough && has_cov {
+        sink.out_line("");
+        // Diff-coverage gate: hand covtool the diff's added lines + a result
+        // path when --cov-diff-fail-under is set; covtool scores them and we
+        // gate on the percentage below.
+        let diff_paths = if want_diff {
+            let base = super::resolve_changed_base(cli, sink)?;
+            build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))?
+        } else {
+            None
+        };
+
+        let mut cmd = std::process::Command::new(python);
+        cmd.args(["-m", "rstest_worker.covtool"])
             .args(args)
             .env("PYTHONPATH", worker::worker_pythonpath())
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir())
-            .status();
+            .env("RSTEST_CACHE", cache::dir());
+        if let Some((lp, op)) = &diff_paths {
+            cmd.arg("--rstest-diff-lines")
+                .arg(lp)
+                .arg("--rstest-diff-out")
+                .arg(op);
+        }
         exitstatus = reconcile_cov_status(
-            &mut std::io::stderr(),
-            status.map(|s| s.success()).map_err(|e| e.to_string()),
+            sink.err(),
+            cmd.status().map(|s| s.success()).map_err(|e| e.to_string()),
             exitstatus,
         );
+
+        if let Some((lp, op)) = diff_paths {
+            if let Some(threshold) = cli.cov_diff_fail_under {
+                exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
+            }
+            if let Some(dst) = &cli.cov_diff_json {
+                copy_diff_cov_json(sink.err(), &op, dst);
+            }
+            let _ = std::fs::remove_file(&lp);
+            let _ = std::fs::remove_file(&op);
+        }
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
         durations::save(&outcome.run);
+        // Whole-suite wall (fixtures included) for the monorepo planner: a
+        // fixture-bound project has near-zero call time in durations.json but
+        // real elapsed cost here, so weighting by call time alone starves it
+        // to one worker on the warm run. See `mono::project_cost`.
+        durations::save_wall(start.elapsed().as_secs_f64());
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);
@@ -358,8 +568,19 @@ pub(super) fn run_post_gates(
                 &outcome.run,
                 cov,
             );
-            let result = remote::transport_for(remote).and_then(|t| remote::push(t.as_ref(), &seg));
-            report_push_result(&mut std::io::stderr(), result, &seg, remote);
+            // Build the transport once and reuse it for an optional inline
+            // auto-compaction after a successful push.
+            match remote::transport_for(remote) {
+                Ok(t) => {
+                    let result = remote::push(t.as_ref(), &seg);
+                    let pushed = result.is_ok();
+                    report_push_result(sink.err(), result, &seg, remote);
+                    if pushed {
+                        maybe_auto_compact(cli, t.as_ref(), remote, sink);
+                    }
+                }
+                Err(e) => report_push_result(sink.err(), Err(e), &seg, remote),
+            }
         }
     }
     write_report_json(
@@ -368,16 +589,16 @@ pub(super) fn run_post_gates(
         &build_run_meta(start, outcome.exitstatus, started_epoch, n),
     )?;
     if duration_regressions > 0 {
-        eprintln!(
+        sink.warn(&format!(
             "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
             if duration_regressions > 1 { "s" } else { "" }
-        );
+        ));
         if exitstatus == 0 {
             exitstatus = 1;
         }
     }
     if doctor_gate_failed {
-        eprintln!("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
+        sink.warn("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
         if exitstatus == 0 {
             exitstatus = 1;
         }
@@ -421,9 +642,9 @@ pub(super) fn run_post_gates(
         // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
         // deltas are measured. Warn instead of silently exiting 0 (matches the
         // --quarantine passthrough behavior).
-        eprintln!(
+        sink.warn(
             "rstest: --fail-on-leak has no effect in passthrough mode \
-             (-s/--pdb/--co); ignoring"
+             (-s/--pdb/--co); ignoring",
         );
     } else if cli.fail_on_leak {
         let leaks = doctor::detect_leaks(&outcome.run);
@@ -431,26 +652,26 @@ pub(super) fn run_post_gates(
             // Note the blind spot: the first test each worker runs is an
             // unchecked warm-up (first-touch imports aren't a per-test leak),
             // so a clean gate does not prove those tests are leak-free.
-            eprintln!(
+            sink.warn(
                 "rstest: --fail-on-leak: no thread/fd leaks detected \
-                 (first test per worker runs as an unchecked warm-up)"
+                 (first test per worker runs as an unchecked warm-up)",
             );
         } else {
             // Under --doctor the RESOURCE LEAKS section already listed these;
             // only gate + summarize here to avoid printing the table twice.
             if !doctor {
-                eprintln!(
+                sink.warn(&format!(
                     "\n{}",
                     palette.bold_red("=========== resource leaks ===========")
-                );
+                ));
                 for l in leaks.iter().take(20) {
-                    eprintln!("  {}  {}", doctor::leak_delta(l), l.nodeid);
+                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.nodeid));
                 }
             }
-            eprintln!(
+            sink.warn(&format!(
                 "rstest: --fail-on-leak: {} test(s) leaked threads/fds",
                 leaks.len()
-            );
+            ));
             if exitstatus == 0 {
                 exitstatus = 1;
             }
@@ -463,32 +684,46 @@ pub(super) fn finalize_output(
     outcome: &mut pool::PoolOutcome,
     passthrough: bool,
     mode: progress::Mode,
-    palette: color::Palette,
     durations: Option<(usize, f64)>,
     very_verbose: bool,
     start: Instant,
+    sink: &mut Sink,
 ) {
+    let palette = sink.palette();
     // Loaded before this run's events are recorded, so the history
     // annotations say "before this run".
     let flake_history = flakes::load();
-    if !passthrough && mode == progress::Mode::Json {
-        // Pure NDJSON: close the stream with a session-finish envelope
-        // (counts + duration + exit status). No human summary/failures.
-        outcome.prog.finish();
+    // Close the `--stream-json` side channel (if any) with the same
+    // `sessionfinish` envelope shape as `--output json`, in every human output
+    // mode. No-op under passthrough (no aggregate run) and when no stream is
+    // attached. The Json branch below writes its own copy to stdout.
+    if !passthrough {
         let envelope = serde_json::json!({
             "event": "sessionfinish",
             "exitstatus": outcome.exitstatus,
             "duration": (start.elapsed().as_secs_f64() * 100.0).round() / 100.0,
             "counts": outcome.run.counts(),
         });
-        println!("{envelope}");
+        sink.emit_event(envelope);
+    }
+    if !passthrough && mode == progress::Mode::Json {
+        // Pure NDJSON: close the stream with a session-finish envelope
+        // (counts + duration + exit status). No human summary/failures.
+        outcome.prog.finish(sink);
+        let envelope = serde_json::json!({
+            "event": "sessionfinish",
+            "exitstatus": outcome.exitstatus,
+            "duration": (start.elapsed().as_secs_f64() * 100.0).round() / 100.0,
+            "counts": outcome.run.counts(),
+        });
+        sink.out_line(&envelope.to_string());
     } else if !passthrough && mode == progress::Mode::Tap {
         // Pure TAP: close the stream with the trailing plan. Failure text
         // already rode along as `#` diagnostics; no human summary.
-        outcome.prog.finish();
-        outcome.prog.tap_plan();
+        outcome.prog.finish(sink);
+        outcome.prog.tap_plan(sink);
     } else if !passthrough {
-        outcome.prog.finish();
+        outcome.prog.finish(sink);
         let wrap = match mode {
             progress::Mode::Gitlab => report::FailureWrap::GitlabSection,
             progress::Mode::Buildkite => report::FailureWrap::BuildkiteGroup,
@@ -497,15 +732,13 @@ pub(super) fn finalize_output(
         // Bar mode already inlines each failure as it happens; re-printing
         // the batched block would duplicate it.
         if mode != progress::Mode::Bar {
-            outcome.run.print_failures(&palette, wrap);
+            outcome.run.print_failures(sink, wrap);
         }
-        outcome.run.print_quarantined(&palette, &flake_history);
-        outcome.run.print_flaky(&palette, &flake_history, wrap);
-        print_warnings_summary(&mut std::io::stdout(), &outcome.warnings, &palette);
+        outcome.run.print_quarantined(sink, &flake_history);
+        outcome.run.print_flaky(sink, &flake_history, wrap);
+        print_warnings_summary(sink.out(), &outcome.warnings, &palette);
         if let Some((dn, dmin)) = durations {
-            outcome
-                .run
-                .print_durations(dn, dmin, very_verbose, &palette);
+            outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
         let warn_part = if warn_total > 0 {
@@ -518,12 +751,10 @@ pub(super) fn finalize_output(
         // the stable summary line (which tooling/CI greps, so keep it intact).
         // The bar gives its own visual break; other modes get a blank line.
         if mode == progress::Mode::Bar && std::io::stdout().is_terminal() {
-            println!(
-                "{}",
-                results_bar_line(&outcome.run.counts(), elapsed, &palette)
-            );
+            let line = results_bar_line(&outcome.run.counts(), elapsed, &palette);
+            sink.out_line(&line);
         } else {
-            println!();
+            sink.out_line("");
         }
         let cached = outcome.run.cached_count();
         let cached_note = if cached > 0 {
@@ -540,17 +771,15 @@ pub(super) fn finalize_output(
         } else {
             palette.red(&summary)
         };
-        println!("{summary}");
+        sink.out_line(&summary);
         // CI-native surfaces emitted from the aggregate at end-of-run. Failures
         // already rode along above, so these add each platform's flake signal
         // (GitHub/Azure annotations here; TeamCity as live service messages).
         match mode {
-            progress::Mode::Github => print_github_annotations(&outcome.run),
-            progress::Mode::Azure => print_azure_annotations(&outcome.run),
-            progress::Mode::Buildkite => buildkite_flaky_annotate(&outcome.run),
-            progress::Mode::Teamcity => {
-                write_teamcity_flaky(&mut std::io::stdout(), &outcome.run.flaky)
-            }
+            progress::Mode::Github => print_github_annotations(sink, &outcome.run),
+            progress::Mode::Azure => print_azure_annotations(sink, &outcome.run),
+            progress::Mode::Buildkite => buildkite_flaky_annotate(sink, &outcome.run),
+            progress::Mode::Teamcity => write_teamcity_flaky(sink.out(), &outcome.run.flaky),
             _ => {}
         }
     }
@@ -576,7 +805,7 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
 /// Writes to `w` (stdout at the call site) so the merge/plural formatting is
 /// unit-testable.
 fn print_warnings_summary(
-    w: &mut impl Write,
+    w: &mut dyn Write,
     warnings: &[proto::WarningEntry],
     palette: &color::Palette,
 ) {
@@ -620,7 +849,10 @@ fn print_warnings_summary(
 
 /// Compile the --quarantine file into one matcher: exact nodeids or `*`
 /// globs, one per line, `#` comments and blanks skipped.
-pub(super) fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexSet> {
+pub(super) fn quarantine_matcher(
+    path: &std::path::Path,
+    sink: &mut Sink,
+) -> Result<regex::RegexSet> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
     let patterns: Vec<String> = text
@@ -638,7 +870,10 @@ pub(super) fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexS
         })
         .collect();
     if patterns.is_empty() {
-        eprintln!("rstest: --quarantine: {} lists no patterns", path.display());
+        sink.warn(&format!(
+            "rstest: --quarantine: {} lists no patterns",
+            path.display()
+        ));
     }
     Ok(regex::RegexSet::new(patterns)?)
 }
@@ -646,15 +881,30 @@ pub(super) fn quarantine_matcher(path: &std::path::Path) -> Result<regex::RegexS
 #[cfg(test)]
 mod tests {
     use super::{
-        build_run_meta, merge_fixtures, merged_lastfailed, print_warnings_summary,
-        quarantine_matcher, reconcile_cov_status, report_push_result, results_bar_line,
-        validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
-        write_teamcity_flaky,
+        apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, diff_cov_gate,
+        finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
+        print_warnings_summary, quarantine_matcher, reconcile_cov_status, report_push_result,
+        resolve_compact_threshold, results_bar_line, validate_regress_ratio,
+        warn_doctor_gate_passthrough, write_report_json, write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
+    use crate::reporting::progress;
     use crate::reporting::report::Run;
+    use crate::reporting::sink::Sink;
+    use crate::scheduling::pool;
     use crate::scheduling::proto::{FixtureStat, WarningEntry};
     use std::time::Instant;
+
+    /// Serializes tests that read or mutate the process-global
+    /// `RSTEST_CACHE_*` env, so a concurrent test can't observe another's
+    /// temporary value (the auto-compact retention path reads env directly).
+    /// Shares the crate-wide lock so it also serializes against the
+    /// `run_cache_compact` tests in the parent module, which touch the same env.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::select::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     // Color-disabled palette: deterministic strings, no tty/env dependence.
     fn plain_palette() -> Palette {
@@ -766,7 +1016,7 @@ mod tests {
             "mixed",
             "# a comment\n\ntest_foo.py::test_a\ntest_bar.py::*\n",
         );
-        let set = quarantine_matcher(&path).unwrap();
+        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
         assert_eq!(set.len(), 2); // comment + blank line skipped
         assert!(set.is_match("test_foo.py::test_a")); // exact
         assert!(!set.is_match("test_foo.py::test_ab")); // anchored: no substring match
@@ -778,7 +1028,7 @@ mod tests {
     #[test]
     fn quarantine_matcher_empty_when_only_comments() {
         let path = write_quarantine("empty", "# nothing here\n\n");
-        let set = quarantine_matcher(&path).unwrap();
+        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
         assert_eq!(set.len(), 0);
         assert!(!set.is_match("test_foo.py::test_a"));
         std::fs::remove_file(&path).ok();
@@ -787,7 +1037,7 @@ mod tests {
     #[test]
     fn quarantine_matcher_errors_on_missing_file() {
         let path = std::env::temp_dir().join("rstest-quarantine-does-not-exist-xyz.txt");
-        assert!(quarantine_matcher(&path).is_err());
+        assert!(quarantine_matcher(&path, &mut Sink::captured().0).is_err());
     }
 
     #[test]
@@ -834,6 +1084,122 @@ mod tests {
         assert!(utf8(buf).contains("coverage reporting failed to run: no python"));
     }
 
+    #[test]
+    fn diff_cov_gate_fails_a_green_run_below_threshold() {
+        let (status, msg) = diff_cov_gate(Some(50.0), 80.0, 0);
+        assert_eq!(status, 1);
+        assert!(msg.contains("diff coverage 50.0% is below 80%"), "{msg}");
+    }
+
+    #[test]
+    fn diff_cov_gate_never_lowers_a_red_run() {
+        // Already-failed run stays failed even when the diff meets the bar.
+        let (status, msg) = diff_cov_gate(Some(100.0), 80.0, 2);
+        assert_eq!(status, 2);
+        assert!(msg.contains("meets 80%"), "{msg}");
+        // And a below-threshold diff can't turn a red run into a 1.
+        let (status, _) = diff_cov_gate(Some(10.0), 80.0, 2);
+        assert_eq!(status, 2);
+    }
+
+    #[test]
+    fn diff_cov_gate_meets_threshold_passes() {
+        let (status, msg) = diff_cov_gate(Some(80.0), 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(msg.contains("meets 80%"), "{msg}");
+        // Exactly-at with float slop (e.g. 79.9999996) still counts as meeting.
+        let (status, _) = diff_cov_gate(Some(80.0 - 1e-10), 80.0, 0);
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn build_diff_lines_warns_and_yields_none_on_git_error() {
+        let mut buf = Vec::new();
+        let out = build_diff_lines(&mut buf, Err(anyhow::anyhow!("bad rev"))).unwrap();
+        assert!(out.is_none());
+        assert!(utf8(buf).contains("--cov-diff-fail-under: bad rev"));
+    }
+
+    #[test]
+    fn build_diff_lines_writes_normalized_map_on_ok() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(std::path::PathBuf::from("pkg/mod.py"), vec![1u32, 2]);
+        let mut buf = Vec::new();
+        let (lines_path, out_path) = build_diff_lines(&mut buf, Ok(map)).unwrap().unwrap();
+        assert!(buf.is_empty());
+        let written = std::fs::read(&lines_path).unwrap();
+        let smap: std::collections::BTreeMap<String, Vec<u32>> =
+            serde_json::from_slice(&written).unwrap();
+        assert_eq!(smap.get("pkg/mod.py"), Some(&vec![1, 2]));
+        // out_path is only a name for covtool to fill; it must not exist yet.
+        assert!(!out_path.exists());
+        std::fs::remove_file(&lines_path).ok();
+    }
+
+    #[test]
+    fn apply_diff_cov_gate_reads_pct_and_warns() {
+        let path =
+            std::env::temp_dir().join(format!("rstest-diffcov-test-{}.json", std::process::id()));
+        std::fs::write(&path, br#"{"pct": 40.0}"#).unwrap();
+        let mut buf = Vec::new();
+        // 40% below an 80% bar fails a green run.
+        let status = apply_diff_cov_gate(&mut buf, &path, 80.0, 0);
+        assert_eq!(status, 1);
+        assert!(utf8(buf).contains("diff coverage 40.0% is below 80%"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn apply_diff_cov_gate_missing_file_scores_none() {
+        let path = std::env::temp_dir().join(format!(
+            "rstest-diffcov-missing-{}.json",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let mut buf = Vec::new();
+        // No result file => None pct => reported, never failed.
+        let status = apply_diff_cov_gate(&mut buf, &path, 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(utf8(buf).contains("no added executable lines to score"));
+    }
+
+    #[test]
+    fn copy_diff_cov_json_copies_result_to_dst() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("rstest-diffcov-src-{}.json", std::process::id()));
+        let dst = dir.join(format!("rstest-diffcov-dst-{}.json", std::process::id()));
+        std::fs::write(&src, br#"{"pct": 90.0}"#).unwrap();
+        std::fs::remove_file(&dst).ok();
+        let mut buf = Vec::new();
+        copy_diff_cov_json(&mut buf, &src, &dst);
+        // Success is silent; the destination now holds the scored result.
+        assert!(utf8(buf).is_empty());
+        assert_eq!(std::fs::read(&dst).unwrap(), br#"{"pct": 90.0}"#);
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[test]
+    fn copy_diff_cov_json_missing_src_warns() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("rstest-diffcov-nosrc-{}.json", std::process::id()));
+        let dst = dir.join(format!("rstest-diffcov-nodst-{}.json", std::process::id()));
+        // No source => copy errors => warn, never gate.
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+        let mut buf = Vec::new();
+        copy_diff_cov_json(&mut buf, &src, &dst);
+        assert!(utf8(buf).contains("could not write --cov-diff-json"));
+        assert!(!dst.exists());
+    }
+
+    #[test]
+    fn diff_cov_gate_none_reports_nothing_scored_without_failing() {
+        let (status, msg) = diff_cov_gate(None, 80.0, 0);
+        assert_eq!(status, 0);
+        assert!(msg.contains("no added executable lines to score"), "{msg}");
+    }
+
     fn segment(durations: usize, events: usize) -> crate::remote::Segment {
         use crate::remote::{FlakeEvent, FlakeKind, Segment};
         Segment {
@@ -871,6 +1237,264 @@ mod tests {
     }
 
     #[test]
+    fn resolve_compact_threshold_flag_then_env() {
+        let _g = env_guard();
+        use crate::cli::Cli;
+        use clap::Parser;
+        let mut cli = Cli::parse_from(["rstest"]);
+        assert_eq!(resolve_compact_threshold(&cli).unwrap(), None);
+        cli.cache_compact_threshold = Some(7);
+        assert_eq!(resolve_compact_threshold(&cli).unwrap(), Some(7)); // flag wins
+
+        let mut cli2 = Cli::parse_from(["rstest"]);
+        cli2.cache_compact_threshold = None;
+        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "3");
+        assert_eq!(resolve_compact_threshold(&cli2).unwrap(), Some(3)); // env fallback
+                                                                        // A non-numeric env is a hard error, never a silent None (feature-off).
+        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        assert!(resolve_compact_threshold(&cli2).is_err());
+        std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD");
+    }
+
+    fn auto_compact_root(label: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("rstest-autocompact-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn seed_segments(t: &crate::remote::DirTransport, n: u64) {
+        for i in 0..n {
+            let mut s = segment(1, 0);
+            s.id = format!("s{i}");
+            s.generated_at = i;
+            crate::remote::push(t, &s).unwrap();
+        }
+    }
+
+    #[test]
+    fn maybe_auto_compact_folds_when_over_threshold() {
+        let _g = env_guard();
+        // 3 loose segments, threshold 2 => compaction fires. No env retention
+        // window, so all fold into a fresh base and are pruned.
+        use crate::cli::Cli;
+        use crate::remote::{DirTransport, Transport};
+        use clap::Parser;
+        let root = auto_compact_root("over");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 3);
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(2);
+        maybe_auto_compact(&cli, &t, "dir", &mut Sink::captured().0);
+        assert!(t.read_base().unwrap().is_some(), "base written");
+        assert!(
+            t.list_segment_ids().unwrap().is_empty(),
+            "all folded (no retention window)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn maybe_auto_compact_noop_at_or_under_threshold() {
+        let _g = env_guard();
+        // 2 segments, threshold 2 => count (2) is not > 2, no compaction.
+        use crate::cli::Cli;
+        use crate::remote::{DirTransport, Transport};
+        use clap::Parser;
+        let root = auto_compact_root("under");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 2);
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(2);
+        maybe_auto_compact(&cli, &t, "dir", &mut Sink::captured().0);
+        assert!(t.read_base().unwrap().is_none(), "no base written");
+        assert_eq!(t.list_segment_ids().unwrap().len(), 2, "segments intact");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn maybe_auto_compact_off_without_threshold() {
+        let _g = env_guard();
+        // No flag, no env => feature off, never touches the remote.
+        use crate::cli::Cli;
+        use crate::remote::{DirTransport, Transport};
+        use clap::Parser;
+        let root = auto_compact_root("off");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 5);
+        let cli = Cli::parse_from(["rstest"]);
+        maybe_auto_compact(&cli, &t, "dir", &mut Sink::captured().0);
+        assert!(t.read_base().unwrap().is_none());
+        assert_eq!(t.list_segment_ids().unwrap().len(), 5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Transport whose failures are toggled per method, to drive the
+    /// best-effort auto-compact error branches without a real remote.
+    struct BrokenTransport {
+        ids: Vec<String>,
+        list_fails: bool,
+        base_fails: bool,
+    }
+
+    impl crate::remote::Transport for BrokenTransport {
+        fn list_segment_ids(&self) -> anyhow::Result<Vec<String>> {
+            if self.list_fails {
+                anyhow::bail!("boom-list");
+            }
+            Ok(self.ids.clone())
+        }
+        fn read_segment(&self, _id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(Some(Vec::new()))
+        }
+        fn read_base(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            if self.base_fails {
+                anyhow::bail!("boom-base");
+            }
+            Ok(None)
+        }
+        fn write_segment(&self, _id: &str, _bytes: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn write_base(&self, _bytes: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn delete_segment(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn maybe_auto_compact_warns_when_listing_fails() {
+        let _g = env_guard();
+        // A failed segment listing is non-fatal: warn and return, never touch
+        // the retention/compaction path.
+        use crate::cli::Cli;
+        use clap::Parser;
+        let t = BrokenTransport {
+            ids: Vec::new(),
+            list_fails: true,
+            base_fails: false,
+        };
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(0);
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        assert!(cap.err().contains("listing failed"), "got: {}", cap.err());
+    }
+
+    #[test]
+    fn maybe_auto_compact_warns_on_bad_retention_env() {
+        let _g = env_guard();
+        // count over threshold, but RSTEST_CACHE_KEEP_LAST is unparseable =>
+        // skip with a warning rather than fold everything.
+        use crate::cli::Cli;
+        use crate::remote::DirTransport;
+        use clap::Parser;
+        let root = auto_compact_root("badenv");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 3);
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(2);
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert!(
+            cap.err().contains("bad retention env"),
+            "got: {}",
+            cap.err()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn maybe_auto_compact_warns_when_compaction_fails() {
+        let _g = env_guard();
+        // Over threshold, retention env clean, but the compaction read fails =>
+        // non-fatal warning, no panic.
+        use crate::cli::Cli;
+        use clap::Parser;
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let t = BrokenTransport {
+            ids: vec!["a".into(), "b".into()],
+            list_fails: false,
+            base_fails: true,
+        };
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(0);
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        if let Some(v) = saved {
+            std::env::set_var("RSTEST_CACHE_KEEP_LAST", v);
+        }
+        assert!(
+            cap.err().contains("auto-compact failed"),
+            "got: {}",
+            cap.err()
+        );
+    }
+
+    #[test]
+    fn maybe_auto_compact_warns_on_bad_threshold() {
+        let _g = env_guard();
+        // An unparseable threshold env is non-fatal: warn and return before
+        // ever touching the transport.
+        use crate::cli::Cli;
+        use clap::Parser;
+        let t = BrokenTransport {
+            ids: Vec::new(),
+            // list must never be reached; make it explode if it is.
+            list_fails: true,
+            base_fails: false,
+        };
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = None;
+        let saved = std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD").ok();
+        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", v),
+            None => std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD"),
+        }
+        assert!(cap.err().contains("bad threshold"), "got: {}", cap.err());
+    }
+
+    #[test]
+    fn maybe_auto_compact_skips_when_keep_last_ge_threshold() {
+        let _g = env_guard();
+        // Over threshold, but a keep-last window >= threshold pins the loose
+        // set above it, so folding would run every push. Skip with a warning
+        // rather than thrash; segments stay intact.
+        use crate::cli::Cli;
+        use crate::remote::{DirTransport, Transport};
+        use clap::Parser;
+        let root = auto_compact_root("keepge");
+        let t = DirTransport::new(&root);
+        seed_segments(&t, 3);
+        let mut cli = Cli::parse_from(["rstest"]);
+        cli.cache_compact_threshold = Some(2);
+        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
+        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "2"); // keep (2) >= threshold (2)
+        let (mut sink, cap) = Sink::captured();
+        maybe_auto_compact(&cli, &t, "dir", &mut sink);
+        match &saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
+            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
+        }
+        assert!(cap.err().contains("keep-last window"), "got: {}", cap.err());
+        assert!(t.read_base().unwrap().is_none(), "no base written");
+        assert_eq!(t.list_segment_ids().unwrap().len(), 3, "segments intact");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn write_report_json_writes_only_when_requested() {
         let run = Run::default();
         let meta = build_run_meta(Instant::now(), 0, 1_700_000_000, 2);
@@ -905,6 +1529,38 @@ mod tests {
             *v = 0;
         }
         assert!(results_bar_line(&counts, 0.0, &plain_palette()).contains("0/0"));
+    }
+
+    #[test]
+    fn finalize_output_streams_sessionfinish_in_any_mode() {
+        // A --stream-json side channel gets the closing sessionfinish envelope
+        // even under a human output mode (here Dots), independent of the
+        // stdout-facing --output json path.
+        let mut outcome = pool::PoolOutcome {
+            run: Run::default(),
+            prog: progress::Progress::default(),
+            fixtures: vec![],
+            warnings: vec![],
+            cache_dir: None,
+            exitstatus: 0,
+        };
+        let (mut sink, _cap) = Sink::captured();
+        let stream = sink.attach_captured_stream();
+        finalize_output(
+            &mut outcome,
+            false,
+            progress::Mode::Dots,
+            None,
+            false,
+            Instant::now(),
+            &mut sink,
+        );
+        let text = String::from_utf8(stream.lock().unwrap().clone()).unwrap();
+        let last: serde_json::Value =
+            serde_json::from_str(text.lines().next_back().unwrap()).unwrap();
+        assert_eq!(last["event"], "sessionfinish");
+        assert_eq!(last["exitstatus"], 0);
+        assert!(last["counts"].is_object());
     }
 
     #[test]

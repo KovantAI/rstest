@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::reporting::sink::Sink;
+
 /// How a CI exposes the PR/MR base for the current job.
 enum CiBase {
     /// A base branch NAME (GitHub/GitLab/Buildkite). Resolved against
@@ -63,10 +65,28 @@ fn nonempty(key: &str) -> Option<String> {
     }
 }
 
+/// Run `git <args>` and return its stdout on success. A spawn failure is
+/// contextualized; a non-zero exit is an error carrying the argv and git's
+/// stderr. Callers wanting a bespoke hint wrap the error with `.with_context`.
+pub(crate) fn git_stdout(args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Resolve the `--changed` base rev, PR-aware. Bare `--changed` diffs vs HEAD,
 /// which silently skips everything on a CI PR checkout; auto-target the merge-base
 /// with the detected PR base. An unresolvable base is an error, not a HEAD fallback.
-pub fn resolve_base_rev(rev: &str) -> Result<String> {
+pub fn resolve_base_rev(rev: &str, sink: &mut Sink) -> Result<String> {
     if rev != "HEAD" {
         return Ok(rev.to_string());
     }
@@ -74,83 +94,57 @@ pub fn resolve_base_rev(rev: &str) -> Result<String> {
         // A CI-provided exact SHA is used verbatim; verify it's present so
         // a shallow clone fails loudly rather than skipping the whole suite.
         Some(CiBase::Sha { sha, env }) => {
-            let out = std::process::Command::new("git")
-                .args([
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("{sha}^{{commit}}"),
-                ])
-                .output()
-                .context("running git rev-parse")?;
-            if !out.status.success() {
-                bail!(
+            git_stdout(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{sha}^{{commit}}"),
+            ])
+            .with_context(|| {
+                format!(
                     "--changed: {env} is '{sha}' but that commit is not in the local \
-                     clone — fetch it first (`git fetch origin {sha}`, or check out with \
-                     full history)"
-                );
-            }
-            eprintln!(
+                         clone — fetch it first (`git fetch origin {sha}`, or check out with \
+                         full history)"
+                )
+            })?;
+            sink.warn(&format!(
                 "rstest: --changed auto-targets MR base {} ({env})",
                 &sha[..sha.len().min(12)]
-            );
+            ));
             return Ok(sha);
         }
         Some(CiBase::Branch { name, env }) => (name, env),
         None => return Ok(rev.to_string()),
     };
     let remote = format!("origin/{target}");
-    let out = std::process::Command::new("git")
-        .args(["merge-base", &remote, "HEAD"])
-        .output()
-        .context("running git merge-base")?;
-    if !out.status.success() {
-        bail!(
+    let sha = git_stdout(&["merge-base", &remote, "HEAD"]).with_context(|| {
+        format!(
             "--changed: {env} is '{target}' but `git merge-base {remote} HEAD` \
              failed — fetch the base branch first (actions/checkout: `fetch-depth: 0`, \
-             or `git fetch origin {target}`): {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    eprintln!(
+             or `git fetch origin {target}`)"
+        )
+    })?;
+    let sha = sha.trim().to_string();
+    sink.warn(&format!(
         "rstest: --changed auto-targets PR base {remote} (merge-base {})",
         &sha[..sha.len().min(12)]
-    );
+    ));
     Ok(sha)
 }
 
 pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
     let diff_base = rev.unwrap_or("HEAD");
-    let out = std::process::Command::new("git")
-        // --relative: paths relative to the CWD and limited to its subtree -
-        // running from a repo subdirectory (or a monorepo project child) must
-        // see ITS files, not repo-rooted paths.
-        .args(["diff", "--name-only", "--relative", diff_base])
-        .output()
-        .context("running git diff (is this a git repository?)")?;
-    if !out.status.success() {
-        bail!(
-            "git diff --name-only {diff_base} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    // --relative: paths relative to the CWD and limited to its subtree -
+    // running from a repo subdirectory (or a monorepo project child) must
+    // see ITS files, not repo-rooted paths.
+    let out = git_stdout(&["diff", "--name-only", "--relative", diff_base])?;
+    for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
     // Untracked files are changes too.
-    let out = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .output()
-        .context("running git ls-files")?;
-    if !out.status.success() {
-        bail!(
-            "git ls-files --others failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    let out = git_stdout(&["ls-files", "--others", "--exclude-standard"])?;
+    for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
     // Runner artifacts churn on every run and must not defeat selection
@@ -188,37 +182,19 @@ pub type ChangedLines = BTreeMap<PathBuf, FileChange>;
 
 pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     let diff_base = rev.unwrap_or("HEAD");
-    let out = std::process::Command::new("git")
-        // -U0: zero context lines, so every hunk's new-side range is exactly
-        // the changed lines. --relative: paths relative to CWD (monorepo child
-        // safety), matching changed_files_from_git and the index keys.
-        .args(["diff", "-U0", "--relative", diff_base])
-        .output()
-        .context("running git diff -U0 (is this a git repository?)")?;
-    if !out.status.success() {
-        bail!(
-            "git diff -U0 {diff_base} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let mut map: ChangedLines = parse_diff_hunks(&String::from_utf8_lossy(&out.stdout))
+    // -U0: zero context lines, so every hunk's new-side range is exactly
+    // the changed lines. --relative: paths relative to CWD (monorepo child
+    // safety), matching changed_files_from_git and the index keys.
+    let out = git_stdout(&["diff", "-U0", "--relative", diff_base])?;
+    let mut map: ChangedLines = parse_diff_hunks(&out)
         .into_iter()
         .map(|(path, change)| (PathBuf::from(path), change))
         .collect();
     // `git diff -U0` emits no hunks for files without a line-diff (deletions,
     // renames, binary, mode-only), which still affect selection. Union the
     // authoritative `--name-only` set; hunk-parsed keys win, the rest fall back.
-    let out = std::process::Command::new("git")
-        .args(["diff", "--name-only", "--relative", diff_base])
-        .output()
-        .context("running git diff --name-only")?;
-    if !out.status.success() {
-        bail!(
-            "git diff --name-only {diff_base} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    let out = git_stdout(&["diff", "--name-only", "--relative", diff_base])?;
+    for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
             has_new_code: true,
@@ -226,17 +202,8 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     }
     // Untracked files are all-new code with no old-side lines: mark
     // has_new_code so the caller falls back to import-graph for them.
-    let out = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .output()
-        .context("running git ls-files")?;
-    if !out.status.success() {
-        bail!(
-            "git ls-files --others failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    let out = git_stdout(&["ls-files", "--others", "--exclude-standard"])?;
+    for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
             has_new_code: true,
@@ -315,11 +282,63 @@ fn parse_hunk_old_range(hunk: &str) -> Option<Option<(u32, u32)>> {
     Some(Some((start, start + count - 1)))
 }
 
+/// Per-file NEW-side added/modified line numbers from `git diff -U0 <base>` —
+/// the lines a diff-coverage gate checks for test coverage. cwd-relative paths
+/// (git `--relative`) so they align with the coverage data's file keys.
+pub fn changed_new_lines(rev: Option<&str>) -> Result<BTreeMap<PathBuf, Vec<u32>>> {
+    let diff_base = rev.unwrap_or("HEAD");
+    let out = std::process::Command::new("git")
+        .args(["diff", "-U0", "--relative", diff_base])
+        .output()
+        .context("running git diff -U0 (is this a git repository?)")?;
+    if !out.status.success() {
+        bail!(
+            "git diff -U0 {diff_base} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut map: BTreeMap<PathBuf, Vec<u32>> = BTreeMap::new();
+    let mut cur: Option<PathBuf> = None;
+    let mut in_hunk = false;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+        } else if !in_hunk {
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                let path = rest.strip_prefix("b/").unwrap_or(rest);
+                cur = (path != "/dev/null").then(|| PathBuf::from(path));
+                continue;
+            }
+        }
+        if line.starts_with("@@") {
+            in_hunk = true;
+            if let (Some(p), Some((start, count))) = (cur.as_ref(), parse_hunk_new_range(line)) {
+                let e = map.entry(p.clone()).or_default();
+                e.extend(start..start + count);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// NEW-side `(start, count)` from `@@ -a,b +c,d @@`; `None` for a pure deletion
+/// (`+c,0`, no new lines) or an unparseable header.
+fn parse_hunk_new_range(hunk: &str) -> Option<(u32, u32)> {
+    let plus = hunk.split_whitespace().find(|t| t.starts_with('+'))?;
+    let mut nums = plus.trim_start_matches('+').split(',');
+    let start: u32 = nums.next()?.parse().ok()?;
+    let count: u32 = match nums.next() {
+        Some(c) => c.parse().ok()?,
+        None => 1,
+    };
+    (count > 0).then_some((start, count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_files_from_git, changed_line_ranges, detect_ci_base, nonempty, parse_diff_hunks,
-        parse_hunk_old_range, CiBase, FileChange,
+        changed_files_from_git, changed_line_ranges, changed_new_lines, detect_ci_base, nonempty,
+        parse_diff_hunks, parse_hunk_new_range, parse_hunk_old_range, CiBase, FileChange,
     };
     use crate::select::GLOBAL_TEST_LOCK as GLOBAL;
     use std::path::{Path, PathBuf};
@@ -571,6 +590,49 @@ mod tests {
     }
 
     #[test]
+    fn changed_new_lines_bails_on_unknown_rev() {
+        let repo = init_repo("newlines-bail");
+        write(&repo, "a.py", "x = 1\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let _cwd = enter(&repo);
+        let err = changed_new_lines(Some("no-such-ref-xyz")).unwrap_err();
+        assert!(err.to_string().contains("git diff -U0"), "{err}");
+    }
+
+    #[test]
+    fn changed_new_lines_over_a_real_repo() {
+        let repo = init_repo("newlines-real");
+        write(&repo, "a.py", "a = 1\nb = 2\nc = 3\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        // Modify line 2 (b) and append a new line 4 (d).
+        write(&repo, "a.py", "a = 1\nb = 20\nc = 3\nd = 4\n");
+        // A brand-new file, staged so `git diff HEAD` reports it (untracked
+        // files never appear in `git diff`).
+        write(&repo, "b.py", "e = 5\nf = 6\n");
+        git(&repo, &["add", "b.py"]);
+
+        let _cwd = enter(&repo);
+
+        let map = changed_new_lines(None).unwrap();
+        // Modified file: new-side line 2 (changed) and line 4 (added).
+        assert_eq!(map.get(Path::new("a.py")), Some(&vec![2u32, 4]), "{map:?}");
+        // New file: every line is new-side.
+        assert_eq!(map.get(Path::new("b.py")), Some(&vec![1u32, 2]), "{map:?}");
+    }
+
+    #[test]
+    fn changed_new_lines_empty_when_nothing_changed() {
+        let repo = init_repo("newlines-empty");
+        write(&repo, "a.py", "x = 1\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let _cwd = enter(&repo);
+        assert!(changed_new_lines(None).unwrap().is_empty());
+    }
+
+    #[test]
     fn hunk_old_range_parsing() {
         // modification: old lines 1..2 changed
         assert_eq!(parse_hunk_old_range("@@ -1,2 +3,4 @@"), Some(Some((1, 2))));
@@ -586,6 +648,18 @@ mod tests {
             parse_hunk_old_range("@@ -10,3 +9,0 @@"),
             Some(Some((10, 12)))
         );
+    }
+
+    #[test]
+    fn parse_hunk_new_range_reads_added_lines() {
+        // `+c,d` -> (start=c, count=d).
+        assert_eq!(parse_hunk_new_range("@@ -1,2 +3,4 @@"), Some((3, 4)));
+        // `+c` with no count -> single line.
+        assert_eq!(parse_hunk_new_range("@@ -5 +5 @@ def foo():"), Some((5, 1)));
+        // Pure deletion `+c,0` -> no new-side lines.
+        assert_eq!(parse_hunk_new_range("@@ -10,3 +9,0 @@"), None);
+        // A brand-new file's hunk (`-0,0 +1,3`).
+        assert_eq!(parse_hunk_new_range("@@ -0,0 +1,3 @@"), Some((1, 3)));
     }
 
     #[test]

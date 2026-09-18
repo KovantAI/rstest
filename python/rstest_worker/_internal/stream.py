@@ -14,7 +14,10 @@ from rstest_worker._internal import messages as m
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
+    _random_order_seed,
     _randomly_seed,
+    _seed_pytest_mypy,
+    _seed_pytest_retry,
 )
 from rstest_worker._internal.wire import _wire_safe
 from rstest_worker._internal.xdistnode import (
@@ -80,6 +83,16 @@ class StreamPlugin:
         # before setup and after teardown, ship the net delta on the teardown
         # report.
         self._leakcheck = os.environ.get("RSTEST_LEAKCHECK") == "1"
+        # A live JSON consumer (--output json / --stream-json) is attached, so
+        # ship captured stdout/stderr/log sections on every report, not only
+        # failures (editors show per-passing-test output).
+        self._stream_output = os.environ.get("RSTEST_STREAM_OUTPUT") == "1"
+        # Measure call-phase CPU (process_time) when doctor asks OR a live JSON
+        # consumer is attached — the latter lets editors flag wait-bound tests
+        # (wall ≫ cpu) inline without a separate --doctor run. Kept off by
+        # default so plain --report-json stays byte-comparable to the pytest
+        # baseline (`rstest try`), whose recorder emits no cpu.
+        self._measure_cpu = self._doctor or self._stream_output
         self._res_base: dict[str, tuple[int, int | None]] = {}
         self._res: dict[str, tuple[int, int | None]] = {}
         # Skip the worker's FIRST test: importing a test module can lazily spin
@@ -108,6 +121,28 @@ class StreamPlugin:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_configure(self, config):
+        self._neutralize_xdist(config)
+        self._register_markers(config)
+        worker_id = os.environ.get("RSTEST_WORKER_ID")
+        if worker_id is None:
+            return  # standalone run: nothing pool-specific to set up
+        # Belt-and-suspenders: rerunfailures is normally neutralized earlier in
+        # pytest_cmdline_main (it must be gone before configure, which snapshots
+        # the impl list). This only catches a plugin registered after cmdline_main.
+        _neutralize_rerunfailures(config)
+        self._build_workerinput(config, worker_id)
+        # workerinput now exists; seed pytest-retry's server_port before its own
+        # (non-tryfirst) pytest_configure reads it and KeyErrors.
+        _seed_pytest_retry(config)
+        # Same dead-master-path: pytest-mypy's worker branch reads
+        # workerinput["mypy_config_stash_serialized"]. This tryfirst configure
+        # runs before the plugin's own, so the key is present when it reads it.
+        _seed_pytest_mypy(config)
+        self._set_basetemp(config, worker_id)
+        self._init_xdist_node(config, worker_id)
+
+    @staticmethod
+    def _neutralize_xdist(config):
         # Neutralize pytest-xdist if ini/addopts pulls it in: its options must
         # PARSE but not engage (rstest owns parallelism). dist="no" keeps xdist
         # inert; numprocesses stays set so plugins that gate parallel-master
@@ -118,14 +153,17 @@ class StreamPlugin:
         if hasattr(opt, "numprocesses"):
             wc = os.environ.get("RSTEST_WORKER_COUNT")
             opt.numprocesses = int(wc) if (wc and os.environ.get("RSTEST_WORKER_ID")) else None
+
+    @staticmethod
+    def _register_markers(config):
         config.addinivalue_line(
             "markers",
-            "serial: rstest — run exclusively on one worker, after all "
+            "serial: rstest - run exclusively on one worker, after all "
             "parallel workers have finished (for tests unsafe to parallelize)",
         )
         config.addinivalue_line(
             "markers",
-            "flaky(reruns=N): rstest — rerun this test up to N times on "
+            "flaky(reruns=N): rstest - rerun this test up to N times on "
             "failure (per-test override of --reruns)",
         )
         config.addinivalue_line(
@@ -135,67 +173,72 @@ class StreamPlugin:
         )
         config.addinivalue_line(
             "markers",
-            "timeout(seconds): rstest — fail this test if its call phase runs "
+            "timeout(seconds): rstest - fail this test if its call phase runs "
             "longer than N seconds (per-test override of --timeout)",
         )
-        # Belt-and-suspenders: rerunfailures is normally neutralized earlier in
-        # pytest_cmdline_main (it must be gone before configure, which snapshots
-        # the impl list). This only catches a plugin registered after cmdline_main.
-        if os.environ.get("RSTEST_WORKER_ID") is not None:
-            _neutralize_rerunfailures(config)
+
+    @staticmethod
+    def _build_workerinput(config, worker_id):
         # When part of a pool, announce ourselves the way an xdist worker
         # would: plugins key per-worker resources on `config.workerinput`
         # (pytest-django suffixes test DB names with workerid, others detect
         # "am I running in parallel?"). Research track 2: 5 of the top 50
         # plugins sniff this attribute.
-        worker_id = os.environ.get("RSTEST_WORKER_ID")
-        if worker_id is not None:
-            import socket
+        import socket
 
-            # The most-grepped xdist env vars: plugins (and conftests we
-            # cannot edit) read these directly.
-            os.environ.setdefault("PYTEST_XDIST_WORKER", worker_id)
-            os.environ.setdefault(
-                "PYTEST_XDIST_WORKER_COUNT", os.environ.get("RSTEST_WORKER_COUNT", "1")
-            )
-            run_uid = os.environ.get("RSTEST_RUN_UID", "")
-            config.workerinput = {
-                "workerid": worker_id,
-                "workercount": int(os.environ.get("RSTEST_WORKER_COUNT", "1")),
-                # One uid per run, shared by every worker (xdist's
-                # testrun_uid contract); the orchestrator provides it.
-                "testrun_uid": run_uid,
-                # pytest-randomly's master broadcasts one resolved seed; absent,
-                # the plugin KeyErrors at -n >= 2. rstest has no master, so we
-                # derive one run-level seed from the shared uid (all workers agree).
-                "randomly_seed": _randomly_seed(run_uid),
-                "mainargv": sys.argv,
-                # pytest-cov's worker mode expects these from the xdist master.
-                # Workers are collocated (same host/cwd), so they write suffixed
-                # .coverage.* files and the ORCHESTRATOR combines after the run.
-                "cov_master_host": socket.gethostname(),
-                "cov_master_topdir": os.getcwd(),
-                "cov_master_rsync_roots": [],
-            }
-            # xdist workers expose this channel dict; pytest-cov and others write
-            # into it. Nothing reads it here - provided so plugin paths don't crash.
-            config.workeroutput = {}
-            # Disjoint per-worker tmp roots (xdist popen-gwN pattern);
-            # user-provided --basetemp wins.
-            basetemp = os.environ.get("RSTEST_BASETEMP")
-            if basetemp and not config.option.basetemp:
-                from pathlib import Path
+        # The most-grepped xdist env vars: plugins (and conftests we
+        # cannot edit) read these directly.
+        os.environ.setdefault("PYTEST_XDIST_WORKER", worker_id)
+        os.environ.setdefault(
+            "PYTEST_XDIST_WORKER_COUNT", os.environ.get("RSTEST_WORKER_COUNT", "1")
+        )
+        run_uid = os.environ.get("RSTEST_RUN_UID", "")
+        config.workerinput = {
+            "workerid": worker_id,
+            "workercount": int(os.environ.get("RSTEST_WORKER_COUNT", "1")),
+            # One uid per run, shared by every worker (xdist's
+            # testrun_uid contract); the orchestrator provides it.
+            "testrun_uid": run_uid,
+            # pytest-randomly's master broadcasts one resolved seed; absent,
+            # the plugin KeyErrors at -n >= 2. rstest has no master, so we
+            # derive one run-level seed from the shared uid (all workers agree).
+            "randomly_seed": _randomly_seed(run_uid),
+            # pytest-random-order reads this key unconditionally when workerinput
+            # exists (even with reordering off, its default); absent, it KeyErrors
+            # at collection. Shared value so all workers agree (full-collect hash).
+            "random_order_seed": _random_order_seed(config, run_uid),
+            "mainargv": sys.argv,
+            # pytest-cov's worker mode expects these from the xdist master.
+            # Workers are collocated (same host/cwd), so they write suffixed
+            # .coverage.* files and the ORCHESTRATOR combines after the run.
+            "cov_master_host": socket.gethostname(),
+            "cov_master_topdir": os.getcwd(),
+            "cov_master_rsync_roots": [],
+        }
+        # xdist workers expose this channel dict; pytest-cov and others write
+        # into it. Nothing reads it here - provided so plugin paths don't crash.
+        config.workeroutput = {}
 
-                # pytest mkdirs option.basetemp with parents=False, so the
-                # shared parent must already exist.
-                os.makedirs(basetemp, exist_ok=True)
-                config.option.basetemp = Path(basetemp) / worker_id
-            # xdist MASTER-side hook emulation: real xdist calls
-            # pytest_configure_node(node) before each worker, filling
-            # node.workerinput. rstest has no master, so each worker plays its own.
-            self._xdist_node = _XdistNodeShim(config, worker_id)
-            for plugin in config.pluginmanager.get_plugins():
-                self._call_configure_node(plugin, lenient=True)
+    @staticmethod
+    def _set_basetemp(config, worker_id):
+        # Disjoint per-worker tmp roots (xdist popen-gwN pattern);
+        # user-provided --basetemp wins.
+        basetemp = os.environ.get("RSTEST_BASETEMP")
+        if basetemp and not config.option.basetemp:
+            from pathlib import Path
+
+            # pytest mkdirs option.basetemp with parents=False, so the
+            # shared parent must already exist.
+            os.makedirs(basetemp, exist_ok=True)
+            config.option.basetemp = Path(basetemp) / worker_id
+
+    def _init_xdist_node(self, config, worker_id):
+        # xdist MASTER-side hook emulation: real xdist calls
+        # pytest_configure_node(node) before each worker, filling
+        # node.workerinput. rstest has no master, so each worker plays its own.
+        self._xdist_node = _XdistNodeShim(config, worker_id)
+        for plugin in config.pluginmanager.get_plugins():
+            self._call_configure_node(plugin, lenient=True)
 
     def _call_configure_node(self, plugin, lenient=False):
         """Direct-call a plugin's pytest_configure_node against our shim.
@@ -374,18 +417,18 @@ class StreamPlugin:
         # is waiting (sleep / IO), the #1 suite-content finding in the research
         # profiling (rich 74%, aiohttp 78% of test time).
         secs = self._effective_timeout(item)
-        if secs is None and not self._doctor:
+        if secs is None and not self._measure_cpu:
             return (yield)
         import time
 
         cancel = self._arm_timeout(secs) if secs else None
-        t0 = time.process_time() if self._doctor else 0.0
+        t0 = time.process_time() if self._measure_cpu else 0.0
         try:
             return (yield)
         finally:
             if cancel is not None:
                 cancel()
-            if self._doctor:
+            if self._measure_cpu:
                 self._cpu[item.nodeid] = time.process_time() - t0
 
     @pytest.hookimpl(wrapper=True)
@@ -461,9 +504,10 @@ class StreamPlugin:
                 payload["thread_delta"] = dt
             if df:
                 payload["fd_delta"] = df
-        if report.failed and report.sections:
-            # Captured stdout/stderr/log; ship only for failures to keep the
-            # wire lean.
+        if report.sections and (report.failed or self._stream_output):
+            # Captured stdout/stderr/log. Shipped for failures always, and for
+            # every outcome when a live JSON consumer asked for it
+            # (RSTEST_STREAM_OUTPUT); otherwise omitted to keep the wire lean.
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]

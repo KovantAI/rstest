@@ -2,6 +2,7 @@
 //! Precedence per pytest docs: a `[pytest]`/`[tool:pytest]`/ini_options section
 //! wins; files probed upward per dir: pytest.ini, pyproject.toml, tox.ini, setup.cfg.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -27,7 +28,10 @@ impl Default for ProjectConfig {
     }
 }
 
-pub fn discover(start: &Path) -> ProjectConfig {
+/// `err` receives the "ignoring malformed <file>" diagnostic; callers pass their
+/// [`Sink`](crate::reporting::sink::Sink)'s stderr handle so it is captured and
+/// consistent with the rest of the run's output (never a raw `eprintln!`).
+pub fn discover(start: &Path, err: &mut dyn Write) -> ProjectConfig {
     let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
     for dir in start.ancestors() {
         for probe in ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"] {
@@ -35,7 +39,7 @@ pub fn discover(start: &Path) -> ProjectConfig {
             if !path.exists() {
                 continue;
             }
-            if let Some(mut cfg) = parse_config_file(&path) {
+            if let Some(mut cfg) = parse_config_file(&path, err) {
                 cfg.rootdir = dir.to_path_buf();
                 return cfg;
             }
@@ -46,20 +50,20 @@ pub fn discover(start: &Path) -> ProjectConfig {
 
 /// Does this directory carry its own pytest configuration? (Any of the four
 /// config files with a pytest section - the monorepo discovery predicate.)
-pub fn has_pytest_config(dir: &Path) -> bool {
+pub fn has_pytest_config(dir: &Path, err: &mut dyn Write) -> bool {
     ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"]
         .iter()
         .any(|probe| {
             let p = dir.join(probe);
-            p.exists() && parse_config_file(&p).is_some()
+            p.exists() && parse_config_file(&p, err).is_some()
         })
 }
 
-fn parse_config_file(path: &Path) -> Option<ProjectConfig> {
+fn parse_config_file(path: &Path, err: &mut dyn Write) -> Option<ProjectConfig> {
     let text = std::fs::read_to_string(path).ok()?;
     let name = path.file_name()?.to_str()?;
     match name {
-        "pyproject.toml" => parse_pyproject(&text, path),
+        "pyproject.toml" => parse_pyproject(&text, path, err),
         "pytest.ini" => parse_ini(&text, "pytest"),
         "tox.ini" => parse_ini(&text, "pytest"),
         "setup.cfg" => parse_ini(&text, "tool:pytest"),
@@ -67,11 +71,11 @@ fn parse_config_file(path: &Path) -> Option<ProjectConfig> {
     }
 }
 
-fn parse_pyproject(text: &str, path: &Path) -> Option<ProjectConfig> {
+fn parse_pyproject(text: &str, path: &Path, err: &mut dyn Write) -> Option<ProjectConfig> {
     let doc: toml::Value = match toml::from_str(text) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("rstest: ignoring malformed {}: {e}", path.display());
+            let _ = writeln!(err, "rstest: ignoring malformed {}: {e}", path.display());
             return None;
         }
     };
@@ -201,7 +205,7 @@ pub struct RstestSettings {
     pub output: Option<String>,
 }
 
-pub fn rstest_settings(start: &Path) -> RstestSettings {
+pub fn rstest_settings(start: &Path, err: &mut dyn Write) -> RstestSettings {
     let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
     for dir in start.ancestors() {
         let path = dir.join("pyproject.toml");
@@ -211,7 +215,7 @@ pub fn rstest_settings(start: &Path) -> RstestSettings {
         let doc = match toml::from_str::<toml::Value>(&text) {
             Ok(doc) => doc,
             Err(e) => {
-                eprintln!("rstest: ignoring malformed {}: {e}", path.display());
+                let _ = writeln!(err, "rstest: ignoring malformed {}: {e}", path.display());
                 continue;
             }
         };
@@ -290,7 +294,7 @@ worker-timeout = 120
 "#,
         )
         .unwrap();
-        let s = rstest_settings(&d);
+        let s = rstest_settings(&d, &mut std::io::sink());
         assert_eq!(s.numprocesses.as_deref(), Some("4"));
         assert_eq!(s.dist.as_deref(), Some("loadfile"));
         assert_eq!(s.reruns, Some(2));
@@ -305,7 +309,12 @@ worker-timeout = 120
             "[tool.rstest]\nnumprocesses = \"auto\"\n",
         )
         .unwrap();
-        assert_eq!(rstest_settings(&d).numprocesses.as_deref(), Some("auto"));
+        assert_eq!(
+            rstest_settings(&d, &mut std::io::sink())
+                .numprocesses
+                .as_deref(),
+            Some("auto")
+        );
     }
 
     #[test]
@@ -317,7 +326,7 @@ worker-timeout = 120
         let child = parent.join("sub");
         std::fs::create_dir_all(&child).unwrap();
         std::fs::write(child.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
-        assert_eq!(rstest_settings(&child).reruns, None);
+        assert_eq!(rstest_settings(&child, &mut std::io::sink()).reruns, None);
     }
 
     #[test]
@@ -328,7 +337,7 @@ worker-timeout = 120
             "[pytest]\npython_files = check_*.py\ntestpaths = tests\n",
         )
         .unwrap();
-        let cfg = discover(&d);
+        let cfg = discover(&d, &mut std::io::sink());
         assert_eq!(cfg.python_files, vec!["check_*.py"]);
         assert_eq!(cfg.testpaths, vec!["tests"]);
         assert_eq!(cfg.rootdir, d.canonicalize().unwrap());
@@ -345,7 +354,7 @@ worker-timeout = 120
             "[tool.pytest.ini_options]\npython_files = \"check_*.py chk_*.py\"\ntestpaths = [\"a\", \"b\"]\n",
         )
         .unwrap();
-        let cfg = discover(&d);
+        let cfg = discover(&d, &mut std::io::sink());
         assert_eq!(cfg.python_files, vec!["check_*.py", "chk_*.py"]);
         assert_eq!(cfg.testpaths, vec!["a", "b"]);
     }
@@ -355,7 +364,10 @@ worker-timeout = 120
         // tox.ini uses [pytest]; setup.cfg uses [tool:pytest].
         let t = tmpdir("tox");
         std::fs::write(t.join("tox.ini"), "[pytest]\npython_files = tox_*.py\n").unwrap();
-        assert_eq!(discover(&t).python_files, vec!["tox_*.py"]);
+        assert_eq!(
+            discover(&t, &mut std::io::sink()).python_files,
+            vec!["tox_*.py"]
+        );
 
         let s = tmpdir("setupcfg");
         std::fs::write(
@@ -363,14 +375,17 @@ worker-timeout = 120
             "[tool:pytest]\npython_files = cfg_*.py\n",
         )
         .unwrap();
-        assert_eq!(discover(&s).python_files, vec!["cfg_*.py"]);
+        assert_eq!(
+            discover(&s, &mut std::io::sink()).python_files,
+            vec!["cfg_*.py"]
+        );
     }
 
     #[test]
     fn discover_bare_dir_falls_back_to_default() {
         // No config file up the ancestry => built-in default (both patterns).
         let d = tmpdir("bare");
-        let cfg = discover(&d);
+        let cfg = discover(&d, &mut std::io::sink());
         assert_eq!(cfg.python_files, vec!["test_*.py", "*_test.py"]);
     }
 
@@ -378,12 +393,12 @@ worker-timeout = 120
     fn has_pytest_config_detects_section() {
         let yes = tmpdir("has-yes");
         std::fs::write(yes.join("pytest.ini"), "[pytest]\n").unwrap();
-        assert!(has_pytest_config(&yes));
+        assert!(has_pytest_config(&yes, &mut std::io::sink()));
 
         // A pyproject with no pytest section is not a pytest config boundary.
         let no = tmpdir("has-no");
         std::fs::write(no.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
-        assert!(!has_pytest_config(&no));
+        assert!(!has_pytest_config(&no, &mut std::io::sink()));
     }
 
     #[test]
@@ -394,7 +409,7 @@ worker-timeout = 120
             "[pytest]\n# a comment\n; also a comment\nunknown = whatever\npython_files = k_*.py\n",
         )
         .unwrap();
-        let cfg = discover(&d);
+        let cfg = discover(&d, &mut std::io::sink());
         assert_eq!(cfg.python_files, vec!["k_*.py"]);
     }
 
@@ -406,7 +421,7 @@ worker-timeout = 120
             "[tool.rstest]\nnumprocesses = 1.5\nprojects = [\"pkg_a\", \"pkg_b\"]\ncollect = \"lazy\"\noutput = \"bar\"\n",
         )
         .unwrap();
-        let s = rstest_settings(&d);
+        let s = rstest_settings(&d, &mut std::io::sink());
         // A float is neither Integer nor String => None.
         assert_eq!(s.numprocesses, None);
         assert_eq!(s.projects, Some(vec!["pkg_a".into(), "pkg_b".into()]));
@@ -424,7 +439,7 @@ worker-timeout = 120
             "[tool.rstest]\nreruns = -1\nworker-timeout = -5\nnumprocesses = -3\n",
         )
         .unwrap();
-        let s = rstest_settings(&d);
+        let s = rstest_settings(&d, &mut std::io::sink());
         assert_eq!(s.reruns, None);
         assert_eq!(s.worker_timeout, None);
         assert_eq!(s.numprocesses, None);
@@ -439,7 +454,7 @@ worker-timeout = 120
             "[pytest]\ntestpaths =\n    tests\n    integration\npython_files:\n    check_*.py\n    chk_*.py\n",
         )
         .unwrap();
-        let cfg = discover(&d);
+        let cfg = discover(&d, &mut std::io::sink());
         assert_eq!(cfg.testpaths, vec!["tests", "integration"]);
         assert_eq!(cfg.python_files, vec!["check_*.py", "chk_*.py"]);
     }
@@ -451,9 +466,16 @@ worker-timeout = 120
         // absent => probe loop falls through to pyproject.toml => None => default.
         let d = tmpdir("discover-bad-toml");
         std::fs::write(d.join("pyproject.toml"), "not [[[ valid = toml").unwrap();
-        let cfg = discover(&d);
+        // The diagnostic routes through the passed writer (a Sink's stderr in
+        // production), not a raw eprintln! — capture and assert it here.
+        let mut err = Vec::new();
+        let cfg = discover(&d, &mut err);
         assert_eq!(cfg.python_files, vec!["test_*.py", "*_test.py"]);
         assert_eq!(cfg.testpaths, Vec::<String>::new());
+        assert!(
+            String::from_utf8_lossy(&err).contains("ignoring malformed"),
+            "expected the malformed-config note on the writer: {err:?}"
+        );
     }
 
     #[test]
@@ -467,7 +489,7 @@ worker-timeout = 120
             "[pytest]\ntestpaths =\n[other]\npython_files = x_*.py\n",
         )
         .unwrap();
-        let cfg = discover(&d);
+        let cfg = discover(&d, &mut std::io::sink());
         // Empty testpaths not applied => stays default (empty).
         assert_eq!(cfg.testpaths, Vec::<String>::new());
         // python_files lives in [other], not [pytest] => default retained.
@@ -487,7 +509,7 @@ worker-timeout = 120
             "[pytest]\ntestpaths =\n\n    tests\n\n    integration\npython_files = y_*.py\n",
         )
         .unwrap();
-        let cfg = discover(&d);
+        let cfg = discover(&d, &mut std::io::sink());
         assert_eq!(cfg.testpaths, vec!["tests", "integration"]);
         assert_eq!(cfg.python_files, vec!["y_*.py"]);
     }
@@ -497,8 +519,13 @@ worker-timeout = 120
         // Unparseable pyproject => skipped; with none valid up-tree => default.
         let d = tmpdir("bad-toml");
         std::fs::write(d.join("pyproject.toml"), "this is : not = valid toml [[[").unwrap();
-        let s = rstest_settings(&d);
+        let mut err = Vec::new();
+        let s = rstest_settings(&d, &mut err);
         assert_eq!(s.numprocesses, None);
         assert_eq!(s.reruns, None);
+        assert!(
+            String::from_utf8_lossy(&err).contains("ignoring malformed"),
+            "expected the malformed-config note on the writer: {err:?}"
+        );
     }
 }

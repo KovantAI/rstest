@@ -29,7 +29,11 @@ pub struct TestEntry {
     pub worker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
-    #[serde(skip)]
+    /// Call-phase CPU time (process_time), present only when measured
+    /// (`--doctor` or a live-stream run). Serialized when present so a
+    /// report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on
+    /// a plain run so the snapshot stays byte-comparable to the pytest baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<f64>,
     /// Leak check: net threads / open fds after teardown (from the teardown
     /// report). Doctor-internal; not serialized to report-json.
@@ -275,12 +279,9 @@ impl Run {
 
     /// nodeids with any failed phase - the merged `lastfailed` truth.
     pub fn failed_nodeids(&self) -> impl Iterator<Item = &String> {
-        self.tests.iter().filter_map(|(id, e)| {
-            let failed = [&e.setup, &e.call, &e.teardown]
-                .iter()
-                .any(|p| p.as_deref() == Some("failed"));
-            failed.then_some(id)
-        })
+        self.tests
+            .iter()
+            .filter_map(|(id, e)| e.any_phase_failed().then_some(id))
     }
 
     /// (nodeid, longrepr) pairs for failed tests (junit rendering).
@@ -291,12 +292,10 @@ impl Run {
 
     pub fn all_passed(&self) -> bool {
         self.collect_errors.is_empty()
-            && self.tests.values().all(|e| {
-                e.quarantined
-                    || (e.setup.as_deref() != Some("failed")
-                        && e.call.as_deref() != Some("failed")
-                        && e.teardown.as_deref() != Some("failed"))
-            })
+            && self
+                .tests
+                .values()
+                .all(|e| e.quarantined || !e.any_phase_failed())
     }
 
     /// Demote failures matching --quarantine: they count as "quarantined",
@@ -305,10 +304,7 @@ impl Run {
     pub fn quarantine(&mut self, matches: impl Fn(&str) -> bool) -> Vec<String> {
         let mut demoted = Vec::new();
         for (nodeid, e) in &mut self.tests {
-            let failed = e.setup.as_deref() == Some("failed")
-                || e.call.as_deref() == Some("failed")
-                || e.teardown.as_deref() == Some("failed");
-            if failed && matches(nodeid) {
+            if e.any_phase_failed() && matches(nodeid) {
                 e.quarantined = true;
                 demoted.push(nodeid.clone());
             }
@@ -398,8 +394,24 @@ impl TestEntry {
     pub fn outcome(&self) -> &'static str {
         classify(self)
     }
+
+    /// Whether any phase (setup/call/teardown) reported `failed`. The raw
+    /// phase-level signal behind `--lf`/quarantine/`all_passed`/CI annotations —
+    /// distinct from `outcome()`, which buckets a setup/teardown failure as
+    /// `errors` and hides a quarantined failure. Callers wanting the truth of
+    /// "did this test fail in any phase" use this; callers wanting the pytest
+    /// display bucket use `outcome()`.
+    pub fn any_phase_failed(&self) -> bool {
+        [&self.setup, &self.call, &self.teardown]
+            .iter()
+            .any(|p| p.as_deref() == Some("failed"))
+    }
 }
 
+/// Bucket a `TestEntry` into its pytest-style outcome. This is the Rust twin of
+/// the `outcomeOf()` function embedded in the HTML report (`html.rs`) — the two
+/// implement the SAME decision tree and MUST be changed together, or the HTML
+/// report will disagree with the summary/report-json/junit for the same entry.
 fn classify(e: &TestEntry) -> &'static str {
     if e.quarantined {
         return "quarantined";
@@ -600,6 +612,32 @@ mod tests {
         run.mark_flaky("a.py::wobbly".into(), 2);
         assert!(run.tests()["a.py::wobbly"].flaky);
         assert!(run.summary_line().contains("1 flaky"));
+    }
+
+    #[test]
+    fn cpu_serialized_in_snapshot_only_when_measured() {
+        let meta = RunMeta {
+            exitstatus: 0,
+            duration_seconds: 0.0,
+            started_at_epoch: 0,
+            workers: 1,
+            argv: vec![],
+        };
+        // Measured (doctor / stream run): cpu rides the call report and lands in
+        // the snapshot entry.
+        let mut run = Run::default();
+        run.record(None, report("a.py::t", "setup", "passed"));
+        let mut call = report("a.py::t", "call", "passed");
+        call.cpu = Some(0.01);
+        run.record(None, call);
+        assert_eq!(run.snapshot_value(&meta)["tests"]["a.py::t"]["cpu"], 0.01);
+
+        // Plain run (cpu None): the key is omitted, so the document stays
+        // byte-comparable to the pytest baseline.
+        let mut plain = Run::default();
+        full(&mut plain, "a.py::t", "passed");
+        let doc = plain.snapshot_value(&meta);
+        assert!(doc["tests"]["a.py::t"].get("cpu").is_none());
     }
 
     #[test]

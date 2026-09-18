@@ -22,11 +22,9 @@ pub struct Probe {
     /// (major, minor, micro).
     pub version: (u8, u8, u8),
     /// `cpython`, `pypy`, ... surfaced by the version-grammar tier.
-    #[allow(dead_code)]
     pub implementation: String,
     /// True on free-threaded (`Py_GIL_DISABLED`) builds; used by the
     /// version-grammar tier (`3.13t`).
-    #[allow(dead_code)]
     pub freethreaded: bool,
     /// Whether `rstest_worker` imports under this interpreter - the thing that
     /// actually has to work for the run to start.

@@ -587,3 +587,67 @@ def gate_coverage_selection_under_autocrlf_crlf_w(g, args, binary):
         got == ["test_a.py::test_a"],
         f"{got} || {r.stderr[-150:]}",
     )
+
+
+def gate_diff_coverage_gate(g, args, binary):
+    print("== diff coverage gate (--cov-diff-fail-under) ==")
+    dp = g.tmp / "diffcov"
+    g.write("diffcov/mod.py", "def used():\n    return 1\n")
+    g.write("diffcov/test_mod.py", "import mod\ndef test_used():\n    assert mod.used() == 1\n")
+    git_init_commit(dp, "base")
+    # Add a function with a covered branch and an UNcovered branch; cover only
+    # the first from a new test.
+    g.write(
+        "diffcov/mod.py",
+        "def used():\n    return 1\n\n"
+        "def added(flag):\n    if flag:\n"
+        '        return "yes"\n    return "no"\n',
+    )
+    g.write(
+        "diffcov/test_mod.py",
+        "import mod\n"
+        "def test_used():\n    assert mod.used() == 1\n"
+        'def test_added():\n    assert mod.added(True) == "yes"\n',
+    )
+    env = {"PYTHONPATH": str(dp)}
+    cov = ["--cov=.", "--cov-report="]
+
+    r = g.run("-n", "2", *cov, "--cov-diff-fail-under", "100", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: uncovered added line fails the gate + is named",
+        r.returncode == 1
+        and "is below 100%" in r.stderr
+        and "uncovered added line" in r.stdout
+        and "mod.py" in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-200:] + r.stdout[-200:],
+    )
+    # A lower bar (83% covered) passes at --cov-diff-fail-under 80.
+    r = g.run("-n", "2", *cov, "--cov-diff-fail-under", "80", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: partial coverage passes a lower threshold",
+        r.returncode == 0 and "meets 80%" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # Cover the other branch -> 100%, gate passes.
+    g.write(
+        "diffcov/test_mod.py",
+        "import mod\n"
+        "def test_used():\n    assert mod.used() == 1\n"
+        "def test_added():\n"
+        '    assert mod.added(True) == "yes"\n'
+        '    assert mod.added(False) == "no"\n',
+    )
+    r = g.run("-n", "2", *cov, "--cov-diff-fail-under", "100", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: fully-covered diff passes at 100%",
+        r.returncode == 0 and "diff coverage 100.0% meets 100%" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # Without --cov there's no coverage data to score: the gate is ignored with
+    # a warning and does not fail the run.
+    r = g.run("-n", "2", "--cov-diff-fail-under", "100", cwd=dp, env_extra=env)
+    check(
+        "diff-cov: --cov-diff-fail-under without --cov warns and is ignored",
+        r.returncode == 0 and "needs --cov" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )

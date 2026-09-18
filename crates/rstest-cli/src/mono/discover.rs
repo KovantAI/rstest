@@ -53,7 +53,7 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         if pruned(name, &path) {
             continue;
         }
-        if config::has_pytest_config(&path) {
+        if config::has_pytest_config(&path, &mut std::io::stderr()) {
             // A project owns its subtree: nested configs are its own.
             found.push(path);
         } else {

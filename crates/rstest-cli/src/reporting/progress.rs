@@ -1,9 +1,8 @@
 //! pytest-style live progress: one status char per test as reports stream
 //! in, wrapped with a running percentage when the total is known.
 
-use std::io::Write;
-
 use crate::reporting::color::Palette;
+use crate::reporting::sink::Sink;
 use crate::reporting::status::StatusFooter;
 use crate::scheduling::proto::Report;
 
@@ -29,6 +28,48 @@ impl OutcomeKind {
     /// except a failed teardown - the test already counted at its call phase.
     fn counts_done(self) -> bool {
         self != OutcomeKind::TeardownError
+    }
+
+    /// pytest's single status char (dots / Github / Gitlab / Buildkite / Azure
+    /// streams): '.' pass, 'X' xpass, 'F' fail, 's' skip, 'x' xfail, 'E' error.
+    fn dot(self) -> char {
+        use OutcomeKind::*;
+        match self {
+            Pass => '.',
+            XPass => 'X',
+            Fail => 'F',
+            Skip => 's',
+            XFail => 'x',
+            // Failed setup/teardown both draw 'E'.
+            SetupError | TeardownError => 'E',
+        }
+    }
+
+    /// The pytest -v outcome word.
+    fn word(self) -> &'static str {
+        use OutcomeKind::*;
+        match self {
+            Pass => "PASSED",
+            XPass => "XPASS",
+            Fail => "FAILED",
+            Skip => "SKIPPED",
+            XFail => "XFAIL",
+            SetupError | TeardownError => "ERROR",
+        }
+    }
+
+    /// The sugar-style bar symbol plus its palette color (green pass /
+    /// red fail+error / yellow skip+xfail+xpass).
+    fn symbol(self) -> (&'static str, fn(&Palette, &str) -> String) {
+        use OutcomeKind::*;
+        match self {
+            Pass => ("✓", Palette::green),
+            XPass => ("X", Palette::yellow),
+            Fail => ("✗", Palette::red),
+            Skip => ("s", Palette::yellow),
+            XFail => ("x", Palette::yellow),
+            SetupError | TeardownError => ("E", Palette::red),
+        }
     }
 }
 
@@ -105,7 +146,6 @@ pub struct Progress {
     col: usize,
     total: Option<usize>,
     mode: Mode,
-    palette: Palette,
     footer: Option<StatusFooter>,
 }
 
@@ -129,40 +169,48 @@ impl Progress {
 
     /// Note that `worker` began running `nodeid` (updates the footer's
     /// per-worker current-test line).
-    pub fn item_started(&mut self, worker: usize, nodeid: String) {
+    pub fn item_started(&mut self, sink: &mut Sink, worker: usize, nodeid: String) {
         if let Some(f) = &mut self.footer {
-            f.item_started(worker, nodeid);
+            f.item_started(sink.out(), worker, nodeid);
         }
     }
 
     /// Note that `worker` finished its current test (clears its footer line).
-    pub fn item_finished(&mut self, worker: usize) {
+    pub fn item_finished(&mut self, sink: &mut Sink, worker: usize) {
         if let Some(f) = &mut self.footer {
-            f.item_finished(worker);
+            f.item_finished(sink.out(), worker);
         }
     }
 
     /// Repaint the footer's elapsed timers between reports (tty only).
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self, sink: &mut Sink) {
         if let Some(f) = &mut self.footer {
-            f.tick();
+            f.tick(sink.out());
         }
     }
 
-    fn out_inline(&mut self, text: &str) {
+    fn out_inline(&mut self, sink: &mut Sink, text: &str) {
         match &mut self.footer {
-            Some(f) => f.print_inline(text),
-            None => {
-                print!("{text}");
-                let _ = std::io::stdout().flush();
-            }
+            Some(f) => f.print_inline(sink.out(), text),
+            None => sink.out_inline(text),
         }
     }
 
-    fn out_line(&mut self, text: &str) {
+    fn out_line(&mut self, sink: &mut Sink, text: &str) {
         match &mut self.footer {
-            Some(f) => f.print_line(text),
-            None => println!("{text}"),
+            Some(f) => f.print_line(sink.out(), text),
+            None => sink.out_line(text),
+        }
+    }
+
+    /// The running-percentage suffix ` [ NN%]`, clamped to 100 — reruns push
+    /// `done` past `total`, so an unclamped `done*100/t` prints `[103%]`. The
+    /// ONE clamp site for every renderer's percentage. `None` when the total is
+    /// unknown, so each caller supplies its own no-total fallback.
+    fn pct_suffix(&self) -> Option<String> {
+        match self.total {
+            Some(t) if t > 0 => Some(format!(" [{:3}%]", (self.done * 100 / t).min(100))),
+            _ => None,
         }
     }
 
@@ -174,121 +222,86 @@ impl Progress {
         }
     }
 
-    /// Set the ANSI palette (color vs. plain) used for glyphs and the bar.
-    pub fn set_palette(&mut self, palette: Palette) {
-        self.palette = palette;
-    }
-
     /// pytest's char per outcome: '.' pass, 'F' fail, 's' skip, 'x' xfail,
     /// 'X' xpass, 'E' setup/teardown error. One char per TEST: on the call
     /// report, a non-passed setup (no call follows), or a failed teardown.
-    pub fn on_report(&mut self, worker: Option<usize>, r: &Report) {
+    pub fn on_report(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
         if self.mode == Mode::Json {
-            return Self::on_report_json(worker, r);
+            return Self::on_report_json(sink, worker, r);
         }
         if self.mode == Mode::Tap {
-            return self.on_report_tap(r);
+            return self.on_report_tap(sink, r);
         }
         if self.mode == Mode::Teamcity {
-            return self.on_report_teamcity(r);
+            return self.on_report_teamcity(sink, r);
         }
         if self.mode == Mode::Verbose {
-            return self.on_report_verbose(worker, r);
+            return self.on_report_verbose(sink, worker, r);
         }
         if self.mode == Mode::Bar {
-            return self.on_report_bar(worker, r);
+            return self.on_report_bar(sink, worker, r);
         }
+        let palette = sink.palette();
         // Github/Gitlab/Buildkite share the dots char stream below; their
         // annotations / fold markers are emitted from the aggregate at
         // end-of-run.
-        use OutcomeKind::*;
         let Some(kind) = outcome_kind(r) else {
             return;
-        };
-        let ch = match kind {
-            Pass => '.',
-            XPass => 'X',
-            Fail => 'F',
-            Skip => 's',
-            XFail => 'x',
-            // A failed teardown gets its own 'E' after the call already
-            // printed - it doesn't advance the counter.
-            SetupError | TeardownError => 'E',
         };
         if kind.counts_done() {
             self.done += 1;
         }
-        let painted = self.palette.outcome(&ch.to_string());
-        self.out_inline(&painted);
+        let painted = palette.outcome(&kind.dot().to_string());
+        self.out_inline(sink, &painted);
         self.col += 1;
         if self.col >= WIDTH {
             self.col = 0;
-            let tail = match self.total {
-                Some(t) if t > 0 => format!(" [{:3}%]", self.done * 100 / t),
-                _ => format!(" [{}]", self.done),
-            };
-            self.out_line(&tail);
+            // No total yet: show the raw done count instead of a percentage.
+            let tail = self
+                .pct_suffix()
+                .unwrap_or_else(|| format!(" [{}]", self.done));
+            self.out_line(sink, &tail);
         }
     }
 
     /// pytest -v: `nodeid OUTCOME [ pct%]` per test, ERROR lines for
     /// failed setup/teardown phases.
-    fn on_report_verbose(&mut self, worker: Option<usize>, r: &Report) {
-        use OutcomeKind::*;
+    fn on_report_verbose(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
         let Some(kind) = outcome_kind(r) else {
             return;
-        };
-        let word = match kind {
-            Pass => "PASSED",
-            XPass => "XPASS",
-            Fail => "FAILED",
-            Skip => "SKIPPED",
-            XFail => "XFAIL",
-            SetupError | TeardownError => "ERROR",
         };
         if kind.counts_done() {
             self.done += 1;
         }
-        let pct = match self.total {
-            Some(t) if t > 0 => format!(" [{:3}%]", (self.done * 100 / t).min(100)),
-            _ => String::new(),
-        };
+        let pct = self.pct_suffix().unwrap_or_default();
         let prefix = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-        let line = format!("{prefix}{} {}{pct}", r.nodeid, self.palette.outcome(word));
-        self.out_line(&line);
+        let line = format!(
+            "{prefix}{} {}{pct}",
+            r.nodeid,
+            sink.palette().outcome(kind.word())
+        );
+        self.out_line(sink, &line);
     }
 
     /// pytest-sugar-style per-test line: `<sym> nodeid  dur [pct%]`, with
     /// the failure repr inlined right under a failing test. Symbol colored
     /// by outcome (green pass / red fail+error / yellow skip+xfail+xpass).
-    fn on_report_bar(&mut self, worker: Option<usize>, r: &Report) {
-        use OutcomeKind::*;
+    fn on_report_bar(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
         let Some(kind) = outcome_kind(r) else {
             return;
         };
-        // symbol + its color (green pass / red fail+error / yellow skip+xfail+xpass)
-        let (sym, color): (&str, fn(&Palette, &str) -> String) = match kind {
-            Pass => ("✓", Palette::green),
-            XPass => ("X", Palette::yellow),
-            Fail => ("✗", Palette::red),
-            Skip => ("s", Palette::yellow),
-            XFail => ("x", Palette::yellow),
-            SetupError | TeardownError => ("E", Palette::red),
-        };
+        let (sym, color) = kind.symbol();
         if kind.counts_done() {
             self.done += 1;
         }
-        let pct = match self.total {
-            Some(t) if t > 0 => format!(" [{:>3}%]", (self.done * 100 / t).min(100)),
-            _ => String::new(),
-        };
+        let pct = self.pct_suffix().unwrap_or_default();
         let dur = if r.duration >= 0.0005 {
             format!("  {:.2}s", r.duration)
         } else {
             String::new()
         };
         let prefix = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-        let palette = self.palette; // Copy - avoids borrowing self during out_line
+        let palette = sink.palette(); // Copy - avoids borrowing sink during out_line
         let painted_sym = color(&palette, sym);
         let meta = format!("{dur}{pct}");
         let tail = if meta.is_empty() {
@@ -296,14 +309,14 @@ impl Progress {
         } else {
             palette.dim(&meta)
         };
-        self.out_line(&format!("{prefix}{painted_sym} {}{tail}", r.nodeid));
+        self.out_line(sink, &format!("{prefix}{painted_sym} {}{tail}", r.nodeid));
         // Sugar shows failures the moment they happen - inline the repr.
         if r.outcome == "failed" {
             if let Some(repr) = &r.longrepr {
                 let header = palette.bold_red(&format!("  ── {} ──", r.nodeid));
-                self.out_line(&header);
+                self.out_line(sink, &header);
                 for l in repr.trim_end().lines() {
-                    self.out_line(&format!("  {l}"));
+                    self.out_line(sink, &format!("  {l}"));
                 }
             }
         }
@@ -312,16 +325,16 @@ impl Progress {
     /// One TAP test point per test as it finishes; failure text follows as
     /// `#` diagnostic lines. The trailing plan comes from [`tap_plan`] so
     /// the count always matches the points emitted.
-    fn on_report_tap(&mut self, r: &Report) {
+    fn on_report_tap(&mut self, sink: &mut Sink, r: &Report) {
         let Some(line) = tap_result_line(self.done + 1, r) else {
             return;
         };
         self.done += 1;
-        println!("{line}");
+        sink.out_line(&line);
         if r.outcome == "failed" {
             if let Some(repr) = &r.longrepr {
                 for l in repr.trim_end().lines() {
-                    println!("# {l}");
+                    sink.out_line(&format!("# {l}"));
                 }
             }
         }
@@ -329,53 +342,45 @@ impl Progress {
 
     /// Close a TAP stream: the trailing `1..N` plan (valid TAP when the
     /// plan comes last), N = test points actually emitted.
-    pub fn tap_plan(&self) {
-        println!("1..{}", self.done);
+    pub fn tap_plan(&self, sink: &mut Sink) {
+        sink.out_line(&format!("1..{}", self.done));
     }
 
     /// One TeamCity service-message group per test. Retroactive
     /// `testStarted`/`testFinished` pairs are fine (duration rides on the
     /// attribute); emitting the group at once avoids parallel interleaving.
-    fn on_report_teamcity(&mut self, r: &Report) {
+    fn on_report_teamcity(&mut self, sink: &mut Sink, r: &Report) {
         let Some(messages) = teamcity_messages(r) else {
             return;
         };
         if r.when != "teardown" {
             self.done += 1;
         }
-        println!("{messages}");
+        sink.out_line(&messages);
     }
 
     /// One NDJSON object per phase report, straight to stdout (no footer in
     /// Json mode). `longrepr` rides only on failures (it's large); `worker`
     /// only in pool runs.
-    fn on_report_json(worker: Option<usize>, r: &Report) {
-        let mut obj = serde_json::json!({
-            "event": "testreport",
-            "nodeid": r.nodeid,
-            "when": r.when,
-            "outcome": r.outcome,
-            "duration": (r.duration * 10_000.0).round() / 10_000.0,
-            "wasxfail": r.wasxfail,
-        });
-        if let Some(w) = worker {
-            obj["worker"] = format!("gw{w}").into();
+    fn on_report_json(sink: &mut Sink, worker: Option<usize>, r: &Report) {
+        sink.out_line(&testreport_json(worker, r).to_string());
+    }
+
+    /// Stream a `collecterror` line to stdout, but only under `--output json`
+    /// (other modes render collection errors in the end-of-run summary, so
+    /// emitting mid-stream would corrupt their human output). The `--stream-json`
+    /// side channel gets the same event independently via
+    /// [`Sink::emit_collect_error`]. No-op in every non-json mode.
+    pub fn on_collect_error(&self, sink: &mut Sink, path: &str, longrepr: &str) {
+        if self.mode == Mode::Json {
+            sink.out_line(&collecterror_json(path, longrepr).to_string());
         }
-        if let Some(l) = r.lineno {
-            obj["lineno"] = l.into();
-        }
-        if r.outcome == "failed" {
-            if let Some(lr) = &r.longrepr {
-                obj["longrepr"] = lr.as_str().into();
-            }
-        }
-        println!("{obj}");
     }
 
     /// Close the dot line before failures/summary print.
-    pub fn finish(&mut self) {
+    pub fn finish(&mut self, sink: &mut Sink) {
         if let Some(f) = &mut self.footer {
-            f.finish();
+            f.finish(sink.out());
         }
         if matches!(
             self.mode,
@@ -384,12 +389,69 @@ impl Progress {
             return;
         }
         if self.col > 0 {
-            match self.total {
-                Some(t) if t > 0 => println!(" [{:3}%]", (self.done * 100 / t).min(100)),
-                _ => println!(),
+            match self.pct_suffix() {
+                Some(tail) => sink.out_line(&tail),
+                None => sink.out_line(""),
             }
         }
     }
+}
+
+/// Serialize one phase [`Report`] as the streaming-JSON `testreport` object —
+/// the single source of truth for that shape, shared by `--output json`
+/// (stdout) and `--stream-json` (side channel), so both stay byte-identical.
+/// `lineno`/`worker` are omitted when absent; `longrepr` rides failures only.
+pub(crate) fn testreport_json(worker: Option<usize>, r: &Report) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "event": "testreport",
+        "nodeid": r.nodeid,
+        "when": r.when,
+        "outcome": r.outcome,
+        "duration": (r.duration * 10_000.0).round() / 10_000.0,
+        "wasxfail": r.wasxfail,
+    });
+    if let Some(w) = worker {
+        obj["worker"] = format!("gw{w}").into();
+    }
+    if let Some(l) = r.lineno {
+        obj["lineno"] = l.into();
+    }
+    // Call-phase CPU time (process_time), present when measured (`--doctor` or a
+    // stream consumer). wall (`duration`) ≫ `cpu` ⇒ the test waited (sleep/IO)
+    // rather than computed — the inline wait-bound signal for editors.
+    if let Some(c) = r.cpu {
+        obj["cpu"] = c.into();
+    }
+    if r.outcome == "failed" {
+        if let Some(lr) = &r.longrepr {
+            obj["longrepr"] = lr.as_str().into();
+        }
+    }
+    // Captured stdout/stderr/log, present when a stream consumer requested it
+    // (`--output json` / `--stream-json` set RSTEST_STREAM_OUTPUT) or on a
+    // failure. Omitted when empty so quiet tests stay one compact line.
+    if !r.sections.is_empty() {
+        obj["sections"] = r
+            .sections
+            .iter()
+            .map(|(name, text)| serde_json::json!({"name": name, "text": text}))
+            .collect::<Vec<_>>()
+            .into();
+    }
+    obj
+}
+
+/// Serialize a collection/import failure as the streaming-JSON `collecterror`
+/// object — shared by `--output json` (stdout) and `--stream-json` (side
+/// channel) so a Test Explorer can mark a failing file red mid-run instead of
+/// waiting for the end-of-run snapshot. `path` is the failing collector
+/// (rootdir-relative file / nodeid); `longrepr` is the traceback.
+pub(crate) fn collecterror_json(path: &str, longrepr: &str) -> serde_json::Value {
+    serde_json::json!({
+        "event": "collecterror",
+        "path": path,
+        "longrepr": longrepr,
+    })
 }
 
 /// The TAP test point for a phase report, or None when it emits nothing.
@@ -523,6 +585,98 @@ mod tests {
     }
 
     #[test]
+    fn pct_suffix_clamps_and_reports_no_total() {
+        let mut p = Progress::default();
+        // No total: no percentage (caller supplies its own fallback).
+        assert_eq!(p.pct_suffix(), None);
+        p.set_total(4);
+        p.done = 2;
+        assert_eq!(p.pct_suffix().as_deref(), Some(" [ 50%]"));
+        // Reruns can push done past total; every renderer must clamp to 100,
+        // never print [150%] (the dots mid-run tail used to skip this clamp).
+        p.done = 6;
+        assert_eq!(p.pct_suffix().as_deref(), Some(" [100%]"));
+    }
+
+    #[test]
+    fn dots_tail_clamps_at_line_wrap() {
+        // Drive the dots stream past a wrap with done > total (reruns) and
+        // assert the wrapped `[NN%]` tail never exceeds 100%.
+        let mut p = Progress::default();
+        p.set_total(1);
+        let (mut sink, buf) = Sink::captured();
+        for _ in 0..WIDTH {
+            p.on_report(&mut sink, None, &report("call", "passed"));
+        }
+        let out = buf.out();
+        assert!(out.contains(" [100%]"), "{out}");
+        // No three-digit-over-100 percentage leaked (unclamped would be 7200%).
+        for bad in [" [101%]", " [102%]", " [150%]", " [7200%]"] {
+            assert!(!out.contains(bad), "leaked {bad}: {out}");
+        }
+    }
+
+    #[test]
+    fn testreport_json_includes_sections_when_present_and_omits_when_empty() {
+        // Empty sections → no `sections` key (quiet tests stay compact).
+        let quiet = testreport_json(Some(0), &report("call", "passed"));
+        assert!(quiet.get("sections").is_none());
+
+        // Populated sections (a stream consumer asked for output) → array of
+        // {name, text}.
+        let mut r = report("call", "passed");
+        r.sections = vec![("Captured stdout call".into(), "hi\n".into())];
+        let obj = testreport_json(Some(0), &r);
+        assert_eq!(obj["sections"][0]["name"], "Captured stdout call");
+        assert_eq!(obj["sections"][0]["text"], "hi\n");
+    }
+
+    #[test]
+    fn on_report_in_json_mode_writes_a_testreport_to_stdout() {
+        // The Mode::Json dispatch renders one NDJSON testreport line on stdout
+        // (the --output json live stream), via the shared serializer.
+        let mut p = Progress::default();
+        p.set_mode(Mode::Json);
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, Some(2), &report("call", "passed"));
+        let obj: serde_json::Value = serde_json::from_str(buf.out().trim()).unwrap();
+        assert_eq!(obj["event"], "testreport");
+        assert_eq!(obj["outcome"], "passed");
+        assert_eq!(obj["worker"], "gw2");
+    }
+
+    #[test]
+    fn testreport_json_includes_cpu_only_when_measured() {
+        // Not measured (plain run) → no `cpu` key.
+        assert!(testreport_json(None, &report("call", "passed"))
+            .get("cpu")
+            .is_none());
+        // Measured → cpu present (wall ≫ cpu is the wait-bound signal).
+        let mut r = report("call", "passed");
+        r.cpu = Some(0.0001);
+        assert_eq!(testreport_json(None, &r)["cpu"], 0.0001);
+    }
+
+    #[test]
+    fn on_collect_error_streams_json_only_in_json_mode() {
+        // Json mode: a collecterror line lands on stdout.
+        let mut p = Progress::default();
+        p.set_mode(Mode::Json);
+        let (mut sink, buf) = Sink::captured();
+        p.on_collect_error(&mut sink, "tests/test_x.py", "ImportError: boom");
+        let obj: serde_json::Value = serde_json::from_str(buf.out().trim()).unwrap();
+        assert_eq!(obj["event"], "collecterror");
+        assert_eq!(obj["path"], "tests/test_x.py");
+
+        // Any other mode: nothing on stdout (the summary renders it at the end).
+        let mut p = Progress::default();
+        p.set_mode(Mode::Dots);
+        let (mut sink, buf) = Sink::captured();
+        p.on_collect_error(&mut sink, "tests/test_x.py", "boom");
+        assert_eq!(buf.out(), "");
+    }
+
+    #[test]
     fn tap_lines() {
         let ok = tap_result_line(1, &report("call", "passed")).unwrap();
         assert_eq!(ok, "ok 1 - tests/test_a.py::test_x");
@@ -570,6 +724,41 @@ mod tests {
         let pass = teamcity_messages(&report("call", "passed")).unwrap();
         assert_eq!(pass.lines().count(), 2);
         assert!(teamcity_messages(&report("setup", "passed")).is_none());
+    }
+
+    #[test]
+    fn json_report_emits_sections_on_any_outcome() {
+        // Passing report with captured output: sections ride as {name, text}
+        // objects even though the outcome isn't a failure.
+        let mut r = report("call", "passed");
+        r.sections = vec![
+            ("Captured stdout".into(), "hello\nworld".into()),
+            ("Captured stderr".into(), "boom".into()),
+        ];
+        let (mut sink, buf) = Sink::captured();
+        Progress::on_report_json(&mut sink, Some(1), &r);
+        let obj: serde_json::Value =
+            serde_json::from_str(buf.out().trim()).expect("valid json line");
+        assert_eq!(obj["outcome"], "passed");
+        assert_eq!(obj["worker"], "gw1");
+        assert_eq!(
+            obj["sections"],
+            serde_json::json!([
+                {"name": "Captured stdout", "text": "hello\nworld"},
+                {"name": "Captured stderr", "text": "boom"},
+            ])
+        );
+    }
+
+    #[test]
+    fn json_report_omits_sections_when_empty() {
+        let (mut sink, buf) = Sink::captured();
+        Progress::on_report_json(&mut sink, None, &report("call", "passed"));
+        let obj: serde_json::Value =
+            serde_json::from_str(buf.out().trim()).expect("valid json line");
+        assert!(obj.get("sections").is_none(), "{obj}");
+        // Non-failure keeps longrepr off the wire too.
+        assert!(obj.get("longrepr").is_none(), "{obj}");
     }
 
     #[test]

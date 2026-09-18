@@ -38,6 +38,21 @@ def test_command_kinds_match_rust():
     assert python_kinds == _rust_variants("Command")
 
 
+def _send_overload_kinds() -> set[str]:
+    """The `kind` literals of `Connection.send`'s @overload stubs."""
+    src = (Path(__file__).parents[1] / "rstest_worker" / "_internal" / "protocol.py").read_text(
+        encoding="utf-8"
+    )
+    return set(re.findall(r'def send\(self, kind: Literal\["([^"]+)"\]', src))
+
+
+def test_send_overloads_match_event_kinds():
+    # Every send() overload must correspond to a real EventKind; an orphan
+    # overload (a payload/kind with no producer and no Rust variant) drifts
+    # silently past the EventKind<->Rust parity check above.
+    assert _send_overload_kinds() == set(get_args(messages.EventKind))
+
+
 def test_kind_literals_are_nonempty():
     # Guards against get_args returning () if EventKind/CommandKind stop being
     # Literal aliases (which would make the parity asserts vacuously pass).

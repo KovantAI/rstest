@@ -26,47 +26,55 @@ pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
             esc(&classname),
             esc(&name)
         );
-        let setup_failed = entry.setup.as_deref() == Some("failed");
-        let teardown_failed = entry.teardown.as_deref() == Some("failed");
-        let call = entry.call.as_deref();
-        if entry.quarantined {
-            // No <failure>/<error> element (junit-gating CI must stay
-            // green) but flagged the property way, like flaky, so
-            // dashboards can track the quarantine set.
-            body.push_str(
-                "><properties><property name=\"quarantined\" value=\"true\"/></properties></testcase>",
-            );
-        } else if setup_failed || teardown_failed {
-            errors += 1;
-            let text = run.failure_text(nodeid).unwrap_or("error");
-            let _ = write!(
-                body,
-                "><error message=\"{}\">{}</error></testcase>",
-                esc("error"),
-                esc(text)
-            );
-        } else if call == Some("failed") {
-            failures += 1;
-            let text = run.failure_text(nodeid).unwrap_or("failed");
-            let _ = write!(
-                body,
-                "><failure message=\"{}\">{}</failure></testcase>",
-                esc("failed"),
-                esc(text)
-            );
-        } else if call == Some("skipped") || entry.setup.as_deref() == Some("skipped") {
-            skipped += 1;
-            let reason = entry.skip_reason.as_deref().unwrap_or("skipped");
-            let _ = write!(body, "><skipped message=\"{}\"/></testcase>", esc(reason));
-        } else if entry.flaky {
-            // Passed only after reruns: JUnit has no standard flaky element,
-            // so flag it the standard-extension way (a testcase property)
-            // for dashboards that read junit rather than --report-json.
-            body.push_str(
-                "><properties><property name=\"flaky\" value=\"true\"/></properties></testcase>",
-            );
-        } else {
-            body.push_str("/>");
+        // Route off the shared outcome bucket rather than re-deriving phase
+        // logic here, so junit can never disagree with the summary/report-json
+        // over what a given entry IS. xpassed lands in the `_` arm (a plain
+        // pass in junit terms); xfailed rides the skipped arm, as pytest does.
+        match entry.outcome() {
+            "quarantined" => {
+                // No <failure>/<error> element (junit-gating CI must stay
+                // green) but flagged the property way, like flaky, so
+                // dashboards can track the quarantine set.
+                body.push_str(
+                    "><properties><property name=\"quarantined\" value=\"true\"/></properties></testcase>",
+                );
+            }
+            "errors" => {
+                errors += 1;
+                let text = run.failure_text(nodeid).unwrap_or("error");
+                let _ = write!(
+                    body,
+                    "><error message=\"{}\">{}</error></testcase>",
+                    esc("error"),
+                    esc(text)
+                );
+            }
+            "failed" => {
+                failures += 1;
+                let text = run.failure_text(nodeid).unwrap_or("failed");
+                let _ = write!(
+                    body,
+                    "><failure message=\"{}\">{}</failure></testcase>",
+                    esc("failed"),
+                    esc(text)
+                );
+            }
+            "skipped" | "xfailed" => {
+                skipped += 1;
+                let reason = entry.skip_reason.as_deref().unwrap_or("skipped");
+                let _ = write!(body, "><skipped message=\"{}\"/></testcase>", esc(reason));
+            }
+            _ if entry.flaky => {
+                // Passed only after reruns: JUnit has no standard flaky element,
+                // so flag it the standard-extension way (a testcase property)
+                // for dashboards that read junit rather than --report-json.
+                body.push_str(
+                    "><properties><property name=\"flaky\" value=\"true\"/></properties></testcase>",
+                );
+            }
+            _ => {
+                body.push_str("/>");
+            }
         }
         body.push('\n');
     }
@@ -276,5 +284,30 @@ mod tests {
         assert!(xml.contains(r#"name="plain" time="0.000"/>"#), "{xml}");
         // Quarantined failure must NOT surface as a <failure> (gate stays green).
         assert!(!xml.contains("<failure"), "{xml}");
+    }
+
+    #[test]
+    fn xfailed_routes_to_skipped_via_shared_outcome() {
+        // outcome()=="xfailed" (call skipped + wasxfail) must render as
+        // <skipped>, like pytest — proving junit rides the shared bucket, not a
+        // private re-derivation that would drop the xfail into a plain pass.
+        let mut run = crate::reporting::report::Run::default();
+        run.record(None, rep("a.py::xf", "setup", "passed", None));
+        let mut r = rep("a.py::xf", "call", "skipped", Some("expected fail"));
+        r.wasxfail = true;
+        run.record(None, r);
+        run.record(None, rep("a.py::xf", "teardown", "passed", None));
+
+        let path =
+            std::env::temp_dir().join(format!("rstest-junit-xfail-{}.xml", std::process::id()));
+        write(&path, &run, 1.0).unwrap();
+        let xml = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(xml.contains(r#"skipped="1""#), "{xml}");
+        assert!(
+            xml.contains(r#"<skipped message="expected fail"/>"#),
+            "{xml}"
+        );
     }
 }

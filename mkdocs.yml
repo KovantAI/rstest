@@ -1,6 +1,6 @@
 site_name: rstest
 site_description: A fast, pytest-compatible test runner — parallel by design, with built-in suite diagnostics
-site_url: https://rstest.readthedocs.io/
+site_url: https://python-rstest.readthedocs.io/
 repo_url: https://github.com/KovantAI/rstest
 repo_name: KovantAI/rstest
 edit_uri: edit/main/docs/
@@ -93,6 +93,7 @@ nav:
   - Guides:
       - guides/index.md
       - Migrating from pytest: guides/migrate-from-pytest.md
+      - Onboarding to pytest 9.1.1: guides/upgrade-to-pytest9.md
       - Migrating from pytest-xdist: guides/migrate-from-xdist.md
       - Parallel safety: guides/parallel-safety.md
       - Suite diagnostics: guides/doctor.md
@@ -125,6 +126,8 @@ nav:
       - Report JSON: reference/report-json.md
       - Benchmarks: reference/benchmarks.md
       - Parity divergences: reference/parity-divergences.md
+      - Plugin compatibility (top 100): reference/top-100-plugins.md
+      - Plugins exercised by the corpus: reference/corpus-plugins.md
       - Troubleshooting: reference/troubleshooting.md
       - Security & supply chain: reference/security.md
       - License: reference/license.md

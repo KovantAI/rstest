@@ -3,11 +3,32 @@
 //! unknown tests just keep collection order.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::cache;
 use crate::reporting::report::Run;
 
 pub const FILE: &str = "durations.json";
+
+/// Per-project wall-clock cache: `.rstest_cache/wall.json`, a single float of
+/// seconds. Unlike `durations.json` (call phase only), this captures the whole
+/// suite's elapsed time — fixture setup/teardown included — so the monorepo
+/// planner can weight a fixture-bound project by its real cost rather than its
+/// near-zero call time. See `mono::project_cost`.
+pub const WALL_FILE: &str = "wall.json";
+
+/// Record this run's total wall time for the cwd project.
+pub fn save_wall(secs: f64) {
+    if let Ok(bytes) = serde_json::to_vec(&secs) {
+        let _ = cache::write_atomic(&cache::file(WALL_FILE), &bytes);
+    }
+}
+
+/// Last run's wall seconds for `project`, if recorded.
+pub fn load_wall_in(project: &Path) -> Option<f64> {
+    let bytes = std::fs::read(cache::file_in(project, WALL_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
 
 pub fn load() -> HashMap<String, f64> {
     std::fs::read(cache::file(FILE))

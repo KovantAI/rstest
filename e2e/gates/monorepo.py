@@ -400,7 +400,7 @@ def gate_shared_cache_backend(g, args, binary):
         f"rc={r.returncode} " + r.stderr[-200:],
     )
     # Compact folds the segment into a base and prunes segments.
-    r = g.run("--cache-remote", str(remote), "--cache-compact", cwd=sca)
+    r = g.run("cache-compact", "--cache-remote", str(remote), cwd=sca)
     leftover = list(segdir.glob("seg-*.json")) if segdir.exists() else []
     check(
         "shared-cache: compact folds to base, prunes segments",
@@ -516,12 +516,12 @@ def gate_shared_cache_backend(g, args, binary):
         f"rc={r.returncode} keys={sorted(merged_local)}",
     )
 
-    # --cache-compact is run-less; combining it with a run-time cache flag would
-    # silently skip the run and the flag, exiting green. Must be rejected.
-    r = g.run("--cache-remote", str(remote), "--cache-compact", "--cache-push", cwd=sca)
+    # cache-compact is a run-less subcommand; --cache-push is not global, so
+    # combining them would silently skip the run and the flag. clap rejects it.
+    r = g.run("cache-compact", "--cache-remote", str(remote), "--cache-push", cwd=sca)
     check(
-        "shared-cache: --cache-compact + --cache-push is rejected",
-        r.returncode != 0 and "run-less" in r.stderr,
+        "shared-cache: cache-compact + --cache-push is rejected",
+        r.returncode != 0 and "cache-push" in r.stderr,
         f"rc={r.returncode} {r.stderr[-160:]}",
     )
 
