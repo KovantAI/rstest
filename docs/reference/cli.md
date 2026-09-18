@@ -370,6 +370,37 @@ core and doesn't otherwise require an external pytest; if `pytest` isn't on
 PATH, `try` exits 2. `migrate-check` and normal runs have no such
 requirement.
 
+### `shard-verify`
+
+Prove a `--shard` matrix covered the whole suite. Sharding partitions the suite
+independently in each job with no coordination, so a divergent duration cache or
+a differently-collected suite can silently drop or double-run tests and still
+exit 0. `shard-verify` reconciles the per-shard reports after the fact.
+
+Each shard run writes a report while `--shard` is active:
+
+```console
+$ rstest -n auto --shard "$K/$N" --report-json "shard.$K.json"
+```
+
+That report carries a `meta.shard` stamp: `k`, `n`, and the sha256
+`collection_hash` and size of the full collected suite. In a final job that has
+gathered all the shard reports, reconcile them:
+
+```console
+$ rstest shard-verify shard.*.json
+ok shard-verify: 4 shards cover all 4200 collected tests (no drops, no overlap)
+```
+
+It exits `0` only when the shards agree on one collection (same
+`collection_hash`, `n`, and size), the shard set is exactly `1..=N` once each,
+and the union of what they ran equals the collection with no test on two shards.
+It exits `1` on any drop, overlap, missing or duplicate shard, or a divergent
+collection, printing a line that names the problem. It reads only the JSON
+files, needs no interpreter, and runs no tests. Full-collection runs only: a
+`--collect lazy` shard run stamps no collection hash and cannot be verified.
+See [Verify no test was dropped](../guides/sharding.md#verify-no-test-was-dropped).
+
 ### `verify-vendor`
 
 Prove the vendored pytest tree in your installed rstest is intact. rstest ships

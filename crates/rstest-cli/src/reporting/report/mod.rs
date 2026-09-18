@@ -65,6 +65,19 @@ pub struct TestEntry {
     pub cached: bool,
 }
 
+/// Sharding identity stamped into report-json meta when `--shard K/N` is active,
+/// so `rstest shard-verify` can prove the shards covered the whole suite without
+/// a separate collection pass. `collection_hash`/`collection_size` are the
+/// sha256 of the full ordered nodeid list and its length, as agreed by every
+/// worker (identical across shards of the same run).
+#[derive(Default, Clone)]
+pub struct ShardMeta {
+    pub k: usize,
+    pub n: usize,
+    pub collection_hash: String,
+    pub collection_size: u64,
+}
+
 /// Run-level metadata for the report-json envelope (schema 5).
 pub struct RunMeta {
     pub exitstatus: i32,
@@ -72,6 +85,8 @@ pub struct RunMeta {
     pub started_at_epoch: u64,
     pub workers: usize,
     pub argv: Vec<String>,
+    /// Present only for a `--shard K/N` run; drives `shard-verify`.
+    pub shard: Option<ShardMeta>,
 }
 
 /// A recorded failure: (nodeid, longrepr, sections of (header, body)).
@@ -374,6 +389,19 @@ impl Run {
             "argv".into(),
             serde_json::to_value(&run_meta.argv).unwrap_or_default(),
         );
+        // Sharding identity (only under --shard): lets `shard-verify` reconcile
+        // the per-shard reports. Optional field, no schema bump (like `cpu`).
+        if let Some(s) = &run_meta.shard {
+            meta.insert(
+                "shard".into(),
+                serde_json::json!({
+                    "k": s.k,
+                    "n": s.n,
+                    "collection_hash": s.collection_hash,
+                    "collection_size": s.collection_size,
+                }),
+            );
+        }
         let collect_errors: Vec<&String> = self.collect_errors.iter().map(|(p, _)| p).collect();
         serde_json::json!({
             "meta": meta,
@@ -622,6 +650,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            shard: None,
         };
         // Measured (doctor / stream run): cpu rides the call report and lands in
         // the snapshot entry.

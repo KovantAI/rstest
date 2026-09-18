@@ -74,42 +74,55 @@ test is simply never run. The merged report is short, yet the build can still
 go green with fewer tests than the suite has. Nothing detects that at runtime.
 
 For a merge-queue or release gate, add a step that proves the shards covered
-the whole suite. rstest's machine-readable outputs make it a few lines: collect
-the full suite once, collect what each shard actually ran, and assert the union
-matches with no overlap.
+the whole suite. The built-in [`rstest shard-verify`](../reference/cli.md#shard-verify)
+does exactly this. Each shard's `--report-json`, written while `--shard` was
+active, carries a `meta.shard` stamp: `k`, `n`, and the sha256
+`collection_hash` and size of the full collected suite. Pass the per-shard
+reports and it reconciles them:
 
 ```bash
-# 1. Full collection, ONCE, with the SAME selection flags the shards use
-#    (--changed, -k, -m, paths). This defines the universe to check against.
-rstest --collect-only --report-json discovery.json
+# Each shard writes a report while sharding (the report carries the stamp):
+rstest -n auto --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
 
-# 2. Each shard already records the tests it ran via --report-json:
-#    rstest -n auto --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
-
-# 3. After every shard finishes, reconcile with jq:
-jq -r '.tests[].nodeid' discovery.json | sort -u > collected.ids
-jq -r '.tests | keys[]'  shard.*.json  | sort    > ran.ids   # object keys = ran nodeids
-
-# Fail if the set the shards ran differs from the set collected:
-if ! diff <(sort -u ran.ids) collected.ids >/dev/null; then
-  echo "shard coverage mismatch: tests were dropped or added" >&2
-  comm -3 <(sort -u ran.ids) collected.ids >&2
-  exit 1
-fi
-
-# Fail if any test ran on more than one shard (overlap):
-if [ "$(wc -l < ran.ids)" -ne "$(sort -u ran.ids | wc -l)" ]; then
-  echo "shard coverage overlap: a test ran on more than one shard" >&2
-  exit 1
-fi
+# After the matrix finishes, in a job that has gathered all the shard reports:
+rstest shard-verify shard.*.json
 ```
 
-The `tests` map in each shard's report-json is keyed by every test that ran,
-including skipped and xfailed ones, so the union is complete. The discovery
-document lists every **collected** test, so `ran == collected` is the exact
-"nothing dropped, nothing double-run" property. Run the `--collect-only` step
-in its own job (or reuse the `durations` job below, which already runs the full
-suite) and pass its `discovery.json` to the reconcile step as an artifact.
+It exits `0` only when the shards agree on one collection (same
+`collection_hash`, `n`, and size), the shard set is exactly `1..=N` once each,
+and the union of what they ran equals the collection with no test on two shards.
+On any drop, overlap, missing or duplicate shard, or a divergent collection, it
+prints what went wrong and exits `1`, failing the gate:
+
+```text
+FAILED shard-verify: coverage is INCOMPLETE
+  - shards ran 4180 of 4200 collected tests; 20 were dropped (ran on no shard)
+```
+
+`shard-verify` needs no interpreter and reads only the JSON files, so it runs in
+a lightweight final job. It covers full-collection runs; a `--collect lazy`
+shard run stamps no collection hash and is not verifiable this way.
+
+??? note "Manual equivalent with jq (no shard-verify)"
+    If you cannot run `shard-verify` (an older rstest, or a policy against extra
+    tooling), reconcile by hand. Collect the full suite once with the **same**
+    selection flags the shards use, union the per-shard ran-ids, and compare.
+    The report-json `tests` map is keyed by every test that ran (including
+    skipped and xfailed), so the union is complete.
+
+    ```bash
+    rstest --collect-only --report-json discovery.json
+    jq -r '.tests[].nodeid' discovery.json | sort -u > collected.ids
+    jq -r '.tests | keys[]'  shard.*.json  | sort    > ran.ids
+    # Dropped or added tests:
+    if ! diff <(sort -u ran.ids) collected.ids >/dev/null; then
+      echo "shard coverage mismatch: tests dropped or added" >&2; exit 1
+    fi
+    # A test that ran on two shards:
+    if [ "$(wc -l < ran.ids)" -ne "$(sort -u ran.ids | wc -l)" ]; then
+      echo "shard coverage overlap: a test ran on more than one shard" >&2; exit 1
+    fi
+    ```
 
 ## GitHub Actions
 

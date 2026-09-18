@@ -597,6 +597,10 @@ pub fn run_lazy_pool(
         warnings,
         cache_dir,
         exitstatus,
+        // Lazy collection shards at file granularity with no global nodeid
+        // hash, so shard-verify does not cover lazy runs (no shard meta stamped).
+        collection_hash: None,
+        collection_size: 0,
     })
 }
 

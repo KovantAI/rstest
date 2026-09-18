@@ -44,6 +44,18 @@ pub(crate) enum Command {
         #[arg(long, value_name = "DURATION")]
         max_age: Option<String>,
     },
+
+    /// Verify a sharded run covered the whole suite. Reads the per-shard
+    /// report-json files (each written with `--report-json` while `--shard`
+    /// was active) and checks the shards agree on one collection and that
+    /// every collected test ran on exactly one shard. Exits non-zero if any
+    /// test was dropped or ran on two shards, or if the shards disagree. Reads
+    /// only the files, so it needs no interpreter.
+    ShardVerify {
+        /// The per-shard report-json files (one per shard, in any order).
+        #[arg(value_name = "REPORT_JSON", required = true, num_args = 1..)]
+        reports: Vec<PathBuf>,
+    },
 }
 
 /// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
@@ -431,7 +443,13 @@ const BOOL_FLAGS: &[&str] = &[
 /// still forwards `-k foo tests/` to the session. Kept in kebab-case to match
 /// clap's derived subcommand names. A pytest path literally named after a
 /// subcommand is shadowed (`rstest ./try` / `rstest -- try` disambiguates).
-const SUBCOMMANDS: &[&str] = &["verify-vendor", "try", "migrate-check", "cache-compact"];
+const SUBCOMMANDS: &[&str] = &[
+    "verify-vendor",
+    "try",
+    "migrate-check",
+    "cache-compact",
+    "shard-verify",
+];
 
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
@@ -503,7 +521,16 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         .peek()
         .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
     {
-        own.push(argv.next().unwrap());
+        let sub = argv.next().unwrap();
+        // `shard-verify` runs no pytest session: every token after it is a clap
+        // positional (report-json paths), so route them all to `own` rather than
+        // forwarding non-flag tokens to the (nonexistent) session.
+        let consumes_all = sub == "shard-verify";
+        own.push(sub);
+        if consumes_all {
+            own.extend(argv.by_ref());
+            return (own, session);
+        }
     }
     while let Some(arg) = argv.next() {
         if arg == "--" {
@@ -542,6 +569,15 @@ mod tests {
         );
         // min alone does nothing (pytest needs --durations to render)
         assert_eq!(parse_durations(&v(&["--durations-min=0.1"])), None);
+    }
+
+    #[test]
+    fn shard_verify_routes_all_positionals_to_clap() {
+        // Report paths after `shard-verify` are clap positionals, not forwarded
+        // pytest args (shard-verify runs no session).
+        let (own, session) = split_args(v(&["shard-verify", "a.json", "b.json"]));
+        assert_eq!(own, v(&["rstest", "shard-verify", "a.json", "b.json"]));
+        assert!(session.is_empty(), "session={session:?}");
     }
 
     #[test]
