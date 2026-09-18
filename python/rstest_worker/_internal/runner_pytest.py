@@ -116,7 +116,7 @@ def _maybe_start_debugpy() -> None:
             flush=True,
         )
         print(
-            f"rstest: debugpy listening on 127.0.0.1:{port}; waiting for client…",
+            f"rstest: debugpy listening on 127.0.0.1:{port}; waiting for client...",
             file=sys.stderr,
             flush=True,
         )
