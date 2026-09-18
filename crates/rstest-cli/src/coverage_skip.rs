@@ -220,6 +220,19 @@ pub fn load(scope: &Path, config_fp: &str) -> Baseline {
         .unwrap_or_default()
 }
 
+/// The last run's green set and per-nodeid def line, ungated by the config
+/// fingerprint. `load` returns empty when the config changed (skipping is off);
+/// `explain` reports *history* rather than skip-eligibility, so it wants the raw
+/// record regardless. Empty on absent / corrupt / schema-mismatched store.
+pub fn load_raw(scope: &Path) -> (HashSet<String>, HashMap<String, u64>) {
+    std::fs::read(cache::file_in(scope, FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Outcomes>(&b).ok())
+        .filter(|o| o.schema == SCHEMA)
+        .map(|o| (o.green, o.test_lines))
+        .unwrap_or_default()
+}
+
 /// Persist the green set + per-test-file hashes + per-nodeid def lines + config
 /// fingerprint after a run. Best-effort: a cache-write failure never fails the
 /// run. `lines` maps green nodeids to their source def line (restores a cached

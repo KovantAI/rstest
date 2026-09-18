@@ -9,9 +9,10 @@ rstest owns a small set of flags; **everything else forwards to the test
 session verbatim**, so the entire pytest flag surface — including flags
 added by your plugins — works without translation.
 
-A handful of **run-less commands** don't run your suite —
+A handful of **run-less commands** don't run your suite:
 [`verify-vendor`](#verify-vendor), [`try`](#try),
-[`migrate-check`](#migrate-check), and [`cache-compact`](#cache-compact). Each
+[`migrate-check`](#migrate-check), [`cache-compact`](#cache-compact),
+[`shard-verify`](#shard-verify), and [`explain`](#explain). Each
 is a subcommand, given as the first argument (`rstest try`); a path literally
 named after one is disambiguated with `rstest ./try` or `rstest -- try`.
 
@@ -411,6 +412,44 @@ collection, printing a line that names the problem. It reads only the JSON
 files, needs no interpreter, and runs no tests. Full-collection runs only: a
 `--collect lazy` shard run stamps no collection hash and cannot be verified.
 See [Verify no test was dropped](../guides/sharding.md#verify-no-test-was-dropped).
+
+### `explain`
+
+Print one test's dossier from the caches without running anything. rstest
+accretes rich per-test data across runs (the duration cache, the flake/fail log,
+the last-green outcome set, the coverage index), but every other surface renders
+it suite-wide. `explain` answers "tell me everything about this test" by merging
+those caches for a single nodeid.
+
+```console
+$ rstest explain "tests/test_api.py::test_login"
+test: tests/test_api.py::test_login
+
+  duration   1.8241s (last recorded)
+  outcome    passed last incremental run
+  flakes     flaked 3x, failed 1x (last 2d ago)
+  coverage   covers 2 file(s), 47 line(s):
+               src/api/auth.py
+               src/api/session.py
+```
+
+Add `--json` for a schema-stamped object on stdout (`{meta, nodeid, found,
+duration_seconds, last_outcome, source_line, flakes, coverage}`), suitable for an
+editor or CI step. Absent fields are `null`: a never-flaked test has no `flakes`,
+a cold coverage index yields `null` coverage.
+
+It reads only cache files, needs no interpreter, and runs no tests. The data
+comes from `.rstest_cache/`: `durations.json` (last recorded call time),
+`flakes.json` (flake/fail counts and last-event age), `incremental_outcomes.json`
+(last-green outcome and source line), and `coverage_index.json` (the coverage
+footprint, populated by a prior `--cov-context=test` run). Fields whose cache is
+cold are shown as unavailable rather than omitted. In human mode an unknown
+nodeid exits `1` and prints substring suggestions; with `--json` it exits `0`
+with `"found": false` so tooling can probe ids cheaply.
+
+Note the local caches keep only the *latest* duration per test, not a history
+series, so variance and an ordered last-N-outcomes list are not reported yet;
+`explain` grows richer as more per-test data is persisted.
 
 ### `verify-vendor`
 

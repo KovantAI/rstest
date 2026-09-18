@@ -504,10 +504,11 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
 }
 
 /// Dispatch a run-less subcommand (`rstest verify-vendor` / `try` /
-/// `migrate-check` / `cache-compact`). Returns `Some(exit)` when a subcommand
-/// ran, `None` for a normal run (the caller falls through to watch/`execute`).
-/// These modes bypass the run pipeline, so the interpreter is resolved here
-/// rather than pulled through [`resolve_run_config`].
+/// `migrate-check` / `cache-compact` / `shard-verify` / `explain`). Returns
+/// `Some(exit)` when a subcommand ran, `None` for a normal run (the caller falls
+/// through to watch/`execute`). These modes bypass the run pipeline; the
+/// interpreter-free ones (`cache-compact`, `shard-verify`, `explain`) return
+/// before Python is resolved, the rest resolve it here.
 pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     use crate::cli::Command;
     let Some(command) = &cli.command else {
@@ -529,6 +530,9 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             &mut sink, reports,
         )?));
     }
+    if let Command::Explain { nodeid, json } = command {
+        return Ok(Some(crate::explain::run_explain(&mut sink, nodeid, *json)?));
+    }
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = discover::resolve(&scope, cli.python.as_deref())?;
     let code = match command {
@@ -546,6 +550,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         )?,
         Command::CacheCompact { .. } => unreachable!("handled above"),
         Command::ShardVerify { .. } => unreachable!("handled above"),
+        Command::Explain { .. } => unreachable!("handled above"),
     };
     Ok(Some(code))
 }
