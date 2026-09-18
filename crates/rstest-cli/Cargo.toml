@@ -33,7 +33,7 @@ regex = "1"
 toml = "1.1"
 notify = "8"
 sha2 = "0.11"
-ureq = { version = "2", optional = true }
+ureq = { version = "3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
