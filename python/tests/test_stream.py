@@ -213,6 +213,61 @@ def test_sessionstart_ships_node_input_snapshot(monkeypatch):
     assert node_inputs == [{"workerinput": {"workerid": "gw0", "workercount": 4}}]
 
 
+# ── _build_workerinput: dead-master-path seed coverage (no-xdist) ───────────
+
+
+class _WiConfig:
+    """Minimal config for _build_workerinput: settable workerinput/workeroutput
+    plus getoption (consumed by _random_order_seed)."""
+
+    def __init__(self):
+        self.workerinput = None
+        self.workeroutput = None
+
+    def getoption(self, name):
+        return None
+
+
+# Every `workerinput[<key>]` a master-gated third-party plugin reads *by direct
+# subscript* on its worker branch — the dead-master-path crash class. With
+# pytest-xdist uninstalled (the adopted state) no master ever stages these, so a
+# pool worker KeyErrors at collection unless _build_workerinput seeds it. Audited
+# against the installed gate-venv plugins (2026-09-17); grouped by who provisions
+# the key. If a plugin adds a new key, extend the audit AND the seed together —
+# this guard fails first so the gap can't ship silently.
+_BUILD_SEEDED_KEYS = frozenset(
+    {
+        "randomly_seed",  # pytest-randomly
+        "random_order_seed",  # pytest-random-order
+        "workerid",  # pytest-cov + generic "am I a worker?" sniffers
+        "workercount",  # pytest-cov, xdist-compat sniffers
+        "mainargv",  # xdist-compat prog-name reconstruction
+        "testrun_uid",  # shared run id (xdist testrun_uid contract)
+        "cov_master_host",  # pytest-cov worker mode
+        "cov_master_topdir",  # pytest-cov worker mode
+    }
+)
+# Crash-class keys NOT seeded here because another mechanism owns them — listed
+# so the audit is exhaustive, not to assert on:
+#   server_port      -> _seed_pytest_retry (stands up pytest-retry's server)
+#   follower_ident   -> _XdistNodeShim configure_node emulation (sqlalchemy)
+#   sock_port,       -> pytest-rerunfailures, unregistered wholesale
+#   statusdb_token       (_neutralize_rerunfailures)
+#   testrunuid       -> read only by xdist itself; absent when xdist uninstalled
+
+
+def test_build_workerinput_seeds_every_direct_seed_crash_key(monkeypatch):
+    monkeypatch.setenv("RSTEST_WORKER_COUNT", "4")
+    monkeypatch.setenv("RSTEST_RUN_UID", "abc123")
+    config = _WiConfig()
+    StreamPlugin._build_workerinput(config, "gw0")
+    assert config.workerinput is not None
+    missing = _BUILD_SEEDED_KEYS - set(config.workerinput)
+    assert not missing, f"unseeded dead-master-path keys (no-xdist KeyError risk): {missing}"
+    # workeroutput must exist too — plugins (pytest-cov) write into it.
+    assert config.workeroutput == {}
+
+
 # ── pytest_warning_recorded: aggregation ───────────────────────────────────
 
 
