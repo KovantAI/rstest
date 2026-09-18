@@ -29,6 +29,16 @@ pub(crate) enum Command {
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
 
+    /// Order-dependency bisect: for a test that fails only when run after some
+    /// other test, delta-debug the predecessor set at -n 0 to the minimal set of
+    /// earlier tests that reproduce the failure — the polluter(s). Prints the
+    /// culprits and a minimal reproducing command. `--bisect-json` writes it.
+    Bisect {
+        /// The failing test's nodeid (`path::test[param]`).
+        #[arg(value_name = "NODEID")]
+        nodeid: String,
+    },
+
     /// Maintenance: fold remote segments into a fresh base and prune them, then
     /// exit without running tests. Needs `--cache-remote`. With no retention
     /// flags it folds all; `--keep-last` / `--max-age` leave a recent window so
@@ -129,6 +139,11 @@ pub struct Cli {
     /// the exit code, so CI can gate on NEW issues while tolerating known ones.
     #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
+
+    /// Write the `bisect` result as JSON (culprits + reproduce command) for
+    /// tooling. Used with the `bisect` subcommand.
+    #[arg(long, global = true)]
+    pub(crate) bisect_json: Option<PathBuf>,
 
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
@@ -447,6 +462,7 @@ const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
     "migrate-check",
+    "bisect",
     "cache-compact",
     "shard-verify",
 ];
@@ -468,6 +484,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--cache-remote",
     "--migrate-check-json",
     "--migrate-allow",
+    "--bisect-json",
     "--durations-regress",
     "--only-rerun",
     "--cov-diff-fail-under",
@@ -522,10 +539,12 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
     {
         let sub = argv.next().unwrap();
-        // `shard-verify` runs no pytest session: every token after it is a clap
-        // positional (report-json paths), so route them all to `own` rather than
-        // forwarding non-flag tokens to the (nonexistent) session.
-        let consumes_all = sub == "shard-verify";
+        // `shard-verify` (report-json paths) and `bisect` (a single nodeid) run
+        // no pytest session: every token after them is a clap positional, so
+        // route them all to `own` rather than forwarding non-flag tokens to the
+        // (nonexistent) session. `bisect`'s nodeid contains `::`, which the flag
+        // tables would otherwise route to the session and hide from clap.
+        let consumes_all = sub == "shard-verify" || sub == "bisect";
         own.push(sub);
         if consumes_all {
             own.extend(argv.by_ref());
