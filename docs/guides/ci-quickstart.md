@@ -9,8 +9,8 @@ parallelism with no extra plugin, and a duration cache that makes scheduling
 smarter when persisted between runs.
 
 This page gets you running on **GitHub Actions** and walks two worked examples
-(Django, monorepo). For other CI systems — AWS CodeBuild, Google Cloud Build,
-GitLab, Azure, CircleCI, Jenkins, pre-commit — see [More CI
+(Django, monorepo). For other CI systems (AWS CodeBuild, Google Cloud Build,
+GitLab, Azure, CircleCI, Jenkins, pre-commit), see [More CI
 systems](ci-recipes.md). For a shard matrix that needs a cache no native CI
 cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
 
@@ -29,7 +29,7 @@ cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
 | One long suite you split across CI nodes | `--shard K/N` matrix + [shared cache](ci-shared-cache.md) | [Sharding](sharding.md) + [Shared cache](ci-shared-cache.md) |
 
 The rule of thumb: **the unit of CI parallelism should be the project, not the
-root** once you have more packages than runner cores — one job per package
+root** once you have more packages than runner cores: one job per package
 gives each the full runner and its own cache. Reach for `--shard` only when a
 *single* project's suite is itself the long pole.
 
@@ -61,8 +61,8 @@ flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
 
 ### Under the hood
 
-The action is a thin wrapper. If you prefer raw YAML — or need something the
-action does not expose — the equivalent steps are:
+The action is a thin wrapper. If you prefer raw YAML (or need something the
+action does not expose), the equivalent steps are:
 
 ```yaml
 jobs:
@@ -97,12 +97,12 @@ jobs:
         # reruns; --doctor auto-publishes diagnostics to the job summary.
         run: rstest -n auto --output github --junitxml junit.xml
 
-      # Long pole? Fan the suite across a runner matrix with --shard K/N —
+      # Long pole? Fan the suite across a runner matrix with --shard K/N;
       # see the Sharding guide.
 
       # Monorepo roots: caches live in EACH project (.rstest_cache per
-      # package — widen the cache path to **/.rstest_cache), and junit
-      # files are written per project as junit.<slug>.xml — glob them
+      # package; widen the cache path to **/.rstest_cache), and junit
+      # files are written per project as junit.<slug>.xml; glob them
       # in the artifact step.
 
       - uses: actions/upload-artifact@v4
@@ -113,7 +113,7 @@ jobs:
 ```
 
 For a shard matrix, swap the `actions/cache` step for the segment-merge
-[shared cache](ci-shared-cache.md) — it sidesteps the `run_id` key dance and
+[shared cache](ci-shared-cache.md). It sidesteps the `run_id` key dance and
 lets every shard write without a single-writer job.
 
 ## Worked example: Django on ephemeral CI
@@ -121,13 +121,13 @@ lets every shard write without a single-writer job.
 A Django suite is the common case: pytest-django, a real database, ephemeral
 GitHub runners where nothing survives between runs unless you persist it. The
 two things people get wrong are the **cold-vs-warm cache** and **per-worker
-databases** — both are handled below.
+databases**. Both are handled below.
 
 pytest-django is exercised continuously in rstest's battery *including
 per-worker test databases under parallelism* (see [Plugins](plugins.md)):
 rstest supplies each worker the xdist-style worker identity pytest-django keys
 off, so every worker gets its own isolated test DB (`test_app_gw0`,
-`test_app_gw1`, …) automatically — no extra flags, same as under xdist.
+`test_app_gw1`, …) automatically. No extra flags, same as under xdist.
 
 ```yaml
 # .github/workflows/tests.yml
@@ -163,8 +163,8 @@ jobs:
             rstest-
 
       # --reuse-db keeps the migrated test DB across runs on a warm workspace;
-      # on ephemeral runners the DB is fresh each time, so it's a no-op there —
-      # harmless to leave in, useful on self-hosted runners.
+      # on ephemeral runners the DB is fresh each time, so it's a no-op there
+      # (harmless to leave in, useful on self-hosted runners).
       - run: rstest -n auto --reuse-db --output github --junitxml junit.xml
 
       - uses: actions/upload-artifact@v4
@@ -173,17 +173,17 @@ jobs:
 ```
 
 **What the two runs look like.** Duration-aware scheduling needs one run of
-timing data, so the first run on a fresh cache key is *cold* — the scheduler
+timing data, so the first run on a fresh cache key is *cold*: the scheduler
 has no per-test durations and falls back to an even split. The second run
 (and every run after, as long as the cache restores) is *warm*: it starts the
 slowest tests first and packs workers tightly.
 
 Concretely, on the runnable
 [`examples/ci-bench`](https://github.com/KovantAI/rstest/tree/main/examples/ci-bench)
-suite (136 wait-bound tests with duration skew) — **measured**, `-n 4`, best of
+suite (136 wait-bound tests with duration skew), **measured**, `-n 4`, best of
 3, Apple Silicon / CPython 3.13:
 
-<!-- SOURCE OF TRUTH: examples/ci-bench/README.md — keep numbers in sync -->
+<!-- SOURCE OF TRUTH: examples/ci-bench/README.md, keep numbers in sync -->
 | config | wall | vs pytest |
 |---|---|---|
 | pytest (serial) | 12.1s | 1.0× |
@@ -191,12 +191,12 @@ suite (136 wait-bound tests with duration skew) — **measured**, `-n 4`, best o
 | rstest warm (`-n 4`, cached durations) | 3.6s | 3.3× |
 
 Cold already wins from parallelism; warm adds ~1.5× on top by scheduling the
-long pole first. That is a **synthetic** wait-bound example, not a Django app —
+long pole first. That is a **synthetic** wait-bound example, not a Django app.
 rstest ships no canonical Django timing, and a suite's win depends on its own
 shape (see the self-check table in the
 [README](https://github.com/KovantAI/rstest#will-rstest-speed-up-your-suite)).
 To get *your* real numbers before committing, run [`rstest try`](migrate-from-pytest.md)
-locally — it runs your suite under plain pytest and under `rstest -n auto`,
+locally. It runs your suite under plain pytest and under `rstest -n auto`,
 diffs outcomes, and reports the speedup, with no migration.
 
 !!! warning "Ephemeral runners: warm the cache from your default branch"
@@ -205,7 +205,7 @@ diffs outcomes, and reports the speedup, with no migration.
     PR jobs restore the base branch's cache entries), so PRs restore a warm
     `.rstest_cache` instead of rebuilding timing data from scratch. For a
     matrix/shard layout, prefer the [shared-cache backend](ci-shared-cache.md)
-    — it sidesteps the `run_id` key dance entirely.
+    (it sidesteps the `run_id` key dance entirely).
 
 ## Worked example: monorepo on ephemeral CI
 
@@ -214,18 +214,18 @@ at once:
 
 1. **Concurrency.** At the root, every project launches concurrently with at
    least one worker each ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
-   Many packages on a small (2–4 core) runner oversubscribes — 20 packages on
+   Many packages on a small (2–4 core) runner oversubscribes: 20 packages on
    a 2-core runner is 20 concurrent single-worker children fighting for 2 cores.
 2. **Shared cache.** `--cache-remote`/`--cache-pull`/`--cache-push` are **not
-   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push)) —
+   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push)):
    each project keeps its own `.rstest_cache`, so the segment-merge shared
    cache is a per-project feature.
 
-**Both dissolve if you make the project the unit of CI parallelism** — one
+**Both dissolve if you make the project the unit of CI parallelism**: one
 job per package via a matrix, instead of one root job running everything
 concurrently. Each job runs a single project (`rstest libs/core` opts out of
 monorepo mode and runs that package alone, with the runner's *full* core count
-— no oversubscription), and because it's a single-project run it can use the
+, no oversubscription), and because it's a single-project run it can use the
 [shared cache](ci-shared-cache.md) normally:
 
 ```yaml
@@ -308,7 +308,7 @@ jobs:
 ```
 
 Each package is its own job: it gets the whole runner, warms its own cache
-segment from the last green main run, and pushes a fresh segment — cold on run
+segment from the last green main run, and pushes a fresh segment: cold on run
 one, warm from run two, exactly like the single-suite case. Isolation is free
 (matrix jobs don't share a runner), and a slow package no longer steals
 workers from a fast one. The segment-merge mechanics are in
@@ -329,13 +329,13 @@ workers from a fast one. The segment-merge mechanics are in
 
 `--doctor-json` writes the doctor analysis as a versioned JSON document
 (see [Suite diagnostics](doctor.md)). Archive it per run and compare a
-PR's report against the main branch's — no extra tooling required, the
+PR's report against the main branch's: no extra tooling required, the
 document already contains totals, wait-bound tests, parallel-floor gate
 tests, and fixture costs by name.
 
 Any doctor run also publishes the report as markdown to the CI job
-summary automatically — appended to `$GITHUB_STEP_SUMMARY` on GitHub
-Actions, piped to `buildkite-agent annotate` on Buildkite — so the
+summary automatically (appended to `$GITHUB_STEP_SUMMARY` on GitHub
+Actions, piped to `buildkite-agent annotate` on Buildkite), so the
 current run's analysis is on the run page with no post-processing step.
 (GitLab and TeamCity have no native markdown summary; use `--doctor-md`
 and publish the file as an artifact.)
@@ -393,7 +393,7 @@ Two practical notes:
 
 [`migrate-check`](../reference/cli.md#migrate-check) exits non-zero when a
 test has a run-to-run unstable id or fails only under parallelism, so a
-dedicated job keeps a migrating suite from regressing — no new co-location
+dedicated job keeps a migrating suite from regressing: no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use
 `--migrate-allow` to tolerate a triaged backlog so the gate fires only on
 **new** issues, and `--migrate-check-json` to archive the findings
@@ -419,30 +419,41 @@ and just run `rstest`.
 ## Notes
 
 - **Exit codes** are pytest's (0 pass, 1 failures, 2 interrupted, 3
-  internal, 4 usage error, 5 nothing collected) with sensible merging across workers —
-  see [Exit codes](../reference/exit-codes.md).
+  internal, 4 usage error, 5 nothing collected) with sensible merging across workers.
+  See [Exit codes](../reference/exit-codes.md).
 - **`--junitxml`** is rendered by rstest from merged results; point your
   CI's test-report integration at it as you would pytest's.
 - **`--report-json`** emits a per-test outcome snapshot (stable schema) if
   you build tooling on top of results.
 - **`--output github`** keeps the normal log and additionally emits
   `::error` annotations for each failure, so failures appear inline on the
-  PR diff — see [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
+  PR diff. See [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
 - **Crash safety matters most in CI**: a segfaulting test costs one FAILED
   entry instead of an aborted job with partial results.
-- **Worker count**: `-n auto` uses the runner's available logical cores —
-  on Linux it honors the CPU affinity mask and cgroup CPU quota, so a
+- **Worker count**: `-n auto` uses the runner's available logical cores.
+  On Linux it honors the CPU affinity mask and cgroup CPU quota, so a
   CPU-limited container gets its allocation, not the host's core count. CI
   runners are small (2–4 cores) and not oversubscribed, so `auto` is the
   right default there; pin `-n <k>` only if you need a fixed count.
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` if your CI renders ANSI.
+- **Platform**: these recipes are written for Linux runners but work
+  unchanged on `windows-latest` and `macos-latest` (swap the runner image);
+  rstest's full test gate runs on all three every commit. `-n auto` returns
+  the runner's logical cores on macOS/Windows (the cgroup/affinity narrowing
+  above is Linux-specific). Two Windows-only behavior differences, both with
+  automatic fallbacks: the per-test timeout has no signal-based interrupt, so
+  `--worker-timeout` (the watchdog) is the only backstop there. See
+  [`--worker-timeout`](../reference/cli.md#-worker-timeout-seconds); and
+  file-descriptor leak tracking is unavailable (it reads `/proc/self/fd` or
+  `/dev/fd`), so `--doctor` reports thread leaks but not fd leaks on Windows.
+  See [Resource leaks](resource-leaks.md).
 
 ## Go deeper
 
-- [More CI systems](ci-recipes.md) — AWS CodeBuild, Google Cloud Build,
+- [More CI systems](ci-recipes.md): AWS CodeBuild, Google Cloud Build,
   GitLab, Azure, CircleCI, Jenkins, and pre-commit.
-- [Shared cache across CI jobs](ci-shared-cache.md) — the segment-merge cache
+- [Shared cache across CI jobs](ci-shared-cache.md): the segment-merge cache
   for a shard matrix.
-- [Sharding across CI jobs](sharding.md) — how partitions are computed and the
+- [Sharding across CI jobs](sharding.md): how partitions are computed and the
   identical-cache-snapshot rule.

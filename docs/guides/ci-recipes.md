@@ -2,8 +2,8 @@
 
 The [CI quickstart](ci-quickstart.md) covers GitHub Actions and the two
 worked examples (Django, monorepo). This page is the per-provider reference
-for everyone else — AWS CodeBuild, Google Cloud Build, GitLab CI, Azure
-Pipelines, CircleCI, Jenkins — plus the pre-commit hooks.
+for everyone else (AWS CodeBuild, Google Cloud Build, GitLab CI, Azure
+Pipelines, CircleCI, Jenkins), plus the pre-commit hooks.
 
 Every recipe follows the same shape as the quickstart: install rstest, run it
 with `-n auto`, publish the JUnit file to the provider's test-report UI, and
@@ -19,8 +19,8 @@ at the [shared-cache backend](ci-shared-cache.md) instead.
 ## AWS CodeBuild
 
 CodeBuild has no log-side annotation command (no equivalent of GitHub's
-`::error` or Azure's `##vso`), so there is no dedicated `--output` style
-— the integration surface is the JUnit file. Point a [CodeBuild report
+`::error` or Azure's `##vso`), so there is no dedicated `--output` style.
+The integration surface is the JUnit file. Point a [CodeBuild report
 group](https://docs.aws.amazon.com/codebuild/latest/userguide/test-reporting.html)
 at `--junitxml` output and CodeBuild renders pass/fail, durations, and
 run-over-run trends in the console.
@@ -57,7 +57,7 @@ to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
 and the cache to `**/.rstest_cache/**/*`.
 
 This single-job recipe re-saves `.rstest_cache` every build, which is
-correct here — one full run owns the authoritative cache. If you **shard**
+correct here (one full run owns the authoritative cache). If you **shard**
 across CodeBuild batch jobs, don't let each shard save: follow the
 [sharding guide](sharding.md)'s discipline (shards restore a stable cache
 read-only; one separate full job saves the fresh one), or the shards will
@@ -85,7 +85,7 @@ role needs `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix
 
 ## Google Cloud Build
 
-Cloud Build likewise has no annotation protocol — it streams step logs
+Cloud Build likewise has no annotation protocol. It streams step logs
 to Cloud Logging and has no native test-report UI, so again there is no
 `--output` style to add. Run rstest as a build step and publish the
 JUnit XML (and any doctor/report-json) as build
@@ -113,14 +113,14 @@ artifacts:
 
 The duration cache lives in `.rstest_cache`; on Cloud Build persist it
 between runs by syncing it to Cloud Storage
-(`gsutil rsync`) at the start and end of the step — the workspace itself
+(`gsutil rsync`) at the start and end of the step. The workspace itself
 is not retained across builds. Colors auto-disable off-tty, so the log
 stays clean; the JUnit file is the machine-readable surface for any
 downstream test-reporting tool.
 
 **Shared cache (sharding, no rsync bookends).** The build's service account
 already reaches GCS, so point [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc--no-secrets)
-straight at a `gs://` bucket — rstest drives the `gcloud storage` (or `gsutil`)
+straight at a `gs://` bucket: rstest drives the `gcloud storage` (or `gsutil`)
 CLI on the step, immutable segments make concurrent shard pushes safe, no
 start/end sync:
 
@@ -174,7 +174,7 @@ test:
 the parallelism you want. For a monorepo root, glob `junit.*.xml` in
 `artifacts:paths` and widen the cache to `**/.rstest_cache/`.
 
-**Shared cache (parallel matrix).** GitLab's `cache:` is one blob per key — it
+**Shared cache (parallel matrix).** GitLab's `cache:` is one blob per key. It
 can't merge segments across `parallel:` jobs. For a duration-balanced matrix,
 use the [shared-cache backend](ci-shared-cache.md#object-store-s3gcsr2-oidc--no-secrets)
 against an object store the runner is authed to (S3/GCS/R2) or an authenticated
@@ -234,7 +234,7 @@ steps:
       testResultsFiles: junit.xml
 ```
 
-**Shared cache (sharding).** rstest has no native Azure Blob transport — an
+**Shared cache (sharding).** rstest has no native Azure Blob transport, so an
 `azblob://` remote is rejected loudly rather than silently written to a junk
 dir. Two supported paths:
 
@@ -254,14 +254,14 @@ dir. Two supported paths:
   The pipeline's service connection / managed identity needs **Storage Blob Data
   Contributor** on the container (the `az` batch calls read, write, and delete).
 
-- **Authenticated `https://` endpoint** — front the store with a static file
+- **Authenticated `https://` endpoint**: front the store with a static file
   server honoring the [listing contract](../concepts/caching.md#transports) and
   use `--cache-remote https://… ` with `RSTEST_CACHE_REMOTE_TOKEN`.
 
 ## CircleCI
 
 CircleCI has no log-side annotation protocol, so there is no dedicated
-`--output` style — the integration surface is the JUnit file, consumed by
+`--output` style. The integration surface is the JUnit file, consumed by
 [`store_test_results`](https://circleci.com/docs/collect-test-data/) for
 the Tests tab and flaky-test detection.
 
@@ -298,8 +298,8 @@ workflows:
 parallelism. Point `store_test_results` at a directory (not a single
 file) so a monorepo's `junit.*.xml` are all collected.
 
-**Shared cache (parallelism).** `save_cache`/`restore_cache` is one blob per key
-— it can't merge across `parallelism: N` containers. Point
+**Shared cache (parallelism).** `save_cache`/`restore_cache` is one blob per key.
+It can't merge across `parallelism: N` containers. Point
 [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc--no-secrets) at an
 object store the job is authed to (S3/GCS via a context or OIDC) so each
 container pushes its segment and pulls the union:
@@ -340,14 +340,14 @@ pipeline {
 }
 ```
 
-Persist `.rstest_cache` between runs to keep scheduling warm — stash/unstash
+Persist `.rstest_cache` between runs to keep scheduling warm: stash/unstash
 it, or use a shared workspace/volume on the agent. If you run a TAP harness
 instead, `--output tap` makes stdout a pure TAP 13 stream for the [TAP
 plugin](https://plugins.jenkins.io/tap/).
 
-**Shared cache (agents, sharding) — zero glue.** Jenkins agents usually share
+**Shared cache (agents, sharding): zero glue.** Jenkins agents usually share
 an NFS/volume mount, which *is* the [shared-cache
-remote](ci-shared-cache.md#self-hosted-shared-mount--zero-glue) — no
+remote](ci-shared-cache.md#self-hosted-shared-mount--zero-glue): no
 stash/unstash, no pull/push bookends beyond the flags. Parallel stages / matrix
 shards each push their immutable segment to the same mount and pull the union:
 
@@ -377,15 +377,15 @@ repos:
 
 Two hook ids are provided:
 
-- `rstest` — runs the whole suite.
-- `rstest-changed` — runs only tests affected by the working-tree changes
+- `rstest`: runs the whole suite.
+- `rstest-changed`: runs only tests affected by the working-tree changes
   (`rstest --changed`), for a fast per-commit gate.
 
 `rstest` defaults to the `pre-push` stage (a full suite is heavy for every
 commit); move it to each commit with `stages: [pre-commit]`.
 
 `rstest-changed` defaults to `pre-commit`, because `--changed` diffs the
-working tree against HEAD — at pre-push everything is already committed, so
+working tree against HEAD. At pre-push everything is already committed, so
 it would select zero tests and pass silently. On CI, set `GITHUB_BASE_REF`
 or `CI_MERGE_REQUEST_*` and `--changed` diffs against the PR base instead.
 
@@ -405,10 +405,10 @@ Pass extra flags with `args`:
 
 ## Go deeper
 
-- [CI quickstart](ci-quickstart.md) — GitHub Actions, the Django and monorepo
+- [CI quickstart](ci-quickstart.md): GitHub Actions, the Django and monorepo
   worked examples, doctor trending, and the migrate-check gate.
-- [Shared cache across CI jobs](ci-shared-cache.md) — the segment model and
+- [Shared cache across CI jobs](ci-shared-cache.md): the segment model and
   every transport, for a shard matrix.
-- [Sharding across CI jobs](sharding.md) — how partitions are computed.
-- [Exit codes](../reference/exit-codes.md) · [Report JSON](../reference/report-json.md)
-  — the machine-readable surfaces to build gates on.
+- [Sharding across CI jobs](sharding.md): how partitions are computed.
+- [Exit codes](../reference/exit-codes.md) · [Report JSON](../reference/report-json.md):
+  the machine-readable surfaces to build gates on.

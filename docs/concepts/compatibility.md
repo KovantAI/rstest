@@ -85,6 +85,30 @@ same upgrade you'd owe pytest itself within a release or two anyway.
 [Onboarding to pytest 9.1.1](../guides/upgrade-to-pytest9.md) is the
 step-by-step for clearing them, including the tiny 9.0.x → 9.1.1 delta.
 
+### Plugin versions vs the vendored core
+
+The same rule applies to your **plugins**, and it is the most common source
+of confusion. A plugin loads *into* the vendored core, so `import pytest`
+inside it resolves to the vendored 9.1.1, not to whatever pytest is installed
+in your environment. Two consequences:
+
+- **The plugin's own code must support pytest 9.** Its compatibility with
+  rstest is exactly its compatibility with pytest 9: if it calls an API that
+  pytest 9 removed, it breaks under rstest just as it would under a real
+  pytest-9 upgrade. A plugin's entry in the [top-100 matrix](../reference/top-100-plugins.md)
+  reflects a version that already supports pytest 9.
+- **A `pytest<9` pin is inert at runtime.** Such a pin is a packaging
+  constraint that pip enforces at install time only. It does not change which
+  pytest the plugin sees once a worker is running, and rstest never consults
+  it, so a plugin pinned to `pytest<9` still executes against the vendored 9.
+
+rstest does not maintain a per-plugin minimum-version table. Instead,
+`rstest -n 0` runs your installed plugins against the vendored core in one
+session and surfaces any pytest-9 incompatibility exactly as a real upgrade
+would. Clear it there before scaling to workers. For the common stack see
+[Your plugin stack](../guides/plugin-stack.md); for the deprecation audit see
+[Onboarding to pytest 9.1.1](../guides/upgrade-to-pytest9.md).
+
 ## Measured at scale
 
 Beyond the four-suite battery, the public-suite corpus runs rstest
