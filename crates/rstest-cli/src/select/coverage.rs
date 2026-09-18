@@ -42,7 +42,7 @@ pub struct CoverageIndex {
 /// when missing, unreadable, corrupt, or an unrecognized schema - every `None`
 /// makes the caller fall back to import-graph selection. A v1 (pre-hash) index
 /// fails the schema check as cold.
-fn load_coverage_index() -> Option<CoverageIndex> {
+pub fn load_coverage_index() -> Option<CoverageIndex> {
     let bytes = std::fs::read(cache::file(COVERAGE_INDEX_FILE)).ok()?;
     let idx: CoverageIndex = serde_json::from_slice(&bytes).ok()?;
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)

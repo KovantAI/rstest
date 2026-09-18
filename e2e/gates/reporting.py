@@ -346,7 +346,7 @@ def gate_doctor(g, args, binary):
     d = json.loads(dj.read_text(encoding="utf-8"))
     check(
         "doctor json schema",
-        d.get("schema") == 2
+        d.get("schema") == 3
         and d.get("wait_bound")
         and any("test_sleepy" in t["nodeid"] for t in d["wait_bound"]["tests"]),
         str(d)[:200],
@@ -373,6 +373,41 @@ def gate_doctor(g, args, binary):
     check(
         "doctor auto-appends job summary",
         summ.exists() and "## rstest doctor" in summ.read_text(encoding="utf-8"),
+    )
+
+    # Coverage waste: two tests hit the same product line; one is slow and adds
+    # no unique coverage, so with a warm per-test index --doctor flags it as a
+    # delete/merge candidate. The fast, equally-redundant test is below the
+    # duration floor and must NOT appear.
+    g.write("cw/mod.py", "def f(x):\n    return x + 1\n")
+    g.write(
+        "cw/test_cw.py",
+        "import time\n"
+        "from mod import f\n"
+        "def test_thorough():\n"
+        "    assert f(1) == 2\n"
+        "def test_redundant_slow():\n"
+        "    time.sleep(0.9)\n"
+        "    assert f(1) == 2\n",
+    )
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+    g.run("cw", *cov)  # warm the per-test coverage index
+    cwj = g.tmp / "cw.json"
+    r = g.run("cw", *cov, "--doctor", "--doctor-json", str(cwj))
+    check(
+        "doctor coverage-waste flags the redundant slow test",
+        "COVERAGE WASTE" in r.stdout and "test_redundant_slow" in r.stdout,
+        r.stdout[-600:],
+    )
+    d = json.loads(cwj.read_text(encoding="utf-8"))
+    cwd = d.get("coverage_waste") or {}
+    nodeids = [t["nodeid"] for t in cwd.get("tests", [])]
+    check(
+        "doctor json coverage_waste",
+        cwd.get("redundant_tests", 0) >= 1
+        and any("test_redundant_slow" in n for n in nodeids)
+        and not any("test_thorough" in n for n in nodeids),
+        str(d.get("coverage_waste"))[:300],
     )
 
     # --doctor-fail-on: turn the doctor signal into a CI gate. The DOCTOR

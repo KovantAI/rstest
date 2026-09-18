@@ -387,11 +387,15 @@ pub(super) fn run_post_gates(
         || !doctor_gate.is_empty())
         && !passthrough
     {
+        // The coverage-waste section needs a warm per-test index; absent (no
+        // prior `--cov --cov-context=test` run) it is simply omitted.
+        let coverage_index = crate::select::load_coverage_index();
         let report = doctor::analyze(
             &outcome.run,
             &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
             start.elapsed().as_secs_f64(),
             n,
+            coverage_index.as_ref(),
         );
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
