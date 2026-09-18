@@ -46,14 +46,14 @@ plugin's category, not yet runtime-verified.
 | 21 | pytest-base-url | 10.2M | ✅ Works | V | Config/fixture only; `--base-url` delivered to every worker (e2e gate). |
 | 22 | pytest-randomly | 10.0M | ✅ Works | V | rstest synthesizes the `randomly_seed` the master would inject (one run-level seed, all workers agree); vetted. Native `--shuffle` also available. |
 | 23 | pytest-icdiff | 9.7M | ➖ N/A | V | Assertion-diff repr; side-by-side diff reaches worker failure output (e2e gate). |
-| 24 | pytest-playwright | 9.6M | ✅ Works | i | Per-worker browser context; designed for xdist-style parallelism. |
-| 25 | pytest-homeassistant-custom-component | 9.4M | ✅ Works | i | Fixture bundle; no master-state dependence expected (unverified). |
+| 24 | pytest-playwright | 9.6M | ✅ Works | V | Per-worker browser context; `page` fixture works under the pool (e2e `plugin-services` gate). |
+| 25 | pytest-homeassistant-custom-component | 9.4M | ✅ Works | V | Fixture bundle; per-worker `hass` fixture works under the pool (e2e `plugin-services` gate). |
 | 26 | pytest-dependency | 8.9M | ⚠️ Caveat | V | Cross-test deps may span workers at `-n ≥ 2`; honored at `-n 0` (dependent skipped when dep fails — e2e gate), or use `--dist loadscope`. |
 | 27 | pytest-sugar | 8.2M | 🔶 `-n 0` | V | Terminal-rendering; not painted at `-n ≥ 2` (rstest owns the terminal). Corpus-flagged as a benign silent/terminal case. |
 | 28 | allure-pytest | 8.1M | ✅ Works | V | Writes one result file per test to a results dir — one file per test across workers (e2e gate). |
 | 29 | pytest-custom-exit-code | 7.9M | ⚠️ Caveat | V | rstest computes the exit status from merged results; the plugin's per-worker exit hook is overridden — `--suppress-tests-failed-exit-code` cannot green a failing run (e2e gate). |
 | 30 | pytest-instafail | 7.3M | 🔶 `-n 0` | V | Inline failure printing is terminal-owned; coexists under the pool (e2e gate). rstest streams failures natively (live progress). |
-| 31 | pytest-postgresql | 6.6M | ✅ Works | i | Per-worker DB/socket fixtures. |
+| 31 | pytest-postgresql | 6.6M | ✅ Works | V | Per-worker DB instance on a free port (e2e `plugin-services` gate). |
 | 32 | pytest-recording | 6.1M | ✅ Works | V | VCR cassettes are per-test files; record and replay both parallel-safe. Corpus: langchain (`libs/langchain_v1` unit tests) VCR replay at `-n auto`. |
 | 33 | pytest-order | 6.1M | ⚠️ Caveat | V | Ordering holds only within a worker; `-n 0` or `--dist loadfile`/`loadscope`. |
 | 34 | pytest-aiohttp | 6.0M | ✅ Works | V | Vetted; per-test aiohttp loop. |

@@ -1,6 +1,7 @@
 """e2e gate sections: plugins."""
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -838,5 +839,108 @@ def gate_pytest_gh_annotate(g, args, binary):
     check(
         "gh-annotate: native --output github emits ::error",
         "::error" in r.stdout and "test_bad" in r.stdout,
+        r.stdout[-400:],
+    )
+
+
+# --- Service-backed gates -------------------------------------------------
+# These need an external resource (a postgres install, a playwright browser, the
+# Home Assistant test stack) that the default offline gate run and most dev
+# machines don't have. They are opt-in via RSTEST_GATE_SERVICES=1 (the CI
+# `plugin-services` job sets it and provisions the resources) and self-skip
+# otherwise, so a plain `python e2e/gate.py` never downloads a 95 MB browser or
+# depends on postgres being installed.
+
+
+def _services_enabled():
+    return os.environ.get("RSTEST_GATE_SERVICES") == "1"
+
+
+def gate_pytest_postgresql(g, args, binary):
+    print("== pytest-postgresql (per-worker DB instance) ==")
+    if not _services_enabled():
+        print("  skip: set RSTEST_GATE_SERVICES=1 to run (needs a postgres install)")
+        return
+    if not (shutil.which("initdb") and shutil.which("pg_ctl")):
+        print("  skip: postgres binaries (initdb/pg_ctl) not on PATH")
+        return
+    # pytest-postgresql's postgresql_proc spawns its own server on a free port
+    # per process, so each worker gets an isolated instance — no shared master.
+    gp = _plugin_gate(binary, args, "-postgresql", ["pytest-postgresql", "psycopg[binary]"])
+    gp.write(
+        "pg/test_pg.py",
+        "def test_one(postgresql):\n"
+        "    cur = postgresql.cursor()\n"
+        "    cur.execute('SELECT 1')\n"
+        "    assert cur.fetchone()[0] == 1\n"
+        "def test_two(postgresql):\n"
+        "    cur = postgresql.cursor()\n"
+        "    cur.execute('CREATE TABLE t (id int); INSERT INTO t VALUES (7)')\n"
+        "    cur.execute('SELECT id FROM t')\n"
+        "    assert cur.fetchone()[0] == 7\n",
+    )
+    r = gp.run("pg", "-n", "2", timeout=180)
+    check(
+        "postgresql: per-worker instance works under the pool",
+        "2 passed" in r.stdout,
+        r.stdout[-400:],
+    )
+
+
+def gate_pytest_playwright(g, args, binary):
+    print("== pytest-playwright (per-worker browser context) ==")
+    if not _services_enabled():
+        print("  skip: set RSTEST_GATE_SERVICES=1 to run (needs a playwright browser)")
+        return
+    gp = _plugin_gate(binary, args, "-playwright", ["pytest-playwright"])
+    # Provision the chromium build into the venv (idempotent; cached after the
+    # first download). Skip the gate if provisioning fails (offline runner).
+    try:
+        subprocess.run(
+            [str(venv_bin(gp.venv, "playwright")), "install", "chromium"],
+            check=True,
+            capture_output=True,
+            timeout=300,
+        )
+    except Exception as exc:  # any provisioning failure -> skip
+        print(f"  skip: could not install chromium ({exc})")
+        return
+    gp.write(
+        "pw/test_pw.py",
+        "def test_a(page):\n"
+        "    page.set_content('<h1>hello</h1>')\n"
+        "    assert page.text_content('h1') == 'hello'\n"
+        "def test_b(page):\n"
+        "    page.set_content(\"<div id='x'>42</div>\")\n"
+        "    assert page.text_content('#x') == '42'\n",
+    )
+    r = gp.run("pw", "-n", "2", timeout=180)
+    check(
+        "playwright: per-worker browser context under the pool",
+        "2 passed" in r.stdout,
+        r.stdout[-400:],
+    )
+
+
+def gate_pytest_homeassistant(g, args, binary):
+    print("== pytest-homeassistant-custom-component (per-worker hass fixture) ==")
+    if not _services_enabled():
+        print("  skip: set RSTEST_GATE_SERVICES=1 to run (heavy Home Assistant deps)")
+        return
+    gh = _plugin_gate(binary, args, "-homeassistant", ["pytest-homeassistant-custom-component"])
+    gh.write("ha/pytest.ini", "[pytest]\nasyncio_mode = auto\n")
+    gh.write(
+        "ha/test_ha.py",
+        "async def test_hass_a(hass, enable_custom_integrations):\n"
+        "    assert hass is not None\n"
+        "    assert hass.states is not None\n"
+        "async def test_hass_b(hass, enable_custom_integrations):\n"
+        "    hass.states.async_set('sensor.x', '42')\n"
+        "    assert hass.states.get('sensor.x').state == '42'\n",
+    )
+    r = gh.run(".", "-n", "2", cwd=gh.tmp / "ha", timeout=300)
+    check(
+        "homeassistant: per-worker hass fixture under the pool",
+        "2 passed" in r.stdout,
         r.stdout[-400:],
     )
