@@ -28,6 +28,31 @@ from rstest_worker._internal.xdistnode import (
 
 log = logging.getLogger("rstest.worker")
 
+# Sentinel for "no value fingerprinted yet" in the scope-promotion tracker.
+_UNSET = object()
+
+
+def _fixture_fingerprint(value: Any) -> str | None:
+    """A cheap, stable-across-calls fingerprint of a fixture's produced value,
+    for the scope-promotion advisor. Returns None when the value can't be
+    compared safely across calls (unhashable-and-unreprable, or an
+    identity-based default repr like ``<X object at 0x...>`` that differs every
+    call). None is conservative: the fixture is then never flagged constant, so
+    the advisor never suggests promoting a fixture whose value it can't verify."""
+    try:
+        return f"h{hash(value)}"
+    except Exception:
+        pass
+    try:
+        r = repr(value)
+    except Exception:
+        return None
+    # Default object repr embeds the address, so it looks different every call;
+    # treat that as "can't tell" rather than "changes every time".
+    if " at 0x" in r or " object at " in r:
+        return None
+    return r[:512]
+
 
 class Timeout(BaseException):
     """Raised in the test's own thread when `--timeout` / `@pytest.mark.timeout`
@@ -100,7 +125,11 @@ class StreamPlugin:
         # leak. Measuring from the 2nd test on drops that first-touch noise.
         self._leak_warmed = False
         self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
-        self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
+        # (argname, scope) -> [count, secs, all_constant, first_fingerprint].
+        # all_constant/first_fingerprint track the scope-promotion advisor:
+        # only function-scoped fixtures whose value fingerprints identically on
+        # every call stay `all_constant`.
+        self._fixtures: dict[tuple[str, str], list[Any]] = {}
         # (when, category, message, filename, lineno) -> count; aggregated
         # because big suites emit thousands of duplicate warnings.
         self._warnings: dict[tuple[Any, ...], int] = {}
@@ -442,9 +471,24 @@ class StreamPlugin:
             return (yield)
         finally:
             key = (fixturedef.argname, fixturedef.scope)
-            entry = self._fixtures.setdefault(key, [0, 0.0])
+            entry = self._fixtures.setdefault(key, [0, 0.0, True, _UNSET])
             entry[0] += 1
             entry[1] += time.perf_counter() - t0
+            # Value-identity tracking only matters for function-scoped fixtures
+            # (the only promotion candidates); wider scopes are already shared.
+            if fixturedef.scope != "function":
+                entry[2] = False
+            elif entry[2]:
+                # cached_result is (value, cache_key, exc); None after a failed
+                # setup, in which case we can't fingerprint -> not a candidate.
+                cached = getattr(fixturedef, "cached_result", None)
+                fp = _fixture_fingerprint(cached[0]) if cached else None
+                if fp is None:
+                    entry[2] = False
+                elif entry[3] is _UNSET:
+                    entry[3] = fp
+                elif entry[3] != fp:
+                    entry[2] = False
 
     def pytest_warning_recorded(self, warning_message, when, nodeid, location):
         m = warning_message
@@ -477,8 +521,16 @@ class StreamPlugin:
             self._conn.send("warnings", {"entries": entries})
         if self._doctor and self._fixtures:
             fixtures: list[m.FixtureStat] = [
-                {"name": name, "scope": scope, "count": c, "total": round(t, 4)}
-                for (name, scope), (c, t) in self._fixtures.items()
+                {
+                    "name": name,
+                    "scope": scope,
+                    "count": c,
+                    "total": round(t, 4),
+                    # A promotion candidate: function-scoped, called more than
+                    # once, and value-identical on every call this worker saw.
+                    "constant": bool(scope == "function" and c >= 2 and const),
+                }
+                for (name, scope), (c, t, const, _fp) in self._fixtures.items()
             ]
             self._conn.send("doctor_fixtures", {"fixtures": fixtures})
 

@@ -2170,6 +2170,7 @@ mod tests {
                     scope: "session".into(),
                     count: 1,
                     total: 0.5,
+                    constant: false,
                 }]
             }),
             None

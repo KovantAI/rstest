@@ -22,7 +22,7 @@ use crate::reporting::report::Run;
 use crate::scheduling::proto::FixtureStat;
 
 /// Bump when the JSON shape changes incompatibly.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 pub struct DoctorReport {
@@ -117,6 +117,20 @@ struct FixtureEntry {
     scope: String,
     count: u64,
     total_seconds: f64,
+    /// Scope-promotion advisor: a function-scoped fixture that produced a
+    /// value-identical result on every call in every worker — a candidate for
+    /// `@pytest.fixture(scope="session")`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    constant: bool,
+    /// Projected wall-time saved by promoting this candidate to session scope:
+    /// `(count - workers) * mean_setup`, i.e. the redundant re-setups removed.
+    /// 0 unless `constant` and the fixture ran more than once per worker.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    projected_saving_seconds: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Serialize)]
@@ -236,11 +250,27 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     // -- Fixtures ----------------------------------------------------------
     let mut fx: Vec<FixtureEntry> = fixtures
         .iter()
-        .map(|f| FixtureEntry {
-            name: f.name.clone(),
-            scope: f.scope.clone(),
-            count: f.count,
-            total_seconds: f.total,
+        .map(|f| {
+            // Promotion to session scope runs the fixture once per worker
+            // session instead of once per call, so the redundant re-setups are
+            // `count - workers`; value each at the mean setup time. Only a
+            // value-verified constant fixture that ran more than once/worker
+            // has anything to save.
+            let mean = f.total / f.count.max(1) as f64;
+            let redundant = f.count.saturating_sub(workers.max(1) as u64);
+            let saving = if f.constant {
+                redundant as f64 * mean
+            } else {
+                0.0
+            };
+            FixtureEntry {
+                name: f.name.clone(),
+                scope: f.scope.clone(),
+                count: f.count,
+                total_seconds: f.total,
+                constant: f.constant,
+                projected_saving_seconds: (saving * 10000.0).round() / 10000.0,
+            }
         })
         .collect();
     fx.sort_by(|a, b| b.total_seconds.total_cmp(&a.total_seconds));
@@ -367,12 +397,24 @@ pub(crate) mod testutil {
                 imbalance_pct: 12.5,
                 long_pole_seconds: 8.4,
             }),
-            fixtures: vec![FixtureEntry {
-                name: "db".into(),
-                scope: "session".into(),
-                count: 4,
-                total_seconds: 6.1,
-            }],
+            fixtures: vec![
+                FixtureEntry {
+                    name: "db".into(),
+                    scope: "session".into(),
+                    count: 4,
+                    total_seconds: 6.1,
+                    constant: false,
+                    projected_saving_seconds: 0.0,
+                },
+                FixtureEntry {
+                    name: "settings".into(),
+                    scope: "function".into(),
+                    count: 40,
+                    total_seconds: 4.0,
+                    constant: true,
+                    projected_saving_seconds: 3.6,
+                },
+            ],
             slowest_files: vec![FileEntry {
                 file: "tests/test_a.py".into(),
                 total_seconds: 20.0,
@@ -507,5 +549,42 @@ mod tests {
         assert_eq!(pe.workers_busy.len(), 3);
         // max 8.0, min 0.0 (idle gw3) => 100%.
         assert!((pe.imbalance_pct - 100.0).abs() < 1e-6);
+    }
+
+    fn fstat(name: &str, scope: &str, count: u64, total: f64, constant: bool) -> FixtureStat {
+        FixtureStat {
+            name: name.into(),
+            scope: scope.into(),
+            count,
+            total,
+            constant,
+        }
+    }
+
+    #[test]
+    fn scope_promotion_projects_saving_over_workers() {
+        let run = Run::default();
+        // 40 calls over 4 workers, 4.0s total => mean 0.1s; promoting to session
+        // leaves 4 setups (one/worker), saving (40-4)*0.1 = 3.6s.
+        let fixtures = vec![fstat("cfg", "function", 40, 4.0, true)];
+        let r = analyze(&run, &fixtures, 10.0, 4);
+        let e = r.fixtures.iter().find(|f| f.name == "cfg").unwrap();
+        assert!(e.constant);
+        assert!((e.projected_saving_seconds - 3.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_constant_and_underused_fixtures_project_no_saving() {
+        let run = Run::default();
+        let fixtures = vec![
+            // constant flag off => never a candidate.
+            fstat("varies", "function", 40, 4.0, false),
+            // constant but ran once per worker already (count <= workers) => nothing to save.
+            fstat("perworker", "function", 4, 4.0, true),
+        ];
+        let r = analyze(&run, &fixtures, 10.0, 4);
+        for f in &r.fixtures {
+            assert_eq!(f.projected_saving_seconds, 0.0, "{}", f.name);
+        }
     }
 }

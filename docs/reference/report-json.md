@@ -249,7 +249,7 @@ It is a **separate document** from the run snapshot above; combine with
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "rstest_version": "0.7.0",
   "workers": 8,
   "wall_seconds": 68.4,
@@ -282,7 +282,9 @@ It is a **separate document** from the run snapshot above; combine with
     "long_pole_seconds": 84.1
   },
   "fixtures": [
-    { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 }
+    { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 },
+    { "name": "rsa_key", "scope": "function", "count": 206, "total_seconds": 4.3,
+      "constant": true, "projected_saving_seconds": 4.18 }
   ],
   "slowest_files": [
     { "file": "tests/test_e2e.py", "total_seconds": 84.1, "pct": 20.4 }
@@ -294,7 +296,7 @@ Top-level fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema` | int | document version, currently `2` |
+| `schema` | int | document version, currently `3` |
 | `rstest_version` | string | the rstest version that wrote it |
 | `workers` | int | worker count for this run (`-n`) |
 | `wall_seconds` | float | total wall-clock time; **depends on worker count** — compare across runs only at equal `-n` |
@@ -335,14 +337,20 @@ this run — `null` for single-worker runs):
 | `imbalance_pct` | float | `100 × (busiest − idlest) / busiest` — load spread across workers |
 | `long_pole_seconds` | float | slowest single test — the hard floor no worker count beats |
 
-`fixtures[]`: `{name, scope, count, total_seconds}` — fixture name, pytest
-scope, setup count, summed setup time. `slowest_files[]`:
+`fixtures[]`: `{name, scope, count, total_seconds, constant?,
+projected_saving_seconds?}` — fixture name, pytest scope, setup count,
+summed setup time. `constant` (present only when `true`) marks a
+function-scoped fixture that returned a value-identical result on every
+call in every worker — a scope-promotion candidate; `projected_saving_seconds`
+(present only when non-zero) is the wall time promoting it to session scope
+would save, `(count − workers) × mean setup`. `slowest_files[]`:
 `{file, total_seconds, pct}` — `pct` is the file's share of
 `test_time_seconds`.
 
 `schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
 `cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
-`slowest_files`); `2` added the `parallel_efficiency` object.
+`slowest_files`); `2` added the `parallel_efficiency` object; `3` added the
+per-fixture `constant` / `projected_saving_seconds` scope-promotion fields.
 
 `schema` aside, all times are raw seconds (no rounding) — round in your
 consumer. Increment-only: incompatible changes bump `schema`.

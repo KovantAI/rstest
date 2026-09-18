@@ -112,6 +112,11 @@ pub struct FixtureStat {
     pub scope: String,
     pub count: u64,
     pub total: f64,
+    /// Scope-promotion advisor: this fixture is function-scoped, ran more than
+    /// once, and produced a value-identical result on every call. `#[serde(default)]`
+    /// keeps older/absent payloads decoding to `false`.
+    #[serde(default)]
+    pub constant: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -328,10 +328,29 @@ def test_sessionfinish_emits_warnings():
 def test_sessionfinish_emits_doctor_fixtures(monkeypatch):
     monkeypatch.setenv("RSTEST_DOCTOR", "1")
     p = _plugin()  # _doctor read from env at init
-    p._fixtures = {("db", "session"): [3, 1.23456]}
+    # [count, secs, all_constant, first_fingerprint]; session scope is never a
+    # promotion candidate, so `constant` in the payload is False regardless.
+    p._fixtures = {("db", "session"): [3, 1.23456, True, "fp"]}
     p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
     fixtures = next(pl for k, pl in p._conn.sent if k == "doctor_fixtures")["fixtures"]
-    assert fixtures == [{"name": "db", "scope": "session", "count": 3, "total": 1.2346}]
+    assert fixtures == [
+        {"name": "db", "scope": "session", "count": 3, "total": 1.2346, "constant": False}
+    ]
+
+
+def test_sessionfinish_flags_constant_function_fixture(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # function scope, ran twice, value-constant => promotion candidate.
+    p._fixtures = {
+        ("cfg", "function"): [2, 0.5, True, "fp"],
+        ("varies", "function"): [2, 0.5, False, "fp"],  # value changed => not
+        ("once", "function"): [1, 0.5, True, "fp"],  # only 1 call => no saving
+    }
+    p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
+    fixtures = next(pl for k, pl in p._conn.sent if k == "doctor_fixtures")["fixtures"]
+    flags = {f["name"]: f["constant"] for f in fixtures}
+    assert flags == {"cfg": True, "varies": False, "once": False}
 
 
 def test_sessionfinish_quiet_when_nothing_to_report():
@@ -351,8 +370,31 @@ def test_fixture_setup_records_under_doctor(monkeypatch):
     assert next(gen) is None  # wrapper yields to the real setup
     with pytest.raises(StopIteration):
         gen.send("result")
-    count, total = p._fixtures[("db", "function")]
+    count, total, _const, _fp = p._fixtures[("db", "function")]
     assert count == 1 and total >= 0.0
+
+
+def test_fixture_setup_tracks_constant_value(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # Two setups returning the SAME value (via cached_result) keep all_constant.
+    for _ in range(2):
+        fd = SimpleNamespace(argname="cfg", scope="function", cached_result=(42, 0, None))
+        gen = p.pytest_fixture_setup(fd, request=None)
+        next(gen)
+        with pytest.raises(StopIteration):
+            gen.send(42)
+    count, _total, const, _fp = p._fixtures[("cfg", "function")]
+    assert count == 2 and const is True
+
+    # A differing value on the second call clears the flag.
+    for val in (1, 2):
+        fd = SimpleNamespace(argname="rnd", scope="function", cached_result=(val, 0, None))
+        gen = p.pytest_fixture_setup(fd, request=None)
+        next(gen)
+        with pytest.raises(StopIteration):
+            gen.send(val)
+    assert p._fixtures[("rnd", "function")][2] is False
 
 
 def test_fixture_setup_passthrough_without_doctor():

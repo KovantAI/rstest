@@ -98,6 +98,32 @@ Total setup time per fixture, with two pieces of advice:
 - A *session-scoped* fixture that ran more than once ran **once per
   worker** — the report reminds you it must be safe to duplicate.
 
+### SCOPE-PROMOTION CANDIDATES
+
+The advisor upgrade to the hotspot heuristic. Under `--doctor`, rstest
+fingerprints each function-scoped fixture's **produced value** on every
+call; a fixture that returned the *same value every time* (in every
+worker) is a proven-safe candidate for `scope="session"`, and the report
+attaches a concrete number:
+
+```text
+SCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):
+  ~  4.10s saved     206x  rsa_key  <- @pytest.fixture(scope="session")
+  (verify the value is safe to share - not mutated per test - before promoting)
+```
+
+The projected saving is `(calls − workers) × mean setup time`: promoting
+to session scope runs the fixture once per worker session instead of once
+per call, so the redundant re-setups disappear. Candidates are listed even
+when below the hotspot threshold, biggest saving first.
+
+The value check is conservative: a fixture whose value can't be compared
+across calls (unhashable and identity-reprable, e.g. a fresh connection
+object) is **never** flagged, so the advice never fires on something it
+can't verify constant. It is still *advice* — confirm the value is not
+mutated per test before promoting, since a shared mutable would leak state
+between tests.
+
 ### SLOWEST FILES
 
 Test time aggregated by file — where to look first, and the input for
@@ -135,10 +161,12 @@ $ rstest -n 4 --doctor     # diagnosing parallel scaling
 $ rstest --doctor-json doctor.json
 ```
 
-writes the same analysis as a versioned JSON document (`"schema": 2`):
+writes the same analysis as a versioned JSON document (`"schema": 3`):
 totals (tests, test time, CPU time, wall, workers), the wait-bound test
 list, parallel-floor gate tests, parallel-efficiency (realized speedup and
-per-worker load), fixture timings, and slowest files.
+per-worker load), fixture timings (each with `constant` and
+`projected_saving_seconds` for the scope-promotion advisor), and slowest
+files.
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.
