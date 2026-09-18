@@ -497,6 +497,61 @@ findings, and the build only goes red when a fresh one appears.
 
 The first slice of a broader migration assistant.
 
+### `audit`
+
+Auto parallel-safety audit — the one-command answer to "which of my tests
+aren't parallel-safe, and how do I fix them?" It **runs the suite at `-n auto`**
+(repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
+probabilistic), then diffs against the `-n 0` oracle and classifies every test
+that fails **only** under parallelism — reusing `migrate-check`'s discriminators
+(`-n 0` twice + `--dist loadfile`, scoped to the failing files) and verdicts
+(ISOLATION / WALL-CLOCK / ORDER-DEPENDENCY / INTRINSIC FLAKE / pre-existing).
+
+Where `migrate-check` is the onboarding preflight (unstable ids first, verbose
+per-verdict classification), `audit` is the focused fix-loop: it prints the
+serial-fixable failures and a **ready-to-paste `conftest.py` block** that marks
+exactly those nodeids `@pytest.mark.serial` (they then run last, alone, after
+the parallel phase) — one paste, no per-test edits:
+
+```python
+import pytest
+
+_RSTEST_SERIAL = {
+    "tests/test_a.py::test_x",
+    "tests/test_b.py::test_z",
+}
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if item.nodeid in _RSTEST_SERIAL:
+            item.add_marker(pytest.mark.serial)
+```
+
+Serial is a **stopgap** — the report also names the real fix per verdict (reset
+leaked state, mock the clock, fix order coupling). Intrinsic flakes (serial
+repeats disagree) and pre-existing `-n 0` failures are reported separately;
+serial won't fix those. Exits non-zero on any parallel-only failure (serial-
+fixable or intrinsic), so it gates CI; pre-existing failures don't fail the
+audit. [`--audit-json`](#-audit-json-path) writes the findings, the serial set,
+and the conftest block for tooling.
+
+### `--audit-json <path>`
+
+Write the `audit` findings as a versioned JSON document (schema `1`):
+`{meta, parallel_safe, tests, serial_candidates[], serial_conftest,
+intrinsic_flakes[], preexisting_failures}`. `serial_candidates[]` carries each
+`{nodeid, verdict, fix}`; `serial_conftest` is the paste-able block as a string.
+Implies `audit`; pass the bare subcommand too for the human report.
+
+### `--audit-repeat <N>`
+
+How many times `audit` re-runs the `-n auto` pass (default `1`). A parallel-only
+failure is probabilistic — a race may not fire every run — so a test that fails
+in **any** repeat is treated as a candidate. Raise it (e.g. `--audit-repeat 5`)
+to shake out intermittent races; the `-n 0` oracle and discriminators run once
+regardless.
+
 ### `--only-rerun <REGEX>`
 
 With reruns active, retry only failures whose error text matches the

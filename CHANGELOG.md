@@ -5,6 +5,17 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **`rstest audit` — one-command parallel-safety check.** Runs the suite at
+  `-n auto` (repeat with `--audit-repeat` to catch probabilistic races), diffs
+  against the `-n 0` oracle, and classifies every test that fails *only* in
+  parallel (reusing `migrate-check`'s `-n 0` ×2 + `--dist loadfile`
+  discriminators and verdicts). Prints the serial-fixable failures with a
+  ready-to-paste `conftest.py` block that marks exactly those nodeids
+  `@pytest.mark.serial` — one paste, no per-test edits — plus the real
+  per-verdict fix. Intrinsic flakes and pre-existing `-n 0` failures are called
+  out separately. Exits non-zero on any parallel-only failure (CI-gateable);
+  `--audit-json` writes the findings, the serial set, and the conftest block.
+  See [`audit`](docs/reference/cli.md#audit).
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

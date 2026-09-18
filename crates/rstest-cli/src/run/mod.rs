@@ -544,6 +544,14 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             &cli.migrate_allow,
             &mut sink,
         )?,
+        // Auto parallel-safety audit: repeat -n auto, diff vs -n 0, serial fix-list.
+        Command::Audit => migrate::run_audit(
+            &python,
+            args,
+            cli.audit_repeat.unwrap_or(1),
+            cli.audit_json.as_deref(),
+            &mut sink,
+        )?,
         Command::CacheCompact { .. } => unreachable!("handled above"),
         Command::ShardVerify { .. } => unreachable!("handled above"),
     };

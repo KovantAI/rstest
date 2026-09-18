@@ -29,6 +29,13 @@ pub(crate) enum Command {
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
 
+    /// Auto parallel-safety audit: run the suite under -n auto (repeat with
+    /// `--audit-repeat` to catch probabilistic flakes), diff against the -n 0
+    /// oracle, and print the tests that fail ONLY in parallel with a
+    /// ready-to-paste `@pytest.mark.serial` fix-list. Exits non-zero on any
+    /// parallel-only failure. `--audit-json` writes the findings for CI.
+    Audit,
+
     /// Maintenance: fold remote segments into a fresh base and prune them, then
     /// exit without running tests. Needs `--cache-remote`. With no retention
     /// flags it folds all; `--keep-last` / `--max-age` leave a recent window so
@@ -129,6 +136,16 @@ pub struct Cli {
     /// the exit code, so CI can gate on NEW issues while tolerating known ones.
     #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
+
+    /// Write the `audit` findings as JSON (stable, versioned schema) for CI
+    /// gating. Used with the `audit` subcommand.
+    #[arg(long, global = true)]
+    pub(crate) audit_json: Option<PathBuf>,
+
+    /// How many times `audit` repeats the `-n auto` run; a parallel flake is
+    /// probabilistic, so more repeats catch more of them. [default: 1]
+    #[arg(long, global = true, value_name = "N")]
+    pub(crate) audit_repeat: Option<u32>,
 
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
@@ -447,6 +464,7 @@ const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
     "migrate-check",
+    "audit",
     "cache-compact",
     "shard-verify",
 ];
@@ -468,6 +486,8 @@ const VALUE_FLAGS: &[&str] = &[
     "--cache-remote",
     "--migrate-check-json",
     "--migrate-allow",
+    "--audit-json",
+    "--audit-repeat",
     "--durations-regress",
     "--only-rerun",
     "--cov-diff-fail-under",
