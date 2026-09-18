@@ -114,6 +114,7 @@ mod merge_tests {
                 started_at_epoch: 1_750_000_000,
                 workers: 4,
                 argv: vec!["rstest".into()],
+                shard: None,
             },
             &out,
         )

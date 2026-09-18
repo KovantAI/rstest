@@ -705,6 +705,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            shard: None,
         };
         let out = Path::new("/nonexistent-dir-xyz-12345/merged.json");
         let parts = vec![("libs-a".to_string(), None, Some(0), false)];
@@ -723,6 +724,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            shard: None,
         };
         // A real (writable) out and a temp part that exists: merge succeeds and
         // the part is cleaned up afterward.

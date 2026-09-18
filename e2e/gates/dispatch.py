@@ -1,5 +1,6 @@
 """e2e gate sections: dispatch."""
 
+import json
 import re
 import shutil
 import xml.etree.ElementTree as ET
@@ -228,6 +229,79 @@ def gate_shard_k_n(g, args, binary):
     check("shard loadfile: no file split across shards", not split, f"split files={split}")
     all_files = set(f1) | set(f2)
     check("shard loadfile: buckets cover both files", len(all_files) == 2, f"files={all_files}")
+
+
+def gate_shard_verify(g, args, binary):
+    print("== shard-verify ==")
+    g.write("sv/test_a.py", "".join(f"def test_a{i}(): assert True\n" for i in range(4)))
+    g.write("sv/test_b.py", "".join(f"def test_b{i}(): assert True\n" for i in range(4)))
+    sv_cwd = g.tmp / "sv"
+
+    def run_shard(k, n):
+        # Identical cold cache per shard, as CI would restore one snapshot.
+        shutil.rmtree(sv_cwd / ".rstest_cache", ignore_errors=True)
+        rp = g.tmp / f"sv.{k}.json"
+        g.run(".", "-n", "2", "--shard", f"{k}/{n}", "--report-json", str(rp), cwd=str(sv_cwd))
+        return rp
+
+    p1, p2 = run_shard(1, 2), run_shard(2, 2)
+
+    # The run stamps meta.shard so shard-verify has something to reconcile.
+    meta = json.loads(p1.read_text()).get("meta", {}).get("shard", {})
+    check(
+        "shard-verify: report stamped with shard meta",
+        meta.get("n") == 2
+        and meta.get("collection_size") == 8
+        and bool(meta.get("collection_hash")),
+        str(meta),
+    )
+
+    # A complete set of shards verifies clean (exit 0).
+    r = g.run("shard-verify", str(p1), str(p2))
+    check(
+        "shard-verify: complete coverage exits 0",
+        r.returncode == 0 and "cover all 8" in r.stdout,
+        f"rc={r.returncode} out={r.stdout[-160:]} err={r.stderr[-160:]}",
+    )
+
+    # A missing shard fails (exit 1) and names the gap.
+    r = g.run("shard-verify", str(p1))
+    check(
+        "shard-verify: missing shard fails",
+        r.returncode == 1 and "missing shard 2/2" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-200:]}",
+    )
+
+    # A duplicated shard fails.
+    r = g.run("shard-verify", str(p1), str(p1))
+    check(
+        "shard-verify: duplicated shard fails",
+        r.returncode == 1 and "supplied 2 times" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-200:]}",
+    )
+
+    # A non-shard report (no --shard) has no meta.shard stamp: errors clearly.
+    plain = g.tmp / "sv.plain.json"
+    g.run(".", "-n", "2", "--report-json", str(plain), cwd=str(sv_cwd))
+    r = g.run("shard-verify", str(plain))
+    check(
+        "shard-verify: non-shard report rejected",
+        r.returncode != 0 and "no shard metadata" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-200:]}",
+    )
+
+    # A fabricated drop in report CONTENT (a ran test removed from a shard's
+    # report) is caught end-to-end, not just in the unit tests.
+    doc = json.loads(p1.read_text())
+    doc["tests"].pop(next(iter(doc["tests"])))
+    dropped = g.tmp / "sv.dropped.json"
+    dropped.write_text(json.dumps(doc))
+    r = g.run("shard-verify", str(dropped), str(p2))
+    check(
+        "shard-verify: dropped test in report content caught",
+        r.returncode == 1 and "dropped" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-200:]}",
+    )
 
 
 def gate_dist_each(g, args, binary):

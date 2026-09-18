@@ -118,6 +118,13 @@ pub struct PoolOutcome {
     pub cache_dir: Option<String>,
     /// Reconciled process exit status for the run.
     pub exitstatus: i32,
+    /// Full-collection identity for `--shard` verification: sha256 of the
+    /// ordered nodeid list, as agreed by every worker. `None` on paths with no
+    /// worker collection hash (single-worker / lazy).
+    pub collection_hash: Option<String>,
+    /// Number of collected tests (the reference count all workers agreed on);
+    /// 0 when unknown.
+    pub collection_size: u64,
 }
 
 /// The clean nodeid for a dispatched index, from the designate's id list.
@@ -855,6 +862,10 @@ pub fn run_pool(
         run.record_cached(id.clone());
     }
     let exitstatus = orchestrator::finalize_exit(&statuses, run.all_passed(), reruns, false);
+    let (collection_size, collection_hash) = match reference {
+        Some((count, hash)) => (count, Some(hash)),
+        None => (0, None),
+    };
     Ok(PoolOutcome {
         run,
         prog,
@@ -862,6 +873,8 @@ pub fn run_pool(
         warnings,
         cache_dir,
         exitstatus,
+        collection_hash,
+        collection_size,
     })
 }
 

@@ -68,6 +68,14 @@ The per-test `cpu` field arrived **without** a schema bump: it is
 conditional (present only on `--doctor` / live-stream runs), so a plain
 run's document shape is unchanged. Treat it as an added optional field.
 
+The `meta.shard` block is the same kind of conditional, no-bump addition:
+present only on a [`--shard K/N`](cli.md#-shard-kn) run (full collection, not
+`--collect lazy`). It carries `{ "k", "n", "collection_hash", "collection_size" }`
+where `collection_hash` is the sha256 of the full ordered nodeid list and
+`collection_size` its length, identical across every shard of one run.
+[`rstest shard-verify`](cli.md#shard-verify) consumes it to prove a shard matrix
+covered the whole suite.
+
 `collect_errors` lists the file paths of collectors that failed outright.
 
 At a [monorepo](../guides/monorepo.md) root, the document is the MERGED

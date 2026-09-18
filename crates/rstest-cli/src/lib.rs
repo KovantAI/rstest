@@ -19,6 +19,7 @@ mod reporting;
 mod run;
 mod scheduling;
 mod select;
+mod shardverify;
 mod text;
 mod time;
 mod vendor;

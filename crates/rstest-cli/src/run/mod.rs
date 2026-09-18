@@ -514,13 +514,19 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         return Ok(None);
     };
     let mut sink = Sink::stdio(color::Palette::detect(args));
-    // cache-compact is interpreter-free; the rest resolve Python first.
+    // cache-compact and shard-verify are interpreter-free (they only touch
+    // cache/report files); the rest resolve Python first.
     if let Command::CacheCompact { keep_last, max_age } = command {
         return Ok(Some(run_cache_compact(
             cli,
             &mut sink,
             *keep_last,
             max_age.as_deref(),
+        )?));
+    }
+    if let Command::ShardVerify { reports } = command {
+        return Ok(Some(crate::shardverify::run_shard_verify(
+            &mut sink, reports,
         )?));
     }
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -539,6 +545,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             &mut sink,
         )?,
         Command::CacheCompact { .. } => unreachable!("handled above"),
+        Command::ShardVerify { .. } => unreachable!("handled above"),
     };
     Ok(Some(code))
 }
@@ -1011,6 +1018,9 @@ fn dispatch_run(
             warnings,
             cache_dir: None,
             exitstatus,
+            // Single-worker path never shards (resolve_shard rejects it).
+            collection_hash: None,
+            collection_size: 0,
         }
     } else if collect_lazy(cli, settings, dist_name, args, sink)? {
         let cwd = std::env::current_dir()?;

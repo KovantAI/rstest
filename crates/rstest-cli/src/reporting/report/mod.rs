@@ -65,6 +65,19 @@ pub struct TestEntry {
     pub cached: bool,
 }
 
+/// Sharding identity stamped into report-json meta when `--shard K/N` is active,
+/// so `rstest shard-verify` can prove the shards covered the whole suite without
+/// a separate collection pass. `collection_hash`/`collection_size` are the
+/// sha256 of the full ordered nodeid list and its length, as agreed by every
+/// worker (identical across shards of the same run).
+#[derive(Default, Clone)]
+pub struct ShardMeta {
+    pub k: usize,
+    pub n: usize,
+    pub collection_hash: String,
+    pub collection_size: u64,
+}
+
 /// Run-level metadata for the report-json envelope (schema 5).
 pub struct RunMeta {
     pub exitstatus: i32,
@@ -72,6 +85,8 @@ pub struct RunMeta {
     pub started_at_epoch: u64,
     pub workers: usize,
     pub argv: Vec<String>,
+    /// Present only for a `--shard K/N` run; drives `shard-verify`.
+    pub shard: Option<ShardMeta>,
 }
 
 /// A recorded failure: (nodeid, longrepr, sections of (header, body)).
@@ -374,6 +389,19 @@ impl Run {
             "argv".into(),
             serde_json::to_value(&run_meta.argv).unwrap_or_default(),
         );
+        // Sharding identity (only under --shard): lets `shard-verify` reconcile
+        // the per-shard reports. Optional field, no schema bump (like `cpu`).
+        if let Some(s) = &run_meta.shard {
+            meta.insert(
+                "shard".into(),
+                serde_json::json!({
+                    "k": s.k,
+                    "n": s.n,
+                    "collection_hash": s.collection_hash,
+                    "collection_size": s.collection_size,
+                }),
+            );
+        }
         let collect_errors: Vec<&String> = self.collect_errors.iter().map(|(p, _)| p).collect();
         serde_json::json!({
             "meta": meta,
@@ -622,6 +650,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            shard: None,
         };
         // Measured (doctor / stream run): cpu rides the call report and lands in
         // the snapshot entry.
@@ -638,6 +667,37 @@ mod tests {
         full(&mut plain, "a.py::t", "passed");
         let doc = plain.snapshot_value(&meta);
         assert!(doc["tests"]["a.py::t"].get("cpu").is_none());
+    }
+
+    #[test]
+    fn shard_meta_emitted_only_when_present() {
+        let run = Run::default();
+        let base = RunMeta {
+            exitstatus: 0,
+            duration_seconds: 0.0,
+            started_at_epoch: 0,
+            workers: 2,
+            argv: vec![],
+            shard: None,
+        };
+        // Absent on a non-shard run: document shape unchanged.
+        assert!(run.snapshot_value(&base)["meta"].get("shard").is_none());
+        // Present and correctly shaped under --shard.
+        let meta = RunMeta {
+            shard: Some(ShardMeta {
+                k: 2,
+                n: 4,
+                collection_hash: "deadbeef".into(),
+                collection_size: 42,
+            }),
+            ..base
+        };
+        let s = run.snapshot_value(&meta);
+        let s = &s["meta"]["shard"];
+        assert_eq!(s["k"], 2);
+        assert_eq!(s["n"], 4);
+        assert_eq!(s["collection_hash"], "deadbeef");
+        assert_eq!(s["collection_size"], 42);
     }
 
     #[test]

@@ -31,7 +31,9 @@ Two consequences for CI:
 
 - **Restore the same duration cache on every shard.** If job 2 sees a
   different cache than job 3, their partitions can overlap or drop tests.
-  Restore one shared cache key across the matrix (recipes below).
+  Restore one shared cache key across the matrix (recipes below), and, for a
+  gating pipeline, prove coverage with the check in
+  [Verify no test was dropped](#verify-no-test-was-dropped).
 - **A cold cache falls back to an even count split** (round-robin). The
   first run is balanced by count; from the second run on — once the cache
   is populated and restored — it balances by wall time.
@@ -61,6 +63,66 @@ per-shard JUnit reconstructs the full run.
       selects correctly, no dedicated unsharded job. Without the shared cache,
       warm the index from an **unsharded** run (or merge each shard's
       `.coverage`). See [keeping the index warm](changed.md#keeping-the-index-warm).
+
+## Verify no test was dropped
+
+The disjoint-and-covers-everything guarantee holds **only** when every shard
+partitions the identical `(test list, duration cache, K, N)`. The way it breaks
+in practice is a divergent duration cache across jobs (above): buckets then
+overlap or drop tests, and because the jobs never talk to each other, a dropped
+test is simply never run. The merged report is short, yet the build can still
+go green with fewer tests than the suite has. Nothing detects that at runtime.
+
+For a merge-queue or release gate, add a step that proves the shards covered
+the whole suite. The built-in [`rstest shard-verify`](../reference/cli.md#shard-verify)
+does exactly this. Each shard's `--report-json`, written while `--shard` was
+active, carries a `meta.shard` stamp: `k`, `n`, and the sha256
+`collection_hash` and size of the full collected suite. Pass the per-shard
+reports and it reconciles them:
+
+```bash
+# Each shard writes a report while sharding (the report carries the stamp):
+rstest -n auto --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
+
+# After the matrix finishes, in a job that has gathered all the shard reports:
+rstest shard-verify shard.*.json
+```
+
+It exits `0` only when the shards agree on one collection (same
+`collection_hash`, `n`, and size), the shard set is exactly `1..=N` once each,
+and the union of what they ran equals the collection with no test on two shards.
+On any drop, overlap, missing or duplicate shard, or a divergent collection, it
+prints what went wrong and exits `1`, failing the gate:
+
+```text
+FAILED shard-verify: coverage is INCOMPLETE
+  - shards ran 4180 of 4200 collected tests; 20 were dropped (ran on no shard)
+```
+
+`shard-verify` needs no interpreter and reads only the JSON files, so it runs in
+a lightweight final job. It covers full-collection runs; a `--collect lazy`
+shard run stamps no collection hash and is not verifiable this way.
+
+??? note "Manual equivalent with jq (no shard-verify)"
+    If you cannot run `shard-verify` (an older rstest, or a policy against extra
+    tooling), reconcile by hand. Collect the full suite once with the **same**
+    selection flags the shards use, union the per-shard ran-ids, and compare.
+    The report-json `tests` map is keyed by every test that ran (including
+    skipped and xfailed), so the union is complete.
+
+    ```bash
+    rstest --collect-only --report-json discovery.json
+    jq -r '.tests[].nodeid' discovery.json | sort -u > collected.ids
+    jq -r '.tests | keys[]'  shard.*.json  | sort    > ran.ids
+    # Dropped or added tests:
+    if ! diff <(sort -u ran.ids) collected.ids >/dev/null; then
+      echo "shard coverage mismatch: tests dropped or added" >&2; exit 1
+    fi
+    # A test that ran on two shards:
+    if [ "$(wc -l < ran.ids)" -ne "$(sort -u ran.ids | wc -l)" ]; then
+      echo "shard coverage overlap: a test ran on more than one shard" >&2; exit 1
+    fi
+    ```
 
 ## GitHub Actions
 

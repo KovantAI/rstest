@@ -33,6 +33,7 @@ pub(super) fn build_run_meta(
         started_at_epoch,
         workers,
         argv: std::env::args().collect(),
+        shard: None,
     }
 }
 
@@ -583,11 +584,19 @@ pub(super) fn run_post_gates(
             }
         }
     }
-    write_report_json(
-        cli.report_json.as_deref(),
-        &outcome.run,
-        &build_run_meta(start, outcome.exitstatus, started_epoch, n),
-    )?;
+    let mut run_meta = build_run_meta(start, outcome.exitstatus, started_epoch, n);
+    // Stamp the sharding identity so `rstest shard-verify` can reconcile the
+    // per-shard reports. Only when we have a full-collection hash (parallel
+    // full-collect path); the lazy path carries none.
+    if let (Some((k, total)), Some(hash)) = (shard, &outcome.collection_hash) {
+        run_meta.shard = Some(report::ShardMeta {
+            k,
+            n: total,
+            collection_hash: hash.clone(),
+            collection_size: outcome.collection_size,
+        });
+    }
+    write_report_json(cli.report_json.as_deref(), &outcome.run, &run_meta)?;
     if duration_regressions > 0 {
         sink.warn(&format!(
             "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
@@ -1543,6 +1552,8 @@ mod tests {
             warnings: vec![],
             cache_dir: None,
             exitstatus: 0,
+            collection_hash: None,
+            collection_size: 0,
         };
         let (mut sink, _cap) = Sink::captured();
         let stream = sink.attach_captured_stream();
