@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Map_of_FlakeStats",
+  "type": "object",
+  "additionalProperties": {
+    "$ref": "#/definitions/FlakeStats"
+  },
+  "definitions": {
+    "FlakeStats": {
+      "type": "object",
+      "properties": {
+        "failed": {
+          "description": "Runs where the test hard-failed (quarantined failures included).",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "flaky": {
+          "description": "Runs where the test passed only after rerun(s).",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "last_epoch": {
+          "description": "Unix epoch of the last recorded event.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

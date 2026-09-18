@@ -35,6 +35,12 @@ notify = "8"
 sha2 = "0.11"
 ureq = { version = "2", optional = true }
 
+[dev-dependencies]
+# Only used to generate the docs JSON Schemas (see src/schema.rs, a test-only
+# module). Kept out of the shipped binary via `cfg_attr(test, ...)` on the
+# derives.
+schemars = "0.8"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

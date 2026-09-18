@@ -18,6 +18,8 @@ mod remote;
 mod reporting;
 mod run;
 mod scheduling;
+#[cfg(test)]
+mod schema;
 mod select;
 mod shardverify;
 mod text;

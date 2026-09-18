@@ -12,6 +12,7 @@ use crate::reporting::report::Run;
 pub const FILE: &str = "flakes.json";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct FlakeStats {
     /// Runs where the test passed only after rerun(s).
     #[serde(default)]

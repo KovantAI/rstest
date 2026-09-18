@@ -297,6 +297,9 @@ It is a **separate document** from the run snapshot above; combine with
 }
 ```
 
+For the machine-readable JSON Schema of this document (generated from the Rust
+type, always current), see [Output schemas](output-schemas.md#doctor-report).
+
 Top-level fields:
 
 | Field | Type | Meaning |

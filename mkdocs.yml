@@ -77,6 +77,10 @@ markdown_extensions:
 
 exclude_docs: |
   PLAN.md
+  # Generated schema partials: embedded via pymdownx snippets into
+  # reference/output-schemas.md, not standalone pages. The .schema.json files
+  # are kept (copied as static assets) so they are directly downloadable.
+  reference/schemas/*.md
 
 plugins:
   - search
@@ -132,6 +136,7 @@ nav:
       - Environment variables: reference/environment.md
       - Exit codes: reference/exit-codes.md
       - Report JSON: reference/report-json.md
+      - Output schemas: reference/output-schemas.md
       - Benchmarks: reference/benchmarks.md
       - Parity divergences: reference/parity-divergences.md
       - Plugin compatibility (top 100): reference/top-100-plugins.md
