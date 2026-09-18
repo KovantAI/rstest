@@ -280,6 +280,29 @@ def gate_shard_verify(g, args, binary):
         f"rc={r.returncode} err={r.stderr[-200:]}",
     )
 
+    # A non-shard report (no --shard) has no meta.shard stamp: errors clearly.
+    plain = g.tmp / "sv.plain.json"
+    g.run(".", "-n", "2", "--report-json", str(plain), cwd=str(sv_cwd))
+    r = g.run("shard-verify", str(plain))
+    check(
+        "shard-verify: non-shard report rejected",
+        r.returncode != 0 and "no shard metadata" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-200:]}",
+    )
+
+    # A fabricated drop in report CONTENT (a ran test removed from a shard's
+    # report) is caught end-to-end, not just in the unit tests.
+    doc = json.loads(p1.read_text())
+    doc["tests"].pop(next(iter(doc["tests"])))
+    dropped = g.tmp / "sv.dropped.json"
+    dropped.write_text(json.dumps(doc))
+    r = g.run("shard-verify", str(dropped), str(p2))
+    check(
+        "shard-verify: dropped test in report content caught",
+        r.returncode == 1 and "dropped" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-200:]}",
+    )
+
 
 def gate_dist_each(g, args, binary):
     print("== --dist each ==")

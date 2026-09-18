@@ -670,6 +670,37 @@ mod tests {
     }
 
     #[test]
+    fn shard_meta_emitted_only_when_present() {
+        let run = Run::default();
+        let base = RunMeta {
+            exitstatus: 0,
+            duration_seconds: 0.0,
+            started_at_epoch: 0,
+            workers: 2,
+            argv: vec![],
+            shard: None,
+        };
+        // Absent on a non-shard run: document shape unchanged.
+        assert!(run.snapshot_value(&base)["meta"].get("shard").is_none());
+        // Present and correctly shaped under --shard.
+        let meta = RunMeta {
+            shard: Some(ShardMeta {
+                k: 2,
+                n: 4,
+                collection_hash: "deadbeef".into(),
+                collection_size: 42,
+            }),
+            ..base
+        };
+        let s = run.snapshot_value(&meta);
+        let s = &s["meta"]["shard"];
+        assert_eq!(s["k"], 2);
+        assert_eq!(s["n"], 4);
+        assert_eq!(s["collection_hash"], "deadbeef");
+        assert_eq!(s["collection_size"], 42);
+    }
+
+    #[test]
     fn phase_durations_only_tracked_on_request() {
         let mut run = Run::default();
         run.record(

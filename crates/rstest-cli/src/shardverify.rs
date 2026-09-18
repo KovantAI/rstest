@@ -34,7 +34,7 @@ struct Meta {
     shard: Option<ShardMeta>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 struct ShardMeta {
     k: usize,
     n: usize,
@@ -44,10 +44,31 @@ struct ShardMeta {
 
 /// One loaded shard report: label (for messages), its shard meta, and the set
 /// of nodeids it ran.
+#[derive(Debug)]
 struct Shard {
     label: String,
     meta: ShardMeta,
     ran: BTreeSet<String>,
+}
+
+/// Parse one report-json body into a `Shard`. Fails if it is not valid JSON or
+/// was not produced by a `--shard` run (no `meta.shard`). Pure (no IO) so the
+/// parse + missing-stamp error paths are unit-tested directly.
+fn parse_report(label: String, bytes: &[u8]) -> Result<Shard> {
+    let doc: ReportDoc = serde_json::from_slice(bytes)
+        .with_context(|| format!("parsing {label} as rstest report-json"))?;
+    let meta = doc.meta.shard.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{label}: no shard metadata. Run each shard with `--shard K/N --report-json`; \
+             shard-verify needs the full-collection stamp those runs write \
+             (lazy-collection shard runs are not covered)"
+        )
+    })?;
+    Ok(Shard {
+        label,
+        meta,
+        ran: doc.tests.into_keys().collect(),
+    })
 }
 
 /// Read + parse the per-shard reports. Fails loudly if a file is missing,
@@ -56,21 +77,7 @@ fn load(reports: &[PathBuf]) -> Result<Vec<Shard>> {
     let mut shards = Vec::with_capacity(reports.len());
     for path in reports {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let doc: ReportDoc = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {} as rstest report-json", path.display()))?;
-        let meta = doc.meta.shard.ok_or_else(|| {
-            anyhow::anyhow!(
-                "{}: no shard metadata. Run each shard with `--shard K/N --report-json`; \
-                 shard-verify needs the full-collection stamp those runs write \
-                 (lazy-collection shard runs are not covered)",
-                path.display()
-            )
-        })?;
-        shards.push(Shard {
-            label: path.display().to_string(),
-            meta,
-            ran: doc.tests.into_keys().collect(),
-        });
+        shards.push(parse_report(path.display().to_string(), &bytes)?);
     }
     Ok(shards)
 }
@@ -203,6 +210,43 @@ mod tests {
             },
             ran: ran.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn parse_report_reads_shard_stamp_and_ran_ids() {
+        let body = br#"{
+            "meta": {"runner":"rstest","schema":5,
+                     "shard":{"k":1,"n":2,"collection_hash":"abc","collection_size":3}},
+            "tests": {"t/a.py::x": {"call":"passed"}, "t/a.py::y": {"setup":"skipped"}}
+        }"#;
+        let s = parse_report("shard.1.json".into(), body).unwrap();
+        assert_eq!((s.meta.k, s.meta.n, s.meta.collection_size), (1, 2, 3));
+        assert_eq!(s.meta.collection_hash, "abc");
+        assert_eq!(
+            s.ran,
+            ["t/a.py::x", "t/a.py::y"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        );
+    }
+
+    #[test]
+    fn parse_report_rejects_a_report_without_shard_meta() {
+        // A plain (non-shard) run, or a lazy shard run: no meta.shard stamp.
+        let body = br#"{"meta":{"runner":"rstest","schema":5},"tests":{}}"#;
+        let err = parse_report("plain.json".into(), body)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no shard metadata"), "{err}");
+    }
+
+    #[test]
+    fn parse_report_rejects_malformed_json() {
+        let err = parse_report("junk.json".into(), b"not json")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parsing junk.json"), "{err}");
     }
 
     #[test]
