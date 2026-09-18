@@ -26,7 +26,7 @@ mod state;
 
 pub(crate) use dispatch::chunk_size;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -127,6 +127,44 @@ pub struct PoolOutcome {
     pub collection_size: u64,
 }
 
+/// The `--dist` name for a mode, for the replay journal (inverse of the
+/// `FromStr` above; kept beside it so the two never drift).
+fn dist_name(dist: Dist) -> &'static str {
+    match dist {
+        Dist::Load => "load",
+        Dist::Loadfile => "loadfile",
+        Dist::Loadscope => "loadscope",
+        Dist::Loadgroup => "loadgroup",
+        Dist::Each => "each",
+    }
+}
+
+/// Warn once at replay time if this run's collection differs from the recorded
+/// one (tests added/removed/renamed since the journal). Replay proceeds with the
+/// tests that still match; the exact interleaving may differ.
+fn warn_replay_drift(
+    sink: &mut Sink,
+    pin: &crate::replay::PinnedSchedule,
+    reference: &Option<(u64, String)>,
+) {
+    let Some((count, hash)) = reference else {
+        return;
+    };
+    let size_drift = pin.collection_size != 0 && pin.collection_size != *count;
+    let hash_drift = pin
+        .collection_hash
+        .as_deref()
+        .is_some_and(|h| h != hash.as_str());
+    if size_drift || hash_drift {
+        sink.warn(&format!(
+            "rstest: replay: the suite changed since the journal was recorded \
+             (now {count} test(s), journal had {}). Replaying the tests that still \
+             match; the exact interleaving may differ.",
+            pin.collection_size
+        ));
+    }
+}
+
 /// The clean nodeid for a dispatched index, from the designate's id list.
 fn nodeid_at(ids_store: &Option<Vec<String>>, index: u64) -> Option<&str> {
     ids_store
@@ -152,6 +190,10 @@ fn known_flaky_ok(
     })
 }
 
+// The eager pool's knobs (dist/shuffle/shard/skip/pinned) are genuinely
+// independent run-shaping inputs; bundling them buys no clarity over the named
+// params, so this one call site keeps them flat.
+#[allow(clippy::too_many_arguments)]
 pub fn run_pool(
     cfg: &PoolConfig,
     dist: Dist,
@@ -162,6 +204,10 @@ pub fn run_pool(
     // is unchanged. Collected but never dispatched; carried forward as cached
     // passes. Empty = feature off.
     skip_ids: &std::collections::HashSet<String>,
+    // `rstest replay`: a recorded per-worker schedule to re-pin. When Some, the
+    // dynamic dispatch queue is bypassed entirely — each worker runs exactly its
+    // recorded nodeids in order — and no new journal is written.
+    pinned: Option<&crate::replay::PinnedSchedule>,
     sink: &mut Sink,
 ) -> Result<PoolOutcome> {
     let &PoolConfig {
@@ -231,6 +277,26 @@ pub fn run_pool(
     // worker is told no_more_items (it finishes in-flight work and ends;
     // bounded overshoot, same trade xdist makes).
     let mut stopping = false;
+
+    // Replay journaling: record each worker's ordered item_starts so the
+    // schedule can be re-pinned later. Off during a replay (don't re-journal),
+    // for --dist each (every worker runs everything — nothing to replay), for a
+    // shard (partial suite), or when opted out. Nodeid, not index, so the
+    // journal survives a machine hop (CI -> local).
+    let journaling = pinned.is_none()
+        && dist != Dist::Each
+        && shard.is_none()
+        && crate::replay::journaling_enabled();
+    let mut recorder: Vec<Vec<String>> = if journaling {
+        vec![Vec::new(); n]
+    } else {
+        Vec::new()
+    };
+    // Replay: state for translating the recorded assignment into this run's
+    // indices and reporting drift/missing once.
+    let mut pin_warned_drift = false;
+    let mut pin_missing = 0usize;
+    let mut pin_missing_warned = false;
 
     loop {
         let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
@@ -349,7 +415,9 @@ pub fn run_pool(
                     }
                 }
                 if let Some(ids) = ids {
-                    if dispatch.is_none() && dist != Dist::Each {
+                    // Replay pins the exact per-worker lists, so the dynamic
+                    // dispatch queue is never built; seeding happens below.
+                    if dispatch.is_none() && dist != Dist::Each && pinned.is_none() {
                         // --shard: keep only bucket K's node-ids, deselecting
                         // the rest. Under an affinity dist mode we partition at
                         // group granularity so a group is never split (its contract).
@@ -455,9 +523,15 @@ pub fn run_pool(
             Ok(Event::ItemStart { index }) => {
                 states[idx].running = Some(index);
                 states[idx].running_since = Some(std::time::Instant::now());
-                let nodeid = nodeid_at(&ids_store, index)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("<item #{index}>"));
+                let resolved = nodeid_at(&ids_store, index).map(str::to_string);
+                // Journal the emergent schedule: worker `idx` started this
+                // nodeid, in order. Recorded per worker so replay can re-pin it.
+                if journaling {
+                    if let Some(id) = &resolved {
+                        recorder[idx].push(id.clone());
+                    }
+                }
+                let nodeid = resolved.unwrap_or_else(|| format!("<item #{index}>"));
                 prog.item_started(sink, idx, nodeid);
             }
             Ok(Event::Stopped { unrun }) => {
@@ -747,6 +821,89 @@ pub fn run_pool(
             }
         }
 
+        // Replay: seed each worker with its recorded nodeids (resolved to this
+        // run's indices), in the recorded order. Bypasses the dynamic queue
+        // entirely, so like --dist each it drains and EndSessions on its own.
+        if let Some(pin) = pinned {
+            // Seed only once the id list has arrived (it rides on the designate's
+            // CollectionDone, which may lag another worker's). Each worker is
+            // seeded as it becomes collected — staggered, like the each-branch —
+            // so there is no latch that could skip a late collector.
+            if let Some(ids) = ids_store.as_ref() {
+                if !pin_warned_drift {
+                    pin_warned_drift = true;
+                    warn_replay_drift(sink, pin, &reference);
+                }
+                // nodeid -> first collected index this run (parametrized tests
+                // can repeat a nodeid across positions; first wins, best-effort).
+                let mut index_of: HashMap<&str, u64> = HashMap::with_capacity(ids.len());
+                for (i, id) in ids.iter().enumerate() {
+                    index_of.entry(id.as_str()).or_insert(i as u64);
+                }
+                for (i, s) in states
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(_, s)| s.collected && !s.seeded && !s.dead)
+                {
+                    s.seeded = true;
+                    if stopping {
+                        let _ = s.worker.send(&proto::Command::EndSession);
+                        s.ended = true;
+                        continue;
+                    }
+                    let indices: Vec<u64> = pin
+                        .assignment
+                        .get(i)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| {
+                            let at = index_of.get(id.as_str()).copied();
+                            if at.is_none() {
+                                pin_missing += 1;
+                            }
+                            at
+                        })
+                        .collect();
+                    s.outstanding.extend(indices.iter().copied());
+                    // Chunked, best-effort (see dispatch_to): a dying worker's
+                    // crash event handles its own remnant.
+                    for chunk in indices.chunks(4096) {
+                        if s.worker
+                            .send(&proto::Command::RunItems {
+                                indices: chunk.to_vec(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    // No shared queue and no reruns: release the held last item.
+                    s.finishing = true;
+                    let _ = s.worker.send(&proto::Command::NoMoreItems);
+                }
+                // Once every worker is seeded, report any recorded tests that no
+                // longer collect (renamed/removed since the journal), just once.
+                if !pin_missing_warned
+                    && pin_missing > 0
+                    && states.iter().all(|s| s.seeded || s.dead)
+                {
+                    pin_missing_warned = true;
+                    sink.warn(&format!(
+                        "rstest: replay: {pin_missing} recorded test(s) are no longer collected \
+                         (renamed or removed since the journal) and were skipped"
+                    ));
+                }
+            }
+            for s in states
+                .iter_mut()
+                .filter(|s| s.seeded && !s.dead && !s.ended && s.outstanding.is_empty())
+            {
+                let _ = s.worker.send(&proto::Command::EndSession);
+                s.ended = true;
+            }
+            continue;
+        }
+
         // Each-mode: a verified worker is seeded with the FULL suite (or a
         // crash replacement's remainder) and released immediately. No shared
         // queue and no reruns, so it drains then EndSessions independently.
@@ -866,6 +1023,20 @@ pub fn run_pool(
         Some((count, hash)) => (count, Some(hash)),
         None => (0, None),
     };
+    // Persist the schedule for `rstest replay`. Best-effort; a write failure
+    // never affects the run's outcome.
+    if journaling {
+        crate::replay::write(&crate::replay::Journal::record(
+            worker_env.run_uid.clone(),
+            n,
+            dist_name(dist).to_string(),
+            shuffle,
+            args.to_vec(),
+            collection_hash.clone(),
+            collection_size,
+            std::mem::take(&mut recorder),
+        ));
+    }
     Ok(PoolOutcome {
         run,
         prog,

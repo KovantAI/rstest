@@ -412,6 +412,57 @@ files, needs no interpreter, and runs no tests. Full-collection runs only: a
 `--collect lazy` shard run stamps no collection hash and cannot be verified.
 See [Verify no test was dropped](../guides/sharding.md#verify-no-test-was-dropped).
 
+### `replay`
+
+Re-run a recorded parallel schedule, so a parallel-only failure reproduces on
+demand. rstest owns dispatch (which worker runs which test, in what order), so
+unlike pytest/xdist it can record that schedule and pin it back. Every pool run
+(`-n >= 2`) journals its exact per-worker assignment and order to
+`.rstest_cache/replay/`: one file per run (`<run-uid>.json`, last 10 kept) plus a
+stable `latest.json`. Journaling is on by default and costs almost nothing (it is
+the assignment rstest already tracks); disable it with
+`RSTEST_NO_REPLAY_JOURNAL=1`.
+
+```console
+$ rstest replay                     # replay the most recent local run
+$ rstest replay <run-uid>           # replay a specific journaled run
+$ rstest replay --journal ci.json   # replay a downloaded CI journal
+```
+
+The primary flow is CI to local. The failing CI run journals without foresight,
+CI uploads `.rstest_cache/replay/latest.json` as an artifact, and a developer
+replays it locally:
+
+```yaml
+# CI: keep the schedule of a failed run
+- run: rstest -n auto
+- uses: actions/upload-artifact@v4
+  if: failure()
+  with:
+    name: rstest-replay
+    path: .rstest_cache/replay/latest.json
+```
+
+```console
+$ rstest replay --journal ./rstest-replay/latest.json
+```
+
+The journal keys on nodeid, not on the machine-local collection index, so it
+survives the machine hop. Replay collects the suite fresh, re-resolves each
+recorded nodeid to this run's index, forces `-n` to the recorded worker count,
+and pins each worker to exactly its recorded nodeids in the recorded order, with
+work-stealing and reruns off (the recorded shuffle is already baked into the
+pinned order). It runs no new journaling.
+
+Determinism is per-worker: worker-local order and assignment are reproduced
+exactly, which is what state-ordering flakes depend on. The exact cross-worker
+interleaving stays timing-dependent, so a genuinely time-dependent race is
+best-effort. If the suite changed since the journal was written, replay prints a
+drift note, runs the tests that still match, and reports how many recorded tests
+no longer collect. Session args (paths, `-k`, `-m`, plugins) come from the
+journal, not from the `replay` invocation; pass `--python` to pick the
+interpreter.
+
 ### `verify-vendor`
 
 Prove the vendored pytest tree in your installed rstest is intact. rstest ships

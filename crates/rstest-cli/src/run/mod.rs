@@ -360,6 +360,16 @@ fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
 /// (doctor, junit, lastfailed, duration-regression, cache push, report-json),
 /// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
+    execute_inner(cli, args, None)
+}
+
+/// The run pipeline. `pinned` is `Some` only under `rstest replay`, carrying the
+/// recorded per-worker schedule to re-pin; a normal run passes `None`.
+pub(crate) fn execute_inner(
+    cli: &Cli,
+    args: &[String],
+    pinned: Option<&crate::replay::PinnedSchedule>,
+) -> Result<i32> {
     let args = args.to_vec();
     // The single output sink for this run: owns stdout/stderr and the resolved
     // palette. Built up front so every diagnostic below (cache maintenance,
@@ -472,6 +482,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
         },
+        pinned,
         &mut sink,
     )?;
 
@@ -503,11 +514,12 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
 }
 
-/// Dispatch a run-less subcommand (`rstest verify-vendor` / `try` /
-/// `migrate-check` / `cache-compact`). Returns `Some(exit)` when a subcommand
-/// ran, `None` for a normal run (the caller falls through to watch/`execute`).
-/// These modes bypass the run pipeline, so the interpreter is resolved here
-/// rather than pulled through [`resolve_run_config`].
+/// Dispatch a subcommand (`rstest verify-vendor` / `try` / `migrate-check` /
+/// `cache-compact` / `shard-verify` / `replay`). Returns `Some(exit)` when a
+/// subcommand ran, `None` for a normal run (the caller falls through to
+/// watch/`execute`). The cache-only modes resolve no interpreter; `try`/
+/// `migrate-check` resolve one here; `replay` runs the full pipeline (resolving
+/// its own interpreter through `execute`) with the recorded schedule pinned.
 pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     use crate::cli::Command;
     let Some(command) = &cli.command else {
@@ -529,6 +541,16 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             &mut sink, reports,
         )?));
     }
+    // `replay` runs the suite (it resolves its own interpreter through the run
+    // pipeline), so it is dispatched here and returns the run's exit code.
+    if let Command::Replay { run_id, journal } = command {
+        return Ok(Some(crate::replay::run_replay(
+            cli,
+            run_id.as_deref(),
+            journal.as_deref(),
+            &mut sink,
+        )?));
+    }
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = discover::resolve(&scope, cli.python.as_deref())?;
     let code = match command {
@@ -546,6 +568,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         )?,
         Command::CacheCompact { .. } => unreachable!("handled above"),
         Command::ShardVerify { .. } => unreachable!("handled above"),
+        Command::Replay { .. } => unreachable!("handled above"),
     };
     Ok(Some(code))
 }
@@ -931,6 +954,7 @@ struct DispatchSelection {
     shard: Option<(usize, usize)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_run(
     cfg: &RunConfig,
     cli: &Cli,
@@ -938,6 +962,7 @@ fn dispatch_run(
     args: &[String],
     skip_ids: &std::collections::HashSet<String>,
     selection: DispatchSelection,
+    pinned: Option<&crate::replay::PinnedSchedule>,
     sink: &mut Sink,
 ) -> Result<pool::PoolOutcome> {
     let DispatchSelection {
@@ -961,6 +986,15 @@ fn dispatch_run(
     let python = python.as_path();
     let worker_env: &worker::WorkerEnv = worker_env;
     let known_flaky = known_flaky.as_ref();
+    // Replay pins a recorded schedule, which only the eager pool can honor.
+    // The command layer forces `-n <recorded>` + `--collect full` and no
+    // passthrough flags, so this is a guard against a stray incompatible arg.
+    if pinned.is_some() && (passthrough || n <= 1) {
+        anyhow::bail!(
+            "replay needs the parallel pool (-n >= 2, no passthrough flags like -s/--pdb); \
+             the journal was recorded from a pool run"
+        );
+    }
     let watchdog = watchdog_duration(worker_timeout, cli.timeout);
     // Compiled once and shared by both pool paths (a config-struct field, so it
     // must outlive the borrow); the passthrough path below ignores it.
@@ -1069,6 +1103,7 @@ fn dispatch_run(
             shuffle_seed,
             shard,
             skip_ids,
+            pinned,
             sink,
         )?
     })
