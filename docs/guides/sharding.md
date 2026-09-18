@@ -31,7 +31,9 @@ Two consequences for CI:
 
 - **Restore the same duration cache on every shard.** If job 2 sees a
   different cache than job 3, their partitions can overlap or drop tests.
-  Restore one shared cache key across the matrix (recipes below).
+  Restore one shared cache key across the matrix (recipes below), and, for a
+  gating pipeline, prove coverage with the check in
+  [Verify no test was dropped](#verify-no-test-was-dropped).
 - **A cold cache falls back to an even count split** (round-robin). The
   first run is balanced by count; from the second run on — once the cache
   is populated and restored — it balances by wall time.
@@ -61,6 +63,53 @@ per-shard JUnit reconstructs the full run.
       selects correctly, no dedicated unsharded job. Without the shared cache,
       warm the index from an **unsharded** run (or merge each shard's
       `.coverage`). See [keeping the index warm](changed.md#keeping-the-index-warm).
+
+## Verify no test was dropped
+
+The disjoint-and-covers-everything guarantee holds **only** when every shard
+partitions the identical `(test list, duration cache, K, N)`. The way it breaks
+in practice is a divergent duration cache across jobs (above): buckets then
+overlap or drop tests, and because the jobs never talk to each other, a dropped
+test is simply never run. The merged report is short, yet the build can still
+go green with fewer tests than the suite has. Nothing detects that at runtime.
+
+For a merge-queue or release gate, add a step that proves the shards covered
+the whole suite. rstest's machine-readable outputs make it a few lines: collect
+the full suite once, collect what each shard actually ran, and assert the union
+matches with no overlap.
+
+```bash
+# 1. Full collection, ONCE, with the SAME selection flags the shards use
+#    (--changed, -k, -m, paths). This defines the universe to check against.
+rstest --collect-only --report-json discovery.json
+
+# 2. Each shard already records the tests it ran via --report-json:
+#    rstest -n auto --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
+
+# 3. After every shard finishes, reconcile with jq:
+jq -r '.tests[].nodeid' discovery.json | sort -u > collected.ids
+jq -r '.tests | keys[]'  shard.*.json  | sort    > ran.ids   # object keys = ran nodeids
+
+# Fail if the set the shards ran differs from the set collected:
+if ! diff <(sort -u ran.ids) collected.ids >/dev/null; then
+  echo "shard coverage mismatch: tests were dropped or added" >&2
+  comm -3 <(sort -u ran.ids) collected.ids >&2
+  exit 1
+fi
+
+# Fail if any test ran on more than one shard (overlap):
+if [ "$(wc -l < ran.ids)" -ne "$(sort -u ran.ids | wc -l)" ]; then
+  echo "shard coverage overlap: a test ran on more than one shard" >&2
+  exit 1
+fi
+```
+
+The `tests` map in each shard's report-json is keyed by every test that ran,
+including skipped and xfailed ones, so the union is complete. The discovery
+document lists every **collected** test, so `ran == collected` is the exact
+"nothing dropped, nothing double-run" property. Run the `--collect-only` step
+in its own job (or reuse the `durations` job below, which already runs the full
+suite) and pass its `discovery.json` to the reconcile step as an artifact.
 
 ## GitHub Actions
 
