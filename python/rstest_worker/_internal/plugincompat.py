@@ -113,6 +113,75 @@ def _seed_pytest_retry(config: Any) -> None:
         _neutralize_pytest_retry(config)
 
 
+# pytest-mypy's pytest11 entrypoint is named "mypy"; match the module too in
+# case an environment exposes it under the package name.
+_MYPY_PLUGIN_NAMES = ("mypy", "pytest_mypy")
+
+
+def _get_pytest_mypy(config: Any) -> Any:
+    for name in _MYPY_PLUGIN_NAMES:
+        plugin = config.pluginmanager.get_plugin(name)
+        if plugin is not None:
+            return plugin
+    return None
+
+
+def _neutralize_pytest_mypy(config: Any) -> None:
+    """Unregister pytest-mypy inside a pool worker (fallback for when its
+    results-cache path cannot be seeded). Its mypy items are then simply not
+    collected under the pool - run mypy checks at `-n 0`. Best-effort no-op if
+    the plugin is absent."""
+    plugin = _get_pytest_mypy(config)
+    if plugin is not None:
+        config.pluginmanager.unregister(plugin)
+
+
+def _seed_pytest_mypy(config: Any) -> None:
+    """Give pytest-mypy the `workerinput["mypy_config_stash_serialized"]` an
+    xdist master would broadcast.
+
+    pytest-mypy splits into a controller (a node *without* `workerinput`) that
+    allocates the mypy results-cache path, and a worker branch that reads that
+    path back from `workerinput["mypy_config_stash_serialized"]`. Under rstest
+    every process has `workerinput`, so no process is the controller and the
+    worker branch reads a key nobody set - `KeyError` aborting `pytest_configure`
+    (same dead-master-path class as pytest-randomly's `randomly_seed` and
+    pytest-retry's `server_port`).
+
+    mypy itself is run lazily by the first `MypyFileItem` via
+    `MypyResults.from_session` (cache-on-miss, `FileLock`-guarded) - that path
+    does not need the controller plugin. So each worker plays master for itself:
+    hand it its own unique results-cache path and its own items run mypy on this
+    worker's subset (correct isolation; the controller only ever *displayed* the
+    summary). We reserve the name the way pytest-mypy's own controller does
+    (`NamedTemporaryFile(delete=True)` - the plugin recreates the file on first
+    write). Idempotent; no-op if pytest-mypy is absent, the key is already set,
+    or real xdist is installed (then rstest keeps `numprocesses` visible and
+    pytest-mypy provisions its own controller path). Falls back to neutralizing
+    the plugin if the reservation fails."""
+    if _get_pytest_mypy(config) is None:
+        return
+    # With real pytest-xdist installed rstest keeps `numprocesses` visible (see
+    # StreamPlugin._neutralize_xdist), so pytest-mypy takes its own controller
+    # branch and self-provisions - seeding here would just orphan a second path.
+    if config.pluginmanager.has_plugin("xdist"):
+        return
+    workerinput = getattr(config, "workerinput", None)
+    if not isinstance(workerinput, dict) or "mypy_config_stash_serialized" in workerinput:
+        return
+    try:
+        import tempfile
+
+        # Reserve a unique per-worker path; delete=True because we only need the
+        # name - pytest-mypy opens/writes it itself (cache-on-miss), exactly as
+        # its controller's `NamedTemporaryFile(delete=True)` block does.
+        with tempfile.NamedTemporaryFile(prefix="rstest-mypy-", delete=True) as tmp_f:
+            path = tmp_f.name
+        workerinput["mypy_config_stash_serialized"] = path
+    except Exception:
+        _neutralize_pytest_mypy(config)
+
+
 def _is_dist_internal(plugin: Any) -> bool:
     """pytest-cov and xdist implement master-side hooks for their own
     master<->worker handshakes, which rstest already emulates directly

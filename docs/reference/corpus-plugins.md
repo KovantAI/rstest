@@ -3,7 +3,7 @@
 This maps every pytest plugin that **actually loads** during a
 compatibility-corpus (`corpus/` in the repo) run to the suite(s) that load it.
 It is the runtime-evidence half of the
-[top-50 plugin matrix](top-50-plugins.md): where that table classifies plugins
+[top-100 plugin matrix](top-100-plugins.md): where that table classifies plugins
 (some `V` verified, most `i` inferred), this table records the ones a real suite
 loads *and still meets the corpus parity floor under rstest*.
 
@@ -23,7 +23,7 @@ It is **not** proof every plugin feature is verified:
   plugin whose *only* corpus evidence is an `-n 0` suite carries **no parallel
   evidence** — flagged below.
 
-Promoting a row to `V` in the [top-50 matrix](top-50-plugins.md) still needs a
+Promoting a row to `V` in the [top-100 matrix](top-100-plugins.md) still needs a
 targeted micro-suite that exercises the plugin's *feature* and diffs its
 observable side effect. This table tells us **where that evidence already
 exists** so the verification work starts from the strongest-covered plugins.
@@ -69,7 +69,7 @@ corpus parity floor under rstest.
 > `pytest-xdist`, `pytest-cov`, `pytest-timeout` register `pytest11` entry points
 > but rstest **supersedes** them (native `-n`, `--cov`, `--timeout`); here they
 > confirm *coexistence* (they load without breaking the run), not that you should
-> run both — see the [top-50 matrix](top-50-plugins.md) "🟦 Native" rows.
+> run both — see the [top-100 matrix](top-100-plugins.md) "🟦 Native" rows.
 
 ## Weak / no evidence — needs a dedicated micro-suite
 
@@ -89,7 +89,7 @@ rich, trio, typer.**
 
 ## Immediate `i` → `V` promotion candidates
 
-Plugins the [top-50 matrix](top-50-plugins.md) currently marks `i` (inferred)
+Plugins the [top-100 matrix](top-100-plugins.md) currently marks `i` (inferred)
 that this corpus already loads with parallel parity — verify the feature side
 effect, then flip to `V`:
 

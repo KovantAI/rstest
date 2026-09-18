@@ -246,6 +246,13 @@ fn resolve_run_config(
     // A one-worker rerun pool is 1 worker everywhere downstream (banner,
     // doctor, report-json meta), never 0.
     let n = if single_worker_reruns { 1 } else { n };
+    // Heads-up when this parallel run pairs with a plugin flag that goes dark
+    // under the pool (silent/empty/racy report), pointing at the native
+    // parallel-safe path. Argv-driven, so it fires whether or not the plugin is
+    // installed — passing the flag is the intent signal.
+    for warning in silent_master_plugin_warnings(n, args) {
+        sink.warn(&warning);
+    }
     let verbose = args
         .iter()
         .any(|a| a == "--verbose" || (a.starts_with("-v") && a.chars().skip(1).all(|c| c == 'v')));
@@ -1119,6 +1126,88 @@ fn warn_windows_timeout(
     }
 }
 
+/// Session flags whose owning plugin produces **no usable artifact** under the
+/// parallel pool: each writes one whole-suite file gated on the xdist master,
+/// which rstest has none of, so at `-n ≥ 2` the file is missing, empty, or a
+/// racy per-worker fragment (see `docs/reference/top-100-plugins.md`). Format:
+/// `(flag, plugin, suggestion)`.
+///
+/// rstest OWNS `--html` / `--junitxml` / `--report-json` and renders them from
+/// merged results (parallel-safe), so those are deliberately absent — passing
+/// them is the *fix*, not a hazard. `--json-report` (pytest-json-report) is a
+/// distinct flag from rstest's `--report-json` and IS forwarded, hence listed.
+const SILENT_MASTER_FLAGS: &[(&str, &str, &str)] = &[
+    (
+        "--json-report",
+        "pytest-json-report",
+        "use rstest's native --report-json, or run -n 0",
+    ),
+    (
+        "--report-log",
+        "pytest-reportlog",
+        "use rstest's native --report-json, or run -n 0",
+    ),
+    (
+        "--ctrf",
+        "pytest-json-ctrf",
+        "use rstest's native --report-json, or run -n 0",
+    ),
+    (
+        "--nunit-xml",
+        "pytest-nunit",
+        "use rstest's native --junitxml, or run -n 0",
+    ),
+    (
+        "--md",
+        "pytest-md",
+        "run -n 0 (its report is empty under the pool)",
+    ),
+    (
+        "--csv",
+        "pytest-csv",
+        "use rstest's native --report-json, or run -n 0 (its CSV is racy under the pool)",
+    ),
+];
+
+/// True when `flag` appears in `args` as a bare token (`--report-log out.x`) or
+/// its `=`-joined form (`--report-log=out.x`).
+fn session_flag_present(args: &[String], flag: &str) -> bool {
+    let eq = format!("{flag}=");
+    args.iter().any(|a| a == flag || a.starts_with(&eq))
+}
+
+/// Warn when a run pairs `-n ≥ 2` with a session flag whose plugin goes dark
+/// under the pool, naming the parallel-safe alternative. Pure (returns the
+/// lines) so the mapping is unit-tested without a Sink; the caller emits each
+/// via `sink.warn`. Empty at `n < 2` (single-worker — the plugin's own master
+/// branch runs, so its artifact is produced normally).
+fn silent_master_plugin_warnings(n: usize, args: &[String]) -> Vec<String> {
+    if n < 2 {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = SILENT_MASTER_FLAGS
+        .iter()
+        .filter(|(flag, _, _)| session_flag_present(args, flag))
+        .map(|(flag, plugin, suggest)| {
+            format!(
+                "rstest: warning: {flag} ({plugin}) produces no usable report under the parallel \
+                 pool — it aggregates on the xdist master, which rstest has none of; {suggest}. \
+                 See docs/reference/top-100-plugins.md"
+            )
+        })
+        .collect();
+    // pytest-benchmark disables itself at -n >= 2 (it detects the pool as xdist)
+    // rather than writing a partial file; any --benchmark* flag is the signal.
+    if args.iter().any(|a| a.starts_with("--benchmark")) {
+        out.push(
+            "rstest: warning: pytest-benchmark auto-disables under the parallel pool; measure at \
+             -n 0 and read --benchmark-json. See docs/reference/top-100-plugins.md"
+                .to_string(),
+        );
+    }
+    out
+}
+
 /// Watchdog duration for a run: explicit `--worker-timeout` wins; otherwise
 /// auto-arm from `--timeout` at a generous multiple, so the worker's in-process
 /// interrupt fires first and the watchdog only catches a C-ext deadlock the
@@ -1426,8 +1515,9 @@ mod tests {
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
         dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
         parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, validate_cache_flags, warn_incremental_conflicts,
-        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration,
+        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
+        warn_windows_timeout, watchdog_duration,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1466,6 +1556,55 @@ mod tests {
         let mut buf = Vec::new();
         warn_windows_timeout(&mut buf, is_windows, timeout, worker_timeout);
         String::from_utf8(buf).unwrap()
+    }
+
+    fn sv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn silent_master_warnings_fire_only_under_the_pool() {
+        // -n >= 2 + a dark-plugin flag => one warning naming the plugin + native path.
+        let w = silent_master_plugin_warnings(2, &sv(&["--report-log=out.jsonl", "tests/"]));
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("pytest-reportlog"));
+        assert!(w[0].contains("--report-json")); // the parallel-safe alternative
+                                                 // Bare-token form (value is the following argv item) matches too.
+        assert_eq!(
+            silent_master_plugin_warnings(4, &sv(&["--report-log", "out.jsonl"])).len(),
+            1
+        );
+        // Single-worker: the plugin's own master branch runs => no warning.
+        assert!(silent_master_plugin_warnings(1, &sv(&["--report-log=out.jsonl"])).is_empty());
+        assert!(silent_master_plugin_warnings(0, &sv(&["--csv=r.csv"])).is_empty());
+    }
+
+    #[test]
+    fn silent_master_warnings_ignore_rstest_owned_report_flags() {
+        // rstest OWNS --html/--junitxml/--report-json (rendered from merged
+        // results) — passing them is the fix, so never warn.
+        assert!(silent_master_plugin_warnings(4, &sv(&["--html=r.html"])).is_empty());
+        assert!(silent_master_plugin_warnings(4, &sv(&["--junitxml=r.xml"])).is_empty());
+        assert!(silent_master_plugin_warnings(4, &sv(&["--report-json=r.json"])).is_empty());
+        // ...but --json-report (pytest-json-report, a DIFFERENT flag) does warn.
+        assert_eq!(
+            silent_master_plugin_warnings(4, &sv(&["--json-report"])).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn silent_master_warnings_cover_benchmark_and_multiple_flags() {
+        // Any --benchmark* flag => the auto-disable heads-up.
+        let b = silent_master_plugin_warnings(2, &sv(&["--benchmark-only"]));
+        assert_eq!(b.len(), 1);
+        assert!(b[0].contains("pytest-benchmark"));
+        // Several dark flags in one run => one warning each.
+        let many = silent_master_plugin_warnings(
+            2,
+            &sv(&["--csv=r.csv", "--md=r.md", "--nunit-xml=n.xml"]),
+        );
+        assert_eq!(many.len(), 3);
     }
 
     #[test]
