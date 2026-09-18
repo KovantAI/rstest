@@ -497,6 +497,45 @@ findings, and the build only goes red when a fresh one appears.
 
 The first slice of a broader migration assistant.
 
+### `bisect <nodeid>`
+
+Order-dependency bisect — the automated answer to "this test only fails when
+run after some other test; *which* one?" Given a failing test's nodeid, it
+finds the **polluter**: the earlier test(s) whose leaked state make the target
+fail.
+
+It works entirely at `-n 0` (serial), so it isolates **ordering**, not
+concurrency (for parallel-only failures use
+[`migrate-check`](#migrate-check)). The steps:
+
+1. **Isolation check** — runs the victim alone. If it fails by itself, that's a
+   plain bug, not an order dependency; reported and done.
+2. **Reproduce** — runs the victim after *all* preceding tests (collection
+   order). If it passes there, the failure doesn't come from ordering (likely
+   parallel-only → `migrate-check`).
+3. **Delta-debug** — [`ddmin`](https://www.st.cs.uni-saarland.de/dd/) over the
+   predecessor set: repeatedly run the victim preceded by a subset of the
+   earlier tests, shrinking toward the **1-minimal** set that still reproduces.
+   Handles a single polluter *and* interacting pairs.
+
+It prints the culprit(s) and a **minimal reproducing command**
+(`rstest -n 0 <culprit…> <victim>`) you can run to confirm and debug. Bounded to
+~80 child runs; if it hits that ceiling it reports the smallest reproducing set
+found (may not be fully minimal). Exit code: `0` = order-dependent culprit
+found, `1` = not order-dependent (fails alone, or doesn't reproduce from
+order), `2` = the nodeid isn't in the suite. `--bisect-json` writes the result.
+
+```console
+$ rstest bisect tests/test_report.py::test_totals
+```
+
+### `--bisect-json <path>`
+
+Write the `bisect` result as a versioned JSON document (schema `1`):
+`{meta, nodeid, order_dependent, culprits[], reproduce_command}`.
+`reproduce_command` is null when the test isn't order-dependent. Used with the
+`bisect` subcommand.
+
 ### `--only-rerun <REGEX>`
 
 With reruns active, retry only failures whose error text matches the

@@ -544,6 +544,10 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             &cli.migrate_allow,
             &mut sink,
         )?,
+        // Order-dependency bisect: delta-debug the predecessor set at -n 0.
+        Command::Bisect { nodeid } => {
+            migrate::run_bisect(&python, nodeid, cli.bisect_json.as_deref(), &mut sink)?
+        }
         Command::CacheCompact { .. } => unreachable!("handled above"),
         Command::ShardVerify { .. } => unreachable!("handled above"),
     };

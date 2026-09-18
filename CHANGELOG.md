@@ -5,6 +5,16 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **`rstest bisect <nodeid>` — order-dependency polluter finder.** For a test
+  that fails only when run after some other test, bisect delta-debugs the
+  predecessor set at `-n 0` (`ddmin`) down to the minimal set of earlier tests
+  that reproduce the failure — the polluter(s) — and prints a minimal
+  reproducing command (`rstest -n 0 <culprit…> <victim>`). Serial by
+  construction, so it isolates ordering (not concurrency); handles a single
+  polluter and interacting pairs, bounded to ~80 child runs. Exits `0` when a
+  culprit is found, `1` when the test isn't order-dependent (fails alone / no
+  reproduction from order), `2` for an unknown nodeid. `--bisect-json` writes
+  the result. See [`bisect`](docs/reference/cli.md#bisect-nodeid).
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
