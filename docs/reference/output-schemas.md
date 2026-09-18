@@ -13,12 +13,36 @@ Each schema carries a `schema` version integer; incompatible changes bump it.
 For the prose walkthrough of the run snapshot and doctor JSON envelopes, see
 [Report JSON](report-json.md).
 
+--8<-- "docs/reference/schemas/report-json.md"
+
+??? note "Run report — full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/report-json.schema.json"
+    ```
+
 --8<-- "docs/reference/schemas/doctor-report.md"
 
 ??? note "Doctor report — full JSON Schema (draft-07)"
 
     ```json
     --8<-- "docs/reference/schemas/doctor-report.schema.json"
+    ```
+
+--8<-- "docs/reference/schemas/discovery.md"
+
+??? note "Discovery — full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/discovery.schema.json"
+    ```
+
+--8<-- "docs/reference/schemas/migrate-check.md"
+
+??? note "Migrate-check — full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/migrate-check.schema.json"
     ```
 
 --8<-- "docs/reference/schemas/flake-log.md"

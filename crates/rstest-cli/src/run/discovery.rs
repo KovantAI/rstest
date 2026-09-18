@@ -3,9 +3,64 @@
 //! machine-readable surface editors/CI consume.
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::config;
 use crate::scheduling::{proto, worker};
+
+/// The `--collect-only --report-json` discovery document (schema 1). Field
+/// order is alphabetical to match the historical `serde_json::Map` output
+/// (serde_json has no `preserve_order` here), so the emitted bytes are
+/// unchanged by the move to a typed struct.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct DiscoveryDoc {
+    /// Per-collector import/collection errors (empty on a clean collection).
+    pub collect_errors: Vec<CollectError>,
+    pub meta: DiscoveryMeta,
+    /// One entry per collected test item, in collection order.
+    pub tests: Vec<DiscoveredTest>,
+}
+
+/// Envelope metadata for the discovery document.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct DiscoveryMeta {
+    /// Number of collected test items (`tests.len()`).
+    pub count: usize,
+    /// Constant discriminator: always `"discovery"`.
+    pub kind: String,
+    /// Absolute project root; `file` paths are resolved against it.
+    pub rootdir: String,
+    /// Constant producer tag: always `"rstest"`.
+    pub runner: String,
+    /// Document schema version.
+    pub schema: u32,
+}
+
+/// One discovered test item.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct DiscoveredTest {
+    /// Absolute source file, or empty when pytest reported no location.
+    pub file: String,
+    /// 0-based definition line, or null when pytest reported none.
+    pub lineno: Option<u64>,
+    /// All pytest marker names on the item (own + inherited).
+    pub markers: Vec<String>,
+    /// The pytest node id.
+    pub nodeid: String,
+}
+
+/// A collection-time error (one collector that failed to import/collect).
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct CollectError {
+    /// The failure text (traceback / repr).
+    pub longrepr: String,
+    /// The path pytest was collecting when it failed.
+    pub path: String,
+}
 
 fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
     let s = p.to_string_lossy();
@@ -71,20 +126,23 @@ pub(super) fn run_collect_discovery(
     };
     let rootdir = strip_verbatim(std::fs::canonicalize(&rootdir).unwrap_or(rootdir));
     let tests = build_tests(&ids, &locations, &marks, &rootdir);
-    let doc = serde_json::json!({
-        "meta": {
-            "runner": "rstest",
-            "kind": "discovery",
-            "schema": 1,
-            "count": ids.len(),
-            "rootdir": rootdir.to_string_lossy(),
-        },
-        "tests": tests,
-        "collect_errors": collect_errors
+    let doc = DiscoveryDoc {
+        collect_errors: collect_errors
             .iter()
-            .map(|(p, l)| serde_json::json!({"path": p, "longrepr": l}))
-            .collect::<Vec<_>>(),
-    });
+            .map(|(p, l)| CollectError {
+                longrepr: l.clone(),
+                path: p.clone(),
+            })
+            .collect(),
+        meta: DiscoveryMeta {
+            count: ids.len(),
+            kind: "discovery".to_string(),
+            rootdir: rootdir.to_string_lossy().into_owned(),
+            runner: "rstest".to_string(),
+            schema: 1,
+        },
+        tests,
+    };
     std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
     Ok(exitstatus)
 }
@@ -137,7 +195,7 @@ fn build_tests(
     locations: &[(String, Option<u64>)],
     marks: &[Vec<String>],
     rootdir: &std::path::Path,
-) -> Vec<serde_json::Value> {
+) -> Vec<DiscoveredTest> {
     ids.iter()
         .enumerate()
         .map(|(i, nodeid)| {
@@ -152,12 +210,12 @@ fn build_tests(
             // All pytest marker names on the item (own + inherited); empty
             // when the worker is older / sent none.
             let markers = marks.get(i).cloned().unwrap_or_default();
-            serde_json::json!({
-                "nodeid": nodeid,
-                "file": file,
-                "lineno": lineno,
-                "markers": markers,
-            })
+            DiscoveredTest {
+                file,
+                lineno,
+                markers,
+                nodeid: nodeid.clone(),
+            }
         })
         .collect()
 }
@@ -299,21 +357,21 @@ mod tests {
         let tests = build_tests(&ids, &locations, &marks, rootdir);
         assert_eq!(tests.len(), 2);
 
-        assert_eq!(tests[0]["nodeid"], "t.py::a");
+        assert_eq!(tests[0].nodeid, "t.py::a");
         // `./` stripped, joined onto the absolute rootdir.
         assert_eq!(
-            tests[0]["file"],
+            tests[0].file,
             std::path::Path::new("/repo")
                 .join("t.py")
                 .to_string_lossy()
                 .into_owned()
         );
-        assert_eq!(tests[0]["lineno"], 10);
-        assert_eq!(tests[0]["markers"][0], "slow");
+        assert_eq!(tests[0].lineno, Some(10));
+        assert_eq!(tests[0].markers[0], "slow");
 
         // Empty file_rel => empty file string; missing marks row => [].
-        assert_eq!(tests[1]["file"], "");
-        assert!(tests[1]["lineno"].is_null());
-        assert_eq!(tests[1]["markers"].as_array().unwrap().len(), 0);
+        assert_eq!(tests[1].file, "");
+        assert!(tests[1].lineno.is_none());
+        assert!(tests[1].markers.is_empty());
     }
 }

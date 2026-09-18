@@ -9,12 +9,110 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
+use serde::Serialize;
 
 use super::classify::{
     bisect_polluter, classify, classify_failures, split_param, Kind, Polluter, Verdict,
 };
 use super::{collect_ids, run_session};
 use crate::reporting::sink::Sink;
+
+/// The `--migrate-check-json` document (schema 1). Field order is alphabetical
+/// to match the historical `serde_json` map output (no `preserve_order`), so
+/// the emitted bytes are unchanged by the move to typed structs.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct MigrateCheckDoc {
+    pub meta: MigrateMeta,
+    /// Parallel-phase result: `null` when the phase was skipped (WILL-bail ids
+    /// force `-n 0`) or could not capture outcomes.
+    pub parallel: Option<ParallelReport>,
+    /// Whether the suite is parallel-ready (no blocking findings).
+    pub ready: bool,
+    /// Tests collected (union across the two collection runs).
+    pub tests_collected: usize,
+    /// Unstable-nodeid findings, grouped by test site.
+    pub unstable_ids: Vec<UnstableSite>,
+    /// Count of per-process-unstable ids that force `-n 0`.
+    pub will_bail_count: usize,
+}
+
+/// Envelope metadata for the migrate-check document.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct MigrateMeta {
+    /// Constant discriminator: always `"migrate-check"`.
+    pub kind: String,
+    /// Constant producer tag: always `"rstest"`.
+    pub runner: String,
+    /// Document schema version.
+    pub schema: u32,
+}
+
+/// Result of the `-n auto` parallel phase. Fields other than `ran` are absent
+/// when the phase did not actually run to completion.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct ParallelReport {
+    /// Per-test parallel-only findings (empty when ready).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<Finding>>,
+    /// Tests that already fail at `-n 0` (pre-existing, not a parallelism bug).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preexisting: Option<usize>,
+    /// Whether the parallel phase actually ran.
+    pub ran: bool,
+    /// Whether it passed (present only once the phase ran).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+}
+
+/// One unstable-nodeid finding, grouped by test site (`file::test`).
+#[derive(Serialize, Clone)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct UnstableSite {
+    /// Whether this site is on the `--allow-unstable` list.
+    pub allowed: bool,
+    /// The upstream fix for the worst instability kind here.
+    pub fix: String,
+    /// Count of unstable ids at this site, keyed by instability kind.
+    pub kinds: BTreeMap<String, usize>,
+    /// A sample parametrize id from this site.
+    pub sample: String,
+    /// The test site (`file::test`).
+    pub site: String,
+    /// Whether the site WILL bail at `-n auto` (per-process-unstable id).
+    pub will_bail: bool,
+}
+
+/// One parallel-only failure finding.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct Finding {
+    /// Whether this nodeid is on the allow list.
+    pub allowed: bool,
+    /// The suggested fix.
+    pub fix: String,
+    /// The failing test's node id.
+    pub nodeid: String,
+    /// The bisected polluter, or `null` when none was found.
+    pub polluter: Option<PolluterJson>,
+    /// The classification verdict title.
+    pub verdict: String,
+    /// Why it fails only under parallelism.
+    pub why: String,
+}
+
+/// A finding's polluter: the file that, run first, reproduces the failure.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct PolluterJson {
+    /// The polluting file (absent for `not_reproducible`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Polluter kind: `other_file`, `same_file`, or `not_reproducible`.
+    pub kind: String,
+}
 
 /// Run the migration preflight. Exit code: 0 = ready, 1 = at least one blocker
 /// (WILL-bail id or parallel-only failure). `json_path` writes findings as JSON.
@@ -53,7 +151,7 @@ pub fn run_migrate_check(
     let tests_total = union.len();
     // Writes the JSON doc (if requested) and returns the exit code. `parallel`
     // is null when the parallel phase was skipped (WILL-bail) or didn't run.
-    let finish = |ready: bool, parallel: serde_json::Value, exit: i32| -> Result<i32> {
+    let finish = |ready: bool, parallel: Option<ParallelReport>, exit: i32| -> Result<i32> {
         if let Some(path) = json_path {
             let doc = check_doc(
                 ready,
@@ -116,11 +214,7 @@ pub fn run_migrate_check(
         if blocking == 0 {
             sink.out_line("    (all allow-listed — gate passes.)");
         }
-        return finish(
-            false,
-            serde_json::Value::Null,
-            if blocking > 0 { 1 } else { 0 },
-        );
+        return finish(false, None, if blocking > 0 { 1 } else { 0 });
     }
 
     // Phase 2: run -n auto and classify any parallel-only failures.
@@ -130,7 +224,16 @@ pub fn run_migrate_check(
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
         );
-        return finish(false, serde_json::json!({ "ran": false }), 1);
+        return finish(
+            false,
+            Some(ParallelReport {
+                findings: None,
+                preexisting: None,
+                ran: false,
+                ready: None,
+            }),
+            1,
+        );
     }
     let verdicts = classify_failures(args, &par, sink)?;
     if verdicts.is_empty() {
@@ -140,7 +243,12 @@ pub fn run_migrate_check(
         ));
         return finish(
             true,
-            serde_json::json!({ "ran": true, "ready": true, "findings": [], "preexisting": 0 }),
+            Some(ParallelReport {
+                findings: Some(vec![]),
+                preexisting: Some(0),
+                ran: true,
+                ready: Some(true),
+            }),
             0,
         );
     }
@@ -166,7 +274,12 @@ pub fn run_migrate_check(
         }
         return finish(
             true,
-            serde_json::json!({ "ran": true, "ready": true, "findings": [], "preexisting": preexisting }),
+            Some(ParallelReport {
+                findings: Some(vec![]),
+                preexisting: Some(preexisting),
+                ran: true,
+                ready: Some(true),
+            }),
             0,
         );
     }
@@ -243,11 +356,11 @@ pub fn run_migrate_check(
     }
     finish(
         false,
-        serde_json::json!({
-            "ran": true,
-            "ready": false,
-            "findings": json_findings,
-            "preexisting": preexisting,
+        Some(ParallelReport {
+            findings: Some(json_findings),
+            preexisting: Some(preexisting),
+            ran: true,
+            ready: Some(false),
         }),
         if blocking > 0 { 1 } else { 0 },
     )
@@ -300,48 +413,63 @@ fn accumulate_unstable<'a>(unstable: &[&'a str]) -> (BTreeMap<&'a str, Acc>, usi
 fn unstable_json(
     by_site: &BTreeMap<&str, Acc>,
     allowed: impl Fn(&str) -> bool,
-) -> Vec<serde_json::Value> {
+) -> Vec<UnstableSite> {
     by_site
         .iter()
-        .map(|(site, acc)| {
-            serde_json::json!({
-                "site": site,
-                "kinds": acc.counts.iter().map(|(k, n)| (*k, *n)).collect::<BTreeMap<_, _>>(),
-                "will_bail": acc.will_bail(),
-                "allowed": allowed(site),
-                "sample": acc.sample,
-                "fix": acc.worst.fix(),
-            })
+        .map(|(site, acc)| UnstableSite {
+            allowed: allowed(site),
+            fix: acc.worst.fix().to_string(),
+            kinds: acc
+                .counts
+                .iter()
+                .map(|(k, n)| ((*k).to_string(), *n))
+                .collect(),
+            sample: acc.sample.clone(),
+            site: (*site).to_string(),
+            will_bail: acc.will_bail(),
         })
         .collect()
 }
 
-/// The `--migrate-check-json` envelope (schema 5's migrate-check variant).
-/// `parallel` is null when the parallel phase was skipped or didn't run.
+/// The `--migrate-check-json` envelope. `parallel` is `None` (serialized null)
+/// when the parallel phase was skipped or didn't run.
 fn check_doc(
     ready: bool,
     tests: usize,
     will_bail: usize,
-    unstable: &[serde_json::Value],
-    parallel: serde_json::Value,
-) -> serde_json::Value {
-    serde_json::json!({
-        "meta": { "runner": "rstest", "kind": "migrate-check", "schema": 1 },
-        "ready": ready,
-        "tests_collected": tests,
-        "will_bail_count": will_bail,
-        "unstable_ids": unstable,
-        "parallel": parallel,
-    })
+    unstable: &[UnstableSite],
+    parallel: Option<ParallelReport>,
+) -> MigrateCheckDoc {
+    MigrateCheckDoc {
+        meta: MigrateMeta {
+            kind: "migrate-check".to_string(),
+            runner: "rstest".to_string(),
+            schema: 1,
+        },
+        parallel,
+        ready,
+        tests_collected: tests,
+        unstable_ids: unstable.to_vec(),
+        will_bail_count: will_bail,
+    }
 }
 
-/// The JSON shape of a victim's polluter (null when the bisect found none).
-fn polluter_json(p: Option<&Polluter>) -> serde_json::Value {
+/// The JSON shape of a victim's polluter (`None` -> null when no bisect hit).
+fn polluter_json(p: Option<&Polluter>) -> Option<PolluterJson> {
     match p {
-        Some(Polluter::OtherFile(f)) => serde_json::json!({ "kind": "other_file", "file": f }),
-        Some(Polluter::SameFile(f)) => serde_json::json!({ "kind": "same_file", "file": f }),
-        Some(Polluter::NotReproducible) => serde_json::json!({ "kind": "not_reproducible" }),
-        None => serde_json::Value::Null,
+        Some(Polluter::OtherFile(f)) => Some(PolluterJson {
+            file: Some(f.clone()),
+            kind: "other_file".to_string(),
+        }),
+        Some(Polluter::SameFile(f)) => Some(PolluterJson {
+            file: Some(f.clone()),
+            kind: "same_file".to_string(),
+        }),
+        Some(Polluter::NotReproducible) => Some(PolluterJson {
+            file: None,
+            kind: "not_reproducible".to_string(),
+        }),
+        None => None,
     }
 }
 
@@ -351,19 +479,19 @@ fn findings_json(
     migration: &[&(String, Verdict)],
     polluter: &BTreeMap<&str, Polluter>,
     allowed: impl Fn(&str) -> bool,
-) -> Vec<serde_json::Value> {
+) -> Vec<Finding> {
     migration
         .iter()
         .map(|(nodeid, v)| {
             let (why, fix) = v.advice();
-            serde_json::json!({
-                "nodeid": nodeid,
-                "verdict": v.title(),
-                "why": why,
-                "fix": fix,
-                "allowed": allowed(nodeid),
-                "polluter": polluter_json(polluter.get(nodeid.as_str())),
-            })
+            Finding {
+                allowed: allowed(nodeid),
+                fix: fix.to_string(),
+                nodeid: nodeid.clone(),
+                polluter: polluter_json(polluter.get(nodeid.as_str())),
+                verdict: v.title().to_string(),
+                why: why.to_string(),
+            }
         })
         .collect()
 }
@@ -408,7 +536,8 @@ mod tests {
     fn unstable_json_carries_site_kinds_and_allow_flag() {
         let ids = ["a.py::t[<obj at 0x10ae4e660>]", "b.py::u[plain]"];
         let (by_site, _) = accumulate_unstable(&ids);
-        let docs = unstable_json(&by_site, |s| s == "b.py::u");
+        let docs = serde_json::to_value(unstable_json(&by_site, |s| s == "b.py::u")).unwrap();
+        let docs = docs.as_array().unwrap();
         assert_eq!(docs.len(), 2);
         let a = docs.iter().find(|d| d["site"] == "a.py::t").unwrap();
         assert_eq!(a["will_bail"], true);
@@ -422,10 +551,12 @@ mod tests {
 
     #[test]
     fn check_doc_has_versioned_envelope() {
-        let unstable = vec![serde_json::json!({ "site": "a.py::t" })];
-        let doc = check_doc(false, 12, 3, &unstable, serde_json::Value::Null);
+        let (by_site, _) = accumulate_unstable(&["a.py::t[<obj at 0x1>]"]);
+        let unstable = unstable_json(&by_site, |_| false);
+        let doc = serde_json::to_value(check_doc(false, 12, 3, &unstable, None)).unwrap();
         assert_eq!(doc["meta"]["schema"], 1);
         assert_eq!(doc["meta"]["runner"], "rstest");
+        assert_eq!(doc["meta"]["kind"], "migrate-check");
         assert_eq!(doc["ready"], false);
         assert_eq!(doc["tests_collected"], 12);
         assert_eq!(doc["will_bail_count"], 3);
@@ -435,19 +566,22 @@ mod tests {
 
     #[test]
     fn polluter_json_maps_each_variant() {
+        fn to_value(p: Option<&Polluter>) -> serde_json::Value {
+            serde_json::to_value(polluter_json(p)).unwrap()
+        }
         assert_eq!(
-            polluter_json(Some(&Polluter::OtherFile("x.py".into()))),
+            to_value(Some(&Polluter::OtherFile("x.py".into()))),
             serde_json::json!({ "kind": "other_file", "file": "x.py" })
         );
         assert_eq!(
-            polluter_json(Some(&Polluter::SameFile("y.py".into()))),
+            to_value(Some(&Polluter::SameFile("y.py".into()))),
             serde_json::json!({ "kind": "same_file", "file": "y.py" })
         );
         assert_eq!(
-            polluter_json(Some(&Polluter::NotReproducible)),
+            to_value(Some(&Polluter::NotReproducible)),
             serde_json::json!({ "kind": "not_reproducible" })
         );
-        assert!(polluter_json(None).is_null());
+        assert!(to_value(None).is_null());
     }
 
     #[test]
@@ -459,7 +593,10 @@ mod tests {
         let migration: Vec<&(String, Verdict)> = migration_owned.iter().collect();
         let mut polluter: BTreeMap<&str, Polluter> = BTreeMap::new();
         polluter.insert("a.py::victim", Polluter::OtherFile("c.py".into()));
-        let docs = findings_json(&migration, &polluter, |n| n == "b.py::order");
+        let docs =
+            serde_json::to_value(findings_json(&migration, &polluter, |n| n == "b.py::order"))
+                .unwrap();
+        let docs = docs.as_array().unwrap();
 
         let v = &docs[0];
         assert_eq!(v["nodeid"], "a.py::victim");
