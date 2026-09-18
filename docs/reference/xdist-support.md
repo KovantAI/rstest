@@ -4,7 +4,7 @@
 
 You are moving a suite off pytest-xdist and need one lookup: for each xdist flag, hook, and worker-identity fixture, does rstest support it, emulate it, or drop it? This page answers that and links to the deeper treatment of each item.
 
-The baseline guarantee: at `-n 0` (or `-n 1`) rstest is a single vendored-pytest session and outcomes are **byte-exact** to pytest: any difference there is a bug (see [Compatibility](../concepts/compatibility.md)). rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the three areas below: flags that silently no-op, hooks that run per-worker instead of once, and the worker-identity fixtures that only exist while pytest-xdist is installed.
+The baseline guarantee: at `-n 0` (or `-n 1`) rstest is a single vendored-pytest session and outcomes are **byte-exact** to pytest: any difference there is a bug (see [Compatibility](../concepts/compatibility.md)). rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the two areas below: flags that silently no-op, and hooks that run per-worker instead of once. The worker-identity fixtures (`worker_id`, `testrun_uid`) are provided natively, so they are one thing you do *not* have to worry about.
 
 For the narrative version see [Migrating from pytest-xdist](../guides/migrate-from-xdist.md).
 
@@ -52,25 +52,28 @@ Two structural caveats on the three emulated hooks: they run **N times concurren
 
 ## Fixtures & worker identity
 
-**rstest does NOT define its own `worker_id` or `testrun_uid` fixtures.** It populates the xdist-compatible *surface* that those fixtures read, but not the fixtures themselves. What rstest sets on every pool worker:
+**rstest provides native `worker_id` and `testrun_uid` fixtures**, with semantics identical to pytest-xdist's, so `def test(worker_id): ...` resolves whether or not pytest-xdist is installed. Removing pytest-xdist from your config does not lose them.
 
-- `RSTEST_WORKER_ID` env var, the `gwN` value (`gw0`, `gw1`, …), rstest-specific.
+- `worker_id`: the worker the test runs on, `gw0`, `gw1`, ..., or `"master"` below `-n 2` (single-worker mode, no worker identity).
+- `testrun_uid`: one uid shared by every worker in a run. Below `-n 2` a fresh uid is generated per session, matching xdist's standalone behavior.
+
+When pytest-xdist is also installed its own same-named fixtures are present too. Because rstest's values match xdist's exactly, whichever definition wins the resolution returns the same result, so the duplicate is harmless.
+
+Under the fixtures, rstest sets the full xdist-compatible surface on every pool worker, for plugins and conftests that read it directly:
+
+- `RSTEST_WORKER_ID` env var, the `gwN` value, rstest-specific.
 - `PYTEST_XDIST_WORKER` and `PYTEST_XDIST_WORKER_COUNT` env vars, set so environment-grepping plugins/conftests keep working.
 - `config.workerinput`, which carries `workerid` (`gwN`), `workercount`, `testrun_uid` (one uid per run, shared by all workers), `mainargv`, and the `cov_master_*` keys pytest-cov expects.
 
-**The migration landmine.** Because rstest ships no `worker_id`/`testrun_uid` fixtures of its own, `def test(worker_id): ...` resolves **only if pytest-xdist is installed**: xdist's fixtures read rstest's `workerinput` and return the right value. If you **remove pytest-xdist from your config**, those fixtures disappear and any test or fixture requesting `worker_id` / `testrun_uid` errors with a fixture-not-found. The fix is to read the surface directly:
+Reading the surface directly, instead of via the fixtures, also works:
 
 ```python
-import os
-
-worker = os.environ.get("RSTEST_WORKER_ID", "main")  # gwN, or "main" below -n 2
-wi = getattr(request.config, "workerinput", None)  # None below -n 2
-uid = wi["testrun_uid"] if wi else None  # one uid per run, or None
+worker = getattr(request.config, "workerinput", {}).get("workerid", "master")
 ```
 
-**Values at `-n 0` / `-n 1`.** There is **no worker identity** below `-n 2`: no `workerinput` is set, so `config.workerinput` does not exist and `RSTEST_WORKER_ID`, `PYTEST_XDIST_WORKER`, and `PYTEST_XDIST_WORKER_COUNT` are all unset (read a default such as `"main"`). This differs from xdist's `-n 1`, which *does* create a `gw0` worker with `workerinput`. Any code that assumes `workerinput` always exists must guard for the single-worker case.
+**Values at `-n 0` / `-n 1`.** There is **no `workerinput`** below `-n 2`: `config.workerinput` does not exist and `RSTEST_WORKER_ID`, `PYTEST_XDIST_WORKER`, and `PYTEST_XDIST_WORKER_COUNT` are all unset. The `worker_id` fixture returns `"master"` there and `testrun_uid` a fresh per-session uid. This differs from xdist's `-n 1`, which *does* create a `gw0` worker with `workerinput`. Code that reads `config.workerinput` directly (rather than via the fixtures) must still guard for the single-worker case.
 
-Plugins keyed on worker identity work unchanged while xdist is installed: pytest-django's per-worker test databases are the canonical case. And `hypothesis`'s shared example DB under many workers can be split per worker with `DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'main')}")` (see [Compatibility](../concepts/compatibility.md)).
+Plugins keyed on worker identity work unchanged: pytest-django's per-worker test databases are the canonical case. And `hypothesis`'s shared example DB under many workers can be split per worker with `DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'master')}")` (see [Compatibility](../concepts/compatibility.md)).
 
 ## Known divergences
 

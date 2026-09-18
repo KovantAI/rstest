@@ -64,6 +64,12 @@ per-worker test databases being the canonical case) work unchanged.
 `RSTEST_WORKER_ID` (same `gwN` values) is also set if you want to
 detect rstest specifically.
 
+The `worker_id` and `testrun_uid` **fixtures** are provided natively, with
+xdist-identical semantics, so `def test(worker_id): ...` resolves whether or
+not pytest-xdist is installed. Removing pytest-xdist from your config keeps
+them working (`worker_id` is `"master"` below `-n 2`, `gwN` in the pool). See
+the [xdist support matrix](../reference/xdist-support.md#fixtures-worker-identity).
+
 ## Master-side hooks
 
 xdist's controller-side hooks (`pytest_configure_node`,
