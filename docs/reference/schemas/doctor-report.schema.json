@@ -1,0 +1,395 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DoctorReport",
+  "type": "object",
+  "required": [
+    "cpu_time_seconds",
+    "fixtures",
+    "rstest_version",
+    "schema",
+    "slowest_files",
+    "test_time_seconds",
+    "tests",
+    "wall_seconds",
+    "workers"
+  ],
+  "properties": {
+    "coverage_waste": {
+      "description": "Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CoverageWaste"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cpu_time_seconds": {
+      "description": "Sum of call-phase CPU time, over tests where it was measured.",
+      "type": "number",
+      "format": "double"
+    },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FixtureEntry"
+      }
+    },
+    "leaks": {
+      "description": "Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Leak"
+      }
+    },
+    "parallel_efficiency": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ParallelEfficiency"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "parallel_floor": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ParallelFloor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rstest_version": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "slowest_files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FileEntry"
+      }
+    },
+    "test_time_seconds": {
+      "type": "number",
+      "format": "double"
+    },
+    "tests": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "wait_bound": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WaitBound"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "wall_seconds": {
+      "type": "number",
+      "format": "double"
+    },
+    "workers": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "CoverageWaste": {
+      "description": "Slow tests that add no unique coverage: every line each one executes is also executed by some other test, so it can be deleted or merged without dropping any covered line. Pure suite bloat on the time axis.",
+      "type": "object",
+      "required": [
+        "redundant_tests",
+        "tests",
+        "wasted_seconds"
+      ],
+      "properties": {
+        "redundant_tests": {
+          "description": "Count of redundant slow tests found (`tests` shows the slowest of them).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "tests": {
+          "description": "The slowest redundant tests, worst first (capped).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WasteTest"
+          }
+        },
+        "wasted_seconds": {
+          "description": "Sum of the durations of every redundant slow test (not just the shown ones) - the time reclaimable by pruning them.",
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "FileEntry": {
+      "type": "object",
+      "required": [
+        "file",
+        "pct",
+        "total_seconds"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "pct": {
+          "type": "number",
+          "format": "double"
+        },
+        "total_seconds": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "FixtureEntry": {
+      "type": "object",
+      "required": [
+        "count",
+        "name",
+        "scope",
+        "total_seconds"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "total_seconds": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "GateTest": {
+      "type": "object",
+      "required": [
+        "duration",
+        "nodeid"
+      ],
+      "properties": {
+        "duration": {
+          "type": "number",
+          "format": "double"
+        },
+        "nodeid": {
+          "type": "string"
+        }
+      }
+    },
+    "Leak": {
+      "description": "A test that ended with more threads / open fds than it started — a resource it opened and never released (its own teardown included).",
+      "type": "object",
+      "required": [
+        "fds",
+        "nodeid",
+        "threads"
+      ],
+      "properties": {
+        "fds": {
+          "description": "Net open fds leaked (0 if only threads leaked).",
+          "type": "integer",
+          "format": "int64"
+        },
+        "nodeid": {
+          "type": "string"
+        },
+        "threads": {
+          "description": "Net threads leaked (0 if only fds leaked).",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "ParallelEfficiency": {
+      "description": "Realized parallel speedup measured from an actual run. Unlike `ParallelFloor` (a static pre-run estimate), this is the after-the-fact \"why isn't `-n auto` faster?\". Only for multi-worker pool runs.",
+      "type": "object",
+      "required": [
+        "efficiency_pct",
+        "ideal_speedup",
+        "imbalance_pct",
+        "long_pole_seconds",
+        "realized_speedup",
+        "workers_busy"
+      ],
+      "properties": {
+        "efficiency_pct": {
+          "description": "100 * realized / ideal. >100% signals wait-bound overlap.",
+          "type": "number",
+          "format": "double"
+        },
+        "ideal_speedup": {
+          "description": "Worker count (`-n`) - the ceiling for a purely CPU-bound suite.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "imbalance_pct": {
+          "description": "100 * (busiest - idlest) / busiest. High = uneven distribution.",
+          "type": "number",
+          "format": "double"
+        },
+        "long_pole_seconds": {
+          "description": "Slowest single test: the hard floor no worker count beats.",
+          "type": "number",
+          "format": "double"
+        },
+        "realized_speedup": {
+          "description": "test_time / wall. May exceed `ideal_speedup` for wait-bound suites, where overlapping sleeps/IO run more tests at once than there are cores.",
+          "type": "number",
+          "format": "double"
+        },
+        "workers_busy": {
+          "description": "Busy time summed per worker, descending - the load-balance picture.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkerLoad"
+          }
+        }
+      }
+    },
+    "ParallelFloor": {
+      "type": "object",
+      "required": [
+        "gate_tests",
+        "ideal_share_seconds",
+        "longest_seconds"
+      ],
+      "properties": {
+        "gate_tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GateTest"
+          }
+        },
+        "ideal_share_seconds": {
+          "type": "number",
+          "format": "double"
+        },
+        "longest_seconds": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "WaitBound": {
+      "type": "object",
+      "required": [
+        "tests",
+        "wait_pct",
+        "wait_seconds"
+      ],
+      "properties": {
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WaitTest"
+          }
+        },
+        "wait_pct": {
+          "type": "number",
+          "format": "double"
+        },
+        "wait_seconds": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "WaitTest": {
+      "type": "object",
+      "required": [
+        "duration",
+        "nodeid",
+        "wait"
+      ],
+      "properties": {
+        "duration": {
+          "type": "number",
+          "format": "double"
+        },
+        "nodeid": {
+          "type": "string"
+        },
+        "wait": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "WasteTest": {
+      "type": "object",
+      "required": [
+        "also_covered_by",
+        "covered_lines",
+        "duration",
+        "nodeid"
+      ],
+      "properties": {
+        "also_covered_by": {
+          "description": "Distinct OTHER tests that between them also cover those lines.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "covered_lines": {
+          "description": "Lines this test covered, all shared with at least one other test.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "duration": {
+          "type": "number",
+          "format": "double"
+        },
+        "nodeid": {
+          "type": "string"
+        }
+      }
+    },
+    "WorkerLoad": {
+      "type": "object",
+      "required": [
+        "busy_seconds",
+        "tests",
+        "worker"
+      ],
+      "properties": {
+        "busy_seconds": {
+          "type": "number",
+          "format": "double"
+        },
+        "tests": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "worker": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

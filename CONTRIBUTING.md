@@ -51,6 +51,22 @@ python e2e/gate.py                         # end-to-end test gate
 `pre-commit run --all-files` covers formatting, clippy, `cargo check`, and
 the file hygiene hooks.
 
+### Output schemas
+
+The JSON Schemas and field tables under `docs/reference/schemas/` are
+generated from the Rust output types (via `schemars`). `cargo test` includes a
+golden test that fails if a type drifts from its committed schema. After
+changing a documented output type (e.g. `DoctorReport`, `FlakeStats`),
+regenerate the artifacts:
+
+```sh
+RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema
+```
+
+Commit the regenerated files. They are embedded into
+`docs/reference/output-schemas.md` via snippets, so the published docs stay in
+lockstep with the code automatically.
+
 ## Vendored pytest
 
 `python/rstest_worker/_vendor/{pytest,_pytest,py.py}` is an **unmodified**
