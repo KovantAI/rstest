@@ -109,6 +109,35 @@ class StreamPlugin:
         self._xdist_node: Any = None
         self._node_configured: set[int] = set()  # plugin ids already given configure_node
 
+    # Native worker-identity fixtures. pytest-xdist ships `worker_id` /
+    # `testrun_uid` fixtures; a suite migrating off xdist that removes it from
+    # its config would otherwise lose them (fixture-not-found) even though
+    # rstest still populates `workerinput`. We provide them ourselves, with
+    # semantics byte-identical to xdist's, so `def test(worker_id)` resolves
+    # with or without pytest-xdist installed. When xdist IS installed it also
+    # defines these; whichever wins the override, the value is the same, so the
+    # duplicate is harmless.
+    @pytest.fixture(scope="session")
+    def worker_id(self, request):
+        """The worker this test runs on: `gw0`, `gw1`, ...; `"master"` below
+        `-n 2` (single-worker mode, no worker identity)."""
+        workerinput = getattr(request.config, "workerinput", None)
+        if workerinput is not None:
+            return workerinput["workerid"]
+        return "master"
+
+    @pytest.fixture(scope="session")
+    def testrun_uid(self, request):
+        """A uid shared by every worker in one run (xdist's `testrun_uid`
+        contract). Below `-n 2` there is no run-level uid, so a fresh one is
+        generated per session, matching xdist's standalone behavior."""
+        workerinput = getattr(request.config, "workerinput", None)
+        if workerinput is not None:
+            return workerinput["testrun_uid"]
+        import uuid
+
+        return uuid.uuid4().hex
+
     @pytest.hookimpl(tryfirst=True)
     def pytest_cmdline_main(self, config):
         # Unregister pytest-rerunfailures BEFORE pytest_configure: under the pool

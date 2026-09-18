@@ -71,6 +71,41 @@ def test_cmdline_main_noop_outside_worker(monkeypatch):
     assert seen == []
 
 
+# ── worker_id / testrun_uid native fixtures ─────────────────────────────────
+
+
+def _fixture_fn(name):
+    """Underlying function behind a @pytest.fixture-decorated method."""
+    return getattr(StreamPlugin, name).__wrapped__
+
+
+def test_worker_id_returns_workerid_from_workerinput():
+    p = _plugin()
+    request = SimpleNamespace(config=SimpleNamespace(workerinput={"workerid": "gw3"}))
+    assert _fixture_fn("worker_id")(p, request) == "gw3"
+
+
+def test_worker_id_falls_back_to_master_without_workerinput():
+    p = _plugin()
+    request = SimpleNamespace(config=SimpleNamespace())  # no workerinput attr
+    assert _fixture_fn("worker_id")(p, request) == "master"
+
+
+def test_testrun_uid_returns_uid_from_workerinput():
+    p = _plugin()
+    request = SimpleNamespace(config=SimpleNamespace(workerinput={"testrun_uid": "abc123"}))
+    assert _fixture_fn("testrun_uid")(p, request) == "abc123"
+
+
+def test_testrun_uid_generates_fresh_hex_without_workerinput():
+    p = _plugin()
+    request = SimpleNamespace(config=SimpleNamespace())  # no workerinput attr
+    uid = _fixture_fn("testrun_uid")(p, request)
+    assert len(uid) == 32 and int(uid, 16) >= 0  # valid uuid4 hex
+    # fresh each call
+    assert uid != _fixture_fn("testrun_uid")(p, request)
+
+
 # ── _call_configure_node / plugin_registered ───────────────────────────────
 
 
