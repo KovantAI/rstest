@@ -59,6 +59,28 @@ Distribution mode. Default `load`.
 
 All five are pytest-xdist-compatible mode names.
 
+### `--order <throughput|fail-fast>`
+
+Dispatch **ordering** within `--dist load` (the other dist modes carry an
+affinity order that is the point, so they ignore this).
+
+- `throughput` (default) — slowest cached tests first, individually, to
+  pack workers for the best wall-clock time. This is the historical
+  behavior.
+- `fail-fast` — order for the earliest **red** signal: tests that
+  hard-failed in recent runs first, then the flakiest (both read from
+  `.rstest_cache/flakes.json`), then clean tests fastest-first with
+  slow-stable last. Duration stays the secondary key, so workers still
+  fill. Pair with [`--maxfail`/`-x`](#forwarded-pytest-flags) for true early exit — a
+  broken run then dies in seconds instead of minutes.
+
+**Auto:** with neither the flag nor `[tool.rstest] order` set, rstest
+picks `fail-fast` under [`--watch`](#-watch) (you want the failure now, on
+each save) and `throughput` otherwise. An explicit `--order fail-fast` on
+an affinity dist warns — it has no effect there. A cold `flakes.json`
+just means no test has a failure/flake signal yet, so fail-fast degrades
+to fastest-first. Config `[tool.rstest] order`.
+
 ### `--durations <N>` / `--durations-min <SECS>`
 
 pytest's slowest-durations report, rendered by the orchestrator after
@@ -862,6 +884,10 @@ test files reruns exactly those files (with your other flags); a source
 (the `--changed` machinery; unresolvable changes fall back to the full
 selection); a pytest-config change reruns the full selection. Ignores
 VCS, caches, and virtualenvs. `Ctrl+C` exits.
+
+Watch reruns default to [`--order fail-fast`](#-order-throughputfail-fast)
+so a fresh failure surfaces first on each save; add `-x`/`--maxfail=1` to
+stop at it. Pass `--order throughput` to opt back into packing.
 
 ### `--junitxml <path>`
 

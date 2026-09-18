@@ -5,6 +5,16 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **Fail-fast dispatch ordering (`--order fail-fast`).** A new
+  `--order <throughput|fail-fast>` flag chooses how `--dist load` sequences the
+  ready queue. `throughput` (default) keeps the slow-tests-first packing that
+  optimizes wall-clock. `fail-fast` orders for the earliest red signal:
+  recently-failed tests first, then the flakiest (both from
+  `.rstest_cache/flakes.json`), then clean tests fastest-first with slow-stable
+  last — so a broken run paired with `--maxfail`/`-x` dies in seconds. Both
+  input signals were already cached; no new data collection. Auto-selected under
+  `--watch`; also settable as `[tool.rstest] order`. See
+  [`--order`](docs/reference/cli.md#-order-throughputfail-fast).
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

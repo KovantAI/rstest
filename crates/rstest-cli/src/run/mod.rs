@@ -1065,6 +1065,7 @@ fn dispatch_run(
         pool::run_pool(
             &base_cfg,
             dist,
+            resolve_order(cli, settings, dist_name, sink)?,
             durations.is_some(),
             shuffle_seed,
             shard,
@@ -1072,6 +1073,31 @@ fn dispatch_run(
             sink,
         )?
     })
+}
+
+/// Resolve dispatch ordering (CLI > [tool.rstest] > auto). Auto picks
+/// fail-fast under `--watch` (surface a red as fast as possible on each save),
+/// throughput otherwise. Only `--dist load` honors the order, so an explicit
+/// fail-fast on an affinity dist warns rather than silently no-op'ing.
+fn resolve_order(
+    cli: &Cli,
+    settings: &config::RstestSettings,
+    dist_name: &str,
+    sink: &mut Sink,
+) -> Result<pool::Order> {
+    let explicit = cli.order.clone().or_else(|| settings.order.clone());
+    let order = match &explicit {
+        Some(s) => s.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?,
+        None if cli.watch => pool::Order::FailFast,
+        None => pool::Order::Throughput,
+    };
+    if explicit.is_some() && order == pool::Order::FailFast && dist_name != "load" {
+        sink.warn(&format!(
+            "rstest: --order fail-fast only reorders --dist load; --dist {dist_name} \
+             keeps its affinity order"
+        ));
+    }
+    Ok(order)
 }
 
 /// Resolve the collection strategy (CLI > [tool.rstest] > "full") and
@@ -1524,8 +1550,8 @@ mod tests {
     use super::{
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
         dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
-        parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        parse_numprocesses, resolve_changed_base, resolve_order, resolve_retention_policy,
+        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
         warn_windows_timeout, watchdog_duration,
     };
@@ -1534,6 +1560,7 @@ mod tests {
     use crate::remote;
     use crate::reporting::sink::Sink;
     use crate::reporting::{progress, report};
+    use crate::scheduling::pool;
     use crate::scheduling::proto;
     use clap::Parser;
 
@@ -1758,6 +1785,73 @@ mod tests {
             &mut Sink::captured().0
         )
         .is_err());
+    }
+
+    fn settings_order(mode: Option<&str>) -> RstestSettings {
+        RstestSettings {
+            order: mode.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_order_defaults_throughput_and_watch_auto_failfast() {
+        let none = settings_order(None);
+        // No flag, no watch => throughput.
+        assert_eq!(
+            resolve_order(&cli(), &none, "load", &mut Sink::captured().0).unwrap(),
+            pool::Order::Throughput
+        );
+        // --watch auto-selects fail-fast.
+        let mut w = cli();
+        w.watch = true;
+        assert_eq!(
+            resolve_order(&w, &none, "load", &mut Sink::captured().0).unwrap(),
+            pool::Order::FailFast
+        );
+    }
+
+    #[test]
+    fn resolve_order_explicit_beats_watch_and_config() {
+        // Explicit --order throughput overrides the watch auto-pick.
+        let mut w = cli();
+        w.watch = true;
+        w.order = Some("throughput".into());
+        assert_eq!(
+            resolve_order(&w, &settings_order(None), "load", &mut Sink::captured().0).unwrap(),
+            pool::Order::Throughput
+        );
+        // Config supplies it when the flag is absent.
+        assert_eq!(
+            resolve_order(
+                &cli(),
+                &settings_order(Some("fail-fast")),
+                "load",
+                &mut Sink::captured().0
+            )
+            .unwrap(),
+            pool::Order::FailFast
+        );
+    }
+
+    #[test]
+    fn resolve_order_rejects_unknown_and_warns_on_affinity_dist() {
+        assert!(resolve_order(
+            &cli(),
+            &settings_order(Some("sideways")),
+            "load",
+            &mut Sink::captured().0
+        )
+        .is_err());
+        // Explicit fail-fast on an affinity dist warns (order is ignored there).
+        let mut c = cli();
+        c.order = Some("fail-fast".into());
+        let (mut sink, cap) = Sink::captured();
+        assert_eq!(
+            resolve_order(&c, &settings_order(None), "loadfile", &mut sink).unwrap(),
+            pool::Order::FailFast
+        );
+        assert!(cap.err().contains("only reorders --dist load"));
     }
 
     #[test]

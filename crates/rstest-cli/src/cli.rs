@@ -136,6 +136,15 @@ pub struct Cli {
     #[arg(long)]
     pub(crate) dist: Option<String>,
 
+    /// Dispatch ordering under `--dist load`: "throughput" (slow tests first,
+    /// to pack workers — the default) or "fail-fast" (historically-failed and
+    /// flakiest tests first, then fastest-stable, slow-stable last, for the
+    /// earliest possible red signal). Pairs with `--maxfail`/`-x` for true
+    /// early exit. Auto-selects fail-fast under `--watch`. Config
+    /// `[tool.rstest] order`.
+    #[arg(long, value_name = "MODE")]
+    pub(crate) order: Option<String>,
+
     /// Write merged results as junit XML (intercepted: per-worker sessions
     /// would clobber a shared file).
     #[arg(long)]
@@ -484,6 +493,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--dist",
     "--shard",
     "--collect",
+    "--order",
     "--keep-last",
     "--max-age",
     "--cache-compact-threshold",

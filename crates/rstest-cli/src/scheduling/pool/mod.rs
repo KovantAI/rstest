@@ -83,6 +83,36 @@ impl std::str::FromStr for Dist {
     }
 }
 
+/// Dispatch ordering under `--dist load`. Ignored by the affinity/each modes
+/// (their order is the affinity contract, not a tunable).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Order {
+    /// Slow tests first, to pack workers (best wall-clock throughput).
+    #[default]
+    Throughput,
+    /// Failed/flakiest first, then fastest-stable, slow-stable last — earliest
+    /// red signal, for `--watch` and PR CI (compose with `--maxfail`).
+    FailFast,
+}
+
+impl std::str::FromStr for Order {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "throughput" => Order::Throughput,
+            // Accept the hyphen spelling (the flag/doc form) and the
+            // underscore for convenience.
+            "fail-fast" | "failfast" | "fail_fast" => Order::FailFast,
+            other => {
+                return Err(format!(
+                    "unknown --order mode: {other} (use throughput|fail-fast)"
+                ))
+            }
+        })
+    }
+}
+
 /// Worker-pool parameters common to the eager (`run_pool`) and lazy
 /// (`run_lazy_pool`) orchestrators. Bundled so each entry point takes a handful
 /// of mode-specific args on top rather than one flat ~17-arg list.
@@ -152,9 +182,11 @@ fn known_flaky_ok(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_pool(
     cfg: &PoolConfig,
     dist: Dist,
+    order: Order,
     track_durations: bool,
     shuffle: Option<u64>,
     shard: Option<(usize, usize)>,
@@ -187,6 +219,13 @@ pub fn run_pool(
     // explicit done_workers break, not channel disconnect.
 
     let duration_cache = crate::scheduling::durations::load();
+    // Flake history feeds fail-fast ordering; empty (and untouched) under the
+    // throughput default so a cold cache costs nothing.
+    let flake_history = if order == Order::FailFast {
+        crate::reporting::flakes::load()
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut run = Run::default();
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
@@ -440,7 +479,9 @@ pub fn run_pool(
                             serial.unwrap_or_default(),
                             groups.unwrap_or_default(),
                             &duration_cache,
+                            &flake_history,
                             dist,
+                            order,
                             shuffle,
                             keep.as_ref(),
                         )?);
@@ -931,6 +972,16 @@ fn partition_skip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_from_str_parses_and_rejects() {
+        assert_eq!("throughput".parse::<Order>().unwrap(), Order::Throughput);
+        assert_eq!("fail-fast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!("failfast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!("fail_fast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!(Order::default(), Order::Throughput);
+        assert!("sideways".parse::<Order>().is_err());
+    }
 
     #[test]
     fn partition_skip_dedups_and_splits() {
