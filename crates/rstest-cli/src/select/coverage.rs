@@ -48,6 +48,23 @@ fn load_coverage_index() -> Option<CoverageIndex> {
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
 }
 
+/// The coverage map's health for the TIA banner: `Some(distinct nodeid count)`
+/// when a schema-current index is on disk (the denominator "X of N mapped tests
+/// impacted"), `None` when the map is cold (missing / unreadable / old schema),
+/// which is the signal that `--impacted` degraded to import-graph selection.
+pub fn mapped_test_count() -> Option<usize> {
+    let idx = load_coverage_index()?;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for f in idx.files.values() {
+        for ids in f.lines.values() {
+            for id in ids {
+                seen.insert(id.as_str());
+            }
+        }
+    }
+    Some(seen.len())
+}
+
 /// Strip the CR from every CRLF so a CRLF working tree and its LF blob hash equal
 /// under git's autocrlf/text filters (the drift hashes must agree, but a real
 /// content edit still changes the hash). Exotic clean/smudge filters just fall back.
@@ -446,6 +463,42 @@ mod tests {
         }
         // Keep the `_` binding to prove the warm-index CoverageFile type is wired.
         let _ = CoverageFile::default();
+    }
+
+    #[test]
+    fn mapped_test_count_dedups_nodeids_across_files_and_lines() {
+        let _lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = fixture("mapcount");
+        // test_a appears on two lines of one file and again in another file:
+        // the distinct-nodeid count must be 2 (test_a, test_b), not 3.
+        let index = cov_index(&[
+            (
+                "s1.py",
+                "H",
+                &[
+                    (1, &["t.py::test_a"]),
+                    (2, &["t.py::test_a", "t.py::test_b"]),
+                ],
+            ),
+            ("s2.py", "H", &[(9, &["t.py::test_a"])]),
+        ]);
+        std::fs::write(
+            dir.join(COVERAGE_INDEX_FILE),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let saved = std::env::var("RSTEST_CACHE").ok();
+        std::env::set_var("RSTEST_CACHE", &dir);
+        let n = super::mapped_test_count();
+        // A cold cache (no file) reads None.
+        std::fs::remove_file(dir.join(COVERAGE_INDEX_FILE)).unwrap();
+        let cold = super::mapped_test_count();
+        match saved {
+            Some(v) => std::env::set_var("RSTEST_CACHE", v),
+            None => std::env::remove_var("RSTEST_CACHE"),
+        }
+        assert_eq!(n, Some(2));
+        assert_eq!(cold, None);
     }
 
     #[test]

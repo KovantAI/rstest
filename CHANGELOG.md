@@ -5,6 +5,16 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **`--changed` now reports coverage-map health (test impact analysis).**
+  `--changed` has been coverage-aware since 0.4.0 (a warm
+  `.rstest_cache/coverage_index.json` maps changed lines to the exact covering
+  tests); it now makes that observable. With a warm map the selection banner
+  shows the savings ratio — `N changed file(s) -> M of K mapped test target(s)
+  affected`. With a **cold** map and a changed non-test source file — exactly
+  where coverage precision would have narrowed the set — it prints a one-line
+  hint that it fell back to the import graph and that a prior
+  `--cov --cov-context=test` run enables coverage-precise selection. No new
+  flags; the hint is silent for test-only / config / non-Python changes.
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

@@ -196,9 +196,13 @@ pub struct Cli {
     #[arg(long, value_name = "SECS")]
     pub(crate) timeout: Option<f64>,
 
-    /// Run only tests affected by changed files (import-graph selection).
-    /// Without a value: working tree + untracked vs HEAD. With a value:
-    /// vs that git rev (e.g. --changed=origin/main in CI).
+    /// Run only tests affected by changed files. Coverage-aware when a warm
+    /// coverage map is present (any prior `--cov --cov-context=test` run writes
+    /// it): changed lines map to the exact covering tests, and the run reports
+    /// how many of the mapped tests are affected. A cold map degrades to
+    /// import-graph reachability with a one-line hint. Without a value: working
+    /// tree + untracked vs HEAD. With a value: vs that git rev (e.g.
+    /// --changed=origin/main in CI).
     #[arg(long, num_args = 0..=1, default_missing_value = "HEAD", value_name = "REV")]
     pub(crate) changed: Option<String>,
 

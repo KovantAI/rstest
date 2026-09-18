@@ -88,6 +88,25 @@ fn apply_selection(
         // (any --cov-context=test run writes it), else falls back per-file to
         // import-graph reachability, so --changed only ever gets tighter.
         let changes = select::changed_line_ranges(rev)?;
+        // Coverage-map health, for the "of K mapped" ratio and the cold-map hint.
+        let mapped = select::mapped_test_count();
+        // One-line nudge when the map is cold BUT a source (non-test) .py file
+        // changed — exactly the case where a warm map would have selected fewer
+        // tests than the import graph is about to. Silent when coverage wouldn't
+        // help (test-only / config / non-Python changes), so it never nags a
+        // user who doesn't run coverage.
+        if mapped.is_none()
+            && changes.keys().any(|f| {
+                f.extension().and_then(|e| e.to_str()) == Some("py")
+                    && !crate::collect::is_test_file(&project.rootdir.join(f), &project)
+            })
+        {
+            sink.warn(
+                "rstest: --changed is using the import graph (no coverage map). A prior \
+                 `--cov --cov-context=test` run enables coverage-precise selection \
+                 (usually fewer tests).",
+            );
+        }
         match select::affected_with_coverage(
             &project.rootdir,
             &project,
@@ -101,10 +120,16 @@ fn apply_selection(
                 ));
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
-                sink.out_line(&format!(
-                    "rstest: no tests affected by {} changed file(s)",
-                    changes.len()
-                ));
+                match mapped {
+                    Some(m) => sink.out_line(&format!(
+                        "rstest: 0 of {m} mapped test(s) affected by {} changed file(s)",
+                        changes.len()
+                    )),
+                    None => sink.out_line(&format!(
+                        "rstest: no tests affected by {} changed file(s)",
+                        changes.len()
+                    )),
+                }
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
                 // don't force a re-run next time.
@@ -120,11 +145,20 @@ fn apply_selection(
                 return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
-                sink.warn(&format!(
-                    "rstest: {} changed file(s) -> {} affected test target(s)",
-                    changes.len(),
-                    tests.len()
-                ));
+                // With a warm map, report the savings ratio (affected of mapped);
+                // cold, just the affected-target count.
+                match mapped {
+                    Some(m) => sink.warn(&format!(
+                        "rstest: {} changed file(s) -> {} of {m} mapped test target(s) affected",
+                        changes.len(),
+                        tests.len()
+                    )),
+                    None => sink.warn(&format!(
+                        "rstest: {} changed file(s) -> {} affected test target(s)",
+                        changes.len(),
+                        tests.len()
+                    )),
+                }
                 let mut selected: Vec<String> =
                     tests.iter().map(|t| t.display().to_string()).collect();
                 // Keep the user's flags; drop any explicit path args in
