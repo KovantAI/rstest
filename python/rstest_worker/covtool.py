@@ -122,7 +122,7 @@ def diff_coverage(cov: Any, diff_lines_path: str, out_path: str) -> None:
             print(f"  {rel}: uncovered added line(s) {_fmt_ranges(lines)}")
     elif denom:
         print(
-            f"rstest: diff coverage {pct:.1f}% — all {total_cov} added executable line(s) covered"
+            f"rstest: diff coverage {pct:.1f}% - all {total_cov} added executable line(s) covered"
         )
     else:
         print("rstest: diff coverage: no added executable lines to check")
