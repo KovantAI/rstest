@@ -39,7 +39,7 @@ use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
-use io::{dispatch_to, spawn_into};
+use io::{dispatch_to, spawn_into, start_into};
 use state::WorkerState;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -99,6 +99,10 @@ pub struct PoolConfig<'a> {
     /// flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     pub known_flaky: Option<&'a std::collections::HashSet<String>>,
     pub worker_env: &'a crate::scheduling::worker::WorkerEnv,
+    /// `--fork-pool`: fork-prewarm the initial pool off one warm zygote (Unix
+    /// only; ignored elsewhere / on the crash-respawn path). Pays the vendored
+    /// pytest import once per run instead of once per worker.
+    pub fork_prewarm: bool,
 }
 
 /// Everything the orchestrator loop produces from one pool run, handed back to
@@ -175,12 +179,18 @@ pub fn run_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        fork_prewarm,
     } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
+    // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
+    // otherwise this is n independent spawns. Each worker then gets its session
+    // command + reader thread via start_into.
+    let workers =
+        crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
     let mut states = Vec::new();
-    for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
+    for (idx, worker) in workers.into_iter().enumerate() {
+        let worker = start_into(worker, idx, args, &tx)?;
         states.push(WorkerState::fresh(worker));
     }
     // NOTE: `tx` stays alive for respawns; the event loop exits via the

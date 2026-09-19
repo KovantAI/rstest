@@ -980,6 +980,7 @@ fn dispatch_run(
         worker_timeout: watchdog,
         known_flaky,
         worker_env,
+        fork_prewarm: cli.fork_pool,
     };
     Ok(if passthrough || (n <= 1 && !single_worker_reruns) {
         let io = if passthrough {

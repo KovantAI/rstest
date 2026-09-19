@@ -141,11 +141,17 @@ pub fn run_lazy_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        fork_prewarm,
     } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
+    // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
+    // otherwise n independent spawns. Each worker then gets its lazy-session
+    // command + reader via start_into.
+    let workers =
+        crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
     let mut states = Vec::new();
-    for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
+    for (idx, worker) in workers.into_iter().enumerate() {
+        let worker = start_into(worker, idx, args, &tx)?;
         states.push(WorkerState::fresh(worker));
     }
 
@@ -604,6 +610,8 @@ pub fn run_lazy_pool(
     })
 }
 
+/// Respawn path: one fresh, independently spawned lazy worker. The initial pool
+/// uses [`Worker::spawn_pool`] + [`start_into`] so it can fork-prewarm.
 fn spawn_into(
     python: &Path,
     idx: usize,
@@ -612,7 +620,18 @@ fn spawn_into(
     tx: &mpsc::Sender<(usize, Result<Event>)>,
     env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<Worker> {
-    let mut worker = Worker::spawn(python, Some((idx, n)), env)?;
+    let worker = Worker::spawn(python, Some((idx, n)), env)?;
+    start_into(worker, idx, args, tx)
+}
+
+/// Send the lazy-session command to an already-spawned worker and start its
+/// reader thread. Shared by [`spawn_into`] and the fork-prewarmed initial pool.
+fn start_into(
+    mut worker: Worker,
+    idx: usize,
+    args: &[String],
+    tx: &mpsc::Sender<(usize, Result<Event>)>,
+) -> Result<Worker> {
     worker.send(&proto::Command::RunLazySession {
         args: args.to_vec(),
     })?;

@@ -12,7 +12,9 @@ use crate::scheduling::worker::Worker;
 use super::dispatch::{Dispatch, Take};
 use super::state::WorkerState;
 
-/// Spawn a worker into slot `idx` and start its reader thread.
+/// Spawn a worker into slot `idx` and start its reader thread. Used for the
+/// crash-respawn path (one fresh, independently spawned worker); the initial
+/// pool uses [`Worker::spawn_pool`] + [`start_into`] so it can fork-prewarm.
 pub(super) fn spawn_into(
     python: &Path,
     idx: usize,
@@ -21,7 +23,19 @@ pub(super) fn spawn_into(
     tx: &mpsc::Sender<(usize, Result<Event>)>,
     env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<Worker> {
-    let mut worker = Worker::spawn(python, Some((idx, n)), env)?;
+    let worker = Worker::spawn(python, Some((idx, n)), env)?;
+    start_into(worker, idx, args, tx)
+}
+
+/// Send the eager-session command to an already-spawned worker and start its
+/// reader thread, mapping events to slot `idx`. Shared by [`spawn_into`] and the
+/// fork-prewarmed initial pool.
+pub(super) fn start_into(
+    mut worker: Worker,
+    idx: usize,
+    args: &[String],
+    tx: &mpsc::Sender<(usize, Result<Event>)>,
+) -> Result<Worker> {
     worker.send(&proto::Command::RunItemsSession {
         args: args.to_vec(),
     })?;
