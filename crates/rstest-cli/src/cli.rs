@@ -80,6 +80,13 @@ pub struct Cli {
     #[arg(short = 'n', long = "numprocesses")]
     pub(crate) numprocesses: Option<String>,
 
+    /// Fork-prewarm the worker pool (Unix only): import the vendored pytest core
+    /// once in a zygote, then fork the workers off it instead of paying that
+    /// import in every freshly spawned worker. Cuts pool startup at high `-n`;
+    /// no effect on Windows or single-worker runs. [default: off]
+    #[arg(long = "fork-pool")]
+    pub(crate) fork_pool: bool,
+
     /// Python interpreter to run workers with: a path, or a version request
     /// (`3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t`). Defaults to the active
     /// venv / a discovered `.venv` / `.python-version` / PATH.
@@ -422,6 +429,7 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
 /// `BOOL_FLAGS`: switches that consume no value.
 const BOOL_FLAGS: &[&str] = &[
     "--doctor",
+    "--fork-pool",
     "--watch",
     "--fail-on-leak",
     "--reruns-only-known-flaky",

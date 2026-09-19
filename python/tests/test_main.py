@@ -1,5 +1,6 @@
 """Unit tests for the worker entrypoint's command loop and dispatch."""
 
+import os
 import sys
 import types
 
@@ -111,6 +112,58 @@ def test_main_converts_windows_handles_via_msvcrt(monkeypatch):
     ]
     # The converted fds (not the raw handles) are what Connection receives.
     assert built["fds"] == (1100, 1200)
+
+
+def test_main_routes_fork_pool(monkeypatch):
+    # `--fork-pool ...` dispatches to _fork_pool with the trailing argv, not the
+    # single-worker Connection path.
+    monkeypatch.setattr(worker_main.sys, "argv", ["prog", "--fork-pool", "2", "9", "10"])
+    seen = {}
+    monkeypatch.setattr(worker_main, "_fork_pool", lambda argv: seen.setdefault("argv", argv))
+    # Guard: the single-worker path must not run.
+    monkeypatch.setattr(
+        worker_main.protocol,
+        "Connection",
+        lambda *a: pytest.fail("single-worker path taken for --fork-pool"),
+    )
+    worker_main.main()
+    assert seen["argv"] == ["2", "9", "10"]
+
+
+def test_fork_pool_parent_reports_pids_and_exits(monkeypatch):
+    # Drive only the PARENT half: os.fork returns fake child pids, so the child
+    # branch is never entered. The parent must write the pids to the report fd,
+    # close the inherited worker fds, and os._exit(0).
+    report_r, report_w = os.pipe()
+
+    forks = iter([111, 222])
+    monkeypatch.setattr(worker_main.os, "fork", lambda: next(forks))
+
+    closed = []
+    real_close = os.close
+
+    def record_close(fd):
+        closed.append(fd)
+        # The fake worker fds (10,20,30,40) aren't real; only close the real one.
+        if fd == report_w:
+            real_close(fd)
+
+    monkeypatch.setattr(worker_main.os, "close", record_close)
+    monkeypatch.setattr(
+        worker_main.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code))
+    )
+
+    # count=2, report_fd, then cmd0 evt0 cmd1 evt1
+    argv = ["2", str(report_w), "10", "20", "30", "40"]
+    with pytest.raises(SystemExit) as exc:
+        worker_main._fork_pool(argv)
+    assert exc.value.code == 0
+
+    pids = os.read(report_r, 64).decode()
+    real_close(report_r)
+    assert pids.split() == ["111", "222"]
+    # All four inherited worker fds were closed in the parent before exit.
+    assert {10, 20, 30, 40} <= set(closed)
 
 
 def test_main_swallows_broken_pipe(monkeypatch):
