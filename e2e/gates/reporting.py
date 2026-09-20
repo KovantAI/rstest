@@ -346,7 +346,8 @@ def gate_doctor(g, args, binary):
     d = json.loads(dj.read_text(encoding="utf-8"))
     check(
         "doctor json schema",
-        d.get("schema") == 2
+        d.get("schema") == 3
+        and "startup_seconds" in d
         and d.get("wait_bound")
         and any("test_sleepy" in t["nodeid"] for t in d["wait_bound"]["tests"]),
         str(d)[:200],

@@ -129,6 +129,10 @@ pub struct PoolOutcome {
     /// Number of collected tests (the reference count all workers agreed on);
     /// 0 when unknown.
     pub collection_size: u64,
+    /// Wall time to spawn the initial worker pool (fork-prewarm zygote or plain
+    /// per-worker spawns), for `--doctor` startup reporting. 0.0 on paths that
+    /// don't spawn a pool (single-worker).
+    pub startup_seconds: f64,
 }
 
 /// The clean nodeid for a dispatched index, from the designate's id list.
@@ -185,7 +189,9 @@ pub fn run_pool(
 
     // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
     // otherwise this is n independent spawns. Each worker then gets its session
-    // command + reader thread via start_into.
+    // command + reader thread via start_into. Time the spawn so --doctor can
+    // report pool startup cost (the lever --fork-pool moves).
+    let spawn_start = std::time::Instant::now();
     let workers =
         crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
     let mut states = Vec::new();
@@ -193,6 +199,15 @@ pub fn run_pool(
         let worker = start_into(worker, idx, args, &tx)?;
         states.push(WorkerState::fresh(worker));
     }
+    // "Pool ready" = every initial worker has emitted its first event (imported
+    // its core + started collecting). This is the startup window --fork-pool
+    // shrinks; stamped in the event loop when all n have responded. Timing the
+    // spawn call itself would be unfair — the plain path returns before its
+    // workers import (that cost is paid async, off-thread), while the zygote
+    // blocks on the shared import, so spawn duration understates one and
+    // overstates the other.
+    let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut startup_seconds = 0.0f64;
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
     // explicit done_workers break, not channel disconnect.
 
@@ -255,6 +270,11 @@ pub fn run_pool(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        // First response from an initial worker (Ok event or a startup crash):
+        // when all n have responded, the pool is warm — record the window.
+        if ready_workers.len() < n && ready_workers.insert(idx) && ready_workers.len() == n {
+            startup_seconds = spawn_start.elapsed().as_secs_f64();
+        }
         match event {
             Ok(Event::Report(mut r)) => {
                 if dist == Dist::Each {
@@ -885,6 +905,7 @@ pub fn run_pool(
         exitstatus,
         collection_hash,
         collection_size,
+        startup_seconds,
     })
 }
 

@@ -22,7 +22,7 @@ use crate::reporting::report::Run;
 use crate::scheduling::proto::FixtureStat;
 
 /// Bump when the JSON shape changes incompatibly.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 pub struct DoctorReport {
@@ -30,6 +30,14 @@ pub struct DoctorReport {
     rstest_version: &'static str,
     workers: usize,
     wall_seconds: f64,
+    /// Wall from pool spawn to every worker's first event (imported core +
+    /// started collecting), part of `wall_seconds`. A fixed per-run tax that
+    /// `--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs.
+    /// Surfaced so a startup-bound suite is legible.
+    startup_seconds: f64,
+    /// Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates
+    /// the "try --fork-pool" hint so it isn't suggested when already on.
+    fork_prewarm: bool,
     tests: usize,
     test_time_seconds: f64,
     /// Sum of call-phase CPU time, over tests where it was measured.
@@ -126,7 +134,14 @@ struct FileEntry {
     pct: f64,
 }
 
-pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -> DoctorReport {
+pub fn analyze(
+    run: &Run,
+    fixtures: &[FixtureStat],
+    wall: f64,
+    startup: f64,
+    fork_prewarm: bool,
+    workers: usize,
+) -> DoctorReport {
     let tests = run.tests();
     let mut durations: Vec<(&String, f64, Option<f64>)> = tests
         .iter()
@@ -270,6 +285,8 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
         rstest_version: env!("CARGO_PKG_VERSION"),
         workers,
         wall_seconds: wall,
+        startup_seconds: startup,
+        fork_prewarm,
         tests: durations.len(),
         test_time_seconds: test_time,
         cpu_time_seconds: cpu_time,
@@ -328,6 +345,8 @@ pub(crate) mod testutil {
             rstest_version: "test",
             workers: 4,
             wall_seconds: 9.0,
+            startup_seconds: 0.3,
+            fork_prewarm: false,
             tests,
             test_time_seconds: 30.0,
             cpu_time_seconds: 6.0,
@@ -458,7 +477,7 @@ mod tests {
         for i in 0..4 {
             record_test(&mut run, &format!("t.py::t{i}"), 0, 2.0);
         }
-        let pe = analyze(&run, &[], 8.0, 8)
+        let pe = analyze(&run, &[], 8.0, 0.0, false, 8)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 1);
@@ -479,7 +498,7 @@ mod tests {
         let mut run = Run::default();
         record_test(&mut run, "t.py::a", 0, 10.0);
         record_test(&mut run, "t.py::b", 1, 10.0);
-        let pe = analyze(&run, &[], 10.0, 2)
+        let pe = analyze(&run, &[], 10.0, 0.0, false, 2)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 2);
@@ -501,7 +520,7 @@ mod tests {
         record_test(&mut run, "t.py::a", 0, 8.0);
         record_test(&mut run, "t.py::b", 1, 4.0);
         record_test(&mut run, "t.py::c", 2, 4.0);
-        let pe = analyze(&run, &[], 9.0, 4)
+        let pe = analyze(&run, &[], 9.0, 0.0, false, 4)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 3);

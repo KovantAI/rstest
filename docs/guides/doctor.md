@@ -120,6 +120,22 @@ flakiness. Full model, false-positive cases, and fixes:
 [Resource leaks](resource-leaks.md). To make it a CI gate, use
 [`--fail-on-leak`](../reference/cli.md#-fail-on-leak).
 
+### startup
+
+A one-line summary under the header reports how long spawning the worker pool
+took — wall from spawn to every worker's first event (import + collection start):
+
+```text
+startup: 0.22s spawning 16 workers (54% of wall) — try --fork-pool to prewarm the pool
+```
+
+When that startup is a real fraction of a short multi-worker run on Unix, the
+line suggests [`--fork-pool`](../reference/cli.md#-fork-pool), which imports the
+vendored pytest core once in a zygote and forks the workers off it instead of
+re-importing per worker. The hint is dropped once the run already uses
+`--fork-pool`, on Windows, and on single-worker runs. It's a fixed per-run tax,
+so it matters most on short / cold suites and is negligible on long ones.
+
 ## Workflow
 
 Doctor is cheap enough to run on a whim and most valuable on a cadence:
@@ -135,10 +151,10 @@ $ rstest -n 4 --doctor     # diagnosing parallel scaling
 $ rstest --doctor-json doctor.json
 ```
 
-writes the same analysis as a versioned JSON document (`"schema": 2`):
-totals (tests, test time, CPU time, wall, workers), the wait-bound test
-list, parallel-floor gate tests, parallel-efficiency (realized speedup and
-per-worker load), fixture timings, and slowest files.
+writes the same analysis as a versioned JSON document (`"schema": 3`):
+totals (tests, test time, CPU time, wall, workers, pool `startup_seconds`),
+the wait-bound test list, parallel-floor gate tests, parallel-efficiency
+(realized speedup and per-worker load), fixture timings, and slowest files.
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.

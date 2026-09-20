@@ -44,6 +44,29 @@ overlap more than the file count allows. Full tuning method:
 Conversely, load-sensitive suites (tight timing assertions) may need `-n`
 *capped* below cores; see [Parallel safety](../guides/parallel-safety.md#choosing-the-worker-count).
 
+### `--fork-pool`
+
+Fork-prewarm the worker pool. **Unix only**, off by default.
+
+Normally each worker is a fresh `python` process that re-imports rstest's
+vendored pytest core over the `PYTHONPATH` prepend. At high `-n` that import is
+paid once per worker. With `--fork-pool` a single zygote imports the core **once**
+and `fork()`s the workers off it, so only the app/conftest imports (which must
+run per-worker anyway, at collection) are paid N times.
+
+- Only the vendored core is shared. Per-worker isolation is unchanged: each child
+  sets its own `gwN` identity, collects independently, and owns its coverage
+  file / temp dir.
+- Only the **initial** pool is forked. A crash-respawned worker uses the normal
+  spawn path.
+- No effect on Windows, single-worker runs (`-n 0`/`-n 1`), or `-s`/`--pdb`/`--co`
+  passthrough. The flag is accepted everywhere but is a no-op where it can't apply.
+
+The win is a fixed per-run startup saving that grows with `-n` and with core
+contention (few cores, many workers). It is largest on short / cold suites where
+startup is a real fraction of wall time, and negligible on compute-heavy suites.
+Run `--doctor` to see the `startup:` line and whether it's worth turning on.
+
 ### `--dist <load|loadfile|loadscope|loadgroup|each>`
 
 Distribution mode. Default `load`.
@@ -762,7 +785,7 @@ file format, and CI surfaces:
 ### `--doctor-json <path>`
 
 Write the doctor analysis as JSON (stable, versioned schema — currently
-`2`) for CI trending. Implies doctor instrumentation; combine with
+`3`) for CI trending. Implies doctor instrumentation; combine with
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
 

@@ -43,6 +43,9 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         "**{} tests** — test time {:.1}s (wall {:.1}s, {} workers)\n",
         r.tests, r.test_time_seconds, r.wall_seconds, r.workers
     );
+    if let Some(line) = startup_line(r) {
+        let _ = writeln!(md, "{line}\n");
+    }
 
     if let Some(w) = &r.wait_bound {
         let _ = writeln!(
@@ -222,6 +225,27 @@ fn buildkite_annotate(sink: &mut Sink, md: &str) {
     }
 }
 
+/// One-line pool-startup summary, or None when there's nothing to say (no pool
+/// spawned, i.e. single-worker). When startup is a notable share of wall on a
+/// multi-worker run, append the `--fork-pool` hint (Unix): that's exactly the
+/// tax the fork-prewarm path cuts.
+fn startup_line(r: &DoctorReport) -> Option<String> {
+    if r.startup_seconds <= 0.0 {
+        return None;
+    }
+    let pct = 100.0 * r.startup_seconds / r.wall_seconds.max(f64::EPSILON);
+    let mut line = format!(
+        "startup: {:.2}s spawning {} workers ({:.0}% of wall)",
+        r.startup_seconds, r.workers, pct
+    );
+    // Advisory only when it matters and isn't already on: a real chunk of a
+    // short multi-worker run, on Unix, without --fork-pool.
+    if cfg!(unix) && !r.fork_prewarm && r.workers > 1 && pct >= 15.0 && r.startup_seconds >= 0.1 {
+        line.push_str(" — try --fork-pool to prewarm the pool");
+    }
+    Some(line)
+}
+
 pub fn render(sink: &mut Sink, r: &DoctorReport) {
     if r.tests == 0 {
         sink.out_line("\n== rstest doctor: no timing data collected ==");
@@ -232,6 +256,10 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         "{} tests, {:.1}s test time (wall {:.1}s, {} workers)",
         r.tests, r.test_time_seconds, r.wall_seconds, r.workers
     ));
+
+    if let Some(line) = startup_line(r) {
+        sink.out_line(&line);
+    }
 
     if let Some(w) = &r.wait_bound {
         sink.out_line(&format!(
@@ -381,6 +409,50 @@ mod tests {
         assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
+    }
+
+    #[test]
+    fn startup_line_reports_and_hints_conditionally() {
+        // No pool spawned (single-worker): nothing to report.
+        let mut r = report(12);
+        r.startup_seconds = 0.0;
+        assert!(startup_line(&r).is_none());
+
+        // A notable share of a short multi-worker run: line + hint (Unix only).
+        let mut r = report(12);
+        r.startup_seconds = 0.5;
+        r.wall_seconds = 1.0;
+        r.workers = 8;
+        r.fork_prewarm = false;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            line.contains("0.50s spawning 8 workers (50% of wall)"),
+            "{line}"
+        );
+        assert_eq!(
+            line.contains("--fork-pool"),
+            cfg!(unix),
+            "hint gated on unix"
+        );
+
+        // Already forked: report the line, never suggest --fork-pool again.
+        r.fork_prewarm = true;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            !line.contains("--fork-pool"),
+            "no hint when already forked: {line}"
+        );
+
+        // Tiny share: line still shown, but no hint (not worth acting on).
+        let mut r = report(12);
+        r.startup_seconds = 0.02;
+        r.wall_seconds = 9.0;
+        r.fork_prewarm = false;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            !line.contains("--fork-pool"),
+            "no hint for a tiny share: {line}"
+        );
     }
 
     #[test]

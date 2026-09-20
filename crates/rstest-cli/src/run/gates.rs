@@ -391,6 +391,8 @@ pub(super) fn run_post_gates(
             &outcome.run,
             &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
             start.elapsed().as_secs_f64(),
+            outcome.startup_seconds,
+            cli.fork_pool,
             n,
         );
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
@@ -1554,6 +1556,7 @@ mod tests {
             exitstatus: 0,
             collection_hash: None,
             collection_size: 0,
+            startup_seconds: 0.0,
         };
         let (mut sink, _cap) = Sink::captured();
         let stream = sink.attach_captured_stream();

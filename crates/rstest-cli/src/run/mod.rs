@@ -1022,6 +1022,8 @@ fn dispatch_run(
             // Single-worker path never shards (resolve_shard rejects it).
             collection_hash: None,
             collection_size: 0,
+            // No worker pool spawned here (one passthrough worker).
+            startup_seconds: 0.0,
         }
     } else if collect_lazy(cli, settings, dist_name, args, sink)? {
         let cwd = std::env::current_dir()?;
