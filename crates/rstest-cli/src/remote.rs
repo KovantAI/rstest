@@ -305,11 +305,9 @@ pub fn load_local_cov_index() -> CoverageIndex {
 /// results are skipped, matching the modules' own behavior.
 pub fn write_local(merged: &Merged) {
     if !merged.durations.is_empty() {
-        let mut d = crate::scheduling::durations::load();
-        d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
-        if let Ok(bytes) = serde_json::to_vec(&d) {
-            let _ = cache::write_atomic(&cache::file(crate::scheduling::durations::FILE), &bytes);
-        }
+        // Tags each pulled entry with the local source fingerprint as it lands,
+        // overlaying onto (and pruning) the existing local cache.
+        crate::scheduling::durations::overlay_remote(&merged.durations);
     }
     if !merged.flakes.is_empty() {
         let mut f = crate::reporting::flakes::load();

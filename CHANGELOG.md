@@ -5,6 +5,14 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **The duration cache self-heals when tests change.** `durations.json` now
+  tags each entry with its test file's `(mtime, size)` fingerprint. On load, an
+  entry whose source file changed (edited body) or vanished (deleted/renamed) is
+  dropped, so an edited test re-times on fresh numbers rather than scheduling on
+  stale ones, and gone tests stop accumulating in the file forever. `wall.json`,
+  a whole-suite aggregate with no per-test source to fingerprint, instead ages
+  out on `RSTEST_WALL_TTL_DAYS` (default 30, `0` disables). Both formats are
+  read back-compatibly, so an upgrade keeps existing caches. (Issue #18.)
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
