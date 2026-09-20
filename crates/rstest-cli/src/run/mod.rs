@@ -777,6 +777,17 @@ struct Incremental {
     skip_ids: std::collections::HashSet<String>,
 }
 
+/// Config fingerprint for an active incremental run: folds config/conftest state
+/// AND — under a narrowed `--cov` ([`coverage_skip::cov_scopes`]) — a hash of the
+/// out-of-scope first-party source, so editing coverage-invisible code busts the
+/// skip set instead of leaving a stale false-green. Factored out of
+/// [`resolve_incremental`] so the `cov_scopes` wiring is unit-testable without
+/// standing up a full `RunConfig`: dropping the scopes here (folding `&[]`) is a
+/// silent-false-green regression the seam test catches.
+fn incremental_config_fp(scope: &std::path::Path, args: &[String]) -> String {
+    coverage_skip::config_fingerprint(scope, &coverage_skip::cov_scopes(args))
+}
+
 /// Resolve `--shuffle`/`--shard` and compute the `--incremental` skip set in one
 /// phase. `--incremental` skipping is restricted to the eager parallel pool on
 /// `--dist load` with full collection; incompatible modes disable it with a note
@@ -836,7 +847,7 @@ fn resolve_incremental(
     // The config fingerprint is only consumed under `active`; computing it
     // unconditionally would walk the whole project tree for conftests.
     let config_fp = if active {
-        coverage_skip::config_fingerprint(scope)
+        incremental_config_fp(scope, args)
     } else {
         String::new()
     };
@@ -857,13 +868,15 @@ fn resolve_incremental(
         );
     }
     // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
-    // coverage-invisible: editing it won't bust the skip, so a test depending on
-    // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
+    // coverage-invisible. That gap is closed soundly: config_fingerprint folds a
+    // hash of every out-of-scope first-party .py, so editing one busts the skip
+    // set wholesale. Warn only about the coarseness (any out-of-scope edit re-runs
+    // everything); --cov=. restores per-file granularity.
     if active && coverage_skip::cov_scope_narrowed(args) {
         sink.warn(
-            "rstest: --incremental with a scoped --cov: edits to first-party source \
-             outside the coverage scope are undetectable and may leave a test cached \
-             on a stale pass; use --cov=. to cover the whole tree",
+            "rstest: --incremental with a scoped --cov: first-party source outside the \
+             coverage scope is folded into the skip fingerprint, so editing any of it \
+             re-runs the whole suite; use --cov=. for per-file incrementality",
         );
     }
     // Snapshot the index BEFORE the run: it drives the skip decision now, and
@@ -1523,14 +1536,15 @@ fn fold_run_event(
 mod tests {
     use super::{
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
-        dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
-        parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        dispatch_command, fold_run_event, head_to_none, incremental_config_fp, lazy_should_steal,
+        parse_duration_secs, parse_numprocesses, resolve_changed_base, resolve_retention_policy,
+        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
         warn_windows_timeout, watchdog_duration,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
+    use crate::coverage_skip;
     use crate::remote;
     use crate::reporting::sink::Sink;
     use crate::reporting::{progress, report};
@@ -1587,6 +1601,47 @@ mod tests {
         // Single-worker: the plugin's own master branch runs => no warning.
         assert!(silent_master_plugin_warnings(1, &sv(&["--report-log=out.jsonl"])).is_empty());
         assert!(silent_master_plugin_warnings(0, &sv(&["--csv=r.csv"])).is_empty());
+    }
+
+    #[test]
+    fn incremental_config_fp_threads_cov_scopes() {
+        // Wiring guard for resolve_incremental's config_fp seam: under a narrowed
+        // --cov, the fingerprint MUST fold out-of-scope first-party source (via
+        // cov_scopes). If that arg is ever dropped (folding &[]), editing
+        // coverage-invisible code would not move the fp -> a silent false-green.
+        let scope = std::env::temp_dir().join(format!("rstest-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("pkg")).unwrap();
+        std::fs::create_dir_all(scope.join("other")).unwrap();
+        std::fs::write(scope.join("pkg/mod.py"), b"x = 1\n").unwrap();
+        std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
+
+        // Under --cov=pkg, editing out-of-scope other/mod.py MUST move the fp.
+        let before = incremental_config_fp(&scope, &sv(&["--cov=pkg"]));
+        std::fs::write(scope.join("other/mod.py"), b"y = 2\n").unwrap();
+        let after = incremental_config_fp(&scope, &sv(&["--cov=pkg"]));
+        assert_ne!(
+            before, after,
+            "out-of-scope edit must bust under --cov=pkg (cov_scopes threaded)"
+        );
+
+        // The seam matches calling config_fingerprint directly with cov_scopes.
+        let args = sv(&["--cov=pkg"]);
+        assert_eq!(
+            incremental_config_fp(&scope, &args),
+            coverage_skip::config_fingerprint(&scope, &coverage_skip::cov_scopes(&args)),
+        );
+
+        // Sanity: whole-tree (no --cov) does NOT fold out-of-scope source, so the
+        // same edit leaves the fp stable — proving the difference above is scoping.
+        let wt = incremental_config_fp(&scope, &sv(&[]));
+        std::fs::write(scope.join("other/mod.py"), b"y = 3\n").unwrap();
+        assert_eq!(
+            wt,
+            incremental_config_fp(&scope, &sv(&[])),
+            "no --cov: out-of-scope source is not folded"
+        );
+        let _ = std::fs::remove_dir_all(&scope);
     }
 
     #[test]

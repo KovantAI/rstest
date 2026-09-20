@@ -301,3 +301,84 @@ def gate_incremental_guards(g, args, binary):
         "scoped --cov" in r.stderr,
         r.stderr[-300:],
     )
+
+
+def gate_incremental_out_of_scope_source(g, args, binary):
+    print("== incremental out-of-scope source (fold + test-file exclusion) ==")
+    sp = g.tmp / "incroos"
+    # pkg/ is the ONLY thing --cov=pkg measures. helper.py lives OUTSIDE it, so
+    # covtool never records coverage for it — yet test_b depends on it. test_b
+    # ALSO touches pkg/mod_b (in scope) so it is present in the coverage index
+    # and thus normally cacheable; that is what makes the helper.py edit a
+    # genuine false-green vector: every tracked hash stays byte-identical, and
+    # only the config-fingerprint fold of out-of-scope first-party source busts
+    # the skip. (A test that touched NO in-scope code would never be indexed, so
+    # it could never be cached in the first place — nothing to falsely keep.)
+    g.write("incroos/pkg/__init__.py", "")
+    g.write("incroos/pkg/mod_a.py", "def a():\n    return 1\n")
+    g.write("incroos/pkg/mod_b.py", "def b():\n    return 2\n")
+    g.write("incroos/helper.py", "def h():\n    return 10\n")
+    g.write(
+        "incroos/test_a.py",
+        "from pkg import mod_a\ndef test_a():\n    assert mod_a.a() == 1\n",
+    )
+    g.write(
+        "incroos/test_b.py",
+        "import helper\nfrom pkg import mod_b\n"
+        "def test_b():\n    assert mod_b.b() + helper.h() == 12\n",
+    )
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=pkg", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run(
+            "test_a.py", "test_b.py", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env
+        )
+
+    # Warm the index + green outcomes, then confirm both tests cache unchanged.
+    run()
+    r = run()
+    check(
+        "incremental(oos): unchanged suite caches under scoped --cov=pkg",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr and "(2 cached)" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # CORE of the branch: edit helper.py — first-party SOURCE outside --cov=pkg,
+    # so coverage never measured it. Pre-fix this stayed a sticky false-green
+    # (test_b cached despite its dependency changing); the config-fingerprint
+    # fold now busts skipping wholesale, so BOTH tests re-run (0 cached).
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited\n")
+    r = run()
+    check(
+        "incremental(oos): out-of-scope source edit busts the skip",
+        r.returncode == 0
+        and "unchanged since last green" not in r.stderr
+        and "cached)" not in r.stdout
+        and "2 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Re-establish green (the edited helper is now the recorded baseline), then
+    # edit an out-of-scope TEST file. Test files are EXCLUDED from the fold (they
+    # are guarded per-test by their own file hash), so this must re-run ONLY
+    # test_b and keep test_a cached — NOT bust the whole suite.
+    r = run()
+    check(
+        "incremental(oos): re-caches after the out-of-scope source settles",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+    g.write(
+        "incroos/test_b.py",
+        "import helper\nfrom pkg import mod_b\n"
+        "def test_b():\n    assert mod_b.b() + helper.h() == 12  # touched\n",
+    )
+    r = run()
+    check(
+        "incremental(oos): out-of-scope test-file edit reruns only that test",
+        r.returncode == 0 and "1 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )

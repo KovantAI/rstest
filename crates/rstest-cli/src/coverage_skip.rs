@@ -10,15 +10,19 @@
 //! config) disables skipping wholesale, and an in-place dependency upgrade is
 //! the known gap shared with `--changed` (bust by deleting the cache file).
 //!
-//! One more coverage-invisible gap: FIRST-PARTY source outside the `--cov`
-//! scope. Under a narrowed `--cov=<pkg>`, coverage only measures `<pkg>`, so a
-//! test that imports a sibling first-party module NOT under `<pkg>` (and that
-//! isn't a conftest — those are folded into the config fingerprint) records no
-//! coverage for it. Editing that module then leaves every tracked hash
-//! byte-identical → the test is wrongly cached (a stale false-green). `--cov=.`
-//! (cover the whole tree) closes this; [`cov_scope_narrowed`] detects the risky
-//! case so the run can warn. Same escape hatch as the other gaps: one `--cov=.`
-//! or full run re-establishes, or delete the cache file.
+//! One more coverage-invisible gap, now CLOSED: FIRST-PARTY source outside the
+//! `--cov` scope. Under a narrowed `--cov=<pkg>`, coverage only measures `<pkg>`,
+//! so a test that imports a sibling first-party module NOT under `<pkg>` records
+//! no coverage for it — editing that module would leave every tracked hash
+//! byte-identical and wrongly cache the test (a stale false-green). When the
+//! scope is narrowed ([`cov_scopes`]), [`config_fingerprint`] folds a hash of
+//! every NON-TEST first-party `.py` OUTSIDE the scope into the config
+//! fingerprint, so an edit to any of them busts skipping wholesale — sound, if
+//! coarse. (Test files are excluded: their edits are already guarded per-test by
+//! [`Baseline::test_file_hashes`], so folding them would needlessly bust the
+//! whole skip set on every test edit.) `--cov=.`
+//! (cover the whole tree) restores per-file granularity; one full run
+//! re-establishes, or delete the cache file.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -101,7 +105,7 @@ pub struct Baseline {
 /// with `tests/conftest.py`), so per-file coverage hashing can't see a conftest
 /// edit. Folding every conftest under `scope` here means adding, editing, or
 /// removing one busts skipping wholesale — the same guard the config files get.
-pub fn config_fingerprint(scope: &Path) -> String {
+pub fn config_fingerprint(scope: &Path, cov_scopes: &[String]) -> String {
     let mut h = Sha256::new();
     for name in CONFIG_FILES {
         if let Some(sha) = current_sha256(&scope.join(name)) {
@@ -109,12 +113,25 @@ pub fn config_fingerprint(scope: &Path) -> String {
             h.update(sha.as_bytes());
         }
     }
-    let mut conftests = Vec::new();
-    collect_conftests(scope, &mut conftests);
-    conftests.sort();
-    for path in &conftests {
+    // ONE walk gathers both fold sets: every conftest.py (always), and — under a
+    // narrowed --cov — every non-test first-party .py OUTSIDE the scope.
+    let mut walk = FingerprintInputs::default();
+    collect_fingerprint_inputs(scope, scope, cov_scopes, &mut walk);
+    walk.conftests.sort();
+    for path in &walk.conftests {
         if let Some(sha) = current_sha256(path) {
             let rel = path.strip_prefix(scope).unwrap_or(path);
+            h.update(rel.to_string_lossy().as_bytes());
+            h.update(sha.as_bytes());
+        }
+    }
+    // Under a narrowed --cov, first-party .py OUTSIDE the scope is coverage-
+    // invisible; fold each so editing one busts skipping (see the module note).
+    walk.uncovered.sort();
+    for path in &walk.uncovered {
+        if let Some(sha) = current_sha256(path) {
+            let rel = path.strip_prefix(scope).unwrap_or(path);
+            h.update(b"py:");
             h.update(rel.to_string_lossy().as_bytes());
             h.update(sha.as_bytes());
         }
@@ -122,49 +139,64 @@ pub fn config_fingerprint(scope: &Path) -> String {
     crate::incremental::hex_encode(&h.finalize())
 }
 
-/// What to do with one directory entry while hunting for `conftest.py`.
-enum EntryAction {
-    /// Ignore it (unreadable type, pruned/dot dir, or an unrelated file).
-    Skip,
-    /// A directory worth recursing into.
-    Descend,
-    /// A `conftest.py` to collect.
-    Collect,
+/// The two path sets [`config_fingerprint`] folds, gathered in one tree walk.
+#[derive(Default)]
+struct FingerprintInputs {
+    /// Every `conftest.py` under `scope` (folded regardless of --cov scope).
+    conftests: Vec<PathBuf>,
+    /// Non-test first-party `.py` OUTSIDE the cov scope (folded only when
+    /// narrowed); empty when `cov_scopes` is empty.
+    uncovered: Vec<PathBuf>,
 }
 
-/// Classify one entry from its `file_type()` result and name. Pure over its
-/// inputs (no filesystem access) so the unreadable-`file_type` arm is testable:
-/// an `Err` — which only happens when the FS returns `DT_UNKNOWN` and the
-/// follow-up `lstat` fails, unreachable on APFS/ext4 — is simply skipped.
-fn classify_entry(ft: std::io::Result<std::fs::FileType>, name: &std::ffi::OsStr) -> EntryAction {
-    let Ok(ft) = ft else {
-        return EntryAction::Skip;
-    };
-    if ft.is_dir() {
-        let name = name.to_string_lossy();
-        if name.starts_with('.') || PRUNE_DIRS.contains(&name.as_ref()) {
-            EntryAction::Skip
-        } else {
-            EntryAction::Descend
-        }
-    } else if name == "conftest.py" {
-        EntryAction::Collect
-    } else {
-        EntryAction::Skip
-    }
+/// Whether `name` is a test file by pytest/unittest convention (`test_*.py` /
+/// `*_test.py`). Test files are NOT folded into the uncovered set: their edits
+/// are already guarded precisely per-test by [`Baseline::test_file_hashes`], so
+/// folding them would bust the WHOLE skip set on any single test-file edit.
+fn is_test_file(name: &str) -> bool {
+    name.starts_with("test_") || name.ends_with("_test.py")
 }
 
-/// Recursively collect every `conftest.py` under `scope`, pruning virtualenv /
-/// VCS / cache directories (and any dot-directory) so the walk stays bounded.
-fn collect_conftests(dir: &Path, out: &mut Vec<PathBuf>) {
+/// One recursive pass over `scope` populating [`FingerprintInputs`]: collects
+/// every `conftest.py`, and — when `cov_scopes` is non-empty — every non-test
+/// first-party `.py` whose path is OUTSIDE the cov scope. Prunes VCS / cache /
+/// virtualenv directories: dot-dirs, [`PRUNE_DIRS`], and any directory holding a
+/// `pyvenv.cfg` (a venv of ANY name — its site-packages is third-party, not
+/// first-party). Descends into in-scope dirs too, since they may hold conftests;
+/// their `.py` are filtered out per-file by the cov-scope check.
+fn collect_fingerprint_inputs(
+    scope: &Path,
+    dir: &Path,
+    cov_scopes: &[String],
+    out: &mut FingerprintInputs,
+) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in rd.flatten() {
-        match classify_entry(entry.file_type(), &entry.file_name()) {
-            EntryAction::Descend => collect_conftests(&entry.path(), out),
-            EntryAction::Collect => out.push(entry.path()),
-            EntryAction::Skip => {}
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if ft.is_dir() {
+            if name.starts_with('.') || PRUNE_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            let path = entry.path();
+            // A virtualenv of any name (PEP 405 marker) is not first-party.
+            if path.join("pyvenv.cfg").is_file() {
+                continue;
+            }
+            collect_fingerprint_inputs(scope, &path, cov_scopes, out);
+        } else if name == "conftest.py" {
+            out.conftests.push(entry.path());
+        } else if !cov_scopes.is_empty() && name.ends_with(".py") && !is_test_file(&name) {
+            let path = entry.path();
+            let rel = path.strip_prefix(scope).unwrap_or(&path);
+            if !cov_scopes.iter().any(|s| rel.starts_with(s)) {
+                out.uncovered.push(path);
+            }
         }
     }
 }
@@ -202,6 +234,36 @@ pub fn cov_scope_narrowed(args: &[String]) -> bool {
         }
     }
     any_scoped
+}
+
+/// The narrowed `--cov` scope values, or empty when coverage is whole-tree or
+/// absent. Non-empty means first-party `.py` OUTSIDE these scopes is coverage-
+/// invisible and must be folded into the config fingerprint ([`config_fingerprint`]).
+/// Values are NORMALIZED for the component-wise prefix match [`config_fingerprint`]
+/// runs against cwd-relative paths: a leading `./` and trailing `/` are stripped
+/// (`--cov=./pkg/` -> `pkg`), so `Path::starts_with` — which compares components,
+/// not raw strings — matches `pkg/mod.py` instead of failing on a stray `CurDir`
+/// component and folding the WHOLE tree. A `--cov=<installed-pkg-name>` that
+/// matches no directory still folds everything (sound, if maximally coarse).
+pub fn cov_scopes(args: &[String]) -> Vec<String> {
+    if !cov_scope_narrowed(args) {
+        return Vec::new();
+    }
+    args.iter()
+        .filter_map(|a| a.strip_prefix("--cov="))
+        .filter(|v| !matches!(*v, "" | "." | "./"))
+        .map(normalize_scope)
+        .collect()
+}
+
+/// Strip leading `./` and trailing `/` from a `--cov` scope value so it prefix-
+/// matches cwd-relative paths component-wise (see [`cov_scopes`]).
+fn normalize_scope(v: &str) -> String {
+    let mut s = v;
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
+    }
+    s.trim_end_matches('/').to_string()
 }
 
 /// The recorded baseline, but ONLY if the config fingerprint still matches — a
@@ -517,17 +579,17 @@ mod tests {
         let scope = std::env::temp_dir().join(format!("rstest-conftest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scope);
         std::fs::create_dir_all(scope.join("tests")).unwrap();
-        let base = config_fingerprint(&scope);
+        let base = config_fingerprint(&scope, &[]);
         std::fs::write(scope.join("tests/conftest.py"), b"import pytest\n").unwrap();
-        let added = config_fingerprint(&scope);
+        let added = config_fingerprint(&scope, &[]);
         assert_ne!(base, added, "adding a nested conftest must bust");
         std::fs::write(scope.join("tests/conftest.py"), b"import pytest  # edit\n").unwrap();
-        let edited = config_fingerprint(&scope);
+        let edited = config_fingerprint(&scope, &[]);
         assert_ne!(added, edited, "editing a conftest must bust");
         std::fs::remove_file(scope.join("tests/conftest.py")).unwrap();
         assert_eq!(
             base,
-            config_fingerprint(&scope),
+            config_fingerprint(&scope, &[]),
             "removing it returns to base"
         );
         let _ = std::fs::remove_dir_all(&scope);
@@ -574,14 +636,159 @@ mod tests {
     }
 
     #[test]
-    fn classify_entry_skips_on_file_type_error() {
-        // Unreadable file_type (DT_UNKNOWN + failed lstat) must be skipped, not
-        // collected or descended into — the arm no real FS reaches in-process.
-        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        assert!(matches!(
-            classify_entry(Err(err), std::ffi::OsStr::new("conftest.py")),
-            EntryAction::Skip
-        ));
+    fn cov_scopes_returns_narrowed_values_only() {
+        assert!(cov_scopes(&["--cov=.".to_string()]).is_empty());
+        assert!(cov_scopes(&["-n".to_string(), "2".to_string()]).is_empty());
+        assert_eq!(cov_scopes(&["--cov=pkg".to_string()]), vec!["pkg"]);
+        assert_eq!(
+            cov_scopes(&["--cov=pkg".to_string(), "--cov=src/lib".to_string()]),
+            vec!["pkg", "src/lib"]
+        );
+        // A whole-tree entry broadens back: no narrowed scopes to fold.
+        assert!(cov_scopes(&["--cov=pkg".to_string(), "--cov=.".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn config_fingerprint_folds_uncovered_first_party_source() {
+        // Under --cov=pkg, editing an out-of-scope first-party module (other/mod.py)
+        // must move the config fingerprint so the skip set busts; editing in-scope
+        // source (covered per-file) must NOT — coverage already guards it.
+        let scope = std::env::temp_dir().join(format!("rstest-uncov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("pkg")).unwrap();
+        std::fs::create_dir_all(scope.join("other")).unwrap();
+        std::fs::write(scope.join("pkg/mod.py"), b"x = 1\n").unwrap();
+        std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
+        let scopes = vec!["pkg".to_string()];
+        let base = config_fingerprint(&scope, &scopes);
+        // Out-of-scope edit busts.
+        std::fs::write(scope.join("other/mod.py"), b"y = 2\n").unwrap();
+        let after_out = config_fingerprint(&scope, &scopes);
+        assert_ne!(base, after_out, "out-of-scope edit must bust");
+        // In-scope edit does NOT change the fingerprint (coverage guards it).
+        let before_in = config_fingerprint(&scope, &scopes);
+        std::fs::write(scope.join("pkg/mod.py"), b"x = 2\n").unwrap();
+        assert_eq!(
+            before_in,
+            config_fingerprint(&scope, &scopes),
+            "in-scope source is coverage-visible, not folded here"
+        );
+        let _ = std::fs::remove_dir_all(&scope);
+    }
+
+    #[test]
+    fn config_fingerprint_ignores_uncovered_source_when_whole_tree() {
+        // With no narrowed scope (empty cov_scopes), out-of-scope .py is NOT
+        // folded — whole-tree coverage measures it per-file already.
+        let scope = std::env::temp_dir().join(format!("rstest-uncov-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("other")).unwrap();
+        std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
+        let base = config_fingerprint(&scope, &[]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 2\n").unwrap();
+        assert_eq!(
+            base,
+            config_fingerprint(&scope, &[]),
+            "not folded when whole-tree"
+        );
+        let _ = std::fs::remove_dir_all(&scope);
+    }
+
+    #[test]
+    fn normalize_scope_strips_dot_slash_and_trailing_slash() {
+        assert_eq!(normalize_scope("pkg"), "pkg");
+        assert_eq!(normalize_scope("./pkg"), "pkg");
+        assert_eq!(normalize_scope("pkg/"), "pkg");
+        assert_eq!(normalize_scope("./src/pkg/"), "src/pkg");
+        assert_eq!(normalize_scope(".//pkg"), "/pkg"); // only "./" prefixes peel
+    }
+
+    #[test]
+    fn is_test_file_matches_pytest_unittest_conventions() {
+        assert!(is_test_file("test_foo.py"));
+        assert!(is_test_file("foo_test.py"));
+        assert!(!is_test_file("mod.py"));
+        assert!(!is_test_file("contest.py"));
+    }
+
+    #[test]
+    fn config_fingerprint_does_not_fold_out_of_scope_test_files() {
+        // Under --cov=pkg, editing an out-of-scope TEST file must NOT move the
+        // config fingerprint: test-file edits are guarded per-test elsewhere, so
+        // folding them here would bust the whole skip set (finding #1).
+        let scope = std::env::temp_dir().join(format!("rstest-tf-fold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("tests")).unwrap();
+        std::fs::write(scope.join("tests/test_foo.py"), b"def test_x(): pass\n").unwrap();
+        let scopes = vec!["pkg".to_string()];
+        let base = config_fingerprint(&scope, &scopes);
+        std::fs::write(
+            scope.join("tests/test_foo.py"),
+            b"def test_x(): pass  # edit\n",
+        )
+        .unwrap();
+        assert_eq!(
+            base,
+            config_fingerprint(&scope, &scopes),
+            "out-of-scope test-file edit must NOT bust the fingerprint"
+        );
+        let _ = std::fs::remove_dir_all(&scope);
+    }
+
+    #[test]
+    fn config_fingerprint_prunes_venv_by_pyvenv_cfg() {
+        // A venv of a non-standard name (not in PRUNE_DIRS) is pruned by its
+        // pyvenv.cfg marker: its site-packages .py must NOT fold as first-party
+        // (finding #2).
+        let scope = std::env::temp_dir().join(format!("rstest-venv-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        let sp = scope
+            .join("env")
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages");
+        std::fs::create_dir_all(&sp).unwrap();
+        std::fs::write(scope.join("env/pyvenv.cfg"), b"home = /usr\n").unwrap();
+        std::fs::write(sp.join("dep.py"), b"x = 1\n").unwrap();
+        let scopes = vec!["pkg".to_string()];
+        let base = config_fingerprint(&scope, &scopes);
+        // Editing a third-party module inside the venv must not move the fp.
+        std::fs::write(sp.join("dep.py"), b"x = 2\n").unwrap();
+        assert_eq!(
+            base,
+            config_fingerprint(&scope, &scopes),
+            "venv (pyvenv.cfg) contents must not fold as first-party"
+        );
+        let _ = std::fs::remove_dir_all(&scope);
+    }
+
+    #[test]
+    fn config_fingerprint_folds_dot_slash_scoped_source_correctly() {
+        // --cov=./pkg must classify pkg/ as in-scope (not fold the whole tree):
+        // editing in-scope source stays stable, out-of-scope busts (finding #3).
+        let scope = std::env::temp_dir().join(format!("rstest-dotslash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("pkg")).unwrap();
+        std::fs::create_dir_all(scope.join("other")).unwrap();
+        std::fs::write(scope.join("pkg/mod.py"), b"x = 1\n").unwrap();
+        std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
+        let scopes = cov_scopes(&["--cov=./pkg".to_string()]);
+        let base = config_fingerprint(&scope, &scopes);
+        // In-scope edit must NOT bust (proves ./pkg matched, not folded-everything).
+        std::fs::write(scope.join("pkg/mod.py"), b"x = 2\n").unwrap();
+        assert_eq!(
+            base,
+            config_fingerprint(&scope, &scopes),
+            "in-scope stays stable"
+        );
+        // Out-of-scope edit still busts.
+        std::fs::write(scope.join("other/mod.py"), b"y = 2\n").unwrap();
+        assert_ne!(
+            base,
+            config_fingerprint(&scope, &scopes),
+            "out-of-scope busts"
+        );
+        let _ = std::fs::remove_dir_all(&scope);
     }
 
     #[test]
@@ -591,23 +798,30 @@ mod tests {
         let scope = std::env::temp_dir().join(format!("rstest-cfgfile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scope);
         std::fs::create_dir_all(&scope).unwrap();
-        let empty = config_fingerprint(&scope);
+        let empty = config_fingerprint(&scope, &[]);
         std::fs::write(scope.join("pyproject.toml"), b"[tool.pytest]\n").unwrap();
-        let added = config_fingerprint(&scope);
+        let added = config_fingerprint(&scope, &[]);
         assert_ne!(empty, added, "adding pyproject.toml must bust");
         std::fs::write(scope.join("pyproject.toml"), b"[tool.pytest]  # edit\n").unwrap();
-        assert_ne!(added, config_fingerprint(&scope), "editing it must bust");
+        assert_ne!(
+            added,
+            config_fingerprint(&scope, &[]),
+            "editing it must bust"
+        );
         let _ = std::fs::remove_dir_all(&scope);
     }
 
     #[test]
     fn config_fingerprint_on_missing_scope_is_stable() {
-        // Nonexistent scope: read_dir fails (collect_conftests returns early) and
+        // Nonexistent scope: read_dir fails (the walk returns early) and
         // no config file hashes → the empty-hash fingerprint, computed twice equal.
         let scope = std::env::temp_dir().join(format!("rstest-nodir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scope);
         assert!(!scope.exists());
-        assert_eq!(config_fingerprint(&scope), config_fingerprint(&scope));
+        assert_eq!(
+            config_fingerprint(&scope, &[]),
+            config_fingerprint(&scope, &[])
+        );
     }
 
     #[test]
@@ -705,10 +919,10 @@ mod tests {
     }
 
     #[test]
-    fn collect_conftests_prunes_and_descends() {
-        // Real filesystem so classify_entry sees genuine dir/file FileTypes:
-        // a conftest at root and in a nested source dir is collected; one under
-        // a pruned dir (.venv) and a dot dir is not.
+    fn collect_fingerprint_inputs_prunes_and_descends() {
+        // Real filesystem so the walk sees genuine dir/file FileTypes: a conftest
+        // at root and in a nested source dir is collected; one under a pruned dir
+        // (.venv), a dot dir, and an Err file_type arm are not reached.
         let root = std::env::temp_dir().join(format!("rstest-conf-walk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -719,9 +933,10 @@ mod tests {
         std::fs::write(root.join("not_a_conftest.py"), b"").unwrap();
         std::fs::write(root.join(".venv/conftest.py"), b"").unwrap();
         std::fs::write(root.join(".hidden/conftest.py"), b"").unwrap();
-        let mut out = Vec::new();
-        collect_conftests(&root, &mut out);
+        let mut out = FingerprintInputs::default();
+        collect_fingerprint_inputs(&root, &root, &[], &mut out);
         let mut names: Vec<String> = out
+            .conftests
             .iter()
             .map(|p| {
                 p.strip_prefix(&root)
@@ -732,6 +947,8 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["conftest.py", "src/conftest.py"]);
+        // With no cov scope, no uncovered .py is collected (not_a_conftest.py skipped).
+        assert!(out.uncovered.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
