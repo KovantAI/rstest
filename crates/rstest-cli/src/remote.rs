@@ -304,22 +304,28 @@ pub fn load_local_cov_index() -> CoverageIndex {
 /// rather than discards local-only history that hasn't been pushed yet. Sparse
 /// results are skipped, matching the modules' own behavior.
 pub fn write_local(merged: &Merged) {
-    if !merged.durations.is_empty() {
-        let mut d = crate::scheduling::durations::load();
-        d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
-        if let Ok(bytes) = serde_json::to_vec(&d) {
-            let _ = cache::write_atomic(&cache::file(crate::scheduling::durations::FILE), &bytes);
+    // Overlay durations+flakes under the cache lock: this is a load→modify→write
+    // like `durations::save`/`flakes::record`, so a concurrent one of those (or a
+    // parallel pull) would otherwise clobber the overlay with a stale snapshot.
+    cache::with_lock(|| {
+        if !merged.durations.is_empty() {
+            let mut d = crate::scheduling::durations::load();
+            d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
+            if let Ok(bytes) = serde_json::to_vec(&d) {
+                let _ =
+                    cache::write_atomic(&cache::file(crate::scheduling::durations::FILE), &bytes);
+            }
         }
-    }
-    if !merged.flakes.is_empty() {
-        let mut f = crate::reporting::flakes::load();
-        for (k, v) in &merged.flakes {
-            f.insert(k.clone(), *v);
+        if !merged.flakes.is_empty() {
+            let mut f = crate::reporting::flakes::load();
+            for (k, v) in &merged.flakes {
+                f.insert(k.clone(), *v);
+            }
+            if let Ok(bytes) = serde_json::to_vec(&f) {
+                let _ = cache::write_atomic(&cache::file(crate::reporting::flakes::FILE), &bytes);
+            }
         }
-        if let Ok(bytes) = serde_json::to_vec(&f) {
-            let _ = cache::write_atomic(&cache::file(crate::reporting::flakes::FILE), &bytes);
-        }
-    }
+    });
     // The coverage index is regenerated each run and drives selection off the
     // merged view, so it is replaced (not overlaid) with the pulled union.
     if !merged.cov_index.files.is_empty() {

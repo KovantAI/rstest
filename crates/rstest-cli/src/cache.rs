@@ -74,6 +74,105 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Sentinel file whose OS advisory lock serializes a load→modify→write across
+/// processes/shards sharing one cache dir. Never read or written — only locked.
+pub const LOCK_FILE: &str = ".lock";
+
+/// Run `f` while holding an exclusive advisory lock over the cwd cache dir.
+/// `write_atomic` stops torn files but not *lost updates*: two processes (or two
+/// shards sharing one cwd cache) each load→modify→write and the last rename wins,
+/// silently dropping the other's merge. Wrapping the whole read-modify-write in
+/// this lock serializes them so each sees the other's committed state.
+pub fn with_lock<T>(f: impl FnOnce() -> T) -> T {
+    with_lock_in(&dir(), f)
+}
+
+/// `with_lock` against a specific cache dir. Best-effort: if the lock can't be
+/// taken (dir uncreatable, unsupported filesystem, permission), `f` still runs
+/// unlocked — degrading to the pre-lock last-writer-wins rather than blocking or
+/// dropping a run's data. The lock releases when the guard's file handle drops.
+pub fn with_lock_in<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+    let _guard = CacheLock::acquire(dir);
+    f()
+}
+
+/// A held cache-dir lock, released when its file handle drops (both `flock` and
+/// `LockFileEx` unlock on close). `file == None` means unlocked (acquire failed);
+/// the caller still proceeds, so correctness only degrades to the old behavior.
+struct CacheLock {
+    #[allow(dead_code)]
+    file: Option<std::fs::File>,
+}
+
+impl CacheLock {
+    fn acquire(dir: &Path) -> Self {
+        if std::fs::create_dir_all(dir).is_err() {
+            return Self { file: None };
+        }
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join(LOCK_FILE))
+        {
+            Ok(f) if lock_exclusive(&f).is_ok() => Some(f),
+            _ => None,
+        };
+        Self { file }
+    }
+}
+
+/// Take a blocking exclusive advisory lock on `f`. The lock is per open-file
+/// handle, so a second `with_lock` on the same dir — even in this process —
+/// blocks until the first releases; callers must not nest it (they don't:
+/// `save`/`record`/`write_local` each lock a self-contained read-modify-write).
+#[cfg(unix)]
+fn lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `f` owns a valid fd for the duration of the call.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    // SAFETY: a zeroed OVERLAPPED means "lock from offset 0"; the handle is valid
+    // for the call. Lock the whole range so it behaves like Unix's flock.
+    let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        LockFileEx(
+            f.as_raw_handle() as _,
+            LOCKFILE_EXCLUSIVE_LOCK,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut ov,
+        )
+    };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn lock_exclusive(_f: &std::fs::File) -> std::io::Result<()> {
+    // No advisory-lock primitive on this platform: run unlocked (best-effort).
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "file locking unsupported on this platform",
+    ))
+}
+
 /// Write `bytes` to `path` and flush data+metadata to disk before returning, so
 /// a following rename can't expose a name pointing at unflushed (zero/torn)
 /// blocks after a crash.
@@ -121,6 +220,59 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "tmp sidecar leaked: {leftovers:?}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn with_lock_serializes_concurrent_read_modify_write() {
+        // Model the lost-update race: N threads each load a counter, +1, store it
+        // back. Without the lock, interleaved load→store lose increments and the
+        // final value is < N; the lock must serialize them so it lands exactly N.
+        let dir = std::env::temp_dir().join(format!("rstest-lock-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("counter");
+        std::fs::write(&counter, b"0").unwrap();
+
+        const N: usize = 16;
+        std::thread::scope(|s| {
+            for _ in 0..N {
+                let dir = dir.clone();
+                let counter = counter.clone();
+                s.spawn(move || {
+                    with_lock_in(&dir, || {
+                        let cur: u64 = std::fs::read_to_string(&counter)
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        // Widen the window the racy version would lose in.
+                        std::thread::yield_now();
+                        std::fs::write(&counter, (cur + 1).to_string()).unwrap();
+                    });
+                });
+            }
+        });
+
+        let final_val: u64 = std::fs::read_to_string(&counter)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(final_val, N as u64, "lock must serialize every increment");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_lock_returns_closure_value_and_creates_dir() {
+        let dir = std::env::temp_dir().join(format!("rstest-lock-ret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let got = with_lock_in(&dir, || 42);
+        assert_eq!(got, 42);
+        assert!(
+            dir.join(LOCK_FILE).exists(),
+            "lock sentinel must be created"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

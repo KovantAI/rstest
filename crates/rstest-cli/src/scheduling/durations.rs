@@ -39,17 +39,21 @@ pub fn load() -> HashMap<String, f64> {
 
 pub fn save(run: &Run) {
     // Merge over previous cache: tests not in this run keep old timings
-    // (-k/-m filtered runs must not wipe the rest of the suite's data).
-    let mut cache = load();
-    for (id, d) in run.durations() {
-        cache.insert(id.clone(), d);
-    }
-    if cache.is_empty() {
-        return;
-    }
-    if let Ok(bytes) = serde_json::to_vec(&cache) {
-        let _ = cache::write_atomic(&cache::file(FILE), &bytes);
-    }
+    // (-k/-m filtered runs must not wipe the rest of the suite's data). Hold the
+    // cache lock across load→merge→write so a concurrent process/shard sharing
+    // this cwd cache can't clobber the merge with a stale snapshot.
+    cache::with_lock(|| {
+        let mut cache = load();
+        for (id, d) in run.durations() {
+            cache.insert(id.clone(), d);
+        }
+        if cache.is_empty() {
+            return;
+        }
+        if let Ok(bytes) = serde_json::to_vec(&cache) {
+            let _ = cache::write_atomic(&cache::file(FILE), &bytes);
+        }
+    });
 }
 
 /// Items with a cached duration above this run first, longest first.
