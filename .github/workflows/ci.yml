@@ -116,7 +116,7 @@ jobs:
         run: uvx --python 3.13 --with pytest pytest corpus/test_bench.py
 
       - name: upload python coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.xml
           flags: python
@@ -263,7 +263,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
         with:
           tool: cargo-llvm-cov
 
@@ -294,7 +294,7 @@ jobs:
           cargo llvm-cov report --release --lcov --output-path e2e.lcov
 
       - name: upload rust-unit coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: unit.lcov
           flags: rust-unit
@@ -302,7 +302,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: upload rust-e2e coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: e2e.lcov
           flags: rust-e2e
