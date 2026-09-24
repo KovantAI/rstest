@@ -33,6 +33,17 @@ Worker count. Default `auto` (logical cores).
   `-n 2`. See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
   (and, for migrators, how it differs from pytest-xdist's `-n 1`)
 
+**An explicit `-n <k>` is not capped by core count.** Only `auto` caps down.
+A literal `-n 16` on an 8-core box runs 16 workers. This is the knob for
+**wait-bound suites** (IO, sleeps, network, timeouts): a worker holds no core
+while it waits, so running more workers than cores overlaps more waits and
+cuts wall time, something `auto` will never do on its own. `auto` can also
+settle *below* the core count on a few-file suite, so pin `-n` when you want to
+overlap more than the file count allows. Full tuning method:
+[wait-bound playbook](../guides/wait-bound.md#2-tune-the-worker-count).
+Conversely, load-sensitive suites (tight timing assertions) may need `-n`
+*capped* below cores; see [Parallel safety](../guides/parallel-safety.md#choosing-the-worker-count).
+
 ### `--dist <load|loadfile|loadscope|loadgroup|each>`
 
 Distribution mode. Default `load`.

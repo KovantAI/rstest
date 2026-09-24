@@ -50,7 +50,9 @@ Read the speed numbers honestly: the wins come from suite *shape*, not magic.
 Wait-bound suites (aiohttp) gain most, and only on a **warm** duration cache —
 the first run is cold, since duration-aware scheduling needs one run of timing
 data. CPU-bound suites already split well under xdist, so rstest lands at
-parity there, not a win (pandas). In ephemeral CI, cache `.rstest_cache`
+parity there, not a win (pandas) — see [Already fast under
+xdist?](guides/migrate-from-xdist.md#already-fast-cpu-bound) for what's still
+worth it. In ephemeral CI, cache `.rstest_cache`
 across runs or expect cold-run timing.
 
 ## The compatibility contract

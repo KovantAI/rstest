@@ -8,10 +8,30 @@ On top of that, rstest adds two things worth wiring up in CI: worker
 parallelism with no extra plugin, and a duration cache that makes scheduling
 smarter when persisted between runs.
 
+This page gets you running on **GitHub Actions** and walks two worked examples
+(Django, monorepo). For other CI systems (AWS CodeBuild, Google Cloud Build,
+GitLab, Azure, CircleCI, Jenkins, pre-commit), see [More CI
+systems](ci-recipes.md). For a shard matrix that needs a cache no native CI
+cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
+
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
     pin a version (`pip install rstest==0.7.0` or `rstest~=0.3`) or install
     from your lockfile.
+
+## Which layout do I want?
+
+| Your situation | Layout | Where |
+|---|---|---|
+| Single project | one job, `rstest -n auto`, cache `.rstest_cache` | [GitHub Actions](#github-actions) below |
+| Monorepo, **few** packages (≤ runner cores) | one root job, `cd repo && rstest`, merged report | [Monorepos guide](monorepo.md) |
+| Monorepo, **many** packages | one job **per package** via a matrix | [Monorepo worked example](#worked-example-monorepo-on-ephemeral-ci) |
+| One long suite you split across CI nodes | `--shard K/N` matrix + [shared cache](ci-shared-cache.md) | [Sharding](sharding.md) + [Shared cache](ci-shared-cache.md) |
+
+The rule of thumb: **the unit of CI parallelism should be the project, not the
+root** once you have more packages than runner cores: one job per package
+gives each the full runner and its own cache. Reach for `--shard` only when a
+*single* project's suite is itself the long pole.
 
 ## GitHub Actions
 
@@ -41,8 +61,8 @@ flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
 
 ### Under the hood
 
-The action is a thin wrapper. If you prefer raw YAML — or need something the
-action does not expose — the equivalent steps are:
+The action is a thin wrapper. If you prefer raw YAML (or need something the
+action does not expose), the equivalent steps are:
 
 ```yaml
 jobs:
@@ -77,12 +97,12 @@ jobs:
         # reruns; --doctor auto-publishes diagnostics to the job summary.
         run: rstest -n auto --output github --junitxml junit.xml
 
-      # Long pole? Fan the suite across a runner matrix with --shard K/N —
+      # Long pole? Fan the suite across a runner matrix with --shard K/N;
       # see the Sharding guide.
 
       # Monorepo roots: caches live in EACH project (.rstest_cache per
-      # package — widen the cache path to **/.rstest_cache), and junit
-      # files are written per project as junit.<slug>.xml — glob them
+      # package; widen the cache path to **/.rstest_cache), and junit
+      # files are written per project as junit.<slug>.xml; glob them
       # in the artifact step.
 
       - uses: actions/upload-artifact@v4
@@ -92,176 +112,22 @@ jobs:
           path: junit.xml
 ```
 
-## Shared cache
-
-The `actions/cache` recipe above works, but its per-key immutability forces the
-`run_id` key dance, and across a shard matrix it needs a dedicated full-run job
-to own the cache. rstest's [shared-cache backend](../concepts/caching.md#shared-cache-backend)
-replaces both: every job pushes its own immutable **segment** and pulls the
-union — no single writer, no key hacks.
-
-!!! tip "Turnkey via the composite action"
-    On GitHub, the [`rstest` action](https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest#warm-cache-as-a-service)
-    wires the whole flow below for you: `cache-backend: artifact` does the
-    resolve-run → download-segments → run → upload-segment bookends natively, and
-    `cache-remote: s3://…` drives the object-store path. The hand-wired YAML here
-    is the reference for other CI systems (or if you want full control).
-
-**GitHub-native, no external cloud, no secrets.** `download-artifact@v4`'s
-`pattern` + `merge-multiple` is exactly the merge-all-segments primitive:
-
-```yaml
-permissions: { contents: read, actions: read }   # actions:read reaches prior-run artifacts
-jobs:
-  test:
-    strategy: { matrix: { shard: [1, 2, 3, 4] } }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.13" }
-      - run: pip install -r requirements.txt && pip install rstest
-
-      # Pull: warm from the latest successful run on your default branch — its
-      # shard segments union into a full index. A plain download-artifact only
-      # sees the CURRENT run; run-id + github-token reach a prior run's artifacts.
-      - name: resolve warm-cache run
-        id: warm
-        env: { GH_TOKEN: ${{ github.token }} }
-        run: |
-          rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "${{ github.workflow }}" --branch main \
-                  --status success --limit 1 \
-                  --json databaseId --jq '.[0].databaseId // ""')
-          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
-      # Land the warmed segments in ./rcache/segments/ — that is where rstest
-      # reads them (--cache-remote <dir> looks in <dir>/segments/). upload-artifact
-      # strips the segments/ prefix from the pushed glob, so aim the download at
-      # .../segments to reconstruct the layout.
-      - uses: actions/download-artifact@v4
-        if: steps.warm.outputs.run-id != ''
-        with:
-          pattern: "rstest-seg-*"
-          merge-multiple: true
-          path: ./rcache/segments
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.warm.outputs.run-id }}
-        continue-on-error: true          # cold start: nothing to warm from yet
-      # Record the warmed segment names so the push below uploads only THIS run's
-      # new ones, not the whole warmed union (which would grow every run).
-      - run: ls ./rcache/segments/seg-*.json 2>/dev/null | xargs -rn1 basename | sort > .warm-segs || true
-
-      # --cov-context=test rides the segment too: each shard pushes its partial
-      # coverage slice, and the next run's pull unions them into a full index
-      # that --changed consumes. --cov-report= suppresses the textual report (we
-      # want only the index side-effect). Drop the --cov flags if you don't use
-      # --changed. Replace <your_package> with your importable package/source dir.
-      - run: rstest -n auto --shard ${{ matrix.shard }}/4
-               --cov=<your_package> --cov-context=test --cov-report=
-               --cache-remote ./rcache --cache-pull --cache-push
-               --junitxml junit.${{ matrix.shard }}.xml
-
-      # Push: stage only the segment(s) this run wrote (absent from .warm-segs),
-      # so each shard's artifact is its own disjoint delta — no collision on the
-      # next merge-multiple, no unbounded re-upload of the warmed union.
-      - run: |
-          mkdir -p ./push
-          for f in ./rcache/segments/seg-*.json; do
-            [ -e "$f" ] || continue
-            grep -qxF "$(basename "$f")" .warm-segs 2>/dev/null || cp "$f" ./push/
-          done
-        if: always()
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: rstest-seg-${{ github.run_id }}-${{ matrix.shard }}
-          path: ./push/seg-*.json
-          if-no-files-found: ignore
-```
-
-No refresh job, no `run_id`/`restore-keys` dance, no single writer — each shard
-contributes its segment (durations, flake events, **and** its share of the
-coverage index). The resolve-and-pull step above warms from the latest
-successful default-branch run, whose shard segments union into a whole
-`--changed` index — no dedicated unsharded job. **Run this workflow on pushes to
-your default branch too**, so those runs publish the segments PR jobs warm from
-(a scheduled run works as well). The first run, or any cold pull, has nothing to
-union and falls back to the import graph — correct, only coarser. Artifact
-retention gives free segment eviction.
-
-!!! note "How the cross-run pull works"
-    Artifacts are run-scoped, so warming reaches back to **one** prior run by id
-    — `gh run list` resolves the latest successful one above (the REST API `GET
-    /repos/{owner}/{repo}/actions/artifacts` is the alternative). One complete
-    sharded run is enough: its `N` shard segments union into a full index. To
-    fold *many* runs instead, add a scheduled job that `cache-compact`s the
-    segments into a base and uploads that base as its own artifact for PR jobs to
-    pull.
-
-**Object store (S3/GCS/R2), OIDC — no secrets.** For teams already on cloud
-storage, point `--cache-remote` straight at the bucket: rstest drives the `aws`
-/ `gcloud` CLI the runner already has, with credentials from the OIDC role — no
-`sync` bookends, no SDK. Immutable, uniquely-named segments make concurrent
-shard pushes safe:
-
-```yaml
-permissions: { id-token: write, contents: read }
-steps:
-  - uses: aws-actions/configure-aws-credentials@v4
-    with: { role-to-assume: arn:aws:iam::…:role/ci, aws-region: us-east-1 }
-  - run: rstest -n auto --shard ${{ matrix.shard }}/4
-           --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
-           --cache-compact-threshold 500
-```
-
-`--cache-compact-threshold` folds the segment set inline once it grows past the
-threshold, so no separate maintenance job is needed (or run `rstest cache-compact
---cache-remote s3://ci-cache/rstest --keep-last 200` on a schedule instead). A
-`gs://` bucket works the same via `gcloud`; an authenticated `https://` endpoint
-via `RSTEST_CACHE_REMOTE_TOKEN`. Still prefer syncing to a local dir? The
-`aws s3 sync … ./rcache` / `--cache-remote ./rcache` form remains valid.
-
-**Self-hosted shared mount — zero glue.** `--cache-remote /mnt/ci-cache/rstest`
-directly; the mount is the remote, no pull/push bookends beyond the flags.
-
-**Reliability.** Add `--require-baseline` to `--durations-regress` so a cold or
-failed pull is a hard error, never a silent green:
-
-```bash
-rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
-```
-
-(`actions/cache` is **not** recommended for this: one blob per key, it can't
-list-and-merge every segment — the exact limitation this design removes.)
-
-**Permissions.** The remote needs **list + read + write + delete** on the cache
-prefix — delete only when a job compacts (`--cache-compact-threshold` or a
-`cache-compact` step); pull/push-only jobs can drop it. Scope the credential to
-the prefix, not the whole bucket. Per backend
-([full table](../concepts/caching.md#transports)):
-
-| Backend | What to grant |
-|---|---|
-| GitHub `artifact` | workflow `permissions: { contents: read, actions: read }` (`actions: read` reaches the prior run's segments). Object store instead? add `id-token: write` for OIDC. |
-| S3 | role/keys with `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on `bucket/prefix/*` — via CodeBuild role, GitHub/CircleCI OIDC, or GitLab CI vars |
-| GCS | service account with `storage.objects.{list,get,create,delete}` on the bucket/prefix (`roles/storage.objectAdmin`) |
-| Azure Blob | `Storage Blob Data Contributor` on the container (dir-materialize via the `az` CLI) |
-| `http(s)://` | a token in `RSTEST_CACHE_REMOTE_TOKEN`; the endpoint enforces authz |
-| dir / shared mount | filesystem read+write+delete on the directory |
+For a shard matrix, swap the `actions/cache` step for the segment-merge
+[shared cache](ci-shared-cache.md). It sidesteps the `run_id` key dance and
+lets every shard write without a single-writer job.
 
 ## Worked example: Django on ephemeral CI
 
 A Django suite is the common case: pytest-django, a real database, ephemeral
 GitHub runners where nothing survives between runs unless you persist it. The
 two things people get wrong are the **cold-vs-warm cache** and **per-worker
-databases** — both are handled below.
+databases**. Both are handled below.
 
 pytest-django is exercised continuously in rstest's battery *including
-per-worker test databases under parallelism* (see
-[Plugins](plugins.md#exercised-continuously)): rstest supplies each worker the
-xdist-style worker identity pytest-django keys off, so every worker gets its
-own isolated test DB (`test_app_gw0`, `test_app_gw1`, …) automatically — no
-extra flags, same as under xdist.
+per-worker test databases under parallelism* (see [Plugins](plugins.md)):
+rstest supplies each worker the xdist-style worker identity pytest-django keys
+off, so every worker gets its own isolated test DB (`test_app_gw0`,
+`test_app_gw1`, …) automatically. No extra flags, same as under xdist.
 
 ```yaml
 # .github/workflows/tests.yml
@@ -297,8 +163,8 @@ jobs:
             rstest-
 
       # --reuse-db keeps the migrated test DB across runs on a warm workspace;
-      # on ephemeral runners the DB is fresh each time, so it's a no-op there —
-      # harmless to leave in, useful on self-hosted runners.
+      # on ephemeral runners the DB is fresh each time, so it's a no-op there
+      # (harmless to leave in, useful on self-hosted runners).
       - run: rstest -n auto --reuse-db --output github --junitxml junit.xml
 
       - uses: actions/upload-artifact@v4
@@ -307,22 +173,17 @@ jobs:
 ```
 
 **What the two runs look like.** Duration-aware scheduling needs one run of
-timing data, so the first run on a fresh cache key is *cold* — the scheduler
+timing data, so the first run on a fresh cache key is *cold*: the scheduler
 has no per-test durations and falls back to an even split. The second run
 (and every run after, as long as the cache restores) is *warm*: it starts the
-slowest tests first and packs workers tightly. The shape, for a wait-bound
-Django suite on a 4-core runner:
-
-Cold: no timings, dispatched in collection order — the long pole can start
-last and run while other workers idle. Warm: the slowest tests start first and
-pack tightly.
+slowest tests first and packs workers tightly.
 
 Concretely, on the runnable
 [`examples/ci-bench`](https://github.com/KovantAI/rstest/tree/main/examples/ci-bench)
-suite (136 wait-bound tests with duration skew) — **measured**, `-n 4`, best of
+suite (136 wait-bound tests with duration skew), **measured**, `-n 4`, best of
 3, Apple Silicon / CPython 3.13:
 
-<!-- SOURCE OF TRUTH: examples/ci-bench/README.md — keep numbers in sync -->
+<!-- SOURCE OF TRUTH: examples/ci-bench/README.md, keep numbers in sync -->
 | config | wall | vs pytest |
 |---|---|---|
 | pytest (serial) | 12.1s | 1.0× |
@@ -330,15 +191,12 @@ suite (136 wait-bound tests with duration skew) — **measured**, `-n 4`, best o
 | rstest warm (`-n 4`, cached durations) | 3.6s | 3.3× |
 
 Cold already wins from parallelism; warm adds ~1.5× on top by scheduling the
-long pole first. That is a **synthetic** wait-bound example, not a Django app —
+long pole first. That is a **synthetic** wait-bound example, not a Django app.
 rstest ships no canonical Django timing, and a suite's win depends on its own
 shape (see the self-check table in the
 [README](https://github.com/KovantAI/rstest#will-rstest-speed-up-your-suite)).
-The [`example-bench.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/example-bench.yml)
-workflow re-runs it on GitHub's runners and posts the table to the job summary,
-so the same measurement is reproducible on standard CI hardware. To get *your*
-real numbers before committing, run [`rstest try`](migrate-from-pytest.md)
-locally — it runs your suite under plain pytest and under `rstest -n auto`,
+To get *your* real numbers before committing, run [`rstest try`](migrate-from-pytest.md)
+locally. It runs your suite under plain pytest and under `rstest -n auto`,
 diffs outcomes, and reports the speedup, with no migration.
 
 !!! warning "Ephemeral runners: warm the cache from your default branch"
@@ -346,8 +204,8 @@ diffs outcomes, and reports the speedup, with no migration.
     cost. Run this workflow on pushes to your default branch too (GitHub lets
     PR jobs restore the base branch's cache entries), so PRs restore a warm
     `.rstest_cache` instead of rebuilding timing data from scratch. For a
-    matrix/shard layout, prefer the [shared-cache backend](#shared-cache)
-    above — it sidesteps the `run_id` key dance entirely.
+    matrix/shard layout, prefer the [shared-cache backend](ci-shared-cache.md)
+    (it sidesteps the `run_id` key dance entirely).
 
 ## Worked example: monorepo on ephemeral CI
 
@@ -356,19 +214,19 @@ at once:
 
 1. **Concurrency.** At the root, every project launches concurrently with at
    least one worker each ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
-   Many packages on a small (2–4 core) runner oversubscribes — 20 packages on
+   Many packages on a small (2–4 core) runner oversubscribes: 20 packages on
    a 2-core runner is 20 concurrent single-worker children fighting for 2 cores.
 2. **Shared cache.** `--cache-remote`/`--cache-pull`/`--cache-push` are **not
-   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push)) —
+   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push)):
    each project keeps its own `.rstest_cache`, so the segment-merge shared
    cache is a per-project feature.
 
-**Both dissolve if you make the project the unit of CI parallelism** — one
+**Both dissolve if you make the project the unit of CI parallelism**: one
 job per package via a matrix, instead of one root job running everything
 concurrently. Each job runs a single project (`rstest libs/core` opts out of
 monorepo mode and runs that package alone, with the runner's *full* core count
-— no oversubscription), and because it's a single-project run it can use the
-shared cache normally:
+, no oversubscription), and because it's a single-project run it can use the
+[shared cache](ci-shared-cache.md) normally:
 
 ```yaml
 # .github/workflows/tests.yml
@@ -450,10 +308,11 @@ jobs:
 ```
 
 Each package is its own job: it gets the whole runner, warms its own cache
-segment from the last green main run, and pushes a fresh segment — cold on run
+segment from the last green main run, and pushes a fresh segment: cold on run
 one, warm from run two, exactly like the single-suite case. Isolation is free
 (matrix jobs don't share a runner), and a slow package no longer steals
-workers from a fast one.
+workers from a fast one. The segment-merge mechanics are in
+[Shared cache across CI jobs](ci-shared-cache.md).
 
 !!! note "When to keep the root run instead"
     If your packages are **few** (roughly ≤ the runner's core count) the root
@@ -466,405 +325,17 @@ workers from a fast one.
     project-level concurrency cap for the root case is on the roadmap
     ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
 
-## AWS CodeBuild
-
-CodeBuild has no log-side annotation command (no equivalent of GitHub's
-`::error` or Azure's `##vso`), so there is no dedicated `--output` style
-— the integration surface is the JUnit file. Point a [CodeBuild report
-group](https://docs.aws.amazon.com/codebuild/latest/userguide/test-reporting.html)
-at `--junitxml` output and CodeBuild renders pass/fail, durations, and
-run-over-run trends in the console.
-
-```yaml
-# buildspec.yml
-version: 0.2
-phases:
-  install:
-    commands:
-      - pip install -r requirements.txt
-      - pip install rstest
-  build:
-    commands:
-      # The `cache` block below persists .rstest_cache across builds, so
-      # from the second run on the scheduler starts the slowest tests first.
-      - rstest -n auto --junitxml junit.xml
-
-reports:
-  rstest:
-    files:
-      - junit.xml
-    file-format: JUNITXML
-
-# Persist .rstest_cache between builds so scheduling stays warm.
-cache:
-  paths:
-    - '.rstest_cache/**/*'
-```
-
-`-n auto` uses the build container's vCPUs; size the compute type to the
-parallelism you want. For a monorepo root, widen the report `files` glob
-to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
-and the cache to `**/.rstest_cache/**/*`.
-
-This single-job recipe re-saves `.rstest_cache` every build, which is
-correct here — one full run owns the authoritative cache. If you **shard**
-across CodeBuild batch jobs, don't let each shard save: follow the
-[sharding guide](sharding.md)'s discipline (shards restore a stable cache
-read-only; one separate full job saves the fresh one), or the shards will
-race to write divergent duration caches and their partitions will drift.
-
-**Shared cache (sharding, no write race).** Drop the `cache:` block and the
-single-writer discipline entirely: the build's IAM role already reaches S3, so
-point [`--cache-remote`](../concepts/caching.md#shared-cache-backend) at a bucket
-and every batch shard pushes its own immutable segment (no clobber), pulls the
-union:
-
-```yaml
-build:
-  commands:
-    - rstest -n auto --shard "$SHARD/$SHARDS"
-        --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
-        --cache-compact-threshold 500 --junitxml "junit.$SHARD.xml"
-```
-
-`--cache-compact-threshold` folds the loose segments inline once they exceed N,
-so no maintenance job is needed. `gsutil rsync … ./rcache` + `--cache-remote
-./rcache` remains valid if you prefer materializing a dir. The build's service
-role needs `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix
-(`Delete` only for the inline compaction).
-
-## Google Cloud Build
-
-Cloud Build likewise has no annotation protocol — it streams step logs
-to Cloud Logging and has no native test-report UI, so again there is no
-`--output` style to add. Run rstest as a build step and publish the
-JUnit XML (and any doctor/report-json) as build
-[artifacts](https://cloud.google.com/build/docs/building/store-artifacts-in-cloud-storage).
-
-```yaml
-# cloudbuild.yaml
-steps:
-  - name: python:3.13
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        pip install -r requirements.txt
-        pip install rstest
-        rstest -n auto --junitxml junit.xml
-
-# Upload the JUnit (and doctor JSON, if produced) to Cloud Storage.
-artifacts:
-  objects:
-    location: 'gs://$PROJECT_ID-ci-artifacts/$BUILD_ID/'
-    paths:
-      - 'junit.xml'
-```
-
-The duration cache lives in `.rstest_cache`; on Cloud Build persist it
-between runs by syncing it to Cloud Storage
-(`gsutil rsync`) at the start and end of the step — the workspace itself
-is not retained across builds. Colors auto-disable off-tty, so the log
-stays clean; the JUnit file is the machine-readable surface for any
-downstream test-reporting tool.
-
-**Shared cache (sharding, no rsync bookends).** The build's service account
-already reaches GCS, so point [`--cache-remote`](../concepts/caching.md#shared-cache-backend)
-straight at a `gs://` bucket — rstest drives the `gcloud storage` (or `gsutil`)
-CLI on the step, immutable segments make concurrent shard pushes safe, no
-start/end sync:
-
-```yaml
-steps:
-  - name: python:3.13
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        pip install -r requirements.txt && pip install rstest
-        rstest -n auto --shard "$_SHARD/$_SHARDS" \
-          --cache-remote gs://$PROJECT_ID-ci-cache/rstest --cache-pull --cache-push \
-          --cache-compact-threshold 500 --junitxml junit.xml
-```
-
-The Cloud Build service account needs `storage.objects.{list,get,create,delete}`
-on the bucket/prefix (`roles/storage.objectAdmin` scoped to it).
-
-## GitLab CI
-
-GitLab reads JUnit from the `artifacts:reports:junit` key to render the
-[test report](https://docs.gitlab.com/ci/testing/unit_test_reports/) and
-per-MR diff. `--output gitlab` additionally folds each failure into a
-[collapsible section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
-so the job log stays readable.
-
-```yaml
-# .gitlab-ci.yml
-test:
-  image: python:3.13
-  # Persist the duration cache between runs (keyed per branch).
-  cache:
-    key: rstest-$CI_COMMIT_REF_SLUG
-    paths:
-      - .rstest_cache/
-  before_script:
-    - pip install -r requirements.txt
-    - pip install rstest
-  script:
-    - rstest -n auto --output gitlab --junitxml junit.xml
-  artifacts:
-    when: always
-    paths:
-      - junit.xml
-    reports:
-      junit: junit.xml
-```
-
-`-n auto` uses the runner's cores; size the runner (or set `-n <k>`) to
-the parallelism you want. For a monorepo root, glob `junit.*.xml` in
-`artifacts:paths` and widen the cache to `**/.rstest_cache/`.
-
-**Shared cache (parallel matrix).** GitLab's `cache:` is one blob per key — it
-can't merge segments across `parallel:` jobs. For a duration-balanced matrix,
-use the [shared-cache backend](../concepts/caching.md#shared-cache-backend)
-against an object store the runner is authed to (S3/GCS/R2) or an authenticated
-`https://` endpoint (`RSTEST_CACHE_REMOTE_TOKEN`):
-
-```yaml
-test:
-  image: python:3.13
-  parallel: 4
-  before_script:
-    - pip install -r requirements.txt && pip install rstest
-  script:
-    - rstest -n auto --shard "$CI_NODE_INDEX/$CI_NODE_TOTAL"
-        --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
-        --cache-compact-threshold 500 --output gitlab --junitxml junit.xml
-  artifacts: { when: always, reports: { junit: junit.xml } }
-```
-
-A shared runner mount (`--cache-remote /cache/rstest`) needs no bookends at all.
-
-## Azure Pipelines
-
-`--output azure` emits an `##vso[task.logissue]` per failing test, which
-Azure surfaces as an inline issue on the file in the PR. Publish the
-JUnit with the
-[`PublishTestResults`](https://learn.microsoft.com/azure/devops/pipelines/tasks/reference/publish-test-results-v2)
-task for the run's Tests tab.
-
-```yaml
-# azure-pipelines.yml
-pool:
-  vmImage: ubuntu-latest
-
-steps:
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: "3.13"
-
-  # Persist the duration cache between runs.
-  - task: Cache@2
-    inputs:
-      key: 'rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)"'
-      restoreKeys: |
-        rstest | "$(Agent.OS)"
-      path: .rstest_cache
-
-  - script: |
-      pip install -r requirements.txt
-      pip install rstest
-      rstest -n auto --output azure --junitxml junit.xml
-    displayName: test
-
-  - task: PublishTestResults@2
-    condition: always()
-    inputs:
-      testResultsFormat: JUnit
-      testResultsFiles: junit.xml
-```
-
-**Shared cache (sharding).** rstest has no native Azure Blob transport — an
-`azblob://` remote is rejected loudly rather than silently written to a junk
-dir. Two supported paths:
-
-- **Materialize a dir** (works with any store): download the segments to a local
-  dir before the run, upload them after, and point `--cache-remote` at the dir.
-  The immutable, uniquely-named segments make the up/download safe across shards.
-
-  ```yaml
-  - script: |
-      az storage blob download-batch -d ./rcache -s ci-cache --pattern 'rstest/*' || true
-      rstest -n auto --shard "$(shard)/4" \
-        --cache-remote ./rcache --cache-pull --cache-push --junitxml junit.xml
-      az storage blob upload-batch -d ci-cache/rstest -s ./rcache/segments --overwrite
-    displayName: test (shared cache)
-  ```
-
-  The pipeline's service connection / managed identity needs **Storage Blob Data
-  Contributor** on the container (the `az` batch calls read, write, and delete).
-
-- **Authenticated `https://` endpoint** — front the store with a static file
-  server honoring the [listing contract](../concepts/caching.md#transports) and
-  use `--cache-remote https://… ` with `RSTEST_CACHE_REMOTE_TOKEN`.
-
-## CircleCI
-
-CircleCI has no log-side annotation protocol, so there is no dedicated
-`--output` style — the integration surface is the JUnit file, consumed by
-[`store_test_results`](https://circleci.com/docs/collect-test-data/) for
-the Tests tab and flaky-test detection.
-
-```yaml
-# .circleci/config.yml
-version: 2.1
-jobs:
-  test:
-    docker:
-      - image: cimg/python:3.13
-    steps:
-      - checkout
-      # Persist the duration cache between runs.
-      - restore_cache:
-          keys:
-            - rstest-{{ .Branch }}
-            - rstest-
-      - run: pip install -r requirements.txt
-      - run: pip install rstest
-      - run: rstest -n auto --junitxml test-results/junit.xml
-      - store_test_results:
-          path: test-results
-      - save_cache:
-          key: rstest-{{ .Branch }}-{{ .Revision }}
-          paths:
-            - .rstest_cache
-workflows:
-  ci:
-    jobs:
-      - test
-```
-
-`-n auto` uses the resource-class vCPUs; pick a larger class for more
-parallelism. Point `store_test_results` at a directory (not a single
-file) so a monorepo's `junit.*.xml` are all collected.
-
-**Shared cache (parallelism).** `save_cache`/`restore_cache` is one blob per key
-— it can't merge across `parallelism: N` containers. Point
-[`--cache-remote`](../concepts/caching.md#shared-cache-backend) at an object
-store the job is authed to (S3/GCS via a context or OIDC) so each container
-pushes its segment and pulls the union:
-
-```yaml
-- run: |
-    rstest -n auto --shard "$((CIRCLE_NODE_INDEX+1))/$CIRCLE_NODE_TOTAL" \
-      --cache-remote s3://ci-cache/rstest --cache-pull --cache-push \
-      --cache-compact-threshold 500 --junitxml test-results/junit.xml
-```
-
-## Jenkins
-
-Jenkins renders JUnit via the [JUnit
-plugin](https://plugins.jenkins.io/junit/); publish the file with
-`junit` in a `post` block so results show even when the build fails.
-
-```groovy
-// Jenkinsfile
-pipeline {
-  agent { docker { image 'python:3.13' } }
-  stages {
-    stage('test') {
-      steps {
-        sh '''
-          pip install -r requirements.txt
-          pip install rstest
-          rstest -n auto --junitxml junit.xml
-        '''
-      }
-    }
-  }
-  post {
-    always {
-      junit 'junit.xml'
-    }
-  }
-}
-```
-
-Persist `.rstest_cache` between runs to keep scheduling warm — stash/unstash
-it, or use a shared workspace/volume on the agent. If you run a TAP harness
-instead, `--output tap` makes stdout a pure TAP 13 stream for the [TAP
-plugin](https://plugins.jenkins.io/tap/).
-
-**Shared cache (agents, sharding) — zero glue.** Jenkins agents usually share
-an NFS/volume mount, which *is* the [shared-cache
-remote](../concepts/caching.md#shared-cache-backend) — no stash/unstash, no
-pull/push bookends beyond the flags. Parallel stages / matrix shards each push
-their immutable segment to the same mount and pull the union:
-
-```groovy
-sh '''
-  rstest -n auto --shard "${SHARD}/${SHARDS}" \
-    --cache-remote /mnt/ci-cache/rstest --cache-pull --cache-push \
-    --junitxml junit.xml
-'''
-```
-
-No mount? Point `--cache-remote` at `s3://…` / `gs://…` (the agent's cloud CLI
-drives it) instead.
-
-## Pre-commit
-
-rstest ships [pre-commit](https://pre-commit.com) hooks so a suite runs
-before code lands. Add to your project's `.pre-commit-config.yaml`:
-
-```yaml
-repos:
-  - repo: https://github.com/KovantAI/rstest
-    rev: v0.7.0             # pin a released tag
-    hooks:
-      - id: rstest         # whole suite, on push
-```
-
-Two hook ids are provided:
-
-- `rstest` — runs the whole suite.
-- `rstest-changed` — runs only tests affected by the working-tree changes
-  (`rstest --changed`), for a fast per-commit gate.
-
-`rstest` defaults to the `pre-push` stage (a full suite is heavy for every
-commit); move it to each commit with `stages: [pre-commit]`.
-
-`rstest-changed` defaults to `pre-commit`, because `--changed` diffs the
-working tree against HEAD — at pre-push everything is already committed, so
-it would select zero tests and pass silently. On CI, set `GITHUB_BASE_REF`
-or `CI_MERGE_REQUEST_*` and `--changed` diffs against the PR base instead.
-
-`--changed` gets **tighter** when a coverage index is warm: run your suite
-once with `--cov-context=test` (e.g. a scheduled main-branch job) and it maps
-changed *lines* to only the tests that cover them, not every importer. The
-`.rstest_cache` you already persist above carries the index, so PR jobs pick
-it up automatically; without it, `--changed` falls back to the import graph.
-See [Selecting changed tests](changed.md).
-
-Pass extra flags with `args`:
-
-```yaml
-      - id: rstest-changed
-        args: ["-q", "--maxfail=1"]
-```
-
-
 ## Suite-health trending with doctor
 
 `--doctor-json` writes the doctor analysis as a versioned JSON document
 (see [Suite diagnostics](doctor.md)). Archive it per run and compare a
-PR's report against the main branch's — no extra tooling required, the
+PR's report against the main branch's: no extra tooling required, the
 document already contains totals, wait-bound tests, parallel-floor gate
 tests, and fixture costs by name.
 
 Any doctor run also publishes the report as markdown to the CI job
-summary automatically — appended to `$GITHUB_STEP_SUMMARY` on GitHub
-Actions, piped to `buildkite-agent annotate` on Buildkite — so the
+summary automatically (appended to `$GITHUB_STEP_SUMMARY` on GitHub
+Actions, piped to `buildkite-agent annotate` on Buildkite), so the
 current run's analysis is on the run page with no post-processing step.
 (GitLab and TeamCity have no native markdown summary; use `--doctor-md`
 and publish the file as an artifact.)
@@ -922,7 +393,7 @@ Two practical notes:
 
 [`migrate-check`](../reference/cli.md#migrate-check) exits non-zero when a
 test has a run-to-run unstable id or fails only under parallelism, so a
-dedicated job keeps a migrating suite from regressing — no new co-location
+dedicated job keeps a migrating suite from regressing: no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use
 `--migrate-allow` to tolerate a triaged backlog so the gate fires only on
 **new** issues, and `--migrate-check-json` to archive the findings
@@ -948,21 +419,41 @@ and just run `rstest`.
 ## Notes
 
 - **Exit codes** are pytest's (0 pass, 1 failures, 2 interrupted, 3
-  internal, 4 usage error, 5 nothing collected) with sensible merging across workers —
-  see [Exit codes](../reference/exit-codes.md).
+  internal, 4 usage error, 5 nothing collected) with sensible merging across workers.
+  See [Exit codes](../reference/exit-codes.md).
 - **`--junitxml`** is rendered by rstest from merged results; point your
   CI's test-report integration at it as you would pytest's.
 - **`--report-json`** emits a per-test outcome snapshot (stable schema) if
   you build tooling on top of results.
 - **`--output github`** keeps the normal log and additionally emits
   `::error` annotations for each failure, so failures appear inline on the
-  PR diff — see [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
+  PR diff. See [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
 - **Crash safety matters most in CI**: a segfaulting test costs one FAILED
   entry instead of an aborted job with partial results.
-- **Worker count**: `-n auto` uses the runner's available logical cores —
-  on Linux it honors the CPU affinity mask and cgroup CPU quota, so a
+- **Worker count**: `-n auto` uses the runner's available logical cores.
+  On Linux it honors the CPU affinity mask and cgroup CPU quota, so a
   CPU-limited container gets its allocation, not the host's core count. CI
   runners are small (2–4 cores) and not oversubscribed, so `auto` is the
   right default there; pin `-n <k>` only if you need a fixed count.
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` if your CI renders ANSI.
+- **Platform**: these recipes are written for Linux runners but work
+  unchanged on `windows-latest` and `macos-latest` (swap the runner image);
+  rstest's full test gate runs on all three every commit. `-n auto` returns
+  the runner's logical cores on macOS/Windows (the cgroup/affinity narrowing
+  above is Linux-specific). Two Windows-only behavior differences, both with
+  automatic fallbacks: the per-test timeout has no signal-based interrupt, so
+  `--worker-timeout` (the watchdog) is the only backstop there. See
+  [`--worker-timeout`](../reference/cli.md#-worker-timeout-seconds); and
+  file-descriptor leak tracking is unavailable (it reads `/proc/self/fd` or
+  `/dev/fd`), so `--doctor` reports thread leaks but not fd leaks on Windows.
+  See [Resource leaks](resource-leaks.md).
+
+## Go deeper
+
+- [More CI systems](ci-recipes.md): AWS CodeBuild, Google Cloud Build,
+  GitLab, Azure, CircleCI, Jenkins, and pre-commit.
+- [Shared cache across CI jobs](ci-shared-cache.md): the segment-merge cache
+  for a shard matrix.
+- [Sharding across CI jobs](sharding.md): how partitions are computed and the
+  identical-cache-snapshot rule.

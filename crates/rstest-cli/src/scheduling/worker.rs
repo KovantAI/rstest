@@ -346,8 +346,7 @@ mod transport {
 
 #[cfg(windows)]
 mod transport {
-    //! EXPERIMENTAL: exercised by CI's windows wheel smoke test, not the full
-    //! gate. Anonymous pipes; child ends made inheritable, HANDLE values passed
+    //! Anonymous pipes; child ends made inheritable, HANDLE values passed
     //! via argv, converted to CRT fds in the worker with msvcrt.open_osfhandle.
 
     use std::fs::File;

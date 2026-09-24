@@ -13,6 +13,11 @@ keeps the collection model, fixture engine, `_pytest.*` import paths, and
 the `pluggy` hook contract. If your suite is warning-clean today, you are
 almost certainly already done — jump to [Verify](#3-verify).
 
+This covers your test code. Your **plugins** must also be pytest-9-compatible
+releases, since they run against the vendored 9.1.1 too and a `pytest<9` pin
+does not change that at runtime. See
+[Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
+
 ## The method
 
 You don't need to guess which *removed APIs* apply. Turn deprecations into

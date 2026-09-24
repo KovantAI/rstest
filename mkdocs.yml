@@ -90,6 +90,12 @@ nav:
       - First steps: getting-started/first-steps.md
       - Features: getting-started/features.md
       - Getting help: getting-started/getting-help.md
+  - By use case:
+      - Wait-bound / IO suites: guides/wait-bound.md
+      - Local dev / inner loop: guides/local-dev.md
+      - Your plugin stack: guides/plugin-stack.md
+      - Migrating from xdist (support matrix): reference/xdist-support.md
+      - Already fast under xdist? (CPU-bound): guides/migrate-from-xdist.md
   - Guides:
       - guides/index.md
       - Migrating from pytest: guides/migrate-from-pytest.md
@@ -103,6 +109,8 @@ nav:
       - Selecting changed tests: guides/changed.md
       - Monorepos: guides/monorepo.md
       - CI quickstart: guides/ci-quickstart.md
+      - More CI systems: guides/ci-recipes.md
+      - Shared cache across CI jobs: guides/ci-shared-cache.md
       - Sharding across CI jobs: guides/sharding.md
       - Plugins: guides/plugins.md
       - Coverage: guides/coverage.md

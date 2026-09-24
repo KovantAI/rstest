@@ -109,6 +109,8 @@ per-test parity exact.
 - Parallel speedups depend on suite shape: wait-bound suites gain most;
   CPU-bound suites gain up to core count; suites gated by one long test
   gain nothing beyond that test (run `--doctor`; it names the floor).
+  Already fast under xdist? See [what's still worth
+  it](../guides/migrate-from-xdist.md#already-fast-cpu-bound).
 
 [^parity]: On the measured run, outcomes matched pytest exactly. Both
     suites contain tests that are intermittently flaky *under plain pytest*

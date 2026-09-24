@@ -13,6 +13,11 @@ re-installation, configuration, or porting.
 Plugin command-line flags forward like any pytest flag; plugin ini options
 are read normally.
 
+Because plugins load into the vendored core, `import pytest` inside a plugin
+resolves to the vendored 9.1.1, so the plugin's own code must support pytest 9
+and a `pytest<9` install pin has no effect at runtime. See
+[Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
+
 !!! tip "Looking for a specific plugin?"
     See the [top-100 plugin compatibility matrix](../reference/top-100-plugins.md)
     — how the 100 most-downloaded plugins behave under the pool, each marked
