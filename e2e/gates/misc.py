@@ -64,3 +64,7 @@ def gate_worker_identity_fixtures(g, args, binary):
     )
     r = g.run("widfix/test_master.py", "-n", "0")
     check("worker_id is 'master' at -n 0", "1 passed" in r.stdout, r.stdout[-300:])
+    # --reruns at -n 0 runs a one-worker pool (workerinput is built); still
+    # single-worker mode, so still "master".
+    r = g.run("widfix/test_master.py", "-n", "0", "--reruns", "1")
+    check("worker_id is 'master' at -n 0 --reruns", "1 passed" in r.stdout, r.stdout[-300:])

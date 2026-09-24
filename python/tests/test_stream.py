@@ -91,10 +91,28 @@ def test_worker_id_falls_back_to_master_without_workerinput():
     assert _fixture_fn("worker_id")(p, request) == "master"
 
 
+def test_worker_id_is_master_in_one_worker_pool():
+    # --reruns below -n 2 runs a one-worker pool that still builds workerinput.
+    p = _plugin()
+    request = SimpleNamespace(
+        config=SimpleNamespace(workerinput={"workerid": "gw0", "workercount": 1})
+    )
+    assert _fixture_fn("worker_id")(p, request) == "master"
+
+
 def test_testrun_uid_returns_uid_from_workerinput():
     p = _plugin()
     request = SimpleNamespace(config=SimpleNamespace(workerinput={"testrun_uid": "abc123"}))
     assert _fixture_fn("testrun_uid")(p, request) == "abc123"
+
+
+def test_testrun_uid_is_fresh_in_one_worker_pool():
+    p = _plugin()
+    request = SimpleNamespace(
+        config=SimpleNamespace(workerinput={"testrun_uid": "abc123", "workercount": 1})
+    )
+    uid = _fixture_fn("testrun_uid")(p, request)
+    assert uid != "abc123" and len(uid) == 32
 
 
 def test_testrun_uid_generates_fresh_hex_without_workerinput():
