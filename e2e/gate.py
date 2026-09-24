@@ -57,6 +57,7 @@ from gates.incremental import (
 from gates.misc import (
     gate_basics,
     gate_collection_error_semantics,
+    gate_worker_identity_fixtures,
 )
 from gates.monorepo import (
     gate_monorepo,
@@ -146,6 +147,7 @@ def main():
     sections = (
         gate_basics,
         gate_collection_error_semantics,
+        gate_worker_identity_fixtures,
         gate_output_styles,
         gate_multiprocessing_spawn_children,
         gate_crash_handling,
