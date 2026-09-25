@@ -367,21 +367,31 @@ impl CollectionCache {
         // matches: a same-size rewrite inside one timestamp tick (or under
         // `cp -p` / `rsync -t`) is invisible to the stamp, not to the watcher.
         let mut forced: HashSet<PathBuf> = HashSet::new();
-        // A reported .py the graph doesn't know is a create; one that no longer
-        // canonicalizes is a delete. A reported existing directory may have
-        // brought in .py files that never got events of their own (a `mv` or
-        // `cp -r` of a package reports only the directory). Any of these moves
-        // the file set.
+        // A reported .py the graph doesn't know is a create (or a delete of a
+        // file it never indexed). A reported directory may have brought in .py
+        // files that never got events of their own (a `mv` or `cp -r` of a
+        // package reports only the directory). Either moves the file set, but
+        // only for paths the walk would index: a hidden path (`.tox/`, an Emacs
+        // `.#lock.py`), a virtualenv, or a directory with no unknown .py
+        // (`htmlcov/`, an existing package) can't change the graph, and
+        // rebuilding for them would cost those setups the fast path.
         let mut structural = false;
         for p in &reported {
-            if p.is_dir() {
-                structural = true;
-            } else if p.extension().and_then(|e| e.to_str()) == Some("py") {
-                match p.canonicalize() {
-                    Ok(c) if self.files.contains_key(&c) => {
-                        forced.insert(c);
-                    }
-                    _ => structural = true,
+            let c = canonical_lossy(p);
+            if !walk_would_index(&rootdir_canon, &c) {
+                continue;
+            }
+            if c.is_dir() {
+                structural |= walk_py_files(&c)
+                    .iter()
+                    .any(|f| !self.files.contains_key(f));
+            } else if c.extension().and_then(|e| e.to_str()) == Some("py") {
+                if self.files.contains_key(&c) {
+                    // Known: re-read it. If it was deleted, the sweep below
+                    // finds it gone and rebuilds.
+                    forced.insert(c);
+                } else {
+                    structural = true;
                 }
             }
         }
@@ -538,6 +548,56 @@ impl CollectionCache {
             reverse,
         }
     }
+}
+
+/// `path` canonicalized; for a path that no longer exists, its parent
+/// canonicalized plus its file name (so a delete still compares equal to the
+/// canonical key it was cached under), else `path` as given.
+fn canonical_lossy(path: &Path) -> PathBuf {
+    if let Ok(c) = path.canonicalize() {
+        return c;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => parent
+            .canonicalize()
+            .map(|p| p.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Whether [`walk_py_files`] from `rootdir_canon` could reach `path`
+/// (canonical): inside the root, no hidden or `__pycache__` component (the
+/// walker skips hidden entries by default), and not in or under a virtualenv
+/// (a directory holding `pyvenv.cfg`).
+fn walk_would_index(rootdir_canon: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(rootdir_canon) else {
+        return false;
+    };
+    let hidden = rel.components().any(|c| {
+        let n = c.as_os_str().to_string_lossy();
+        n.starts_with('.') || n == "__pycache__"
+    });
+    if hidden {
+        return false;
+    }
+    // Every directory from just below the root down to `path` itself (when it
+    // is a directory) must not be a virtualenv.
+    let mut dir = if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+    };
+    while let Some(d) = dir {
+        if d == rootdir_canon || !d.starts_with(rootdir_canon) {
+            break;
+        }
+        if d.join("pyvenv.cfg").exists() {
+            return false;
+        }
+        dir = d.parent();
+    }
+    true
 }
 
 /// `file`'s imported `modules` resolved to project files, minus self-edges.
@@ -1224,6 +1284,65 @@ mod tests {
         write(&root, "c.py", "");
         let _ = cache.index(&root, &[PathBuf::from("test_b.py"), PathBuf::from("c.py")]);
         assert_eq!(cache.files[&test_b].modules, vec!["a".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Whether reporting `paths` makes the next reselection do a full rebuild.
+    /// Detected by planting a sentinel out-edge on the unchanged `a.py`: only a
+    /// rebuild re-resolves it.
+    fn rebuilds_for(root: &Path, cache: &mut CollectionCache, paths: &[&str]) -> bool {
+        let a = root.join("a.py");
+        let sentinel = vec![PathBuf::from("/sentinel")];
+        cache.files.get_mut(&a).unwrap().out = sentinel.clone();
+        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        cache.note_changed(root, &paths);
+        let _ = cache.index(root, &[]);
+        cache.files[&a].out != sentinel
+    }
+
+    #[test]
+    fn cache_keeps_the_fast_path_for_paths_the_walk_never_indexes() {
+        let root = test_a_and_b("cache-unwalkable");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        // Hidden paths: a tox env, a CI script, a dangling Emacs lock link.
+        write(&root, ".tox/py3/lib/site.py", "");
+        write(&root, ".github/scripts/gate.py", "");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("user@host.1234", root.join(".#a.py")).unwrap();
+        // A virtualenv not named .venv, reported as a dir and as a file.
+        write(&root, "venv/pyvenv.cfg", "home = /usr/bin\n");
+        write(&root, "venv/lib/mod.py", "");
+        // A tool-output dir with no Python in it, and an existing package
+        // whose files are all already cached.
+        write(&root, "htmlcov/index.html", "");
+        write(&root, "pkg/__init__.py", "");
+        let _ = cache.index(&root, &[PathBuf::from("pkg/__init__.py")]);
+        for paths in [
+            &[".tox/py3/lib/site.py", ".tox"][..],
+            &[".github/scripts/gate.py"],
+            &[".#a.py"],
+            &["venv", "venv/lib/mod.py"],
+            &["htmlcov"],
+            &["pkg"],
+        ] {
+            assert!(!rebuilds_for(&root, &mut cache, paths), "{paths:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_still_rebuilds_for_walkable_unknowns() {
+        // Controls for the filter above: these must keep forcing the full walk.
+        let root = test_a_and_b("cache-walkable");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        write(&root, "sub/test_new.py", "");
+        assert!(rebuilds_for(&root, &mut cache, &["sub/test_new.py"]));
+        write(&root, "newpkg/mod.py", "");
+        assert!(rebuilds_for(&root, &mut cache, &["newpkg"]));
+        // A .py never indexed and now gone (created then deleted mid-run).
+        assert!(rebuilds_for(&root, &mut cache, &["ghost.py"]));
         let _ = std::fs::remove_dir_all(&root);
     }
 
