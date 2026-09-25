@@ -902,18 +902,8 @@ mod tests {
     use crate::reporting::sink::Sink;
     use crate::scheduling::pool;
     use crate::scheduling::proto::{FixtureStat, WarningEntry};
+    use crate::test_env;
     use std::time::Instant;
-
-    /// Serializes tests that read or mutate the process-global
-    /// `RSTEST_CACHE_*` env, so a concurrent test can't observe another's
-    /// temporary value (the auto-compact retention path reads env directly).
-    /// Shares the crate-wide lock so it also serializes against the
-    /// `run_cache_compact` tests in the parent module, which touch the same env.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::select::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     // Color-disabled palette: deterministic strings, no tty/env dependence.
     fn plain_palette() -> Palette {
@@ -1247,7 +1237,7 @@ mod tests {
 
     #[test]
     fn resolve_compact_threshold_flag_then_env() {
-        let _g = env_guard();
+        let held = test_env::lock();
         use crate::cli::Cli;
         use clap::Parser;
         let mut cli = Cli::parse_from(["rstest"]);
@@ -1257,12 +1247,11 @@ mod tests {
 
         let mut cli2 = Cli::parse_from(["rstest"]);
         cli2.cache_compact_threshold = None;
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "3");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "3");
         assert_eq!(resolve_compact_threshold(&cli2).unwrap(), Some(3)); // env fallback
                                                                         // A non-numeric env is a hard error, never a silent None (feature-off).
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
         assert!(resolve_compact_threshold(&cli2).is_err());
-        std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD");
     }
 
     fn auto_compact_root(label: &str) -> std::path::PathBuf {
@@ -1283,7 +1272,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_folds_when_over_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // 3 loose segments, threshold 2 => compaction fires. No env retention
         // window, so all fold into a fresh base and are pruned.
         use crate::cli::Cli;
@@ -1305,7 +1294,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_noop_at_or_under_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // 2 segments, threshold 2 => count (2) is not > 2, no compaction.
         use crate::cli::Cli;
         use crate::remote::{DirTransport, Transport};
@@ -1323,7 +1312,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_off_without_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // No flag, no env => feature off, never touches the remote.
         use crate::cli::Cli;
         use crate::remote::{DirTransport, Transport};
@@ -1375,7 +1364,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_when_listing_fails() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // A failed segment listing is non-fatal: warn and return, never touch
         // the retention/compaction path.
         use crate::cli::Cli;
@@ -1394,7 +1383,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_on_bad_retention_env() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // count over threshold, but RSTEST_CACHE_KEEP_LAST is unparseable =>
         // skip with a warning rather than fold everything.
         use crate::cli::Cli;
@@ -1405,14 +1394,9 @@ mod tests {
         seed_segments(&t, 3);
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = Some(2);
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "notnum");
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert!(
             cap.err().contains("bad retention env"),
             "got: {}",
@@ -1423,13 +1407,12 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_when_compaction_fails() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // Over threshold, retention env clean, but the compaction read fails =>
         // non-fatal warning, no panic.
         use crate::cli::Cli;
         use clap::Parser;
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_KEEP_LAST");
         let t = BrokenTransport {
             ids: vec!["a".into(), "b".into()],
             list_fails: false,
@@ -1439,9 +1422,6 @@ mod tests {
         cli.cache_compact_threshold = Some(0);
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        if let Some(v) = saved {
-            std::env::set_var("RSTEST_CACHE_KEEP_LAST", v);
-        }
         assert!(
             cap.err().contains("auto-compact failed"),
             "got: {}",
@@ -1451,7 +1431,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_on_bad_threshold() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // An unparseable threshold env is non-fatal: warn and return before
         // ever touching the transport.
         use crate::cli::Cli;
@@ -1464,20 +1444,15 @@ mod tests {
         };
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = None;
-        let saved = std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD").ok();
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", v),
-            None => std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD"),
-        }
         assert!(cap.err().contains("bad threshold"), "got: {}", cap.err());
     }
 
     #[test]
     fn maybe_auto_compact_skips_when_keep_last_ge_threshold() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // Over threshold, but a keep-last window >= threshold pins the loose
         // set above it, so folding would run every push. Skip with a warning
         // rather than thrash; segments stay intact.
@@ -1489,14 +1464,9 @@ mod tests {
         seed_segments(&t, 3);
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = Some(2);
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "2"); // keep (2) >= threshold (2)
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "2"); // keep (2) >= threshold (2)
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert!(cap.err().contains("keep-last window"), "got: {}", cap.err());
         assert!(t.read_base().unwrap().is_none(), "no base written");
         assert_eq!(t.list_segment_ids().unwrap().len(), 3, "segments intact");

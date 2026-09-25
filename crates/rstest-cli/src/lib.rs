@@ -21,6 +21,8 @@ mod run;
 mod scheduling;
 mod select;
 mod shardverify;
+#[cfg(test)]
+mod test_env;
 mod text;
 mod time;
 mod vendor;
