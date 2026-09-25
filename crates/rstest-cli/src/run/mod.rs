@@ -1107,6 +1107,9 @@ fn dispatch_run(
                 // Single-worker path never shards (resolve_shard rejects it).
                 collection_hash: None,
                 collection_size: 0,
+                // A single session reports no collection; the duration cache
+                // falls back to its saved rootdir and current file contents.
+                sources: Default::default(),
             }
         } else if path == RunPath::Lazy {
             let cwd = std::env::current_dir()?;

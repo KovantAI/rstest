@@ -15,6 +15,21 @@ between 0.0.x releases and are listed here.
   process (`--pdb`, `-s`, `--debug`, ...) only `Ctrl+C` exits. A watch started
   in the background (`rstest --watch &`) never reads the terminal, so the shell
   does not suspend it.
+- **The duration cache self-heals when tests change.** `durations.json` now
+  tags each entry with its test file's path and a sha256 of its contents. On
+  load, an entry whose source file changed (edited body) or vanished
+  (deleted/renamed) is dropped, so an edited test re-times on fresh numbers
+  rather than scheduling on stale ones, and gone tests stop accumulating in the
+  file forever. The hash is content-based and ignores line endings, so a
+  restored cache still matches after a fresh clone or CI checkout. The path is
+  recorded from the rootdir pytest reports on the run that timed the test, so
+  runs with different rootdirs share one cache, and a test edited mid-run
+  re-times next run. Entries a run cannot locate (such as `-n 0` runs of tests
+  never timed in parallel) are kept untagged, as before. `--durations-regress`
+  still compares an edited file's tests against their previous timings. `wall.json`,
+  a whole-suite aggregate with no per-test source to fingerprint, instead ages
+  out on `RSTEST_WALL_TTL_DAYS` (default 30, `0` disables). Both formats are
+  read back-compatibly, so an upgrade keeps existing caches. (Issue #18.)
 - **Fixture scope-promotion advisor in `--doctor`.** Doctor already flags hot
   function-scoped fixtures; it now *checks* the case for promoting them. Under
   `--doctor` each function-scoped fixture's produced value is fingerprinted on

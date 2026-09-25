@@ -320,12 +320,9 @@ fn write_local_in(dir: &Path, merged: &Merged) {
     // parallel pull) would otherwise clobber the overlay with a stale snapshot.
     cache::with_lock_in(dir, || {
         if !merged.durations.is_empty() {
-            let path = dir.join(durations::FILE);
-            let mut d = durations::load_from(&path);
-            d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
-            if let Ok(bytes) = serde_json::to_vec(&d) {
-                let _ = cache::write_atomic(&path, &bytes);
-            }
+            // Tags each pulled entry with the local source fingerprint as it
+            // lands, overlaying onto (and pruning) the existing local cache.
+            durations::overlay_remote_in(&dir.join(durations::FILE), &merged.durations);
         }
         if !merged.flakes.is_empty() {
             let path = dir.join(flakes::FILE);
@@ -1251,13 +1248,17 @@ mod tests {
             last_epoch: now,
             last_failed_epoch: 0,
         };
-        // Local-only history the pull must keep, plus a shared key it overrides.
+        // Local-only history the pull must keep, plus a shared key it overrides,
+        // plus a tagged entry whose source vanished, which the overlay prunes
+        // (fingerprint self-heal). Untagged bare floats are kept as-is.
+        let gone_src = dir.join("test_gone.py");
         std::fs::write(
             dir.join(durations::FILE),
-            serde_json::to_vec(&HashMap::from([
-                ("local".to_string(), 1.0),
-                ("shared".to_string(), 2.0),
-            ]))
+            serde_json::to_vec(&serde_json::json!({
+                "local": 1.0,
+                "shared": 2.0,
+                "gone::t": { "secs": 4.0, "src": gone_src, "hash": "h" },
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -1282,7 +1283,7 @@ mod tests {
         write_local_in(&dir, &merged);
 
         let d = durations::load_from(&dir.join(durations::FILE));
-        assert_eq!(d.len(), 3);
+        assert_eq!(d.len(), 3, "vanished test pruned");
         assert_eq!(d["local"], 1.0, "local-only duration kept");
         assert_eq!(d["shared"], 9.0, "remote wins on shared key");
         assert_eq!(d["remote"], 3.0);
