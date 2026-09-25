@@ -11,6 +11,7 @@ mod config;
 mod coverage_skip;
 mod discover;
 mod doctor;
+mod explain;
 mod incremental;
 mod migrate;
 mod mono;

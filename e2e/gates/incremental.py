@@ -301,3 +301,84 @@ def gate_incremental_guards(g, args, binary):
         "scoped --cov" in r.stderr,
         r.stderr[-300:],
     )
+
+
+def gate_explain(g, args, binary):
+    print("== explain <nodeid> (reads real run caches) ==")
+    sp = g.tmp / "explainproj"
+    g.write("explainproj/mod_a.py", "def a():\n    return 1\n")
+    g.write("explainproj/mod_b.py", "def b():\n    return 2\n")
+    g.write(
+        "explainproj/test_e.py",
+        "import mod_a\n\n\ndef test_green():\n    assert mod_a.a() == 1\n\n\n"
+        "def test_red():\n    assert False\n",
+    )
+    env = {"PYTHONPATH": str(sp)}
+    for stale in sp.glob(".coverage*"):
+        stale.unlink()
+    # One real run populates all four caches explain merges: durations,
+    # flakes (test_red's hard failure), incremental outcomes, coverage index.
+    g.run(
+        "test_e.py",
+        "-n",
+        "2",
+        "--cov=.",
+        "--cov-context=test",
+        "--cov-report=",
+        "--incremental",
+        cwd=sp,
+        env_extra=env,
+    )
+
+    def explain(nodeid, *extra):
+        return g.run("explain", nodeid, *extra, cwd=sp, env_extra=env)
+
+    r = explain("test_e.py::test_green", "--json")
+    try:
+        doc = json.loads(r.stdout)
+    except ValueError:
+        doc = {}
+    check(
+        "explain: --json dossier for a green test merges every cache",
+        r.returncode == 0
+        and doc.get("found") is True
+        and doc.get("meta", {}).get("kind") == "explain"
+        and isinstance(doc.get("duration_seconds"), float)
+        and doc.get("last_outcome") == "passed"
+        and doc.get("source_line") == 4
+        and doc.get("flakes") is None
+        and "mod_a.py" in (doc.get("coverage") or {}).get("files", [])
+        and "mod_b.py" not in (doc.get("coverage") or {}).get("files", []),
+        f"rc={r.returncode} out={r.stdout[-600:]} err={r.stderr[-200:]}",
+    )
+
+    r = explain("test_e.py::test_red", "--json")
+    try:
+        doc = json.loads(r.stdout)
+    except ValueError:
+        doc = {}
+    check(
+        "explain: failing test shows fail history, no last-green",
+        r.returncode == 0
+        and doc.get("last_outcome") is None
+        and (doc.get("flakes") or {}).get("failed") == 1,
+        f"rc={r.returncode} out={r.stdout[-600:]}",
+    )
+
+    r = explain("test_e.py::test_green")
+    check(
+        "explain: human report exits 0 with every section",
+        r.returncode == 0
+        and "test: test_e.py::test_green" in r.stdout
+        and "test_e.py:4" in r.stdout
+        and "passed" in r.stdout
+        and "mod_a.py" in r.stdout,
+        f"rc={r.returncode} out={r.stdout[-400:]} err={r.stderr[-200:]}",
+    )
+
+    r = explain("test_green")
+    check(
+        "explain: partial id exits 1 and suggests the full nodeid",
+        r.returncode == 1 and "no cached data" in r.stderr and "test_e.py::test_green" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-400:]}",
+    )

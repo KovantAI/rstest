@@ -51,6 +51,7 @@ from gates.flaky import (
     gate_verify_vendor,
 )
 from gates.incremental import (
+    gate_explain,
     gate_incremental_dispatch_skip,
     gate_incremental_guards,
     gate_since_green_incremental,
@@ -226,6 +227,7 @@ def main():
         gate_since_green_incremental,
         gate_incremental_dispatch_skip,
         gate_incremental_guards,
+        gate_explain,
         gate_coverage_based_selection_changed_uses_th,
         gate_coverage_selection_under_autocrlf_crlf_w,
         gate_shuffle,

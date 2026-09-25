@@ -529,17 +529,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
 }
 
 /// Dispatch a run-less subcommand (`rstest verify-vendor` / `try` /
-/// `migrate-check` / `cache-compact`). Returns `Some(exit)` when a subcommand
-/// ran, `None` for a normal run (the caller falls through to watch/`execute`).
-/// These modes bypass the run pipeline, so the interpreter is resolved here
-/// rather than pulled through [`resolve_run_config`].
+/// `migrate-check` / `cache-compact` / `shard-verify` / `explain`). Returns
+/// `Some(exit)` when a subcommand ran, `None` for a normal run (the caller falls
+/// through to watch/`execute`). These modes bypass the run pipeline; the
+/// interpreter-free ones (`cache-compact`, `shard-verify`, `explain`) return
+/// before Python is resolved, the rest resolve it here.
 pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     use crate::cli::Command;
     let Some(command) = &cli.command else {
         return Ok(None);
     };
     let mut sink = Sink::stdio(color::Palette::detect(args));
-    // cache-compact and shard-verify are interpreter-free (they only touch
+    // cache-compact, shard-verify and explain are interpreter-free (they only touch
     // cache/report files); the rest resolve Python first, lazily, so the
     // interpreter-free modes never probe one. One `?` for every arm.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -551,6 +552,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         Command::ShardVerify { reports } => {
             crate::shardverify::run_shard_verify(&mut sink, reports)
         }
+        Command::Explain { nodeid, json } => crate::explain::run_explain(&mut sink, nodeid, *json),
         // Verify the vendored pytest tree against the packaged manifest.
         Command::VerifyVendor => python().and_then(|py| crate::vendor::run_verify(&py)),
         // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
