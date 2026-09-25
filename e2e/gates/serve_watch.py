@@ -144,3 +144,49 @@ def gate_migrate_check(g, args, binary):
         doc["ready"] is False and doc["will_bail_count"] >= 1 and bool(doc["unstable_ids"]),
         str(doc)[:300],
     )
+
+
+def gate_bisect(g, args, binary):
+    print("== bisect (order-dependency polluter search) ==")
+    # One polluter among clean predecessors: test_poison leaks an env var the
+    # victim asserts is absent. Passes alone, fails after the full prefix, so
+    # ddmin runs and must shrink the prefix to exactly test_poison.
+    g.write(
+        "bisectfix/test_pol.py",
+        "import os\n\n"
+        "def test_a(): assert True\n"
+        "def test_b(): assert True\n"
+        "def test_poison(): os.environ['RSTEST_BISECT_POISON'] = '1'\n"
+        "def test_c(): assert True\n"
+        "def test_victim(): assert 'RSTEST_BISECT_POISON' not in os.environ\n",
+    )
+    jpath = g.tmp / "bisect.json"
+    r = g.run(
+        "bisect",
+        "test_pol.py::test_victim",
+        "--bisect-json",
+        str(jpath),
+        cwd=g.tmp / "bisectfix",
+    )
+    repro = "rstest -n 0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
+    check(
+        "bisect: polluter found, minimal reproduce command printed (exit 0)",
+        r.returncode == 0 and "culprit: 1 predecessor" in r.stdout and repro in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-500:] + r.stderr[-200:],
+    )
+    doc = json.loads(jpath.read_text(encoding="utf-8"))
+    check(
+        "bisect-json: versioned doc names the culprit + reproduce command",
+        doc["meta"]["kind"] == "bisect"
+        and doc["order_dependent"] is True
+        and doc["culprits"] == ["test_pol.py::test_poison"]
+        and doc["reproduce_command"] == repro,
+        str(doc)[:300],
+    )
+    # A nodeid that isn't collected exits 2 without running anything.
+    r = g.run("bisect", "test_pol.py::test_nope", cwd=g.tmp / "bisectfix")
+    check(
+        "bisect: uncollected nodeid exits 2",
+        r.returncode == 2 and "was not collected" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-200:],
+    )
