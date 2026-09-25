@@ -103,6 +103,17 @@ pub(super) fn file_of(nodeid: &str) -> &str {
 /// through the one-worker pool (which reorders by the duration cache) and a
 /// passing rerun would hide the very failure the preflight is looking for.
 pub(super) fn run_session(python: &Path, config: &[&str], args: &[String]) -> Result<Outcomes> {
+    Ok(run_session_report(python, config, args)?.unwrap_or_default())
+}
+
+/// [`run_session`], but `None` when the child wrote no report at all (it
+/// refused to dispatch or crashed), as opposed to `Some` of an empty map for a
+/// run that finished with zero tests selected.
+pub(super) fn run_session_report(
+    python: &Path,
+    config: &[&str],
+    args: &[String],
+) -> Result<Option<Outcomes>> {
     let exe = std::env::current_exe()?;
     let tmp = std::env::temp_dir().join(format!(
         "rstest-migrate-{}-{}.json",
@@ -134,8 +145,7 @@ pub(super) fn run_session(python: &Path, config: &[&str], args: &[String]) -> Re
     let out = std::fs::read_to_string(&tmp)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|doc| parse_outcomes(&doc, true))
-        .unwrap_or_default();
+        .and_then(|doc| parse_outcomes(&doc, true));
     let _ = std::fs::remove_file(&tmp);
     Ok(out)
 }

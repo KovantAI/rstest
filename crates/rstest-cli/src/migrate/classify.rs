@@ -3,12 +3,13 @@
 //! (`classify`, `decide`) are pure and unit-tested; the discriminator runs
 //! (`classify_failures`, `bisect_polluter`) drive child sessions to reach them.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::Result;
 use regex::Regex;
 
+use super::bisect::{child_pins, pinned_inifile, workdir, MAXFAIL_LIFT};
 use super::{file_of, run_session, Outcomes, Phase};
 use crate::reporting::sink::Sink;
 
@@ -98,6 +99,7 @@ pub(super) enum Verdict {
     OrderDependency, // passes serial + loadfile, fails under load
     WallClock,       // passes serial, fails parallel, wait-bound - load-sensitive timing
     Isolation,       // passes serial, fails under load AND loadfile - co-location
+    Inconclusive,    // missing from a discriminator run - no evidence either way
 }
 
 impl Verdict {
@@ -108,6 +110,7 @@ impl Verdict {
             Verdict::OrderDependency => "ORDER DEPENDENCY",
             Verdict::WallClock => "WALL-CLOCK / LOAD-SENSITIVE",
             Verdict::Isolation => "ISOLATION / CO-LOCATION",
+            Verdict::Inconclusive => "INCONCLUSIVE",
         }
     }
     pub(super) fn advice(&self) -> (&'static str, &'static str) {
@@ -133,16 +136,26 @@ impl Verdict {
                 "passes serial, fails under both load and loadfile — co-located state leak",
                 "reset the leaked global state per test; stopgap @pytest.mark.serial",
             ),
+            Verdict::Inconclusive => (
+                "did not run in a -n 0 / loadfile follow-up run, so it can't be classified",
+                "check the nodeid is stable across collections (`rstest migrate-check`) \
+                 and that the follow-up runs collect it",
+            ),
         }
     }
 }
 
-/// Classify the parallel-only failures. `par` = -n auto outcomes; the function
-/// runs the discriminators (serial ×2, loadfile) and decides per failing test.
+/// Classify the parallel-only failures. `par` = -n auto outcomes, pooled over
+/// `repeat` parallel runs; the function runs the discriminators (serial
+/// ×max(`repeat`, 2), loadfile ×max(`repeat`, 1)) and decides per failing test.
+/// Matching the discriminator run counts to the parallel pass keeps the
+/// evidence symmetric: an intermittent failure caught once in N parallel runs
+/// gets N chances to show up serially and under loadfile too.
 pub(super) fn classify_failures(
     python: &Path,
     args: &[String],
     par: &Outcomes,
+    repeat: u32,
     sink: &mut Sink,
 ) -> Result<Vec<(String, Verdict)>> {
     let failed: Vec<&String> = par
@@ -157,23 +170,77 @@ pub(super) fn classify_failures(
     // whole suite - cost ∝ failing files. A cross-file polluter in a
     // non-failing file may round ISOLATION down to ORDER-DEPENDENCY.
     let files: std::collections::BTreeSet<&str> = failed.iter().map(|n| file_of(n)).collect();
-    let mut scoped: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+    // Nodeids (and so these file paths) are rootdir-relative, but a child
+    // resolves paths from the cwd; from a subdirectory `tests/test_a.py` would
+    // become `tests/tests/test_a.py` and collect nothing. Anchor them at the
+    // rootdir, and pin the rootdir, config file and conftest cutoff the way
+    // bisect does: absolute paths under a nested `pkg/pytest.ini` would
+    // otherwise load that config instead of the one the -n auto pass used.
+    // Best effort: without a rootdir the paths stay as-is, and any test the
+    // children then miss comes back INCONCLUSIVE below rather than a pass.
+    let collected = super::collect_session(python, args).ok();
+    let rootdir = collected
+        .as_ref()
+        .and_then(|c| c.rootdir.as_deref())
+        .map(PathBuf::from);
+    // Holds the blank stand-in config (when none was loaded) until the
+    // discriminators finish.
+    let work = workdir()?;
+    let mut scoped: Vec<String> = files
+        .iter()
+        .map(|f| match &rootdir {
+            Some(root) => root.join(f).display().to_string(),
+            None => f.to_string(),
+        })
+        .collect();
+    if let (Some(root), Some(c)) = (&rootdir, &collected) {
+        let ini = pinned_inifile(c.inifile.as_deref(), work.path())?;
+        let cutoff = c
+            .confcutdir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.clone());
+        scoped.extend(child_pins(root, &ini, &cutoff));
+    }
     scoped.extend_from_slice(args);
+    // After the user's args and addopts (the last --maxfail wins): an `-x`
+    // run stopping at an earlier failure would leave the rest missing, and so
+    // INCONCLUSIVE, for a reason that has nothing to do with them.
+    scoped.push(MAXFAIL_LIFT.into());
+    let (serial_runs, loadfile_runs) = (repeat.max(2), repeat.max(1));
     sink.warn(&format!(
-        "  {} parallel failure(s) in {} file(s); running discriminators (serial ×2, loadfile, \
-         scoped to those files)…",
+        "  {} parallel failure(s) in {} file(s); running discriminators (serial ×{serial_runs}, \
+         loadfile ×{loadfile_runs}, scoped to those files)…",
         failed.len(),
-        files.len()
+        files.len(),
     ));
-    let s1 = run_session(python, &["-n", "0"], &scoped)?;
-    let s2 = run_session(python, &["-n", "0"], &scoped)?;
-    let lf = run_session(python, &["--dist", "loadfile"], &scoped)?;
+    let serial: Vec<Outcomes> = (0..serial_runs)
+        .map(|_| run_session(python, &["-n", "0"], &scoped))
+        .collect::<Result<_>>()?;
+    let loadfile: Vec<Outcomes> = (0..loadfile_runs)
+        .map(|_| run_session(python, &["--dist", "loadfile"], &scoped))
+        .collect::<Result<_>>()?;
 
     let fails = |o: &Outcomes, n: &str| matches!(o.get(n).map(|r| r.phase), Some(Phase::Fail));
     let wait_bound = |n: &str| par.get(n).map(|r| r.wait_bound()).unwrap_or(false);
     let mut out = Vec::new();
     for n in failed {
-        let v = decide(fails(&s1, n), fails(&s2, n), fails(&lf, n), wait_bound(n));
+        // A test absent from any follow-up run (empty snapshot, unstable id,
+        // collection error) has no evidence; reading absence as a pass would
+        // turn a deterministic failure into ORDER DEPENDENCY.
+        let ran = |o: &Outcomes| o.contains_key(n.as_str());
+        if !serial.iter().chain(&loadfile).all(ran) {
+            out.push((n.clone(), Verdict::Inconclusive));
+            continue;
+        }
+        // decide() wants "failed every serial run" and "failed some serial run";
+        // with exactly two runs these are s1 && s2 and s1 || s2 as before.
+        let all = serial.iter().all(|o| fails(o, n));
+        let any = serial.iter().any(|o| fails(o, n));
+        // Any loadfile failure counts: an intermittent co-location race that
+        // passed one loadfile run is still a co-location race, not ORDER.
+        let lf = loadfile.iter().any(|o| fails(o, n));
+        let v = decide(all, any, lf, wait_bound(n));
         out.push((n.clone(), v));
     }
     Ok(out)

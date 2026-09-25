@@ -454,6 +454,9 @@ size — a clean suite runs no discriminators at all:
 - **NOT PARALLEL-SPECIFIC** — also fails at `-n 0`; a pre-existing bug/env gap,
   summarized (not a migration concern).
 - **INTRINSIC FLAKE** — serial repeats disagree; flaky under any runner.
+- **INCONCLUSIVE**: missing from a follow-up run (for example an unstable
+  parametrize id), so there is no evidence to classify it. Not counted as a
+  pass.
 - **ORDER DEPENDENCY** — passes serial and under `--dist loadfile`, fails under
   `load`; run with `loadfile` or fix the in-file coupling.
 - **WALL-CLOCK / LOAD-SENSITIVE** — passes serial, fails parallel, and is
@@ -504,7 +507,7 @@ aren't parallel-safe, and how do I fix them?" It **runs the suite at `-n auto`**
 (repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
 probabilistic), then diffs against the `-n 0` oracle and classifies every test
 that fails **only** under parallelism — reusing `migrate-check`'s discriminators
-(`-n 0` twice + `--dist loadfile`, scoped to the failing files) and verdicts
+(`-n 0` at least twice + `--dist loadfile`, repeated with `--audit-repeat` and scoped to the failing files) and verdicts
 (ISOLATION / WALL-CLOCK / ORDER-DEPENDENCY / INTRINSIC FLAKE / pre-existing).
 
 Where `migrate-check` is the onboarding preflight (unstable ids first, verbose
@@ -528,29 +531,53 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.serial)
 ```
 
-Serial is a **stopgap** — the report also names the real fix per verdict (reset
-leaked state, mock the clock, fix order coupling). Intrinsic flakes (serial
-repeats disagree) and pre-existing `-n 0` failures are reported separately;
-serial won't fix those. Exits non-zero on any parallel-only failure (serial-
-fixable or intrinsic), so it gates CI; pre-existing failures don't fail the
-audit. [`--audit-json`](#-audit-json-path) writes the findings, the serial set,
+If your `conftest.py` already defines `pytest_collection_modifyitems`, paste
+only `_RSTEST_SERIAL` and add the loop to your existing hook. A second
+definition of the same name replaces the first, so your original hook would
+silently stop running.
+
+Only ISOLATION and WALL-CLOCK failures go in the block. Serial is a **stopgap**
+for those; the report also names the real fix (reset leaked state, mock the
+clock). ORDER-DEPENDENCY failures are listed separately with a `--dist loadfile`
+recommendation instead: they depend on tests that run before them in the same
+file, and the serial phase would run them apart from those tests, so marking
+them serial wouldn't make them pass. Intrinsic flakes (serial repeats disagree)
+and pre-existing `-n 0` failures are also reported separately; serial won't fix
+those. A test that fails under `-n auto` but is missing from a
+follow-up run (for example an unstable parametrize id) is reported as
+**inconclusive** rather than guessed at. Exits non-zero on any parallel-only
+failure (serial-fixable, order-dependent, intrinsic or inconclusive), so it
+gates CI; pre-existing failures don't fail the audit. A selection that matches
+no tests (for example a `-m` with no matching tests) exits `0` with a "no tests
+were selected" note; exit `2` is kept for a run rstest refused to dispatch. [`--audit-json`](#-audit-json-path) writes the findings, the serial set,
 and the conftest block for tooling.
 
 ### `--audit-json <path>`
 
 Write the `audit` findings as a versioned JSON document (schema `1`):
-`{meta, parallel_safe, tests, serial_candidates[], serial_conftest,
-intrinsic_flakes[], preexisting_failures}`. `serial_candidates[]` carries each
-`{nodeid, verdict, fix}`; `serial_conftest` is the paste-able block as a string.
-Implies `audit`; pass the bare subcommand too for the human report.
+`{meta, ran, parallel_safe, tests, serial_candidates[], serial_conftest,
+order_dependent[], intrinsic_flakes[], inconclusive[], preexisting_failures}`. `serial_candidates[]`
+carries each `{nodeid, verdict, fix}`; `serial_conftest` is the paste-able block
+as a string. The file is written as `{meta, ran: false, parallel_safe: false}`
+before the audit starts and replaced with the full result at the end, so an
+audit that stops early (the `-n auto` pass produced no run, exit `2`, or a child
+session failed) leaves `ran: false` rather than a stale result from an earlier
+run. `-x`/`--maxfail` from your args or `addopts` is lifted for every run the
+audit makes, so the whole suite is checked.
+Only read by the `audit` subcommand (`rstest audit --audit-json out.json`); on
+its own it is ignored and no file is written.
 
 ### `--audit-repeat <N>`
 
 How many times `audit` re-runs the `-n auto` pass (default `1`). A parallel-only
 failure is probabilistic — a race may not fire every run — so a test that fails
 in **any** repeat is treated as a candidate. Raise it (e.g. `--audit-repeat 5`)
-to shake out intermittent races; the `-n 0` oracle and discriminators run once
-regardless.
+to shake out intermittent races. The discriminators repeat the same number of
+times (the `-n 0` oracle at least twice, `--dist loadfile` at least once), so
+an intermittent failure gets as many chances to show up in them as it had in
+the parallel pass. That makes a misclassification less likely but does not rule
+it out: a test that is flaky in every mode can still pass all serial runs by
+chance and be listed as a serial candidate.
 
 ### `bisect <nodeid>`
 

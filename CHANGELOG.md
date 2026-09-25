@@ -9,11 +9,13 @@ between 0.0.x releases and are listed here.
   `-n auto` (repeat with `--audit-repeat` to catch probabilistic races), diffs
   against the `-n 0` oracle, and classifies every test that fails *only* in
   parallel (reusing `migrate-check`'s `-n 0` ×2 + `--dist loadfile`
-  discriminators and verdicts). Prints the serial-fixable failures with a
-  ready-to-paste `conftest.py` block that marks exactly those nodeids
-  `@pytest.mark.serial` — one paste, no per-test edits — plus the real
-  per-verdict fix. Intrinsic flakes and pre-existing `-n 0` failures are called
-  out separately. Exits non-zero on any parallel-only failure (CI-gateable);
+  discriminators and verdicts). Prints the serial-fixable (isolation and
+  wall-clock) failures with a ready-to-paste `conftest.py` block that marks
+  exactly those nodeids `@pytest.mark.serial` — one paste, no per-test edits —
+  plus the real per-verdict fix. Order-dependent failures get a
+  `--dist loadfile` recommendation instead, since serial would separate them
+  from the tests they depend on. Intrinsic flakes, inconclusive results and
+  pre-existing `-n 0` failures are called out separately. Exits non-zero on any parallel-only failure (CI-gateable);
   `--audit-json` writes the findings, the serial set, and the conftest block.
   See [`audit`](docs/reference/cli.md#audit).
 - **`rstest bisect <nodeid>`: order-dependency polluter finder.** For a test
