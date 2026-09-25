@@ -34,9 +34,15 @@ pub(crate) enum Command {
     /// earlier tests that reproduce the failure — the polluter(s). Prints the
     /// culprits and a minimal reproducing command. `--bisect-json` writes it.
     Bisect {
-        /// The failing test's nodeid (`path::test[param]`).
+        /// The failing test's nodeid (`path::test[param]`), rootdir- or
+        /// cwd-relative.
         #[arg(value_name = "NODEID")]
         nodeid: String,
+        /// pytest options after `--` (`-p plugin`, `-o key=val`, `-m expr`),
+        /// applied to the collection and every child run. Not test paths:
+        /// bisect selects tests by nodeid itself.
+        #[arg(last = true, value_name = "PYTEST_ARGS")]
+        pytest_args: Vec<String>,
     },
 
     /// Maintenance: fold remote segments into a fresh base and prune them, then
@@ -597,6 +603,78 @@ mod tests {
         let (own, session) = split_args(v(&["shard-verify", "a.json", "b.json"]));
         assert_eq!(own, v(&["rstest", "shard-verify", "a.json", "b.json"]));
         assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn bisect_routes_the_nodeid_to_clap() {
+        // The nodeid contains `::` and `[param]`; it must reach clap as the
+        // positional, not be forwarded to a (nonexistent) pytest session.
+        let (own, session) = split_args(v(&[
+            "bisect",
+            "tests/test_a.py::test_v[1-x]",
+            "--bisect-json",
+            "out.json",
+        ]));
+        assert_eq!(
+            own,
+            v(&[
+                "rstest",
+                "bisect",
+                "tests/test_a.py::test_v[1-x]",
+                "--bisect-json",
+                "out.json",
+            ])
+        );
+        assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn bisect_keeps_pytest_args_after_double_dash_for_clap() {
+        // `--` after `bisect` must not trigger the forward-everything-to-the-
+        // session rule: the pytest args belong to bisect's own positional.
+        let argv = ["bisect", "t.py::v", "--", "-p", "no:randomly", "-o", "x=1"];
+        let (own, session) = split_args(v(&argv));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::try_parse_from(own).unwrap();
+        match cli.command {
+            Some(Command::Bisect {
+                ref nodeid,
+                ref pytest_args,
+            }) => {
+                assert_eq!(nodeid, "t.py::v");
+                assert_eq!(pytest_args, &v(&["-p", "no:randomly", "-o", "x=1"]));
+            }
+            _ => panic!("expected the bisect subcommand"),
+        }
+    }
+
+    #[test]
+    fn bisect_parses_nodeid_and_json_path() {
+        let cli = Cli::try_parse_from(v(&[
+            "rstest",
+            "bisect",
+            "t.py::test_v",
+            "--bisect-json",
+            "b.json",
+        ]))
+        .unwrap();
+        match cli.command {
+            Some(Command::Bisect {
+                ref nodeid,
+                ref pytest_args,
+            }) => {
+                assert_eq!(nodeid, "t.py::test_v");
+                assert!(pytest_args.is_empty());
+            }
+            _ => panic!("expected the bisect subcommand"),
+        }
+        assert_eq!(
+            cli.bisect_json.as_deref(),
+            Some(std::path::Path::new("b.json"))
+        );
+
+        // The nodeid is required.
+        assert!(Cli::try_parse_from(v(&["rstest", "bisect"])).is_err());
     }
 
     #[test]

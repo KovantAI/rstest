@@ -5,16 +5,30 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
-- **`rstest bisect <nodeid>` — order-dependency polluter finder.** For a test
+- **`rstest bisect <nodeid>`: order-dependency polluter finder.** For a test
   that fails only when run after some other test, bisect delta-debugs the
   predecessor set at `-n 0` (`ddmin`) down to the minimal set of earlier tests
-  that reproduce the failure — the polluter(s) — and prints a minimal
+  that reproduce the failure (the polluters) and prints a shell-quoted minimal
   reproducing command (`rstest -n 0 <culprit…> <victim>`). Serial by
   construction, so it isolates ordering (not concurrency); handles a single
-  polluter and interacting pairs, bounded to ~80 child runs. Exits `0` when a
-  culprit is found, `1` when the test isn't order-dependent (fails alone / no
-  reproduction from order), `2` for an unknown nodeid. `--bisect-json` writes
-  the result. See [`bisect`](docs/reference/cli.md#bisect-nodeid).
+  polluter and interacting pairs, bounded to ~80 child runs. Uses pytest's
+  own rootdir and collects the whole suite even from a subdirectory, keeps
+  child runs on the collection's interpreter, rootdir and config file,
+  disables pytest-randomly and uses a private cleared cache so the victim
+  always runs last (`--ff`/`--lf`/`-x` in `addopts` included; `--nf`/`--sw`
+  are refused by name), leaves your `.pytest_cache` untouched, scales past the
+  OS argv limit, and forwards pytest options given after `--`. Exits `0` when a culprit is found, `1` when the test isn't
+  order-dependent (fails alone / no reproduction from order), `2` for an
+  unknown nodeid. `--bisect-json` writes the result. See
+  [`bisect`](docs/reference/cli.md#bisect-nodeid).
+- **`migrate-check` child runs honor `--python`.** Its serial, loadfile and
+  polluter discriminator runs re-resolved an interpreter from the environment
+  and could land on a different one than the collection used; they are now
+  pinned to the same interpreter. Its polluter search also disables
+  pytest-randomly, which could shuffle the candidates after the victim.
+- **A pytest `@argsfile` counts as an explicit selection.** At a monorepo root
+  with no pytest config, `rstest @tests.txt` fanned out over every subproject
+  instead of running the listed tests as one project.
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

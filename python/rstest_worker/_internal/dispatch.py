@@ -11,6 +11,58 @@ import pytest
 from rstest_worker._internal import messages as m
 from rstest_worker._internal.stream import StreamPlugin
 
+# (option dest, CLI spelling) of the options that reorder or cut short a session
+# based on the cache: --nf / --ff / --lf (cacheprovider) and stepwise. `-x` /
+# `--maxfail` ride along as "--maxfail".
+_ORDER_FLAGS = (
+    ("newfirst", "--nf"),
+    ("failedfirst", "--ff"),
+    ("lf", "--lf"),
+    ("stepwise", "--sw"),
+    ("stepwise_skip", "--sw-skip"),
+)
+
+
+def _session_roots(config) -> m.SessionRootsPayload:
+    """pytest's own view of where this session is rooted, for `rstest bisect`:
+    the rootdir nodeids are relative to, where the initial args came from, and
+    the roots a no-arg run *from the rootdir* would collect (the ini
+    `testpaths`, globbed against the rootdir the way pytest does, else the
+    rootdir itself), and the config file in effect, so child runs can pin both.
+    Empty when the config carries no rootpath."""
+    import glob
+
+    rootpath = getattr(config, "rootpath", None)
+    if rootpath is None:
+        return {}
+    root = str(rootpath)
+    testpaths = list(config.getini("testpaths"))
+    if not getattr(config.option, "pyargs", False):
+        testpaths = [
+            p
+            for t in testpaths
+            for p in sorted(glob.iglob(os.path.join(glob.escape(root), t), recursive=True))
+        ]
+    roots: m.SessionRootsPayload = {
+        "rootdir": root,
+        "args_source": config.args_source.name.lower(),
+        "root_args": testpaths or [root],
+    }
+    inipath = getattr(config, "inipath", None)
+    if inipath is not None:
+        roots["inifile"] = str(inipath)
+    # Cache-driven reordering/filtering in effect (from the command line, ini
+    # `addopts` or PYTEST_ADDOPTS alike): bisect's "victim runs last" needs to
+    # know, since some of these can't be switched off from the command line.
+    option = getattr(config, "option", None)
+    flags = [flag for dest, flag in _ORDER_FLAGS if getattr(option, dest, False)]
+    # -x / --maxfail cut a session short at the first unrelated failure.
+    if getattr(option, "maxfail", 0):
+        flags.append("--maxfail")
+    if flags:
+        roots["order_flags"] = flags
+    return roots
+
 
 class ItemDispatchPlugin(StreamPlugin):
     """xdist remote.py model: collect everything, run items on command.
@@ -48,6 +100,7 @@ class ItemDispatchPlugin(StreamPlugin):
             ]
             if session.config.cache is not None:
                 payload["cache_dir"] = str(session.config.cache._cachedir)
+            payload.update(_session_roots(session.config))
             payload["serial"] = [
                 i
                 for i, item in enumerate(session.items)

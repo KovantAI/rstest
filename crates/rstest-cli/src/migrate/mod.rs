@@ -91,7 +91,10 @@ pub(super) fn file_of(nodeid: &str) -> &str {
 
 /// Run one full session in a child rstest process with the given config flags
 /// (e.g. `["-n","0"]`), capture per-test pass/fail from its `--report-json`.
-pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> {
+/// `python` is pinned with `--python`: the child would otherwise re-resolve an
+/// interpreter from the environment and could land on a different one than
+/// the parent collected with.
+pub(super) fn run_session(python: &Path, config: &[&str], args: &[String]) -> Result<Outcomes> {
     let exe = std::env::current_exe()?;
     let tmp = std::env::temp_dir().join(format!(
         "rstest-migrate-{}-{}.json",
@@ -99,7 +102,9 @@ pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> 
         run_session_seq()
     ));
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(config)
+    cmd.arg("--python")
+        .arg(python)
+        .args(config)
         .args(args)
         .arg("--report-json")
         .arg(&tmp)
@@ -124,7 +129,7 @@ pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> 
     Ok(out)
 }
 
-fn run_session_seq() -> u64 {
+pub(super) fn run_session_seq() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     N.fetch_add(1, Ordering::Relaxed)
@@ -132,6 +137,26 @@ fn run_session_seq() -> u64 {
 
 /// One fresh collect-only session -> the collected nodeids in session order.
 pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>> {
+    Ok(collect_session(python, args)?.ids)
+}
+
+/// A collect-only session: the nodeids plus pytest's own view of its roots.
+pub(super) struct Collected {
+    pub ids: Vec<String>,
+    /// pytest's rootdir, the base every nodeid is relative to.
+    pub rootdir: Option<String>,
+    /// `config.args_source`: "args", "invocation_dir" or "testpaths".
+    pub args_source: Option<String>,
+    /// Absolute roots a no-arg run from the rootdir would collect.
+    pub root_args: Vec<String>,
+    /// The config file pytest loaded, when any.
+    pub inifile: Option<String>,
+    /// Active cache-driven order flags (`--nf`, `--ff`, `--lf`, `--sw`, ...).
+    pub order_flags: Vec<String>,
+}
+
+/// One fresh collect-only session -> [`Collected`].
+pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collected> {
     // Full id+location payload from pytest_collection_finish (single session).
     // The lone worker ships ids; params ride its env, not process set_var.
     let env = worker::WorkerEnv {
@@ -153,16 +178,38 @@ pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>>
     }
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     w.send(&proto::Command::RunItemsSession { args: collect_args })?;
-    let mut ids: Vec<String> = Vec::new();
+    let mut out = Collected {
+        ids: Vec::new(),
+        rootdir: None,
+        args_source: None,
+        root_args: Vec::new(),
+        inifile: None,
+        order_flags: Vec::new(),
+    };
     loop {
         match w.recv()? {
-            proto::Event::CollectionDone { ids: Some(i), .. } => ids = i,
+            proto::Event::CollectionDone {
+                ids: Some(i),
+                rootdir,
+                args_source,
+                root_args,
+                inifile,
+                order_flags,
+                ..
+            } => {
+                out.ids = i;
+                out.rootdir = rootdir;
+                out.args_source = args_source;
+                out.root_args = root_args.unwrap_or_default();
+                out.inifile = inifile;
+                out.order_flags = order_flags.unwrap_or_default();
+            }
             proto::Event::Done { .. } => break,
             _ => {}
         }
     }
     w.shutdown()?;
-    Ok(ids)
+    Ok(out)
 }
 
 #[cfg(test)]

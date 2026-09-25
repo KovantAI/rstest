@@ -545,9 +545,17 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             &mut sink,
         )?,
         // Order-dependency bisect: delta-debug the predecessor set at -n 0.
-        Command::Bisect { nodeid } => {
-            migrate::run_bisect(&python, nodeid, cli.bisect_json.as_deref(), &mut sink)?
-        }
+        Command::Bisect {
+            nodeid,
+            pytest_args,
+        } => migrate::run_bisect(
+            &python,
+            cli.python.as_deref(),
+            nodeid,
+            pytest_args,
+            cli.bisect_json.as_deref(),
+            &mut sink,
+        )?,
         Command::CacheCompact { .. } => unreachable!("handled above"),
         Command::ShardVerify { .. } => unreachable!("handled above"),
     };
@@ -669,10 +677,7 @@ fn maybe_dispatch_monorepo(
         return Ok(ControlFlow::Continue(()));
     }
     let cwd = std::env::current_dir()?;
-    let path_args = args
-        .iter()
-        .any(|a| !a.starts_with('-') && std::path::Path::new(a).exists());
-    if path_args || config::has_pytest_config(&cwd, sink.err()) {
+    if names_a_selection(args) || config::has_pytest_config(&cwd, sink.err()) {
         return Ok(ControlFlow::Continue(()));
     }
     let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
@@ -691,6 +696,17 @@ fn maybe_dispatch_monorepo(
         );
     }
     monorepo::execute_monorepo(cli, args, &cwd, projects, run_uid, sink).map(ControlFlow::Break)
+}
+
+/// Do the session args name tests explicitly? An existing path does, and so
+/// does a pytest `@argsfile` (its lines are the selection, e.g. `bisect`'s
+/// child runs): either keeps the run single-project instead of fanning out
+/// over every subproject and ignoring what was asked for.
+fn names_a_selection(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        let a = a.strip_prefix('@').unwrap_or(a);
+        !a.starts_with('-') && std::path::Path::new(a).exists()
+    })
 }
 
 /// require-baseline: with the durations-regress gate active, an absent baseline
@@ -1527,9 +1543,9 @@ fn fold_run_event(
 mod tests {
     use super::{
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
-        dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
-        parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        dispatch_command, fold_run_event, head_to_none, lazy_should_steal, names_a_selection,
+        parse_duration_secs, parse_numprocesses, resolve_changed_base, resolve_retention_policy,
+        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
         warn_windows_timeout, watchdog_duration,
     };
@@ -1540,6 +1556,21 @@ mod tests {
     use crate::reporting::{progress, report};
     use crate::scheduling::proto;
     use clap::Parser;
+
+    #[test]
+    fn an_argsfile_counts_as_an_explicit_selection() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("rstest-sel-{}.txt", std::process::id()));
+        std::fs::write(&file, "t.py::a\n").unwrap();
+        let at = |p: &std::path::Path| vec![format!("@{}", p.display())];
+        let has_file = names_a_selection(&at(&file));
+        let missing = names_a_selection(&at(&dir.join("rstest-no-such-argsfile.txt")));
+        let _ = std::fs::remove_file(&file);
+        assert!(has_file, "an existing @argsfile names tests");
+        assert!(!missing, "a missing @argsfile names nothing");
+        assert!(names_a_selection(&[dir.display().to_string()]));
+        assert!(!names_a_selection(&["-k".into(), "smoke".into()]));
+    }
 
     fn cli() -> Cli {
         Cli::parse_from(["rstest"])
