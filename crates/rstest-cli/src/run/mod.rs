@@ -90,15 +90,26 @@ fn apply_selection(
         let changes = select::changed_line_ranges(rev)?;
         // Coverage-map health, for the "of K mapped" ratio and the cold-map hint.
         let mapped = select::mapped_test_count();
+        let selection = select::affected_with_coverage(
+            &project.rootdir,
+            &project,
+            &changes,
+            cli.changed_strict,
+            rev,
+        )?;
         // One-line nudge when the map is cold BUT a source (non-test) .py file
         // changed — exactly the case where a warm map would have selected fewer
         // tests than the import graph is about to. Silent when coverage wouldn't
         // help (test-only / config / non-Python changes), so it never nags a
-        // user who doesn't run coverage.
+        // user who doesn't run coverage - including when such a change forces
+        // a full run alongside a source edit (the graph isn't used then).
         if mapped.is_none()
+            && !matches!(selection, select::Selection::FullRun(_))
             && changes.keys().any(|f| {
                 f.extension().and_then(|e| e.to_str()) == Some("py")
                     && !crate::collect::is_test_file(&project.rootdir.join(f), &project)
+                    // A warm map routes conftest.py to the graph too.
+                    && f.file_name().and_then(|n| n.to_str()) != Some("conftest.py")
             })
         {
             sink.warn(
@@ -107,13 +118,7 @@ fn apply_selection(
                  (usually fewer tests).",
             );
         }
-        match select::affected_with_coverage(
-            &project.rootdir,
-            &project,
-            &changes,
-            cli.changed_strict,
-            rev,
-        )? {
+        match selection {
             select::Selection::FullRun(reason) => {
                 sink.warn(&format!(
                     "rstest: --changed falling back to full run ({reason})"
@@ -121,8 +126,9 @@ fn apply_selection(
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
                 match mapped {
+                    // Keep the cold-map wording as the prefix: scripts grep for it.
                     Some(m) => sink.out_line(&format!(
-                        "rstest: 0 of {m} mapped test(s) affected by {} changed file(s)",
+                        "rstest: no tests affected by {} changed file(s) (0 of {m} mapped)",
                         changes.len()
                     )),
                     None => sink.out_line(&format!(
@@ -146,13 +152,27 @@ fn apply_selection(
             }
             select::Selection::Tests(tests) => {
                 // With a warm map, report the savings ratio (affected of mapped);
-                // cold, just the affected-target count.
+                // cold, just the affected-target count. Only `file::test` targets
+                // came from the map, so they alone are "of K mapped"; whole-file
+                // targets (graph fallback, changed test files) are counted apart.
                 match mapped {
-                    Some(m) => sink.warn(&format!(
-                        "rstest: {} changed file(s) -> {} of {m} mapped test target(s) affected",
-                        changes.len(),
-                        tests.len()
-                    )),
+                    Some(m) => {
+                        let from_map = tests
+                            .iter()
+                            .filter(|t| t.to_string_lossy().contains("::"))
+                            .count();
+                        let files = tests.len() - from_map;
+                        let extra = if files > 0 {
+                            format!(" + {files} whole-file target(s)")
+                        } else {
+                            String::new()
+                        };
+                        sink.warn(&format!(
+                            "rstest: {} changed file(s) -> {from_map} of {m} mapped test(s) \
+                             affected{extra}",
+                            changes.len(),
+                        ));
+                    }
                     None => sink.warn(&format!(
                         "rstest: {} changed file(s) -> {} affected test target(s)",
                         changes.len(),

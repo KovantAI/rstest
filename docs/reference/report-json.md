@@ -315,7 +315,7 @@ Top-level fields:
 | `parallel_efficiency` | object / `null` | realized parallel speedup and per-worker load; **`null`** unless the run used more than one worker (`workers > 1`) |
 | `fixtures` | array | fixture timings, slowest first (≤ 50) |
 | `slowest_files` | array | per-file totals, slowest first (≤ 20) |
-| `coverage_waste` | object / `null` | slow tests that add no unique coverage; **`null`** unless a per-test coverage index is warm (`--cov --cov-context=test`) and at least one slow test qualified |
+| `coverage_waste` | object / `null` | slow tests that add no unique coverage; **`null`** unless this run collected per-test coverage (`--cov --cov-context=test`) and at least one slow test qualified |
 
 `wait_bound` (wall ≫ CPU — tests that wait rather than compute):
 
@@ -362,8 +362,8 @@ skipped setups (see the
 `test_time_seconds`.
 
 `coverage_waste` (slow tests that cover no line another test doesn't also
-cover, so they are safe to delete or merge; needs a warm per-test coverage
-index):
+cover, so they are safe to delete or merge; needs per-test coverage from the
+same run):
 
 | Field | Type | Meaning |
 |---|---|---|

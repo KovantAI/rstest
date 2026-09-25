@@ -380,22 +380,117 @@ pub(super) fn run_post_gates(
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
     warn_doctor_gate_passthrough(sink.err(), doctor_gate.is_empty(), passthrough);
-    let mut doctor_gate_failed = false;
-    if (cli.doctor
+    let want_doctor = (cli.doctor
         || cli.doctor_json.is_some()
         || cli.doctor_md.is_some()
         || !doctor_gate.is_empty())
-        && !passthrough
-    {
-        // The coverage-waste section needs a warm per-test index; absent (no
-        // prior `--cov --cov-context=test` run) it is simply omitted.
-        let coverage_index = crate::select::load_coverage_index();
+        && !passthrough;
+    // The doctor and the run reports come after covtool (the doctor needs this
+    // run's coverage index), so pin the suite's wall time here: covtool's own
+    // time is not test time.
+    let suite_wall = start.elapsed().as_secs_f64();
+    // The doctor used to run first, so a later step's error never cost its
+    // output. It now waits for covtool, so an error before it (diff-coverage
+    // setup) is held here and returned once the doctor has reported.
+    let mut deferred_err: Option<anyhow::Error> = None;
+    // Before publishing, drop any coverage index left by --cache-pull: only an
+    // index covtool writes for THIS run may be pushed. Unconditional on push (not
+    // gated by --cov) so a run that produces no fresh index — no --cov at all, no
+    // --cov-context, or an empty shard — pushes an empty slice rather than
+    // re-publishing the pulled merged index as its own. Selection already
+    // consumed the pulled index earlier, so removing it now is safe.
+    if cli.cache_push {
+        let _ = std::fs::remove_file(cache::file(select::COVERAGE_INDEX_FILE));
+    }
+    // Coverage: workers save suffixed data files (pytest-cov worker mode);
+    // the orchestrator plays the xdist-master role, so combine and report.
+    // Runs BEFORE the cache-push below so this run's coverage-index slice is
+    // materialized (covtool overwrites the local index) in time to be published.
+    let mut exitstatus = outcome.exitstatus;
+    let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
+    let want_diff = cli.cov_diff_fail_under.is_some() || cli.cov_diff_json.is_some();
+    if want_diff && !has_cov && !passthrough {
+        sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
+    }
+    // Whether covtool rewrote the coverage index during this run (it does only
+    // under per-test contexts): the doctor's coverage-waste input.
+    let index_mtime = || {
+        std::fs::metadata(cache::file(select::COVERAGE_INDEX_FILE))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    let mut fresh_index = false;
+    if !passthrough && has_cov {
+        let before = index_mtime();
+        sink.out_line("");
+        // Diff-coverage gate: hand covtool the diff's added lines + a result
+        // path when --cov-diff-fail-under is set; covtool scores them and we
+        // gate on the percentage below.
+        let diff_paths = if want_diff {
+            super::resolve_changed_base(cli, sink).and_then(|base| {
+                build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))
+            })
+        } else {
+            Ok(None)
+        };
+        // A diff-setup error still aborts the run before covtool, as before;
+        // it is just returned after the doctor instead of right away.
+        match diff_paths {
+            Err(e) => deferred_err = Some(e),
+            Ok(diff_paths) => {
+                let mut cmd = std::process::Command::new(python);
+                cmd.args(["-m", "rstest_worker.covtool"])
+                    .args(args)
+                    .env("PYTHONPATH", worker::worker_pythonpath())
+                    // Same cache dir the Rust side reads (cache::dir()) so the index
+                    // lands where load_coverage_index / --cache-push look for it.
+                    .env("RSTEST_CACHE", cache::dir());
+                if let Some((lp, op)) = &diff_paths {
+                    cmd.arg("--rstest-diff-lines")
+                        .arg(lp)
+                        .arg("--rstest-diff-out")
+                        .arg(op);
+                }
+                let cov_status = cmd.status().map(|s| s.success()).map_err(|e| e.to_string());
+                // Freshness is "covtool replaced the file", not "covtool exited 0": a
+                // missed --cov-fail-under exits 1 but still writes this run's index.
+                let after = index_mtime();
+                fresh_index = after.is_some() && after != before;
+                exitstatus = reconcile_cov_status(sink.err(), cov_status, exitstatus);
+
+                if let Some((lp, op)) = diff_paths {
+                    if let Some(threshold) = cli.cov_diff_fail_under {
+                        exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
+                    }
+                    if let Some(dst) = &cli.cov_diff_json {
+                        copy_diff_cov_json(sink.err(), &op, dst);
+                    }
+                    let _ = std::fs::remove_file(&lp);
+                    let _ = std::fs::remove_file(&op);
+                }
+            }
+        }
+    }
+    let mut doctor_gate_failed = false;
+    if want_doctor {
+        // Coverage waste is judged only from the index covtool wrote for THIS
+        // run: an older one (a previous run, a cache restore, --cache-pull) can
+        // describe tests or files that have since changed, and a stale "fully
+        // shared" verdict would recommend deleting a test that is now unique.
+        let coverage_index = fresh_index.then(select::load_coverage_index).flatten();
+        // Test-file patterns (`python_files`) tell test code from product code.
+        let project = coverage_index.as_ref().map(|_| {
+            crate::config::discover(
+                &std::env::current_dir().unwrap_or_default(),
+                &mut std::io::sink(),
+            )
+        });
         let report = doctor::analyze(
             &outcome.run,
             &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
-            start.elapsed().as_secs_f64(),
+            suite_wall,
             n,
-            coverage_index.as_ref(),
+            coverage_index.as_ref().zip(project.as_ref()),
         );
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
@@ -434,12 +529,17 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // Both reports get the pre-covtool wall, as they did when they ran first.
+    let report_meta = report::RunMeta {
+        duration_seconds: suite_wall,
+        ..build_run_meta(start, outcome.exitstatus, started_epoch, n)
+    };
     write_run_reports(
         cli.junitxml.as_deref(),
         cli.html.as_deref(),
         &outcome.run,
-        start.elapsed().as_secs_f64(),
-        &build_run_meta(start, outcome.exitstatus, started_epoch, n),
+        suite_wall,
+        &report_meta,
     )?;
     // Merged lastfailed: workers' own writes are blocked in pool mode
     // (each knows only its failures); write the union into pytest's cache
@@ -484,66 +584,8 @@ pub(super) fn run_post_gates(
             }
         }
     }
-    // Before publishing, drop any coverage index left by --cache-pull: only an
-    // index covtool writes for THIS run may be pushed. Unconditional on push (not
-    // gated by --cov) so a run that produces no fresh index — no --cov at all, no
-    // --cov-context, or an empty shard — pushes an empty slice rather than
-    // re-publishing the pulled merged index as its own. Selection already
-    // consumed the pulled index earlier, so removing it now is safe.
-    if cli.cache_push {
-        let _ = std::fs::remove_file(cache::file(select::COVERAGE_INDEX_FILE));
-    }
-    // Coverage: workers save suffixed data files (pytest-cov worker mode);
-    // the orchestrator plays the xdist-master role, so combine and report.
-    // Runs BEFORE the cache-push below so this run's coverage-index slice is
-    // materialized (covtool overwrites the local index) in time to be published.
-    let mut exitstatus = outcome.exitstatus;
-    let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
-    let want_diff = cli.cov_diff_fail_under.is_some() || cli.cov_diff_json.is_some();
-    if want_diff && !has_cov && !passthrough {
-        sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
-    }
-    if !passthrough && has_cov {
-        sink.out_line("");
-        // Diff-coverage gate: hand covtool the diff's added lines + a result
-        // path when --cov-diff-fail-under is set; covtool scores them and we
-        // gate on the percentage below.
-        let diff_paths = if want_diff {
-            let base = super::resolve_changed_base(cli, sink)?;
-            build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))?
-        } else {
-            None
-        };
-
-        let mut cmd = std::process::Command::new(python);
-        cmd.args(["-m", "rstest_worker.covtool"])
-            .args(args)
-            .env("PYTHONPATH", worker::worker_pythonpath())
-            // Same cache dir the Rust side reads (cache::dir()) so the index
-            // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir());
-        if let Some((lp, op)) = &diff_paths {
-            cmd.arg("--rstest-diff-lines")
-                .arg(lp)
-                .arg("--rstest-diff-out")
-                .arg(op);
-        }
-        exitstatus = reconcile_cov_status(
-            sink.err(),
-            cmd.status().map(|s| s.success()).map_err(|e| e.to_string()),
-            exitstatus,
-        );
-
-        if let Some((lp, op)) = diff_paths {
-            if let Some(threshold) = cli.cov_diff_fail_under {
-                exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
-            }
-            if let Some(dst) = &cli.cov_diff_json {
-                copy_diff_cov_json(sink.err(), &op, dst);
-            }
-            let _ = std::fs::remove_file(&lp);
-            let _ = std::fs::remove_file(&op);
-        }
+    if let Some(e) = deferred_err {
+        return Err(e);
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.

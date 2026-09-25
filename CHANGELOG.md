@@ -6,19 +6,21 @@ between 0.0.x releases and are listed here.
 ## Unreleased
 
 - **`--doctor` coverage-waste section: slow tests that add no unique coverage.**
-  When a per-test coverage index is warm (any prior `--cov --cov-context=test`
-  run), `--doctor` now flags slow tests whose every executed line is also
-  executed by another test, so they can be deleted or merged without dropping a
-  covered line. Reports the reclaimable time, the count, and per-test detail
+  When the doctor run itself collects per-test coverage
+  (`--doctor --cov --cov-context=test`), `--doctor` now flags slow passing tests
+  whose every executed product line is also executed by another kept passing
+  test, so they can all be deleted or merged together without dropping a
+  covered line (duplicates are picked slowest first). An index from an earlier
+  run or a cache is never used. Reports the reclaimable time, the count, and per-test detail
   (lines covered, distinct other tests sharing them). Emitted in the terminal
   report, the markdown report, and `--doctor-json` as `coverage_waste` (doctor
-  JSON `schema` bumped to `3`). Silent when no coverage index is present.
+  JSON `schema` bumped to `3`). Silent without this run's coverage index.
 - **`--changed` now reports coverage-map health (test impact analysis).**
   `--changed` has been coverage-aware since 0.4.0 (a warm
   `.rstest_cache/coverage_index.json` maps changed lines to the exact covering
   tests); it now makes that observable. With a warm map the selection banner
-  shows the savings ratio — `N changed file(s) -> M of K mapped test target(s)
-  affected`. With a **cold** map and a changed non-test source file — exactly
+  shows the savings ratio — `N changed file(s) -> M of K mapped test(s)
+  affected`, with any whole-file fallback targets counted separately. With a **cold** map and a changed non-test source file — exactly
   where coverage precision would have narrowed the set — it prints a one-line
   hint that it fell back to the import graph and that a prior
   `--cov --cov-context=test` run enables coverage-precise selection. No new
