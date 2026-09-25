@@ -11,6 +11,7 @@ mod config;
 mod coverage_skip;
 mod discover;
 mod doctor;
+mod explain;
 mod incremental;
 mod migrate;
 mod mono;
@@ -20,6 +21,8 @@ mod run;
 mod scheduling;
 mod select;
 mod shardverify;
+#[cfg(test)]
+mod test_env;
 mod text;
 mod time;
 mod vendor;

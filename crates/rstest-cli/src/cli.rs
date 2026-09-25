@@ -29,6 +29,13 @@ pub(crate) enum Command {
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
 
+    /// Auto parallel-safety audit: run the suite under -n auto (repeat with
+    /// `--audit-repeat` to catch probabilistic flakes), diff against the -n 0
+    /// oracle, and print the tests that fail ONLY in parallel with a
+    /// ready-to-paste `@pytest.mark.serial` fix-list. Exits non-zero on any
+    /// parallel-only failure. `--audit-json` writes the findings for CI.
+    Audit,
+
     /// Order-dependency bisect: for a test that fails only when run after some
     /// other test, delta-debug the predecessor set at -n 0 to the minimal set of
     /// earlier tests that reproduce the failure — the polluter(s). Prints the
@@ -71,6 +78,21 @@ pub(crate) enum Command {
         /// The per-shard report-json files (one per shard, in any order).
         #[arg(value_name = "REPORT_JSON", required = true, num_args = 1..)]
         reports: Vec<PathBuf>,
+    },
+
+    /// Print one test's dossier from the caches without running anything:
+    /// last recorded duration, flake/fail history, last-green outcome, and the
+    /// coverage footprint (files it covered). Merges `durations.json`,
+    /// `flakes.json`, `incremental_outcomes.json`, and `coverage_index.json`
+    /// for the given nodeid. Reads only cache files, so it needs no interpreter.
+    Explain {
+        /// The test nodeid to explain, e.g. `tests/test_x.py::test_y`.
+        #[arg(value_name = "NODEID", required = true)]
+        nodeid: String,
+        /// Emit the dossier as JSON (schema-stamped) to stdout for tooling,
+        /// instead of the human-readable report.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -145,6 +167,16 @@ pub struct Cli {
     /// the exit code, so CI can gate on NEW issues while tolerating known ones.
     #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
+
+    /// Write the `audit` findings as JSON (stable, versioned schema) for CI
+    /// gating. Used with the `audit` subcommand.
+    #[arg(long, global = true)]
+    pub(crate) audit_json: Option<PathBuf>,
+
+    /// How many times `audit` repeats the `-n auto` run; a parallel flake is
+    /// probabilistic, so more repeats catch more of them. [default: 1]
+    #[arg(long, global = true, value_name = "N")]
+    pub(crate) audit_repeat: Option<u32>,
 
     /// Write the `bisect` result as JSON (culprits + reproduce command) for
     /// tooling. Used with the `bisect` subcommand.
@@ -477,9 +509,11 @@ const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
     "migrate-check",
+    "audit",
     "bisect",
     "cache-compact",
     "shard-verify",
+    "explain",
 ];
 
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
@@ -499,6 +533,8 @@ const VALUE_FLAGS: &[&str] = &[
     "--cache-remote",
     "--migrate-check-json",
     "--migrate-allow",
+    "--audit-json",
+    "--audit-repeat",
     "--bisect-json",
     "--durations-regress",
     "--only-rerun",
@@ -555,12 +591,13 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
     {
         let sub = argv.next().unwrap();
-        // `shard-verify` (report-json paths) and `bisect` (a single nodeid) run
-        // no pytest session: every token after them is a clap positional, so
-        // route them all to `own` rather than forwarding non-flag tokens to the
-        // (nonexistent) session. `bisect`'s nodeid contains `::`, which the flag
-        // tables would otherwise route to the session and hide from clap.
-        let consumes_all = sub == "shard-verify" || sub == "bisect";
+        // `shard-verify` (report-json paths), `bisect` (a single nodeid) and
+        // `explain` (a nodeid) run no pytest session: every token after them is
+        // a clap positional or a subcommand-local flag, so route them all to
+        // `own` rather than forwarding non-flag tokens to the (nonexistent)
+        // session. The nodeids contain `::`, which the flag tables would
+        // otherwise route to the session and hide from clap.
+        let consumes_all = sub == "shard-verify" || sub == "bisect" || sub == "explain";
         own.push(sub);
         if consumes_all {
             own.extend(argv.by_ref());
@@ -613,6 +650,21 @@ mod tests {
         let (own, session) = split_args(v(&["shard-verify", "a.json", "b.json"]));
         assert_eq!(own, v(&["rstest", "shard-verify", "a.json", "b.json"]));
         assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn explain_routes_nodeid_and_json_to_clap() {
+        use clap::Parser;
+        // `explain` runs no session: the nodeid positional and `--json` are clap
+        // tokens, not forwarded to pytest, even though the nodeid is a non-flag.
+        let (own, session) = split_args(v(&["explain", "t/x.py::test_a", "--json"]));
+        assert_eq!(own, v(&["rstest", "explain", "t/x.py::test_a", "--json"]));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Explain { ref nodeid, json: true }) if nodeid == "t/x.py::test_a"
+        ));
     }
 
     #[test]

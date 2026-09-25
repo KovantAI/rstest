@@ -2320,10 +2320,11 @@ mod tests {
     #[test]
     fn http_real_client_reads_bearer_token_from_env() {
         // The env->Authorization mapping is pure; test it without a server.
-        std::env::set_var("RSTEST_CACHE_REMOTE_TOKEN", "sekret");
+        let held = crate::test_env::lock();
+        let _env = crate::test_env::set_var(&held, "RSTEST_CACHE_REMOTE_TOKEN", "sekret");
         let c = RealHttpClient::from_env();
         assert_eq!(c.auth.as_deref(), Some("Bearer sekret"));
-        std::env::remove_var("RSTEST_CACHE_REMOTE_TOKEN");
+        let _env = crate::test_env::remove_var(&held, "RSTEST_CACHE_REMOTE_TOKEN");
         assert_eq!(RealHttpClient::from_env().auth, None);
     }
 
@@ -2607,9 +2608,10 @@ mod tests {
             }
         });
         // Token set => with_auth attaches Authorization.
-        std::env::set_var("RSTEST_CACHE_REMOTE_TOKEN", "tok");
+        let held = crate::test_env::lock();
+        let token = crate::test_env::set_var(&held, "RSTEST_CACHE_REMOTE_TOKEN", "tok");
         let c = RealHttpClient::from_env();
-        std::env::remove_var("RSTEST_CACHE_REMOTE_TOKEN");
+        drop(token);
         let base = format!("http://{addr}");
         let g = c.get(&format!("{base}/base.json")).unwrap();
         assert_eq!(g.status, 200);

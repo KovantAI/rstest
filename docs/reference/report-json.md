@@ -444,7 +444,7 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `nodeid` | string | the failing test |
-| `verdict` | string | `NOT PARALLEL-SPECIFIC` / `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` |
+| `verdict` | string | `NOT PARALLEL-SPECIFIC` / `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` / `INCONCLUSIVE` |
 | `why` | string | the evidence behind the verdict |
 | `fix` | string | the recommended fix plus rstest stopgap |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |

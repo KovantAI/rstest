@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use super::bisect::MAXFAIL_LIFT;
 use super::classify::{
     bisect_polluter, classify, classify_failures, split_param, Kind, Polluter, Verdict,
 };
@@ -125,14 +126,20 @@ pub fn run_migrate_check(
 
     // Phase 2: run -n auto and classify any parallel-only failures.
     sink.warn("rstest migrate-check: running -n auto to check parallel behaviour…");
-    let par = run_session(python, &[], args)?;
+    // Lift -x/--maxfail so the parallel pass covers the whole suite (see audit).
+    let par_args: Vec<String> = args
+        .iter()
+        .cloned()
+        .chain([MAXFAIL_LIFT.to_string()])
+        .collect();
+    let par = run_session(python, &[], &par_args)?;
     if par.is_empty() {
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
         );
         return finish(false, serde_json::json!({ "ran": false }), 1);
     }
-    let verdicts = classify_failures(python, args, &par, sink)?;
+    let verdicts = classify_failures(python, args, &par, 1, sink)?;
     if verdicts.is_empty() {
         sink.out_line(&format!(
             "PARALLEL: ready — {} tests pass at -n auto.",

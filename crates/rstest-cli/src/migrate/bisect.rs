@@ -80,7 +80,7 @@ fn needs_fresh_cache(order_flags: &[String]) -> bool {
 /// is pinned back to what the collection had: the loaded config's directory,
 /// else the rootdir (never the stand-in's temp dir, which would let conftest
 /// lookup wander the whole temp tree, seconds per run).
-fn child_pins(rootdir: &Path, inifile: &Path, confcutdir: &Path) -> Vec<String> {
+pub(super) fn child_pins(rootdir: &Path, inifile: &Path, confcutdir: &Path) -> Vec<String> {
     vec![
         "--rootdir".into(),
         rootdir.display().to_string(),
@@ -94,10 +94,16 @@ fn child_pins(rootdir: &Path, inifile: &Path, confcutdir: &Path) -> Vec<String> 
 /// Lifts `-x`/`--maxfail`, which would stop a run at an unrelated earlier
 /// failure before the victim runs. The last `--maxfail` wins, so this goes
 /// after `addopts` and after the user's own args alike.
-const MAXFAIL_LIFT: &str = "--maxfail=0";
+pub(super) const MAXFAIL_LIFT: &str = "--maxfail=0";
 
 /// A temp directory removed (with its contents) on drop.
-struct TempDir(PathBuf);
+pub(super) struct TempDir(PathBuf);
+
+impl TempDir {
+    pub(super) fn path(&self) -> &Path {
+        &self.0
+    }
+}
 
 impl Drop for TempDir {
     fn drop(&mut self) {
@@ -105,9 +111,10 @@ impl Drop for TempDir {
     }
 }
 
-/// bisect's private scratch directory, removed when the bisect ends: it holds
-/// the sessions' cache (`cache/`) and, when needed, the stand-in config.
-fn workdir() -> Result<TempDir> {
+/// A private scratch directory, removed when dropped. bisect keeps the
+/// sessions' cache (`cache/`) and, when needed, the stand-in config there;
+/// the parallel classifier uses it for the stand-in config only.
+pub(super) fn workdir() -> Result<TempDir> {
     let dir = std::env::temp_dir().join(format!(
         "rstest-bisect-{}-{}",
         std::process::id(),
@@ -122,7 +129,7 @@ fn workdir() -> Result<TempDir> {
 /// up a nested one. The stand-in gets a directory of its own, so nothing
 /// unrelated sits beside a config pytest loads (the conftest cutoff is pinned
 /// separately, see [`child_pins`]).
-fn pinned_inifile(inifile: Option<&str>, work: &Path) -> Result<PathBuf> {
+pub(super) fn pinned_inifile(inifile: Option<&str>, work: &Path) -> Result<PathBuf> {
     if let Some(ini) = inifile {
         return Ok(PathBuf::from(ini));
     }

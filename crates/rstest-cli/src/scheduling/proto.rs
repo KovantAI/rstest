@@ -476,6 +476,7 @@ mod property {
             cache_dir in prop::option::of(small_str()),
             flaky in prop::option::of(prop::collection::hash_map(small_str(), any::<u32>(), 0..4)),
             groups in prop::option::of(prop::collection::hash_map(small_str(), small_str(), 0..4)),
+            // Grouped: proptest's tuple strategies stop at 12 elements.
             (rootdir, args_source, root_args, inifile, order_flags, confcutdir) in (
                 prop::option::of(small_str()),
                 prop::option::of(small_str()),
