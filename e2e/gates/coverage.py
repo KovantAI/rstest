@@ -486,7 +486,8 @@ def gate_coverage_based_selection_changed_uses_th(g, args, binary):
     check(
         "changed: deleted test file skipped, no missing-path error",
         r.returncode == 0
-        and "no tests affected" in r.stdout
+        # warm map -> "0 of N mapped test(s) affected"; cold -> "no tests affected"
+        and ("no tests affected" in r.stdout or "0 of " in r.stdout)
         and "not found" not in (r.stdout + r.stderr)
         and "No such file" not in (r.stdout + r.stderr),
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-250:],

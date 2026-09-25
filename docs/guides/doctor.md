@@ -106,8 +106,10 @@ deciding what to split under `--dist load`.
 ### COVERAGE WASTE
 
 Slow tests that add **no unique coverage**: every line each one executes is
-also executed by some other test, so it can be deleted or merged without
-dropping a single covered line. This is the "which time is *wasted*"
+also executed by a test you keep, so the whole listed set can be deleted or
+merged without dropping a single covered line. Tests are picked slowest first,
+so of two tests covering identical lines only one is listed, and the headline
+time counts only that one. This is the "which time is *wasted*"
 counterpart to SLOWEST FILES.
 
 ```text
@@ -116,9 +118,10 @@ COVERAGE WASTE: 18.4s across 3 slow test(s) that cover no line another test does
      4.30s   88 line(s), all shared with 2 other test(s)  tests/test_api.py::test_variant_b
 ```
 
-It needs a warm per-test coverage index, so run coverage at least once with
-per-test contexts (`--cov --cov-context=test`). Without that index the
-section is simply omitted. Only tests slow enough to matter are flagged (a
+It needs a per-test coverage index written by the same run, so pass
+`--cov --cov-context=test` together with `--doctor`. An index left by an
+earlier run is ignored, because tests deleted since then would still count as
+covering lines. Without a fresh index the section is simply omitted. Only tests slow enough to matter are flagged (a
 fast redundant test frees no meaningful time when deleted).
 
 ### RESOURCE LEAKS

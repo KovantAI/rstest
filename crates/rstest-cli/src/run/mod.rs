@@ -145,9 +145,13 @@ fn apply_selection(
                 return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
-                // With a warm map, report the savings ratio (affected of mapped);
-                // cold, just the affected-target count.
-                match mapped {
+                // The savings ratio (affected of mapped) only compares like with
+                // like when every target is a mapped test id. Whole test files
+                // (a changed test file, or an import-graph fallback for files the
+                // map doesn't cover) each hold many tests, so any file target
+                // makes "X of M" understate the run; report the plain count then.
+                let all_nodeids = tests.iter().all(|t| t.to_string_lossy().contains("::"));
+                match mapped.filter(|_| all_nodeids) {
                     Some(m) => sink.warn(&format!(
                         "rstest: {} changed file(s) -> {} of {m} mapped test target(s) affected",
                         changes.len(),

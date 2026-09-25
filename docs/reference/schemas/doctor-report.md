@@ -6,7 +6,7 @@ Source: `--doctor-json`
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `coverage_waste` | CoverageWaste or null | no | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
+| `coverage_waste` | CoverageWaste or null | no | Slow tests that can be deleted together without dropping any covered line - delete/merge candidates. `None` unless THIS run wrote a per-test coverage index (`--cov --cov-context=test` alongside `--doctor`; an index left by an earlier run is ignored as stale) and at least one test qualified. |
 | `cpu_time_seconds` | number | yes | Sum of call-phase CPU time, over tests where it was measured. |
 | `fixtures` | array of FixtureEntry | yes |  |
 | `leaks` | array of Leak | no | Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
@@ -23,13 +23,13 @@ Source: `--doctor-json`
 
 ### CoverageWaste
 
-Slow tests that add no unique coverage: every line each one executes is also executed by some other test, so it can be deleted or merged without dropping any covered line. Pure suite bloat on the time axis.
+Slow tests that add no unique coverage: chosen greedily (slowest first) so that deleting ALL of them together still leaves every covered line covered by some kept test. Of two tests covering identical lines, only one is listed. Pure suite bloat on the time axis.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `redundant_tests` | integer | yes | Count of redundant slow tests found (`tests` shows the slowest of them). |
+| `redundant_tests` | integer | yes | Size of the deletable set (`tests` shows the slowest of them). |
 | `tests` | array of WasteTest | yes | The slowest redundant tests, worst first (capped). |
-| `wasted_seconds` | number | yes | Sum of the durations of every redundant slow test (not just the shown ones) - the time reclaimable by pruning them. |
+| `wasted_seconds` | number | yes | Sum of the durations of the whole deletable set (not just the shown ones) - the time reclaimable by pruning them together. |
 
 ### FileEntry
 
@@ -106,8 +106,8 @@ Realized parallel speedup measured from an actual run. Unlike `ParallelFloor` (a
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `also_covered_by` | integer | yes | Distinct OTHER tests that between them also cover those lines. |
-| `covered_lines` | integer | yes | Lines this test covered, all shared with at least one other test. |
+| `also_covered_by` | integer | yes | Distinct KEPT tests (not themselves in the deletable set) that between them also cover those lines. |
+| `covered_lines` | integer | yes | Product lines this test covered, all also covered by a kept test. |
 | `duration` | number | yes |  |
 | `nodeid` | string | yes |  |
 

@@ -48,6 +48,43 @@ pub fn load_coverage_index() -> Option<CoverageIndex> {
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
 }
 
+/// Identity of the on-disk coverage index file: `None` when absent, else its
+/// mtime, length and (on unix) inode. Compared before/after covtool runs to tell
+/// whether THIS run wrote the index. Equality, not an mtime-vs-clock ordering,
+/// so coarse (1-2s) filesystem timestamps and NFS server clock skew can't make a
+/// fresh index look old. covtool writes via tmp + `os.replace`, so every write
+/// is a new inode on unix even within one timestamp tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexStamp(Option<(Option<std::time::SystemTime>, u64, u64)>);
+
+pub fn coverage_index_stamp() -> IndexStamp {
+    IndexStamp(
+        std::fs::metadata(cache::file(COVERAGE_INDEX_FILE))
+            .ok()
+            .map(|m| (m.modified().ok(), m.len(), inode(&m))),
+    )
+}
+
+#[cfg(unix)]
+fn inode(m: &std::fs::Metadata) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(m)
+}
+
+#[cfg(not(unix))]
+fn inode(_: &std::fs::Metadata) -> u64 {
+    0
+}
+
+/// [`load_coverage_index`], but only when the index file was (re)written since
+/// `before` was taken - i.e. by the current run. `None` for a leftover index
+/// from an earlier run, whose test set may no longer match the suite.
+pub fn load_coverage_index_written_since(before: &IndexStamp) -> Option<CoverageIndex> {
+    let now = coverage_index_stamp();
+    (now.0.is_some() && now != *before)
+        .then(load_coverage_index)
+        .flatten()
+}
+
 /// The coverage map's health for the TIA banner: `Some(distinct nodeid count)`
 /// when a schema-current index is on disk (the denominator "X of N mapped tests
 /// impacted"), `None` when the map is cold (missing / unreadable / old schema),

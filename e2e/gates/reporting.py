@@ -376,9 +376,9 @@ def gate_doctor(g, args, binary):
     )
 
     # Coverage waste: two tests hit the same product line; one is slow and adds
-    # no unique coverage, so with a warm per-test index --doctor flags it as a
-    # delete/merge candidate. The fast, equally-redundant test is below the
-    # duration floor and must NOT appear.
+    # no unique coverage, so --doctor flags it as a delete/merge candidate from
+    # the per-test index THIS run writes (no warm-up run needed). The fast,
+    # equally-redundant test is below the duration floor and must NOT appear.
     g.write("cw/mod.py", "def f(x):\n    return x + 1\n")
     g.write(
         "cw/test_cw.py",
@@ -391,7 +391,6 @@ def gate_doctor(g, args, binary):
         "    assert f(1) == 2\n",
     )
     cov = ["--cov=.", "--cov-context=test", "--cov-report="]
-    g.run("cw", *cov)  # warm the per-test coverage index
     cwj = g.tmp / "cw.json"
     r = g.run("cw", *cov, "--doctor", "--doctor-json", str(cwj))
     check(
@@ -407,6 +406,14 @@ def gate_doctor(g, args, binary):
         cwd.get("redundant_tests", 0) >= 1
         and any("test_redundant_slow" in n for n in nodeids)
         and not any("test_thorough" in n for n in nodeids),
+        str(d.get("coverage_waste"))[:300],
+    )
+    # A later run without coverage must not reuse that (now stale) index.
+    r = g.run("cw", "--doctor", "--doctor-json", str(cwj))
+    d = json.loads(cwj.read_text(encoding="utf-8"))
+    check(
+        "doctor ignores a coverage index left by an earlier run",
+        "COVERAGE WASTE" not in r.stdout and d.get("coverage_waste") is None,
         str(d.get("coverage_waste"))[:300],
     )
 

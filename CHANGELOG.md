@@ -16,13 +16,14 @@ between 0.0.x releases and are listed here.
   from typed structs with unchanged bytes. A golden test enforces schema
   freshness (`RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`).
 - **`--doctor` coverage-waste section: slow tests that add no unique coverage.**
-  When a per-test coverage index is warm (any prior `--cov --cov-context=test`
-  run), `--doctor` now flags slow tests whose every executed line is also
-  executed by another test, so they can be deleted or merged without dropping a
-  covered line. Reports the reclaimable time, the count, and per-test detail
-  (lines covered, distinct other tests sharing them). Emitted in the terminal
+  When the same run writes a per-test coverage index (`--cov --cov-context=test`
+  alongside `--doctor`), `--doctor` now flags slow tests whose every executed
+  line is also executed by a kept test, so the whole set can be deleted or
+  merged without dropping a covered line. Of tests covering identical lines,
+  only one is flagged. Reports the reclaimable time, the count, and per-test detail
+  (lines covered, distinct kept tests sharing them). Emitted in the terminal
   report, the markdown report, and `--doctor-json` as `coverage_waste` (doctor
-  JSON `schema` bumped to `3`). Silent when no coverage index is present.
+  JSON `schema` bumped to `3`). Silent when this run wrote no coverage index.
 - **`--changed` now reports coverage-map health (test impact analysis).**
   `--changed` has been coverage-aware since 0.4.0 (a warm
   `.rstest_cache/coverage_index.json` maps changed lines to the exact covering

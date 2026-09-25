@@ -337,9 +337,9 @@ fn write_teamcity_flaky(w: &mut dyn Write, flaky: &[(String, u32)]) {
     }
 }
 
-/// Post-run gates and side-effects, in order: the doctor report + `--doctor-fail-on`
-/// gate, junit/html reports, merged lastfailed cache, duration-regression gate,
-/// coverage combine/report, duration+flake save, `--cache-push`, report-json,
+/// Post-run gates and side-effects, in order: junit/html reports, merged
+/// lastfailed cache, duration-regression gate, coverage combine/report, the
+/// doctor report + `--doctor-fail-on` gate, duration+flake save, `--cache-push`, report-json,
 /// the `--incremental` green-set record, and the `--fail-on-leak` gate. Returns
 /// the reconciled process exit status (starting from the pool's, raised by any
 /// gate breach).
@@ -380,60 +380,9 @@ pub(super) fn run_post_gates(
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
     warn_doctor_gate_passthrough(sink.err(), doctor_gate.is_empty(), passthrough);
-    let mut doctor_gate_failed = false;
-    if (cli.doctor
-        || cli.doctor_json.is_some()
-        || cli.doctor_md.is_some()
-        || !doctor_gate.is_empty())
-        && !passthrough
-    {
-        // The coverage-waste section needs a warm per-test index; absent (no
-        // prior `--cov --cov-context=test` run) it is simply omitted.
-        let coverage_index = crate::select::load_coverage_index();
-        let report = doctor::analyze(
-            &outcome.run,
-            &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
-            start.elapsed().as_secs_f64(),
-            n,
-            coverage_index.as_ref(),
-        );
-        // In json mode stdout is a pure NDJSON stream, so the doctor's human
-        // report would corrupt it; --doctor-json still writes to its file.
-        if cli.doctor && mode != progress::Mode::Json {
-            doctor::render(sink, &report);
-        }
-        if let Some(path) = &cli.doctor_json {
-            doctor::write_json(path, &report)?;
-        }
-        if let Some(path) = &cli.doctor_md {
-            doctor::write_markdown(path, &report)?;
-        }
-        doctor::append_ci_summary(sink, &report)?;
-        if !doctor_gate.is_empty() {
-            let gate = doctor::evaluate(&report, doctor_gate);
-            for s in &gate.skipped {
-                sink.warn(&format!("rstest: --doctor-fail-on: {s}"));
-            }
-            if gate.breaches.is_empty() {
-                sink.warn(&format!(
-                    "rstest: --doctor-fail-on: all {} condition(s) passed",
-                    doctor_gate.len()
-                ));
-            } else {
-                // stderr, not stdout: --output json/tap keep stdout a pure
-                // machine stream, and the failure block must not corrupt it
-                // (same reason the human doctor render is gated above).
-                sink.warn(&format!(
-                    "\n{}",
-                    palette.bold_red("=========== doctor gate failures ===========")
-                ));
-                for b in &gate.breaches {
-                    sink.warn(&format!("  {b}"));
-                }
-                doctor_gate_failed = true;
-            }
-        }
-    }
+    // Wall time of the test session itself, taken before coverage combine /
+    // reporting so the doctor's parallel-efficiency math excludes covtool time.
+    let wall = start.elapsed().as_secs_f64();
     write_run_reports(
         cli.junitxml.as_deref(),
         cli.html.as_deref(),
@@ -503,6 +452,9 @@ pub(super) fn run_post_gates(
     if want_diff && !has_cov && !passthrough {
         sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
     }
+    // Snapshot the index file's identity before covtool may rewrite it; the
+    // doctor uses it to tell this run's coverage index from a leftover one.
+    let index_before = select::coverage_index_stamp();
     if !passthrough && has_cov {
         sink.out_line("");
         // Diff-coverage gate: hand covtool the diff's added lines + a result
@@ -543,6 +495,65 @@ pub(super) fn run_post_gates(
             }
             let _ = std::fs::remove_file(&lp);
             let _ = std::fs::remove_file(&op);
+        }
+    }
+    // Doctor runs AFTER coverage combine so its coverage-waste section reads
+    // the index this run just wrote, not the previous run's.
+    let mut doctor_gate_failed = false;
+    if (cli.doctor
+        || cli.doctor_json.is_some()
+        || cli.doctor_md.is_some()
+        || !doctor_gate.is_empty())
+        && !passthrough
+    {
+        // The coverage-waste section needs a per-test index written by THIS
+        // run's `--cov --cov-context=test` combine above. A leftover index from
+        // an earlier run is stale (a since-deleted test still reads as a
+        // co-coverer, so a live test could look redundant), so it is ignored
+        // and the section omitted.
+        let coverage_index = crate::select::load_coverage_index_written_since(&index_before);
+        let report = doctor::analyze(
+            &outcome.run,
+            &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
+            wall,
+            n,
+            coverage_index.as_ref(),
+        );
+        // In json mode stdout is a pure NDJSON stream, so the doctor's human
+        // report would corrupt it; --doctor-json still writes to its file.
+        if cli.doctor && mode != progress::Mode::Json {
+            doctor::render(sink, &report);
+        }
+        if let Some(path) = &cli.doctor_json {
+            doctor::write_json(path, &report)?;
+        }
+        if let Some(path) = &cli.doctor_md {
+            doctor::write_markdown(path, &report)?;
+        }
+        doctor::append_ci_summary(sink, &report)?;
+        if !doctor_gate.is_empty() {
+            let gate = doctor::evaluate(&report, doctor_gate);
+            for s in &gate.skipped {
+                sink.warn(&format!("rstest: --doctor-fail-on: {s}"));
+            }
+            if gate.breaches.is_empty() {
+                sink.warn(&format!(
+                    "rstest: --doctor-fail-on: all {} condition(s) passed",
+                    doctor_gate.len()
+                ));
+            } else {
+                // stderr, not stdout: --output json/tap keep stdout a pure
+                // machine stream, and the failure block must not corrupt it
+                // (same reason the human doctor render is gated above).
+                sink.warn(&format!(
+                    "\n{}",
+                    palette.bold_red("=========== doctor gate failures ===========")
+                ));
+                for b in &gate.breaches {
+                    sink.warn(&format!("  {b}"));
+                }
+                doctor_gate_failed = true;
+            }
         }
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
