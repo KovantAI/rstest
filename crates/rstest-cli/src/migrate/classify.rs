@@ -179,29 +179,10 @@ pub(super) fn classify_failures(
     // Best effort: without a rootdir the paths stay as-is, and any test the
     // children then miss comes back INCONCLUSIVE below rather than a pass.
     let collected = super::collect_session(python, args).ok();
-    let rootdir = collected
-        .as_ref()
-        .and_then(|c| c.rootdir.as_deref())
-        .map(PathBuf::from);
     // Holds the blank stand-in config (when none was loaded) until the
     // discriminators finish.
     let work = workdir()?;
-    let mut scoped: Vec<String> = files
-        .iter()
-        .map(|f| match &rootdir {
-            Some(root) => root.join(f).display().to_string(),
-            None => f.to_string(),
-        })
-        .collect();
-    if let (Some(root), Some(c)) = (&rootdir, &collected) {
-        let ini = pinned_inifile(c.inifile.as_deref(), work.path())?;
-        let cutoff = c
-            .confcutdir
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.clone());
-        scoped.extend(child_pins(root, &ini, &cutoff));
-    }
+    let mut scoped = scoped_selection(&files, collected.as_ref(), work.path())?;
     scoped.extend_from_slice(args);
     // After the user's args and addopts (the last --maxfail wins): an `-x`
     // run stopping at an earlier failure would leave the rest missing, and so
@@ -244,6 +225,34 @@ pub(super) fn classify_failures(
         out.push((n.clone(), v));
     }
     Ok(out)
+}
+
+/// The discriminator selection for the failing `files`: anchored at the
+/// rootdir and followed by the rootdir/config/cutoff pins when the collection
+/// reported one, or the bare rootdir-relative paths when it did not. `work`
+/// holds the blank stand-in config when none was loaded.
+fn scoped_selection(
+    files: &std::collections::BTreeSet<&str>,
+    collected: Option<&super::Collected>,
+    work: &Path,
+) -> Result<Vec<String>> {
+    let Some((root, c)) =
+        collected.and_then(|c| c.rootdir.as_deref().map(|r| (PathBuf::from(r), c)))
+    else {
+        return Ok(files.iter().map(|f| f.to_string()).collect());
+    };
+    let mut scoped: Vec<String> = files
+        .iter()
+        .map(|f| root.join(f).display().to_string())
+        .collect();
+    let ini = pinned_inifile(c.inifile.as_deref(), work)?;
+    let cutoff = c
+        .confcutdir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.clone());
+    scoped.extend(child_pins(&root, &ini, &cutoff));
+    Ok(scoped)
 }
 
 /// The pure classifier decision for a test that failed under `-n auto`, given
@@ -439,6 +448,7 @@ mod tests {
             Verdict::OrderDependency,
             Verdict::WallClock,
             Verdict::Isolation,
+            Verdict::Inconclusive,
         ];
         for v in all {
             assert!(!v.title().is_empty());
@@ -448,10 +458,48 @@ mod tests {
         }
         // Titles are all distinct (they key the by-verdict grouping in check.rs).
         let titles: std::collections::HashSet<_> = all.iter().map(|v| v.title()).collect();
-        assert_eq!(titles.len(), 5);
+        assert_eq!(titles.len(), 6);
         // Spot-check the semantics carried in the advice text.
         assert!(Verdict::NotParallel.advice().0.contains("-n 0"));
         assert!(Verdict::WallClock.advice().0.contains("wait-bound"));
+        assert!(Verdict::Inconclusive.advice().1.contains("migrate-check"));
+    }
+
+    fn collected(rootdir: Option<&str>) -> super::super::Collected {
+        super::super::Collected {
+            ids: Vec::new(),
+            rootdir: rootdir.map(String::from),
+            args_source: None,
+            root_args: Vec::new(),
+            inifile: None,
+            order_flags: Vec::new(),
+            confcutdir: None,
+        }
+    }
+
+    #[test]
+    fn scoped_selection_without_a_rootdir_keeps_bare_paths() {
+        // A failed collection, or one that reported no rootdir, leaves the
+        // paths as-is and adds no pins (best effort; misses go INCONCLUSIVE).
+        let files: std::collections::BTreeSet<&str> = ["b.py", "a.py"].into();
+        let work = workdir().unwrap();
+        for c in [None, Some(collected(None))] {
+            let scoped = scoped_selection(&files, c.as_ref(), work.path()).unwrap();
+            assert_eq!(scoped, ["a.py", "b.py"]);
+        }
+    }
+
+    #[test]
+    fn scoped_selection_anchors_at_the_rootdir_and_pins_it() {
+        let files: std::collections::BTreeSet<&str> = ["tests/a.py"].into();
+        let work = workdir().unwrap();
+        let root = work.path().join("root");
+        let c = collected(Some(root.to_str().unwrap()));
+        let scoped = scoped_selection(&files, Some(&c), work.path()).unwrap();
+        assert_eq!(scoped[0], root.join("tests/a.py").display().to_string());
+        // Followed by the same pins bisect uses; the cutoff defaults to the rootdir.
+        let ini = pinned_inifile(None, work.path()).unwrap();
+        assert_eq!(scoped[1..], child_pins(&root, &ini, &root)[..]);
     }
 
     #[test]

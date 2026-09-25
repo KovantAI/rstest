@@ -199,25 +199,31 @@ pub fn run_audit(
     // failures more often the higher N goes.
     let verdicts = classify_failures(python, args, &par, runs, sink)?;
     let b = partition(&verdicts);
+
+    if let Some(path) = json_path {
+        let doc = audit_doc(par.len(), &b);
+        std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    }
+    Ok(report(par.len(), &b, sink))
+}
+
+/// Print the audit report for `tests` audited tests and return the exit code
+/// (0 = parallel-safe, 1 = at least one parallel-only failure). Pure over the
+/// buckets so every section is unit-testable without driving child sessions.
+fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
     let Buckets {
         serial,
         order,
         intrinsic,
         inconclusive,
         preexisting,
-    } = &b;
+    } = b;
     let preexisting = *preexisting;
-
-    if let Some(path) = json_path {
-        let doc = audit_doc(par.len(), &b);
-        std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
-    }
 
     sink.out_line("\n================= rstest audit =================");
     if b.parallel_safe() {
         sink.out_line(&format!(
-            "  ✓ parallel-safe: all {} tests that pass at -n 0 also pass at -n auto.",
-            par.len()
+            "  ✓ parallel-safe: all {tests} tests that pass at -n 0 also pass at -n auto."
         ));
         if preexisting > 0 {
             sink.out_line(&format!(
@@ -226,7 +232,7 @@ pub fn run_audit(
             ));
         }
         sink.out_line("================================================");
-        return Ok(0);
+        return 0;
     }
 
     if !serial.is_empty() {
@@ -315,7 +321,7 @@ pub fn run_audit(
     // Any parallel-only failure (serial-fixable, order-dependent, intrinsic or
     // inconclusive) fails the gate; pre-existing -n 0 failures do not (they are
     // not a parallel-safety issue).
-    Ok(1)
+    1
 }
 
 /// The `--audit-json` envelope.
@@ -482,6 +488,114 @@ mod tests {
         let b = partition(&[("o.py::order".to_string(), Verdict::OrderDependency)]);
         assert!(b.serial.is_empty());
         assert!(!b.parallel_safe());
+    }
+
+    fn ids(prefix: &str, n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{prefix}_{i}.py::t")).collect()
+    }
+
+    fn render(tests: usize, b: &Buckets) -> (i32, String) {
+        let (mut sink, cap) = Sink::captured();
+        let code = report(tests, b, &mut sink);
+        (code, cap.out())
+    }
+
+    #[test]
+    fn report_parallel_safe_exits_zero_and_notes_preexisting() {
+        let b = partition(&[("b.py::bug".to_string(), Verdict::NotParallel)]);
+        let (code, out) = render(3, &b);
+        assert_eq!(code, 0);
+        assert!(out.contains("parallel-safe: all 3 tests"), "{out}");
+        assert!(out.contains("1 test(s) already fail at -n 0"), "{out}");
+        assert!(!out.contains("not listed"), "{out}");
+    }
+
+    #[test]
+    fn report_serial_candidates_print_fix_list_and_one_fix_per_verdict() {
+        let b = partition(&[
+            ("z.py::iso".to_string(), Verdict::Isolation),
+            ("y.py::iso".to_string(), Verdict::Isolation),
+            ("m.py::wall".to_string(), Verdict::WallClock),
+        ]);
+        let (code, out) = render(5, &b);
+        assert_eq!(code, 1);
+        assert!(
+            out.contains("3 test(s) pass serially but fail under -n auto"),
+            "{out}"
+        );
+        assert!(
+            out.contains("    z.py::iso   [ISOLATION / CO-LOCATION]"),
+            "{out}"
+        );
+        assert!(
+            out.contains("    m.py::wall   [WALL-CLOCK / LOAD-SENSITIVE]"),
+            "{out}"
+        );
+        // The conftest block is indented for the terminal.
+        assert!(out.contains("    _RSTEST_SERIAL = {\n"), "{out}");
+        assert!(
+            out.contains("already defines pytest_collection_modifyitems"),
+            "{out}"
+        );
+        assert!(out.contains("Serial is a STOPGAP"), "{out}");
+        // Two isolation tests, but the fix for that verdict prints once.
+        let iso_fix = format!(
+            "    {}: {}",
+            Verdict::Isolation.title(),
+            Verdict::Isolation.advice().1
+        );
+        assert_eq!(out.matches(&iso_fix).count(), 1, "{out}");
+        assert!(out.contains(&format!(
+            "    {}: {}",
+            Verdict::WallClock.title(),
+            Verdict::WallClock.advice().1
+        )));
+        assert!(!out.contains("ORDER DEPENDENT"), "{out}");
+        assert!(!out.contains("INCONCLUSIVE"), "{out}");
+    }
+
+    #[test]
+    fn report_truncates_long_order_and_inconclusive_lists() {
+        let b = Buckets {
+            serial: Vec::new(),
+            order: ids("o", 9),
+            intrinsic: Vec::new(),
+            inconclusive: ids("q", 10),
+            preexisting: 2,
+        };
+        let (code, out) = render(30, &b);
+        assert_eq!(code, 1);
+        assert!(out.contains("9 test(s) are ORDER DEPENDENT"), "{out}");
+        assert!(out.contains("    o_7.py::t\n"), "{out}");
+        assert!(!out.contains("o_8.py::t"), "{out}");
+        assert!(out.contains("    … and 1 more"), "{out}");
+        assert!(out.contains(&format!("  Fix: {}", Verdict::OrderDependency.advice().1)));
+        assert!(out.contains("10 test(s) are INCONCLUSIVE"), "{out}");
+        assert!(out.contains("    q_7.py::t\n"), "{out}");
+        assert!(!out.contains("q_8.py::t"), "{out}");
+        assert!(out.contains("    … and 2 more"), "{out}");
+        assert!(out.contains(&format!("  Fix: {}", Verdict::Inconclusive.advice().1)));
+        assert!(out.contains("2 test(s) already fail at -n 0") && out.contains("not listed"));
+        // No serial candidates: no fix-list.
+        assert!(!out.contains("_RSTEST_SERIAL"), "{out}");
+    }
+
+    #[test]
+    fn report_short_lists_have_no_more_tail() {
+        let b = Buckets {
+            serial: Vec::new(),
+            order: ids("o", 8),
+            intrinsic: ids("f", 8),
+            inconclusive: ids("q", 8),
+            preexisting: 0,
+        };
+        let (code, out) = render(24, &b);
+        assert_eq!(code, 1);
+        assert!(
+            out.contains("o_7.py::t") && out.contains("f_7.py::t") && out.contains("q_7.py::t")
+        );
+        assert!(!out.contains("more"), "{out}");
+        assert!(!out.contains("pre-existing"), "{out}");
     }
 
     #[test]

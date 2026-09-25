@@ -254,3 +254,83 @@ fn refused_run_exits_two() {
     assert!(out.contains("produced no run"), "{out}");
     assert!(out.contains("rstest migrate-check"), "{out}");
 }
+
+#[test]
+fn empty_selection_is_clean_and_writes_json() {
+    // A -k that matches nothing: nothing selected is nothing unsafe (exit 0),
+    // but the report says so and the json records a run over zero tests.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("empty");
+    std::fs::write(dir.join("test_one.py"), "def test_a():\n    assert True\n").unwrap();
+    let jpath = dir.join("audit.json");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &[
+            "audit",
+            "--audit-json",
+            jpath.to_str().unwrap(),
+            "-k",
+            "no_such_test",
+        ],
+    );
+    let doc = read_json(&jpath);
+    // Without --audit-json the report is the same and nothing is written.
+    std::fs::remove_file(&jpath).unwrap();
+    let (plain_code, plain_out) = run(&venv, &dir, &["audit", "-k", "no_such_test"]);
+    let wrote = jpath.exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "an empty selection should not fail audit\n{out}");
+    assert_eq!(plain_code, 0, "{plain_out}");
+    assert!(plain_out.contains("no tests were selected"), "{plain_out}");
+    assert!(!wrote);
+    assert!(out.contains("no tests were selected"), "{out}");
+    assert_eq!(doc["ran"], true);
+    assert_eq!(doc["parallel_safe"], true);
+    assert_eq!(doc["tests"], 0);
+}
+
+#[test]
+fn test_missing_from_serial_run_is_inconclusive() {
+    // Defined only inside a worker pool, so it fails under -n auto but never
+    // collects at -n 0: no serial evidence, so INCONCLUSIVE (and it fails the
+    // gate) rather than being read as a serial pass.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("ghost");
+    std::fs::write(
+        dir.join("test_ghost.py"),
+        "import os\n\
+         \n\
+         if 'RSTEST_WORKER_ID' in os.environ:\n\
+         \x20   def test_ghost():\n\
+         \x20       assert False\n\
+         \n\
+         def test_ok():\n\
+         \x20   assert True\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("test_other.py"),
+        "def test_x():\n    assert True\n",
+    )
+    .unwrap();
+    let jpath = dir.join("audit.json");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &["audit", "--audit-json", jpath.to_str().unwrap()],
+    );
+    let doc = read_json(&jpath);
+    let _ = std::fs::remove_dir_all(&dir);
+    // A box that can't run two workers never defines the test.
+    if !out.contains("parallel failure(s)") {
+        return;
+    }
+    assert_eq!(code, 1, "an inconclusive test should fail audit\n{out}");
+    assert!(out.contains("1 test(s) are INCONCLUSIVE"), "{out}");
+    assert!(out.contains("test_ghost.py::test_ghost"), "{out}");
+    assert!(!out.contains("_RSTEST_SERIAL"), "{out}");
+    assert_eq!(doc["parallel_safe"], false);
+    assert_eq!(doc["inconclusive"][0], "test_ghost.py::test_ghost");
+    assert_eq!(doc["serial_candidates"].as_array().unwrap().len(), 0);
+}
