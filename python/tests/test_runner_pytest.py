@@ -210,3 +210,79 @@ def test_contained_reports_base_exception_as_collect_error():
     assert kind == "collect_error"
     assert payload["path"] == "<session: BaseException>"
     assert "config-time boom" in payload["longrepr"]
+
+
+def test_pool_coverage_args_standalone_untouched(monkeypatch):
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    assert runner_pytest._pool_coverage_args(["--cov=."]) == ["--cov=."]
+
+
+def test_pool_coverage_args_without_cov_untouched(monkeypatch):
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw1")
+    assert runner_pytest._pool_coverage_args(["t.py"]) == ["t.py"]
+
+
+def test_pool_coverage_args_honors_user_append_and_no_cov(monkeypatch):
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw0")
+    erased: list[str] = []
+    monkeypatch.setattr(runner_pytest, "_erase_coverage_data", erased.append)
+    for args in (["--cov=.", "--cov-append"], ["--cov", "--no-cov"]):
+        assert runner_pytest._pool_coverage_args(args) == args
+    assert erased == []
+
+
+def test_pool_coverage_args_only_gw0_erases(monkeypatch):
+    # Every worker skips pytest-cov's own erase; gw0 alone erases up front.
+    erased: list[str] = []
+    monkeypatch.setattr(runner_pytest, "_erase_coverage_data", erased.append)
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw1")
+    assert runner_pytest._pool_coverage_args(["--cov=."]) == ["--cov-append", "--cov=."]
+    assert erased == []
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw0")
+    args = ["--cov=.", "--cov-config", "setup.cfg"]
+    assert runner_pytest._pool_coverage_args(args) == ["--cov-append", *args]
+    assert erased == ["setup.cfg"]
+
+
+def test_cov_config_forms():
+    assert runner_pytest._cov_config(["--cov=."]) == ".coveragerc"
+    assert runner_pytest._cov_config(["--cov-config=tox.ini"]) == "tox.ini"
+    assert runner_pytest._cov_config(["--cov-config", "setup.cfg"]) == "setup.cfg"
+
+
+def test_erase_coverage_data_retries_transient_lock(monkeypatch, tmp_path):
+    import coverage
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    calls = []
+
+    def flaky_erase(self):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(coverage.Coverage, "erase", flaky_erase)
+    runner_pytest._erase_coverage_data(".coveragerc")
+    assert len(calls) == 3
+
+
+def test_erase_coverage_data_warns_when_lock_persists(monkeypatch, tmp_path, capsys):
+    import coverage
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    def locked(self):
+        raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(coverage.Coverage, "erase", locked)
+    runner_pytest._erase_coverage_data(".coveragerc")
+    assert "could not erase stale coverage data" in capsys.readouterr().err
+
+
+def test_erase_coverage_data_removes_stale_file(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".coverage").write_bytes(b"stale")
+    runner_pytest._erase_coverage_data(".coveragerc")
+    assert not (tmp_path / ".coverage").exists()
