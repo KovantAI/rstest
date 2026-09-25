@@ -277,6 +277,15 @@ fn build_worker_command(
         .stdout(match io {
             Stdio::Null => std::process::Stdio::null(),
             Stdio::Inherit => std::process::Stdio::inherit(),
+        })
+        // stdin is only the worker's in passthrough (pdb, `input()` under
+        // -s). Elsewhere it must not inherit: `--watch` keeps a thread
+        // blocked reading stdin for `q`, and on Windows a pending synchronous
+        // read on a pipe blocks the child interpreter's startup probe of fd 0,
+        // hanging every worker.
+        .stdin(match io {
+            Stdio::Null => std::process::Stdio::null(),
+            Stdio::Inherit => std::process::Stdio::inherit(),
         });
     if env.doctor {
         command.env("RSTEST_DOCTOR", "1");
