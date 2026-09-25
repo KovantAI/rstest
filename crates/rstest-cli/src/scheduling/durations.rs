@@ -135,6 +135,16 @@ fn relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
     Some(rel)
 }
 
+/// A relative path with `/` separators on every platform, so a cache written
+/// on Windows still resolves when restored on a POSIX runner (and vice versa;
+/// Windows accepts `/` when joining).
+fn slash_joined(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// What the run saw at collection time: pytest's own rootdir and the content
 /// hash of each collected test file, taken as the file was collected. `save`
 /// tags this run's timings with these rather than re-reading the files
@@ -217,8 +227,11 @@ fn persist_to(
                     Some(h) => h.clone(),
                     None => content_hash(&abs),
                 };
-                let src = relative_to(&abs, base).unwrap_or(abs);
-                hash.map(|hash| (src.to_string_lossy().into_owned(), hash))
+                let src = match relative_to(&abs, base) {
+                    Some(rel) => slash_joined(&rel),
+                    None => abs.to_string_lossy().into_owned(),
+                };
+                hash.map(|hash| (src, hash))
             }
             None => known.get(&id).and_then(|src| {
                 let hash = content_hash(&base.join(src))?;
@@ -797,8 +810,16 @@ mod tests {
         // Matching hash survives.
         assert_eq!(fresh(one(), &root).len(), 1);
 
-        // Same-size edit: only the content hash catches it.
+        // Same-size edit: only the content hash catches it. Bump the mtime so
+        // the (len, mtime) memo sees the edit even where the clock tick is
+        // coarser than the gap between the two writes (Windows).
         std::fs::write(&file, b"def test_a(): pas5\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
         assert!(fresh(one(), &root).is_empty());
 
         // Deleted file -> dropped.
