@@ -395,6 +395,7 @@ def test_sessionfinish_emits_doctor_fixtures(monkeypatch):
             "constant": False,
             "repeated": False,
             "redundant": 0.0,
+            "fingerprint": None,
         }
     ]
 
@@ -412,12 +413,16 @@ def test_sessionfinish_flags_constant_function_fixture(monkeypatch):
     }
     p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
     fixtures = next(pl for k, pl in p._conn.sent if k == "doctor_fixtures")["fixtures"]
-    got = {f["name"]: (f["constant"], f["repeated"], f["redundant"]) for f in fixtures}
-    # cfg: 4 calls, mean 0.5s => 3 redundant setups = 1.5s.
+    got = {
+        f["name"]: (f["constant"], f["repeated"], f["redundant"], f["fingerprint"])
+        for f in fixtures
+    }
+    # cfg: 4 calls, mean 0.5s => 3 redundant setups = 1.5s. The fingerprint
+    # ships only for constant fixtures, for the CLI's cross-worker check.
     assert got == {
-        "cfg": (True, True, 1.5),
-        "varies": (False, False, 0.0),
-        "once": (True, False, 0.0),
+        "cfg": (True, True, 1.5, "fp"),
+        "varies": (False, False, 0.0, None),
+        "once": (True, False, 0.0, "fp"),
     }
 
 
@@ -644,6 +649,41 @@ def test_fixture_setup_requires_session_scoped_dependencies(monkeypatch, dep_sco
         )
         _run_setup(p, fd, request=request)
     assert p._fixtures[("env", "function")][2] is expected
+
+
+def test_fixture_setup_dynamic_narrower_dependency_taints_parent(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # `def cfg_name(request): request.getfixturevalue("tmp_path"); return "c.ini"`:
+    # the nested setup runs while cfg_name's hook frame is open.
+    for _ in range(2):
+        outer = SimpleNamespace(
+            argname="cfg_name", scope="function", cached_result=("c.ini", 0, None)
+        )
+        inner = SimpleNamespace(argname="tmp_path", scope="function", cached_result=("/t", 0, None))
+        g_outer = p.pytest_fixture_setup(outer, request=None)
+        next(g_outer)
+        _run_setup(p, inner)
+        with pytest.raises(StopIteration):
+            g_outer.send("c.ini")
+    assert p._fixtures[("cfg_name", "function")][2] is False
+    assert p._setup_stack == []
+
+
+def test_fixture_setup_dynamic_session_dependency_keeps_parent(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    for _ in range(2):
+        outer = SimpleNamespace(
+            argname="url", scope="function", cached_result=("http://x", 0, None)
+        )
+        inner = SimpleNamespace(argname="server", scope="session", cached_result=("x", 0, None))
+        g_outer = p.pytest_fixture_setup(outer, request=None)
+        next(g_outer)
+        _run_setup(p, inner)
+        with pytest.raises(StopIteration):
+            g_outer.send("http://x")
+    assert p._fixtures[("url", "function")][2] is True
 
 
 def test_fixture_setup_failed_setup_is_not_constant(monkeypatch):

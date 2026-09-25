@@ -132,6 +132,11 @@ pub struct FixtureStat {
     /// spread over the pool or pinned to one worker by `--dist loadfile`.
     #[serde(default)]
     pub redundant: f64,
+    /// Digest of the constant value (`None` unless `constant`). Merged
+    /// sessions that report different fingerprints are not constant: the
+    /// value depends on which tests a worker got, not just on the fixture.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -444,8 +449,9 @@ mod property {
             count in any::<u64>(), total in finite_f64(),
             constant in any::<bool>(), repeated in any::<bool>(),
             redundant in finite_f64(),
+            fingerprint in proptest::option::of(small_str()),
         ) -> FixtureStat {
-            FixtureStat { name, scope, count, total, constant, repeated, redundant }
+            FixtureStat { name, scope, count, total, constant, repeated, redundant, fingerprint }
         }
     }
 

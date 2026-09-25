@@ -807,7 +807,9 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
                 // A promotion candidate only if constant in EVERY worker that
                 // ran it: one worker seeing a varying value vetoes the advice.
                 // Workers that ran it once report `true`, so they don't veto.
-                m.constant &= f.constant;
+                // Each worker only compares its own calls, so also require
+                // every worker to have seen the same value.
+                m.constant &= f.constant && m.fingerprint == f.fingerprint;
                 m.repeated |= f.repeated;
                 m.redundant = m.redundant.max(f.redundant);
             })
@@ -1002,6 +1004,7 @@ mod tests {
             constant,
             repeated: false,
             redundant: 0.0,
+            fingerprint: constant.then(|| "v".to_string()),
         };
         let merged = merge_fixtures(vec![
             stat("db", "session", 2, 1.0, false),
@@ -1041,6 +1044,7 @@ mod tests {
             constant,
             repeated,
             redundant,
+            fingerprint: constant.then(|| "v".to_string()),
         };
         // `--dist loadfile`: one session ran it 12x (11s redundant), others
         // never touched it. The saving is that session's, not diluted by -n.
@@ -1061,6 +1065,15 @@ mod tests {
             stat(6, 0.6, true, true, 0.5),
         ]);
         assert!((spread[0].redundant - 0.9).abs() < 1e-9);
+
+        // Constant within each worker but a different value per worker (e.g.
+        // derived from request.module under --dist loadfile): not constant.
+        let mut a = stat(3, 0.3, true, true, 0.2);
+        let mut b = stat(3, 0.3, true, true, 0.2);
+        a.fingerprint = Some("mod_a".into());
+        b.fingerprint = Some("mod_b".into());
+        let per_worker = merge_fixtures(vec![a, b]);
+        assert!(!per_worker[0].constant);
     }
 
     fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {

@@ -41,6 +41,9 @@ class FixtureStat(TypedDict):
     repeated: bool
     # Setup seconds session scope would skip in this session: (count-1) * mean.
     redundant: float
+    # Digest of the constant value (None unless `constant`), compared across
+    # workers so a per-worker-varying value is not reported constant.
+    fingerprint: str | None
 
 
 class _ReportRequired(TypedDict):

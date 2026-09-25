@@ -197,6 +197,10 @@ class StreamPlugin:
         # only function-scoped fixtures whose value fingerprints identically on
         # every call stay `all_constant`.
         self._fixtures: dict[tuple[str, str], list[Any]] = {}
+        # Doctor: one frame per fixture setup in progress, innermost last. A
+        # frame is [tainted]; a narrower-than-session setup starting inside it
+        # (request.getfixturevalue in the body) taints every enclosing frame.
+        self._setup_stack: list[list[bool]] = []
         # (when, category, message, filename, lineno) -> count; aggregated
         # because big suites emit thousands of duplicate warnings.
         self._warnings: dict[tuple[Any, ...], int] = {}
@@ -575,10 +579,18 @@ class StreamPlugin:
 
         fins = getattr(fixturedef, "_finalizers", None)
         fins_before = len(fins) if fins is not None else None
+        # Declared argnames are set up before this hook runs, so anything that
+        # starts while a frame is open was fetched dynamically from its body.
+        if fixturedef.scope != "session":
+            for frame in self._setup_stack:
+                frame[0] = True
+        frame = [False]
+        self._setup_stack.append(frame)
         t0 = time.perf_counter()
         try:
             return (yield)
         finally:
+            self._setup_stack.pop()
             key = (fixturedef.argname, fixturedef.scope)
             entry = self._fixtures.setdefault(key, [0, 0.0, True, _UNSET])
             entry[0] += 1
@@ -588,7 +600,7 @@ class StreamPlugin:
             if fixturedef.scope != "function":
                 entry[2] = False
             elif entry[2]:
-                ok = _promotable_setup(fixturedef, request, fins_before)
+                ok = not frame[0] and _promotable_setup(fixturedef, request, fins_before)
                 fp = _fixture_fingerprint(fixturedef.cached_result[0]) if ok else None
                 if fp is None:
                     entry[2] = False
@@ -643,8 +655,13 @@ class StreamPlugin:
                     # Setup seconds session scope would have skipped in this
                     # session: every call after the first.
                     "redundant": (c - 1) * t / c if cand and c >= 2 else 0.0,
+                    # The value itself, so the CLI can veto a fixture whose
+                    # value differs between workers (e.g. derived from
+                    # request.module under --dist loadfile). Deterministic
+                    # across processes: a digest of builtin values only.
+                    "fingerprint": fp if cand else None,
                 }
-                for (name, scope), (c, t, const, _fp) in self._fixtures.items()
+                for (name, scope), (c, t, const, fp) in self._fixtures.items()
             ]
             self._conn.send("doctor_fixtures", {"fixtures": fixtures})
 

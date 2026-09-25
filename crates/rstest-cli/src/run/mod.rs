@@ -2482,6 +2482,7 @@ mod tests {
                     constant: false,
                     repeated: false,
                     redundant: 0.0,
+                    fingerprint: None,
                 }]
             }),
             None

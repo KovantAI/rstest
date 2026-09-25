@@ -140,8 +140,12 @@ flagged:
 - a fixture with per-test teardown: a `yield` fixture, or one that calls
   `request.addfinalizer`;
 - a fixture that depends on anything narrower than session scope
-  (`monkeypatch`, `tmp_path`, a per-test database): promoting it would
-  raise `ScopeMismatch`, and its per-test effects are the point;
+  (`monkeypatch`, `tmp_path`, a per-test database), whether as an argument
+  or fetched with `request.getfixturevalue(...)` in its body: promoting it
+  would raise `ScopeMismatch`, and its per-test effects are the point;
+- a fixture that returned a different value in different workers (say,
+  one built from `request.module` under `--dist loadfile`): the value
+  depends on which tests a worker got;
 - a fixture whose setup failed or skipped;
 - a `@pytest.mark.parametrize` argument, which pytest serves through an
   internal fixture there is nothing to promote.
@@ -150,7 +154,10 @@ So a fixture returning a settings object or a key is not suggested even
 when sharing it would be fine; the advisor only speaks when it is sure
 about the value. It still can't see side effects that leave no trace
 (writing a file, setting a global), so treat it as *advice* and check the
-fixture body before promoting.
+fixture body before promoting. One known gap: a narrower fixture fetched
+with `request.getfixturevalue(...)` is only noticed when that call actually
+sets it up, not when the test had already set it up and pytest hands back
+the cached value.
 
 ### SLOWEST FILES
 

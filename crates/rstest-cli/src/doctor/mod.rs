@@ -558,6 +558,7 @@ mod tests {
             constant,
             repeated: redundant > 0.0,
             redundant,
+            fingerprint: None,
         }
     }
 
