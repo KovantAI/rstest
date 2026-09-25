@@ -454,7 +454,7 @@ pub(super) fn run_post_gates(
     let mut duration_regressions = 0usize;
     if let Some(ratio) = cli.durations_regress {
         validate_regress_ratio(ratio)?;
-        let baseline = durations::load();
+        let baseline = durations::load_baseline();
         if baseline.is_empty() {
             sink.warn(
                 "rstest: --durations-regress: no duration baseline yet \
@@ -544,7 +544,7 @@ pub(super) fn run_post_gates(
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
-        durations::save(&outcome.run);
+        durations::save(&outcome.run, &outcome.sources);
         // Whole-suite wall (fixtures included) for the monorepo planner: a
         // fixture-bound project has near-zero call time in durations.json but
         // real elapsed cost here, so weighting by call time alone starves it
@@ -1591,6 +1591,7 @@ mod tests {
             exitstatus: 0,
             collection_hash: None,
             collection_size: 0,
+            sources: Default::default(),
         };
         let (mut sink, _cap) = Sink::captured();
         let stream = sink.attach_captured_stream();

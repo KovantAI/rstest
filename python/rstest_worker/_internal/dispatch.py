@@ -205,6 +205,9 @@ class LazyDispatchPlugin(StreamPlugin):
         payload = {}
         if session.config.cache is not None:
             payload["cache_dir"] = str(session.config.cache._cachedir)
+        rootpath = getattr(session.config, "rootpath", None)
+        if rootpath is not None:
+            payload["rootdir"] = str(rootpath)
         self._conn.send("lazy_ready", payload)
         return True
 

@@ -315,11 +315,11 @@ def test_lazy_collection_announces_ready_and_short_circuits():
     session = SimpleNamespace(
         testscollected=1,
         items=[1],
-        config=SimpleNamespace(cache=SimpleNamespace(_cachedir="/c")),
+        config=SimpleNamespace(cache=SimpleNamespace(_cachedir="/c"), rootpath="/r"),
     )
     assert LazyDispatchPlugin(conn).pytest_collection(session) is True
     assert session.testscollected == 0 and session.items == []
-    assert conn.sent == [("lazy_ready", {"cache_dir": "/c"})]
+    assert conn.sent == [("lazy_ready", {"cache_dir": "/c", "rootdir": "/r"})]
 
 
 def test_lazy_collection_without_cache():
