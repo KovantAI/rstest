@@ -2,18 +2,30 @@
 //! Drives long-pole-first scheduling; absent or stale entries are harmless,
 //! unknown tests just keep collection order.
 //!
-//! Each entry is tagged with the `(mtime, size)` fingerprint of its test's
-//! source file (issue #18). That is how the cache self-heals: on load an entry
-//! whose source file no longer matches — edited body (new mtime/size), or a
-//! deleted/renamed file (no metadata at all) — is dropped, so a changed test
+//! Each entry records its test's source file (`src`) and the sha256 of that
+//! file's contents (`hash`) when it was timed (issue #18). That is how the cache
+//! self-heals: on load an entry whose file no longer hashes the same (edited
+//! body) or can't be read (deleted/renamed) is dropped, so a changed test
 //! re-times on fresh numbers instead of scheduling on stale ones, and vanished
 //! nodeids stop accumulating (the merge-on-write below only ever *added*). The
+//! fingerprint is content, not mtime, so it survives a fresh `git clone` / CI
+//! checkout and a branch switch that leaves the file's bytes alone. The
 //! validation is a pure function of the working tree, which is stable for the
 //! duration of a run, so every shard worker restoring the cache derives the
 //! same snapshot — the determinism the sharder in `shard.rs` relies on.
+//!
+//! `src` is stored per entry because nodeids are relative to pytest's rootdir,
+//! which only the run that timed a test knows (it varies with `--rootdir`,
+//! `-c` and the path arguments); a later load never has to guess it. It is kept
+//! relative to the cwd (the project the cache belongs to) so a cache restored
+//! into a checkout at another path still resolves. An entry whose source the
+//! run could not locate is stored untagged and kept as-is, like the pre-#18
+//! bare timings.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -23,21 +35,34 @@ use crate::reporting::report::Run;
 
 pub const FILE: &str = "durations.json";
 
-/// A cached call duration, tagged with the source file's fingerprint when
-/// recorded. `mtime` is a 1s-resolution clock that a mtime-preserving edit
-/// (`touch -r`, some editors) can leave untouched, so it is paired with `size`
-/// to catch the rewrite mtime alone would miss — the same pairing
-/// `discover::cache` uses for the interpreter probe cache.
-#[derive(Clone, Copy, Serialize, Deserialize)]
+/// A cached call duration, tagged with its source file and that file's content
+/// hash when recorded. Both empty marks an untagged entry (legacy bare float,
+/// or a run that could not locate the source), which is never invalidated.
+#[derive(Clone, Serialize, Deserialize)]
 struct Timing {
     secs: f64,
-    /// Source-file mtime (secs since epoch) when recorded. `#[serde(default)]`
-    /// keeps a legacy bare-float file readable via the untagged parse below; a
-    /// missing fingerprint reads as 0 and never matches a real file's mtime.
-    #[serde(default)]
-    mtime: u64,
-    #[serde(default)]
-    size: u64,
+    /// Source path, relative to the cwd when it lies under the same root
+    /// (possibly with `..`), else absolute.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    src: String,
+    /// sha256 of the newline-normalized bytes, as `select::current_sha256`, so
+    /// an LF checkout and an autocrlf CRLF one hash the same.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    hash: String,
+}
+
+impl Timing {
+    fn untagged(secs: f64) -> Timing {
+        Timing {
+            secs,
+            src: String::new(),
+            hash: String::new(),
+        }
+    }
+
+    fn is_tagged(&self) -> bool {
+        !self.src.is_empty() && !self.hash.is_empty()
+    }
 }
 
 /// Accepts both the tagged on-disk form and the legacy bare-float one, so an
@@ -54,11 +79,7 @@ impl From<StoredTiming> for Timing {
     fn from(s: StoredTiming) -> Timing {
         match s {
             StoredTiming::Tagged(t) => t,
-            StoredTiming::Bare(secs) => Timing {
-                secs,
-                mtime: 0,
-                size: 0,
-            },
+            StoredTiming::Bare(secs) => Timing::untagged(secs),
         }
     }
 }
@@ -75,56 +96,140 @@ fn load_raw_from(path: &Path) -> HashMap<String, Timing> {
         .unwrap_or_default()
 }
 
-/// `(mtime secs, size bytes)` of a source file, or None if it can't be read
-/// (deleted/renamed). See `discover::cache::file_fingerprint` for the rationale.
-fn source_fingerprint(file: &str) -> Option<(u64, u64)> {
-    let md = std::fs::metadata(file).ok()?;
-    let mtime = md
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    Some((mtime, md.len()))
+/// Content hash of `path`, or None if it can't be read (deleted/renamed).
+/// Memoized for the process on `(len, mtime)`: `load` runs several times per
+/// run (worker sizing, dispatch, sharding) and collection fingerprints the same
+/// files again, so an unchanged file is read once and afterwards only
+/// `stat`ed, while an edit (new len or mtime) is re-hashed, which keeps a
+/// long-lived watch/serve process current.
+fn content_hash(path: &Path) -> Option<String> {
+    type Memo = HashMap<PathBuf, (u64, Option<SystemTime>, String)>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let md = std::fs::metadata(path).ok()?;
+    let key = (md.len(), md.modified().ok());
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some((len, mtime, hash)) = memo.lock().ok()?.get(path) {
+        if (*len, *mtime) == key {
+            return Some(hash.clone());
+        }
+    }
+    let hash = crate::select::current_sha256(path)?;
+    if let Ok(mut m) = memo.lock() {
+        m.insert(path.to_path_buf(), (key.0, key.1, hash.clone()));
+    }
+    Some(hash)
 }
 
-/// Keep only entries whose source file still matches the recorded fingerprint;
-/// drop changed bodies and vanished files. Fingerprints are memoized per file,
-/// so the number of `stat`s is the number of distinct test files, not tests.
-/// A legacy entry (no stored fingerprint: `mtime == 0 && size == 0`) is kept
-/// while its source file still exists — it loses the deleted-file rot at once
-/// and gains full staleness detection the next time it is saved with a real
-/// fingerprint.
-fn fresh(map: HashMap<String, Timing>) -> HashMap<String, Timing> {
-    let mut fp: HashMap<String, Option<(u64, u64)>> = HashMap::new();
-    map.into_iter()
-        .filter(|(id, t)| {
-            let file = crate::text::nodeid_file(id);
-            let cur = *fp
-                .entry(file.to_string())
-                .or_insert_with(|| source_fingerprint(file));
-            if t.mtime == 0 && t.size == 0 {
-                cur.is_some()
-            } else {
-                cur == Some((t.mtime, t.size))
+/// `path` expressed relative to `base` (both absolute), walking up with `..`
+/// past their common prefix. None when they share no root (another Windows
+/// drive), in which case callers keep the absolute path.
+fn relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
+    let (p, b): (Vec<Component>, Vec<Component>) =
+        (path.components().collect(), base.components().collect());
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return None;
+    }
+    let mut rel: PathBuf = b[common..].iter().map(|_| Component::ParentDir).collect();
+    rel.extend(&p[common..]);
+    Some(rel)
+}
+
+/// What the run saw at collection time: pytest's own rootdir and the content
+/// hash of each collected test file, taken as the file was collected. `save`
+/// tags this run's timings with these rather than re-reading the files
+/// afterwards, so a file edited mid-run leaves its timings tagged with the
+/// pre-edit hash, and the next load drops them as stale. Empty on paths whose
+/// worker reports no collection (the single-session run); `save` then reuses
+/// the source a previous run recorded for the test, else stores it untagged.
+#[derive(Default)]
+pub struct Collected {
+    rootdir: Option<PathBuf>,
+    hashes: HashMap<PathBuf, Option<String>>,
+}
+
+impl Collected {
+    /// Record pytest's rootdir (`config.rootpath`); the first report wins,
+    /// since every worker runs the same session.
+    pub fn set_rootdir(&mut self, rootdir: &str) {
+        self.rootdir.get_or_insert_with(|| PathBuf::from(rootdir));
+    }
+
+    /// Hash the source file of each collected nodeid not seen yet. A no-op
+    /// until the rootdir is known, since the ids are relative to it.
+    pub fn record<'a>(&mut self, ids: impl IntoIterator<Item = &'a String>) {
+        let Some(root) = &self.rootdir else {
+            return;
+        };
+        for id in ids {
+            let file = root.join(crate::text::nodeid_file(id));
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.hashes.entry(file) {
+                let hash = content_hash(slot.key());
+                slot.insert(hash);
             }
+        }
+    }
+
+    /// Absolute source path of `id`, when the rootdir is known.
+    fn source(&self, id: &str) -> Option<PathBuf> {
+        Some(self.rootdir.as_ref()?.join(crate::text::nodeid_file(id)))
+    }
+}
+
+fn cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Keep untagged entries and tagged ones whose source still hashes as
+/// recorded; drop edited bodies and vanished files. `base` resolves a relative
+/// `src` (the cwd).
+fn fresh(map: HashMap<String, Timing>, base: &Path) -> HashMap<String, Timing> {
+    map.into_iter()
+        .filter(|(_, t)| {
+            !t.is_tagged() || content_hash(&base.join(&t.src)).is_some_and(|h| h == t.hash)
         })
         .collect()
 }
 
-/// Load→prune→fold `add` (id -> seconds)→write the cache at `path`, tagging
-/// each added entry with the current fingerprint of its source file. The
-/// caller holds the cache lock. Shared by `save` and `overlay_remote_in`.
-fn persist_to(path: &Path, add: impl Iterator<Item = (String, f64)>) {
-    let mut cache = fresh(load_raw_from(path));
-    let mut fp: HashMap<String, Option<(u64, u64)>> = HashMap::new();
+/// Load→prune→fold `add` (id -> seconds)→write the cache at `path`. Each added
+/// entry is tagged with its source: from `collected` when the run reported its
+/// rootdir (hash as collected), else the source a previous run recorded for the
+/// same id (hash as it is now), else left untagged. `base` is the cwd that
+/// relative `src` paths hang off. The caller holds the cache lock. Shared by
+/// `save` and `overlay_remote_in`.
+fn persist_to(
+    path: &Path,
+    add: impl Iterator<Item = (String, f64)>,
+    collected: &Collected,
+    base: &Path,
+) {
+    let raw = load_raw_from(path);
+    let known: HashMap<String, String> = raw
+        .iter()
+        .filter(|(_, t)| !t.src.is_empty())
+        .map(|(id, t)| (id.clone(), t.src.clone()))
+        .collect();
+    let mut cache = fresh(raw, base);
     for (id, secs) in add {
-        let file = crate::text::nodeid_file(&id);
-        let (mtime, size) = fp
-            .entry(file.to_string())
-            .or_insert_with(|| source_fingerprint(file))
-            .unwrap_or((0, 0));
-        cache.insert(id, Timing { secs, mtime, size });
+        let tagged = match collected.source(&id) {
+            Some(abs) => {
+                let hash = match collected.hashes.get(&abs) {
+                    Some(h) => h.clone(),
+                    None => content_hash(&abs),
+                };
+                let src = relative_to(&abs, base).unwrap_or(abs);
+                hash.map(|hash| (src.to_string_lossy().into_owned(), hash))
+            }
+            None => known.get(&id).and_then(|src| {
+                let hash = content_hash(&base.join(src))?;
+                Some((src.clone(), hash))
+            }),
+        };
+        let t = match tagged {
+            Some((src, hash)) => Timing { secs, src, hash },
+            None => Timing::untagged(secs),
+        };
+        cache.insert(id, t);
     }
     if cache.is_empty() {
         return;
@@ -222,13 +327,24 @@ pub fn load() -> HashMap<String, f64> {
 
 /// `load` against an explicit `durations.json` path (missing/corrupt = empty).
 pub fn load_from(path: &Path) -> HashMap<String, f64> {
-    fresh(load_raw_from(path))
-        .into_iter()
-        .map(|(k, t)| (k, t.secs))
-        .collect()
+    secs_only(fresh(load_raw_from(path), &cwd()))
 }
 
-pub fn save(run: &Run) {
+/// The cache as recorded, without fingerprint validation. The
+/// `--durations-regress` baseline: a test in a file this change edited is
+/// exactly the one whose old timing the gate must compare against, and a
+/// vanished test cannot match any id in the current run anyway.
+pub fn load_baseline() -> HashMap<String, f64> {
+    secs_only(load_raw_from(&cache::file(FILE)))
+}
+
+fn secs_only(map: HashMap<String, Timing>) -> HashMap<String, f64> {
+    map.into_iter().map(|(k, t)| (k, t.secs)).collect()
+}
+
+/// Record this run's call durations, tagged with the sources and hashes
+/// `collected` took at collection time (see `Collected`).
+pub fn save(run: &Run, collected: &Collected) {
     // Merge over the previous cache: tests not in this run keep old timings
     // (-k/-m filtered runs must not wipe the rest of the suite's data). `fresh`
     // prunes stale/vanished entries in the same pass, so the file self-heals on
@@ -239,18 +355,26 @@ pub fn save(run: &Run) {
         persist_to(
             &cache::file(FILE),
             run.durations().map(|(id, d)| (id.clone(), d)),
+            collected,
+            &cwd(),
         );
     });
 }
 
 /// Land remote-pulled durations into the cache at `path`. The remote stores
 /// bare seconds (fingerprints are local-fs facts, meaningless across machines),
-/// so each pulled entry is tagged with the local source file's current
-/// fingerprint as it lands and then self-heals locally like a natively recorded
-/// one. Remote wins on shared keys; stale locals are pruned in the same pass.
-/// The caller holds the cache lock.
+/// so a pulled entry takes the source the local cache already recorded for
+/// that test, hashed as the file is now, and then self-heals locally like a
+/// natively recorded one; a test the local cache has never timed lands
+/// untagged. Remote wins on shared keys; stale locals are pruned in the same
+/// pass. The caller holds the cache lock.
 pub fn overlay_remote_in(path: &Path, remote: &HashMap<String, f64>) {
-    persist_to(path, remote.iter().map(|(k, v)| (k.clone(), *v)));
+    persist_to(
+        path,
+        remote.iter().map(|(k, v)| (k.clone(), *v)),
+        &Collected::default(),
+        &cwd(),
+    );
 }
 
 /// Items with a cached duration above this run first, longest first.
@@ -614,72 +738,230 @@ mod tests {
 
     #[test]
     fn read_map_accepts_legacy_bare_and_tagged() {
-        // Legacy: bare floats, no fingerprint -> mtime/size 0.
+        // Legacy: bare floats -> untagged.
         let legacy = read_map(br#"{"a::t":1.5}"#);
         assert_eq!(legacy["a::t"].secs, 1.5);
-        assert_eq!((legacy["a::t"].mtime, legacy["a::t"].size), (0, 0));
+        assert!(!legacy["a::t"].is_tagged());
         // Tagged: full object round-trips.
-        let tagged = read_map(br#"{"a::t":{"secs":2.0,"mtime":7,"size":42}}"#);
+        let tagged = read_map(br#"{"a::t":{"secs":2.0,"src":"a.py","hash":"ab"}}"#);
         assert_eq!(tagged["a::t"].secs, 2.0);
-        assert_eq!((tagged["a::t"].mtime, tagged["a::t"].size), (7, 42));
+        assert_eq!(
+            (tagged["a::t"].src.as_str(), tagged["a::t"].hash.as_str()),
+            ("a.py", "ab")
+        );
         // Garbage degrades to empty, never a panic.
         assert!(read_map(b"not json").is_empty());
     }
 
-    /// A unique temp file whose path is used as the nodeid's file part, so
-    /// `fresh` fingerprints a real file without depending on the cwd.
-    fn temp_source(tag: &str, body: &[u8]) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "rstest-dur-{}-{}-{tag}.py",
+    /// A unique temp dir standing in for the cwd / rootdir, so tests resolve
+    /// real files without depending on the process cwd.
+    fn temp_root(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "rstest-dur-{}-{}-{tag}",
             std::process::id(),
             crate::time::now_epoch_nanos()
         ));
-        std::fs::write(&p, body).unwrap();
-        p
+        std::fs::create_dir_all(&d).unwrap();
+        d
     }
 
-    fn tagged(secs: f64, fp: Option<(u64, u64)>) -> Timing {
-        let (mtime, size) = fp.unwrap_or((0, 0));
-        Timing { secs, mtime, size }
+    fn tagged(secs: f64, src: &str, hash: Option<String>) -> Timing {
+        Timing {
+            secs,
+            src: src.to_string(),
+            hash: hash.unwrap_or_default(),
+        }
+    }
+
+    fn collected_at(root: &Path, ids: &[&String]) -> Collected {
+        let mut c = Collected::default();
+        c.set_rootdir(root.to_str().unwrap());
+        c.record(ids.iter().copied());
+        c
     }
 
     #[test]
     fn fresh_keeps_matching_drops_changed_and_vanished() {
-        let file = temp_source("keep", b"def test_a(): pass\n");
-        let id = format!("{}::test_a", file.display());
-        let fp = source_fingerprint(file.to_str().unwrap());
-        assert!(fp.is_some());
+        let root = temp_root("keep");
+        let file = root.join("test_a.py");
+        std::fs::write(&file, b"def test_a(): pass\n").unwrap();
+        let h = content_hash(&file);
+        assert!(h.is_some());
+        let one = || {
+            HashMap::from([(
+                "test_a.py::t".to_string(),
+                tagged(1.0, "test_a.py", h.clone()),
+            )])
+        };
 
-        // Matching fingerprint survives.
-        let mut m = HashMap::new();
-        m.insert(id.clone(), tagged(1.0, fp));
-        assert_eq!(fresh(m).len(), 1);
+        // Matching hash survives.
+        assert_eq!(fresh(one(), &root).len(), 1);
 
-        // Edited body (size changes) -> stale fingerprint dropped.
-        std::fs::write(&file, b"def test_a(): return 12345\n").unwrap();
-        let mut m = HashMap::new();
-        m.insert(id.clone(), tagged(1.0, fp));
-        assert!(fresh(m).is_empty());
+        // Same-size edit: only the content hash catches it.
+        std::fs::write(&file, b"def test_a(): pas5\n").unwrap();
+        assert!(fresh(one(), &root).is_empty());
 
-        // Deleted file -> dropped even though the entry looks tagged.
+        // Deleted file -> dropped.
         std::fs::remove_file(&file).unwrap();
-        let mut m = HashMap::new();
-        m.insert(id.clone(), tagged(1.0, fp));
-        assert!(fresh(m).is_empty());
+        assert!(fresh(one(), &root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn fresh_legacy_kept_while_file_exists_dropped_when_gone() {
-        let file = temp_source("legacy", b"def test_b(): pass\n");
-        let live = format!("{}::test_b", file.display());
-        let dead = "does/not/exist_test.py::test_c".to_string();
-        let mut m = HashMap::new();
-        m.insert(live.clone(), tagged(1.0, None)); // legacy (0,0)
-        m.insert(dead, tagged(1.0, None)); // legacy, file gone
-        let kept = fresh(m);
-        assert_eq!(kept.len(), 1);
-        assert!(kept.contains_key(&live));
-        std::fs::remove_file(&file).unwrap();
+    fn fresh_survives_mtime_and_line_ending_changes() {
+        // A fresh checkout restamps mtimes; autocrlf rewrites LF as CRLF. Neither
+        // changes the (newline-normalized) content hash.
+        let root = temp_root("mtime");
+        let file = root.join("test_m.py");
+        std::fs::write(&file, b"def test_m():\n    pass\n").unwrap();
+        let h = content_hash(&file);
+        std::fs::write(&file, b"def test_m():\r\n    pass\r\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        let m = HashMap::from([("test_m.py::t".to_string(), tagged(1.0, "test_m.py", h))]);
+        assert_eq!(fresh(m, &root).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fresh_keeps_untagged_entries_unconditionally() {
+        // No recorded source (legacy, or a run that could not locate it): never
+        // invalidated, whatever the working tree looks like.
+        let root = temp_root("untagged");
+        let m = HashMap::from([("gone.py::t".to_string(), Timing::untagged(1.0))]);
+        assert_eq!(fresh(m, &root).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn entries_from_different_rootdirs_coexist() {
+        // Two runs with different rootdirs (no ini, different path args) record
+        // the same relative nodeid shape; each entry carries its own source, so
+        // the second save must not prune the first.
+        let base = temp_root("roots");
+        for pkg in ["pkg_a/tests", "pkg_b/tests"] {
+            std::fs::create_dir_all(base.join(pkg)).unwrap();
+        }
+        std::fs::write(base.join("pkg_a/tests/test_x.py"), b"a\n").unwrap();
+        std::fs::write(base.join("pkg_b/tests/test_y.py"), b"b\n").unwrap();
+        let path = base.join(FILE);
+        let (x, y) = ("test_x.py::t".to_string(), "test_y.py::t".to_string());
+        let run_a = collected_at(&base.join("pkg_a/tests"), &[&x]);
+        persist_to(&path, [(x.clone(), 1.0)].into_iter(), &run_a, &base);
+        let run_b = collected_at(&base.join("pkg_b/tests"), &[&y]);
+        persist_to(&path, [(y.clone(), 2.0)].into_iter(), &run_b, &base);
+
+        let raw = load_raw_from(&path);
+        assert_eq!(
+            raw[&x].src, "pkg_a/tests/test_x.py",
+            "stored relative to the cwd"
+        );
+        let got = secs_only(fresh(raw, &base));
+        assert_eq!((got[&x], got[&y]), (1.0, 2.0));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn source_above_cwd_is_stored_with_parent_components() {
+        // Run from a subdirectory with the rootdir above it.
+        let root = temp_root("above");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("test_r.py"), b"r\n").unwrap();
+        let id = "test_r.py::t".to_string();
+        let cwd = root.join("sub");
+        let path = cwd.join(FILE);
+        persist_to(
+            &path,
+            [(id.clone(), 1.0)].into_iter(),
+            &collected_at(&root, &[&id]),
+            &cwd,
+        );
+        let raw = load_raw_from(&path);
+        assert_eq!(raw[&id].src, "../test_r.py");
+        assert_eq!(fresh(raw, &cwd).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_without_rootdir_reuses_known_source_else_untagged() {
+        // Single-session / remote overlay: no collection report. A test with a
+        // previously recorded source keeps being validated; a new one lands
+        // untagged and is kept rather than dropped on the next load.
+        let root = temp_root("norootdir");
+        std::fs::write(root.join("test_k.py"), b"k\n").unwrap();
+        let (k, n) = ("test_k.py::t".to_string(), "test_n.py::t".to_string());
+        let path = root.join(FILE);
+        persist_to(
+            &path,
+            [(k.clone(), 1.0)].into_iter(),
+            &collected_at(&root, &[&k]),
+            &root,
+        );
+        persist_to(
+            &path,
+            [(k.clone(), 3.0), (n.clone(), 4.0)].into_iter(),
+            &Collected::default(),
+            &root,
+        );
+        let raw = load_raw_from(&path);
+        assert!(raw[&k].is_tagged() && raw[&k].secs == 3.0);
+        assert!(!raw[&n].is_tagged());
+        assert_eq!(fresh(raw, &root).len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_tags_with_collection_time_hash() {
+        // A file edited after collection: its timing is tagged with the
+        // pre-edit hash, so the next load drops it. A touched-but-unchanged
+        // file keeps its timing.
+        let root = temp_root("collected");
+        std::fs::write(root.join("test_e.py"), b"def test_e(): pass\n").unwrap();
+        std::fs::write(root.join("test_s.py"), b"def test_s(): pass\n").unwrap();
+        let (e, s) = ("test_e.py::t".to_string(), "test_s.py::t".to_string());
+        let collected = collected_at(&root, &[&e, &s]);
+
+        std::fs::write(root.join("test_e.py"), b"def test_e(): return 1\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("test_s.py"))
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+
+        let path = root.join(FILE);
+        persist_to(
+            &path,
+            [(e, 1.0), (s.clone(), 2.0)].into_iter(),
+            &collected,
+            &root,
+        );
+        let got = secs_only(fresh(load_raw_from(&path), &root));
+        assert_eq!(got.len(), 1, "test edited after collection re-times");
+        assert_eq!(got[&s], 2.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collected_ignores_ids_before_rootdir_is_known() {
+        let mut c = Collected::default();
+        c.record([&"test_x.py::t".to_string()]);
+        assert!(c.hashes.is_empty());
+    }
+
+    #[test]
+    fn relative_to_walks_up_and_down() {
+        let r = |p: &str, b: &str| relative_to(Path::new(p), Path::new(b));
+        assert_eq!(r("/a/b/c.py", "/a"), Some(PathBuf::from("b/c.py")));
+        assert_eq!(r("/a/c.py", "/a/b"), Some(PathBuf::from("../c.py")));
+        assert_eq!(
+            r("/a/x/c.py", "/a/b/d"),
+            Some(PathBuf::from("../../x/c.py"))
+        );
     }
 
     #[test]

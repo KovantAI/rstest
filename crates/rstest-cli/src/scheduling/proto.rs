@@ -205,6 +205,10 @@ pub enum Event {
     LazyReady {
         #[serde(default)]
         cache_dir: Option<String>,
+        /// pytest's rootdir (`config.rootpath`): what every nodeid is
+        /// relative to. The duration cache resolves source files against it.
+        #[serde(default)]
+        rootdir: Option<String>,
     },
     /// Lazy mode: one file collected (by exactly one worker). `ids` in
     /// collection order; serial/flaky ride along, keyed by nodeid.
@@ -494,7 +498,8 @@ mod property {
             prop::collection::vec(arb_warning(), 0..4)
                 .prop_map(|entries| Event::Warnings { entries }),
             arb_collection_done(),
-            prop::option::of(small_str()).prop_map(|cache_dir| Event::LazyReady { cache_dir }),
+            (prop::option::of(small_str()), prop::option::of(small_str()))
+                .prop_map(|(cache_dir, rootdir)| Event::LazyReady { cache_dir, rootdir }),
             arb_file_collected(),
         ];
         let group_b = prop_oneof![

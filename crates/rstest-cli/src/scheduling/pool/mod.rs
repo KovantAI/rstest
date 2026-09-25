@@ -172,6 +172,9 @@ pub struct PoolOutcome {
     /// Number of collected tests (the reference count all workers agreed on);
     /// 0 when unknown.
     pub collection_size: u64,
+    /// pytest's rootdir and the collected test files' fingerprints, which the
+    /// duration cache tags this run's timings with.
+    pub sources: crate::scheduling::durations::Collected,
 }
 
 /// The clean nodeid for a dispatched index, from the designate's id list.
@@ -274,6 +277,7 @@ pub fn run_pool(
     // rstest routes it to a sibling).
     let mut pending_downs: VecDeque<(serde_json::Value, String)> = VecDeque::new();
     let mut cache_dir: Option<String> = None;
+    let mut sources = crate::scheduling::durations::Collected::default();
     let mut rerun_used: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
     // @pytest.mark.flaky(reruns=N) budgets, from the designate's payload.
     let mut flaky_budget: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
@@ -364,7 +368,7 @@ pub fn run_pool(
                 groups,
                 locations: _,
                 marks: _,
-                rootdir: _,
+                rootdir,
                 args_source: _,
                 root_args: _,
                 inifile: _,
@@ -373,6 +377,12 @@ pub fn run_pool(
             }) => {
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
+                }
+                if let Some(rd) = &rootdir {
+                    sources.set_rootdir(rd);
+                }
+                if let Some(ids) = &ids {
+                    sources.record(ids);
                 }
                 if dist != Dist::Each {
                     if let Some(f) = flaky {
@@ -940,6 +950,7 @@ pub fn run_pool(
         exitstatus,
         collection_hash,
         collection_size,
+        sources,
     })
 }
 
