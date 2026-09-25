@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use crate::reporting::sink::Sink;
 
 /// How a CI exposes the PR/MR base for the current job.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum CiBase {
     /// A base branch NAME (GitHub/GitLab/Buildkite). Resolved against
     /// `origin/<name>` via merge-base - the PR fork point, not the base
@@ -392,13 +393,13 @@ mod tests {
 
         // GitLab MR without the exact SHA falls to the target-branch name.
         let _branch = test_env::set_var(&held, "CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "main");
-        match detect_ci_base() {
-            Some(CiBase::Branch { name, env }) => {
-                assert_eq!(name, "main");
-                assert_eq!(env, "CI_MERGE_REQUEST_TARGET_BRANCH_NAME");
-            }
-            _ => panic!("expected target-branch base"),
-        }
+        assert_eq!(
+            detect_ci_base(),
+            Some(CiBase::Branch {
+                name: "main".into(),
+                env: "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+            })
+        );
 
         // The exact diff-base SHA wins over the branch name.
         let _sha = test_env::set_var(&held, "CI_MERGE_REQUEST_DIFF_BASE_SHA", "abc123");
@@ -406,13 +407,13 @@ mod tests {
 
         // GITHUB_BASE_REF has top priority.
         let _gh = test_env::set_var(&held, "GITHUB_BASE_REF", "trunk");
-        match detect_ci_base() {
-            Some(CiBase::Branch { name, env }) => {
-                assert_eq!(name, "trunk");
-                assert_eq!(env, "GITHUB_BASE_REF");
-            }
-            _ => panic!("expected GITHUB_BASE_REF branch"),
-        }
+        assert_eq!(
+            detect_ci_base(),
+            Some(CiBase::Branch {
+                name: "trunk".into(),
+                env: "GITHUB_BASE_REF",
+            })
+        );
     }
 
     #[test]
