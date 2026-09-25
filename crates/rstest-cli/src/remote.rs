@@ -17,7 +17,7 @@
 //! (Phase 3) live above it. Kept unit-testable with no IO.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -307,27 +307,42 @@ pub fn load_local_cov_index() -> CoverageIndex {
 /// rather than discards local-only history that hasn't been pushed yet. Sparse
 /// results are skipped, matching the modules' own behavior.
 pub fn write_local(merged: &Merged) {
-    if !merged.durations.is_empty() {
-        let mut d = crate::scheduling::durations::load();
-        d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
-        if let Ok(bytes) = serde_json::to_vec(&d) {
-            let _ = cache::write_atomic(&cache::file(crate::scheduling::durations::FILE), &bytes);
+    write_local_in(&cache::dir(), merged)
+}
+
+/// `write_local` against an explicit cache dir (the one `RSTEST_CACHE` would
+/// name), so the overlay is testable without mutating process env.
+fn write_local_in(dir: &Path, merged: &Merged) {
+    use crate::reporting::flakes;
+    use crate::scheduling::durations;
+    // Overlay durations+flakes under the cache lock: this is a load→modify→write
+    // like `durations::save`/`flakes::record`, so a concurrent one of those (or a
+    // parallel pull) would otherwise clobber the overlay with a stale snapshot.
+    cache::with_lock_in(dir, || {
+        if !merged.durations.is_empty() {
+            let path = dir.join(durations::FILE);
+            let mut d = durations::load_from(&path);
+            d.extend(merged.durations.iter().map(|(k, v)| (k.clone(), *v)));
+            if let Ok(bytes) = serde_json::to_vec(&d) {
+                let _ = cache::write_atomic(&path, &bytes);
+            }
         }
-    }
-    if !merged.flakes.is_empty() {
-        let mut f = crate::reporting::flakes::load();
-        for (k, v) in &merged.flakes {
-            f.insert(k.clone(), *v);
+        if !merged.flakes.is_empty() {
+            let path = dir.join(flakes::FILE);
+            let mut f = flakes::load_from(&path);
+            for (k, v) in &merged.flakes {
+                f.insert(k.clone(), *v);
+            }
+            if let Ok(bytes) = serde_json::to_vec(&f) {
+                let _ = cache::write_atomic(&path, &bytes);
+            }
         }
-        if let Ok(bytes) = serde_json::to_vec(&f) {
-            let _ = cache::write_atomic(&cache::file(crate::reporting::flakes::FILE), &bytes);
-        }
-    }
+    });
     // The coverage index is regenerated each run and drives selection off the
     // merged view, so it is replaced (not overlaid) with the pulled union.
     if !merged.cov_index.files.is_empty() {
         if let Ok(bytes) = serde_json::to_vec(&merged.cov_index) {
-            let _ = cache::write_atomic(&cache::file(COVERAGE_INDEX_FILE), &bytes);
+            let _ = cache::write_atomic(&dir.join(COVERAGE_INDEX_FILE), &bytes);
         }
     }
 }
@@ -1220,6 +1235,91 @@ mod tests {
             flake_events: Vec::new(),
             cov_index: idx,
         }
+    }
+
+    #[test]
+    fn write_local_overlays_durations_and_flakes_onto_local_cache() {
+        use crate::reporting::flakes;
+        use crate::scheduling::durations;
+        let dir = std::env::temp_dir().join(format!("rstest-write-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = crate::time::now_epoch_secs();
+        let stats = |flaky, failed| FlakeStats {
+            flaky,
+            failed,
+            last_epoch: now,
+            last_failed_epoch: 0,
+        };
+        // Local-only history the pull must keep, plus a shared key it overrides.
+        std::fs::write(
+            dir.join(durations::FILE),
+            serde_json::to_vec(&HashMap::from([
+                ("local".to_string(), 1.0),
+                ("shared".to_string(), 2.0),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(flakes::FILE),
+            serde_json::to_vec(&HashMap::from([
+                ("local".to_string(), stats(1, 0)),
+                ("shared".to_string(), stats(1, 1)),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let merged = Merged {
+            durations: HashMap::from([("shared".to_string(), 9.0), ("remote".to_string(), 3.0)]),
+            flakes: HashMap::from([
+                ("shared".to_string(), stats(5, 5)),
+                ("remote".to_string(), stats(2, 0)),
+            ]),
+            cov_index: CoverageIndex::default(),
+        };
+        write_local_in(&dir, &merged);
+
+        let d = durations::load_from(&dir.join(durations::FILE));
+        assert_eq!(d.len(), 3);
+        assert_eq!(d["local"], 1.0, "local-only duration kept");
+        assert_eq!(d["shared"], 9.0, "remote wins on shared key");
+        assert_eq!(d["remote"], 3.0);
+        let f = flakes::load_from(&dir.join(flakes::FILE));
+        assert_eq!(f.len(), 3);
+        assert_eq!(f["local"], stats(1, 0), "local-only flake kept");
+        assert_eq!(f["shared"], stats(5, 5), "remote wins on shared key");
+        assert_eq!(f["remote"], stats(2, 0));
+        // No coverage in the pull: the index file is not written.
+        assert!(!dir.join(COVERAGE_INDEX_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_local_replaces_cov_index_and_skips_empty_sections() {
+        use crate::reporting::flakes;
+        use crate::scheduling::durations;
+        let dir =
+            std::env::temp_dir().join(format!("rstest-write-local-cov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cov = cov_seg("s", 1, &[("a.py", "h", &[(3, &["t::x"])])]).cov_index;
+        let merged = Merged {
+            durations: HashMap::new(),
+            flakes: HashMap::new(),
+            cov_index: cov.clone(),
+        };
+        write_local_in(&dir, &merged);
+        assert!(
+            !dir.join(durations::FILE).exists(),
+            "empty durations not written"
+        );
+        assert!(!dir.join(flakes::FILE).exists(), "empty flakes not written");
+        let got: CoverageIndex =
+            serde_json::from_slice(&std::fs::read(dir.join(COVERAGE_INDEX_FILE)).unwrap()).unwrap();
+        assert_eq!(got.files.len(), 1);
+        assert_eq!(got.files["a.py"].hash, "h");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

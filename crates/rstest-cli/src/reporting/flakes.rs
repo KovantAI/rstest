@@ -70,7 +70,12 @@ fn retain_recent(log: &mut HashMap<String, FlakeStats>, now: u64, max_age: u64) 
 }
 
 pub fn load() -> HashMap<String, FlakeStats> {
-    let mut log: HashMap<String, FlakeStats> = std::fs::read(cache::file(FILE))
+    load_from(&cache::file(FILE))
+}
+
+/// `load` against an explicit `flakes.json` path, with the same retention aging.
+pub fn load_from(path: &std::path::Path) -> HashMap<String, FlakeStats> {
+    let mut log: HashMap<String, FlakeStats> = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
@@ -109,22 +114,26 @@ pub fn record(run: &Run) {
         return;
     }
     let now = crate::time::now_epoch_secs();
-    // load() has already dropped entries past the retention window, so writing
-    // the merged map back garbage-collects the file on any event-bearing run.
-    let mut log = load();
-    for (nodeid, was_flaky) in events {
-        let e = log.entry(nodeid.clone()).or_default();
-        if was_flaky {
-            e.flaky += 1;
-        } else {
-            e.failed += 1;
-            e.last_failed_epoch = now;
+    // Hold the cache lock across load→merge→write: flake counts ACCUMULATE, so a
+    // lost update here doesn't just stale a value, it drops a run's +1 events
+    // entirely. load() has already dropped entries past the retention window, so
+    // writing the merged map back garbage-collects the file on any event run.
+    cache::with_lock(|| {
+        let mut log = load();
+        for (nodeid, was_flaky) in events {
+            let e = log.entry(nodeid.clone()).or_default();
+            if was_flaky {
+                e.flaky += 1;
+            } else {
+                e.failed += 1;
+                e.last_failed_epoch = now;
+            }
+            e.last_epoch = now;
         }
-        e.last_epoch = now;
-    }
-    if let Ok(bytes) = serde_json::to_vec(&log) {
-        let _ = cache::write_atomic(&cache::file(FILE), &bytes);
-    }
+        if let Ok(bytes) = serde_json::to_vec(&log) {
+            let _ = cache::write_atomic(&cache::file(FILE), &bytes);
+        }
+    });
 }
 
 #[cfg(test)]

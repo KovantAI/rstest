@@ -452,12 +452,14 @@ mod property {
             cache_dir in prop::option::of(small_str()),
             flaky in prop::option::of(prop::collection::hash_map(small_str(), any::<u32>(), 0..4)),
             groups in prop::option::of(prop::collection::hash_map(small_str(), small_str(), 0..4)),
-            rootdir in prop::option::of(small_str()),
-            args_source in prop::option::of(small_str()),
-            root_args in prop::option::of(small_strs()),
-            inifile in prop::option::of(small_str()),
-            order_flags in prop::option::of(small_strs()),
-            confcutdir in prop::option::of(small_str()),
+            (rootdir, args_source, root_args, inifile, order_flags, confcutdir) in (
+                prop::option::of(small_str()),
+                prop::option::of(small_str()),
+                prop::option::of(small_strs()),
+                prop::option::of(small_str()),
+                prop::option::of(small_strs()),
+                prop::option::of(small_str()),
+            ),
         ) -> Event {
             Event::CollectionDone {
                 count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
