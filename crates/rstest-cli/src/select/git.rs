@@ -475,16 +475,22 @@ mod tests {
         assert!(err.to_string().contains("git diff -U0"), "{err}");
     }
 
-    /// Absolute path to the real `git`, found before we shadow it on PATH.
+    /// Absolute path to the real `git`, resolved once. Callers must hold
+    /// GLOBAL (via `enter`) so the first lookup can't see a sibling test's
+    /// shim on PATH and mistake it for git.
     #[cfg(unix)]
     fn real_git() -> PathBuf {
-        for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-            let cand = dir.join("git");
-            if cand.is_file() {
-                return cand;
+        static REAL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        REAL.get_or_init(|| {
+            for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+                let cand = dir.join("git");
+                if cand.is_file() {
+                    return cand;
+                }
             }
-        }
-        panic!("no git on PATH");
+            panic!("no git on PATH");
+        })
+        .clone()
     }
 
     /// A `bin/` dir holding a `git` shim that exits non-zero for any invocation
@@ -512,8 +518,10 @@ mod tests {
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let bin = shim_git(&repo, "ls-files");
+        // Lock first: shim_git resolves the real git from PATH, which a sibling
+        // test may have shadowed with its own shim while holding the lock.
         let _cwd = enter(&repo);
+        let bin = shim_git(&repo, "ls-files");
         let saved = std::env::var_os("PATH");
         let mut path = bin.clone().into_os_string();
         path.push(":");
@@ -540,8 +548,9 @@ mod tests {
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let bin = shim_git(&repo, "--name-only");
+        // Lock first; see bails_when_ls_files_fails_after_diff_succeeds.
         let _cwd = enter(&repo);
+        let bin = shim_git(&repo, "--name-only");
         let saved = std::env::var_os("PATH");
         let mut path = bin.clone().into_os_string();
         path.push(":");
