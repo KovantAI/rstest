@@ -104,6 +104,7 @@ class FileCollectedPayload(_FileCollectedRequired, total=False):
 
 class LazyReadyPayload(TypedDict, total=False):
     cache_dir: str
+    rootdir: str  # pytest's config.rootpath
 
 
 class DonePayload(TypedDict):
