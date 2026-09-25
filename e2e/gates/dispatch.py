@@ -689,3 +689,64 @@ def gate_crash_restart_exhaustion(g, args, binary):
         r.returncode == 3 and "terminated unexpectedly" in (r.stdout + r.stderr),
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
     )
+
+
+def gate_order_fail_fast(g, args, binary):
+    print("== --order fail-fast ==")
+    suite = g.tmp / "ffsuite"
+    shutil.rmtree(suite, ignore_errors=True)
+    g.write(
+        "ffsuite/test_ff.py",
+        "".join(f"def test_ok{i}(): assert True\n" for i in range(6))
+        + "def test_red(): assert False\n",
+    )
+    # First run records the hard failure in .rstest_cache/flakes.json.
+    r = g.run(".", "-n", "2", cwd=str(suite))
+    flakes = suite / ".rstest_cache" / "flakes.json"
+    check(
+        "fail-fast: failure recorded in flakes.json",
+        r.returncode == 1
+        and flakes.exists()
+        and any(k.endswith("test_red") for k in json.loads(flakes.read_text(encoding="utf-8"))),
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # Pool path loads that history and leads with the red test.
+    r = g.run(".", "-n", "2", "--order", "fail-fast", "-x", cwd=str(suite))
+    check(
+        "fail-fast: pool run reads flake history, red still fails",
+        r.returncode == 1 and "test_red" in r.stdout and "no effect" not in r.stderr,
+        r.stdout[-300:] + r.stderr[-200:],
+    )
+    r = g.run(".", "-n", "1", "--order", "fail-fast", cwd=str(suite))
+    check(
+        "fail-fast: single-worker run warns it needs the pool",
+        "--order fail-fast needs the parallel pool" in r.stderr,
+        r.stderr[-300:],
+    )
+    r = g.run(".", "-n", "2", "--collect", "lazy", "--order", "fail-fast", cwd=str(suite))
+    check(
+        "fail-fast: --collect lazy warns it is ignored",
+        "ignored under --collect lazy" in r.stderr,
+        r.stderr[-300:],
+    )
+    # Monorepo root validates --order once, before fanning out.
+    mono = g.tmp / "ffmono"
+    shutil.rmtree(mono, ignore_errors=True)
+    g.write("ffmono/a/pytest.ini", "[pytest]\n")
+    g.write("ffmono/a/tests/test_a.py", "def test_a(): pass\n")
+    g.write("ffmono/b/pytest.ini", "[pytest]\n")
+    g.write("ffmono/b/tests/test_b.py", "def test_b(): pass\n")
+    r = g.run("-n", "2", "--order", "bogus", cwd=mono)
+    check(
+        "fail-fast: monorepo rejects bad --order once",
+        r.returncode != 0
+        and r.stderr.count("unknown --order mode: bogus") == 1
+        and "monorepo:" not in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-300:] + r.stdout[-200:],
+    )
+    r = g.run("-n", "2", "--order", "fail-fast", cwd=mono)
+    check(
+        "fail-fast: monorepo forwards a valid --order",
+        r.returncode == 0 and "monorepo: 2 projects" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:],
+    )
