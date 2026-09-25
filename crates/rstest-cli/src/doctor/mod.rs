@@ -589,4 +589,21 @@ mod tests {
             assert!(!f.constant, "{}", f.name);
         }
     }
+
+    #[test]
+    fn json_omits_zero_saving_and_false_constant() {
+        let r = testutil::report(12);
+        let v = serde_json::to_value(&r).unwrap();
+        let fixtures = v["fixtures"].as_array().unwrap();
+        // `db`: not constant, no saving => both fields skipped.
+        let db = &fixtures[0];
+        assert_eq!(db["name"], "db");
+        assert!(db.get("constant").is_none());
+        assert!(db.get("projected_saving_seconds").is_none());
+        // `settings`: a candidate => both fields serialized.
+        let settings = &fixtures[1];
+        assert_eq!(settings["name"], "settings");
+        assert_eq!(settings["constant"], true);
+        assert_eq!(settings["projected_saving_seconds"], 0.9);
+    }
 }

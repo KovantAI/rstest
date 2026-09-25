@@ -76,7 +76,8 @@ def _fixture_fingerprint(value: Any) -> str | None:
         return None
     try:
         enc = _fp_encode(value, [_FP_MAX_ITEMS])
-    except RecursionError:
+    except (RecursionError, ValueError):
+        # ValueError: int repr past sys.get_int_max_str_digits() (3.11+).
         return None
     if enc is None:
         return None
@@ -118,6 +119,32 @@ def _promotable_setup(fixturedef: Any, request: Any, finalizers_before: int | No
         dep = active.get(name) if isinstance(active, dict) else None
         if dep is None or dep.scope != "session":
             return False
+    return True
+
+
+def _spy_dynamic_fetches(request: Any, frame: list[bool]) -> bool:
+    """Shadow ``request.getfixturevalue`` so a fixture body fetching a
+    narrower-scoped fixture taints ``frame``. The nested-setup check in
+    ``pytest_fixture_setup`` misses a fetch pytest serves from its cache (the
+    test already requested ``tmp_path``), since no setup hook fires. Returns
+    whether the spy was installed (undo with ``del request.getfixturevalue``)."""
+    orig = getattr(request, "getfixturevalue", None)
+    if not callable(orig):
+        return False
+
+    def getfixturevalue(argname: str) -> Any:
+        value = orig(argname)
+        if argname != "request":
+            active = getattr(request, "_fixture_defs", None)
+            dep = active.get(argname) if isinstance(active, dict) else None
+            if dep is None or dep.scope != "session":
+                frame[0] = True
+        return value
+
+    try:
+        request.getfixturevalue = getfixturevalue
+    except AttributeError:
+        return False
     return True
 
 
@@ -586,10 +613,13 @@ class StreamPlugin:
                 frame[0] = True
         frame = [False]
         self._setup_stack.append(frame)
+        spied = fixturedef.scope == "function" and _spy_dynamic_fetches(request, frame)
         t0 = time.perf_counter()
         try:
             return (yield)
         finally:
+            if spied:
+                del request.getfixturevalue
             self._setup_stack.pop()
             key = (fixturedef.argname, fixturedef.scope)
             entry = self._fixtures.setdefault(key, [0, 0.0, True, _UNSET])
@@ -649,7 +679,9 @@ class StreamPlugin:
                     # calls this worker saw. Not gated on c >= 2: a worker that
                     # ran it once has no evidence against, and must not veto
                     # the merge; `repeated` carries the evidence instead.
-                    "constant": (cand := bool(scope == "function" and const)),
+                    # An _UNSET fingerprint means tracking never completed
+                    # (setup interrupted): no evidence, and not serializable.
+                    "constant": (cand := bool(scope == "function" and const and fp is not _UNSET)),
                     # This session compared at least two values.
                     "repeated": cand and c >= 2,
                     # Setup seconds session scope would have skipped in this

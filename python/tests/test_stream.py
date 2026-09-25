@@ -5,6 +5,7 @@ sessionfinish emission, the doctor fixture timer, and report payloads."""
 from __future__ import annotations
 
 import contextlib
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -400,6 +401,16 @@ def test_sessionfinish_emits_doctor_fixtures(monkeypatch):
     ]
 
 
+def test_sessionfinish_drops_unfinished_fingerprint(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # A setup interrupted before fingerprinting leaves the _UNSET sentinel.
+    p._fixtures[("cfg", "function")] = [1, 0.1, True, stream._UNSET]
+    p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
+    (stat,) = next(pl for k, pl in p._conn.sent if k == "doctor_fixtures")["fixtures"]
+    assert stat["constant"] is False and stat["fingerprint"] is None
+
+
 def test_sessionfinish_flags_constant_function_fixture(monkeypatch):
     monkeypatch.setenv("RSTEST_DOCTOR", "1")
     p = _plugin()
@@ -503,6 +514,15 @@ def test_fixture_fingerprint_caps_walked_items(monkeypatch):
     assert stream._fixture_fingerprint((1, 2, 3)) is not None
     assert stream._fixture_fingerprint((1, 2, 3, 4)) is None
     assert stream._fixture_fingerprint(((1, 2), (3, 4))) is None  # nested items count
+
+
+def test_fixture_fingerprint_rejects_int_past_str_digit_limit():
+    # 3.11+ caps int->str conversion; repr raises ValueError past the limit.
+    if not getattr(sys, "get_int_max_str_digits", lambda: 0)():
+        pytest.skip("no int str-digit limit (pre-3.11, or disabled)")
+    huge = 10 ** (sys.get_int_max_str_digits() + 1)
+    assert stream._fixture_fingerprint(huge) is None
+    assert stream._fixture_fingerprint((1, huge)) is None
 
 
 def test_fixture_fingerprint_survives_deep_nesting():
@@ -668,6 +688,37 @@ def test_fixture_setup_dynamic_narrower_dependency_taints_parent(monkeypatch):
             g_outer.send("c.ini")
     assert p._fixtures[("cfg_name", "function")][2] is False
     assert p._setup_stack == []
+
+
+class _FakeRequest:
+    """Stands in for pytest's SubRequest: getfixturevalue serves from
+    ``_fixture_defs`` without running a setup hook (the cached path)."""
+
+    def __init__(self, active):
+        self._fixture_defs = active
+
+    def getfixturevalue(self, argname):
+        return self._fixture_defs[argname].cached_result[0]
+
+
+@pytest.mark.parametrize(("dep_scope", "expected"), [("function", False), ("session", True)])
+def test_fixture_setup_cached_dynamic_fetch_checks_scope(monkeypatch, dep_scope, expected):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # `def test(tmp_path, cfg_name)` with cfg_name calling
+    # request.getfixturevalue("tmp_path"): tmp_path is already set up, so
+    # pytest returns it from cache and no nested setup hook fires.
+    dep = SimpleNamespace(scope=dep_scope, cached_result=("/t", 0, None))
+    request = _FakeRequest({"dep": dep})
+    for _ in range(2):
+        fd = SimpleNamespace(argname="cfg_name", scope="function", cached_result=("c.ini", 0, None))
+        gen = p.pytest_fixture_setup(fd, request=request)
+        next(gen)
+        assert request.getfixturevalue("dep") == "/t"  # the fixture body's fetch
+        with pytest.raises(StopIteration):
+            gen.send("c.ini")
+        assert "getfixturevalue" not in vars(request)  # spy removed after setup
+    assert p._fixtures[("cfg_name", "function")][2] is expected
 
 
 def test_fixture_setup_dynamic_session_dependency_keeps_parent(monkeypatch):

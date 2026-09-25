@@ -583,4 +583,60 @@ mod tests {
             .collect();
         render(&mut Sink::captured().0, &r); // exercises the len > 10 truncation-tail branch
     }
+
+    /// Covers every `FixtureAdvice` arm plus candidate sorting (needs two or
+    /// more candidates) in both the terminal and markdown renderers.
+    #[test]
+    fn fixture_advice_arms_and_candidate_order() {
+        use super::super::FixtureEntry;
+        let mut r = report(12);
+        let entry = |name: &str, count, total, constant, saving| FixtureEntry {
+            name: name.into(),
+            scope: "function".into(),
+            count,
+            total_seconds: total,
+            constant,
+            projected_saving_seconds: saving,
+        };
+        r.fixtures.extend([
+            // Many runs, real time, value not verified constant => widen.
+            entry("client", 25, 2.0, false, 0.0),
+            // Hotspot by time but too few runs for any advice.
+            entry("tmpdir", 2, 0.6, false, 0.0),
+            // Second candidate, smaller saving: must sort after `settings`.
+            entry("config", 30, 0.3, true, 0.3),
+        ]);
+
+        let md = render_markdown(&r);
+        assert!(md.contains("| `client` | function | 25 | 2.0s | ran many times; widen scope if value is reusable |"));
+        assert!(md.contains("| `tmpdir` | function | 2 | 0.6s |  |"));
+        let (settings, config) = (
+            md.find("| `settings` | 40 | ~0.90s |").unwrap(),
+            md.find("| `config` | 30 | ~0.30s |").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
+
+        let (mut sink, captured) = Sink::captured();
+        render(&mut sink, &r);
+        let out = captured.out();
+        assert!(out.contains(
+            "scope=function client  <- ran many times; widen scope if value is reusable"
+        ));
+        let tmpdir = out.lines().find(|l| l.contains("tmpdir")).unwrap();
+        assert!(
+            tmpdir.ends_with("scope=function tmpdir"),
+            "no advice: {tmpdir:?}"
+        );
+        let (settings, config) = (
+            out.find("40x  settings  <- @pytest.fixture").unwrap(),
+            out.find("30x  config  <- @pytest.fixture").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
+    }
 }
