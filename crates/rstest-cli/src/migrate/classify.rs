@@ -3,6 +3,7 @@
 //! (`classify`, `decide`) are pure and unit-tested; the discriminator runs
 //! (`classify_failures`, `bisect_polluter`) drive child sessions to reach them.
 
+use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::Result;
@@ -139,6 +140,7 @@ impl Verdict {
 /// Classify the parallel-only failures. `par` = -n auto outcomes; the function
 /// runs the discriminators (serial ×2, loadfile) and decides per failing test.
 pub(super) fn classify_failures(
+    python: &Path,
     args: &[String],
     par: &Outcomes,
     sink: &mut Sink,
@@ -163,9 +165,9 @@ pub(super) fn classify_failures(
         failed.len(),
         files.len()
     ));
-    let s1 = run_session(&["-n", "0"], &scoped)?;
-    let s2 = run_session(&["-n", "0"], &scoped)?;
-    let lf = run_session(&["--dist", "loadfile"], &scoped)?;
+    let s1 = run_session(python, &["-n", "0"], &scoped)?;
+    let s2 = run_session(python, &["-n", "0"], &scoped)?;
+    let lf = run_session(python, &["--dist", "loadfile"], &scoped)?;
 
     let fails = |o: &Outcomes, n: &str| matches!(o.get(n).map(|r| r.phase), Some(Phase::Fail));
     let wait_bound = |n: &str| par.get(n).map(|r| r.wait_bound()).unwrap_or(false);
@@ -206,7 +208,12 @@ pub(super) enum Polluter {
 /// Find the polluter: the file whose tests, run serially BEFORE the victim,
 /// reproduce its failure. Checks the victim's own file first (same-file
 /// co-location), then binary-searches the rest (polluter must precede victim).
-pub(super) fn bisect_polluter(args: &[String], victim: &str, all: &Outcomes) -> Result<Polluter> {
+pub(super) fn bisect_polluter(
+    python: &Path,
+    args: &[String],
+    victim: &str,
+    all: &Outcomes,
+) -> Result<Polluter> {
     let vfile = file_of(victim).to_string();
 
     // reproduce(subset): run `-n 0 <subset…> <vfile>` (vfile last so the
@@ -215,7 +222,9 @@ pub(super) fn bisect_polluter(args: &[String], victim: &str, all: &Outcomes) -> 
         let mut sel: Vec<String> = subset.to_vec();
         sel.push(vfile.clone());
         sel.extend_from_slice(args);
-        let o = run_session(&["-n", "0"], &sel)?;
+        // Order is the whole point here: keep pytest-randomly from shuffling
+        // the candidates after the victim.
+        let o = run_session(python, &["-n", "0", "-p", "no:randomly"], &sel)?;
         Ok(matches!(o.get(victim).map(|r| r.phase), Some(Phase::Fail)))
     };
 

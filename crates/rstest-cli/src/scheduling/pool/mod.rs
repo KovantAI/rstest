@@ -307,6 +307,12 @@ pub fn run_pool(
                 groups,
                 locations: _,
                 marks: _,
+                rootdir: _,
+                args_source: _,
+                root_args: _,
+                inifile: _,
+                order_flags: _,
+                confcutdir: _,
             }) => {
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);

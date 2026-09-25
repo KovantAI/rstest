@@ -95,14 +95,13 @@ pub fn run_audit(
     json_path: Option<&Path>,
     sink: &mut Sink,
 ) -> Result<i32> {
-    let _ = python; // child sessions self-resolve the interpreter, like migrate-check.
     let runs = repeat.max(1);
     sink.warn(&format!(
         "rstest audit: running -n auto {runs}× to surface parallel-only failures…"
     ));
     let mut par = Outcomes::new();
     for _ in 0..runs {
-        let o = run_session(&["-n", "auto"], args)?;
+        let o = run_session(python, &["-n", "auto"], args)?;
         if o.is_empty() {
             sink.out_line(
                 "rstest audit: rstest produced no run (it may have refused to dispatch — \
@@ -115,7 +114,7 @@ pub fn run_audit(
 
     // classify_failures runs the -n 0 oracle (×2) and a loadfile discriminator,
     // so a test that also fails serially is caught as NOT PARALLEL-SPECIFIC.
-    let verdicts = classify_failures(args, &par, sink)?;
+    let verdicts = classify_failures(python, args, &par, sink)?;
     let (serial, intrinsic, preexisting) = partition(&verdicts);
 
     if let Some(path) = json_path {
