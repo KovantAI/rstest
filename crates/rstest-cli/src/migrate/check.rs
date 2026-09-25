@@ -67,6 +67,38 @@ pub struct ParallelReport {
     pub ready: Option<bool>,
 }
 
+impl ParallelReport {
+    /// The phase started but captured no outcomes (no snapshot).
+    fn not_run() -> Self {
+        Self {
+            findings: None,
+            preexisting: None,
+            ran: false,
+            ready: None,
+        }
+    }
+
+    /// The phase ran and found no parallel-only failures.
+    fn ready(preexisting: usize) -> Self {
+        Self {
+            findings: Some(vec![]),
+            preexisting: Some(preexisting),
+            ran: true,
+            ready: Some(true),
+        }
+    }
+
+    /// The phase ran and found parallel-only failures.
+    fn blocked(findings: Vec<Finding>, preexisting: usize) -> Self {
+        Self {
+            findings: Some(findings),
+            preexisting: Some(preexisting),
+            ran: true,
+            ready: Some(false),
+        }
+    }
+}
+
 /// One unstable-nodeid finding, grouped by test site (`file::test`).
 #[derive(Serialize, Clone)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -224,16 +256,7 @@ pub fn run_migrate_check(
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
         );
-        return finish(
-            false,
-            Some(ParallelReport {
-                findings: None,
-                preexisting: None,
-                ran: false,
-                ready: None,
-            }),
-            1,
-        );
+        return finish(false, Some(ParallelReport::not_run()), 1);
     }
     let verdicts = classify_failures(python, args, &par, sink)?;
     if verdicts.is_empty() {
@@ -241,16 +264,7 @@ pub fn run_migrate_check(
             "PARALLEL: ready — {} tests pass at -n auto.",
             par.len()
         ));
-        return finish(
-            true,
-            Some(ParallelReport {
-                findings: Some(vec![]),
-                preexisting: Some(0),
-                ran: true,
-                ready: Some(true),
-            }),
-            0,
-        );
+        return finish(true, Some(ParallelReport::ready(0)), 0);
     }
 
     // Pre-existing failures (fail at -n 0 too) aren't a migration concern;
@@ -272,16 +286,7 @@ pub fn run_migrate_check(
                  issue; see `rstest -n 0`.)"
             ));
         }
-        return finish(
-            true,
-            Some(ParallelReport {
-                findings: Some(vec![]),
-                preexisting: Some(preexisting),
-                ran: true,
-                ready: Some(true),
-            }),
-            0,
-        );
+        return finish(true, Some(ParallelReport::ready(preexisting)), 0);
     }
 
     // Bisect the polluting file for order + isolation victims (both reproduce
@@ -356,12 +361,7 @@ pub fn run_migrate_check(
     }
     finish(
         false,
-        Some(ParallelReport {
-            findings: Some(json_findings),
-            preexisting: Some(preexisting),
-            ran: true,
-            ready: Some(false),
-        }),
+        Some(ParallelReport::blocked(json_findings, preexisting)),
         if blocking > 0 { 1 } else { 0 },
     )
 }
@@ -562,6 +562,33 @@ mod tests {
         assert_eq!(doc["will_bail_count"], 3);
         assert_eq!(doc["unstable_ids"][0]["site"], "a.py::t");
         assert!(doc["parallel"].is_null());
+    }
+
+    #[test]
+    fn parallel_report_shapes_per_outcome() {
+        // Not run: only `ran` is emitted; the rest are skipped, not null.
+        assert_eq!(
+            serde_json::to_value(ParallelReport::not_run()).unwrap(),
+            serde_json::json!({ "ran": false })
+        );
+        assert_eq!(
+            serde_json::to_value(ParallelReport::ready(2)).unwrap(),
+            serde_json::json!({ "ran": true, "ready": true, "findings": [], "preexisting": 2 })
+        );
+        let finding = Finding {
+            allowed: false,
+            fix: "f".into(),
+            nodeid: "a.py::t".into(),
+            polluter: None,
+            verdict: "v".into(),
+            why: "w".into(),
+        };
+        let blocked = serde_json::to_value(ParallelReport::blocked(vec![finding], 1)).unwrap();
+        assert_eq!(blocked["ran"], true);
+        assert_eq!(blocked["ready"], false);
+        assert_eq!(blocked["preexisting"], 1);
+        assert_eq!(blocked["findings"][0]["nodeid"], "a.py::t");
+        assert!(blocked["findings"][0]["polluter"].is_null());
     }
 
     #[test]

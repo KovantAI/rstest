@@ -272,7 +272,11 @@ mod tests {
                 std::fs::write(&path, &f.contents).unwrap();
                 continue;
             }
-            let current = std::fs::read_to_string(&path).unwrap_or_default();
+            // Windows checkouts may rewrite LF to CRLF (core.autocrlf); compare
+            // content, not line endings.
+            let current = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .replace("\r\n", "\n");
             if current != f.contents {
                 stale.push(f.rel_path);
             }

@@ -118,7 +118,19 @@ pub(super) fn run_collect_discovery(
     };
     let rootdir = strip_verbatim(std::fs::canonicalize(&rootdir).unwrap_or(rootdir));
     let tests = build_tests(&ids, &locations, &marks, &rootdir);
-    let doc = DiscoveryDoc {
+    let doc = discovery_doc(tests, &collect_errors, &rootdir);
+    std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
+    Ok(exitstatus)
+}
+
+/// Assemble the discovery envelope from the built tests and the
+/// `(path, longrepr)` collect errors.
+fn discovery_doc(
+    tests: Vec<DiscoveredTest>,
+    collect_errors: &[(String, String)],
+    rootdir: &std::path::Path,
+) -> DiscoveryDoc {
+    DiscoveryDoc {
         collect_errors: collect_errors
             .iter()
             .map(|(p, l)| CollectError {
@@ -127,16 +139,14 @@ pub(super) fn run_collect_discovery(
             })
             .collect(),
         meta: DiscoveryMeta {
-            count: ids.len(),
+            count: tests.len(),
             kind: "discovery".to_string(),
             rootdir: rootdir.to_string_lossy().into_owned(),
             runner: "rstest".to_string(),
             schema: 1,
         },
         tests,
-    };
-    std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
-    Ok(exitstatus)
+    }
 }
 
 /// Fold one collect-session event into the discovery accumulators. Returns
@@ -214,7 +224,7 @@ fn build_tests(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_tests, fold_collect_event, strip_verbatim};
+    use super::{build_tests, discovery_doc, fold_collect_event, strip_verbatim};
     use crate::scheduling::proto;
 
     #[test]
@@ -371,5 +381,25 @@ mod tests {
         assert_eq!(tests[1].file, "");
         assert!(tests[1].lineno.is_none());
         assert!(tests[1].markers.is_empty());
+    }
+
+    #[test]
+    fn discovery_doc_carries_meta_tests_and_collect_errors() {
+        let rootdir = std::path::Path::new("/repo");
+        let ids = vec!["t.py::a".to_string()];
+        let tests = build_tests(&ids, &[("t.py".to_string(), Some(3))], &[], rootdir);
+        let errors = vec![("bad.py".to_string(), "ImportError: nope".to_string())];
+
+        let doc = serde_json::to_value(discovery_doc(tests, &errors, rootdir)).unwrap();
+        assert_eq!(doc["meta"]["kind"], "discovery");
+        assert_eq!(doc["meta"]["runner"], "rstest");
+        assert_eq!(doc["meta"]["schema"], 1);
+        assert_eq!(doc["meta"]["count"], 1);
+        assert_eq!(doc["meta"]["rootdir"], rootdir.to_string_lossy().as_ref());
+        assert_eq!(doc["tests"][0]["nodeid"], "t.py::a");
+        assert_eq!(
+            doc["collect_errors"],
+            serde_json::json!([{ "path": "bad.py", "longrepr": "ImportError: nope" }])
+        );
     }
 }

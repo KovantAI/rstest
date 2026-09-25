@@ -120,16 +120,7 @@ fn apply_selection(
                 ));
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
-                match mapped {
-                    Some(m) => sink.out_line(&format!(
-                        "rstest: 0 of {m} mapped test(s) affected by {} changed file(s)",
-                        changes.len()
-                    )),
-                    None => sink.out_line(&format!(
-                        "rstest: no tests affected by {} changed file(s)",
-                        changes.len()
-                    )),
-                }
+                sink.out_line(&none_affected_message(mapped, changes.len()));
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
                 // don't force a re-run next time.
@@ -145,24 +136,7 @@ fn apply_selection(
                 return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
-                // The savings ratio (affected of mapped) only compares like with
-                // like when every target is a mapped test id. Whole test files
-                // (a changed test file, or an import-graph fallback for files the
-                // map doesn't cover) each hold many tests, so any file target
-                // makes "X of M" understate the run; report the plain count then.
-                let all_nodeids = tests.iter().all(|t| t.to_string_lossy().contains("::"));
-                match mapped.filter(|_| all_nodeids) {
-                    Some(m) => sink.warn(&format!(
-                        "rstest: {} changed file(s) -> {} of {m} mapped test target(s) affected",
-                        changes.len(),
-                        tests.len()
-                    )),
-                    None => sink.warn(&format!(
-                        "rstest: {} changed file(s) -> {} affected test target(s)",
-                        changes.len(),
-                        tests.len()
-                    )),
-                }
+                sink.warn(&affected_message(mapped, changes.len(), &tests));
                 let mut selected: Vec<String> =
                     tests.iter().map(|t| t.display().to_string()).collect();
                 // Keep the user's flags; drop any explicit path args in
@@ -177,6 +151,38 @@ fn apply_selection(
         }
     }
     Ok(ControlFlow::Continue(args))
+}
+
+/// `--changed` summary when nothing was affected; names the mapped-test
+/// denominator when the coverage map is warm.
+fn none_affected_message(mapped: Option<usize>, changed: usize) -> String {
+    match mapped {
+        Some(m) => format!("rstest: 0 of {m} mapped test(s) affected by {changed} changed file(s)"),
+        None => format!("rstest: no tests affected by {changed} changed file(s)"),
+    }
+}
+
+/// `--changed` summary for a non-empty selection.
+fn affected_message(
+    mapped: Option<usize>,
+    changed: usize,
+    targets: &[std::path::PathBuf],
+) -> String {
+    // The savings ratio (affected of mapped) only compares like with like when
+    // every target is a mapped test id. Whole test files (a changed test file,
+    // or an import-graph fallback for files the map doesn't cover) each hold
+    // many tests, so any file target makes "X of M" understate the run; report
+    // the plain count then.
+    let all_nodeids = targets.iter().all(|t| t.to_string_lossy().contains("::"));
+    let n = targets.len();
+    match mapped.filter(|_| all_nodeids) {
+        Some(m) => {
+            format!(
+                "rstest: {changed} changed file(s) -> {n} of {m} mapped test target(s) affected"
+            )
+        }
+        None => format!("rstest: {changed} changed file(s) -> {n} affected test target(s)"),
+    }
 }
 
 /// Run-time context threaded into [`run_post_gates`]: the timing/cache/selection
@@ -1732,13 +1738,13 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
-        collect_lazy, dispatch_command, fold_run_event, head_to_none, lazy_should_steal,
-        names_a_selection, order_ignored_warning, parse_duration_secs, parse_numprocesses,
-        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, watchdog_duration, RunPath,
+        affected_message, attach_stream_json, cap_workers_by_files, cap_workers_by_time,
+        check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
+        lazy_should_steal, names_a_selection, none_affected_message, order_ignored_warning,
+        parse_duration_secs, parse_numprocesses, resolve_changed_base, resolve_order,
+        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
+        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration, RunPath,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -2647,5 +2653,38 @@ mod tests {
         // Nothing was attached, so emitting is a no-op (no panic writing to a
         // closed/absent stream).
         sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
+    }
+
+    #[test]
+    fn none_affected_message_names_the_mapped_denominator_when_warm() {
+        assert_eq!(
+            none_affected_message(Some(40), 2),
+            "rstest: 0 of 40 mapped test(s) affected by 2 changed file(s)"
+        );
+        assert_eq!(
+            none_affected_message(None, 2),
+            "rstest: no tests affected by 2 changed file(s)"
+        );
+    }
+
+    #[test]
+    fn affected_message_ratio_only_when_every_target_is_a_nodeid() {
+        use std::path::PathBuf;
+        let ids = [PathBuf::from("t.py::a"), PathBuf::from("t.py::b")];
+        assert_eq!(
+            affected_message(Some(40), 1, &ids),
+            "rstest: 1 changed file(s) -> 2 of 40 mapped test target(s) affected"
+        );
+        // A whole-file target would make "X of M" understate the run.
+        let mixed = [PathBuf::from("t.py::a"), PathBuf::from("u.py")];
+        assert_eq!(
+            affected_message(Some(40), 1, &mixed),
+            "rstest: 1 changed file(s) -> 2 affected test target(s)"
+        );
+        // Cold map: plain count.
+        assert_eq!(
+            affected_message(None, 3, &ids),
+            "rstest: 3 changed file(s) -> 2 affected test target(s)"
+        );
     }
 }
