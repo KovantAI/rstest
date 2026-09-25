@@ -59,7 +59,7 @@ struct ExplainReport {
     /// otherwise (absence is not proof of failure — see `flakes` for fail
     /// history).
     last_outcome: Option<&'static str>,
-    /// Source def line recorded on the last incremental run, if known.
+    /// Source def line (1-based) recorded on the last incremental run, if known.
     source_line: Option<u64>,
     /// Cross-run flake/fail counts + last-event epoch, if the test has any.
     flakes: Option<FlakeStats>,
@@ -108,7 +108,9 @@ fn gather(nodeid: &str) -> ExplainReport {
     let flakes = crate::reporting::flakes::load().get(nodeid).copied();
     let (green, lines) = crate::coverage_skip::load_raw(&scope);
     let last_outcome = green.contains(nodeid).then_some("passed");
-    let source_line = lines.get(nodeid).copied();
+    // The outcomes store keeps pytest's 0-based `location` line; report it
+    // 1-based like every other human-facing surface (e.g. CI annotations).
+    let source_line = lines.get(nodeid).map(|l| l + 1);
     let coverage = load_coverage_index().and_then(|idx| footprint(&idx, nodeid));
 
     let found = duration_seconds.is_some()
@@ -327,5 +329,240 @@ mod tests {
         assert_eq!(ago(now - 5 * 24 * 60 * 60, now), "5d ago");
         // Future epoch (skew) never goes negative.
         assert_eq!(ago(now + 999, now), "just now");
+    }
+
+    #[test]
+    fn ago_bucket_boundaries() {
+        let now = 100 * 24 * 60 * 60;
+        assert_eq!(ago(now - 59, now), "just now");
+        assert_eq!(ago(now - 60, now), "1m ago");
+        assert_eq!(ago(now - (60 * 60 - 1), now), "59m ago");
+        assert_eq!(ago(now - 60 * 60, now), "1h ago");
+        assert_eq!(ago(now - (24 * 60 * 60 - 1), now), "23h ago");
+        assert_eq!(ago(now - 24 * 60 * 60, now), "1d ago");
+        // A zeroed epoch is a real (huge) age, not a panic.
+        assert_eq!(ago(0, now), "100d ago");
+    }
+
+    #[test]
+    fn footprint_counts_lines_across_files_and_sorts_them() {
+        let id = "t/x.py::test_a";
+        let mut idx = index_with(id);
+        let mut lines = HashMap::new();
+        lines.insert(3, vec![id.to_string()]);
+        lines.insert(4, vec!["other::t".to_string()]);
+        idx.files.insert(
+            "src/0_first.py".to_string(),
+            CoverageFile {
+                hash: "h3".to_string(),
+                lines,
+            },
+        );
+        let cov = footprint(&idx, id).expect("covers something");
+        assert_eq!(cov.file_count, 2);
+        assert_eq!(cov.line_count, 3);
+        assert_eq!(cov.files, vec!["src/0_first.py", "src/a.py"]);
+    }
+
+    #[test]
+    fn footprint_matches_nodeid_exactly_not_by_prefix() {
+        // `test_a` must not claim lines covered by `test_a[1]` or `test_ab`.
+        let mut idx = index_with("t/x.py::test_a[1]");
+        idx.files
+            .get_mut("src/b.py")
+            .unwrap()
+            .lines
+            .insert(10, vec!["t/x.py::test_ab".to_string()]);
+        assert!(footprint(&idx, "t/x.py::test_a").is_none());
+    }
+
+    #[test]
+    fn footprint_none_on_empty_index() {
+        let idx = CoverageIndex {
+            schema: COVERAGE_INDEX_SCHEMA,
+            files: HashMap::new(),
+        };
+        assert!(footprint(&idx, "t/x.py::test_a").is_none());
+    }
+
+    fn report(nodeid: &str) -> ExplainReport {
+        ExplainReport {
+            meta: Meta {
+                runner: "rstest",
+                kind: "explain",
+                schema: SCHEMA,
+                rstest_version: env!("CARGO_PKG_VERSION"),
+            },
+            nodeid: nodeid.to_string(),
+            found: true,
+            duration_seconds: None,
+            last_outcome: None,
+            source_line: None,
+            flakes: None,
+            coverage: None,
+        }
+    }
+
+    fn full_report() -> ExplainReport {
+        let now = crate::time::now_epoch_secs();
+        ExplainReport {
+            duration_seconds: Some(0.12345),
+            last_outcome: Some("passed"),
+            source_line: Some(42),
+            flakes: Some(FlakeStats {
+                flaky: 2,
+                failed: 1,
+                last_epoch: now.saturating_sub(3 * 60 * 60),
+                last_failed_epoch: 0,
+            }),
+            coverage: Some(Coverage {
+                file_count: 2,
+                line_count: 7,
+                files: vec!["src/a.py".to_string(), "src/b.py".to_string()],
+            }),
+            ..report("tests/test_x.py::TestC::test_m[a::b]")
+        }
+    }
+
+    fn rendered(r: &ExplainReport) -> (String, String) {
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, r);
+        (cap.out(), cap.err())
+    }
+
+    #[test]
+    fn render_full_dossier() {
+        let (out, err) = rendered(&full_report());
+        assert!(err.is_empty(), "err={err}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "test: tests/test_x.py::TestC::test_m[a::b]");
+        // The source location uses the file part only (param `::` not split).
+        assert_eq!(lines[1], "  tests/test_x.py:42");
+        assert_eq!(lines[2], "");
+        assert_eq!(lines[3], "  duration   0.1235s (last recorded)");
+        assert_eq!(lines[4], "  outcome    passed last incremental run");
+        assert_eq!(lines[5], "  flakes     flaked 2x, failed 1x (last 3h ago)");
+        assert_eq!(lines[6], "  coverage   covers 2 file(s), 7 line(s):");
+        assert_eq!(lines[7], "               src/a.py");
+        assert_eq!(lines[8], "               src/b.py");
+        assert_eq!(lines.len(), 9, "out={out}");
+    }
+
+    #[test]
+    fn render_placeholders_for_absent_sections() {
+        // Found via duration alone: every other section prints its placeholder,
+        // and no source-location line appears without a recorded def line.
+        let r = ExplainReport {
+            duration_seconds: Some(1.0),
+            ..report("t/x.py::test_a")
+        };
+        let (out, _) = rendered(&r);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "test: t/x.py::test_a");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], "  duration   1.0000s (last recorded)");
+        assert_eq!(lines[3], "  outcome    no last-green record");
+        assert_eq!(lines[4], "  flakes     no flake/fail history");
+        assert!(lines[5].starts_with("  coverage   cold"), "{}", lines[5]);
+        assert!(lines[5].contains("--cov-context=test"));
+        assert_eq!(lines.len(), 6, "out={out}");
+    }
+
+    #[test]
+    fn render_no_cached_timing() {
+        let r = ExplainReport {
+            last_outcome: Some("passed"),
+            ..report("t/x.py::test_a")
+        };
+        let (out, _) = rendered(&r);
+        assert!(out.contains("  duration   no cached timing\n"), "out={out}");
+    }
+
+    #[test]
+    fn render_flakes_only_failed_or_only_flaky_or_neither() {
+        let now = crate::time::now_epoch_secs();
+        let flakes = |flaky, failed| ExplainReport {
+            flakes: Some(FlakeStats {
+                flaky,
+                failed,
+                last_epoch: now,
+                last_failed_epoch: 0,
+            }),
+            ..report("t/x.py::test_a")
+        };
+        let (out, _) = rendered(&flakes(0, 4));
+        assert!(
+            out.contains("  flakes     failed 4x (last just now)\n"),
+            "out={out}"
+        );
+        let (out, _) = rendered(&flakes(3, 0));
+        assert!(
+            out.contains("  flakes     flaked 3x (last just now)\n"),
+            "out={out}"
+        );
+        // An entry with zeroed counts (legal on disk) still renders sanely.
+        let (out, _) = rendered(&flakes(0, 0));
+        assert!(
+            out.contains("  flakes     no events (last just now)\n"),
+            "out={out}"
+        );
+    }
+
+    #[test]
+    fn render_not_found_goes_to_stderr_only() {
+        // A needle no real cache could contain, so `suggestions` adds nothing.
+        let r = ExplainReport {
+            found: false,
+            ..report("zz/\u{1f600}_nope.py::never_seen")
+        };
+        let (out, err) = rendered(&r);
+        assert!(out.is_empty(), "out={out}");
+        assert!(
+            err.contains("explain: no cached data for zz/\u{1f600}_nope.py::never_seen"),
+            "err={err}"
+        );
+        assert!(err.contains("FAILED"), "err={err}");
+        assert!(!err.contains("did you mean"), "err={err}");
+    }
+
+    #[test]
+    fn json_shape_is_stable() {
+        let v = serde_json::to_value(full_report()).unwrap();
+        assert_eq!(v["meta"]["runner"], "rstest");
+        assert_eq!(v["meta"]["kind"], "explain");
+        assert_eq!(v["meta"]["schema"], SCHEMA);
+        assert_eq!(v["meta"]["rstest_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(v["nodeid"], "tests/test_x.py::TestC::test_m[a::b]");
+        assert_eq!(v["found"], true);
+        assert_eq!(v["duration_seconds"], 0.12345);
+        assert_eq!(v["last_outcome"], "passed");
+        assert_eq!(v["source_line"], 42);
+        assert_eq!(v["flakes"]["flaky"], 2);
+        assert_eq!(v["flakes"]["failed"], 1);
+        assert!(v["flakes"]["last_epoch"].is_u64());
+        assert_eq!(v["coverage"]["file_count"], 2);
+        assert_eq!(v["coverage"]["line_count"], 7);
+        assert_eq!(v["coverage"]["files"][1], "src/b.py");
+    }
+
+    #[test]
+    fn json_absent_fields_are_null_not_omitted() {
+        // Tooling keys on every field existing; absence must serialize as null.
+        let v = serde_json::to_value(ExplainReport {
+            found: false,
+            ..report("t/x.py::test_a")
+        })
+        .unwrap();
+        let obj = v.as_object().unwrap();
+        for k in [
+            "duration_seconds",
+            "last_outcome",
+            "source_line",
+            "flakes",
+            "coverage",
+        ] {
+            assert!(obj.get(k).is_some_and(|x| x.is_null()), "{k}: {v}");
+        }
+        assert_eq!(v["found"], false);
     }
 }
