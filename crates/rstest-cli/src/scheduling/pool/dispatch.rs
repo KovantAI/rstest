@@ -118,7 +118,7 @@ pub(super) fn build_dispatch(
     order: super::Order,
     shuffle: Option<u64>,
     keep: Option<&HashSet<u64>>,
-) -> anyhow::Result<Dispatch> {
+) -> Option<Dispatch> {
     // --shard filter: an index not in `keep` is deselected everywhere
     // (parallel order, serial phase, groups). None keeps everything.
     let kept = |i: &u64| keep.is_none_or(|k| k.contains(i));
@@ -127,14 +127,9 @@ pub(super) fn build_dispatch(
     let parallel = || (0..ids.len() as u64).filter(|i| !serial_set.contains(i) && kept(i));
 
     let (order, slow_count, group_ends) = match dist {
-        // Each mode never builds a dispatch queue (each worker is seeded
-        // with the full suite); run_pool guards the call. Return an error
-        // rather than panic if that invariant is ever violated.
-        Dist::Each => {
-            return Err(anyhow::anyhow!(
-                "--dist each has no dispatch queue (run_pool must guard the build_dispatch call)"
-            ))
-        }
+        // Each mode has no dispatch queue (each worker is seeded with the
+        // full suite), so there is nothing to build.
+        Dist::Each => return None,
         Dist::Load => match order {
             super::Order::Throughput => {
                 let full = crate::scheduling::durations::dispatch_order(ids, cache);
@@ -152,16 +147,27 @@ pub(super) fn build_dispatch(
                     .count();
                 (order, slow_count, None)
             }
-            // Fail-fast: failed/flaky first, then fastest-stable. No long-pole
-            // spreading (slow_count = 0) — the point is red-signal latency, not
-            // packing; ascending duration is the secondary key that still fills.
+            // Fail-fast: suspects (failed/flaky) first, then the throughput
+            // order. The single-dispatch prefix covers the suspects AND the
+            // long poles, so reds spread across workers at once and slow
+            // tests still don't pile onto one worker's chunk.
             super::Order::FailFast => {
-                let full = crate::scheduling::durations::failfast_order(ids, cache, flakes);
-                let order: Vec<u64> = full
+                use crate::scheduling::durations::{
+                    failfast_order, is_suspect, SLOW_THRESHOLD_SECS,
+                };
+                let order: Vec<u64> = failfast_order(ids, cache, flakes)
                     .into_iter()
                     .filter(|i| !serial_set.contains(i) && kept(i))
                     .collect();
-                (order, 0, None)
+                let slow_count = order
+                    .iter()
+                    .take_while(|&&i| {
+                        let id = &ids[i as usize];
+                        is_suspect(id, flakes)
+                            || cache.get(id).is_some_and(|&d| d >= SLOW_THRESHOLD_SECS)
+                    })
+                    .count();
+                (order, slow_count, None)
             }
         },
         // Affinity modes: collection order, grouped by a key; a dispatch
@@ -252,7 +258,7 @@ pub(super) fn build_dispatch(
         // the same permutation pattern as the parallel one.
         shuffle_slice(&mut serial, seed.wrapping_add(1));
     }
-    Ok(Dispatch {
+    Some(Dispatch {
         order,
         slow_count,
         cursor: 0,
@@ -283,7 +289,7 @@ mod tests {
         dist: Dist,
         shuffle: Option<u64>,
         keep: Option<&HashSet<u64>>,
-    ) -> anyhow::Result<Dispatch> {
+    ) -> Option<Dispatch> {
         build_dispatch(
             ids,
             serial,
@@ -337,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn failfast_dispatch_puts_red_first_and_zeroes_slow_count() {
+    fn failfast_dispatch_puts_red_first_and_singles_red_and_long_poles() {
         use crate::reporting::flakes::FlakeStats;
         let names = ids(&["t/a.py::ok_slow", "t/a.py::red", "t/b.py::ok_fast"]);
         let cache = HashMap::from([
@@ -363,10 +369,10 @@ mod tests {
             None,
         )
         .unwrap();
-        // red (index 1) first, then clean fast, slow-stable last.
-        assert_eq!(d.order, vec![1, 2, 0]);
-        // No long-pole spreading in fail-fast: signal latency, not packing.
-        assert_eq!(d.slow_count, 0);
+        // red (index 1) first, then the throughput tail: long pole, then rest.
+        assert_eq!(d.order, vec![1, 0, 2]);
+        // Red and the long pole both dispatch one at a time.
+        assert_eq!(d.slow_count, 2);
     }
 
     #[test]
@@ -562,5 +568,20 @@ mod tests {
             Take::Items(items) => assert_eq!(items, vec![0, 1]),
             Take::Exhausted => panic!("designate should get serial items"),
         }
+    }
+
+    #[test]
+    fn each_mode_builds_no_dispatch() {
+        let names = ids(&["a.py::t1", "a.py::t2"]);
+        let d = dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &HashMap::new(),
+            Dist::Each,
+            None,
+            None,
+        );
+        assert!(d.is_none());
     }
 }

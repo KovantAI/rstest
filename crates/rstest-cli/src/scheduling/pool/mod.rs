@@ -90,8 +90,9 @@ pub enum Order {
     /// Slow tests first, to pack workers (best wall-clock throughput).
     #[default]
     Throughput,
-    /// Failed/flakiest first, then fastest-stable, slow-stable last — earliest
-    /// red signal, for `--watch` and PR CI (compose with `--maxfail`).
+    /// Recently failed, then flaky tests first, then the throughput order for
+    /// the rest: earliest red signal, for `--watch` and PR CI (compose with
+    /// `--maxfail`).
     FailFast,
 }
 
@@ -474,7 +475,7 @@ pub fn run_pool(
                             cached_ids.append(&mut cached);
                             Some(run_idx)
                         };
-                        dispatch = Some(build_dispatch(
+                        dispatch = build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
                             groups.unwrap_or_default(),
@@ -484,7 +485,7 @@ pub fn run_pool(
                             order,
                             shuffle,
                             keep.as_ref(),
-                        )?);
+                        );
                     }
                     ids_store.get_or_insert(ids);
                 }

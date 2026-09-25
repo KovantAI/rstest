@@ -174,6 +174,11 @@ struct RunConfig {
     n: usize,
     /// `--dist` name, validated but kept as a string (lazy/each check it).
     dist_name: String,
+    /// Resolved `--order` (validated up front like `--dist`).
+    order: pool::Order,
+    /// Whether `--order` came from the flag or `[tool.rstest]` (vs the auto
+    /// pick), so conflicts with an explicit request warn or refuse.
+    order_explicit: bool,
     reruns: u32,
     known_flaky: Option<std::collections::HashSet<String>>,
     worker_timeout: Option<u64>,
@@ -243,6 +248,18 @@ fn resolve_run_config(
     // the rerun loop is orchestrator-side (rerunfailures neutralized inside).
     // Passthrough can't be pooled, so reruns stay inert there.
     let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
+    // Resolve `--order` here, not at pool dispatch, so a bad value errors on
+    // every run path (same rule as `--dist` above).
+    let order = resolve_order(cli, settings, &dist_name, sink)?;
+    let order_explicit = cli.order.is_some() || settings.order.is_some();
+    if let Some(w) = order_ignored_warning(
+        order,
+        order_explicit,
+        passthrough || (n <= 1 && !single_worker_reruns),
+        false,
+    ) {
+        sink.warn(w);
+    }
     // A one-worker rerun pool is 1 worker everywhere downstream (banner,
     // doctor, report-json meta), never 0.
     let n = if single_worker_reruns { 1 } else { n };
@@ -321,6 +338,8 @@ fn resolve_run_config(
         numprocesses,
         n,
         dist_name,
+        order,
+        order_explicit,
         reruns,
         known_flaky,
         worker_timeout,
@@ -686,6 +705,11 @@ fn maybe_dispatch_monorepo(
              (each project has its own .rstest_cache); run rstest per project"
         );
     }
+    // The root never reaches resolve_run_config, so validate --order here: a
+    // bad value errors once, not once per child. Children get it forwarded.
+    if let Some(o) = &cli.order {
+        o.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?;
+    }
     monorepo::execute_monorepo(cli, args, &cwd, projects, run_uid, sink).map(ControlFlow::Break)
 }
 
@@ -814,6 +838,10 @@ fn resolve_incremental(
         dist_name,
         sink,
     )?;
+    // An explicit fail-fast order and --shuffle both claim the dispatch queue;
+    // refuse rather than let the shuffle silently discard the requested order.
+    // The --watch auto-pick yields to --shuffle without complaint.
+    check_order_shuffle(cfg.order, cfg.order_explicit, shuffle_seed.is_some())?;
     // --shard K/N: partition the suite and keep bucket K. Purely an
     // orchestrator-side node-id (or, in lazy mode, file) filter.
     let shard = resolve_shard(
@@ -952,6 +980,8 @@ fn dispatch_run(
         single_worker_reruns,
         mode,
         durations,
+        order,
+        order_explicit,
         ref dist_name,
         ref known_flaky,
         ref worker_env,
@@ -1023,6 +1053,9 @@ fn dispatch_run(
             collection_size: 0,
         }
     } else if collect_lazy(cli, settings, dist_name, args, sink)? {
+        if let Some(w) = order_ignored_warning(order, order_explicit, false, true) {
+            sink.warn(w);
+        }
         let cwd = std::env::current_dir()?;
         let project = config::discover(&cwd, sink.err());
         let paths: Vec<PathBuf> = args
@@ -1065,7 +1098,7 @@ fn dispatch_run(
         pool::run_pool(
             &base_cfg,
             dist,
-            resolve_order(cli, settings, dist_name, sink)?,
+            order,
             durations.is_some(),
             shuffle_seed,
             shard,
@@ -1098,6 +1131,47 @@ fn resolve_order(
         ));
     }
     Ok(order)
+}
+
+/// Heads-up when an explicit `--order fail-fast` lands on a run path that
+/// never builds a `--dist load` dispatch queue: single-worker/passthrough
+/// (session order) or `--collect lazy` (whole-file dispatch). The `--watch`
+/// auto-pick stays quiet: it was never asked for.
+fn order_ignored_warning(
+    order: pool::Order,
+    explicit: bool,
+    single_worker: bool,
+    lazy: bool,
+) -> Option<&'static str> {
+    if !explicit || order != pool::Order::FailFast {
+        return None;
+    }
+    if single_worker {
+        Some(
+            "rstest: --order fail-fast needs the parallel pool (-n >= 2); \
+             single-worker mode runs in session order",
+        )
+    } else if lazy {
+        Some(
+            "rstest: --order fail-fast is ignored under --collect lazy \
+             (lazy dispatches whole files); use --collect full",
+        )
+    } else {
+        None
+    }
+}
+
+/// An explicit fail-fast order and `--shuffle` both claim the dispatch queue;
+/// refuse rather than let the shuffle silently discard the requested order.
+/// The `--watch` auto-pick yields to `--shuffle` without complaint.
+fn check_order_shuffle(order: pool::Order, explicit: bool, shuffled: bool) -> Result<()> {
+    if shuffled && explicit && order == pool::Order::FailFast {
+        anyhow::bail!(
+            "--shuffle cannot be combined with --order fail-fast (the shuffle \
+             replaces the dispatch order); drop one of them"
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the collection strategy (CLI > [tool.rstest] > "full") and
@@ -1548,12 +1622,13 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_stream_json, cap_workers_by_files, cap_workers_by_time, collect_lazy,
-        dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
-        parse_numprocesses, resolve_changed_base, resolve_order, resolve_retention_policy,
-        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, watchdog_duration,
+        attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
+        collect_lazy, dispatch_command, fold_run_event, head_to_none, lazy_should_steal,
+        order_ignored_warning, parse_duration_secs, parse_numprocesses, resolve_changed_base,
+        resolve_order, resolve_retention_policy, resolve_shard, resolve_shuffle_seed,
+        run_cache_compact, silent_master_plugin_warnings, validate_cache_flags,
+        warn_incremental_conflicts, warn_quarantine_passthrough, warn_windows_timeout,
+        watchdog_duration,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1852,6 +1927,35 @@ mod tests {
             pool::Order::FailFast
         );
         assert!(cap.err().contains("only reorders --dist load"));
+    }
+
+    #[test]
+    fn order_ignored_warning_only_for_explicit_failfast_off_pool() {
+        use pool::Order::{FailFast, Throughput};
+        // Explicit fail-fast on single-worker / lazy paths warns.
+        assert!(order_ignored_warning(FailFast, true, true, false)
+            .unwrap()
+            .contains("needs the parallel pool"));
+        assert!(order_ignored_warning(FailFast, true, false, true)
+            .unwrap()
+            .contains("--collect lazy"));
+        // Pool path, auto-pick, or throughput: silent.
+        assert!(order_ignored_warning(FailFast, true, false, false).is_none());
+        assert!(order_ignored_warning(FailFast, false, true, true).is_none());
+        assert!(order_ignored_warning(Throughput, true, true, true).is_none());
+    }
+
+    #[test]
+    fn check_order_shuffle_refuses_explicit_failfast_only() {
+        use pool::Order::{FailFast, Throughput};
+        assert!(check_order_shuffle(FailFast, true, true)
+            .unwrap_err()
+            .to_string()
+            .contains("--shuffle cannot be combined"));
+        // --watch auto-pick yields to --shuffle; no shuffle => no conflict.
+        assert!(check_order_shuffle(FailFast, false, true).is_ok());
+        assert!(check_order_shuffle(FailFast, true, false).is_ok());
+        assert!(check_order_shuffle(Throughput, true, true).is_ok());
     }
 
     #[test]

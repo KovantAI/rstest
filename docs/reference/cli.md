@@ -68,18 +68,20 @@ affinity order that is the point, so they ignore this).
   pack workers for the best wall-clock time. This is the historical
   behavior.
 - `fail-fast` — order for the earliest **red** signal: tests that
-  hard-failed in recent runs first, then the flakiest (both read from
-  `.rstest_cache/flakes.json`), then clean tests fastest-first with
-  slow-stable last. Duration stays the secondary key, so workers still
-  fill. Pair with [`--maxfail`/`-x`](#forwarded-pytest-flags) for true early exit — a
+  hard-failed first (most recent failure first), then flaky tests (most
+  recent flake first), both read from `.rstest_cache/flakes.json`, each
+  dispatched on its own so they run in parallel. The remaining clean tests
+  follow in `throughput` order, so workers still pack and modules stay
+  together. Pair with [`--maxfail`/`-x`](#forwarded-pytest-flags) for true early exit — a
   broken run then dies in seconds instead of minutes.
 
 **Auto:** with neither the flag nor `[tool.rstest] order` set, rstest
 picks `fail-fast` under [`--watch`](#-watch) (you want the failure now, on
 each save) and `throughput` otherwise. An explicit `--order fail-fast` on
-an affinity dist warns — it has no effect there. A cold `flakes.json`
-just means no test has a failure/flake signal yet, so fail-fast degrades
-to fastest-first. Config `[tool.rstest] order`.
+an affinity dist, a single-worker run, or `--collect lazy` warns, since
+it has no effect there; combining it with `--shuffle` is an error. A cold `flakes.json`
+just means no test has a failure/flake signal yet, so fail-fast matches
+`throughput`. Monorepo runs forward `--order` to every project. Config `[tool.rstest] order`.
 
 ### `--durations <N>` / `--durations-min <SECS>`
 

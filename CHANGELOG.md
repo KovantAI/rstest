@@ -10,8 +10,8 @@ between 0.0.x releases and are listed here.
   ready queue. `throughput` (default) keeps the slow-tests-first packing that
   optimizes wall-clock. `fail-fast` orders for the earliest red signal:
   recently-failed tests first, then the flakiest (both from
-  `.rstest_cache/flakes.json`), then clean tests fastest-first with slow-stable
-  last — so a broken run paired with `--maxfail`/`-x` dies in seconds. Both
+  `.rstest_cache/flakes.json`), then the usual throughput order for clean
+  tests — so a broken run paired with `--maxfail`/`-x` dies in seconds. Both
   input signals were already cached; no new data collection. Auto-selected under
   `--watch`; also settable as `[tool.rstest] order`. See
   [`--order`](docs/reference/cli.md#-order-throughputfail-fast).
