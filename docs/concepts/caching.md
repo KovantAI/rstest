@@ -114,7 +114,7 @@ without discarding fresh history, keep a recent window loose:
   push** when the loose count exceeds N (honoring the window above), so no
   separate maintenance job is needed. Best-effort: never fails the run.
 
-Recipes: [CI quickstart → Shared cache](../guides/ci-quickstart.md#shared-cache).
+Recipes: [Shared cache across CI jobs](../guides/ci-shared-cache.md).
 
 ## `.pytest_cache/` (pytest's, shared)
 

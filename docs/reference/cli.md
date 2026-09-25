@@ -33,6 +33,17 @@ Worker count. Default `auto` (logical cores).
   `-n 2`. See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
   (and, for migrators, how it differs from pytest-xdist's `-n 1`)
 
+**An explicit `-n <k>` is not capped by core count.** Only `auto` caps down.
+A literal `-n 16` on an 8-core box runs 16 workers. This is the knob for
+**wait-bound suites** (IO, sleeps, network, timeouts): a worker holds no core
+while it waits, so running more workers than cores overlaps more waits and
+cuts wall time, something `auto` will never do on its own. `auto` can also
+settle *below* the core count on a few-file suite, so pin `-n` when you want to
+overlap more than the file count allows. Full tuning method:
+[wait-bound playbook](../guides/wait-bound.md#2-tune-the-worker-count).
+Conversely, load-sensitive suites (tight timing assertions) may need `-n`
+*capped* below cores; see [Parallel safety](../guides/parallel-safety.md#choosing-the-worker-count).
+
 ### `--dist <load|loadfile|loadscope|loadgroup|each>`
 
 Distribution mode. Default `load`.
@@ -511,6 +522,102 @@ parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
 findings, and the build only goes red when a fresh one appears.
 
 The first slice of a broader migration assistant.
+
+### `bisect <nodeid>`
+
+Order-dependency bisect: the automated answer to "this test only fails when
+run after some other test; *which* one?" Given a failing test's nodeid, it
+finds the **polluter**: the earlier test(s) whose leaked state make the target
+fail.
+
+It works entirely at `-n 0` (serial), so it isolates **ordering**, not
+concurrency (for parallel-only failures use
+[`migrate-check`](#migrate-check)). The steps:
+
+1. **Isolation check.** Runs the victim alone. If it fails by itself, that's a
+   plain bug, not an order dependency; reported and done.
+2. **Reproduce.** Runs the victim after *all* preceding tests (collection
+   order). If it passes there, the failure doesn't come from ordering (likely
+   parallel-only, so try `migrate-check`).
+3. **Delta-debug.** [`ddmin`](https://www.st.cs.uni-saarland.de/dd/) over the
+   predecessor set: repeatedly run the victim preceded by a subset of the
+   earlier tests, shrinking toward the **1-minimal** set that still reproduces.
+   Handles a single polluter *and* interacting pairs.
+
+It prints the culprit(s) and a **minimal reproducing command**
+(`rstest -n 0 <culprit…> <victim>`) you can paste to confirm and debug. It
+runs from where you ran bisect: ids are shell-quoted and written relative to
+the current directory, and your `--python` and pytest options are carried
+over as given.
+
+You can run bisect from any directory. The rootdir comes from pytest itself
+(so `--rootdir`, `-c`, and every config file pytest honors apply), and the
+predecessor set is the whole suite as a run from the rootdir would collect it
+(its `testpaths`), not only the subdirectory you're in. The nodeid you pass
+may be rootdir-relative or relative to the current directory; when both
+readings name a test, the one relative to the current directory wins, as it
+would for pytest. Every child run
+uses the same interpreter, rootdir and config file as the collection, so a
+nested config (say `pkg/pytest.ini`) can't re-root a run that only touches
+`pkg/`. When the printed command would re-root the same way (a nested config,
+or a nearer `setup.py` in a project with no config file), it carries those
+pins too: `--rootdir` plus the loaded config, or `-c /dev/null` and
+`--confcutdir` when there is none.
+
+Order is the whole point, so bisect disables pytest-randomly (`-p no:randomly`)
+in the collection, every child run and the printed command. The predecessor
+set is the suite's plain collection order. To bisect a failure that only
+appears in one shuffled order, reorder explicitly instead.
+
+Its runs also use a private pytest cache, new and empty for each run, so `--ff`
+and `--lf` (often set in `addopts`) have nothing to reorder by and your own
+`.pytest_cache` is left alone (with the cacheprovider disabled the pin is
+simply inert); the printed command brings a fresh cache of its
+own when those flags are active. `-x` and `--maxfail` (from `addopts` or after
+`--`) are lifted in the child runs and in the printed command, so an earlier
+failure, the culprit's own included, can't stop a run before the victim.
+`--nf` and `--sw` can't be switched off from the command line, so bisect
+refuses them (exit `2`) and says how to drop them for the bisect. rstest's own
+`reruns` (config or `--reruns`) is off in the child runs too: a passing rerun
+would hide the failure, and a rerun run goes through the pool, which orders
+tests by duration. A `--confcutdir` of your own is kept as pytest applied it.
+
+Bounded to ~80 child runs; if it hits that ceiling it stops and reports the
+smallest reproducing set found (may not be fully minimal). Large suites are
+fine: the selection reaches each child run through a file, not the command
+line.
+
+Pass pytest options after `--`; they apply to the collection and to every
+child run:
+
+```console
+$ rstest bisect tests/test_report.py::test_totals
+$ rstest bisect tests/test_report.py::test_totals -- -p no:randomly -o log_level=DEBUG
+```
+
+Only options go there. A test path or nodeid after `--` is rejected (exit `2`),
+since it would be added to every child's selection. pytest decides what counts
+as one, so option values are never mistaken for paths. The same goes for test
+paths in the ini `addopts` or `PYTEST_ADDOPTS`: bisect says so and exits `2`.
+Clear them for the bisect with `-- -o addopts="<options only>"` (or unset the
+variable).
+
+Exit code: `0` = order-dependent culprit found, `1` = not order-dependent
+(fails alone, or doesn't reproduce from order), `2` = the nodeid isn't in the
+suite, or a test selection was passed after `--`. If the victim doesn't run in
+a child session (deselected by an option, a collection error), bisect stops
+with an error instead of reading that as a pass. `--bisect-json` writes the
+result.
+
+### `--bisect-json <path>`
+
+Write the `bisect` result as a versioned JSON document (schema `1`):
+`{meta, nodeid, rootdir, cwd, order_dependent, culprits[], reproduce_command}`.
+Nodeids are relative to `rootdir`; `reproduce_command` runs from `cwd` and is
+null when the test isn't order-dependent. A run that ends without a verdict
+(exit `2`, or an error) still writes the document, with an `error` message
+and no culprits, so a stale result from an earlier run is never left behind.
+Used with the `bisect` subcommand.
 
 ### `--only-rerun <REGEX>`
 

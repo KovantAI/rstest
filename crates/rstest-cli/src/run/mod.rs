@@ -540,38 +540,46 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     };
     let mut sink = Sink::stdio(color::Palette::detect(args));
     // cache-compact and shard-verify are interpreter-free (they only touch
-    // cache/report files); the rest resolve Python first.
-    if let Command::CacheCompact { keep_last, max_age } = command {
-        return Ok(Some(run_cache_compact(
-            cli,
-            &mut sink,
-            *keep_last,
-            max_age.as_deref(),
-        )?));
-    }
-    if let Command::ShardVerify { reports } = command {
-        return Ok(Some(crate::shardverify::run_shard_verify(
-            &mut sink, reports,
-        )?));
-    }
+    // cache/report files); the rest resolve Python first, lazily, so the
+    // interpreter-free modes never probe one. One `?` for every arm.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let python = discover::resolve(&scope, cli.python.as_deref())?;
+    let python = || discover::resolve(&scope, cli.python.as_deref());
     let code = match command {
+        Command::CacheCompact { keep_last, max_age } => {
+            run_cache_compact(cli, &mut sink, *keep_last, max_age.as_deref())
+        }
+        Command::ShardVerify { reports } => {
+            crate::shardverify::run_shard_verify(&mut sink, reports)
+        }
         // Verify the vendored pytest tree against the packaged manifest.
-        Command::VerifyVendor => crate::vendor::run_verify(&python)?,
+        Command::VerifyVendor => python().and_then(|py| crate::vendor::run_verify(&py)),
         // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
-        Command::Try => migrate::run_try(&python, args, &mut sink)?,
+        Command::Try => python().and_then(|py| migrate::run_try(&py, args, &mut sink)),
         // Parallel-readiness preflight: its own collect-twice path, not a run.
-        Command::MigrateCheck => migrate::run_migrate_check(
-            &python,
-            args,
-            cli.migrate_check_json.as_deref(),
-            &cli.migrate_allow,
-            &mut sink,
-        )?,
-        Command::CacheCompact { .. } => unreachable!("handled above"),
-        Command::ShardVerify { .. } => unreachable!("handled above"),
-    };
+        Command::MigrateCheck => python().and_then(|py| {
+            migrate::run_migrate_check(
+                &py,
+                args,
+                cli.migrate_check_json.as_deref(),
+                &cli.migrate_allow,
+                &mut sink,
+            )
+        }),
+        // Order-dependency bisect: delta-debug the predecessor set at -n 0.
+        Command::Bisect {
+            nodeid,
+            pytest_args,
+        } => python().and_then(|py| {
+            migrate::run_bisect(
+                &py,
+                cli.python.as_deref(),
+                nodeid,
+                pytest_args,
+                cli.bisect_json.as_deref(),
+                &mut sink,
+            )
+        }),
+    }?;
     Ok(Some(code))
 }
 
@@ -690,10 +698,7 @@ fn maybe_dispatch_monorepo(
         return Ok(ControlFlow::Continue(()));
     }
     let cwd = std::env::current_dir()?;
-    let path_args = args
-        .iter()
-        .any(|a| !a.starts_with('-') && std::path::Path::new(a).exists());
-    if path_args || config::has_pytest_config(&cwd, sink.err()) {
+    if names_a_selection(args) || config::has_pytest_config(&cwd, sink.err()) {
         return Ok(ControlFlow::Continue(()));
     }
     let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
@@ -717,6 +722,17 @@ fn maybe_dispatch_monorepo(
         o.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?;
     }
     monorepo::execute_monorepo(cli, args, &cwd, projects, run_uid, sink).map(ControlFlow::Break)
+}
+
+/// Do the session args name tests explicitly? An existing path does, and so
+/// does a pytest `@argsfile` (its lines are the selection, e.g. `bisect`'s
+/// child runs): either keeps the run single-project instead of fanning out
+/// over every subproject and ignoring what was asked for.
+fn names_a_selection(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        let a = a.strip_prefix('@').unwrap_or(a);
+        !a.starts_with('-') && std::path::Path::new(a).exists()
+    })
 }
 
 /// require-baseline: with the durations-regress gate active, an absent baseline
@@ -1678,11 +1694,11 @@ mod tests {
     use super::{
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
         collect_lazy, dispatch_command, fold_run_event, head_to_none, lazy_should_steal,
-        order_ignored_warning, parse_duration_secs, parse_numprocesses, resolve_changed_base,
-        resolve_order, resolve_retention_policy, resolve_shard, resolve_shuffle_seed,
-        run_cache_compact, silent_master_plugin_warnings, validate_cache_flags,
-        warn_incremental_conflicts, warn_quarantine_passthrough, warn_windows_timeout,
-        watchdog_duration, RunPath,
+        names_a_selection, order_ignored_warning, parse_duration_secs, parse_numprocesses,
+        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
+        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
+        warn_windows_timeout, watchdog_duration, RunPath,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1692,6 +1708,21 @@ mod tests {
     use crate::scheduling::pool;
     use crate::scheduling::proto;
     use clap::Parser;
+
+    #[test]
+    fn an_argsfile_counts_as_an_explicit_selection() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("rstest-sel-{}.txt", std::process::id()));
+        std::fs::write(&file, "t.py::a\n").unwrap();
+        let at = |p: &std::path::Path| vec![format!("@{}", p.display())];
+        let has_file = names_a_selection(&at(&file));
+        let missing = names_a_selection(&at(&dir.join("rstest-no-such-argsfile.txt")));
+        let _ = std::fs::remove_file(&file);
+        assert!(has_file, "an existing @argsfile names tests");
+        assert!(!missing, "a missing @argsfile names nothing");
+        assert!(names_a_selection(&[dir.display().to_string()]));
+        assert!(!names_a_selection(&["-k".into(), "smoke".into()]));
+    }
 
     fn cli() -> Cli {
         Cli::parse_from(["rstest"])
@@ -2143,6 +2174,24 @@ mod tests {
         }
         assert_eq!(p.keep_last, Some(7));
         assert!(err.to_string().contains("invalid RSTEST_CACHE_KEEP_LAST"));
+    }
+
+    #[test]
+    fn dispatch_shard_verify_surfaces_an_unreadable_report() {
+        // shard-verify is interpreter-free: a missing report errors straight
+        // through dispatch, no Python resolved.
+        let cli = Cli::parse_from(["rstest", "shard-verify", "/nonexistent/rstest-report.json"]);
+        let err = dispatch_command(&cli, &[]).expect_err("missing report => error");
+        assert!(err.to_string().contains("reading"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_resolves_python_only_for_the_modes_that_need_it() {
+        // verify-vendor needs an interpreter: an unusable --python fails it in
+        // dispatch, before the mode runs.
+        let cli = Cli::parse_from(["rstest", "verify-vendor", "--python", "/nonexistent/python"]);
+        let err = dispatch_command(&cli, &[]).expect_err("no interpreter => error");
+        assert!(err.to_string().contains("no usable Python"), "{err}");
     }
 
     #[test]

@@ -57,6 +57,7 @@ from gates.incremental import (
 from gates.misc import (
     gate_basics,
     gate_collection_error_semantics,
+    gate_worker_identity_fixtures,
 )
 from gates.monorepo import (
     gate_monorepo,
@@ -122,6 +123,7 @@ from gates.reporting import (
     gate_warnings,
 )
 from gates.serve_watch import (
+    gate_bisect,
     gate_migrate_check,
     gate_try,
     gate_watch_mode,
@@ -146,6 +148,7 @@ def main():
     sections = (
         gate_basics,
         gate_collection_error_semantics,
+        gate_worker_identity_fixtures,
         gate_output_styles,
         gate_multiprocessing_spawn_children,
         gate_crash_handling,
@@ -238,6 +241,7 @@ def main():
         gate_native_timeout,
         gate_try,
         gate_migrate_check,
+        gate_bisect,
         gate_watch_mode,
     )
     names = [s.__name__.removeprefix("gate_") for s in sections]
