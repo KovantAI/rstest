@@ -34,6 +34,16 @@ class FixtureStat(TypedDict):
     scope: str
     count: int
     total: float
+    # Scope-promotion advisor: function-scoped, and value-identical on every
+    # call in this worker session (a single call counts as "no evidence against").
+    constant: bool
+    # `constant` and this session ran it at least twice (actual evidence).
+    repeated: bool
+    # Setup seconds session scope would skip in this session: (count-1) * mean.
+    redundant: float
+    # Digest of the constant value (None unless `constant`), compared across
+    # workers so a per-worker-varying value is not reported constant.
+    fingerprint: str | None
 
 
 class _ReportRequired(TypedDict):

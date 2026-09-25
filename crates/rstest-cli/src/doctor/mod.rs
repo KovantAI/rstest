@@ -22,7 +22,7 @@ use crate::reporting::report::Run;
 use crate::scheduling::proto::FixtureStat;
 
 /// Bump when the JSON shape changes incompatibly.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 pub struct DoctorReport {
@@ -117,6 +117,22 @@ struct FixtureEntry {
     scope: String,
     count: u64,
     total_seconds: f64,
+    /// Scope-promotion advisor: a function-scoped fixture that produced the
+    /// same immutable builtin value on every call in every worker, with no
+    /// per-test teardown or narrower-scoped inputs (checked worker-side), a
+    /// candidate for `@pytest.fixture(scope="session")`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    constant: bool,
+    /// Projected wall-time saved by promoting this candidate to session scope:
+    /// the largest per-worker-session `(calls - 1) * mean_setup`, i.e. the
+    /// redundant re-setups removed on the worker that benefits most.
+    /// 0 unless `constant`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    projected_saving_seconds: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Serialize)]
@@ -236,11 +252,23 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     // -- Fixtures ----------------------------------------------------------
     let mut fx: Vec<FixtureEntry> = fixtures
         .iter()
-        .map(|f| FixtureEntry {
-            name: f.name.clone(),
-            scope: f.scope.clone(),
-            count: f.count,
-            total_seconds: f.total,
+        .map(|f| {
+            // Workers report `constant` as "never varied here", including a
+            // session that ran it only once; `repeated` says some session
+            // actually compared two values. Promotion runs the fixture once
+            // per worker session, so each session's redundant setup is every
+            // call after its first; `redundant` is the largest of those, the
+            // wall time saved on the worker that benefits most.
+            let constant = f.constant && f.repeated;
+            let saving = if constant { f.redundant } else { 0.0 };
+            FixtureEntry {
+                name: f.name.clone(),
+                scope: f.scope.clone(),
+                count: f.count,
+                total_seconds: f.total,
+                constant,
+                projected_saving_seconds: saving,
+            }
         })
         .collect();
     fx.sort_by(|a, b| b.total_seconds.total_cmp(&a.total_seconds));
@@ -367,12 +395,24 @@ pub(crate) mod testutil {
                 imbalance_pct: 12.5,
                 long_pole_seconds: 8.4,
             }),
-            fixtures: vec![FixtureEntry {
-                name: "db".into(),
-                scope: "session".into(),
-                count: 4,
-                total_seconds: 6.1,
-            }],
+            fixtures: vec![
+                FixtureEntry {
+                    name: "db".into(),
+                    scope: "session".into(),
+                    count: 4,
+                    total_seconds: 6.1,
+                    constant: false,
+                    projected_saving_seconds: 0.0,
+                },
+                FixtureEntry {
+                    name: "settings".into(),
+                    scope: "function".into(),
+                    count: 40,
+                    total_seconds: 4.0,
+                    constant: true,
+                    projected_saving_seconds: 0.9,
+                },
+            ],
             slowest_files: vec![FileEntry {
                 file: "tests/test_a.py".into(),
                 total_seconds: 20.0,
@@ -507,5 +547,63 @@ mod tests {
         assert_eq!(pe.workers_busy.len(), 3);
         // max 8.0, min 0.0 (idle gw3) => 100%.
         assert!((pe.imbalance_pct - 100.0).abs() < 1e-6);
+    }
+
+    fn fstat(name: &str, count: u64, total: f64, constant: bool, redundant: f64) -> FixtureStat {
+        FixtureStat {
+            name: name.into(),
+            scope: "function".into(),
+            count,
+            total,
+            constant,
+            repeated: redundant > 0.0,
+            redundant,
+            fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn scope_promotion_projects_largest_per_worker_saving() {
+        let run = Run::default();
+        // Merged stat: the busiest session skipped 1.1s of repeat setup.
+        let fixtures = vec![fstat("cfg", 40, 4.0, true, 1.1)];
+        let r = analyze(&run, &fixtures, 10.0, 4);
+        let e = r.fixtures.iter().find(|f| f.name == "cfg").unwrap();
+        assert!(e.constant);
+        assert!((e.projected_saving_seconds - 1.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_constant_and_unrepeated_fixtures_project_no_saving() {
+        let run = Run::default();
+        let fixtures = vec![
+            // Value varied in some session => never a candidate.
+            fstat("varies", 40, 4.0, false, 0.0),
+            // Never varied, but no session ran it twice (e.g. 5 sessions
+            // after a respawn, one call each): no evidence, nothing to save.
+            fstat("once_each", 5, 5.0, true, 0.0),
+        ];
+        let r = analyze(&run, &fixtures, 10.0, 4);
+        for f in &r.fixtures {
+            assert_eq!(f.projected_saving_seconds, 0.0, "{}", f.name);
+            assert!(!f.constant, "{}", f.name);
+        }
+    }
+
+    #[test]
+    fn json_omits_zero_saving_and_false_constant() {
+        let r = testutil::report(12);
+        let v = serde_json::to_value(&r).unwrap();
+        let fixtures = v["fixtures"].as_array().unwrap();
+        // `db`: not constant, no saving => both fields skipped.
+        let db = &fixtures[0];
+        assert_eq!(db["name"], "db");
+        assert!(db.get("constant").is_none());
+        assert!(db.get("projected_saving_seconds").is_none());
+        // `settings`: a candidate => both fields serialized.
+        let settings = &fixtures[1];
+        assert_eq!(settings["name"], "settings");
+        assert_eq!(settings["constant"], true);
+        assert_eq!(settings["projected_saving_seconds"], 0.9);
     }
 }
