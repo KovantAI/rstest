@@ -116,6 +116,27 @@ pub struct FixtureStat {
     pub scope: String,
     pub count: u64,
     pub total: f64,
+    /// Scope-promotion advisor: this fixture is function-scoped and produced a
+    /// value-identical result on every call this worker session saw (one call
+    /// counts as "no evidence against", so it cannot veto the merge).
+    /// `#[serde(default)]` keeps older/absent payloads decoding to `false`.
+    #[serde(default)]
+    pub constant: bool,
+    /// `constant`, and some session ran it at least twice: actual evidence,
+    /// counted per session so respawned workers can't fake it.
+    #[serde(default)]
+    pub repeated: bool,
+    /// Setup seconds session scope would skip, `(count - 1) * mean` for one
+    /// session. Merged as the max over sessions: the saving on the worker
+    /// that benefits most, a wall-time estimate that holds whether calls were
+    /// spread over the pool or pinned to one worker by `--dist loadfile`.
+    #[serde(default)]
+    pub redundant: f64,
+    /// Digest of the constant value (`None` unless `constant`). Merged
+    /// sessions that report different fingerprints are not constant: the
+    /// value depends on which tests a worker got, not just on the fixture.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,8 +447,11 @@ mod property {
         fn arb_fixture()(
             name in small_str(), scope in small_str(),
             count in any::<u64>(), total in finite_f64(),
+            constant in any::<bool>(), repeated in any::<bool>(),
+            redundant in finite_f64(),
+            fingerprint in proptest::option::of(small_str()),
         ) -> FixtureStat {
-            FixtureStat { name, scope, count, total }
+            FixtureStat { name, scope, count, total, constant, repeated, redundant, fingerprint }
         }
     }
 

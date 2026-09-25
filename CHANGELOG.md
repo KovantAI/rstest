@@ -23,6 +23,20 @@ between 0.0.x releases and are listed here.
   hint that it fell back to the import graph and that a prior
   `--cov --cov-context=test` run enables coverage-precise selection. No new
   flags; the hint is silent for test-only / config / non-Python changes.
+- **Fixture scope-promotion advisor in `--doctor`.** Doctor already flags hot
+  function-scoped fixtures; it now *checks* the case for promoting them. Under
+  `--doctor` each function-scoped fixture's produced value is fingerprinted on
+  every call, and a fixture that returned the same value every time (in every
+  worker) is reported as a `scope="session"` candidate with a projected saving:
+  the largest per-worker `(calls − 1) × mean setup time`, the redundant
+  re-setups removed, as wall time. New terminal "SCOPE-PROMOTION CANDIDATES"
+  section and markdown table; the `--doctor-json` document (now `schema: 3`) carries `constant` and
+  `projected_saving_seconds` per fixture. Conservative: only immutable
+  builtin values (`str`, numbers, `bytes`, and tuples/frozensets of them)
+  qualify, and fixtures with per-test teardown (`yield`,
+  `request.addfinalizer`), narrower-scoped dependencies, parametrize
+  arguments, or failed/skipped setups are never flagged. See
+  [doctor guide](docs/guides/doctor.md#scope-promotion-candidates).
 - **`rstest audit` — one-command parallel-safety check.** Runs the suite at
   `-n auto` (repeat with `--audit-repeat` to catch probabilistic races), diffs
   against the `-n 0` oracle, and classifies every test that fails *only* in
