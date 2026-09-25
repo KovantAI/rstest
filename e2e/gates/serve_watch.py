@@ -24,6 +24,7 @@ def gate_watch_mode(g, args, binary):
         [str(binary), "--watch", "-n", "2"],
         cwd=str(wd),
         env=env,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -75,8 +76,21 @@ def gate_watch_mode(g, args, binary):
             ok4 and ok5 and ok6,
             (out5 + out6)[-300:],
         )
+        # `q` + Enter ends the session cleanly (exit 0). A graceful exit is also
+        # what lets an instrumented binary flush its coverage profile; a kill
+        # would leave watch_loop uncovered.
+        ok7, _ = wait_for("waiting for changes")
+        assert proc.stdin is not None
+        proc.stdin.write("q\n")
+        proc.stdin.flush()
+        try:
+            code = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            code = None
+        check("watch quits on q", ok7 and code == 0, f"exit={code}")
     finally:
-        proc.kill()
+        if proc.poll() is None:
+            proc.kill()
 
 
 def gate_try(g, args, binary):

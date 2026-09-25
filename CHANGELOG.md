@@ -5,6 +5,16 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **`--watch` reselects incrementally and quits on `q`.** The import graph
+  behind affected-test selection is kept warm for the session: each save
+  re-checks every file's mtime and size and re-reads only the changed ones, and
+  adding or deleting a `.py` file re-resolves every
+  import against the new file set while reusing each untouched file's parse.
+  Typing `q` then Enter now ends the session cleanly with exit 0 (`Ctrl+C` still
+  works); closing stdin does not, and in modes that hand stdin to the test
+  process (`--pdb`, `-s`, `--debug`, ...) only `Ctrl+C` exits. A watch started
+  in the background (`rstest --watch &`) never reads the terminal, so the shell
+  does not suspend it.
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

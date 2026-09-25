@@ -15,7 +15,10 @@ rust-version = "1.82"
 # `cargo clippy` denies the same set without the extra flag. Crates opt in via
 # `[lints] workspace = true`.
 [workspace.lints.rust]
-unused = "deny"
+unused = { level = "deny", priority = -1 }
+# `cargo llvm-cov` builds with `--cfg=coverage`; declare it so gating on it
+# (e.g. keeping ignored benches out of coverage) is not an unexpected cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 [workspace.lints.clippy]
 all = "deny"

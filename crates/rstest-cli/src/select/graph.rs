@@ -38,6 +38,9 @@ pub fn affected_tests_cached(
     cache: &mut CollectionCache,
 ) -> Result<Selection> {
     if let Some(full) = rule1_full_run(changed) {
+        // The graph isn't consulted, but a .py created in this batch must still
+        // reach it before the next reselection.
+        cache.note_changed(rootdir, changed);
         return Ok(full);
     }
     let index = cache.index(rootdir, changed);
@@ -257,33 +260,65 @@ impl ProjectIndex {
     }
 }
 
-/// One cached file: its mtime and the resolved target files it imports (the
-/// forward edges). Keeping resolved targets lets an edit patch the reverse index
-/// by removing the file's old out-edges and adding its new ones, no full rebuild.
+/// What a cached parse is keyed on: mtime AND size. Size catches most rewrites
+/// that leave the mtime unchanged: a second save inside a coarse filesystem's
+/// timestamp tick (HFS+ 1s, FAT 2s), or a tool that preserves mtimes
+/// (`cp -p`, `rsync -t`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Stamp {
+    mtime: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+/// `file`'s current [`Stamp`], or `None` if it is gone or unreadable.
+fn stamp_of(file: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(file).ok()?;
+    Some(Stamp {
+        mtime: meta.modified().ok(),
+        len: meta.len(),
+    })
+}
+
+/// One cached file: its stamp, the module names it imports (the costly read +
+/// scan), and those names resolved to target files (the forward edges). The raw
+/// names are what a rebuild reuses: resolution depends on the current file set,
+/// so it is redone whenever that set moves. The resolved targets let an edit
+/// patch the reverse index by removing the file's old out-edges and adding its
+/// new ones, no full rebuild.
 #[derive(Clone, Default)]
 struct CachedFile {
-    mtime: Option<std::time::SystemTime>,
+    stamp: Option<Stamp>,
+    modules: Vec<String>,
     out: Vec<PathBuf>,
 }
 
 /// A stateful import-graph index that survives across `--watch` reselections.
 ///
-/// Cold or on any file-set change (a file added or deleted) it does a full
-/// rebuild, reusing the cached parse of every file whose mtime is unchanged. On
-/// the common case — a content edit to existing files — it re-reads only those
-/// files and patches their forward/reverse edges in place, skipping the
-/// whole-tree read entirely. Correctness is preserved because a file-set change
-/// (which could create new import targets for unchanged importers) always forces
-/// the full path; edits never change which files exist, only their edges.
+/// Cold, or when the file set moves (a file created or deleted), it does a full
+/// walk + rebuild, reusing the cached parse (not the resolution) of every file
+/// whose stamp is unchanged. Otherwise (the common case: content edits) it
+/// skips the walk, re-reads only the files whose stamp moved, and patches their
+/// forward/reverse edges in place.
+///
+/// It does not trust any one change set to name every edit. Each reselection
+/// re-stats every cached file, so an edit the caller never reported (a
+/// test-only rerun that bypassed the graph, an event dropped while a run was
+/// executing) is still picked up. A stat cannot reveal a *new* file, so paths
+/// seen outside a reselection are queued with [`CollectionCache::note_changed`];
+/// an unknown `.py` or an existing directory among them (or in the change
+/// set) forces the full rebuild. Known `.py` files that are reported are always
+/// re-read: the stamp is only trusted for files nobody named.
 #[derive(Default)]
 pub struct CollectionCache {
     rootdir: Option<PathBuf>,
-    /// canonical file -> (mtime, resolved out-edges)
+    /// canonical file -> (stamp, imported modules, resolved out-edges)
     files: HashMap<PathBuf, CachedFile>,
     /// canonical file -> dotted module name
     dotted: HashMap<PathBuf, String>,
     /// imported file -> importers (the reverse graph, maintained incrementally)
     reverse: HashMap<PathBuf, HashSet<PathBuf>>,
+    /// paths reported between reselections, folded into the next one
+    pending: Vec<PathBuf>,
 }
 
 impl CollectionCache {
@@ -291,13 +326,20 @@ impl CollectionCache {
         Self::default()
     }
 
+    /// Queue paths that changed outside a graph reselection (e.g. a test-only
+    /// rerun, or events drained while a run executed) so the next
+    /// [`affected_tests_cached`] call accounts for them. `paths` may be
+    /// root-relative or absolute.
+    pub fn note_changed(&mut self, rootdir: &Path, paths: &[PathBuf]) {
+        self.pending.extend(paths.iter().map(|p| rootdir.join(p)));
+    }
+
     /// Produce the current [`ProjectIndex`], reusing cached work. `changed` is
-    /// the watcher's change set (root-relative); when every changed path is an
-    /// edit to a file already in the graph, the whole-tree walk is skipped and
-    /// only those files are re-read. Any path the graph doesn't already know
-    /// (a create) or that no longer exists (a delete) means the file set moved,
-    /// so a full walk+rebuild runs to keep selection sound (a new import target
-    /// could now be reached by an unchanged importer).
+    /// the watcher's change set (root-relative or absolute). A full walk +
+    /// rebuild runs when the file set may have moved: a cached file is gone, or
+    /// `changed` / the pending queue names a `.py` file the graph doesn't know
+    /// (a new import target could now be reached by an unchanged importer).
+    /// Otherwise only the files whose stamp moved are re-read.
     fn index(&mut self, rootdir: &Path, changed: &[PathBuf]) -> ProjectIndex {
         let rootdir_canon = rootdir
             .canonicalize()
@@ -309,6 +351,10 @@ impl CollectionCache {
             self.dotted.clear();
             self.reverse.clear();
         }
+        let reported: Vec<PathBuf> = std::mem::take(&mut self.pending)
+            .into_iter()
+            .chain(changed.iter().map(|c| rootdir.join(c)))
+            .collect();
 
         // Cold start: no cache yet, so a full walk+build is unavoidable.
         if self.files.is_empty() {
@@ -317,38 +363,80 @@ impl CollectionCache {
             return self.materialize();
         }
 
-        // Classify the change set: an edit to a known file stays on the fast
-        // path; a create (canonicalizes but unknown) or delete (no longer
-        // canonicalizes) forces a full walk.
-        let mut edits: Vec<PathBuf> = Vec::new();
+        // Known .py files the caller named are re-read even if their stamp
+        // matches: a same-size rewrite inside one timestamp tick (or under
+        // `cp -p` / `rsync -t`) is invisible to the stamp, not to the watcher.
+        let mut forced: HashSet<PathBuf> = HashSet::new();
+        // A reported .py the graph doesn't know is a create; one that no longer
+        // canonicalizes is a delete. A reported existing directory may have
+        // brought in .py files that never got events of their own (a `mv` or
+        // `cp -r` of a package reports only the directory). Any of these moves
+        // the file set.
         let mut structural = false;
-        for c in changed {
-            let abs = rootdir.join(c);
-            match abs.canonicalize() {
-                Ok(p) if self.files.contains_key(&p) => edits.push(p),
-                _ => {
-                    structural = true;
-                    break;
+        for p in &reported {
+            if p.is_dir() {
+                structural = true;
+            } else if p.extension().and_then(|e| e.to_str()) == Some("py") {
+                match p.canonicalize() {
+                    Ok(c) if self.files.contains_key(&c) => {
+                        forced.insert(c);
+                    }
+                    _ => structural = true,
+                }
+            }
+        }
+        // Re-stat every cached file: a vanished one is a delete, a moved stamp
+        // an edit, whether or not anyone reported it.
+        let mut edits: HashSet<PathBuf> = forced.clone();
+        if !structural {
+            for (f, cached) in &self.files {
+                match stamp_of(f) {
+                    None => {
+                        structural = true;
+                        break;
+                    }
+                    Some(now) if cached.stamp != Some(now) => {
+                        edits.insert(f.clone());
+                    }
+                    Some(_) => {}
                 }
             }
         }
 
         if structural {
             // File set moved: rebuild the whole graph, reusing the cached parse
-            // of every file whose mtime is unchanged (only new/edited files read).
+            // of every unforced file whose stamp is unchanged.
             let present = walk_py_files(rootdir);
-            self.rebuild(&rootdir_canon, &present);
+            self.rebuild_forcing(&rootdir_canon, &present, &forced);
         } else {
             // Edit-only cycle: re-read and re-edge just the changed files, no walk.
-            for f in &edits {
-                self.repatch_file(&rootdir_canon, f);
+            // The file set is unchanged, so one resolver serves the whole batch
+            // (building it per file made a mass rewrite O(edits x files)).
+            if !edits.is_empty() {
+                let resolver = self.resolver();
+                for f in &edits {
+                    self.repatch_file(&rootdir_canon, f, &resolver);
+                }
             }
         }
         self.materialize()
     }
 
-    /// Full rebuild over `files`, reusing each unchanged file's cached out-edges.
+    /// Full rebuild over `files`, reusing each unchanged file's cached import
+    /// scan but re-resolving every file against the new file set: a created file
+    /// can be the target of an unchanged importer, a deleted one no longer is.
     fn rebuild(&mut self, rootdir_canon: &Path, files: &[PathBuf]) {
+        self.rebuild_forcing(rootdir_canon, files, &HashSet::new());
+    }
+
+    /// [`Self::rebuild`], but re-reading every file in `forced` regardless of
+    /// its stamp.
+    fn rebuild_forcing(
+        &mut self,
+        rootdir_canon: &Path,
+        files: &[PathBuf],
+        forced: &HashSet<PathBuf>,
+    ) {
         // Refresh dotted names for the current file set.
         self.dotted = files
             .iter()
@@ -357,35 +445,44 @@ impl CollectionCache {
         let resolver = Resolver::build(self.dotted.iter().map(|(f, d)| (d, f)));
         let mut fresh: HashMap<PathBuf, CachedFile> = HashMap::with_capacity(files.len());
         for f in files {
-            let now = mtime_of(f);
-            // Reuse the cached out-edges when the mtime is unchanged.
-            if let Some(prev) = self.files.get(f) {
-                if prev.mtime == now && now.is_some() {
-                    fresh.insert(f.clone(), prev.clone());
-                    continue;
+            let now = stamp_of(f);
+            // Reuse the cached import scan when the stamp is unchanged.
+            let modules = match self.files.remove(f) {
+                Some(prev) if prev.stamp == now && now.is_some() && !forced.contains(f) => {
+                    prev.modules
                 }
-            }
-            let dotted = self.dotted.get(f).cloned().unwrap_or_default();
-            let out = parse_imports(f, &dotted)
-                .unwrap_or_default()
-                .iter()
-                .flat_map(|m| resolver.resolve(m))
-                .filter(|t| t != f)
-                .collect();
-            fresh.insert(f.clone(), CachedFile { mtime: now, out });
+                _ => {
+                    let dotted = self.dotted.get(f).cloned().unwrap_or_default();
+                    parse_imports(f, &dotted).unwrap_or_default()
+                }
+            };
+            let out = resolve_out(&resolver, &modules, f);
+            fresh.insert(
+                f.clone(),
+                CachedFile {
+                    stamp: now,
+                    modules,
+                    out,
+                },
+            );
         }
         self.files = fresh;
         self.rebuild_reverse();
     }
 
-    /// Re-read one file and patch its forward/reverse edges in place. Used on the
+    /// A [`Resolver`] over the cache's current file set.
+    fn resolver(&self) -> Resolver {
+        Resolver::build(self.dotted.iter().map(|(f, d)| (d, f)))
+    }
+
+    /// Re-read one file and patch its forward/reverse edges in place, resolving
+    /// against `resolver` (built for the current file set). Used on the
     /// edit-only fast path (file set unchanged), so no other file is touched.
-    fn repatch_file(&mut self, rootdir_canon: &Path, file: &Path) {
-        // Nothing to do if the mtime is unchanged (e.g. a touch, or a duplicate
-        // event): the cached edges are still valid.
-        if self.files.get(file).map(|c| c.mtime) == Some(mtime_of(file)) {
-            return;
-        }
+    fn repatch_file(&mut self, rootdir_canon: &Path, file: &Path, resolver: &Resolver) {
+        // Stamp BEFORE reading: a save racing the read then leaves the stored
+        // stamp older than the file, so the next sweep re-reads it. Stamping
+        // after would pair the new stamp with the old imports for good.
+        let stamp = stamp_of(file);
         // Remove the file's old out-edges from the reverse graph.
         if let Some(prev) = self.files.get(file) {
             for target in &prev.out {
@@ -400,13 +497,8 @@ impl CollectionCache {
             .entry(file.to_path_buf())
             .or_insert_with(|| dotted_of(rootdir_canon, file))
             .clone();
-        let resolver = Resolver::build(self.dotted.iter().map(|(f, d)| (d, f)));
-        let out: Vec<PathBuf> = parse_imports(file, &dotted)
-            .unwrap_or_default()
-            .iter()
-            .flat_map(|m| resolver.resolve(m))
-            .filter(|t| t != file)
-            .collect();
+        let modules = parse_imports(file, &dotted).unwrap_or_default();
+        let out = resolve_out(resolver, &modules, file);
         for target in &out {
             self.reverse
                 .entry(target.clone())
@@ -416,7 +508,8 @@ impl CollectionCache {
         self.files.insert(
             file.to_path_buf(),
             CachedFile {
-                mtime: mtime_of(file),
+                stamp,
+                modules,
                 out,
             },
         );
@@ -447,9 +540,13 @@ impl CollectionCache {
     }
 }
 
-/// A file's modified time, or `None` if its metadata is unreadable.
-fn mtime_of(file: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(file).and_then(|m| m.modified()).ok()
+/// `file`'s imported `modules` resolved to project files, minus self-edges.
+fn resolve_out(resolver: &Resolver, modules: &[String], file: &Path) -> Vec<PathBuf> {
+    modules
+        .iter()
+        .flat_map(|m| resolver.resolve(m))
+        .filter(|t| t != file)
+        .collect()
 }
 
 /// Modules imported by `src`. Includes indented (function-local /
@@ -785,14 +882,13 @@ mod tests {
 
         // Rewrite test_b.py to import a instead of b, then report THAT edit (as
         // the watcher would). The cache must re-parse test_b.py and re-edge it,
-        // so a subsequent edit to a.py now reaches BOTH tests. (Sleep so the
-        // mtime is observably different on coarse-resolution filesystems.)
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // so a subsequent edit to a.py now reaches BOTH tests.
         write(
             &root,
             "test_b.py",
             "import a\ndef test_b():\n    assert a.VALUE\n",
         );
+        bump_mtime(&root, "test_b.py");
         let edit = [PathBuf::from("test_b.py")];
         let _ = affected_tests_cached(&root, &proj, &edit, false, &mut cache).unwrap();
 
@@ -849,16 +945,371 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Push `rel`'s mtime forward so the cache sees an edit without sleeping
+    /// past a coarse-resolution filesystem's mtime granularity.
+    fn bump_mtime(dir: &Path, rel: &str) {
+        let f = std::fs::File::options()
+            .write(true)
+            .open(dir.join(rel))
+            .unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+        f.set_modified(later).unwrap();
+    }
+
+    #[test]
+    fn cached_config_change_is_a_full_run() {
+        // Rule 1 runs before the cache is consulted: a non-Python change defeats
+        // the graph and must not warm (or touch) the cache.
+        let root = tmp("cache-rule1");
+        let mut cache = CollectionCache::new();
+        let sel = affected_tests_cached(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("pyproject.toml")],
+            false,
+            &mut cache,
+        )
+        .unwrap();
+        assert!(matches!(sel, Selection::FullRun(_)));
+        assert_eq!(
+            cache.pending,
+            vec![root.join("pyproject.toml")],
+            "the batch is queued for the next reselection"
+        );
+        assert!(
+            cache.files.is_empty(),
+            "rule 1 must short-circuit the cache"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cached_resolves_package_init_modules() {
+        // `pkg/__init__.py` is the module `pkg`, so `import pkg` must reach it on
+        // both the cold build and an edit-only repatch.
+        let root = tmp("cache-init");
+        write(&root, "pkg/__init__.py", "VALUE = 1\n");
+        write(
+            &root,
+            "test_pkg.py",
+            "import pkg\ndef test_pkg():\n    assert pkg.VALUE\n",
+        );
+        let proj = ProjectConfig::default();
+        let mut cache = CollectionCache::new();
+        let changed = [PathBuf::from("pkg/__init__.py")];
+        let cold =
+            tests_of(affected_tests_cached(&root, &proj, &changed, false, &mut cache).unwrap());
+        assert_eq!(cold, vec![PathBuf::from("test_pkg.py")]);
+        assert_eq!(
+            cold,
+            tests_of(affected_tests(&root, &proj, &changed, false).unwrap())
+        );
+        let init = root.join("pkg/__init__.py");
+        assert_eq!(cache.dotted.get(&init).map(String::as_str), Some("pkg"));
+
+        write(&root, "pkg/__init__.py", "VALUE = 2\n");
+        bump_mtime(&root, "pkg/__init__.py");
+        let warm =
+            tests_of(affected_tests_cached(&root, &proj, &changed, false, &mut cache).unwrap());
+        assert_eq!(warm, cold, "edit-only repatch must keep the package edge");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cached_create_links_unchanged_importer_and_reparses_edits() {
+        // test_new.py imports `helper` before helper.py exists (no edge). Creating
+        // helper.py is structural: the full rebuild must link the UNCHANGED
+        // importer to it (reusing its cached parse), and re-read any file edited
+        // in the same batch while reusing the untouched ones.
+        let root = tmp("cache-create");
+        write(&root, "a.py", "VALUE = 1\n");
+        write(
+            &root,
+            "test_a.py",
+            "import a\ndef test_a():\n    assert a.VALUE\n",
+        );
+        write(
+            &root,
+            "test_new.py",
+            "import helper\ndef test_new():\n    assert helper.VALUE\n",
+        );
+        let proj = ProjectConfig::default();
+        let mut cache = CollectionCache::new();
+        let _ = affected_tests_cached(&root, &proj, &[PathBuf::from("a.py")], false, &mut cache)
+            .unwrap();
+        let test_new = root.join("test_new.py");
+        let before = cache.files.get(&test_new).unwrap().stamp;
+
+        // One batch: create helper.py, and edit test_a.py to import it too.
+        write(&root, "helper.py", "VALUE = 1\n");
+        write(
+            &root,
+            "test_a.py",
+            "import a, helper\ndef test_a():\n    assert a.VALUE\n",
+        );
+        bump_mtime(&root, "test_a.py");
+        let batch = [PathBuf::from("helper.py"), PathBuf::from("test_a.py")];
+        let _ = affected_tests_cached(&root, &proj, &batch, false, &mut cache).unwrap();
+        assert_eq!(
+            cache.files.get(&test_new).unwrap().stamp,
+            before,
+            "unchanged importer must keep its cached entry"
+        );
+
+        let changed = [PathBuf::from("helper.py")];
+        let cached =
+            tests_of(affected_tests_cached(&root, &proj, &changed, false, &mut cache).unwrap());
+        assert_eq!(
+            cached,
+            tests_of(affected_tests(&root, &proj, &changed, false).unwrap())
+        );
+        assert_eq!(
+            cached,
+            vec![PathBuf::from("test_a.py"), PathBuf::from("test_new.py")],
+            "new target must reach the edited AND the unchanged importer"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn test_a_and_b(tag: &str) -> PathBuf {
+        let root = tmp(tag);
+        write(&root, "a.py", "VALUE = 1\n");
+        write(&root, "b.py", "VALUE = 2\n");
+        write(&root, "test_a.py", "import a\n");
+        write(&root, "test_b.py", "import b\n");
+        root
+    }
+
+    fn assert_a_reaches_both(root: &Path, cache: &mut CollectionCache) {
+        let proj = ProjectConfig::default();
+        let changed = [PathBuf::from("a.py")];
+        let cached = tests_of(affected_tests_cached(root, &proj, &changed, false, cache).unwrap());
+        assert_eq!(
+            cached,
+            tests_of(affected_tests(root, &proj, &changed, false).unwrap())
+        );
+        assert_eq!(
+            cached,
+            vec![PathBuf::from("test_a.py"), PathBuf::from("test_b.py")]
+        );
+    }
+
+    #[test]
+    fn cache_picks_up_an_edit_nobody_reported() {
+        // test_b.py is edited but never named in a change set (a test-only
+        // rerun, or an event drained mid-run). The re-stat sweep must re-read it.
+        let root = test_a_and_b("cache-unreported");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        write(&root, "test_b.py", "import a, b\n");
+        bump_mtime(&root, "test_b.py");
+        assert_a_reaches_both(&root, &mut cache);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_detects_a_rewrite_that_keeps_the_mtime() {
+        // Same mtime (coarse timestamp tick, `cp -p`), different content: the
+        // size half of the stamp must still invalidate the cached parse.
+        let root = test_a_and_b("cache-same-mtime");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        let test_b = root.join("test_b.py");
+        let mtime = std::fs::metadata(&test_b).unwrap().modified().unwrap();
+        write(&root, "test_b.py", "import a, b\n");
+        std::fs::File::options()
+            .write(true)
+            .open(&test_b)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_a_reaches_both(&root, &mut cache);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_evicts_a_delete_nobody_reported() {
+        // The sweep finding a cached file gone is a file-set change on its own.
+        let root = test_a_and_b("cache-unreported-delete");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        std::fs::remove_file(root.join("test_b.py")).unwrap();
+        let _ = cache.index(&root, &[]);
+        assert!(
+            !cache.files.keys().any(|p| p.ends_with("test_b.py")),
+            "vanished file must be evicted"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_rebuilds_when_only_a_directory_is_reported() {
+        // `mv /tmp/newpkg ./newpkg` reports the directory, not its files. The
+        // tests inside must still be linked before the next source edit.
+        let root = test_a_and_b("cache-dir-move");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        write(&root, "newpkg/test_n.py", "import a\n");
+        cache.note_changed(&root, &[PathBuf::from("newpkg")]);
+        let got = tests_of(
+            affected_tests_cached(
+                &root,
+                &ProjectConfig::default(),
+                &[PathBuf::from("a.py")],
+                false,
+                &mut cache,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("newpkg/test_n.py"),
+                PathBuf::from("test_a.py")
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_rereads_a_reported_file_even_when_its_stamp_matches() {
+        // Same size AND same mtime (`import b` -> `import a` within one tick, or
+        // `cp -p`): the stamp can't see it, but the watcher named the file.
+        let root = test_a_and_b("cache-forced");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        let test_b = root.join("test_b.py");
+        let mtime = std::fs::metadata(&test_b).unwrap().modified().unwrap();
+        write(&root, "test_b.py", "import a\n");
+        std::fs::File::options()
+            .write(true)
+            .open(&test_b)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let _ = cache.index(&root, &[PathBuf::from("test_b.py")]);
+        let got = tests_of(
+            affected_tests_cached(
+                &root,
+                &ProjectConfig::default(),
+                &[PathBuf::from("a.py")],
+                false,
+                &mut cache,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            got,
+            vec![PathBuf::from("test_a.py"), PathBuf::from("test_b.py")]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rebuild_rereads_a_forced_file_even_when_its_stamp_matches() {
+        // Same as above, but the batch also holds a create, so the rebuild path
+        // (not the repatch path) must honor the forced re-read.
+        let root = test_a_and_b("cache-forced-rebuild");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        let test_b = root.join("test_b.py");
+        let mtime = std::fs::metadata(&test_b).unwrap().modified().unwrap();
+        write(&root, "test_b.py", "import a\n");
+        std::fs::File::options()
+            .write(true)
+            .open(&test_b)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        write(&root, "c.py", "");
+        let _ = cache.index(&root, &[PathBuf::from("test_b.py"), PathBuf::from("c.py")]);
+        assert_eq!(cache.files[&test_b].modules, vec!["a".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_rebuilds_for_a_create_queued_by_note_changed() {
+        // A new file can't be found by re-statting known ones; a path queued
+        // via note_changed that the graph doesn't know forces the full walk.
+        let root = test_a_and_b("cache-note-create");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        write(&root, "test_c.py", "import a\n");
+        cache.note_changed(&root, &[PathBuf::from("test_c.py")]);
+        let proj = ProjectConfig::default();
+        let got = tests_of(
+            affected_tests_cached(&root, &proj, &[PathBuf::from("a.py")], false, &mut cache)
+                .unwrap(),
+        );
+        assert_eq!(
+            got,
+            vec![PathBuf::from("test_a.py"), PathBuf::from("test_c.py")]
+        );
+        assert!(cache.pending.is_empty(), "the queue is consumed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_ignores_non_python_paths_in_the_queue() {
+        // A queued config/txt path is not a file-set change for the graph.
+        let root = test_a_and_b("cache-note-nonpy");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        let a = root.join("a.py");
+        // Only a rebuild re-resolves an unchanged file's out-edges.
+        let sentinel = vec![PathBuf::from("/sentinel")];
+        cache.files.get_mut(&a).unwrap().out = sentinel.clone();
+        cache.note_changed(&root, &[PathBuf::from("notes.txt")]);
+        let _ = cache.index(&root, &[]);
+        assert_eq!(cache.files[&a].out, sentinel, "no rebuild ran");
+        // Control: a queued unknown .py does rebuild, replacing the sentinel.
+        cache.note_changed(&root, &[PathBuf::from("new.py")]);
+        let _ = cache.index(&root, &[]);
+        assert!(cache.files[&a].out.is_empty(), "rebuild re-resolved");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repatch_adds_a_file_the_cache_has_not_seen() {
+        // repatch_file on an unknown file has no old edges to drop and no cached
+        // dotted name: it must derive one and add the file's out-edges.
+        let root = tmp("cache-repatch-new");
+        write(&root, "a.py", "VALUE = 1\n");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        write(&root, "sub/test_late.py", "import a\n");
+        let late = root.join("sub/test_late.py");
+        let resolver = cache.resolver();
+        cache.repatch_file(&root, &late, &resolver);
+        assert_eq!(
+            cache.dotted.get(&late).map(String::as_str),
+            Some("sub.test_late")
+        );
+        assert!(cache
+            .reverse
+            .get(&root.join("a.py"))
+            .is_some_and(|imps| imps.contains(&late)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Before/after micro-benchmark for incremental collection under `--watch`.
     /// Ignored by default (it writes a large tree and is timing-based); run with:
     ///   cargo test -p rstest-cli --lib -- --ignored --nocapture watch_collection_bench
+    // Excluded from instrumented builds (`cargo llvm-cov` sets `cfg(coverage)`):
+    // it is `#[ignore]`d, so it never runs there and would only count as uncovered.
+    #[cfg(not(coverage))]
     #[test]
     #[ignore]
     #[allow(non_snake_case)] // FILES/TESTS/CYCLES read as consts throughout the body
     fn watch_collection_bench() {
         use std::time::Instant;
         // Source modules == test files; override with RSTEST_BENCH_FILES to sweep
-        // sizes, RSTEST_BENCH_CYCLES for the edit count.
+        // sizes, RSTEST_BENCH_CYCLES for the cycle count, RSTEST_BENCH_EDITS for
+        // how many source files each cycle rewrites (a formatter / checkout).
+        let edits: usize = std::env::var("RSTEST_BENCH_EDITS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
         let files: usize = std::env::var("RSTEST_BENCH_FILES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -897,18 +1348,24 @@ mod tests {
             );
         }
         let proj = ProjectConfig::default();
-        let changed = [PathBuf::from("pkg/mod_0.py")];
-        // Simulate a real edit each cycle: rewrite the changed file (same imports,
-        // different body) so its mtime moves and the cache must re-read it.
+        let edits = edits.clamp(1, FILES);
+        let changed: Vec<PathBuf> = (0..edits)
+            .map(|i| PathBuf::from(format!("pkg/mod_{i}.py")))
+            .collect();
+        // Simulate real edits each cycle: rewrite the changed files (same
+        // imports, different body) so their stamps move and the cache must
+        // re-read them.
         let edit = |cycle: usize| {
-            let deps: String = (0..5)
-                .map(|d| format!("from pkg import mod_{}\n", (d + 1) % FILES))
-                .collect();
-            write(
-                &root,
-                "pkg/mod_0.py",
-                &format!("{deps}VALUE = 0  # edit {cycle}\n{filler}"),
-            );
+            for i in 0..edits {
+                let deps: String = (0..5)
+                    .map(|d| format!("from pkg import mod_{}\n", (i + d + 1) % FILES))
+                    .collect();
+                write(
+                    &root,
+                    &format!("pkg/mod_{i}.py"),
+                    &format!("{deps}VALUE = {i}  # edit {cycle}\n{filler}"),
+                );
+            }
         };
 
         // BEFORE: a fresh full index build every cycle (today's --watch).
@@ -931,7 +1388,9 @@ mod tests {
 
         let files = FILES + TESTS + 1;
         eprintln!("\n=== incremental collection under --watch ===");
-        eprintln!("project: {files} .py files, {CYCLES} reselect cycles (1 file changed each)");
+        eprintln!(
+            "project: {files} .py files, {CYCLES} reselect cycles ({edits} file(s) changed each)"
+        );
         eprintln!(
             "BEFORE (fresh index each change): {:>8.1?}  ({:.1?}/cycle)",
             before,
