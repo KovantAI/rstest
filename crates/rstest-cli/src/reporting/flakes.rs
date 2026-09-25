@@ -54,7 +54,12 @@ fn retain_recent(log: &mut HashMap<String, FlakeStats>, now: u64, max_age: u64) 
 }
 
 pub fn load() -> HashMap<String, FlakeStats> {
-    let mut log: HashMap<String, FlakeStats> = std::fs::read(cache::file(FILE))
+    load_from(&cache::file(FILE))
+}
+
+/// `load` against an explicit `flakes.json` path, with the same retention aging.
+pub fn load_from(path: &std::path::Path) -> HashMap<String, FlakeStats> {
+    let mut log: HashMap<String, FlakeStats> = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();

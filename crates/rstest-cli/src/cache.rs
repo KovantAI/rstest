@@ -132,6 +132,13 @@ fn lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     // SAFETY: `f` owns a valid fd for the duration of the call.
     let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    rc_to_result(rc)
+}
+
+/// Map a libc-style return code (0 = success) to `io::Result`, reading errno
+/// on failure. Split out so the error arm is testable without a failing flock.
+#[cfg(unix)]
+fn rc_to_result(rc: libc::c_int) -> std::io::Result<()> {
     if rc == 0 {
         Ok(())
     } else {
@@ -288,5 +295,44 @@ mod tests {
         let target = file.join("nested").join("durations.json");
         assert!(write_atomic(&target, b"{}").is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn with_lock_runs_unlocked_when_dir_uncreatable() {
+        // Cache dir under a regular file can't be created: acquire degrades to
+        // unlocked and the closure still runs.
+        let base = std::env::temp_dir().join(format!("rstest-lock-nodir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("afile");
+        std::fs::write(&file, b"x").unwrap();
+        let dir = file.join("cache");
+        let lock = CacheLock::acquire(&dir);
+        assert!(lock.file.is_none(), "uncreatable dir must yield no lock");
+        assert_eq!(with_lock_in(&dir, || 7), 7);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn with_lock_runs_unlocked_when_lock_file_unopenable() {
+        // Lock sentinel path is a directory, so opening it as a file fails:
+        // acquire degrades to unlocked and the closure still runs.
+        let dir = std::env::temp_dir().join(format!("rstest-lock-noopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(LOCK_FILE)).unwrap();
+        let lock = CacheLock::acquire(&dir);
+        assert!(
+            lock.file.is_none(),
+            "unopenable lock file must yield no lock"
+        );
+        assert_eq!(with_lock_in(&dir, || "ran"), "ran");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rc_to_result_maps_nonzero_to_err() {
+        assert!(rc_to_result(0).is_ok());
+        assert!(rc_to_result(-1).is_err());
     }
 }

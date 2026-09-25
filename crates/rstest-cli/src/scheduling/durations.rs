@@ -31,7 +31,12 @@ pub fn load_wall_in(project: &Path) -> Option<f64> {
 }
 
 pub fn load() -> HashMap<String, f64> {
-    std::fs::read(cache::file(FILE))
+    load_from(&cache::file(FILE))
+}
+
+/// `load` against an explicit `durations.json` path (missing/corrupt = empty).
+pub fn load_from(path: &Path) -> HashMap<String, f64> {
+    std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
