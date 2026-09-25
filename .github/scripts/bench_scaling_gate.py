@@ -26,8 +26,11 @@ import re
 import sys
 
 # `test decode_event/collection_done/10000 ... bench:      287960 ns/iter (+/- 3021)`
+# Criterion can print a diagnostic between `...` and `bench:` (e.g. "Criterion.rs
+# ERROR: Failed to access file .../base/sample.json" when a cached target/criterion
+# holds a partial baseline), pushing `bench:` onto the next line - tolerate that.
 _BENCH = re.compile(
-    r"test\s+decode_event/collection_done/(\d+)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns/iter"
+    r"test\s+decode_event/collection_done/(\d+)\s+\.\.\.[^\n]*\n?\s*bench:\s+([\d,]+)\s+ns/iter"
 )
 
 

@@ -19,9 +19,25 @@ pub struct FlakeStats {
     /// Runs where the test hard-failed (quarantined failures included).
     #[serde(default)]
     pub failed: u32,
-    /// Unix epoch of the last recorded event.
+    /// Unix epoch of the last recorded event (flake or failure).
     #[serde(default)]
     pub last_epoch: u64,
+    /// Unix epoch of the last hard failure. 0 = none, or a cache written
+    /// before this field existed; see [`FlakeStats::failed_epoch`].
+    #[serde(default)]
+    pub last_failed_epoch: u64,
+}
+
+impl FlakeStats {
+    /// When the test last hard-failed. Older caches lack `last_failed_epoch`,
+    /// so a recorded failure falls back to `last_epoch` (best available).
+    pub fn failed_epoch(&self) -> u64 {
+        match (self.failed, self.last_failed_epoch) {
+            (0, _) => 0,
+            (_, 0) => self.last_epoch,
+            (_, t) => t,
+        }
+    }
 }
 
 /// Seconds a flake/failure record stays relevant. A test with no event inside
@@ -110,6 +126,7 @@ pub fn record(run: &Run) {
                 e.flaky += 1;
             } else {
                 e.failed += 1;
+                e.last_failed_epoch = now;
             }
             e.last_epoch = now;
         }
@@ -132,6 +149,7 @@ mod tests {
                 flaky: 2,
                 failed: 0,
                 last_epoch: 1,
+                last_failed_epoch: 0,
             },
         );
         // Hard-failure-only history must NOT count as known-flaky — this is
@@ -142,6 +160,7 @@ mod tests {
                 flaky: 0,
                 failed: 9,
                 last_epoch: 1,
+                last_failed_epoch: 0,
             },
         );
         log.insert(
@@ -150,6 +169,7 @@ mod tests {
                 flaky: 1,
                 failed: 3,
                 last_epoch: 1,
+                last_failed_epoch: 0,
             },
         );
         let set = filter_known_flaky(log);
@@ -159,11 +179,31 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
+    #[test]
+    fn failed_epoch_prefers_field_and_falls_back_for_old_caches() {
+        let e = |failed, last_epoch, last_failed_epoch| FlakeStats {
+            failed,
+            last_epoch,
+            last_failed_epoch,
+            ..Default::default()
+        };
+        assert_eq!(e(1, 900, 100).failed_epoch(), 100);
+        // Pre-field cache: no last_failed_epoch, fall back to last_epoch.
+        assert_eq!(e(1, 900, 0).failed_epoch(), 900);
+        // Never hard-failed.
+        assert_eq!(e(0, 900, 0).failed_epoch(), 0);
+        // Old JSON without the field still deserializes.
+        let old: FlakeStats =
+            serde_json::from_str(r#"{"flaky":0,"failed":2,"last_epoch":5}"#).unwrap();
+        assert_eq!(old.failed_epoch(), 5);
+    }
+
     fn entry(last_epoch: u64) -> FlakeStats {
         FlakeStats {
             flaky: 1,
             failed: 0,
             last_epoch,
+            last_failed_epoch: 0,
         }
     }
 
