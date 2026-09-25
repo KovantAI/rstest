@@ -158,6 +158,7 @@ of failing files, not suite size. Each failure lands in one class:
 |---|---|---|
 | **NOT PARALLEL-SPECIFIC** | also fails at `-n 0` | a pre-existing bug / env gap, not a migration concern |
 | **INTRINSIC FLAKE** | serial repeats disagree | flaky under any runner; fix the test |
+| **INCONCLUSIVE** | missing from a follow-up run, so no evidence either way | make the nodeid stable across collections |
 | **ORDER DEPENDENCY** | passes serial + `loadfile`, fails under `load` | `--dist loadfile`, or fix the in-file coupling |
 | **WALL-CLOCK / LOAD-SENSITIVE** | passes serial, fails parallel, wait-bound (wall ≫ cpu) | mock the clock / drop the tight deadline; stopgap `-n 4` |
 | **ISOLATION / CO-LOCATION** | passes serial, fails under `load` **and** `loadfile` | reset the leaked global state; stopgap `@pytest.mark.serial` |
