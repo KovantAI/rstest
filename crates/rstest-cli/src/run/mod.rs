@@ -2480,6 +2480,8 @@ mod tests {
                     count: 1,
                     total: 0.5,
                     constant: false,
+                    repeated: false,
+                    redundant: 0.0,
                 }]
             }),
             None

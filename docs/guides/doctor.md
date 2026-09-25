@@ -102,27 +102,55 @@ Total setup time per fixture, with two pieces of advice:
 
 The advisor upgrade to the hotspot heuristic. Under `--doctor`, rstest
 fingerprints each function-scoped fixture's **produced value** on every
-call; a fixture that returned the *same value every time* (in every
-worker) is a proven-safe candidate for `scope="session"`, and the report
-attaches a concrete number:
+call. A fixture that returned the *same immutable value every time* (in
+every worker), with no per-test teardown and only session-scoped inputs,
+is a candidate for `scope="session"`, and the report attaches a concrete
+number:
 
 ```text
 SCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):
-  ~  4.10s saved     206x  rsa_key  <- @pytest.fixture(scope="session")
-  (verify the value is safe to share - not mutated per test - before promoting)
+  ~  0.52s saved     206x  feature_flags  <- @pytest.fixture(scope="session")
+  (check the fixture body for side effects before promoting)
 ```
 
-The projected saving is `(calls − workers) × mean setup time`: promoting
-to session scope runs the fixture once per worker session instead of once
-per call, so the redundant re-setups disappear. Candidates are listed even
-when below the hotspot threshold, biggest saving first.
+Promoting to session scope runs the fixture once per worker session
+instead of once per call, so every call after a worker's first is a
+redundant re-setup. Each worker session totals its own
+`(calls − 1) × mean setup time`, and the projected saving is the largest
+of those: the wall time saved on the worker that benefits most. That
+holds whether the calls were spread across the pool or pinned to one
+worker by `--dist loadfile`. A fixture is only flagged when some worker
+session actually ran it twice, so a run where every worker (including a
+respawned one) called it once is not evidence. Candidates are listed even
+when below the hotspot threshold (from 0.01s up), biggest saving first.
 
-The value check is conservative: a fixture whose value can't be compared
-across calls (unhashable and identity-reprable, e.g. a fresh connection
-object) is **never** flagged, so the advice never fires on something it
-can't verify constant. It is still *advice* — confirm the value is not
-mutated per test before promoting, since a shared mutable would leak state
-between tests.
+The check is deliberately narrow. Only **immutable builtin values**
+qualify: `str`, `bytes`, `int`, `float`, `bool`, `complex`, and tuples or
+frozensets built from them (up to 10,000 items in total). Looking at any
+other object can't prove it is safe to share, so these are **never**
+flagged:
+
+- mutable values, even when they look the same each call: a fresh `[]`
+  or `{}` is usually exactly what each test must get its own copy of;
+- any other object: user classes, settings models, mocks, numpy arrays,
+  DataFrames, lazy objects. rstest never calls their `repr`, so `--doctor`
+  runs no extra user code;
+- `None`, since side-effect fixtures (reset a global, truncate tables)
+  return it every call;
+- a fixture with per-test teardown: a `yield` fixture, or one that calls
+  `request.addfinalizer`;
+- a fixture that depends on anything narrower than session scope
+  (`monkeypatch`, `tmp_path`, a per-test database): promoting it would
+  raise `ScopeMismatch`, and its per-test effects are the point;
+- a fixture whose setup failed or skipped;
+- a `@pytest.mark.parametrize` argument, which pytest serves through an
+  internal fixture there is nothing to promote.
+
+So a fixture returning a settings object or a key is not suggested even
+when sharing it would be fine; the advisor only speaks when it is sure
+about the value. It still can't see side effects that leave no trace
+(writing a file, setting a global), so treat it as *advice* and check the
+fixture body before promoting.
 
 ### SLOWEST FILES
 

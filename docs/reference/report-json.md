@@ -283,8 +283,8 @@ It is a **separate document** from the run snapshot above; combine with
   },
   "fixtures": [
     { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 },
-    { "name": "rsa_key", "scope": "function", "count": 206, "total_seconds": 4.3,
-      "constant": true, "projected_saving_seconds": 4.18 }
+    { "name": "feature_flags", "scope": "function", "count": 206, "total_seconds": 4.3,
+      "constant": true, "projected_saving_seconds": 0.52 }
   ],
   "slowest_files": [
     { "file": "tests/test_e2e.py", "total_seconds": 84.1, "pct": 20.4 }
@@ -340,10 +340,16 @@ this run — `null` for single-worker runs):
 `fixtures[]`: `{name, scope, count, total_seconds, constant?,
 projected_saving_seconds?}` — fixture name, pytest scope, setup count,
 summed setup time. `constant` (present only when `true`) marks a
-function-scoped fixture that returned a value-identical result on every
-call in every worker — a scope-promotion candidate; `projected_saving_seconds`
+function-scoped fixture that returned the same immutable builtin value on
+every call in every worker — a scope-promotion candidate; `projected_saving_seconds`
 (present only when non-zero) is the wall time promoting it to session scope
-would save, `(count − workers) × mean setup`. `slowest_files[]`:
+would save: the largest per-worker-session `(calls − 1) × mean setup`.
+`constant` also requires some worker session to have run it at least
+twice, and is never set for fixtures with per-test teardown or
+narrower-scoped dependencies, for parametrize arguments, or for failed or
+skipped setups (see the
+[doctor guide](../guides/doctor.md#scope-promotion-candidates)).
+`slowest_files[]`:
 `{file, total_seconds, pct}` — `pct` is the file's share of
 `test_time_seconds`.
 

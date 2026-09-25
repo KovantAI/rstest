@@ -806,7 +806,10 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
                 m.total += f.total;
                 // A promotion candidate only if constant in EVERY worker that
                 // ran it: one worker seeing a varying value vetoes the advice.
+                // Workers that ran it once report `true`, so they don't veto.
                 m.constant &= f.constant;
+                m.repeated |= f.repeated;
+                m.redundant = m.redundant.max(f.redundant);
             })
             .or_insert(f);
     }
@@ -997,6 +1000,8 @@ mod tests {
             count,
             total,
             constant,
+            repeated: false,
+            redundant: 0.0,
         };
         let merged = merge_fixtures(vec![
             stat("db", "session", 2, 1.0, false),
@@ -1006,8 +1011,12 @@ mod tests {
             // constant in one worker, NOT in another => merged non-constant.
             stat("cfg", "function", 5, 0.5, true),
             stat("cfg", "function", 5, 0.5, false),
+            // constant in one worker; another ran it once (reports true) =>
+            // still constant, the light worker does not veto.
+            stat("key", "function", 5, 0.5, true),
+            stat("key", "function", 1, 0.1, true),
         ]);
-        assert_eq!(merged.len(), 4);
+        assert_eq!(merged.len(), 5);
         let db_session = merged
             .iter()
             .find(|f| f.name == "db" && f.scope == "session")
@@ -1017,6 +1026,41 @@ mod tests {
         // One dissenting worker vetoes the promotion candidacy.
         let cfg = merged.iter().find(|f| f.name == "cfg").unwrap();
         assert!(!cfg.constant);
+        let key = merged.iter().find(|f| f.name == "key").unwrap();
+        assert!(key.constant);
+        assert_eq!(key.count, 6);
+    }
+
+    #[test]
+    fn merge_fixtures_keeps_per_session_promotion_evidence() {
+        let stat = |count, total, constant, repeated, redundant| FixtureStat {
+            name: "f".into(),
+            scope: "function".into(),
+            count,
+            total,
+            constant,
+            repeated,
+            redundant,
+        };
+        // `--dist loadfile`: one session ran it 12x (11s redundant), others
+        // never touched it. The saving is that session's, not diluted by -n.
+        let pinned = merge_fixtures(vec![stat(12, 12.0, true, true, 11.0)]);
+        assert!(pinned[0].repeated);
+        assert!((pinned[0].redundant - 11.0).abs() < 1e-9);
+
+        // Five one-call sessions (a respawned worker): count 5 > 4 workers, but
+        // no session compared two values, so there is no evidence.
+        let respawn = merge_fixtures((0..5).map(|_| stat(1, 1.0, true, false, 0.0)).collect());
+        assert_eq!(respawn[0].count, 5);
+        assert!(respawn[0].constant && !respawn[0].repeated);
+        assert_eq!(respawn[0].redundant, 0.0);
+
+        // Spread load: the largest per-session saving wins.
+        let spread = merge_fixtures(vec![
+            stat(10, 1.0, true, true, 0.9),
+            stat(6, 0.6, true, true, 0.5),
+        ]);
+        assert!((spread[0].redundant - 0.9).abs() < 1e-9);
     }
 
     fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {

@@ -117,14 +117,16 @@ struct FixtureEntry {
     scope: String,
     count: u64,
     total_seconds: f64,
-    /// Scope-promotion advisor: a function-scoped fixture that produced a
-    /// value-identical result on every call in every worker — a candidate for
-    /// `@pytest.fixture(scope="session")`.
+    /// Scope-promotion advisor: a function-scoped fixture that produced the
+    /// same immutable builtin value on every call in every worker, with no
+    /// per-test teardown or narrower-scoped inputs (checked worker-side), a
+    /// candidate for `@pytest.fixture(scope="session")`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     constant: bool,
     /// Projected wall-time saved by promoting this candidate to session scope:
-    /// `(count - workers) * mean_setup`, i.e. the redundant re-setups removed.
-    /// 0 unless `constant` and the fixture ran more than once per worker.
+    /// the largest per-worker-session `(calls - 1) * mean_setup`, i.e. the
+    /// redundant re-setups removed on the worker that benefits most.
+    /// 0 unless `constant`.
     #[serde(default, skip_serializing_if = "is_zero")]
     projected_saving_seconds: f64,
 }
@@ -251,25 +253,21 @@ pub fn analyze(run: &Run, fixtures: &[FixtureStat], wall: f64, workers: usize) -
     let mut fx: Vec<FixtureEntry> = fixtures
         .iter()
         .map(|f| {
-            // Promotion to session scope runs the fixture once per worker
-            // session instead of once per call, so the redundant re-setups are
-            // `count - workers`; value each at the mean setup time. Only a
-            // value-verified constant fixture that ran more than once/worker
-            // has anything to save.
-            let mean = f.total / f.count.max(1) as f64;
-            let redundant = f.count.saturating_sub(workers.max(1) as u64);
-            let saving = if f.constant {
-                redundant as f64 * mean
-            } else {
-                0.0
-            };
+            // Workers report `constant` as "never varied here", including a
+            // session that ran it only once; `repeated` says some session
+            // actually compared two values. Promotion runs the fixture once
+            // per worker session, so each session's redundant setup is every
+            // call after its first; `redundant` is the largest of those, the
+            // wall time saved on the worker that benefits most.
+            let constant = f.constant && f.repeated;
+            let saving = if constant { f.redundant } else { 0.0 };
             FixtureEntry {
                 name: f.name.clone(),
                 scope: f.scope.clone(),
                 count: f.count,
                 total_seconds: f.total,
-                constant: f.constant,
-                projected_saving_seconds: (saving * 10000.0).round() / 10000.0,
+                constant,
+                projected_saving_seconds: saving,
             }
         })
         .collect();
@@ -412,7 +410,7 @@ pub(crate) mod testutil {
                     count: 40,
                     total_seconds: 4.0,
                     constant: true,
-                    projected_saving_seconds: 3.6,
+                    projected_saving_seconds: 0.9,
                 },
             ],
             slowest_files: vec![FileEntry {
@@ -551,40 +549,43 @@ mod tests {
         assert!((pe.imbalance_pct - 100.0).abs() < 1e-6);
     }
 
-    fn fstat(name: &str, scope: &str, count: u64, total: f64, constant: bool) -> FixtureStat {
+    fn fstat(name: &str, count: u64, total: f64, constant: bool, redundant: f64) -> FixtureStat {
         FixtureStat {
             name: name.into(),
-            scope: scope.into(),
+            scope: "function".into(),
             count,
             total,
             constant,
+            repeated: redundant > 0.0,
+            redundant,
         }
     }
 
     #[test]
-    fn scope_promotion_projects_saving_over_workers() {
+    fn scope_promotion_projects_largest_per_worker_saving() {
         let run = Run::default();
-        // 40 calls over 4 workers, 4.0s total => mean 0.1s; promoting to session
-        // leaves 4 setups (one/worker), saving (40-4)*0.1 = 3.6s.
-        let fixtures = vec![fstat("cfg", "function", 40, 4.0, true)];
+        // Merged stat: the busiest session skipped 1.1s of repeat setup.
+        let fixtures = vec![fstat("cfg", 40, 4.0, true, 1.1)];
         let r = analyze(&run, &fixtures, 10.0, 4);
         let e = r.fixtures.iter().find(|f| f.name == "cfg").unwrap();
         assert!(e.constant);
-        assert!((e.projected_saving_seconds - 3.6).abs() < 1e-6);
+        assert!((e.projected_saving_seconds - 1.1).abs() < 1e-9);
     }
 
     #[test]
-    fn non_constant_and_underused_fixtures_project_no_saving() {
+    fn non_constant_and_unrepeated_fixtures_project_no_saving() {
         let run = Run::default();
         let fixtures = vec![
-            // constant flag off => never a candidate.
-            fstat("varies", "function", 40, 4.0, false),
-            // constant but ran once per worker already (count <= workers) => nothing to save.
-            fstat("perworker", "function", 4, 4.0, true),
+            // Value varied in some session => never a candidate.
+            fstat("varies", 40, 4.0, false, 0.0),
+            // Never varied, but no session ran it twice (e.g. 5 sessions
+            // after a respawn, one call each): no evidence, nothing to save.
+            fstat("once_each", 5, 5.0, true, 0.0),
         ];
         let r = analyze(&run, &fixtures, 10.0, 4);
         for f in &r.fixtures {
             assert_eq!(f.projected_saving_seconds, 0.0, "{}", f.name);
+            assert!(!f.constant, "{}", f.name);
         }
     }
 }

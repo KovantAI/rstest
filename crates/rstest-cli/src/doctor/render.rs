@@ -10,8 +10,9 @@ use crate::reporting::sink::Sink;
 /// renderers; classify once here, let each surface word it (the wordings
 /// differ, so this returns the category, not the text).
 enum FixtureAdvice {
-    /// A function-scoped fixture proven value-identical every call: promoting
-    /// it to session scope is safe on value grounds and saves real time.
+    /// A function-scoped fixture that returned the same immutable value every
+    /// call, with no per-test teardown or narrower-scoped inputs: a likely
+    /// session-scope candidate that saves real time.
     PromoteScope,
     /// A function-scoped fixture that ran often and cost real time, but whose
     /// value we did not verify constant (heuristic only).
@@ -21,8 +22,16 @@ enum FixtureAdvice {
     None,
 }
 
+/// Candidates saving less than this are noise (e.g. a cheap constant that
+/// ran a handful of times); the JSON still carries them.
+const MIN_PROMOTION_SAVING_SECONDS: f64 = 0.01;
+
+fn is_promotion_candidate(f: &FixtureEntry) -> bool {
+    f.constant && f.projected_saving_seconds >= MIN_PROMOTION_SAVING_SECONDS
+}
+
 fn fixture_advice(f: &FixtureEntry) -> FixtureAdvice {
-    if f.constant && f.projected_saving_seconds > 0.0 {
+    if is_promotion_candidate(f) {
         FixtureAdvice::PromoteScope
     } else if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
         FixtureAdvice::WidenScope
@@ -153,7 +162,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
     let mut candidates: Vec<&FixtureEntry> = r
         .fixtures
         .iter()
-        .filter(|f| f.constant && f.projected_saving_seconds > 0.0)
+        .filter(|f| is_promotion_candidate(f))
         .collect();
     candidates.sort_by(|a, b| {
         b.projected_saving_seconds
@@ -164,7 +173,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push_str(
             "> Function-scoped fixtures that produced the same value on every call. \
              Promoting to `scope=\"session\"` skips the redundant re-setups \
-             (verify the value is safe to share first).\n\n",
+             (check the fixture body for side effects first).\n\n",
         );
         md.push_str("| Fixture | Runs | Projected saving |\n|---|---:|---:|\n");
         for f in candidates.iter().take(8) {
@@ -366,7 +375,7 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
     let mut candidates: Vec<&FixtureEntry> = r
         .fixtures
         .iter()
-        .filter(|f| f.constant && f.projected_saving_seconds > 0.0)
+        .filter(|f| is_promotion_candidate(f))
         .collect();
     candidates.sort_by(|a, b| {
         b.projected_saving_seconds
@@ -382,9 +391,7 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
                 f.projected_saving_seconds, f.count, f.name
             ));
         }
-        sink.out_line(
-            "  (verify the value is safe to share - not mutated per test - before promoting)",
-        );
+        sink.out_line("  (check the fixture body for side effects before promoting)");
     }
 
     sink.out_line("\nSLOWEST FILES:");
@@ -454,8 +461,8 @@ mod tests {
         // promotion candidate with its projected saving, and its hotspot row
         // carries the promote advice.
         assert!(md.contains("### Scope-promotion candidates"));
-        assert!(md.contains("| `settings` | 40 | ~3.60s |"));
-        assert!(md.contains("promote to `scope=\"session\"` to save ~3.60s"));
+        assert!(md.contains("| `settings` | 40 | ~0.90s |"));
+        assert!(md.contains("promote to `scope=\"session\"` to save ~0.90s"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
     }
