@@ -219,7 +219,7 @@ pub fn run_migrate_check(
 
     // Phase 2: run -n auto and classify any parallel-only failures.
     sink.warn("rstest migrate-check: running -n auto to check parallel behaviour…");
-    let par = run_session(&[], args)?;
+    let par = run_session(python, &[], args)?;
     if par.is_empty() {
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
@@ -235,7 +235,7 @@ pub fn run_migrate_check(
             1,
         );
     }
-    let verdicts = classify_failures(args, &par, sink)?;
+    let verdicts = classify_failures(python, args, &par, sink)?;
     if verdicts.is_empty() {
         sink.out_line(&format!(
             "PARALLEL: ready — {} tests pass at -n auto.",
@@ -299,7 +299,7 @@ pub fn run_migrate_check(
             "  bisecting the polluting file for {n} victim(s)…"
         ));
         for victim in victims.iter().take(BISECT_CAP) {
-            polluter.insert(victim, bisect_polluter(args, victim, &par)?);
+            polluter.insert(victim, bisect_polluter(python, args, victim, &par)?);
         }
     }
 

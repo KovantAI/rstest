@@ -24,7 +24,14 @@
           "minimum": 0.0
         },
         "last_epoch": {
-          "description": "Unix epoch of the last recorded event.",
+          "description": "Unix epoch of the last recorded event (flake or failure).",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "last_failed_epoch": {
+          "description": "Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed; see [`FlakeStats::failed_epoch`].",
           "default": 0,
           "type": "integer",
           "format": "uint64",

@@ -107,15 +107,18 @@ fn shuffle_slice<T>(v: &mut [T], seed: u64) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_dispatch(
     ids: &[String],
     serial: Vec<u64>,
     groups: std::collections::HashMap<String, String>,
     cache: &std::collections::HashMap<String, f64>,
+    flakes: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
     dist: Dist,
+    order: super::Order,
     shuffle: Option<u64>,
     keep: Option<&HashSet<u64>>,
-) -> anyhow::Result<Dispatch> {
+) -> Option<Dispatch> {
     // --shard filter: an index not in `keep` is deselected everywhere
     // (parallel order, serial phase, groups). None keeps everything.
     let kept = |i: &u64| keep.is_none_or(|k| k.contains(i));
@@ -124,30 +127,56 @@ pub(super) fn build_dispatch(
     let parallel = || (0..ids.len() as u64).filter(|i| !serial_set.contains(i) && kept(i));
 
     let (order, slow_count, group_ends) = match dist {
-        // Each mode never builds a dispatch queue (each worker is seeded
-        // with the full suite); run_pool guards the call. Return an error
-        // rather than panic if that invariant is ever violated.
-        Dist::Each => {
-            return Err(anyhow::anyhow!(
-                "--dist each has no dispatch queue (run_pool must guard the build_dispatch call)"
-            ))
-        }
-        Dist::Load => {
-            let full = crate::scheduling::durations::dispatch_order(ids, cache);
-            let order: Vec<u64> = full
-                .into_iter()
-                .filter(|i| !serial_set.contains(i) && kept(i))
-                .collect();
-            let slow_count = order
-                .iter()
-                .take_while(|&&i| {
-                    cache
-                        .get(&ids[i as usize])
-                        .is_some_and(|&d| d >= crate::scheduling::durations::SLOW_THRESHOLD_SECS)
-                })
-                .count();
-            (order, slow_count, None)
-        }
+        // Each mode has no dispatch queue (each worker is seeded with the
+        // full suite), so there is nothing to build.
+        Dist::Each => return None,
+        Dist::Load => match order {
+            super::Order::Throughput => {
+                let full = crate::scheduling::durations::dispatch_order(ids, cache);
+                let order: Vec<u64> = full
+                    .into_iter()
+                    .filter(|i| !serial_set.contains(i) && kept(i))
+                    .collect();
+                let slow_count = order
+                    .iter()
+                    .take_while(|&&i| {
+                        cache.get(&ids[i as usize]).is_some_and(|&d| {
+                            d >= crate::scheduling::durations::SLOW_THRESHOLD_SECS
+                        })
+                    })
+                    .count();
+                (order, slow_count, None)
+            }
+            // Fail-fast: suspects (failed/flaky) first, then the throughput
+            // order. The single-dispatch prefix covers the suspects AND the
+            // long poles, so reds spread across workers at once and slow
+            // tests still don't pile onto one worker's chunk.
+            super::Order::FailFast => {
+                use crate::scheduling::durations::{
+                    failfast_order, is_suspect, FAILFAST_SUSPECT_CAP, SLOW_THRESHOLD_SECS,
+                };
+                let order =
+                    failfast_order(ids, cache, flakes, |i| !serial_set.contains(&i) && kept(&i));
+                // Single-dispatch prefix: the (capped) suspect lead, then the
+                // long poles. The order is already filtered, so the cap here
+                // matches the one failfast_order applied.
+                let lead = order
+                    .iter()
+                    .take(FAILFAST_SUSPECT_CAP)
+                    .take_while(|&&i| is_suspect(&ids[i as usize], flakes))
+                    .count();
+                let slow_count = lead
+                    + order[lead..]
+                        .iter()
+                        .take_while(|&&i| {
+                            cache
+                                .get(&ids[i as usize])
+                                .is_some_and(|&d| d >= SLOW_THRESHOLD_SECS)
+                        })
+                        .count();
+                (order, slow_count, None)
+            }
+        },
         // Affinity modes: collection order, grouped by a key; a dispatch
         // never splits a group. Duration reordering is off; affinity is
         // the point.
@@ -236,7 +265,7 @@ pub(super) fn build_dispatch(
         // the same permutation pattern as the parallel one.
         shuffle_slice(&mut serial, seed.wrapping_add(1));
     }
-    Ok(Dispatch {
+    Some(Dispatch {
         order,
         slow_count,
         cursor: 0,
@@ -254,6 +283,31 @@ mod tests {
 
     fn ids(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Throughput-order build_dispatch with no flake history — the shape the
+    /// pre-fail-fast tests exercised. Fail-fast has its own tests below.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        ids: &[String],
+        serial: Vec<u64>,
+        groups: HashMap<String, String>,
+        cache: &HashMap<String, f64>,
+        dist: Dist,
+        shuffle: Option<u64>,
+        keep: Option<&HashSet<u64>>,
+    ) -> Option<Dispatch> {
+        build_dispatch(
+            ids,
+            serial,
+            groups,
+            cache,
+            &HashMap::new(),
+            dist,
+            super::super::Order::Throughput,
+            shuffle,
+            keep,
+        )
     }
 
     fn drain(d: &mut Dispatch, want: usize, designate: bool) -> Vec<Vec<u64>> {
@@ -279,7 +333,7 @@ mod tests {
         let names = ids(&["t/a.py::t1", "t/a.py::t2", "t/b.py::t3", "t/b.py::t4"]);
         let mut cache = HashMap::new();
         cache.insert("t/b.py::t3".to_string(), 5.0); // long pole
-        let d = build_dispatch(
+        let d = dispatch(
             &names,
             vec![1],
             HashMap::new(),
@@ -296,11 +350,79 @@ mod tests {
     }
 
     #[test]
+    fn failfast_dispatch_puts_red_first_and_singles_red_and_long_poles() {
+        use crate::reporting::flakes::FlakeStats;
+        let names = ids(&["t/a.py::ok_slow", "t/a.py::red", "t/b.py::ok_fast"]);
+        let cache = HashMap::from([
+            ("t/a.py::ok_slow".to_string(), 9.0),
+            ("t/b.py::ok_fast".to_string(), 0.1),
+        ]);
+        let flakes = HashMap::from([(
+            "t/a.py::red".to_string(),
+            FlakeStats {
+                failed: 1,
+                ..Default::default()
+            },
+        )]);
+        let d = build_dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &cache,
+            &flakes,
+            Dist::Load,
+            super::super::Order::FailFast,
+            None,
+            None,
+        )
+        .unwrap();
+        // red (index 1) first, then the throughput tail: long pole, then rest.
+        assert_eq!(d.order, vec![1, 0, 2]);
+        // Red and the long pole both dispatch one at a time.
+        assert_eq!(d.slow_count, 2);
+    }
+
+    #[test]
+    fn failfast_dispatch_caps_single_dispatch_suspect_prefix() {
+        use crate::reporting::flakes::FlakeStats;
+        use crate::scheduling::durations::FAILFAST_SUSPECT_CAP;
+        // Mass failure: more suspects than the cap, none slow.
+        let n = FAILFAST_SUSPECT_CAP + 50;
+        let owned: Vec<String> = (0..n).map(|i| format!("t/a.py::t{i}")).collect();
+        let flakes: HashMap<String, FlakeStats> = owned
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    FlakeStats {
+                        failed: 1,
+                        last_epoch: 1,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let d = build_dispatch(
+            &owned,
+            vec![],
+            HashMap::new(),
+            &HashMap::new(),
+            &flakes,
+            Dist::Load,
+            super::super::Order::FailFast,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.slow_count, FAILFAST_SUSPECT_CAP);
+    }
+
+    #[test]
     fn shuffle_is_deterministic_and_defeats_duration_order() {
         let names = ids(&["t/a.py::t1", "t/a.py::t2", "t/b.py::t3", "t/b.py::t4"]);
         let mut cache = HashMap::new();
         cache.insert("t/b.py::t3".to_string(), 5.0);
-        let a = build_dispatch(
+        let a = dispatch(
             &names,
             vec![],
             HashMap::new(),
@@ -310,7 +432,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let b = build_dispatch(
+        let b = dispatch(
             &names,
             vec![],
             HashMap::new(),
@@ -327,7 +449,7 @@ mod tests {
         assert_eq!(seen, vec![0, 1, 2, 3]); // a permutation, nothing lost
                                             // Some seed must produce a different order than seed 7.
         assert!((0..20u64).any(|s| {
-            build_dispatch(
+            dispatch(
                 &names,
                 vec![],
                 HashMap::new(),
@@ -352,7 +474,7 @@ mod tests {
             "t/b.py::t5",
         ]);
         for seed in 0..10u64 {
-            let mut d = build_dispatch(
+            let mut d = dispatch(
                 &names,
                 vec![],
                 HashMap::new(),
@@ -381,7 +503,7 @@ mod tests {
             "t/b.py::t4",
             "t/b.py::t5",
         ]);
-        let mut d = build_dispatch(
+        let mut d = dispatch(
             &names,
             vec![],
             HashMap::new(),
@@ -404,7 +526,7 @@ mod tests {
             "t/a.py::TestY::t3",
             "t/a.py::t4",
         ]);
-        let mut d = build_dispatch(
+        let mut d = dispatch(
             &names,
             vec![],
             HashMap::new(),
@@ -430,7 +552,7 @@ mod tests {
         let mut groups = HashMap::new();
         groups.insert("0".to_string(), "g".to_string());
         groups.insert("2".to_string(), "g".to_string());
-        let mut d = build_dispatch(
+        let mut d = dispatch(
             &names,
             vec![],
             groups,
@@ -449,7 +571,7 @@ mod tests {
     #[test]
     fn take_serves_requeued_before_queue() {
         let names = ids(&["a.py::t1", "a.py::t2", "a.py::t3"]);
-        let mut d = build_dispatch(
+        let mut d = dispatch(
             &names,
             vec![],
             HashMap::new(),
@@ -469,7 +591,7 @@ mod tests {
     #[test]
     fn serial_only_for_active_designate() {
         let names = ids(&["a.py::t1", "a.py::t2"]);
-        let mut d = build_dispatch(
+        let mut d = dispatch(
             &names,
             vec![0, 1],
             HashMap::new(),
@@ -488,5 +610,20 @@ mod tests {
             Take::Items(items) => assert_eq!(items, vec![0, 1]),
             Take::Exhausted => panic!("designate should get serial items"),
         }
+    }
+
+    #[test]
+    fn each_mode_builds_no_dispatch() {
+        let names = ids(&["a.py::t1", "a.py::t2"]);
+        let d = dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &HashMap::new(),
+            Dist::Each,
+            None,
+            None,
+        );
+        assert!(d.is_none());
     }
 }

@@ -5,10 +5,12 @@
 //! classifiers (unstable ids, parallel-only failures); [`check`] is the
 //! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run.
 
+mod bisect;
 pub(crate) mod check;
 mod classify;
 mod try_cmd;
 
+pub use bisect::run_bisect;
 pub use check::run_migrate_check;
 pub use try_cmd::run_try;
 
@@ -89,7 +91,16 @@ pub(super) fn file_of(nodeid: &str) -> &str {
 
 /// Run one full session in a child rstest process with the given config flags
 /// (e.g. `["-n","0"]`), capture per-test pass/fail from its `--report-json`.
-pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> {
+/// `python` is pinned with `--python`: the child would otherwise re-resolve an
+/// interpreter from the environment and could land on a different one than
+/// the parent collected with.
+///
+/// `config` is rstest's own flags; `args` go to pytest verbatim, after `--`, so
+/// an rstest flag among them (`--reruns`, `-n`) can't change how the child
+/// runs. Reruns are pinned off: a `[tool.rstest] reruns` would route `-n 0`
+/// through the one-worker pool (which reorders by the duration cache) and a
+/// passing rerun would hide the very failure the preflight is looking for.
+pub(super) fn run_session(python: &Path, config: &[&str], args: &[String]) -> Result<Outcomes> {
     let exe = std::env::current_exe()?;
     let tmp = std::env::temp_dir().join(format!(
         "rstest-migrate-{}-{}.json",
@@ -97,15 +108,20 @@ pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> 
         run_session_seq()
     ));
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(config)
-        .args(args)
+    cmd.arg("--python")
+        .arg(python)
+        .args(config)
         .arg("--report-json")
         .arg(&tmp)
         // worker-timeout: a fixed-port / deadlock test (httpx, werkzeug) would
         // otherwise hang the preflight; the stuck test becomes a failure.
         .args(["--worker-timeout", "120"])
         // dots off-tty keeps the child quiet & byte-stable; we discard stdout.
-        .args(["-q", "--output", "dots"])
+        .args(["--output", "dots"])
+        .args(["--reruns", "0"])
+        .arg("--")
+        .arg("-q")
+        .args(args)
         // doctor instrumentation adds per-test cpu time (cheap) so the
         // classifier can tell a wait-bound (wall-clock) failure from a real
         // co-location/isolation one.
@@ -122,7 +138,7 @@ pub(super) fn run_session(config: &[&str], args: &[String]) -> Result<Outcomes> 
     Ok(out)
 }
 
-fn run_session_seq() -> u64 {
+pub(super) fn run_session_seq() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     N.fetch_add(1, Ordering::Relaxed)
@@ -130,6 +146,28 @@ fn run_session_seq() -> u64 {
 
 /// One fresh collect-only session -> the collected nodeids in session order.
 pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>> {
+    Ok(collect_session(python, args)?.ids)
+}
+
+/// A collect-only session: the nodeids plus pytest's own view of its roots.
+pub(super) struct Collected {
+    pub ids: Vec<String>,
+    /// pytest's rootdir, the base every nodeid is relative to.
+    pub rootdir: Option<String>,
+    /// `config.args_source`: "args", "invocation_dir" or "testpaths".
+    pub args_source: Option<String>,
+    /// Absolute roots a no-arg run from the rootdir would collect.
+    pub root_args: Vec<String>,
+    /// The config file pytest loaded, when any.
+    pub inifile: Option<String>,
+    /// Active cache-driven order flags (`--nf`, `--ff`, `--lf`, `--sw`, ...).
+    pub order_flags: Vec<String>,
+    /// The conftest cutoff pytest used (absolute).
+    pub confcutdir: Option<String>,
+}
+
+/// One fresh collect-only session -> [`Collected`].
+pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collected> {
     // Full id+location payload from pytest_collection_finish (single session).
     // The lone worker ships ids; params ride its env, not process set_var.
     let env = worker::WorkerEnv {
@@ -151,16 +189,41 @@ pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>>
     }
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     w.send(&proto::Command::RunItemsSession { args: collect_args })?;
-    let mut ids: Vec<String> = Vec::new();
+    let mut out = Collected {
+        ids: Vec::new(),
+        rootdir: None,
+        args_source: None,
+        root_args: Vec::new(),
+        inifile: None,
+        order_flags: Vec::new(),
+        confcutdir: None,
+    };
     loop {
         match w.recv()? {
-            proto::Event::CollectionDone { ids: Some(i), .. } => ids = i,
+            proto::Event::CollectionDone {
+                ids: Some(i),
+                rootdir,
+                args_source,
+                root_args,
+                inifile,
+                order_flags,
+                confcutdir,
+                ..
+            } => {
+                out.ids = i;
+                out.rootdir = rootdir;
+                out.args_source = args_source;
+                out.root_args = root_args.unwrap_or_default();
+                out.inifile = inifile;
+                out.order_flags = order_flags.unwrap_or_default();
+                out.confcutdir = confcutdir;
+            }
             proto::Event::Done { .. } => break,
             _ => {}
         }
     }
     w.shutdown()?;
-    Ok(ids)
+    Ok(out)
 }
 
 #[cfg(test)]

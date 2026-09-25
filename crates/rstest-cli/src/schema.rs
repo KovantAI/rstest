@@ -104,6 +104,9 @@ fn render_md(o: &Output) -> String {
             render_object(&mut s, "###", name, "", obj);
         }
     }
+    // Exactly one trailing newline, so pre-commit's end-of-file-fixer is a no-op.
+    s.truncate(s.trim_end().len());
+    s.push('\n');
     s
 }
 

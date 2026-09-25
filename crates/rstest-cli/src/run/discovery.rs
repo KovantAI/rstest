@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::config;
 use crate::scheduling::{proto, worker};
+use crate::text::strip_verbatim;
 
 /// The `--collect-only --report-json` discovery document (schema 1). Field
 /// order is alphabetical to match the historical `serde_json::Map` output
@@ -60,15 +61,6 @@ pub struct CollectError {
     pub longrepr: String,
     /// The path pytest was collecting when it failed.
     pub path: String,
-}
-
-fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
-    let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        std::path::PathBuf::from(rest.to_string())
-    } else {
-        p
-    }
 }
 
 /// Run a single collect-only session and write a structured discovery doc
@@ -259,6 +251,12 @@ mod tests {
             cache_dir: None,
             flaky: None,
             groups: None,
+            rootdir: None,
+            args_source: None,
+            root_args: None,
+            inifile: None,
+            order_flags: None,
+            confcutdir: None,
         }
     }
 
