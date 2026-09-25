@@ -171,6 +171,29 @@ pub enum Event {
         /// --dist loadgroup affinity.
         #[serde(default)]
         groups: Option<std::collections::HashMap<String, String>>,
+        /// pytest's rootdir (`config.rootpath`, rides with `ids`): what every
+        /// nodeid is relative to.
+        #[serde(default)]
+        rootdir: Option<String>,
+        /// Where the session's initial args came from (`config.args_source`):
+        /// "args" (positional paths/nodeids), "invocation_dir", "testpaths".
+        #[serde(default)]
+        args_source: Option<String>,
+        /// The absolute roots a no-arg run from the rootdir would collect
+        /// (globbed `testpaths`, else the rootdir). Lets `bisect` collect the
+        /// whole suite even when invoked from a subdirectory.
+        #[serde(default)]
+        root_args: Option<Vec<String>>,
+        /// The config file in effect (`config.inipath`), when there is one.
+        #[serde(default)]
+        inifile: Option<String>,
+        /// Active cache-driven order flags (`--nf`, `--ff`, `--lf`, `--sw`,
+        /// `--sw-skip`), however they were given (command line or addopts).
+        #[serde(default)]
+        order_flags: Option<Vec<String>>,
+        /// The conftest cutoff pytest used (absolute), when it reported one.
+        #[serde(default)]
+        confcutdir: Option<String>,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.

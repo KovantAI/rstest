@@ -123,6 +123,7 @@ from gates.reporting import (
     gate_warnings,
 )
 from gates.serve_watch import (
+    gate_bisect,
     gate_migrate_check,
     gate_try,
     gate_watch_mode,
@@ -240,6 +241,7 @@ def main():
         gate_native_timeout,
         gate_try,
         gate_migrate_check,
+        gate_bisect,
         gate_watch_mode,
     )
     names = [s.__name__.removeprefix("gate_") for s in sections]
