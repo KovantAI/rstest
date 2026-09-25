@@ -191,6 +191,9 @@ pub enum Event {
         /// `--sw-skip`), however they were given (command line or addopts).
         #[serde(default)]
         order_flags: Option<Vec<String>>,
+        /// The conftest cutoff pytest used (absolute), when it reported one.
+        #[serde(default)]
+        confcutdir: Option<String>,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.

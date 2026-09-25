@@ -543,14 +543,18 @@ in the collection, every child run and the printed command. The predecessor
 set is the suite's plain collection order. To bisect a failure that only
 appears in one shuffled order, reorder explicitly instead.
 
-Its runs also use a private pytest cache, cleared before each run, so `--ff`
+Its runs also use a private pytest cache, new and empty for each run, so `--ff`
 and `--lf` (often set in `addopts`) have nothing to reorder by and your own
-`.pytest_cache` is left alone; the printed command brings a fresh cache of its
+`.pytest_cache` is left alone (with the cacheprovider disabled the pin is
+simply inert); the printed command brings a fresh cache of its
 own when those flags are active. `-x` and `--maxfail` (from `addopts` or after
 `--`) are lifted in the child runs and in the printed command, so an earlier
 failure, the culprit's own included, can't stop a run before the victim.
 `--nf` and `--sw` can't be switched off from the command line, so bisect
-refuses them (exit `2`) and says how to drop them for the bisect.
+refuses them (exit `2`) and says how to drop them for the bisect. rstest's own
+`reruns` (config or `--reruns`) is off in the child runs too: a passing rerun
+would hide the failure, and a rerun run goes through the pool, which orders
+tests by duration. A `--confcutdir` of your own is kept as pytest applied it.
 
 Bounded to ~80 child runs; if it hits that ceiling it stops and reports the
 smallest reproducing set found (may not be fully minimal). Large suites are

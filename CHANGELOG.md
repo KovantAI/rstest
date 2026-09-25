@@ -26,6 +26,14 @@ between 0.0.x releases and are listed here.
   and could land on a different one than the collection used; they are now
   pinned to the same interpreter. Its polluter search also disables
   pytest-randomly, which could shuffle the candidates after the victim.
+- **`migrate-check` discriminator runs ignore rstest `reruns`.** A configured
+  `[tool.rstest] reruns` routed its serial runs through the one-worker pool
+  (duration-ordered) and a passing rerun could hide the failure being
+  classified; the child runs now pin `--reruns 0`, and pass their pytest args
+  after `--` so no rstest flag among them changes how the child runs.
+- **Id-bearing collection works with `-p no:cacheprovider`.** The worker read
+  `config.cache` unguarded, so with the cacheprovider disabled the collection
+  report was never sent.
 - **A pytest `@argsfile` counts as an explicit selection.** At a monorepo root
   with no pytest config, `rstest @tests.txt` fanned out over every subproject
   instead of running the listed tests as one project.

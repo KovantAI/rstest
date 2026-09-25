@@ -198,6 +198,7 @@ mod tests {
             root_args: None,
             inifile: None,
             order_flags: None,
+            confcutdir: None,
         }
     }
 

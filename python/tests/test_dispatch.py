@@ -113,6 +113,19 @@ def _roots_config(
     )
 
 
+def test_collection_finish_without_a_cacheprovider(monkeypatch):
+    # `-p no:cacheprovider` leaves config with no `cache` attribute at all;
+    # the id-bearing payload must still ship (no cache_dir), not raise.
+    monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    conn = FakeConn()
+    session = SimpleNamespace(items=[FakeItem("t.py::a")], config=SimpleNamespace())
+    ItemDispatchPlugin(conn).pytest_collection_finish(session)
+    kind, payload = conn.sent[0]
+    assert kind == "collection_done"
+    assert payload["ids"] == ["t.py::a"]
+    assert "cache_dir" not in payload
+
+
 def test_session_roots_absent_without_rootpath():
     # Fake configs (and any config without rootpath) ship no roots.
     assert _session_roots(SimpleNamespace(cache=None)) == {}

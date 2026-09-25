@@ -515,50 +515,46 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     };
     let mut sink = Sink::stdio(color::Palette::detect(args));
     // cache-compact and shard-verify are interpreter-free (they only touch
-    // cache/report files); the rest resolve Python first.
-    if let Command::CacheCompact { keep_last, max_age } = command {
-        return Ok(Some(run_cache_compact(
-            cli,
-            &mut sink,
-            *keep_last,
-            max_age.as_deref(),
-        )?));
-    }
-    if let Command::ShardVerify { reports } = command {
-        return Ok(Some(crate::shardverify::run_shard_verify(
-            &mut sink, reports,
-        )?));
-    }
+    // cache/report files); the rest resolve Python first, lazily, so the
+    // interpreter-free modes never probe one. One `?` for every arm.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let python = discover::resolve(&scope, cli.python.as_deref())?;
+    let python = || discover::resolve(&scope, cli.python.as_deref());
     let code = match command {
+        Command::CacheCompact { keep_last, max_age } => {
+            run_cache_compact(cli, &mut sink, *keep_last, max_age.as_deref())
+        }
+        Command::ShardVerify { reports } => {
+            crate::shardverify::run_shard_verify(&mut sink, reports)
+        }
         // Verify the vendored pytest tree against the packaged manifest.
-        Command::VerifyVendor => crate::vendor::run_verify(&python)?,
+        Command::VerifyVendor => python().and_then(|py| crate::vendor::run_verify(&py)),
         // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
-        Command::Try => migrate::run_try(&python, args, &mut sink)?,
+        Command::Try => python().and_then(|py| migrate::run_try(&py, args, &mut sink)),
         // Parallel-readiness preflight: its own collect-twice path, not a run.
-        Command::MigrateCheck => migrate::run_migrate_check(
-            &python,
-            args,
-            cli.migrate_check_json.as_deref(),
-            &cli.migrate_allow,
-            &mut sink,
-        )?,
+        Command::MigrateCheck => python().and_then(|py| {
+            migrate::run_migrate_check(
+                &py,
+                args,
+                cli.migrate_check_json.as_deref(),
+                &cli.migrate_allow,
+                &mut sink,
+            )
+        }),
         // Order-dependency bisect: delta-debug the predecessor set at -n 0.
         Command::Bisect {
             nodeid,
             pytest_args,
-        } => migrate::run_bisect(
-            &python,
-            cli.python.as_deref(),
-            nodeid,
-            pytest_args,
-            cli.bisect_json.as_deref(),
-            &mut sink,
-        )?,
-        Command::CacheCompact { .. } => unreachable!("handled above"),
-        Command::ShardVerify { .. } => unreachable!("handled above"),
-    };
+        } => python().and_then(|py| {
+            migrate::run_bisect(
+                &py,
+                cli.python.as_deref(),
+                nodeid,
+                pytest_args,
+                cli.bisect_json.as_deref(),
+                &mut sink,
+            )
+        }),
+    }?;
     Ok(Some(code))
 }
 
@@ -1918,6 +1914,24 @@ mod tests {
         }
         assert_eq!(p.keep_last, Some(7));
         assert!(err.to_string().contains("invalid RSTEST_CACHE_KEEP_LAST"));
+    }
+
+    #[test]
+    fn dispatch_shard_verify_surfaces_an_unreadable_report() {
+        // shard-verify is interpreter-free: a missing report errors straight
+        // through dispatch, no Python resolved.
+        let cli = Cli::parse_from(["rstest", "shard-verify", "/nonexistent/rstest-report.json"]);
+        let err = dispatch_command(&cli, &[]).expect_err("missing report => error");
+        assert!(err.to_string().contains("reading"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_resolves_python_only_for_the_modes_that_need_it() {
+        // verify-vendor needs an interpreter: an unusable --python fails it in
+        // dispatch, before the mode runs.
+        let cli = Cli::parse_from(["rstest", "verify-vendor", "--python", "/nonexistent/python"]);
+        let err = dispatch_command(&cli, &[]).expect_err("no interpreter => error");
+        assert!(err.to_string().contains("no usable Python"), "{err}");
     }
 
     #[test]

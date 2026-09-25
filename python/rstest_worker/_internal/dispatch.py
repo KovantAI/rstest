@@ -51,6 +51,14 @@ def _session_roots(config) -> m.SessionRootsPayload:
     inipath = getattr(config, "inipath", None)
     if inipath is not None:
         roots["inifile"] = str(inipath)
+    # The conftest cutoff pytest actually used (a user's --confcutdir, from the
+    # command line or addopts, else pytest's default), made absolute against
+    # the invocation dir.
+    ns = getattr(config, "known_args_namespace", None)
+    confcutdir = getattr(ns, "confcutdir", None)
+    if confcutdir:
+        base = getattr(getattr(config, "invocation_params", None), "dir", None)
+        roots["confcutdir"] = str(base / confcutdir) if base is not None else str(confcutdir)
     # Cache-driven reordering/filtering in effect (from the command line, ini
     # `addopts` or PYTEST_ADDOPTS alike): bisect's "victim runs last" needs to
     # know, since some of these can't be switched off from the command line.
@@ -98,8 +106,10 @@ class ItemDispatchPlugin(StreamPlugin):
             payload["marks"] = [
                 sorted({m.name for m in item.iter_markers()}) for item in session.items
             ]
-            if session.config.cache is not None:
-                payload["cache_dir"] = str(session.config.cache._cachedir)
+            # No `cache` attribute at all with `-p no:cacheprovider`.
+            cache = getattr(session.config, "cache", None)
+            if cache is not None:
+                payload["cache_dir"] = str(cache._cachedir)
             payload.update(_session_roots(session.config))
             payload["serial"] = [
                 i

@@ -34,22 +34,30 @@ const DEFAULT_BUDGET: u32 = 80;
 const ORDER_PINS: [&str; 2] = ["-p", "no:randomly"];
 
 /// The pins every bisect session gets, the collection and each child run:
-/// `ORDER_PINS`, plus a private cache cleared at the start of each run. pytest's
-/// cacheprovider reorders or filters by the cache (`--ff`/`--lf`, often set in
-/// `addopts`): with an empty cache there is nothing to act on, a child's own
-/// failure can't move the victim ahead in the next child, and the user's
-/// `.pytest_cache` is never rewritten.
-fn session_pins(cache_dir: &Path) -> Vec<String> {
-    let mut pins: Vec<String> = ORDER_PINS.iter().map(|a| a.to_string()).collect();
-    pins.push("-o".into());
-    pins.push(format!("cache_dir={}", cache_dir.display()));
-    pins.push("--cache-clear".into());
-    pins
+/// `ORDER_PINS`, plus a private cache of its own, new and empty for every
+/// session. pytest's cacheprovider reorders or filters by the cache
+/// (`--ff`/`--lf`, often set in `addopts`): with an empty cache there is
+/// nothing to act on, a child's own failure can't move the victim ahead in the
+/// next child, and the user's `.pytest_cache` is never rewritten. A fresh
+/// directory rather than `--cache-clear`, which only exists while the
+/// cacheprovider is loaded. With it disabled (`-p no:cacheprovider`) the
+/// `cache_dir` override is inert: pytest flags the unknown option (an end-of-
+/// session error under `--strict-config`) but still collects and runs, and the
+/// outcomes are all bisect reads.
+struct Pins {
+    cache_root: PathBuf,
 }
 
-/// `pins` ahead of `args`.
-fn with_pins(pins: &[String], args: &[String]) -> Vec<String> {
-    pins.iter().chain(args).cloned().collect()
+impl Pins {
+    /// The session pins, then `args`.
+    fn session(&self, args: &[String]) -> Vec<String> {
+        let dir = self.cache_root.join(format!("s{}", run_session_seq()));
+        let mut out: Vec<String> = ORDER_PINS.iter().map(|a| a.to_string()).collect();
+        out.push("-o".into());
+        out.push(format!("cache_dir={}", dir.display()));
+        out.extend_from_slice(args);
+        out
+    }
 }
 
 /// Order flags no command-line option can switch back off: `--nf` sorts every
@@ -147,6 +155,7 @@ struct Runner<'a> {
     python: &'a Path,
     victim: &'a str,
     rootdir: &'a Path,
+    pins: &'a Pins,
     pytest_args: &'a [String],
     budget: u32,
 }
@@ -162,7 +171,8 @@ impl Runner<'_> {
         self.budget -= 1;
         let mut sel: Vec<String> = preds.to_vec();
         sel.push(self.victim.to_string());
-        let out = run_selection(self.python, self.rootdir, self.pytest_args, &sel)?;
+        let args = self.pins.session(self.pytest_args);
+        let out = run_selection(self.python, self.rootdir, &args, &sel)?;
         victim_failed(&out, self.victim).map(Some)
     }
 }
@@ -288,13 +298,16 @@ fn canonical(p: &Path) -> PathBuf {
 /// so there is no guessing at which tokens are flag values.
 fn collect_suite(
     python: &Path,
-    pins: &[String],
+    pins: &Pins,
     pytest_args: &[String],
     cwd: &Path,
 ) -> Result<(Collected, PathBuf, Selection)> {
-    let first = collect_session(python, &with_pins(pins, pytest_args))?;
+    let first = collect_session(python, &pins.session(pytest_args))?;
     let Some(root) = first.rootdir.as_deref().map(|r| canonical(Path::new(r))) else {
-        bail!("rstest bisect: the worker did not report pytest's rootdir");
+        bail!(
+            "rstest bisect: the collection failed (pytest reported no rootdir); \
+             run `rstest --collect-only` with the same pytest args to see why"
+        );
     };
     let selection = if first.args_source.as_deref() != Some("args") {
         Selection::None
@@ -304,7 +317,7 @@ fn collect_suite(
         // pytest folds ini `addopts` and `PYTEST_ADDOPTS` in ahead of the
         // command line, so "args" alone can't say who named the paths. Ask
         // again without the user's args: still "args" means the config did.
-        let bare = collect_session(python, pins)?;
+        let bare = collect_session(python, &pins.session(&[]))?;
         if bare.args_source.as_deref() == Some("args") {
             Selection::Config
         } else {
@@ -314,7 +327,7 @@ fn collect_suite(
     if first.args_source.as_deref() != Some("invocation_dir") || root == cwd {
         return Ok((first, root, selection));
     }
-    let mut args = with_pins(pins, pytest_args);
+    let mut args = pins.session(pytest_args);
     args.extend(first.root_args.iter().cloned());
     let full = collect_session(python, &args)?;
     let root = full
@@ -539,7 +552,9 @@ fn bisect(
 ) -> Result<Verdict> {
     let cwd = strip_verbatim(std::env::current_dir()?.canonicalize()?);
     let work = workdir()?;
-    let pins = session_pins(&work.0.join("cache"));
+    let pins = Pins {
+        cache_root: work.0.join("cache"),
+    };
 
     sink.warn(&format!(
         "rstest bisect: collecting the suite to locate {nodeid}…"
@@ -601,17 +616,21 @@ fn bisect(
         pytest_args,
     };
 
-    let confcutdir = match collected.inifile.as_deref() {
-        Some(real) => Path::new(real).parent().unwrap_or(&rootdir).to_path_buf(),
-        None => rootdir.clone(),
-    };
-    let mut child_args = with_pins(&pins, &child_pins(&rootdir, &ini, &confcutdir));
+    // The cutoff pytest actually used (a user's own `--confcutdir` included;
+    // pytest always sets one), the rootdir if a worker ever omits it.
+    let confcutdir = collected
+        .confcutdir
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or(rootdir.clone());
+    let mut child_args = child_pins(&rootdir, &ini, &confcutdir);
     child_args.extend_from_slice(pytest_args);
     child_args.push(MAXFAIL_LIFT.into());
     let mut runner = Runner {
         python,
         victim,
         rootdir: &rootdir,
+        pins: &pins,
         pytest_args: &child_args,
         budget: DEFAULT_BUDGET,
     };
@@ -855,11 +874,8 @@ mod tests {
         let mut calls = 0;
         let (out, capped) = ddmin(&preds, |_| {
             calls += 1;
-            match calls {
-                1 => Ok(Some(true)),
-                2 => Ok(None),
-                _ => panic!("oracle asked after the budget ran out"),
-            }
+            assert!(calls <= 2, "oracle asked after the budget ran out");
+            Ok((calls == 1).then_some(true))
         })
         .unwrap();
         assert!(capped);
@@ -872,19 +888,33 @@ mod tests {
         // the budget hits 0 without ddmin ever seeing `None`. The result is
         // 1-minimal and must not be flagged capped.
         let preds = ids(&["a", "poison"]);
-        let mut budget = 2;
+        let mut budget: u32 = 2;
         let mut oracle = contains(&["poison"]);
         let (out, capped) = ddmin(&preds, |s| {
-            if budget == 0 {
-                return Ok(None);
-            }
-            budget -= 1;
+            budget = budget.checked_sub(1).expect("asked past the budget");
             oracle(s)
         })
         .unwrap();
         assert_eq!(out, ids(&["poison"]));
         assert!(!capped);
         assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn ddmin_stops_when_the_budget_runs_out_in_the_complement_pass() {
+        // 4 items: n=2 asks 2 halves, n=4 asks 4 singletons (all no), then the
+        // first complement finds the budget spent. ddmin must stop right
+        // there, capped, with the set it had.
+        let preds = ids(&["a", "b", "c", "d"]);
+        let mut calls = 0;
+        let (out, capped) = ddmin(&preds, |_| {
+            calls += 1;
+            Ok(if calls <= 6 { Some(false) } else { None })
+        })
+        .unwrap();
+        assert!(capped);
+        assert_eq!(out, preds);
+        assert_eq!(calls, 7, "no ask after the budget ran out");
     }
 
     #[test]
@@ -905,10 +935,14 @@ mod tests {
     fn reproduces_with_no_budget_runs_nothing() {
         // budget 0 short-circuits before spawning a session, and leaves the
         // budget at 0 (no underflow).
+        let pins = Pins {
+            cache_root: PathBuf::from("/nonexistent"),
+        };
         let mut r = Runner {
             python: Path::new("/nonexistent/python"),
             victim: "t::v",
             rootdir: Path::new("/nonexistent"),
+            pins: &pins,
             pytest_args: &[],
             budget: 0,
         };
@@ -943,10 +977,9 @@ mod tests {
 
     #[test]
     fn argsfile_lists_absolute_ids_one_per_line() {
-        let body = argsfile_body(
-            Path::new("/root"),
-            &ids(&["tests/a.py::t[x y]", "b.py::C::m"]),
-        );
+        // A real absolute root: `/root` has no drive on Windows.
+        let root = std::env::temp_dir();
+        let body = argsfile_body(&root, &ids(&["tests/a.py::t[x y]", "b.py::C::m"]));
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].ends_with("tests/a.py::t[x y]"), "{body}");
@@ -1040,6 +1073,16 @@ mod tests {
     }
 
     #[test]
+    fn cwd_relative_without_a_shared_root_stays_absolute() {
+        // No component in common (another Windows drive; here a relative cwd
+        // against an absolute rootdir): `..` can't bridge it, so the id keeps
+        // the rootdir's absolute path.
+        let root = std::env::temp_dir();
+        let got = cwd_relative(Path::new("elsewhere"), &root, "t.py::x");
+        assert_eq!(got, format!("{}::x", root.join("t.py").display()));
+    }
+
+    #[test]
     fn repro_command_quotes_and_keeps_options_verbatim() {
         let root = Path::new("/r");
         let args = ids(&["-c", "sub/pytest.ini", "-p", "no:cacheprovider"]);
@@ -1094,10 +1137,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             nested,
+            // Paths go through shell_quote: a Windows path (`C:\...`) is quoted.
             format!(
                 "rstest -n 0 -p no:randomly --rootdir {} -c {} pkg/tests/test_v.py::v",
-                root.display(),
-                ini.display()
+                shell_quote(&root.display().to_string()),
+                shell_quote(&ini.display().to_string())
             )
         );
         assert_eq!(flat, "rstest -n 0 -p no:randomly tests/test_a.py::v");
@@ -1122,7 +1166,7 @@ mod tests {
         };
         let cmd = repro_command(&ctx, &[], "pkg/test_v.py::v");
         let _ = std::fs::remove_dir_all(&root);
-        let r = root.display();
+        let r = shell_quote(&root.display().to_string());
         assert_eq!(
             cmd,
             format!(
@@ -1170,21 +1214,20 @@ mod tests {
     }
 
     #[test]
-    fn session_pins_disable_randomly_and_use_a_cleared_private_cache() {
-        let pins = session_pins(Path::new("/w/cache"));
-        assert_eq!(
-            pins,
-            ids(&[
-                "-p",
-                "no:randomly",
-                "-o",
-                "cache_dir=/w/cache",
-                "--cache-clear"
-            ])
-        );
-        let all = with_pins(&pins, &ids(&["-k", "x"]));
-        assert_eq!(&all[..pins.len()], &pins[..]);
-        assert_eq!(&all[pins.len()..], &ids(&["-k", "x"])[..]);
+    fn session_pins_give_every_session_its_own_empty_cache() {
+        let pins = Pins {
+            cache_root: PathBuf::from("/w/cache"),
+        };
+        let a = pins.session(&ids(&["-k", "x"]));
+        let b = pins.session(&[]);
+        assert_eq!(&a[..3], &ids(&["-p", "no:randomly", "-o"])[..]);
+        let prefix = format!("cache_dir={}", Path::new("/w/cache").join("s").display());
+        assert!(a[3].starts_with(&prefix), "{a:?}");
+        assert_eq!(&a[4..], &ids(&["-k", "x"])[..]);
+        // A new directory per session, never `--cache-clear` (which needs
+        // the cacheprovider loaded).
+        assert_ne!(a[3], b[3]);
+        assert!(!a.iter().any(|x| x == "--cache-clear"));
     }
 
     #[test]

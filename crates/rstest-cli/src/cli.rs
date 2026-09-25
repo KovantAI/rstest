@@ -636,15 +636,21 @@ mod tests {
         let (own, session) = split_args(v(&argv));
         assert!(session.is_empty(), "session={session:?}");
         let cli = Cli::try_parse_from(own).unwrap();
-        match cli.command {
+        assert_eq!(
+            bisect_parts(&cli),
+            Some(("t.py::v", v(&["-p", "no:randomly", "-o", "x=1"])))
+        );
+    }
+
+    /// The `bisect` subcommand's (nodeid, pytest args), or `None` for any other
+    /// command line.
+    fn bisect_parts(cli: &Cli) -> Option<(&str, Vec<String>)> {
+        match &cli.command {
             Some(Command::Bisect {
-                ref nodeid,
-                ref pytest_args,
-            }) => {
-                assert_eq!(nodeid, "t.py::v");
-                assert_eq!(pytest_args, &v(&["-p", "no:randomly", "-o", "x=1"]));
-            }
-            _ => panic!("expected the bisect subcommand"),
+                nodeid,
+                pytest_args,
+            }) => Some((nodeid.as_str(), pytest_args.clone())),
+            _ => None,
         }
     }
 
@@ -658,16 +664,9 @@ mod tests {
             "b.json",
         ]))
         .unwrap();
-        match cli.command {
-            Some(Command::Bisect {
-                ref nodeid,
-                ref pytest_args,
-            }) => {
-                assert_eq!(nodeid, "t.py::test_v");
-                assert!(pytest_args.is_empty());
-            }
-            _ => panic!("expected the bisect subcommand"),
-        }
+        assert_eq!(bisect_parts(&cli), Some(("t.py::test_v", vec![])));
+        // Any other command line is not a bisect.
+        assert_eq!(bisect_parts(&Cli::parse_from(["rstest"])), None);
         assert_eq!(
             cli.bisect_json.as_deref(),
             Some(std::path::Path::new("b.json"))

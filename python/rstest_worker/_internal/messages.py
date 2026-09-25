@@ -67,6 +67,7 @@ class SessionRootsPayload(TypedDict, total=False):
     args_source: str  # config.args_source: "args" | "invocation_dir" | "testpaths"
     root_args: list[str]  # what a no-arg run from the rootdir would collect
     inifile: str  # config.inipath, when a config file is in effect
+    confcutdir: str  # the conftest cutoff in effect, absolute
     order_flags: list[str]  # active "--nf" "--ff" "--lf" "--sw" "--sw-skip" "--maxfail"
 
 

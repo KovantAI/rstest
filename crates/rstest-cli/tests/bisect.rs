@@ -990,3 +990,138 @@ fn a_cwd_relative_nodeid_wins_over_a_same_named_rootdir_file() {
         serde_json::json!(["tests/test_pair.py::test_poison"])
     );
 }
+
+#[test]
+fn a_disabled_cacheprovider_does_not_break_bisect() {
+    // `-p no:cacheprovider`: no `--cache-clear`, no cache to pin. Plain, and
+    // under `--strict-config`, where even the cache_dir override is rejected
+    // and bisect must fall back to no cache pin at all.
+    let Some(venv) = pytest_env() else { return };
+    for (tag, ini) in [
+        ("nocache", "[pytest]\naddopts = -p no:cacheprovider\n"),
+        (
+            "nocachestrict",
+            "[pytest]\naddopts = -p no:cacheprovider --strict-config\n",
+        ),
+    ] {
+        let dir = fresh_dir(tag);
+        std::fs::write(dir.join("pytest.ini"), ini).unwrap();
+        write_pair(&dir, "NOCACHE");
+        let (code, out) = run(&venv, &dir, &["bisect", "test_pair.py::test_victim"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{tag}:\n{out}");
+        assert!(out.contains("culprit: 1 predecessor"), "{tag}:\n{out}");
+    }
+}
+
+#[test]
+fn rstest_reruns_in_config_do_not_mask_the_victims_failure() {
+    // The victim fails only on its first attempt after the polluter (it
+    // consumes the leaked flag). With `[tool.rstest] reruns` live in the
+    // child runs, the rerun would pass and hide the order dependency.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("reruns");
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        "[tool.pytest.ini_options]\n\n[tool.rstest]\nreruns = 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("test_pair.py"),
+        "import os\n\
+         def test_poison():\n    os.environ['RSTEST_BISECT_RERUNS'] = '1'\n\n\
+         def test_victim():\n    assert os.environ.pop('RSTEST_BISECT_RERUNS', None) is None\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &dir, &["bisect", "test_pair.py::test_victim"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("culprit: 1 predecessor"), "{out}");
+}
+
+#[test]
+fn a_users_confcutdir_in_addopts_is_kept_in_the_child_runs() {
+    // The fixture lives in a conftest ABOVE the rootdir, reachable only via
+    // `addopts = --confcutdir=..`. Pinning pytest's default cutoff instead
+    // would drop it and misread the victim as failing in isolation.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("confcut");
+    std::fs::write(
+        dir.join("conftest.py"),
+        "import pytest\n@pytest.fixture\ndef parentfix():\n    return 1\n",
+    )
+    .unwrap();
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("pytest.ini"),
+        "[pytest]\naddopts = --confcutdir=..\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("test_pair.py"),
+        "import os\n\
+         def test_poison(parentfix):\n    os.environ['RSTEST_BISECT_CONFCUT'] = '1'\n\n\
+         def test_victim(parentfix):\n    assert 'RSTEST_BISECT_CONFCUT' not in os.environ\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &proj, &["bisect", "test_pair.py::test_victim"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("culprit: 1 predecessor"), "{out}");
+}
+
+#[test]
+fn a_collection_that_fails_outright_errors_and_records_it_in_the_json() {
+    // An option pytest rejects fails every collection (with or without the
+    // private cache pin). bisect must stop with an error naming the failed
+    // collection and still leave a verdict-less doc, not a stale or no doc.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("badopt");
+    write_pair(&dir, "BADOPT");
+    let jpath = dir.join("b.json");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &[
+            "bisect",
+            "test_pair.py::test_victim",
+            "--bisect-json",
+            jpath.to_str().unwrap(),
+            "--",
+            "--no-such-pytest-option",
+        ],
+    );
+    let doc = read_json(&jpath);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("the collection failed"), "{out}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the collection failed"),
+        "{doc}"
+    );
+    assert_eq!(doc["culprits"], serde_json::json!([]));
+}
+
+#[test]
+fn an_addopts_path_is_blamed_on_the_config_even_with_user_options() {
+    // User options after `--` (no path among them) plus a path in addopts:
+    // the re-check without the user's args still sees the path, so the
+    // config is named, not the user's `--` args.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("addoptsuser");
+    std::fs::write(dir.join("pytest.ini"), "[pytest]\naddopts = test_pair.py\n").unwrap();
+    write_pair(&dir, "ADDOPTSUSER");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &["bisect", "test_pair.py::test_victim", "--", "-v"],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("`addopts`"), "{out}");
+    assert!(!out.contains("after `--` include"), "{out}");
+}

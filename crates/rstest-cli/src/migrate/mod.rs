@@ -94,6 +94,12 @@ pub(super) fn file_of(nodeid: &str) -> &str {
 /// `python` is pinned with `--python`: the child would otherwise re-resolve an
 /// interpreter from the environment and could land on a different one than
 /// the parent collected with.
+///
+/// `config` is rstest's own flags; `args` go to pytest verbatim, after `--`, so
+/// an rstest flag among them (`--reruns`, `-n`) can't change how the child
+/// runs. Reruns are pinned off: a `[tool.rstest] reruns` would route `-n 0`
+/// through the one-worker pool (which reorders by the duration cache) and a
+/// passing rerun would hide the very failure the preflight is looking for.
 pub(super) fn run_session(python: &Path, config: &[&str], args: &[String]) -> Result<Outcomes> {
     let exe = std::env::current_exe()?;
     let tmp = std::env::temp_dir().join(format!(
@@ -105,14 +111,17 @@ pub(super) fn run_session(python: &Path, config: &[&str], args: &[String]) -> Re
     cmd.arg("--python")
         .arg(python)
         .args(config)
-        .args(args)
         .arg("--report-json")
         .arg(&tmp)
         // worker-timeout: a fixed-port / deadlock test (httpx, werkzeug) would
         // otherwise hang the preflight; the stuck test becomes a failure.
         .args(["--worker-timeout", "120"])
         // dots off-tty keeps the child quiet & byte-stable; we discard stdout.
-        .args(["-q", "--output", "dots"])
+        .args(["--output", "dots"])
+        .args(["--reruns", "0"])
+        .arg("--")
+        .arg("-q")
+        .args(args)
         // doctor instrumentation adds per-test cpu time (cheap) so the
         // classifier can tell a wait-bound (wall-clock) failure from a real
         // co-location/isolation one.
@@ -153,6 +162,8 @@ pub(super) struct Collected {
     pub inifile: Option<String>,
     /// Active cache-driven order flags (`--nf`, `--ff`, `--lf`, `--sw`, ...).
     pub order_flags: Vec<String>,
+    /// The conftest cutoff pytest used (absolute).
+    pub confcutdir: Option<String>,
 }
 
 /// One fresh collect-only session -> [`Collected`].
@@ -185,6 +196,7 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
         root_args: Vec::new(),
         inifile: None,
         order_flags: Vec::new(),
+        confcutdir: None,
     };
     loop {
         match w.recv()? {
@@ -195,6 +207,7 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
                 root_args,
                 inifile,
                 order_flags,
+                confcutdir,
                 ..
             } => {
                 out.ids = i;
@@ -203,6 +216,7 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
                 out.root_args = root_args.unwrap_or_default();
                 out.inifile = inifile;
                 out.order_flags = order_flags.unwrap_or_default();
+                out.confcutdir = confcutdir;
             }
             proto::Event::Done { .. } => break,
             _ => {}
