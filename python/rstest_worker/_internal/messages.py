@@ -62,7 +62,16 @@ class _CollectionDoneRequired(TypedDict):
     hash: str  # sha256 of the newline-joined nodeids
 
 
-class CollectionDonePayload(_CollectionDoneRequired, total=False):
+class SessionRootsPayload(TypedDict, total=False):
+    rootdir: str  # pytest's config.rootpath
+    args_source: str  # config.args_source: "args" | "invocation_dir" | "testpaths"
+    root_args: list[str]  # what a no-arg run from the rootdir would collect
+    inifile: str  # config.inipath, when a config file is in effect
+    confcutdir: str  # the conftest cutoff in effect, absolute
+    order_flags: list[str]  # active "--nf" "--ff" "--lf" "--sw" "--sw-skip" "--maxfail"
+
+
+class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=False):
     # Only worker 0 (RSTEST_SEND_IDS=1) ships the id-bearing fields.
     ids: list[str]
     locations: list[list[str | int | None]]  # [relpath, lineno] per item
