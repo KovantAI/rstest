@@ -141,6 +141,8 @@ pub fn run_lazy_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        // Lazy never reorders by flake history, so quarantine is post-run only.
+        quarantine: _,
     } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();

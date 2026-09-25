@@ -50,7 +50,11 @@ jobs:
       # Short criterion timings keep the job fast — we need the slope, not
       # publication-grade precision.
       - name: run decode bench (bencher format)
+        # rust-cache can restore a partial target/criterion baseline, which makes
+        # criterion print "Failed to access file .../base/sample.json" errors
+        # mid-line. No baseline comparison is needed here, so start clean.
         run: |
+          rm -rf target/criterion
           cargo bench --bench proto_decode -- \
             --output-format bencher \
             --warm-up-time 0.5 --measurement-time 3 --sample-size 20 \

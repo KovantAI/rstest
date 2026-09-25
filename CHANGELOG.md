@@ -18,6 +18,16 @@ between 0.0.x releases and are listed here.
   pre-existing `-n 0` failures are called out separately. Exits non-zero on any parallel-only failure (CI-gateable);
   `--audit-json` writes the findings, the serial set, and the conftest block.
   See [`audit`](docs/reference/cli.md#audit).
+- **Fail-fast dispatch ordering (`--order fail-fast`).** A new
+  `--order <throughput|fail-fast>` flag chooses how `--dist load` sequences the
+  ready queue. `throughput` (default) keeps the slow-tests-first packing that
+  optimizes wall-clock. `fail-fast` orders for the earliest red signal:
+  recently-failed tests first, then the flakiest (both from
+  `.rstest_cache/flakes.json`), then the usual throughput order for clean
+  tests, so a broken run paired with `--maxfail`/`-x` dies in seconds. Both
+  input signals were already cached; no new data collection. Auto-selected under
+  `--watch`; also settable as `[tool.rstest] order`. See
+  [`--order`](docs/reference/cli.md#-order-throughputfail-fast).
 - **`rstest bisect <nodeid>`: order-dependency polluter finder.** For a test
   that fails only when run after some other test, bisect delta-debugs the
   predecessor set at `-n 0` (`ddmin`) down to the minimal set of earlier tests

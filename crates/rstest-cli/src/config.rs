@@ -201,6 +201,8 @@ pub struct RstestSettings {
     /// restricts/replaces auto-discovery.
     pub projects: Option<Vec<String>>,
     pub collect: Option<String>,
+    /// Dispatch ordering: "throughput" (default) or "fail-fast".
+    pub order: Option<String>,
     /// Terminal output style: "dots" (default), "verbose", or "bar".
     pub output: Option<String>,
 }
@@ -253,6 +255,7 @@ pub fn rstest_settings(start: &Path, err: &mut dyn Write) -> RstestSettings {
                 .get("collect")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            order: tool.get("order").and_then(|v| v.as_str()).map(String::from),
             output: tool
                 .get("output")
                 .and_then(|v| v.as_str())
