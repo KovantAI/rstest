@@ -567,6 +567,16 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 &mut sink,
             )
         }),
+        // Auto parallel-safety audit: repeat -n auto, diff vs -n 0, serial fix-list.
+        Command::Audit => python().and_then(|py| {
+            migrate::run_audit(
+                &py,
+                args,
+                cli.audit_repeat.unwrap_or(1),
+                cli.audit_json.as_deref(),
+                &mut sink,
+            )
+        }),
         // Order-dependency bisect: delta-debug the predecessor set at -n 0.
         Command::Bisect {
             nodeid,
