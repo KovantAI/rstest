@@ -154,10 +154,7 @@ So a fixture returning a settings object or a key is not suggested even
 when sharing it would be fine; the advisor only speaks when it is sure
 about the value. It still can't see side effects that leave no trace
 (writing a file, setting a global), so treat it as *advice* and check the
-fixture body before promoting. One known gap: a narrower fixture fetched
-with `request.getfixturevalue(...)` is only noticed when that call actually
-sets it up, not when the test had already set it up and pytest hands back
-the cached value.
+fixture body before promoting.
 
 ### SLOWEST FILES
 
