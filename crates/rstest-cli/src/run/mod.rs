@@ -250,16 +250,8 @@ fn resolve_run_config(
     let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
     // Resolve `--order` here, not at pool dispatch, so a bad value errors on
     // every run path (same rule as `--dist` above).
-    let order = resolve_order(cli, settings, &dist_name, sink)?;
+    let order = resolve_order(cli, settings)?;
     let order_explicit = cli.order.is_some() || settings.order.is_some();
-    if let Some(w) = order_ignored_warning(
-        order,
-        order_explicit,
-        passthrough || (n <= 1 && !single_worker_reruns),
-        false,
-    ) {
-        sink.warn(w);
-    }
     // A one-worker rerun pool is 1 worker everywhere downstream (banner,
     // doctor, report-json meta), never 0.
     let n = if single_worker_reruns { 1 } else { n };
@@ -481,6 +473,13 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     // Resolve dispatch selection (--shuffle/--shard) and the --incremental skip
     // set in one phase.
     let inc = resolve_incremental(&cfg, cli, &settings, &args, since_green, &mut sink)?;
+    // Load the --quarantine list once, before dispatch: fail-fast ordering needs
+    // it (a quarantined test must not lead the queue and trip -x), and the
+    // post-run demotion reuses it. Inert under passthrough.
+    let quarantine = match &cli.quarantine {
+        Some(p) if !passthrough => Some(gates::quarantine_matcher(p, &mut sink)?),
+        _ => None,
+    };
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -490,11 +489,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         DispatchSelection {
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
+            quarantine: quarantine.as_ref(),
         },
         &mut sink,
     )?;
 
-    apply_quarantine(cli, &mut outcome, passthrough, &mut sink)?;
+    apply_quarantine(
+        cli,
+        quarantine.as_ref(),
+        &mut outcome,
+        passthrough,
+        &mut sink,
+    )?;
     gates::finalize_output(
         &mut outcome,
         passthrough,
@@ -931,18 +937,21 @@ fn resolve_incremental(
 /// demoted outcomes consistently. Inert under passthrough (no aggregate Run).
 fn apply_quarantine(
     cli: &Cli,
+    matcher: Option<&regex::RegexSet>,
     outcome: &mut pool::PoolOutcome,
     passthrough: bool,
     sink: &mut Sink,
 ) -> Result<()> {
-    let Some(qpath) = &cli.quarantine else {
+    if cli.quarantine.is_none() {
         return Ok(());
-    };
+    }
     if passthrough {
         warn_quarantine_passthrough(sink.err());
         return Ok(());
     }
-    let matcher = gates::quarantine_matcher(qpath, sink)?;
+    let Some(matcher) = matcher else {
+        return Ok(());
+    };
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
     // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
@@ -953,10 +962,12 @@ fn apply_quarantine(
 }
 
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
-/// the argument budget: the resolved `--shuffle` seed and `--shard` bucket.
-struct DispatchSelection {
+/// the argument budget: the resolved `--shuffle` seed, `--shard` bucket, and
+/// `--quarantine` matcher (fail-fast keeps quarantined tests out of the front).
+struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    quarantine: Option<&'a regex::RegexSet>,
 }
 
 fn dispatch_run(
@@ -965,12 +976,13 @@ fn dispatch_run(
     settings: &config::RstestSettings,
     args: &[String],
     skip_ids: &std::collections::HashSet<String>,
-    selection: DispatchSelection,
+    selection: DispatchSelection<'_>,
     sink: &mut Sink,
 ) -> Result<pool::PoolOutcome> {
     let DispatchSelection {
         shuffle_seed,
         shard,
+        quarantine,
     } = selection;
     let RunConfig {
         n,
@@ -1010,155 +1022,197 @@ fn dispatch_run(
         worker_timeout: watchdog,
         known_flaky,
         worker_env,
+        quarantine,
     };
-    Ok(if passthrough || (n <= 1 && !single_worker_reruns) {
-        let io = if passthrough {
-            worker::Stdio::Inherit
-        } else {
-            worker::Stdio::Null
-        };
-        let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
-        w.send(&proto::Command::RunTests {
-            args: args.to_vec(),
-        })?;
-        let mut run = report::Run::default();
-        run.track_phase_durations = durations.is_some();
-        let mut prog = progress::Progress::default();
-        prog.set_mode(mode);
-        let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
-        let mut warnings: Vec<proto::WarningEntry> = Vec::new();
-        let exitstatus = loop {
-            if let Some(code) = fold_run_event(
-                w.recv()?,
-                passthrough,
-                &mut run,
-                &mut prog,
-                &mut fixtures,
-                &mut warnings,
-                sink,
-            ) {
-                break code;
-            }
-        };
-        w.shutdown()?;
-        pool::PoolOutcome {
-            run,
-            prog,
-            fixtures,
-            warnings,
-            cache_dir: None,
-            exitstatus,
-            // Single-worker path never shards (resolve_shard rejects it).
-            collection_hash: None,
-            collection_size: 0,
-        }
+    let path = if passthrough {
+        RunPath::Passthrough
+    } else if n <= 1 && !single_worker_reruns {
+        RunPath::SingleWorker
     } else if collect_lazy(cli, settings, dist_name, args, sink)? {
-        if let Some(w) = order_ignored_warning(order, order_explicit, false, true) {
-            sink.warn(w);
-        }
-        let cwd = std::env::current_dir()?;
-        let project = config::discover(&cwd, sink.err());
-        let paths: Vec<PathBuf> = args
-            .iter()
-            .filter(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
-            .map(PathBuf::from)
-            .collect();
-        let mut files = collect::collect_test_files(&paths, &project)?;
-        if let Some((k, total)) = shard {
-            let before = files.len();
-            files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
-            sink.warn(&format!(
-                "rstest: shard {k}/{total} -> {} of {before} test file(s)",
-                files.len()
-            ));
-        }
-        let cfg = pool::PoolConfig {
-            n: n.min(files.len().max(1)),
-            ..base_cfg
-        };
-        lazy::run_lazy_pool(
-            &cfg,
-            files,
-            // Steal (split files across workers) only on an EXPLICIT --dist
-            // load: lazy defaults to strict file affinity, since stealing
-            // exposes cross-file/in-file order dependence affinity doesn't.
-            lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
-            sink,
-        )?
+        RunPath::Lazy
     } else {
-        let dist = dist_name
-            .parse::<pool::Dist>()
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if dist == pool::Dist::Each && reruns > 0 {
-            anyhow::bail!(
-                "--reruns is not supported with --dist each (every worker runs the \
+        RunPath::Pool
+    };
+    if let Some(w) =
+        order_ignored_warning(order, order_explicit, cli.order.is_some(), dist_name, path)
+    {
+        sink.warn(&w);
+    }
+    Ok(
+        if matches!(path, RunPath::Passthrough | RunPath::SingleWorker) {
+            let io = if passthrough {
+                worker::Stdio::Inherit
+            } else {
+                worker::Stdio::Null
+            };
+            let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
+            w.send(&proto::Command::RunTests {
+                args: args.to_vec(),
+            })?;
+            let mut run = report::Run::default();
+            run.track_phase_durations = durations.is_some();
+            let mut prog = progress::Progress::default();
+            prog.set_mode(mode);
+            let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
+            let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+            let exitstatus = loop {
+                if let Some(code) = fold_run_event(
+                    w.recv()?,
+                    passthrough,
+                    &mut run,
+                    &mut prog,
+                    &mut fixtures,
+                    &mut warnings,
+                    sink,
+                ) {
+                    break code;
+                }
+            };
+            w.shutdown()?;
+            pool::PoolOutcome {
+                run,
+                prog,
+                fixtures,
+                warnings,
+                cache_dir: None,
+                exitstatus,
+                // Single-worker path never shards (resolve_shard rejects it).
+                collection_hash: None,
+                collection_size: 0,
+            }
+        } else if path == RunPath::Lazy {
+            let cwd = std::env::current_dir()?;
+            let project = config::discover(&cwd, sink.err());
+            let paths: Vec<PathBuf> = args
+                .iter()
+                .filter(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
+                .map(PathBuf::from)
+                .collect();
+            let mut files = collect::collect_test_files(&paths, &project)?;
+            if let Some((k, total)) = shard {
+                let before = files.len();
+                files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
+                sink.warn(&format!(
+                    "rstest: shard {k}/{total} -> {} of {before} test file(s)",
+                    files.len()
+                ));
+            }
+            let cfg = pool::PoolConfig {
+                n: n.min(files.len().max(1)),
+                ..base_cfg
+            };
+            lazy::run_lazy_pool(
+                &cfg,
+                files,
+                // Steal (split files across workers) only on an EXPLICIT --dist
+                // load: lazy defaults to strict file affinity, since stealing
+                // exposes cross-file/in-file order dependence affinity doesn't.
+                lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
+                sink,
+            )?
+        } else {
+            let dist = dist_name
+                .parse::<pool::Dist>()
+                .map_err(|e| anyhow::anyhow!(e))?;
+            if dist == pool::Dist::Each && reruns > 0 {
+                anyhow::bail!(
+                    "--reruns is not supported with --dist each (every worker runs the \
                  full suite; rerun-on-another-worker semantics do not apply)"
-            );
-        }
-        pool::run_pool(
-            &base_cfg,
-            dist,
-            order,
-            durations.is_some(),
-            shuffle_seed,
-            shard,
-            skip_ids,
-            sink,
-        )?
-    })
+                );
+            }
+            pool::run_pool(
+                &base_cfg,
+                dist,
+                order,
+                durations.is_some(),
+                shuffle_seed,
+                shard,
+                skip_ids,
+                sink,
+            )?
+        },
+    )
 }
 
 /// Resolve dispatch ordering (CLI > [tool.rstest] > auto). Auto picks
 /// fail-fast under `--watch` (surface a red as fast as possible on each save),
-/// throughput otherwise. Only `--dist load` honors the order, so an explicit
-/// fail-fast on an affinity dist warns rather than silently no-op'ing.
-fn resolve_order(
-    cli: &Cli,
-    settings: &config::RstestSettings,
-    dist_name: &str,
-    sink: &mut Sink,
-) -> Result<pool::Order> {
-    let explicit = cli.order.clone().or_else(|| settings.order.clone());
-    let order = match &explicit {
+/// throughput otherwise. Where the order has no effect is reported once, at
+/// dispatch, by [`order_ignored_warning`].
+fn resolve_order(cli: &Cli, settings: &config::RstestSettings) -> Result<pool::Order> {
+    Ok(match cli.order.as_deref().or(settings.order.as_deref()) {
         Some(s) => s.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?,
         None if cli.watch => pool::Order::FailFast,
         None => pool::Order::Throughput,
-    };
-    if explicit.is_some() && order == pool::Order::FailFast && dist_name != "load" {
-        sink.warn(&format!(
-            "rstest: --order fail-fast only reorders --dist load; --dist {dist_name} \
-             keeps its affinity order"
-        ));
-    }
-    Ok(order)
+    })
+}
+
+/// Which run path [`dispatch_run`] takes, as far as `--order` cares.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RunPath {
+    /// `-s`/`--pdb`/`--co`/`--debug`: one worker, inherited stdio.
+    Passthrough,
+    /// `-n <= 1` (explicit, or `auto` capped down on a small suite).
+    SingleWorker,
+    /// Parallel pool with `--collect lazy`.
+    Lazy,
+    /// Parallel pool with full collection: the only path that reorders.
+    Pool,
 }
 
 /// Heads-up when an explicit `--order fail-fast` lands on a run path that
-/// never builds a `--dist load` dispatch queue: single-worker/passthrough
-/// (session order) or `--collect lazy` (whole-file dispatch). The `--watch`
-/// auto-pick stays quiet: it was never asked for.
+/// never builds a `--dist load` dispatch queue. At most ONE warning, and it
+/// names the actual cause, so following it enables the reordering. The
+/// `--watch` auto-pick stays quiet: it was never asked for. The single-worker
+/// paths warn only for an `--order` typed on the command line (`from_cli`): a
+/// `[tool.rstest] order` means "when it applies", and `-n auto` legitimately
+/// drops to one worker on small suites, so warning there would fire every run.
 fn order_ignored_warning(
     order: pool::Order,
     explicit: bool,
-    single_worker: bool,
-    lazy: bool,
-) -> Option<&'static str> {
+    from_cli: bool,
+    dist_name: &str,
+    path: RunPath,
+) -> Option<String> {
     if !explicit || order != pool::Order::FailFast {
         return None;
     }
-    if single_worker {
-        Some(
-            "rstest: --order fail-fast needs the parallel pool (-n >= 2); \
-             single-worker mode runs in session order",
+    let msg = if path == RunPath::Passthrough {
+        if !from_cli {
+            return None;
+        }
+        "rstest: --order fail-fast has no effect under -s/--pdb/--co/--debug \
+         (one worker runs the session in its own order)"
+            .to_string()
+    } else if path == RunPath::SingleWorker {
+        if !from_cli {
+            return None;
+        }
+        "rstest: --order fail-fast needs the parallel pool (-n >= 2); \
+         single-worker mode runs in session order"
+            .to_string()
+    } else if dist_name == "each" {
+        "rstest: --order fail-fast has no effect with --dist each (every worker \
+         runs the full suite; there is no dispatch queue)"
+            .to_string()
+    } else if path == RunPath::Lazy {
+        let dist_hint = if dist_name == "load" {
+            ""
+        } else {
+            " --dist load"
+        };
+        format!(
+            "rstest: --order fail-fast is ignored under --collect lazy (lazy \
+             dispatches whole files); use --collect full{dist_hint}"
         )
-    } else if lazy {
-        Some(
-            "rstest: --order fail-fast is ignored under --collect lazy \
-             (lazy dispatches whole files); use --collect full",
+    } else if dist_name != "load" {
+        format!(
+            "rstest: --order fail-fast only reorders --dist load; --dist {dist_name} \
+             keeps its affinity order"
         )
     } else {
-        None
-    }
+        return None;
+    };
+    Some(msg)
 }
 
 /// An explicit fail-fast order and `--shuffle` both claim the dispatch queue;
@@ -1628,7 +1682,7 @@ mod tests {
         resolve_order, resolve_retention_policy, resolve_shard, resolve_shuffle_seed,
         run_cache_compact, silent_master_plugin_warnings, validate_cache_flags,
         warn_incremental_conflicts, warn_quarantine_passthrough, warn_windows_timeout,
-        watchdog_duration,
+        watchdog_duration, RunPath,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1874,16 +1928,13 @@ mod tests {
         let none = settings_order(None);
         // No flag, no watch => throughput.
         assert_eq!(
-            resolve_order(&cli(), &none, "load", &mut Sink::captured().0).unwrap(),
+            resolve_order(&cli(), &none).unwrap(),
             pool::Order::Throughput
         );
         // --watch auto-selects fail-fast.
         let mut w = cli();
         w.watch = true;
-        assert_eq!(
-            resolve_order(&w, &none, "load", &mut Sink::captured().0).unwrap(),
-            pool::Order::FailFast
-        );
+        assert_eq!(resolve_order(&w, &none).unwrap(), pool::Order::FailFast);
     }
 
     #[test]
@@ -1893,56 +1944,67 @@ mod tests {
         w.watch = true;
         w.order = Some("throughput".into());
         assert_eq!(
-            resolve_order(&w, &settings_order(None), "load", &mut Sink::captured().0).unwrap(),
+            resolve_order(&w, &settings_order(None)).unwrap(),
             pool::Order::Throughput
         );
         // Config supplies it when the flag is absent.
         assert_eq!(
-            resolve_order(
-                &cli(),
-                &settings_order(Some("fail-fast")),
-                "load",
-                &mut Sink::captured().0
-            )
-            .unwrap(),
+            resolve_order(&cli(), &settings_order(Some("fail-fast"))).unwrap(),
             pool::Order::FailFast
         );
     }
 
     #[test]
-    fn resolve_order_rejects_unknown_and_warns_on_affinity_dist() {
-        assert!(resolve_order(
-            &cli(),
-            &settings_order(Some("sideways")),
-            "load",
-            &mut Sink::captured().0
-        )
-        .is_err());
-        // Explicit fail-fast on an affinity dist warns (order is ignored there).
-        let mut c = cli();
-        c.order = Some("fail-fast".into());
-        let (mut sink, cap) = Sink::captured();
-        assert_eq!(
-            resolve_order(&c, &settings_order(None), "loadfile", &mut sink).unwrap(),
-            pool::Order::FailFast
-        );
-        assert!(cap.err().contains("only reorders --dist load"));
+    fn resolve_order_rejects_unknown() {
+        assert!(resolve_order(&cli(), &settings_order(Some("sideways"))).is_err());
     }
 
     #[test]
-    fn order_ignored_warning_only_for_explicit_failfast_off_pool() {
+    fn order_ignored_warning_emits_one_actionable_message() {
         use pool::Order::{FailFast, Throughput};
-        // Explicit fail-fast on single-worker / lazy paths warns.
-        assert!(order_ignored_warning(FailFast, true, true, false)
+        use RunPath::{Lazy, Passthrough, Pool, SingleWorker};
+        let w = |dist, path| order_ignored_warning(FailFast, true, true, dist, path);
+        // Passthrough names -s/--pdb, not -n (which may already be >= 2).
+        let pt = w("load", Passthrough).unwrap();
+        assert!(
+            pt.contains("-s/--pdb") && !pt.contains("-n >= 2"),
+            "got {pt}"
+        );
+        assert!(w("loadfile", SingleWorker)
             .unwrap()
             .contains("needs the parallel pool"));
-        assert!(order_ignored_warning(FailFast, true, false, true)
+        // --dist each: no dispatch queue, not "affinity order".
+        let each = w("each", Pool).unwrap();
+        assert!(each.contains("no dispatch queue"), "got {each}");
+        // Lazy + affinity dist: ONE message naming both changes.
+        let lazy_file = w("loadfile", Lazy).unwrap();
+        assert!(
+            lazy_file.contains("--collect full --dist load"),
+            "got {lazy_file}"
+        );
+        assert!(!lazy_file.contains("affinity"));
+        // Lazy + load: only the collect hint.
+        assert!(w("load", Lazy).unwrap().ends_with("use --collect full"));
+        // Full collection, affinity dist.
+        assert!(w("loadscope", Pool)
             .unwrap()
-            .contains("--collect lazy"));
-        // Pool path, auto-pick, or throughput: silent.
-        assert!(order_ignored_warning(FailFast, true, false, false).is_none());
-        assert!(order_ignored_warning(FailFast, false, true, true).is_none());
-        assert!(order_ignored_warning(Throughput, true, true, true).is_none());
+            .contains("only reorders --dist load"));
+        // Pool path on load, auto-pick, or throughput: silent.
+        assert!(w("load", Pool).is_none());
+        assert!(order_ignored_warning(FailFast, false, false, "each", Lazy).is_none());
+        assert!(order_ignored_warning(Throughput, true, true, "each", Lazy).is_none());
+    }
+
+    #[test]
+    fn order_ignored_warning_single_worker_quiet_for_config_order() {
+        use pool::Order::FailFast;
+        use RunPath::{Lazy, Passthrough, SingleWorker};
+        // [tool.rstest] order (explicit, not from CLI): -n auto capping to 1 or
+        // a -s run must not warn every time.
+        assert!(order_ignored_warning(FailFast, true, false, "load", SingleWorker).is_none());
+        assert!(order_ignored_warning(FailFast, true, false, "load", Passthrough).is_none());
+        // A config-level misconfiguration on the pool path still warns.
+        assert!(order_ignored_warning(FailFast, true, false, "load", Lazy).is_some());
     }
 
     #[test]

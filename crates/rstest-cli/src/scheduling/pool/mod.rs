@@ -114,6 +114,18 @@ impl std::str::FromStr for Order {
     }
 }
 
+/// Drop quarantined ids from the flake history fail-fast ranks on, so they
+/// fall into the normal (clean) tail instead of leading the queue.
+fn without_quarantined(
+    mut history: std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
+    quarantine: Option<&regex::RegexSet>,
+) -> std::collections::HashMap<String, crate::reporting::flakes::FlakeStats> {
+    if let Some(q) = quarantine {
+        history.retain(|id, _| !q.is_match(id));
+    }
+    history
+}
+
 /// Worker-pool parameters common to the eager (`run_pool`) and lazy
 /// (`run_lazy_pool`) orchestrators. Bundled so each entry point takes a handful
 /// of mode-specific args on top rather than one flat ~17-arg list.
@@ -130,6 +142,10 @@ pub struct PoolConfig<'a> {
     /// flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     pub known_flaky: Option<&'a std::collections::HashSet<String>>,
     pub worker_env: &'a crate::scheduling::worker::WorkerEnv,
+    /// `--quarantine` matcher. Fail-fast ordering drops matching ids from the
+    /// suspect set: a quarantined test fails every run by design, so leading
+    /// with it would trip `-x`/`--maxfail` and then be forgiven post-run.
+    pub quarantine: Option<&'a regex::RegexSet>,
 }
 
 /// Everything the orchestrator loop produces from one pool run, handed back to
@@ -208,6 +224,7 @@ pub fn run_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        quarantine,
     } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
@@ -223,7 +240,7 @@ pub fn run_pool(
     // Flake history feeds fail-fast ordering; empty (and untouched) under the
     // throughput default so a cold cache costs nothing.
     let flake_history = if order == Order::FailFast {
-        crate::reporting::flakes::load()
+        without_quarantined(crate::reporting::flakes::load(), quarantine)
     } else {
         std::collections::HashMap::new()
     };
@@ -973,6 +990,25 @@ fn partition_skip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_quarantined_drops_only_matching_ids() {
+        use crate::reporting::flakes::FlakeStats;
+        let red = FlakeStats {
+            failed: 3,
+            ..Default::default()
+        };
+        let h = std::collections::HashMap::from([
+            ("q.py::always_red".to_string(), red),
+            ("a.py::real_red".to_string(), red),
+        ]);
+        let q = regex::RegexSet::new(["^q\\.py::.*$"]).unwrap();
+        let kept = without_quarantined(h.clone(), Some(&q));
+        assert!(!kept.contains_key("q.py::always_red"));
+        assert!(kept.contains_key("a.py::real_red"));
+        // No --quarantine: history untouched.
+        assert_eq!(without_quarantined(h, None).len(), 2);
+    }
 
     #[test]
     fn order_from_str_parses_and_rejects() {

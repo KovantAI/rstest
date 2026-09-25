@@ -100,32 +100,56 @@ pub fn is_suspect(id: &str, flakes: &HashMap<String, FlakeStats>) -> bool {
     flakes.get(id).is_some_and(|f| f.failed > 0 || f.flaky > 0)
 }
 
+/// Most suspects fail-fast pulls to the front (and dispatches one at a time).
+/// Bounds the damage of a mass failure: after one bad commit fails thousands
+/// of tests, every later run would otherwise single-dispatch all of them for
+/// the whole retention window. Suspects past the cap rejoin the clean tail.
+pub const FAILFAST_SUSPECT_CAP: usize = 128;
+
 /// Fail-fast dispatch order: surface a red as early as possible. Suspects
 /// (see [`is_suspect`]) go first, hard-failed before flaky-only; within each,
 /// most recent event first (`last_epoch` desc) so a test that failed last run
-/// beats one that failed often but long ago, then event count (desc), then
-/// fastest first. Everything after is exactly [`dispatch_order`]: long poles
-/// longest-first, then collection order, so clean tests keep module locality
-/// and workers still pack. The caller dispatches the suspect + long-pole
-/// prefix one test at a time. Pairs with `--maxfail`/`-x` for true early exit.
+/// beats one that failed often but long ago (for hard-failed tests this is the
+/// last FAILURE, not a later flake), then event count (desc), then
+/// collection order (a same-run cohort stays module-contiguous). At most
+/// [`FAILFAST_SUSPECT_CAP`] suspects lead. Everything after is exactly
+/// [`dispatch_order`]: long poles longest-first, then collection order, so
+/// clean tests keep module locality and workers still pack. The caller
+/// dispatches the suspect + long-pole prefix one test at a time. Only ids
+/// passing `include` are returned. Pairs with `--maxfail`/`-x` for true early
+/// exit.
 pub fn failfast_order(
     ids: &[String],
     cache: &HashMap<String, f64>,
     flakes: &HashMap<String, FlakeStats>,
+    include: impl Fn(u64) -> bool,
 ) -> Vec<u64> {
-    let (mut suspects, clean): (Vec<u64>, Vec<u64>) =
-        (0..ids.len() as u64).partition(|&i| is_suspect(&ids[i as usize], flakes));
+    // Filter (shard / serial) BEFORE ranking and capping, so the cap counts
+    // only suspects this run will actually dispatch.
+    let (mut suspects, mut clean): (Vec<u64>, Vec<u64>) = (0..ids.len() as u64)
+        .filter(|&i| include(i))
+        .partition(|&i| is_suspect(&ids[i as usize], flakes));
+    // Recency: last hard failure for failed tests, last flake otherwise.
+    let recency = |f: &FlakeStats| {
+        if f.failed > 0 {
+            f.failed_epoch()
+        } else {
+            f.last_epoch
+        }
+    };
+    // Stable sort: full ties keep collection order.
     suspects.sort_by(|&a, &b| {
-        let (ia, ib) = (&ids[a as usize], &ids[b as usize]);
-        let (fa, fb) = (flakes[ia], flakes[ib]);
-        let dur = |id: &String| cache.get(id).copied().unwrap_or(0.0);
+        let (fa, fb) = (flakes[&ids[a as usize]], flakes[&ids[b as usize]]);
         (fa.failed == 0)
             .cmp(&(fb.failed == 0))
-            .then(fb.last_epoch.cmp(&fa.last_epoch))
+            .then(recency(&fb).cmp(&recency(&fa)))
             .then(fb.failed.cmp(&fa.failed))
             .then(fb.flaky.cmp(&fa.flaky))
-            .then(dur(ia).total_cmp(&dur(ib)))
     });
+    if suspects.len() > FAILFAST_SUSPECT_CAP {
+        clean.extend(suspects.drain(FAILFAST_SUSPECT_CAP..));
+        clean.sort_unstable();
+    }
     // Clean tail: reuse throughput ordering over the clean subset.
     let clean_ids: Vec<String> = clean.iter().map(|&i| ids[i as usize].clone()).collect();
     suspects
@@ -212,7 +236,10 @@ mod tests {
         // index 0=failed, 1=flaky, 2=fast, 3=slow
         // hard-failed first, then flaky, then the clean tail in throughput
         // order: the long pole first, then collection order.
-        assert_eq!(failfast_order(&names, &cache, &flakes), vec![0, 1, 3, 2]);
+        assert_eq!(
+            failfast_order(&names, &cache, &flakes, |_| true),
+            vec![0, 1, 3, 2]
+        );
     }
 
     #[test]
@@ -252,7 +279,107 @@ mod tests {
                 },
             ),
         ]);
-        assert_eq!(failfast_order(&names, &cache, &flakes), vec![1, 0, 2]);
+        assert_eq!(
+            failfast_order(&names, &cache, &flakes, |_| true),
+            vec![1, 0, 2]
+        );
+    }
+
+    #[test]
+    fn failfast_caps_suspects_and_keeps_cohort_in_collection_order() {
+        use crate::reporting::flakes::FlakeStats;
+        // A mass failure: every test failed in the same run (full tie), and a
+        // later-collected test failed alone in a newer run.
+        let n = FAILFAST_SUSPECT_CAP + 10;
+        let names: Vec<String> = (0..n).map(|i| format!("m{}.py::t{i}", i % 3)).collect();
+        let mut flakes: HashMap<String, FlakeStats> = names
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    FlakeStats {
+                        failed: 1,
+                        last_epoch: 100,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        flakes.get_mut(&names[n - 1]).unwrap().last_epoch = 200;
+        let order = failfast_order(&names, &HashMap::new(), &flakes, |_| true);
+        assert_eq!(order.len(), n, "a permutation, nothing lost");
+        // Newest failure leads, then the tied cohort in collection order
+        // (no duration shuffling), capped; overflow rejoins in collection order.
+        assert_eq!(order[0], (n - 1) as u64);
+        let expected: Vec<u64> = std::iter::once((n - 1) as u64)
+            .chain(0..(n - 1) as u64)
+            .collect();
+        assert_eq!(order, expected);
+    }
+
+    #[test]
+    fn failfast_ranks_hard_failures_by_last_failure_not_last_flake() {
+        use crate::reporting::flakes::FlakeStats;
+        let names: Vec<String> = ["old_fail_new_flake", "new_fail"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let flakes = HashMap::from([
+            // Hard-failed long ago, flaked last run.
+            (
+                "old_fail_new_flake".to_string(),
+                FlakeStats {
+                    failed: 1,
+                    flaky: 1,
+                    last_epoch: 1000,
+                    last_failed_epoch: 100,
+                },
+            ),
+            // Hard-failed more recently than the other's failure.
+            (
+                "new_fail".to_string(),
+                FlakeStats {
+                    failed: 1,
+                    last_epoch: 900,
+                    last_failed_epoch: 900,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert_eq!(
+            failfast_order(&names, &HashMap::new(), &flakes, |_| true),
+            vec![1, 0]
+        );
+    }
+
+    #[test]
+    fn failfast_caps_after_filtering() {
+        use crate::reporting::flakes::FlakeStats;
+        // 2*CAP suspects; the filter keeps only odd indices (a shard). The cap
+        // must count kept suspects, so all CAP kept ones lead.
+        let n = 2 * FAILFAST_SUSPECT_CAP + 2;
+        let names: Vec<String> = (0..n).map(|i| format!("a.py::t{i}")).collect();
+        let flakes: HashMap<String, FlakeStats> = names
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                (
+                    id.clone(),
+                    FlakeStats {
+                        failed: 1,
+                        // Even (filtered-out) ones are newest: a pre-filter
+                        // cap would spend every slot on them.
+                        last_epoch: if i % 2 == 0 { 200 } else { 100 },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let order = failfast_order(&names, &HashMap::new(), &flakes, |i| i % 2 == 1);
+        assert_eq!(order.len(), n / 2);
+        assert!(order.iter().all(|i| i % 2 == 1));
+        let expected: Vec<u64> = (0..n as u64).filter(|i| i % 2 == 1).collect();
+        assert_eq!(order, expected);
     }
 
     #[test]
@@ -263,9 +390,12 @@ mod tests {
         // the throughput one (long pole b first, then collection order).
         let cache = HashMap::from([("a".to_string(), 0.5), ("b".to_string(), 3.0)]);
         let flakes: HashMap<String, FlakeStats> = HashMap::new();
-        assert_eq!(failfast_order(&names, &cache, &flakes), vec![1, 0, 2]);
         assert_eq!(
-            failfast_order(&names, &cache, &flakes),
+            failfast_order(&names, &cache, &flakes, |_| true),
+            vec![1, 0, 2]
+        );
+        assert_eq!(
+            failfast_order(&names, &cache, &flakes, |_| true),
             dispatch_order(&names, &cache)
         );
     }

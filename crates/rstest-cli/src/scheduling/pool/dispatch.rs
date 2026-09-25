@@ -153,20 +153,27 @@ pub(super) fn build_dispatch(
             // tests still don't pile onto one worker's chunk.
             super::Order::FailFast => {
                 use crate::scheduling::durations::{
-                    failfast_order, is_suspect, SLOW_THRESHOLD_SECS,
+                    failfast_order, is_suspect, FAILFAST_SUSPECT_CAP, SLOW_THRESHOLD_SECS,
                 };
-                let order: Vec<u64> = failfast_order(ids, cache, flakes)
-                    .into_iter()
-                    .filter(|i| !serial_set.contains(i) && kept(i))
-                    .collect();
-                let slow_count = order
+                let order =
+                    failfast_order(ids, cache, flakes, |i| !serial_set.contains(&i) && kept(&i));
+                // Single-dispatch prefix: the (capped) suspect lead, then the
+                // long poles. The order is already filtered, so the cap here
+                // matches the one failfast_order applied.
+                let lead = order
                     .iter()
-                    .take_while(|&&i| {
-                        let id = &ids[i as usize];
-                        is_suspect(id, flakes)
-                            || cache.get(id).is_some_and(|&d| d >= SLOW_THRESHOLD_SECS)
-                    })
+                    .take(FAILFAST_SUSPECT_CAP)
+                    .take_while(|&&i| is_suspect(&ids[i as usize], flakes))
                     .count();
+                let slow_count = lead
+                    + order[lead..]
+                        .iter()
+                        .take_while(|&&i| {
+                            cache
+                                .get(&ids[i as usize])
+                                .is_some_and(|&d| d >= SLOW_THRESHOLD_SECS)
+                        })
+                        .count();
                 (order, slow_count, None)
             }
         },
@@ -373,6 +380,41 @@ mod tests {
         assert_eq!(d.order, vec![1, 0, 2]);
         // Red and the long pole both dispatch one at a time.
         assert_eq!(d.slow_count, 2);
+    }
+
+    #[test]
+    fn failfast_dispatch_caps_single_dispatch_suspect_prefix() {
+        use crate::reporting::flakes::FlakeStats;
+        use crate::scheduling::durations::FAILFAST_SUSPECT_CAP;
+        // Mass failure: more suspects than the cap, none slow.
+        let n = FAILFAST_SUSPECT_CAP + 50;
+        let owned: Vec<String> = (0..n).map(|i| format!("t/a.py::t{i}")).collect();
+        let flakes: HashMap<String, FlakeStats> = owned
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    FlakeStats {
+                        failed: 1,
+                        last_epoch: 1,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let d = build_dispatch(
+            &owned,
+            vec![],
+            HashMap::new(),
+            &HashMap::new(),
+            &flakes,
+            Dist::Load,
+            super::super::Order::FailFast,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.slow_count, FAILFAST_SUSPECT_CAP);
     }
 
     #[test]
