@@ -1,0 +1,9 @@
+# Process-global state is shared by every unit test in the process; changing it
+# directly races sibling tests. Tests go through crate::test_env (lock + guard
+# that restores on drop). Production code hands config to workers via their
+# own environment instead of mutating ours.
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "tests: use crate::test_env::set_var under test_env::lock()" },
+    { path = "std::env::remove_var", reason = "tests: use crate::test_env::remove_var under test_env::lock()" },
+    { path = "std::env::set_current_dir", reason = "tests: use crate::test_env::set_cwd under test_env::lock()" },
+]

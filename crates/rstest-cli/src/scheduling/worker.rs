@@ -786,15 +786,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_then_wait_reaps_the_worker_child() {
+        // Held throughout: worker_python() and the spawn resolve python via
+        // PATH, and the spawn reads RSTEST_WORKER_PATH.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping reap test: no python with pytest found");
             return;
         };
-        // Point production `worker_pythonpath()` at the repo package. SAFETY:
-        // edition 2021; every worker-spawning test writes this same repo path,
-        // so concurrent writes converge on one value (no divergent read). Left
-        // set on exit, matching serve.rs's live-worker tests.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        // Point production `worker_pythonpath()` at the repo package.
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let env = WorkerEnv {
             run_uid: format!("reap-{}", std::process::id()),
