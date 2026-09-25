@@ -3,6 +3,8 @@ master-side node hooks each pool worker must play for itself."""
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import logging
 import os
 import sys
@@ -27,6 +29,123 @@ from rstest_worker._internal.xdistnode import (
 )
 
 log = logging.getLogger("rstest.worker")
+
+# Sentinel for "no value fingerprinted yet" in the scope-promotion tracker.
+_UNSET = object()
+
+# Scope-promotion fingerprinting only accepts immutable builtin values:
+# exact scalar types, and tuples/frozensets of them. Anything else (a fresh
+# `[]`, a mock, a DataFrame, a lazy QuerySet, a user object) can't be proven
+# safe to share by looking at it, and calling its repr runs user code.
+_FP_SCALARS = frozenset({str, bytes, int, float, bool, complex, type(None)})
+# Total items walked per value (cost cap).
+_FP_MAX_ITEMS = 10_000
+
+
+def _fp_encode(value: Any, budget: list[int]) -> str | None:
+    t = type(value)
+    if t in _FP_SCALARS:
+        # Type-tagged so 1, 1.0 and True stay distinct; builtin reprs are
+        # deterministic and run no user code.
+        return f"{t.__name__}:{value!r}"
+    if t is tuple or t is frozenset:
+        budget[0] -= len(value)
+        if budget[0] < 0:
+            return None
+        parts = []
+        for item in value:
+            enc = _fp_encode(item, budget)
+            if enc is None:
+                return None
+            parts.append(enc)
+        if t is frozenset:
+            parts.sort()  # iteration order is not part of the value
+        return f"{t.__name__}({','.join(parts)})"
+    return None
+
+
+def _fixture_fingerprint(value: Any) -> str | None:
+    """A stable-across-calls fingerprint of a fixture's produced value, for
+    the scope-promotion advisor, or None when the value can't be proven safe
+    to share. Only immutable builtin values qualify (see ``_FP_SCALARS``);
+    everything else, and ``None`` itself, returns None. ``None`` is excluded
+    because side-effect-only fixtures (reset a global, truncate tables)
+    return it every call. None is conservative: the fixture is then never
+    flagged constant."""
+    if value is None:
+        return None
+    try:
+        enc = _fp_encode(value, [_FP_MAX_ITEMS])
+    except (RecursionError, ValueError):
+        # ValueError: int repr past sys.get_int_max_str_digits() (3.11+).
+        return None
+    if enc is None:
+        return None
+    return hashlib.blake2b(enc.encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
+
+
+def _promotable_setup(fixturedef: Any, request: Any, finalizers_before: int | None) -> bool:
+    """Whether this successful function-scoped setup could run once per
+    session instead: no per-test teardown and no narrower-scoped inputs."""
+    # cached_result is (value, cache_key, exc_info). A failed or skipped
+    # setup stores (None, key, exc_info): no real value to judge.
+    cached = getattr(fixturedef, "cached_result", None)
+    if cached is None or cached[2] is not None:
+        return False
+    func = getattr(fixturedef, "func", None)
+    # `@pytest.mark.parametrize` args are served by a synthetic
+    # function-scoped fixturedef; there is no fixture to promote.
+    if getattr(func, "__name__", "") == "get_direct_param_fixture_func":
+        return False
+    # Per-test teardown (yield, or request.addfinalizer) does work a constant
+    # value can't vouch for. pytest queues both on fixturedef._finalizers
+    # during setup; fall back to the yield check if that's unavailable.
+    if inspect.isgeneratorfunction(func) or inspect.isasyncgenfunction(func):
+        return False
+    finalizers = getattr(fixturedef, "_finalizers", None)
+    if (
+        finalizers_before is not None
+        and finalizers is not None
+        and len(finalizers) != finalizers_before
+    ):
+        return False
+    # Promoting to session scope requires session-scoped inputs; anything
+    # narrower (monkeypatch, tmp_path, a per-test DB) would raise
+    # ScopeMismatch, and its per-test effects are the point.
+    active = getattr(request, "_fixture_defs", None)
+    for name in getattr(fixturedef, "argnames", ()):
+        if name == "request":
+            continue
+        dep = active.get(name) if isinstance(active, dict) else None
+        if dep is None or dep.scope != "session":
+            return False
+    return True
+
+
+def _spy_dynamic_fetches(request: Any, frame: list[bool]) -> bool:
+    """Shadow ``request.getfixturevalue`` so a fixture body fetching a
+    narrower-scoped fixture taints ``frame``. The nested-setup check in
+    ``pytest_fixture_setup`` misses a fetch pytest serves from its cache (the
+    test already requested ``tmp_path``), since no setup hook fires. Returns
+    whether the spy was installed (undo with ``del request.getfixturevalue``)."""
+    orig = getattr(request, "getfixturevalue", None)
+    if not callable(orig):
+        return False
+
+    def getfixturevalue(argname: str) -> Any:
+        value = orig(argname)
+        if argname != "request":
+            active = getattr(request, "_fixture_defs", None)
+            dep = active.get(argname) if isinstance(active, dict) else None
+            if dep is None or dep.scope != "session":
+                frame[0] = True
+        return value
+
+    try:
+        request.getfixturevalue = getfixturevalue
+    except AttributeError:
+        return False
+    return True
 
 
 class Timeout(BaseException):
@@ -100,7 +219,15 @@ class StreamPlugin:
         # leak. Measuring from the 2nd test on drops that first-touch noise.
         self._leak_warmed = False
         self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
-        self._fixtures: dict[tuple[str, str], list[Any]] = {}  # (argname, scope) -> [count, secs]
+        # (argname, scope) -> [count, secs, all_constant, first_fingerprint].
+        # all_constant/first_fingerprint track the scope-promotion advisor:
+        # only function-scoped fixtures whose value fingerprints identically on
+        # every call stay `all_constant`.
+        self._fixtures: dict[tuple[str, str], list[Any]] = {}
+        # Doctor: one frame per fixture setup in progress, innermost last. A
+        # frame is [tainted]; a narrower-than-session setup starting inside it
+        # (request.getfixturevalue in the body) taints every enclosing frame.
+        self._setup_stack: list[list[bool]] = []
         # (when, category, message, filename, lineno) -> count; aggregated
         # because big suites emit thousands of duplicate warnings.
         self._warnings: dict[tuple[Any, ...], int] = {}
@@ -477,14 +604,40 @@ class StreamPlugin:
             return (yield)
         import time
 
+        fins = getattr(fixturedef, "_finalizers", None)
+        fins_before = len(fins) if fins is not None else None
+        # Declared argnames are set up before this hook runs, so anything that
+        # starts while a frame is open was fetched dynamically from its body.
+        if fixturedef.scope != "session":
+            for frame in self._setup_stack:
+                frame[0] = True
+        frame = [False]
+        self._setup_stack.append(frame)
+        spied = fixturedef.scope == "function" and _spy_dynamic_fetches(request, frame)
         t0 = time.perf_counter()
         try:
             return (yield)
         finally:
+            if spied:
+                del request.getfixturevalue
+            self._setup_stack.pop()
             key = (fixturedef.argname, fixturedef.scope)
-            entry = self._fixtures.setdefault(key, [0, 0.0])
+            entry = self._fixtures.setdefault(key, [0, 0.0, True, _UNSET])
             entry[0] += 1
             entry[1] += time.perf_counter() - t0
+            # Value-identity tracking only matters for function-scoped fixtures
+            # (the only promotion candidates); wider scopes are already shared.
+            if fixturedef.scope != "function":
+                entry[2] = False
+            elif entry[2]:
+                ok = not frame[0] and _promotable_setup(fixturedef, request, fins_before)
+                fp = _fixture_fingerprint(fixturedef.cached_result[0]) if ok else None
+                if fp is None:
+                    entry[2] = False
+                elif entry[3] is _UNSET:
+                    entry[3] = fp
+                elif entry[3] != fp:
+                    entry[2] = False
 
     def pytest_warning_recorded(self, warning_message, when, nodeid, location):
         m = warning_message
@@ -517,8 +670,30 @@ class StreamPlugin:
             self._conn.send("warnings", {"entries": entries})
         if self._doctor and self._fixtures:
             fixtures: list[m.FixtureStat] = [
-                {"name": name, "scope": scope, "count": c, "total": round(t, 4)}
-                for (name, scope), (c, t) in self._fixtures.items()
+                {
+                    "name": name,
+                    "scope": scope,
+                    "count": c,
+                    "total": round(t, 4),
+                    # Function-scoped and the value never varied across the
+                    # calls this worker saw. Not gated on c >= 2: a worker that
+                    # ran it once has no evidence against, and must not veto
+                    # the merge; `repeated` carries the evidence instead.
+                    # An _UNSET fingerprint means tracking never completed
+                    # (setup interrupted): no evidence, and not serializable.
+                    "constant": (cand := bool(scope == "function" and const and fp is not _UNSET)),
+                    # This session compared at least two values.
+                    "repeated": cand and c >= 2,
+                    # Setup seconds session scope would have skipped in this
+                    # session: every call after the first.
+                    "redundant": (c - 1) * t / c if cand and c >= 2 else 0.0,
+                    # The value itself, so the CLI can veto a fixture whose
+                    # value differs between workers (e.g. derived from
+                    # request.module under --dist loadfile). Deterministic
+                    # across processes: a digest of builtin values only.
+                    "fingerprint": fp if cand else None,
+                }
+                for (name, scope), (c, t, const, fp) in self._fixtures.items()
             ]
             self._conn.send("doctor_fixtures", {"fixtures": fixtures})
 

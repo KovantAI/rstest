@@ -5,6 +5,7 @@ sessionfinish emission, the doctor fixture timer, and report payloads."""
 from __future__ import annotations
 
 import contextlib
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -381,16 +382,154 @@ def test_sessionfinish_emits_warnings():
 def test_sessionfinish_emits_doctor_fixtures(monkeypatch):
     monkeypatch.setenv("RSTEST_DOCTOR", "1")
     p = _plugin()  # _doctor read from env at init
-    p._fixtures = {("db", "session"): [3, 1.23456]}
+    # [count, secs, all_constant, first_fingerprint]; session scope is never a
+    # promotion candidate, so `constant` in the payload is False regardless.
+    p._fixtures = {("db", "session"): [3, 1.23456, True, "fp"]}
     p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
     fixtures = next(pl for k, pl in p._conn.sent if k == "doctor_fixtures")["fixtures"]
-    assert fixtures == [{"name": "db", "scope": "session", "count": 3, "total": 1.2346}]
+    assert fixtures == [
+        {
+            "name": "db",
+            "scope": "session",
+            "count": 3,
+            "total": 1.2346,
+            "constant": False,
+            "repeated": False,
+            "redundant": 0.0,
+            "fingerprint": None,
+        }
+    ]
+
+
+def test_sessionfinish_drops_unfinished_fingerprint(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # A setup interrupted before fingerprinting leaves the _UNSET sentinel.
+    p._fixtures[("cfg", "function")] = [1, 0.1, True, stream._UNSET]
+    p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
+    (stat,) = next(pl for k, pl in p._conn.sent if k == "doctor_fixtures")["fixtures"]
+    assert stat["constant"] is False and stat["fingerprint"] is None
+
+
+def test_sessionfinish_flags_constant_function_fixture(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # function scope, ran twice, value-constant => promotion candidate.
+    p._fixtures = {
+        ("cfg", "function"): [4, 2.0, True, "fp"],
+        ("varies", "function"): [2, 0.5, False, "fp"],  # value changed => not
+        # One call is "no evidence against": reported constant so it can't veto
+        # the cross-worker merge, but not `repeated`, so it is no evidence for.
+        ("once", "function"): [1, 0.5, True, "fp"],
+    }
+    p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
+    fixtures = next(pl for k, pl in p._conn.sent if k == "doctor_fixtures")["fixtures"]
+    got = {
+        f["name"]: (f["constant"], f["repeated"], f["redundant"], f["fingerprint"])
+        for f in fixtures
+    }
+    # cfg: 4 calls, mean 0.5s => 3 redundant setups = 1.5s. The fingerprint
+    # ships only for constant fixtures, for the CLI's cross-worker check.
+    assert got == {
+        "cfg": (True, True, 1.5, "fp"),
+        "varies": (False, False, 0.0, None),
+        "once": (True, False, 0.0, "fp"),
+    }
 
 
 def test_sessionfinish_quiet_when_nothing_to_report():
     p = _plugin()
     p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
     assert p._conn.sent == []  # no warnings, doctor off -> nothing sent
+
+
+# ── _fixture_fingerprint: scope-promotion value comparison ─────────────────
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["prod", b"k", 7, 1.5, True, 2j, ("a", 1, None), frozenset({1, 2}), ((1,), frozenset())],
+)
+def test_fixture_fingerprint_accepts_immutable_builtins(value):
+    fp = stream._fixture_fingerprint(value)
+    assert fp is not None
+    assert fp == stream._fixture_fingerprint(value)
+
+
+def test_fixture_fingerprint_distinguishes_values_and_types():
+    fp = stream._fixture_fingerprint
+    assert fp(("a", 1)) != fp(("a", 2))
+    # Equal-comparing values of different types are different values.
+    assert len({fp(1), fp(1.0), fp(True)}) == 3
+
+
+def test_fixture_fingerprint_frozenset_ignores_iteration_order():
+    a = frozenset(["x", "y", "z"])
+    b = frozenset(["z", "y", "x"])
+    assert stream._fixture_fingerprint(a) == stream._fixture_fingerprint(b)
+
+
+class _Settings:
+    def __repr__(self) -> str:
+        return "Settings(mode='prod')"
+
+
+class _Str(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,  # side-effect-only fixtures return None every call
+        [],  # fresh mutable containers look identical but must not be shared
+        {},
+        {"k": 1},
+        set(),
+        bytearray(b"x"),
+        _Settings(),  # user objects: repr proves nothing and runs user code
+        _Str("prod"),  # subclasses may override behaviour
+        ("a", []),  # immutable shell around a mutable
+        object(),
+    ],
+)
+def test_fixture_fingerprint_rejects_everything_else(value):
+    assert stream._fixture_fingerprint(value) is None
+
+
+def test_fixture_fingerprint_never_calls_user_repr():
+    class Loud:
+        def __repr__(self) -> str:
+            pytest.fail("repr must not run")
+
+    from unittest import mock
+
+    assert stream._fixture_fingerprint(Loud()) is None
+    assert stream._fixture_fingerprint(("a", Loud())) is None
+    assert stream._fixture_fingerprint(mock.MagicMock()) is None
+
+
+def test_fixture_fingerprint_caps_walked_items(monkeypatch):
+    monkeypatch.setattr(stream, "_FP_MAX_ITEMS", 3)
+    assert stream._fixture_fingerprint((1, 2, 3)) is not None
+    assert stream._fixture_fingerprint((1, 2, 3, 4)) is None
+    assert stream._fixture_fingerprint(((1, 2), (3, 4))) is None  # nested items count
+
+
+def test_fixture_fingerprint_rejects_int_past_str_digit_limit():
+    # 3.11+ caps int->str conversion; repr raises ValueError past the limit.
+    if not getattr(sys, "get_int_max_str_digits", lambda: 0)():
+        pytest.skip("no int str-digit limit (pre-3.11, or disabled)")
+    huge = 10 ** (sys.get_int_max_str_digits() + 1)
+    assert stream._fixture_fingerprint(huge) is None
+    assert stream._fixture_fingerprint((1, huge)) is None
+
+
+def test_fixture_fingerprint_survives_deep_nesting():
+    v: tuple = ()
+    for _ in range(5000):
+        v = (v,)
+    assert stream._fixture_fingerprint(v) is None
 
 
 # ── pytest_fixture_setup: doctor timing wrapper ────────────────────────────
@@ -404,8 +543,213 @@ def test_fixture_setup_records_under_doctor(monkeypatch):
     assert next(gen) is None  # wrapper yields to the real setup
     with pytest.raises(StopIteration):
         gen.send("result")
-    count, total = p._fixtures[("db", "function")]
+    count, total, _const, _fp = p._fixtures[("db", "function")]
     assert count == 1 and total >= 0.0
+
+
+def test_fixture_setup_tracks_constant_value(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # Two setups returning the SAME value (via cached_result) keep all_constant.
+    for _ in range(2):
+        fd = SimpleNamespace(argname="cfg", scope="function", cached_result=(42, 0, None))
+        gen = p.pytest_fixture_setup(fd, request=None)
+        next(gen)
+        with pytest.raises(StopIteration):
+            gen.send(42)
+    count, _total, const, _fp = p._fixtures[("cfg", "function")]
+    assert count == 2 and const is True
+
+    # A differing value on the second call clears the flag.
+    for val in (1, 2):
+        fd = SimpleNamespace(argname="rnd", scope="function", cached_result=(val, 0, None))
+        gen = p.pytest_fixture_setup(fd, request=None)
+        next(gen)
+        with pytest.raises(StopIteration):
+            gen.send(val)
+    assert p._fixtures[("rnd", "function")][2] is False
+
+
+def test_fixture_setup_yield_fixture_is_not_constant(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+
+    def gen_fixture():
+        yield 42
+
+    async def agen_fixture():
+        yield 42
+
+    # Same value every call, but a yield fixture's teardown may do per-test
+    # work, so neither sync nor async generator fixtures are candidates.
+    for name, func in (("sync", gen_fixture), ("async", agen_fixture)):
+        for _ in range(2):
+            fd = SimpleNamespace(
+                argname=name, scope="function", func=func, cached_result=(42, 0, None)
+            )
+            gen = p.pytest_fixture_setup(fd, request=None)
+            next(gen)
+            with pytest.raises(StopIteration):
+                gen.send(42)
+        assert p._fixtures[(name, "function")][2] is False, name
+
+
+def test_fixture_setup_parametrize_pseudo_fixture_is_not_constant(monkeypatch):
+    from _pytest.python import get_direct_param_fixture_func
+
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # `@pytest.mark.parametrize("backend", ["sqlite"])` is served by a synthetic
+    # function-scoped fixturedef; same value every call, nothing to promote.
+    for _ in range(2):
+        fd = SimpleNamespace(
+            argname="backend",
+            scope="function",
+            func=get_direct_param_fixture_func,
+            cached_result=("sqlite", 0, None),
+        )
+        gen = p.pytest_fixture_setup(fd, request=None)
+        next(gen)
+        with pytest.raises(StopIteration):
+            gen.send("sqlite")
+    assert p._fixtures[("backend", "function")][2] is False
+
+
+def _run_setup(p, fd, request=None, register_finalizer=False):
+    gen = p.pytest_fixture_setup(fd, request=request)
+    next(gen)
+    if register_finalizer:
+        fd._finalizers.append(lambda: None)  # what request.addfinalizer does
+    with pytest.raises(StopIteration):
+        gen.send(fd.cached_result[0])
+
+
+def test_fixture_setup_addfinalizer_fixture_is_not_constant(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # `request.addfinalizer(rollback); return "ready"`: same value, but the
+    # per-test teardown would become once-per-worker if promoted.
+    for _ in range(2):
+        fd = SimpleNamespace(
+            argname="txn", scope="function", cached_result=("ready", 0, None), _finalizers=[]
+        )
+        _run_setup(p, fd, register_finalizer=True)
+    assert p._fixtures[("txn", "function")][2] is False
+
+
+def test_fixture_setup_without_new_finalizer_stays_constant(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    for _ in range(2):
+        # pytest pre-registers its post-finalizer before the hook runs.
+        fd = SimpleNamespace(
+            argname="cfg", scope="function", cached_result=("x", 0, None), _finalizers=[object()]
+        )
+        _run_setup(p, fd)
+    assert p._fixtures[("cfg", "function")][2] is True
+
+
+@pytest.mark.parametrize(
+    ("dep_scope", "expected"),
+    [("session", True), ("module", False), ("function", False), (None, False)],
+)
+def test_fixture_setup_requires_session_scoped_dependencies(monkeypatch, dep_scope, expected):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # `def env(monkeypatch): ...; return "prod"` would raise ScopeMismatch if
+    # promoted; only session-scoped inputs (plus `request`) allow it.
+    active = {} if dep_scope is None else {"dep": SimpleNamespace(scope=dep_scope)}
+    request = SimpleNamespace(_fixture_defs=active)
+    for _ in range(2):
+        fd = SimpleNamespace(
+            argname="env",
+            scope="function",
+            argnames=("request", "dep"),
+            cached_result=("prod", 0, None),
+        )
+        _run_setup(p, fd, request=request)
+    assert p._fixtures[("env", "function")][2] is expected
+
+
+def test_fixture_setup_dynamic_narrower_dependency_taints_parent(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # `def cfg_name(request): request.getfixturevalue("tmp_path"); return "c.ini"`:
+    # the nested setup runs while cfg_name's hook frame is open.
+    for _ in range(2):
+        outer = SimpleNamespace(
+            argname="cfg_name", scope="function", cached_result=("c.ini", 0, None)
+        )
+        inner = SimpleNamespace(argname="tmp_path", scope="function", cached_result=("/t", 0, None))
+        g_outer = p.pytest_fixture_setup(outer, request=None)
+        next(g_outer)
+        _run_setup(p, inner)
+        with pytest.raises(StopIteration):
+            g_outer.send("c.ini")
+    assert p._fixtures[("cfg_name", "function")][2] is False
+    assert p._setup_stack == []
+
+
+class _FakeRequest:
+    """Stands in for pytest's SubRequest: getfixturevalue serves from
+    ``_fixture_defs`` without running a setup hook (the cached path)."""
+
+    def __init__(self, active):
+        self._fixture_defs = active
+
+    def getfixturevalue(self, argname):
+        return self._fixture_defs[argname].cached_result[0]
+
+
+@pytest.mark.parametrize(("dep_scope", "expected"), [("function", False), ("session", True)])
+def test_fixture_setup_cached_dynamic_fetch_checks_scope(monkeypatch, dep_scope, expected):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # `def test(tmp_path, cfg_name)` with cfg_name calling
+    # request.getfixturevalue("tmp_path"): tmp_path is already set up, so
+    # pytest returns it from cache and no nested setup hook fires.
+    dep = SimpleNamespace(scope=dep_scope, cached_result=("/t", 0, None))
+    request = _FakeRequest({"dep": dep})
+    for _ in range(2):
+        fd = SimpleNamespace(argname="cfg_name", scope="function", cached_result=("c.ini", 0, None))
+        gen = p.pytest_fixture_setup(fd, request=request)
+        next(gen)
+        assert request.getfixturevalue("dep") == "/t"  # the fixture body's fetch
+        with pytest.raises(StopIteration):
+            gen.send("c.ini")
+        assert "getfixturevalue" not in vars(request)  # spy removed after setup
+    assert p._fixtures[("cfg_name", "function")][2] is expected
+
+
+def test_fixture_setup_dynamic_session_dependency_keeps_parent(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    for _ in range(2):
+        outer = SimpleNamespace(
+            argname="url", scope="function", cached_result=("http://x", 0, None)
+        )
+        inner = SimpleNamespace(argname="server", scope="session", cached_result=("x", 0, None))
+        g_outer = p.pytest_fixture_setup(outer, request=None)
+        next(g_outer)
+        _run_setup(p, inner)
+        with pytest.raises(StopIteration):
+            g_outer.send("http://x")
+    assert p._fixtures[("url", "function")][2] is True
+
+
+def test_fixture_setup_failed_setup_is_not_constant(monkeypatch):
+    monkeypatch.setenv("RSTEST_DOCTOR", "1")
+    p = _plugin()
+    # pytest caches (None, key, exc_info) for a setup that raised or skipped;
+    # an always-failing fixture must not look value-constant.
+    for _ in range(2):
+        exc = pytest.skip.Exception("no gpu")
+        fd = SimpleNamespace(argname="gpu", scope="function", cached_result=(None, 0, (exc, None)))
+        gen = p.pytest_fixture_setup(fd, request=None)
+        next(gen)
+        with pytest.raises(StopIteration):
+            gen.send(None)
+    assert p._fixtures[("gpu", "function")][2] is False
 
 
 def test_fixture_setup_passthrough_without_doctor():
