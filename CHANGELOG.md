@@ -5,6 +5,16 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **`--watch` reselects incrementally and quits on `q`.** The import graph
+  behind affected-test selection is kept warm for the session: each save
+  re-checks every file's mtime and size and re-reads only the changed ones, and
+  adding or deleting a `.py` file re-resolves every
+  import against the new file set while reusing each untouched file's parse.
+  Typing `q` then Enter now ends the session cleanly with exit 0 (`Ctrl+C` still
+  works); closing stdin does not, and in modes that hand stdin to the test
+  process (`--pdb`, `-s`, `--debug`, ...) only `Ctrl+C` exits. A watch started
+  in the background (`rstest --watch &`) never reads the terminal, so the shell
+  does not suspend it.
 - **The duration cache self-heals when tests change.** `durations.json` now
   tags each entry with its test file's path and a sha256 of its contents. On
   load, an entry whose source file changed (edited body) or vanished

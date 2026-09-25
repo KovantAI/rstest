@@ -517,7 +517,10 @@ pub(super) fn run_post_gates(
             .env("PYTHONPATH", worker::worker_pythonpath())
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir());
+            .env("RSTEST_CACHE", cache::dir())
+            // Never reads stdin; inheriting it hangs on Windows under
+            // `--watch`, whose `q` listener holds a blocking read on it.
+            .stdin(std::process::Stdio::null());
         if let Some((lp, op)) = &diff_paths {
             cmd.arg("--rstest-diff-lines")
                 .arg(lp)
