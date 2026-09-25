@@ -29,6 +29,22 @@ pub(crate) enum Command {
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
 
+    /// Order-dependency bisect: for a test that fails only when run after some
+    /// other test, delta-debug the predecessor set at -n 0 to the minimal set of
+    /// earlier tests that reproduce the failure — the polluter(s). Prints the
+    /// culprits and a minimal reproducing command. `--bisect-json` writes it.
+    Bisect {
+        /// The failing test's nodeid (`path::test[param]`), rootdir- or
+        /// cwd-relative.
+        #[arg(value_name = "NODEID")]
+        nodeid: String,
+        /// pytest options after `--` (`-p plugin`, `-o key=val`, `-m expr`),
+        /// applied to the collection and every child run. Not test paths:
+        /// bisect selects tests by nodeid itself.
+        #[arg(last = true, value_name = "PYTEST_ARGS")]
+        pytest_args: Vec<String>,
+    },
+
     /// Maintenance: fold remote segments into a fresh base and prune them, then
     /// exit without running tests. Needs `--cache-remote`. With no retention
     /// flags it folds all; `--keep-last` / `--max-age` leave a recent window so
@@ -145,11 +161,25 @@ pub struct Cli {
     #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
 
+    /// Write the `bisect` result as JSON (culprits + reproduce command) for
+    /// tooling. Used with the `bisect` subcommand.
+    #[arg(long, global = true)]
+    pub(crate) bisect_json: Option<PathBuf>,
+
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
     /// (every test on every worker). [default: load]
     #[arg(long)]
     pub(crate) dist: Option<String>,
+
+    /// Dispatch ordering under `--dist load`: "throughput" (slow tests first,
+    /// to pack workers — the default) or "fail-fast" (recently-failed, then
+    /// flaky tests first, then the throughput order for the rest, for the
+    /// earliest possible red signal). Pairs with `--maxfail`/`-x` for true
+    /// early exit. Auto-selects fail-fast under `--watch`. Config
+    /// `[tool.rstest] order`.
+    #[arg(long, value_name = "MODE")]
+    pub(crate) order: Option<String>,
 
     /// Write merged results as junit XML (intercepted: per-worker sessions
     /// would clobber a shared file).
@@ -462,6 +492,7 @@ const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
     "migrate-check",
+    "bisect",
     "cache-compact",
     "shard-verify",
     "explain",
@@ -484,6 +515,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--cache-remote",
     "--migrate-check-json",
     "--migrate-allow",
+    "--bisect-json",
     "--durations-regress",
     "--only-rerun",
     "--cov-diff-fail-under",
@@ -500,6 +532,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--dist",
     "--shard",
     "--collect",
+    "--order",
     "--keep-last",
     "--max-age",
     "--cache-compact-threshold",
@@ -538,11 +571,13 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
     {
         let sub = argv.next().unwrap();
-        // `shard-verify` and `explain` run no pytest session: every token after
-        // them is a clap positional (report-json paths / the nodeid) or a
-        // subcommand-local flag, so route them all to `own` rather than
-        // forwarding non-flag tokens to the (nonexistent) session.
-        let consumes_all = sub == "shard-verify" || sub == "explain";
+        // `shard-verify` (report-json paths), `bisect` (a single nodeid) and
+        // `explain` (a nodeid) run no pytest session: every token after them is
+        // a clap positional or a subcommand-local flag, so route them all to
+        // `own` rather than forwarding non-flag tokens to the (nonexistent)
+        // session. The nodeids contain `::`, which the flag tables would
+        // otherwise route to the session and hide from clap.
+        let consumes_all = sub == "shard-verify" || sub == "bisect" || sub == "explain";
         own.push(sub);
         if consumes_all {
             own.extend(argv.by_ref());
@@ -610,6 +645,77 @@ mod tests {
             cli.command,
             Some(Command::Explain { ref nodeid, json: true }) if nodeid == "t/x.py::test_a"
         ));
+    }
+
+    #[test]
+    fn bisect_routes_the_nodeid_to_clap() {
+        // The nodeid contains `::` and `[param]`; it must reach clap as the
+        // positional, not be forwarded to a (nonexistent) pytest session.
+        let (own, session) = split_args(v(&[
+            "bisect",
+            "tests/test_a.py::test_v[1-x]",
+            "--bisect-json",
+            "out.json",
+        ]));
+        assert_eq!(
+            own,
+            v(&[
+                "rstest",
+                "bisect",
+                "tests/test_a.py::test_v[1-x]",
+                "--bisect-json",
+                "out.json",
+            ])
+        );
+        assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn bisect_keeps_pytest_args_after_double_dash_for_clap() {
+        // `--` after `bisect` must not trigger the forward-everything-to-the-
+        // session rule: the pytest args belong to bisect's own positional.
+        let argv = ["bisect", "t.py::v", "--", "-p", "no:randomly", "-o", "x=1"];
+        let (own, session) = split_args(v(&argv));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::try_parse_from(own).unwrap();
+        assert_eq!(
+            bisect_parts(&cli),
+            Some(("t.py::v", v(&["-p", "no:randomly", "-o", "x=1"])))
+        );
+    }
+
+    /// The `bisect` subcommand's (nodeid, pytest args), or `None` for any other
+    /// command line.
+    fn bisect_parts(cli: &Cli) -> Option<(&str, Vec<String>)> {
+        match &cli.command {
+            Some(Command::Bisect {
+                nodeid,
+                pytest_args,
+            }) => Some((nodeid.as_str(), pytest_args.clone())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn bisect_parses_nodeid_and_json_path() {
+        let cli = Cli::try_parse_from(v(&[
+            "rstest",
+            "bisect",
+            "t.py::test_v",
+            "--bisect-json",
+            "b.json",
+        ]))
+        .unwrap();
+        assert_eq!(bisect_parts(&cli), Some(("t.py::test_v", vec![])));
+        // Any other command line is not a bisect.
+        assert_eq!(bisect_parts(&Cli::parse_from(["rstest"])), None);
+        assert_eq!(
+            cli.bisect_json.as_deref(),
+            Some(std::path::Path::new("b.json"))
+        );
+
+        // The nodeid is required.
+        assert!(Cli::try_parse_from(v(&["rstest", "bisect"])).is_err());
     }
 
     #[test]

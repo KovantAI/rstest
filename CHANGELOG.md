@@ -5,6 +5,48 @@ between 0.0.x releases and are listed here.
 
 ## Unreleased
 
+- **Fail-fast dispatch ordering (`--order fail-fast`).** A new
+  `--order <throughput|fail-fast>` flag chooses how `--dist load` sequences the
+  ready queue. `throughput` (default) keeps the slow-tests-first packing that
+  optimizes wall-clock. `fail-fast` orders for the earliest red signal:
+  recently-failed tests first, then the flakiest (both from
+  `.rstest_cache/flakes.json`), then the usual throughput order for clean
+  tests, so a broken run paired with `--maxfail`/`-x` dies in seconds. Both
+  input signals were already cached; no new data collection. Auto-selected under
+  `--watch`; also settable as `[tool.rstest] order`. See
+  [`--order`](docs/reference/cli.md#-order-throughputfail-fast).
+- **`rstest bisect <nodeid>`: order-dependency polluter finder.** For a test
+  that fails only when run after some other test, bisect delta-debugs the
+  predecessor set at `-n 0` (`ddmin`) down to the minimal set of earlier tests
+  that reproduce the failure (the polluters) and prints a shell-quoted minimal
+  reproducing command (`rstest -n 0 <culprit…> <victim>`). Serial by
+  construction, so it isolates ordering (not concurrency); handles a single
+  polluter and interacting pairs, bounded to ~80 child runs. Uses pytest's
+  own rootdir and collects the whole suite even from a subdirectory, keeps
+  child runs on the collection's interpreter, rootdir and config file,
+  disables pytest-randomly and uses a private cleared cache so the victim
+  always runs last (`--ff`/`--lf`/`-x` in `addopts` included; `--nf`/`--sw`
+  are refused by name), leaves your `.pytest_cache` untouched, scales past the
+  OS argv limit, and forwards pytest options given after `--`. Exits `0` when a culprit is found, `1` when the test isn't
+  order-dependent (fails alone / no reproduction from order), `2` for an
+  unknown nodeid. `--bisect-json` writes the result. See
+  [`bisect`](docs/reference/cli.md#bisect-nodeid).
+- **`migrate-check` child runs honor `--python`.** Its serial, loadfile and
+  polluter discriminator runs re-resolved an interpreter from the environment
+  and could land on a different one than the collection used; they are now
+  pinned to the same interpreter. Its polluter search also disables
+  pytest-randomly, which could shuffle the candidates after the victim.
+- **`migrate-check` discriminator runs ignore rstest `reruns`.** A configured
+  `[tool.rstest] reruns` routed its serial runs through the one-worker pool
+  (duration-ordered) and a passing rerun could hide the failure being
+  classified; the child runs now pin `--reruns 0`, and pass their pytest args
+  after `--` so no rstest flag among them changes how the child runs.
+- **Id-bearing collection works with `-p no:cacheprovider`.** The worker read
+  `config.cache` unguarded, so with the cacheprovider disabled the collection
+  report was never sent.
+- **A pytest `@argsfile` counts as an explicit selection.** At a monorepo root
+  with no pytest config, `rstest @tests.txt` fanned out over every subproject
+  instead of running the listed tests as one project.
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

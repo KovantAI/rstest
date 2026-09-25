@@ -31,6 +31,10 @@ use clap::Parser;
 
 pub use cli::Cli;
 pub use run::execute;
+/// Orchestrator<->worker wire protocol. Re-exported so the decode benchmark
+/// (`benches/proto_decode.rs`) and the fuzz target can build frames and decode
+/// them against the exact types the orchestrator uses.
+pub use scheduling::proto;
 
 /// Entry point shared by the `rstest` binary and integration tests. Parses
 /// argv, dispatches to the watch loop or a single run, and returns the process

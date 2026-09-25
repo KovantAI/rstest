@@ -143,7 +143,10 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
             let e = flakes.entry(ev.nodeid).or_default();
             match ev.kind {
                 FlakeKind::Flaky => e.flaky += 1,
-                FlakeKind::Failed => e.failed += 1,
+                FlakeKind::Failed => {
+                    e.failed += 1;
+                    e.last_failed_epoch = e.last_failed_epoch.max(seg.generated_at);
+                }
             }
             e.last_epoch = e.last_epoch.max(seg.generated_at);
         }
@@ -1243,8 +1246,11 @@ mod tests {
         let f = m.flakes.get("t::f").unwrap();
         assert_eq!((f.flaky, f.failed), (2, 0));
         assert_eq!(f.last_epoch, 20);
+        // Flakes never stamp the failure time.
+        assert_eq!(f.last_failed_epoch, 0);
         let g = m.flakes.get("t::g").unwrap();
         assert_eq!((g.flaky, g.failed), (0, 1));
+        assert_eq!(g.last_failed_epoch, 20);
     }
 
     #[test]
