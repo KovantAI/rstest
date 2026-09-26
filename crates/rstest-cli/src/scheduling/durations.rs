@@ -313,9 +313,10 @@ fn wall_expired(epoch: u64, now: u64, max_age: u64) -> bool {
     max_age != 0 && epoch != 0 && now.saturating_sub(epoch) > max_age
 }
 
-/// Last run's wall seconds for `project`, if recorded and still within the TTL.
-pub fn load_wall_in(project: &Path) -> Option<f64> {
-    let bytes = std::fs::read(cache::file_in(project, WALL_FILE)).ok()?;
+/// Last run's wall seconds from a project's cache dir, if recorded and still
+/// within the TTL.
+pub fn load_wall_in(cache_dir: &Path) -> Option<f64> {
+    let bytes = std::fs::read(cache_dir.join(WALL_FILE)).ok()?;
     let w: Wall = match serde_json::from_slice::<StoredWall>(&bytes).ok()? {
         StoredWall::Tagged(w) => w,
         StoredWall::Bare(secs) => Wall { secs, epoch: 0 },
@@ -323,12 +324,13 @@ pub fn load_wall_in(project: &Path) -> Option<f64> {
     (!wall_expired(w.epoch, crate::time::now_epoch_secs(), wall_ttl_secs())).then_some(w.secs)
 }
 
-/// Sum of cached call durations for `project`, tolerant of both on-disk formats.
+/// Sum of cached call durations in a project's cache dir, tolerant of both
+/// on-disk formats.
 /// The monorepo planner's fallback cost for caches written before wall tracking.
 /// Not fingerprint-validated: `project` need not be the cwd, so its nodeid-
 /// relative paths would not resolve here, and the sum is only a coarse weight.
-pub fn sum_secs_in(project: &Path) -> Option<f64> {
-    let bytes = std::fs::read(cache::file_in(project, FILE)).ok()?;
+pub fn sum_secs_in(cache_dir: &Path) -> Option<f64> {
+    let bytes = std::fs::read(cache_dir.join(FILE)).ok()?;
     Some(read_map(&bytes).values().map(|t| t.secs).sum())
 }
 

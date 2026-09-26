@@ -774,7 +774,8 @@ pub fn run_pool(
                 }
                 None => {
                     sink.warn(
-                        "rstest: no surviving worker to run pytest_testnodedown                          for a crashed worker; per-worker resources may leak",
+                        "rstest: no surviving worker to run pytest_testnodedown \
+                         for a crashed worker; per-worker resources may leak",
                     );
                     break;
                 }

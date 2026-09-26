@@ -158,6 +158,13 @@ pub struct Cli {
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,
 
+    /// Internal: turn on the workers' cpu/fixture instrumentation without the
+    /// doctor report. Passed only by a parent rstest (migrate-check's
+    /// classifier runs); a flag rather than an env var so a user's shell or CI
+    /// environment can never switch it on.
+    #[arg(long = "instrument-workers", hide = true)]
+    pub(crate) instrument_workers: bool,
+
     /// Write the migrate-check findings as JSON (stable, versioned schema) for
     /// CI gating. Used with the `migrate-check` subcommand.
     #[arg(long, global = true)]
@@ -506,6 +513,7 @@ const BOOL_FLAGS: &[&str] = &[
     "--doctor",
     "--watch",
     "--fail-on-leak",
+    "--instrument-workers",
     "--reruns-only-known-flaky",
     "--since-green",
     "--incremental",
@@ -927,6 +935,24 @@ mod tests {
                 max_age: Some(ref d),
             }) if d == "30d"
         ));
+    }
+
+    #[test]
+    fn instrument_workers_is_a_hidden_owned_flag() {
+        use clap::{CommandFactory, Parser};
+        // Owned by clap (never forwarded to pytest) and parsed as a switch.
+        let (own, session) = split_args(v(&["--instrument-workers", "tests/"]));
+        assert_eq!(own, v(&["rstest", "--instrument-workers"]));
+        assert_eq!(session, v(&["tests/"]));
+        assert!(Cli::parse_from(&own).instrument_workers);
+        assert!(!Cli::parse_from(["rstest"]).instrument_workers);
+        // Internal plumbing for a parent rstest: kept out of --help.
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some("instrument-workers"))
+            .unwrap();
+        assert!(arg.is_hide_set());
     }
 
     #[test]

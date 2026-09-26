@@ -33,6 +33,10 @@ pub(super) fn execute_monorepo(
     // at the root, not as N separate child aborts (children re-validate too).
     doctor::parse_conditions(&cli.doctor_fail_on, sink)?;
     validate_monorepo_flags(cli.watch, cli.output.as_deref())?;
+    refuse_single_project_flags(cli)?;
+    // One seed for every project, so a single `--shuffle=SEED` at the root
+    // reproduces the whole run (children print it too).
+    let shuffle = resolve_mono_shuffle(cli.shuffle.as_deref(), sink)?;
     let rels: Vec<String> = projects
         .iter()
         .map(|p| {
@@ -79,7 +83,21 @@ pub(super) fn execute_monorepo(
         }
         None => None,
     };
-    let costs: Vec<Option<f64>> = projects.iter().map(|p| mono::project_cost(p)).collect();
+    // Each project's cache dir, the one its child reads and writes: its own
+    // `.rstest_cache`, or `<RSTEST_CACHE>/<slug>` when RSTEST_CACHE is set (so
+    // projects never share one dir). The planner weighs from the same place.
+    let cache_overrides: Vec<Option<PathBuf>> = projects
+        .iter()
+        .map(|p| crate::cache::mono_override(root, &mono::slug(root, p)))
+        .collect();
+    let costs: Vec<Option<f64>> = projects
+        .iter()
+        .zip(&cache_overrides)
+        .map(|(p, over)| {
+            let own = p.join(crate::cache::DIR_NAME);
+            mono::project_cost(over.as_deref().unwrap_or(&own))
+        })
+        .collect();
     // A project pinning its own numprocesses (e.g. 0 for an
     // order-sensitive suite that needs pytest-exact mode) keeps it.
     let fixed: Vec<Option<usize>> = projects.iter().map(|p| mono::project_fixed_n(p)).collect();
@@ -139,6 +157,16 @@ pub(super) fn execute_monorepo(
             doctor_json: cli.doctor_json.as_deref(),
             doctor_md: cli.doctor_md.as_deref(),
             doctor_fail_on: &cli.doctor_fail_on,
+            timeout: cli.timeout,
+            html: cli.html.as_deref(),
+            fail_on_leak: cli.fail_on_leak,
+            instrument_workers: cli.instrument_workers,
+            reruns_only_known_flaky: cli.reruns_only_known_flaky,
+            collect: cli.collect.as_deref(),
+            shuffle: shuffle.as_deref(),
+            durations_regress: cli.durations_regress,
+            require_baseline: cli.require_baseline,
+            incremental: cli.incremental,
         };
         let mut cmd = std::process::Command::new(&exe);
         cmd.current_dir(project)
@@ -150,6 +178,9 @@ pub(super) fn execute_monorepo(
             .stderr(std::process::Stdio::piped())
             .args(build_child_args(&spec))
             .args(args);
+        if let Some(dir) = &cache_overrides[i] {
+            cmd.env("RSTEST_CACHE", dir);
+        }
         if spawn_child_stream(cmd, i, rel, &tx, sink.err()) {
             launched += 1;
         }
@@ -242,6 +273,70 @@ fn validate_monorepo_flags(watch: bool, output: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Refuse root flags a per-project child can't honor correctly, rather than
+/// dropping them (clap consumed them, so they never reach the session either).
+/// Everything else the root accepts is forwarded by [`build_child_args`].
+fn refuse_single_project_flags(cli: &Cli) -> Result<()> {
+    if cli.debug.is_some() {
+        anyhow::bail!(
+            "--debug needs a single pytest session; run it inside one project of \
+             this monorepo"
+        );
+    }
+    if cli.shard.is_some() {
+        anyhow::bail!(
+            "--shard is not supported at a monorepo root (shard buckets and \
+             shard-verify cover one project's collection); run --shard inside \
+             each project"
+        );
+    }
+    if cli.cov_diff_fail_under.is_some() || cli.cov_diff_json.is_some() {
+        anyhow::bail!(
+            "--cov-diff-fail-under/--cov-diff-json are not supported at a monorepo \
+             root (diff coverage is scored against one project's coverage data); \
+             run them inside each project"
+        );
+    }
+    if cli.stream_json.is_some() {
+        anyhow::bail!(
+            "--stream-json is not supported at a monorepo root (one live stream \
+             can't carry several concurrent project sessions); run it inside a \
+             single project, or use --report-json for one merged document"
+        );
+    }
+    // Mirrors the single-project rule: an explicit --changed disables it.
+    if cli.since_green && cli.changed.is_none() {
+        anyhow::bail!(
+            "--since-green is not supported at a monorepo root (each project would \
+             track its own green baseline and miss dependents of a changed \
+             sibling); use --changed=<rev> at the root, or run --since-green \
+             inside a project"
+        );
+    }
+    Ok(())
+}
+
+/// Resolve `--shuffle` once at the root: a bare `--shuffle` picks one seed
+/// shared by every project (printed here) so the run reproduces from the
+/// root; an explicit seed is validated once instead of in every child.
+fn resolve_mono_shuffle(shuffle: Option<&str>, sink: &mut Sink) -> Result<Option<String>> {
+    let Some(v) = shuffle else {
+        return Ok(None);
+    };
+    let seed: u64 = if v == "random" {
+        crate::time::now_epoch_nanos() as u64 ^ u64::from(std::process::id())
+    } else {
+        v.parse()
+            .map_err(|_| anyhow::anyhow!("--shuffle seed must be an unsigned integer, got '{v}'"))?
+    };
+    if v == "random" {
+        sink.warn(&format!(
+            "rstest: shuffle seed {seed} for every project (reproduce with --shuffle={seed})"
+        ));
+    }
+    Ok(Some(seed.to_string()))
+}
+
 /// The per-project inputs the orchestrator translates into one child `rstest`
 /// invocation. Kept as a struct (not a long argument list) so [`build_child_args`]
 /// stays a pure, unit-testable translation.
@@ -270,6 +365,17 @@ struct ChildSpec<'a> {
     doctor_json: Option<&'a std::path::Path>,
     doctor_md: Option<&'a std::path::Path>,
     doctor_fail_on: &'a [String],
+    timeout: Option<f64>,
+    html: Option<&'a std::path::Path>,
+    fail_on_leak: bool,
+    instrument_workers: bool,
+    reruns_only_known_flaky: bool,
+    collect: Option<&'a str>,
+    /// The concrete seed [`resolve_mono_shuffle`] chose, shared by all projects.
+    shuffle: Option<&'a str>,
+    durations_regress: Option<f64>,
+    require_baseline: bool,
+    incremental: bool,
 }
 
 /// Build the args appended to a child `rstest` process (after the env/pipe
@@ -356,6 +462,41 @@ fn build_child_args(spec: &ChildSpec) -> Vec<String> {
     // exit code, which the orchestrator aggregates.
     for c in spec.doctor_fail_on {
         pair(&mut a, "--doctor-fail-on", c.clone());
+    }
+    if let Some(t) = spec.timeout {
+        pair(&mut a, "--timeout", t.to_string());
+    }
+    if let Some(p) = spec.html {
+        pair(
+            &mut a,
+            "--html",
+            path_to_string(&spec.root.join(mono::suffixed(p, spec.slug))),
+        );
+    }
+    // Gates apply per project: a breach fails that child, and so the root.
+    if spec.fail_on_leak {
+        a.push("--fail-on-leak".into());
+    }
+    if let Some(r) = spec.durations_regress {
+        pair(&mut a, "--durations-regress", r.to_string());
+    }
+    if spec.require_baseline {
+        a.push("--require-baseline".into());
+    }
+    if spec.instrument_workers {
+        a.push("--instrument-workers".into());
+    }
+    if spec.reruns_only_known_flaky {
+        a.push("--reruns-only-known-flaky".into());
+    }
+    if let Some(c) = spec.collect {
+        pair(&mut a, "--collect", c.into());
+    }
+    if let Some(seed) = spec.shuffle {
+        a.push(format!("--shuffle={seed}"));
+    }
+    if spec.incremental {
+        a.push("--incremental".into());
     }
     a
 }
@@ -451,8 +592,9 @@ fn write_merged_report(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_child_args, child_output, report_part_path, resolve_report_out, spawn_child_stream,
-        validate_monorepo_flags, verdict_label, ChildSpec,
+        build_child_args, child_output, refuse_single_project_flags, report_part_path,
+        resolve_mono_shuffle, resolve_report_out, spawn_child_stream, validate_monorepo_flags,
+        verdict_label, ChildSpec,
     };
     use std::path::{Path, PathBuf};
 
@@ -486,6 +628,60 @@ mod tests {
             .contains("--output tap"));
     }
 
+    fn root_cli(extra: &[&str]) -> crate::cli::Cli {
+        use clap::Parser;
+        let mut argv = vec!["rstest"];
+        argv.extend_from_slice(extra);
+        crate::cli::Cli::parse_from(argv)
+    }
+
+    #[test]
+    fn refuse_single_project_flags_names_each_unsupported_flag() {
+        assert!(refuse_single_project_flags(&root_cli(&[])).is_ok());
+        for (argv, want) in [
+            (&["--debug"][..], "--debug needs a single pytest session"),
+            (
+                &["--shard", "1/2"][..],
+                "--shard is not supported at a monorepo root",
+            ),
+            (
+                &["--cov-diff-fail-under", "80"][..],
+                "--cov-diff-fail-under/--cov-diff-json",
+            ),
+            (
+                &["--cov-diff-json", "d.json"][..],
+                "--cov-diff-fail-under/--cov-diff-json",
+            ),
+            (
+                &["--stream-json", "s.ndjson"][..],
+                "--stream-json is not supported",
+            ),
+            (&["--since-green"][..], "--since-green is not supported"),
+        ] {
+            let err = refuse_single_project_flags(&root_cli(argv)).unwrap_err();
+            assert!(err.to_string().contains(want), "{argv:?}: {err}");
+        }
+        // An explicit --changed disables --since-green, as in a single project.
+        assert!(refuse_single_project_flags(&root_cli(&["--since-green", "--changed"])).is_ok());
+    }
+
+    #[test]
+    fn resolve_mono_shuffle_pins_one_seed() {
+        let mut sink = crate::reporting::sink::Sink::captured().0;
+        assert_eq!(resolve_mono_shuffle(None, &mut sink).unwrap(), None);
+        assert_eq!(
+            resolve_mono_shuffle(Some("7"), &mut sink)
+                .unwrap()
+                .as_deref(),
+            Some("7")
+        );
+        let seed = resolve_mono_shuffle(Some("random"), &mut sink)
+            .unwrap()
+            .unwrap();
+        assert!(seed.parse::<u64>().is_ok(), "{seed}");
+        assert!(resolve_mono_shuffle(Some("x"), &mut sink).is_err());
+    }
+
     // A minimal spec with everything off; tests flip on just what they exercise.
     fn bare_spec<'a>(
         root: &'a Path,
@@ -514,6 +710,16 @@ mod tests {
             doctor_json: None,
             doctor_md: None,
             doctor_fail_on: fail_on,
+            timeout: None,
+            html: None,
+            fail_on_leak: false,
+            instrument_workers: false,
+            reruns_only_known_flaky: false,
+            collect: None,
+            shuffle: None,
+            durations_regress: None,
+            require_baseline: false,
+            incremental: false,
         }
     }
 
@@ -558,6 +764,17 @@ mod tests {
         spec.report_json = true;
         spec.doctor_json = Some(&dj);
         spec.doctor_md = Some(&dm);
+        let html = PathBuf::from("out/report.html");
+        spec.timeout = Some(2.5);
+        spec.html = Some(&html);
+        spec.fail_on_leak = true;
+        spec.instrument_workers = true;
+        spec.reruns_only_known_flaky = true;
+        spec.collect = Some("lazy");
+        spec.shuffle = Some("42");
+        spec.durations_regress = Some(2.0);
+        spec.require_baseline = true;
+        spec.incremental = true;
 
         let args = build_child_args(&spec);
 
@@ -594,6 +811,23 @@ mod tests {
             .collect();
         assert_eq!(rerun_vals, vec!["reA", "reB"]);
         assert_eq!(val_after(&args, "--doctor-fail-on"), Some("p95<1.0"));
+        assert_eq!(val_after(&args, "--timeout"), Some("2.5"));
+        assert_eq!(
+            val_after(&args, "--html").map(PathBuf::from),
+            Some(root.join("out/report.libs-a.html"))
+        );
+        assert_eq!(val_after(&args, "--collect"), Some("lazy"));
+        assert_eq!(val_after(&args, "--durations-regress"), Some("2"));
+        for flag in [
+            "--fail-on-leak",
+            "--require-baseline",
+            "--instrument-workers",
+            "--reruns-only-known-flaky",
+            "--incremental",
+            "--shuffle=42",
+        ] {
+            assert!(args.iter().any(|a| a == flag), "missing {flag}: {args:?}");
+        }
     }
 
     #[test]

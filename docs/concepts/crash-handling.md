@@ -27,6 +27,17 @@ this from its queue, which can misattribute; the explicit signal cannot.)
    re-provisioning can race the crashed node's cleanup (see
    [xdist hook emulation](xdist-hooks.md)).
 
+## Hung tests (`--worker-timeout`)
+
+A test that hangs instead of crashing goes through the same machinery when
+[`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs) is set
+(off by default). A worker stuck on one test for longer than SECS, in any
+phase, is killed; the test is reported failed with a timeout message
+instead of the crash message, and steps 2 and 3 above follow unchanged.
+Under `--reruns` the timed-out test is retried within the budget, and the
+kill counts against the same restart cap below. Hangs outside a test
+(collection, session config) are not covered.
+
 ## Budgets
 
 Total restarts per run are capped (`max(workers, 4)`). Past the cap, a

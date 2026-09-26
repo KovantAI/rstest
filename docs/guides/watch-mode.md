@@ -9,18 +9,27 @@ runs the suite once, then watches the project and reruns on every save:
 ```text
 2 passed in 0.13s
 
-[watch] waiting for changes... (Ctrl+C to quit, last exit: 0)
+[watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
 [watch] test_w.py changed; rerunning changed files
 2 passed in 0.13s
-[watch] helper.py changed; rerunning full selection
+
+[watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
+[watch] helper.py changed; rerunning affected tests
+1 passed in 0.11s
 ```
+
+Type `q` (or `quit`) and Enter between runs, or press Ctrl+C, to end the
+session. The `q` option is left out, and the prompt says only `Ctrl+C`, when a
+test owns stdin (`-s`, `--pdb`, `--trace`, `--debug`) or rstest runs as a
+background job (`rstest --watch &`). **Unreleased:** `q` to quit is not in
+rstest 0.7.0, whose prompt reads `(Ctrl+C to quit, last exit: 0)`.
 
 ## Rerun policy
 
 - A change set consisting **only of test files** (per your project's
   `python_files` patterns) reruns exactly those files, with all your other
   flags intact.
-- Any other `.py` change — source code — runs the tests **affected by the
+- Any other `.py` change (source code) runs the tests **affected by the
   change** per the project import graph (same machinery as
   [`--changed`](../reference/cli.md#-changedrev)); a change affecting no
   tests skips the rerun, and changes the graph can't reason about fall

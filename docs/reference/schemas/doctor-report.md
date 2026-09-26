@@ -59,7 +59,7 @@ Slow tests that add no unique coverage: every line each one executes is also exe
 
 ### Leak
 
-A test that ended with more threads / open fds than it started — a resource it opened and never released (its own teardown included).
+A test that ended with more threads / open fds than it started: a resource it opened and never released (its own teardown included).
 
 | Field | Type | Required | Description |
 |---|---|---|---|

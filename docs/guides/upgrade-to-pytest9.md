@@ -15,7 +15,9 @@ almost certainly already done: jump to [Verify](#3-verify).
 
 This covers your test code. Your **plugins** must also be pytest-9-compatible
 releases, since they run against the vendored 9.1.1 too and a `pytest<9` pin
-does not change that at runtime. See
+does not change that at runtime. rstest flags such pins: one
+`rstest: warning: <plugin> <version> requires pytest<9, ...` line to stderr
+per run (Unreleased: not in 0.7.0). See
 [Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
 
 ## The method
@@ -45,6 +47,15 @@ A clean run here means **nothing below applies to you**: go to step 3.
 !!! tip "No config change needed"
     `-W` is a command-line flag; it overrides your `filterwarnings` ini for
     this one run. Don't commit it yet: it's a probe, not the fix.
+
+!!! warning "No stopgap filter for `PytestRemovedIn9Warning`"
+    On pytest 9.0 the APIs behind `PytestRemovedIn9Warning` raise errors by
+    default; 9.1 removed those APIs **and** the warning class itself. So under
+    rstest's 9.1.1 core there is nothing left to silence: fix each hit. Also
+    delete any `ignore::pytest.PytestRemovedIn9Warning` entry already in your
+    `filterwarnings` ini: pytest 9.1 can't resolve the class and aborts the
+    run with a usage error before collecting anything. The next deprecation
+    cycle is `PytestRemovedIn10Warning`.
 
 Optionally, once that is clean, run the broad probe
 `pytest -W error::DeprecationWarning -W error::PendingDeprecationWarning`.
@@ -101,7 +112,6 @@ these by hand:
 | **CI detection requires a non-empty value.** `$CI` / `$BUILD_NUMBER` must now be set to something non-empty; an empty string no longer triggers CI mode. | Pipelines that export `CI=` empty and rely on CI-mode output. | Set `CI=1` (or any non-empty value) in the job. |
 | **`config.args` holds strings only** (no longer `pathlib.Path`). | conftest/plugins that read `config.args` and expect path objects. | Wrap in `pathlib.Path(...)` at the read site. |
 | **Python 3.9 support dropped.** | Suites still running on 3.9. | The vendored core needs CPython **3.10+**, the floor rstest already requires. Upgrade the interpreter. |
-| **`PytestRemovedIn9Warning` is now an error by default.** | Anything using an API slated for removal in 9.1. | Fix it (that's the point), or stopgap `filterwarnings = ignore::pytest.PytestRemovedIn9Warning` in your ini while you work through them. |
 
 ### 3. Verify
 

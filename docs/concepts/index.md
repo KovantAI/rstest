@@ -9,5 +9,5 @@ How rstest works, and why it's built that way:
 - [Crash handling](crash-handling.md): attribution, redistribution, restart budgets
 - [Monorepo mode](monorepo.md): discovery, worker budget, per-flag behavior across projects
 - [xdist hook emulation](xdist-hooks.md): how master-side hooks are emulated, and where they diverge
-- [Caching](caching.md): what lives in `.rstest_cache` and `.pytest_cache`
+- [Caching](caching.md): what lives in `.rstest_cache` and `.pytest_cache`, the shared remote cache backend and its trust boundary, worker temp directories
 - [Glossary](glossary.md)

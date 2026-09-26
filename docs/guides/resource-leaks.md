@@ -107,8 +107,11 @@ than a pre-existing fixture pattern.
   ```
 
 - If a leak is genuinely unavoidable for one test (a C extension you don't
-  control), isolate it with [`@pytest.mark.serial`](../reference/markers.md) so
-  it can't race the parallel phase, and exclude it from the gate.
+  control), know that `--fail-on-leak` has no allowlist: it fails the run on
+  every test with a positive delta, and markers don't exempt a test. Keep that
+  test out of the gated run instead: deselect it there (`-k "not test_name"`
+  or `--deselect <nodeid>`) and run it in a separate invocation without
+  `--fail-on-leak`.
 
 ## See also
 

@@ -29,14 +29,18 @@ Every run (except `--dist each`) merges its events into
 
 ```json
 {
-  "tests/test_ws.py::test_reconnect": { "flaky": 7, "failed": 2, "last_epoch": 1783850000 },
-  "tests/test_api.py::test_poll":     { "flaky": 1, "failed": 0, "last_epoch": 1783700000 }
+  "tests/test_ws.py::test_reconnect": { "flaky": 7, "failed": 2, "last_epoch": 1783850000, "last_failed_epoch": 1783800000 },
+  "tests/test_api.py::test_poll":     { "flaky": 1, "failed": 0, "last_epoch": 1783700000, "last_failed_epoch": 0 }
 }
 ```
 
 - `flaky`: runs where the test passed only after rerun(s)
 - `failed`: runs where it hard-failed (quarantined failures included)
 - `last_epoch`: when it last misbehaved; also drives **aging** (below)
+- `last_failed_epoch`: when it last hard-failed (`0` = never). **Unreleased:**
+  added after 0.7.0; caches written by 0.7.0 lack it, and readers fall back to
+  `last_epoch` when `failed` is non-zero. Full field reference:
+  [flake log schema](../reference/output-schemas.md#flake-log).
 
 The file is **sparse**: only tests that ever flaked or failed get an
 entry, so a green suite writes nothing and the file stays small at any
@@ -100,7 +104,7 @@ Write the known offenders to a file (commit it, the quarantine set is
 a team decision and its diff history is the audit trail):
 
 ```text
-# quarantine.txt — tracked in JIRA-1234; remove entries when fixed
+# quarantine.txt: tracked in JIRA-1234; remove entries when fixed
 tests/test_ws.py::test_reconnect
 tests/test_legacy_sync.py::*
 ```

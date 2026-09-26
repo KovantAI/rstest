@@ -3,7 +3,8 @@
 The 100 most-downloaded pytest plugins (30-day PyPI counts via
 [pythontest.com/top-pytest-plugins](https://pythontest.com/top-pytest-plugins/),
 Aug–Sep 2026), each classified for how it behaves under rstest's parallel pool.
-Ranks 1–50 are fully runtime-verified (every row `V`); ranks 51–100 are
+Ranks 1–50 are runtime-verified except pytest-env, pytest-repeat and
+pytest-order (marked `i`: no e2e gate or corpus suite loads them yet); ranks 51–100 are
 classified by category, with the code-touched and genuinely-risky ones
 (pytest-mypy, the report aggregators) and the plugins a corpus suite loads in
 parallel also runtime-`V`.
@@ -19,9 +20,9 @@ parallel also runtime-`V`.
 | 🔴 Silent | Produces **nothing** at `-n ≥ 2` (report aggregators gated on the xdist master); use `-n 0` or a native equivalent. |
 | ➖ N/A | Unaffected by parallelism (assertion / fixture / format helpers). |
 
-**Verified** column: **V** = exercised by an e2e gate, rstest's
-[tested-compat table](../guides/plugins.md#tested-compatibility), or loaded by a
-corpus suite (see the runtime inventory in
+**Verified** column: **V** = exercised by an e2e gate or loaded by a
+corpus suite (the per-plugin notes are in the
+[tested-compat table](../guides/plugins.md#tested-compatibility)) (see the runtime inventory in
 [Plugins exercised by the corpus](corpus-plugins.md)); **i** = inferred from the
 plugin's category, not yet runtime-verified.
 
@@ -36,12 +37,12 @@ plugin's category, not yet runtime-verified.
 | 7 | pytest-rerunfailures | 79.1M | 🟦 Native | V | Unregistered in the pool (its xdist `sock_port` branch would KeyError); rstest owns reruns (`--reruns`, `@mark.flaky`). |
 | 8 | hypothesis | 48.3M | ✅ Works | V | Vetted; property-based per worker. Known gap: shared `.hypothesis` DB untested past `-n 8`. |
 | 9 | pytest-metadata | 35.2M | ➖ N/A | V | Session metadata for report plugins; plugin active on workers, no parallel hazard (e2e gate). |
-| 10 | pytest-env | 24.0M | ✅ Works | V | Env vars set on every worker. |
+| 10 | pytest-env | 24.0M | ✅ Works | i | Env vars set on every worker (its hook runs in each worker session). No gate yet. |
 | 11 | pytest-httpx | 22.9M | ✅ Works | V | Per-test httpx mock fixture; isolated per worker (e2e gate). |
 | 12 | pytest-html | 21.8M | 🔴 Silent | V | Writes no report at `-n ≥ 2` (gates on the master `workerinput`); a command-line `--html` is rstest's native report; for the plugin's own, `rstest -n 0 -- --html=...`. |
 | 13 | pytest-django | 21.6M | ✅ Works | V | Per-worker test DB suffixed by `workerid`. Verified on django-allauth, which uses SQLite `:memory:`; server-backed databases (Postgres, MySQL) are not in the corpus yet. |
 | 14 | pytest-split | 21.0M | 🟦 Native | V | Group selection is deselection (honored under the pool: e2e gate); rstest sharding is native `--shard K/N`. |
-| 15 | pytest-repeat | 15.5M | ✅ Works | V | `@mark.repeat(N)` items distribute across workers. |
+| 15 | pytest-repeat | 15.5M | ✅ Works | i | `@mark.repeat(N)` expands at collection, so the copies distribute across workers. No gate yet. |
 | 16 | pytest-json-report | 15.0M | 🔴 Silent / 🟦 | V | Report aggregator; no file at `-n ≥ 2`, written at `-n 0` (e2e gate). Use native `--report-json`. |
 | 17 | pytest-benchmark | 14.2M | 🔶 `-n 0` | V | Auto-disables at `-n ≥ 2` (sees the pool as xdist); benchmark at `-n 0`, read `--benchmark-json`. e2e gate: no `--benchmark-json` written at `-n ≥ 2`, measured + written at `-n 0`. |
 | 18 | pytest-socket | 13.9M | ✅ Works | V | `--disable-socket` blocks identically in parallel. |
@@ -59,7 +60,7 @@ plugin's category, not yet runtime-verified.
 | 30 | pytest-instafail | 7.3M | 🔶 `-n 0` | V | Inline failure printing is terminal-owned; coexists under the pool (e2e gate). rstest streams failures natively (live progress). |
 | 31 | pytest-postgresql | 6.6M | ✅ Works | V | Per-worker DB instance on a free port (e2e `plugin-services` gate). |
 | 32 | pytest-recording | 6.1M | ✅ Works | V | VCR cassettes are per-test files; record and replay both parallel-safe. Corpus: langchain (`libs/langchain_v1` unit tests) VCR replay at `-n auto`. |
-| 33 | pytest-order | 6.1M | ⚠️ Caveat | V | Ordering holds only within a worker; `-n 0` or `--dist loadfile`/`loadscope`. |
+| 33 | pytest-order | 6.1M | ⚠️ Caveat | i | Ordering holds only within a worker; `-n 0` or `--dist loadfile`/`loadscope`. No gate yet; inferred from pytest-ordering (#48), which is gated. |
 | 34 | pytest-aiohttp | 6.0M | ✅ Works | V | Vetted; per-test aiohttp loop. |
 | 35 | pytest-dotenv | 5.5M | ✅ Works | V | `.env` loaded per worker (e2e gate). |
 | 36 | pytest-subtests | 4.9M | ✅ Works | V | Sub-results ride the normal report hook; failing subtests attributed per worker (e2e gate). |
@@ -76,7 +77,7 @@ plugin's category, not yet runtime-verified.
 | 47 | pytest-factoryboy | 2.8M | ✅ Works | V | Fixture generation; registered factory fixture resolves on workers (e2e gate). |
 | 48 | pytest-ordering | 2.8M | ⚠️ Caveat | V | Same as pytest-order: `@mark.run(order=N)` honored within a worker / at `-n 0` (e2e gate). |
 | 49 | pytest-snapshot | 2.6M | ✅ Works | V | Asserts parallel-safe; update at `-n 0`, assert under the pool (e2e gate). |
-| 50 | pytest-retry | 2.6M | ✅ Works | V | rstest seeds the `server_port` its worker branch reads (each worker plays master for itself); vetted. Native reruns also available. |
+| 50 | pytest-retry | 2.6M | ✅ Works | V | Each worker plays master for itself: with pytest-xdist installed, its controller branch self-provisions a report server (e2e gate); without xdist, rstest seeds the `server_port` its worker branch reads (langgraph corpus). Native reruns also available. |
 | 51 | pytest-docker | 2.4M | ⚠️ Caveat | i | Session docker-compose fixture → one stack **per worker**. Fine if the service is per-worker; for a single shared stack use `--dist loadgroup` or `-n 0`. |
 | 52 | pytest-vcr | 2.3M | ✅ Works | i | Per-test VCR cassette files; record/replay parallel-safe (same class as pytest-recording #32). |
 | 53 | pytest-lazy-fixtures | 2.2M | ➖ N/A | i | Resolves fixture *values* inside `parametrize`; no parallel interaction. |

@@ -23,7 +23,9 @@ options are read normally.
 
 Because plugins load into the vendored core, `import pytest` inside a plugin
 resolves to the vendored 9.1.1, so the plugin's own code must support pytest 9
-and a `pytest<9` install pin has no effect at runtime. See
+and a `pytest<9` install pin has no effect at runtime. rstest warns about
+such a pin: one `rstest: warning: <plugin> <version> requires pytest<9, ...`
+line to stderr per run (Unreleased: not in 0.7.0). See
 [Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
 
 !!! tip "Looking for a specific plugin?"
@@ -66,11 +68,17 @@ rstest's compatibility battery, on real suites:
 
 ## Tested compatibility
 
-Beyond the battery above, these common ecosystem plugins were run under both
-`-n 0` and the parallel pool and tiered by result. **Works** = correct in
-parallel; **Native** = works, but rstest has a built-in that replaces it;
-**caveat** = works with a stated limitation; **parallel-unsafe** = run it at
-`-n 0` (or use rstest's native equivalent).
+Beyond the battery above, these common ecosystem plugins are tiered with the
+same verdicts as the top-100 matrix: **✅ Works** = correct in parallel;
+**🟦 Native** = works, but rstest has a built-in that replaces it;
+**⚠️ Caveat** = works with a stated limitation; **🔶 `-n 0`** = run
+single-worker for this plugin's feature; **🔴 Silent** = produces nothing at
+`-n ≥ 2` (use `-n 0` or rstest's native equivalent).
+
+Most rows are backed by an e2e gate or a corpus suite that loads the plugin
+under the parallel pool. Rows marked *not gated* have no automated check yet:
+their tier is what the plugin's design predicts, so confirm it with one
+`-n 0` and one `-n auto` run on your own suite.
 
 For the broader picture (the 100 most-downloaded plugins, each with a
 verified/inferred marker), see the
@@ -78,18 +86,18 @@ verified/inferred marker), see the
 
 | Plugin | Tier | Note |
 |---|---|---|
-| pytest-timeout | Native | the plugin's ini `timeout =` fires in both modes, but rstest has a built-in [`--timeout`](../reference/cli.md#-timeout-secs) and honors `@pytest.mark.timeout` itself at every worker count, even without `--timeout`. So with the plugin installed, a marked test gets two SIGALRM timers (rstest's is installed last, so its `Timeout` error is the one you see), and a command-line `--timeout` never reaches the plugin. Pick one: uninstall pytest-timeout, or disable it with `-p no:timeout`. See also `--worker-timeout` for C-extension deadlocks |
-| pytest-env | Works | env vars set on every worker |
-| pytest-socket | Works | `--disable-socket` blocks identically in parallel |
-| pytest-repeat | Works | `@mark.repeat(N)` items distribute across workers |
-| freezegun / pytest-freezer | Works | in-process time freezing is per-worker; **but** don't put `now()` in parametrize IDs (see [known gaps](../concepts/compatibility.md#known-gaps)) |
-| pytest-benchmark | Caveat | auto-disables at `-n ≥ 2` (sees the pool as xdist); run benchmarks at `-n 0` and read numbers from `--benchmark-json` (the stats table isn't painted: rstest owns the terminal) |
-| pytest-order | Caveat | ordering only holds within a worker at `-n ≥ 2`; use `-n 0`, or `--dist loadfile`/`loadscope` to keep an ordered group on one worker |
-| pytest-randomly | Works | rstest synthesizes the `randomly_seed` key xdist's master would inject, derived from the run uid so every worker agrees on one reproducible seed. An explicit `--randomly-seed=<n>` still wins. (rstest's native [`--shuffle`](../reference/cli.md#-shuffleseed) remains available and is also parallel-safe.) |
-| pytest-random-order | Works | its `pytest_configure` reads `workerinput["random_order_seed"]` *unconditionally* whenever `workerinput` exists (even with reordering off, the default) so merely installing it used to `KeyError` every `-n ≥ 2` run. rstest now seeds that key (shared across workers so the shuffled collection hashes agree), keeping the plugin's own `default:` prefix so order is untouched unless you pass `--random-order[-bucket\|-seed]`; an explicit `--random-order-seed=<n>` is honored. Global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
-| pytest-mypy | Works | its worker branch reads `workerinput["mypy_config_stash_serialized"]` (the mypy results-cache path an xdist **controller** sets) so merely installing it used to `KeyError` every `-n ≥ 2` run (no rstest master runs the controller). rstest now seeds a unique **per-worker** cache path; mypy is run lazily by the first mypy item on each worker (`MypyResults.from_session`, `FileLock`-guarded), so each worker type-checks its own subset and errors surface identically at `-n auto` and `-n 0`. If the seed can't be provisioned the plugin is unregistered (run mypy at `-n 0`). |
-| pytest-rerunfailures | Works | inside pool workers rstest unregisters it *before* `pytest_configure`, so its xdist `sock_port` client branch never fires (the old `KeyError: 'sock_port'` at `-n ≥ 2` with pytest-xdist installed), and rstest owns reruns natively: crash-aware, honoring `@mark.flaky` and [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun`. At `-n 0` without rstest's command-line `--reruns` the plugin keeps its own behavior; a `--reruns` in `addopts` therefore works at `-n 0` but silently does nothing in the pool. |
-| pytest-html | Parallel-unsafe | at `-n ≥ 2` **no report is written**: a silent no-op, not a crash. pytest-html registers its report writer only on a node *without* `workerinput` (its xdist "am I the master?" check); every rstest pool worker has a `workerinput`, so nothing ever owns report generation. Merging all workers' results into one file needs a single master process, which rstest doesn't run (the Rust orchestrator owns the merge, and workers are isolated sessions). Use rstest's native `--html` (a command-line `--html` is always rstest's merged report), generate pytest-html's own report at `-n 0 -- --html=...`, or keep the parallel run and emit from merged artifacts: see [HTML & aggregated reporting](#html-aggregated-reporting-under-parallelism). |
+| pytest-timeout | 🟦 Native | the plugin's ini `timeout =` fires in both modes, but rstest has a built-in [`--timeout`](../reference/cli.md#-timeout-secs) and honors `@pytest.mark.timeout` itself at every worker count, even without `--timeout`. So with the plugin installed, a marked test gets two SIGALRM timers (rstest's is installed last, so its `Timeout` error is the one you see), and a command-line `--timeout` never reaches the plugin. Pick one: uninstall pytest-timeout, or disable it with `-p no:timeout`. See also `--worker-timeout` for C-extension deadlocks |
+| pytest-env | ✅ Works | *not gated*. Env vars are set by its `pytest_load_initial_conftests` hook, which runs in every worker session |
+| pytest-socket | ✅ Works | `--disable-socket` blocks identically in parallel |
+| pytest-repeat | ✅ Works | *not gated*. `@mark.repeat(N)` expands at collection, so the copies are ordinary items that distribute across workers |
+| freezegun | ✅ Works | in-process time freezing is per-worker (the freezegun, aiohttp, itsdangerous, langchain and python-dateutil corpus suites load it in parallel). pytest-freezer, the fixture wrapper, is *not gated* but uses the same model. Keep `now()` out of parametrize IDs unless every worker computes the same string (see [known gaps](../concepts/compatibility.md#known-gaps)) |
+| pytest-benchmark | 🔶 `-n 0` | auto-disables at `-n ≥ 2` (sees the pool as xdist); run benchmarks at `-n 0` and read numbers from `--benchmark-json` (the stats table isn't painted: rstest owns the terminal) |
+| pytest-order | ⚠️ Caveat | *not gated* (the e2e gate covers pytest-ordering, same model). Ordering only holds within a worker at `-n ≥ 2`; use `-n 0`, or `--dist loadfile`/`loadscope` to keep an ordered group on one worker |
+| pytest-randomly | ✅ Works | rstest synthesizes the `randomly_seed` key xdist's master would inject, derived from the run uid so every worker agrees on one reproducible seed. An explicit `--randomly-seed=<n>` still wins. (rstest's native [`--shuffle`](../reference/cli.md#-shuffleseed) remains available and is also parallel-safe.) |
+| pytest-random-order | ✅ Works | its `pytest_configure` reads `workerinput["random_order_seed"]` *unconditionally* whenever `workerinput` exists (even with reordering off, the default) so merely installing it used to `KeyError` every `-n ≥ 2` run. rstest now seeds that key (shared across workers so the shuffled collection hashes agree), keeping the plugin's own `default:` prefix so order is untouched unless you pass `--random-order[-bucket\|-seed]`; an explicit `--random-order-seed=<n>` is honored. Global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
+| pytest-mypy | ✅ Works | its worker branch reads `workerinput["mypy_config_stash_serialized"]` (the mypy results-cache path an xdist **controller** sets) so merely installing it used to `KeyError` every `-n ≥ 2` run (no rstest master runs the controller). rstest now seeds a unique **per-worker** cache path; mypy is run lazily by the first mypy item on each worker (`MypyResults.from_session`, `FileLock`-guarded), so each worker type-checks its own subset and errors surface identically at `-n auto` and `-n 0`. If the seed can't be provisioned the plugin is unregistered (run mypy at `-n 0`). |
+| pytest-rerunfailures | 🟦 Native | inside pool workers rstest unregisters it *before* `pytest_configure`, so its xdist `sock_port` client branch never fires (the old `KeyError: 'sock_port'` at `-n ≥ 2` with pytest-xdist installed), and rstest owns reruns natively: crash-aware, honoring `@mark.flaky` and [`--reruns`](../reference/cli.md#-reruns-n) / `--only-rerun`. At `-n 0` without rstest's command-line `--reruns` the plugin keeps its own behavior; a `--reruns` in `addopts` therefore works at `-n 0` but silently does nothing in the pool. |
+| pytest-html | 🔴 Silent | at `-n ≥ 2` **no report is written**: a silent no-op, not a crash. pytest-html registers its report writer only on a node *without* `workerinput` (its xdist "am I the master?" check); every rstest pool worker has a `workerinput`, so nothing ever owns report generation. Merging all workers' results into one file needs a single master process, which rstest doesn't run (the Rust orchestrator owns the merge, and workers are isolated sessions). Use rstest's native `--html` (a command-line `--html` is always rstest's merged report), generate pytest-html's own report at `-n 0 -- --html=...`, or keep the parallel run and emit from merged artifacts: see [HTML & aggregated reporting](#html-aggregated-reporting-under-parallelism). |
 
 The recurring fault line: plugins that read xdist-**master**-injected
 `workerinput` keys used to crash under the pool when rstest had no master to
@@ -291,7 +299,7 @@ no-op.
 
 ```bash
 #!/usr/bin/env bash
-# silent-noop-audit.sh — flag plugin artifacts that vanish under the pool.
+# silent-noop-audit.sh: flag plugin artifacts that vanish under the pool.
 # Usage: ./silent-noop-audit.sh tests/some_slice
 set -euo pipefail
 slice="${1:-tests}"

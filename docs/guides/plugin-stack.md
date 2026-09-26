@@ -47,14 +47,14 @@ upgraded to `V`.
 | pytest-mock | ✅ Works | V | Per-test `mocker` fixture; vetted ([top-100](../reference/top-100-plugins.md)). |
 | pytest-html | 🔴 Silent | V | **Writes no report at `-n ≥ 2`**: a silent no-op, not a crash (gates on the master `workerinput`). A command-line `--html` is rstest's native report; for the plugin's own report run `-n 0 -- --html=...`. See below. |
 | pytest-sugar | 🔶 `-n 0` | V | Terminal-rendering; **not painted at `-n ≥ 2`**: rstest owns the terminal. Non-visual behavior unaffected; run at `-n 0` when you want its rendering. |
-| freezegun | Works | n/a | From the [tested-compatibility table](plugins.md) (in-process time freezing is per-worker); **but don't put `now()` in parametrize IDs** ([time-derived IDs gap](../concepts/compatibility.md)). |
+| freezegun | ✅ Works | V | In-process time freezing is per-worker; five corpus suites load it in parallel ([tested compatibility](plugins.md#tested-compatibility)). Keep `now()` out of parametrize IDs unless every worker computes the same string ([time-derived IDs gap](../concepts/compatibility.md#known-gaps)). |
 
-Notes on freezegun: the tested-compatibility table tiers it as **Works**
-(that table uses Works / caveat / parallel-unsafe, not V/i). The
-pytest-plugin wrappers around it, **pytest-freezegun** and
-**pytest-freezer** ([top-100](../reference/top-100-plugins.md)), are marked
-**✅ Works (i, inferred)**: same in-process time-freeze model, not yet
-runtime-verified.
+Notes on freezegun: it is a library, not a pytest plugin, so it has no
+top-100 row; the [tested-compatibility table](plugins.md#tested-compatibility)
+uses the same verdict marks as the top-100 matrix. The pytest-plugin wrappers
+around it, **pytest-freezegun** and **pytest-freezer**
+([top-100](../reference/top-100-plugins.md)), are marked **✅ Works (i,
+inferred)**: same in-process time-freeze model, not yet runtime-verified.
 
 Six of the eight run unchanged or via a native flag; the only two that need
 a mode switch are pytest-html and pytest-sugar.
@@ -76,7 +76,7 @@ core. The consequence to internalize:
   excludes the running pytest (say it declares `pytest<9`), rstest prints one
   `rstest: warning: <plugin> <version> requires pytest<9, ...` line to stderr
   per run. The run is unaffected; the warning just tells you the pin is not
-  doing anything.
+  doing anything. (Unreleased: not in 0.7.0.)
 - **`rstest -n 0` exercises every installed plugin against vendored-9** and
   surfaces any pytest-9 incompatibility *exactly as a real pytest upgrade
   would*, because that is effectively what it is. Clear it there first.
@@ -98,7 +98,9 @@ resolved and ran against vendored pytest 9.1.1. They are **known-good
 floors to aim for, not proven minimums**: older releases were not tested,
 and the corpus installs plugins unpinned, so a newer corpus run may resolve
 newer versions. Every corpus run records the versions it installed, and the
-rows are regenerated from that data with `python3 corpus/plugin_versions.py`.
+rows are regenerated from that data with
+`python3 corpus/plugin_versions.py --from-venvs` (reads the populated corpus
+venvs under `corpus/work/*/venv`, so run the corpus first).
 The declared range is the plugin's own `Requires-Dist` on pytest.
 
 | Plugin | Verified with | Declared pytest range | Exercised by |

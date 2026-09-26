@@ -13,7 +13,9 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   need a fixed count (for example with `--shard`).
 - **`--dist load` / `loadfile` / `loadscope` / `loadgroup`**: same names and
   semantics, including `@pytest.mark.xdist_group`. `load` (the default) adds
-  duration-aware slowest-first scheduling.
+  duration-aware slowest-first scheduling. Pass the mode on the rstest command
+  line or set `[tool.rstest] dist`: rstest does not read `--dist` from
+  `addopts` (see [below](#if-xdist-is-still-in-your-ini)).
 - **`-n 1`**: differs. xdist's `-n 1` is one `gw0` worker with `workerinput`;
   rstest's `-n 1`, like `-n 0`, is single-worker mode with no worker identity.
 - **`--dist no`**: rejected (exit 1). Use `-n 0` for a single worker.
@@ -47,11 +49,13 @@ per-worker outcome differences, so retrying failures would defeat it; see
 
 rstest workers announce themselves exactly like xdist workers.
 `config.workerinput` carries: `workerid` (`gw0`, `gw1`, ...),
-`workercount`, `testrun_uid` (one uid per run, shared by all workers),
-`mainargv`, and the `cov_master_*` keys pytest-cov expects. The
-`PYTEST_XDIST_WORKER` and `PYTEST_XDIST_WORKER_COUNT` environment
+`workercount`, the run uid as `testrunuid` (xdist's key) and `testrun_uid`
+(one uid per run, shared by all workers), `mainargv`, and the `cov_master_*`
+keys pytest-cov expects. The `PYTEST_XDIST_WORKER`,
+`PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` environment
 variables are set too, so plugins and conftests that grep the
-environment keep working as-is. Plugins
+environment keep working as-is. (`testrunuid` and `PYTEST_XDIST_TESTRUNUID`
+are Unreleased: rstest 0.7.0 had only `testrun_uid`.) Plugins
 keying per-worker resources on worker identity work unchanged. The canonical
 case is pytest-django's per-worker test database (`test_<name>_gw0`, ...),
 which follows from the `workerid` above; note that rstest's corpus only
@@ -62,10 +66,16 @@ database (Postgres, MySQL) on your own suite.
 detect rstest specifically.
 
 The `worker_id` and `testrun_uid` **fixtures** are provided natively, with
-xdist-identical semantics, so `def test(worker_id): ...` resolves whether or
-not pytest-xdist is installed. Removing pytest-xdist from your config keeps
-them working (`worker_id` is `"master"` below `-n 2`, `gwN` in the pool). See
-the [xdist support matrix](../reference/xdist-support.md#fixtures-worker-identity).
+xdist's semantics, so `def test(worker_id): ...` resolves whether or not
+pytest-xdist is installed. Removing pytest-xdist from your config keeps them
+working (`worker_id` is `"master"` below `-n 2`, `gwN` in the pool). With
+pytest-xdist installed, rstest's definitions take precedence over xdist's (a
+conftest override still wins), and in the pool both return the same values.
+One caveat: `--reruns` at `-n 0/1` runs a one-worker pool where
+`config.workerinput` and `PYTEST_XDIST_WORKER=gw0` exist, so xdist's
+`get_xdist_worker_id()` / `is_xdist_worker()` report `gw0` while the fixtures
+report `"master"`. See the
+[xdist support matrix](../reference/xdist-support.md#fixtures-worker-identity).
 
 ## Master-side hooks
 
@@ -90,6 +100,18 @@ race: [xdist hook emulation](../concepts/xdist-hooks.md).
 workers automatically: options parse, the xdist session never engages, no
 nested workers. Keep it while a pytest-xdist job is still your fallback, then
 remove it and pass `-n` to rstest.
+
+rstest reads neither `-n` nor `--dist` from `addopts` (or `PYTEST_ADDOPTS`):
+its worker count comes from the command line or `[tool.rstest] numprocesses`
+(default `auto`), and its mode from `--dist` or `[tool.rstest] dist` (default
+`load`). So `addopts = -n 4 --dist loadgroup` gives an `auto`-sized `load`
+run, and `@pytest.mark.xdist_group` tests are no longer kept together, with no
+warning. Copy the mode when you switch:
+
+```toml
+[tool.rstest]
+dist = "loadgroup"
+```
 
 ## What improves
 

@@ -117,8 +117,12 @@ in your environment. Two consequences:
   reflects a version that already supports pytest 9.
 - **A `pytest<9` pin is inert at runtime.** Such a pin is a packaging
   constraint that pip enforces at install time only. It does not change which
-  pytest the plugin sees once a worker is running, and rstest never consults
-  it, so a plugin pinned to `pytest<9` still executes against the vendored 9.
+  pytest the plugin sees once a worker is running, so a plugin pinned to
+  `pytest<9` still executes against the vendored 9. rstest reads each loaded
+  plugin's `Requires-Dist` on pytest and, when it excludes the running pytest,
+  prints one `rstest: warning: <plugin> <version> requires pytest<9, ...` line
+  to stderr per run; the run itself is unaffected (**Unreleased:** the warning
+  is not in 0.7.0).
 
 rstest does not maintain a per-plugin minimum-version table. Instead,
 `rstest -n 0` runs your installed plugins against the vendored core in one
@@ -156,7 +160,7 @@ Honest list, maintained as things close:
 | `--sw` (stepwise, `--stepwise-skip`, `--stepwise-reset`) | runs in a single pytest session automatically (like `--pdb`/`-s`/`--co`): the vendored stepwise plugin owns resume/stop and its `cache/stepwise` round-trips exactly as upstream. Sequential by nature: stop-at-first-failure + resume-from-a-single-cursor has no meaning under split, duration-ordered parallel dispatch, so it does not run at `-n ≥ 2`. Same constraint as xdist. |
 | xdist master-side hooks (`pytest_configure_node` and friends) | emulated for hooks that are per-node-stateless (read `gateway.id`, fill `node.workerinput`: SQLAlchemy's pattern, measured). Structural divergences from a single xdist controller: the hooks run N times concurrently in N processes (controller-side shared state needs rework), and crashed-node `pytest_testnodedown` runs on a survivor without the dead node's configure-time state. Details: [xdist hook emulation](xdist-hooks.md). |
 | Plugins needing a controller-side service *shared* across all workers | rstest runs no central controller, so a plugin that needs one shared service for the whole pool isn't emulated. The known ecosystem cases are instead handled per worker: pytest-retry's branch self-provisions its own report server per worker (its `server_port` is set locally, no master needed) and pytest-rerunfailures is neutralized in favor of native `--reruns`, both work at `-n ≥ 2`. See [parity divergences §8](../reference/parity-divergences.md#8-plugin-master-hook-gating-rstest-side-fixed). |
-| Time-derived parametrize IDs (`now()` in `@pytest.mark.parametrize`) | collection runs once per worker, so time-dependent IDs differ between workers; rstest detects the mismatch and refuses to dispatch rather than misattribute results: use stable IDs or `-n 0` (same constraint as xdist) |
+| Time-derived parametrize IDs (`now()` in `@pytest.mark.parametrize`) | collection runs once per worker, and rstest compares every worker's collected ids (count + hash). IDs that come out identical on every worker run normally: second-resolution timestamps usually do, since workers collect within the same second (marshmallow runs 100% at `-n auto`; [parity divergences §3](../reference/parity-divergences.md#3-run-dependent-nodeids-now-resolved)). IDs that differ between workers (sub-second timestamps, uuids, random values, or a second-resolution collection that straddles a tick) make rstest refuse to dispatch rather than misattribute results; there is no automatic fallback. Use stable `ids=` or `-n 0` (same constraint as xdist) |
 | Plugins that need a single master process to aggregate worker output into one artifact (pytest-html) | pytest-html registers its report writer only on a node *without* `workerinput` (its xdist master check); every rstest worker has one, so at `-n ≥ 2` no writer is registered and an `--html` that reaches the plugin (via `addopts` or after `--`) silently produces nothing (no crash). Merging all workers into one file needs a master process rstest doesn't run. A command-line `--html` is rstest's native merged report at every worker count; for pytest-html's own report, run `rstest -n 0 -- --html=...`. (Formerly this row also listed pytest-rerunfailures/`sock_port` and pytest-retry/`server_port`, both now handled, and claimed a pytest-html `TypeError`: that path is fixed by signature-aware node-hook dispatch; pytest-randomly's derivable `randomly_seed` is synthesized.) Full per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility) |
 
 Found a difference not listed here? That's a bug report we want.

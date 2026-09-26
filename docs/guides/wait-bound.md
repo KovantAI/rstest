@@ -137,9 +137,12 @@ See the
 The general rule holds for anything else: key the resource on
 `RSTEST_WORKER_ID` (or `workerinput`) so N workers don't collide.
 
-`rstest --doctor` prints a warning for every session fixture that ran more
-than once, with this exact caveat, a quick way to spot resources you
-haven't made per-worker-safe yet.
+`rstest --doctor` flags session fixtures that ran more than once with this
+exact caveat ("session fixture ran once PER WORKER; must be safe to
+duplicate"), but only on rows of its FIXTURE HOTSPOTS table: fixtures with at
+least 0.5s of total setup time, top 8. It is a quick way to spot the expensive
+resources you haven't made per-worker-safe yet; a cheap session fixture that
+runs per worker gets no warning, so audit those by hand.
 
 ## 4. Measure the real win
 

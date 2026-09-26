@@ -247,12 +247,19 @@ is in [CI quickstart](ci-quickstart.md#suite-health-trending-with-doctor).
 
 Under GitHub Actions, any doctor run appends the report to
 `$GITHUB_STEP_SUMMARY` automatically: `rstest --doctor-json doctor.json`
-in a workflow puts the analysis on the run page with no extra step. To
-write the markdown to a custom path instead (or outside Actions):
+in a workflow puts the analysis on the run page with no extra step. On
+Buildkite, the same markdown is piped to `buildkite-agent annotate` as an
+info annotation (best-effort: a missing agent never fails the run).
+
+To also write the markdown to a file of your own (for an artifact, or on a
+CI with no native summary):
 
 ```console
 $ rstest --doctor-md doctor.md
 ```
+
+`--doctor-md` is additive: under GitHub Actions or Buildkite the automatic
+summary is still published.
 
 ## Gating a PR on doctor metrics
 

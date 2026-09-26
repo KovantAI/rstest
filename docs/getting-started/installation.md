@@ -42,6 +42,10 @@ touches your `pytest` installation. (One exception: `rstest try` runs your
 suite under plain `pytest` to produce a baseline, so *that* command needs
 pytest installed, see [`try`](../reference/cli-commands.md#try).)
 
+Tests always run on the vendored pytest core (currently 9.1.1), whatever
+pytest version your project or its plugins pin. If a plugin still requires
+an older pytest, see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
+
 First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
 it covers the common install/first-run failures (missing `msgpack`, wrong
 interpreter, import errors).

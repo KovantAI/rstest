@@ -301,11 +301,10 @@ fn relevant(path: &Path) -> bool {
     }
     match path.extension().and_then(|e| e.to_str()) {
         Some("py") => true,
-        Some("toml" | "ini" | "cfg") => {
-            path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                matches!(n, "pyproject.toml" | "pytest.ini" | "tox.ini" | "setup.cfg")
-            })
-        }
+        Some("toml" | "ini" | "cfg") => path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| crate::config::CONFIG_NAMES.contains(&n)),
         _ => false,
     }
 }
@@ -614,6 +613,9 @@ mod tests {
         assert!(relevant(Path::new("pytest.ini")));
         assert!(relevant(Path::new("tox.ini")));
         assert!(relevant(Path::new("setup.cfg")));
+        assert!(relevant(Path::new("pytest.toml")));
+        assert!(relevant(Path::new(".pytest.toml")));
+        assert!(relevant(Path::new(".pytest.ini")));
         // Unrelated toml/ini/cfg and other extensions are ignored.
         assert!(!relevant(Path::new("Cargo.toml")));
         assert!(!relevant(Path::new("mypy.ini")));

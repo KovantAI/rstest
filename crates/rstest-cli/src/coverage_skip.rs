@@ -39,12 +39,17 @@ const SCHEMA: u32 = 2;
 /// Config files whose change invalidates the whole skip decision: markers,
 /// addopts, and coverage config aren't reflected in per-test coverage, so a
 /// change to any of them disables skipping for that run.
-const CONFIG_FILES: [&str; 5] = [
+/// The pytest 9 names are appended (not merged into probe order) so an existing
+/// project's fingerprint is unchanged by their addition.
+const CONFIG_FILES: [&str; 8] = [
     "pyproject.toml",
     "pytest.ini",
     "setup.cfg",
     "tox.ini",
     ".coveragerc",
+    "pytest.toml",
+    ".pytest.toml",
+    ".pytest.ini",
 ];
 
 /// Directories never worth descending into when hunting for `conftest.py`:

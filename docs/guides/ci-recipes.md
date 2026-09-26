@@ -80,7 +80,7 @@ build:
 ```
 
 `--cache-compact-threshold` folds the loose segments inline once they exceed N,
-so no maintenance job is needed. `gsutil rsync … ./rcache` + `--cache-remote
+so no maintenance job is needed. `aws s3 sync … ./rcache` + `--cache-remote
 ./rcache` remains valid if you prefer materializing a dir. The build's service
 role needs `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix
 (`Delete` only for the inline compaction).

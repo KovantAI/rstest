@@ -39,6 +39,14 @@ the plugin would instead take its *worker* branch and read a
 the width lets each worker self-provision its own server, the same way the
 follower-DB pattern self-provisions.
 
+That branch needs `has_plugin("xdist")`, so it only applies when pytest-xdist
+is installed next to rstest. Without xdist, pytest-retry takes its worker
+branch; rstest then starts pytest-retry's own `ReportServer` inside each
+worker and seeds `workerinput["server_port"]` with its port, so the read
+succeeds (the same "every worker plays master" model as the synthesized
+`randomly_seed`). If that seeding fails, rstest unregisters the plugin and
+its native `--reruns` take over.
+
 ## When self-provisioning can't apply: pytest-rerunfailures
 
 Not every controller-service plugin can be steered to a master branch.

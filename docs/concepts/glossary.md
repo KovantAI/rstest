@@ -73,8 +73,10 @@ byte-exact pytest behavior: the compatibility anchor. Also called
 name this same mode. There is no worker identity below
 `-n 2` (unlike pytest-xdist, whose `-n 1` spawns a `gw0` worker: see
 [xdist migration](../guides/migrate-from-xdist.md)). The flags that need
-pytest's own terminal (`--co`, `-s`, `--capture`, `--pdb`, `--trace`)
-switch to this mode automatically. See [Compatibility](compatibility.md)
+pytest's own terminal (`--co`/`--collect-only`, `-s`, `--capture=...`,
+`--pdb`, `--trace`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
+`--sw-reset`/`--stepwise-reset`, and rstest's `--debug`) switch to this mode
+automatically. See [Compatibility](compatibility.md)
 for the guarantee and [Architecture](architecture.md) for how it falls
 back. One opt-in exception: passing [`--reruns`](../reference/cli.md#-reruns-n)
 runs `-n 0`/`-n 1` as a degenerate one-worker pool so retries fire, trading
@@ -85,8 +87,9 @@ byte-exactness for the reruns you asked for.
 counted and listed.
 
 **Selection**: the set of tests chosen to run; under
-[`--changed`](../reference/cli.md#-changedrev), derived from the import
-graph.
+[`--changed`](../reference/cli.md#-changedrev), derived from the
+per-test coverage index when it is warm, with the import graph as the
+fallback (see [Caching](caching.md)).
 
 ## Internals
 
@@ -102,8 +105,10 @@ role), so "master-side" xdist hooks are *emulated* per worker. See
 `rstest_worker._vendor`; provides all test semantics. Never conflicts with
 an installed pytest.
 
-**Item dispatch**: distributing individual tests (not files) to workers
-by index into the verified collection.
+**Item dispatch**: distributing individual tests (not files) to workers.
+In the default eager mode a test travels as its index into the verified
+collection; under [lazy collection](lazy-collection.md) (`--collect lazy`)
+it travels by nodeid, since lazy workers share no index space.
 
 **Long pole**: the slowest single test in the run (`long_pole_seconds` in
 the doctor report). No worker count can finish the run faster than it. When
@@ -120,8 +125,10 @@ preserving module-fixture locality.
 it knows the successor (teardown scoping requires it); queues must always
 end explicitly.
 
-**Designate**: the worker chosen to host the serial phase and to ship the
-full collection id list.
+**Designate**: the worker chosen to host the serial phase: the lowest
+alive worker, promoted to the next one if it crashes. (The full collection
+id list is always shipped by worker `gw0`; the others verify their
+collection against it by count and hash.)
 
 **Serial phase**{#serial-phase}: `@pytest.mark.serial` tests running exclusively on the
 designate after all other workers finish.

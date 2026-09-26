@@ -136,7 +136,10 @@ under `--changed-strict`) before running anything, so `--junitxml` and
 `--report-json` are **not written**. CI steps that expect those files
 (GitLab `reports: junit`, test-report publishers, `upload-artifact`, a JUnit
 ratio gate) should tolerate their absence, e.g. `if-no-files-found: ignore` on
-`actions/upload-artifact`.
+`actions/upload-artifact`. That applies to single-project runs. At a
+[monorepo](monorepo.md) root, the merged `--report-json` is still written,
+with every project marked `"skipped": true` (same exit code); only the
+per-project JUnit files are absent.
 
 Keep the default-branch runs that feed the cache **full**, not `--changed`:
 a `--changed` run only records durations and coverage for the tests it ran.
@@ -149,8 +152,11 @@ a `--changed` run only records durations and coverage for the tests it ran.
   (`--cache-pull --cache-push`) and they **union on pull** into a full index;
   otherwise warm the index from an **unsharded** coverage run (or merge shard
   data before building it). See [Sharding](sharding.md).
-- **Monorepos.** `--changed` is forwarded to each affected project, which
-  narrows within its own tree against its own `.rstest_cache`. See
-  [Monorepos](monorepo.md).
+- **Monorepos.** At the root, rstest classifies projects once against the
+  repo-wide change set. A project with changed files of its own gets
+  `--changed` and narrows within its own tree against its own `.rstest_cache`;
+  a project that only depends on a changed one runs its full suite; the rest
+  are skipped. See [Monorepos](monorepo.md) and
+  [Monorepo mode](../concepts/monorepo.md).
 - **Watch mode.** [`--watch`](watch-mode.md) uses import-graph selection for
   its targeted reruns.

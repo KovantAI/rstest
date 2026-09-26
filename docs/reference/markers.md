@@ -97,7 +97,10 @@ both honor the marker, so uninstall it rather than run two timers.
 Not a marker rstest owns, but the one that most often blocks parallelism:
 parametrize **IDs must be stable across collections**. rstest collects on
 each worker and refuses to dispatch if the id sets disagree, so an id built
-from a memory address (`repr()` fallback), a uuid, or `now()` forces the
-suite to `-n 0`. Give such a parametrize an explicit stable `ids=` (e.g.
+from a memory address (`repr()` fallback), a uuid, or a sub-second timestamp
+stops a parallel run (`workers collected different test sets`) until you fix
+it or run `-n 0`. A second-resolution `now()` id usually matches across
+workers and runs, but can fail intermittently when collection straddles a
+second. Give such a parametrize an explicit stable `ids=` (e.g.
 `ids=[c.name for c in cases]`). [`rstest migrate-check`](cli-commands.md#migrate-check)
 finds these before your first run and names the exact site.

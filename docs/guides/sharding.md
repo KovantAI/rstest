@@ -111,7 +111,9 @@ does exactly this.
 !!! warning "Unreleased"
     `shard-verify` and the `meta.shard` report stamp it reads are on `main`
     but **not in rstest 0.7.0**. On 0.7.0, `rstest shard-verify …` is treated
-    as a test path. Until the next release, use the jq equivalent below. Each shard's `--report-json`, written while `--shard` was
+    as a test path. Until the next release, use the jq equivalent below.
+
+Each shard's `--report-json`, written while `--shard` was
 active, carries a `meta.shard` stamp: `k`, `n`, and the sha256
 `collection_hash` and size of the full collected suite. Pass the per-shard
 reports and it reconciles them:
@@ -174,8 +176,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: |
@@ -185,9 +187,9 @@ jobs:
       # Restore a SHARED cache so every shard partitions identically.
       # read-only: shards must not race to save divergent caches.
       # The `durations` job below saves `...-<ref>-<run_id>`, so this exact
-      # `key` never hits — the match happens via the `restore-keys` prefix,
+      # `key` never hits; the match happens via the `restore-keys` prefix,
       # pulling the newest cache for this ref. That's intended.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: .rstest_cache
           key: rstest-durations-${{ github.ref_name }}
@@ -198,7 +200,7 @@ jobs:
       - name: test shard ${{ matrix.shard }}
         run: rstest -n 4 --shard ${{ matrix.shard }}/4 --junitxml junit.${{ matrix.shard }}.xml
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit-${{ matrix.shard }}
@@ -210,11 +212,11 @@ jobs:
   durations:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
       - run: pip install -r requirements.txt && pip install rstest
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .rstest_cache
           key: rstest-durations-${{ github.ref_name }}-${{ github.run_id }}
@@ -226,14 +228,14 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: junit-*
           merge-multiple: true
       # Feed junit.*.xml to your test-report integration; most accept a
       # glob. Or merge with junitparser: pip install junitparser &&
       # junitparser merge junit.*.xml junit.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: junit-all
           path: junit.*.xml
@@ -277,7 +279,7 @@ The only inputs are the 1-based shard number and the total. Wire them
 from whatever your system exposes:
 
 ```bash
-# N total jobs; THIS job is number K (1..N). -n auto per job.
+# N total jobs; THIS job is number K (1..N). Pin -n per job (not auto).
 rstest -n 4 --shard "$K/$N" --junitxml "junit.$K.xml"
 ```
 

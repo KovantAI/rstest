@@ -165,6 +165,116 @@ def test_testrun_uid_generates_fresh_hex_without_workerinput():
     assert uid != _fixture_fn("testrun_uid")(p, request)
 
 
+def test_build_workerinput_exposes_run_uid_under_both_spellings(monkeypatch):
+    # xdist's `testrun_uid` fixture reads workerinput["testrunuid"] and xdist
+    # workers export PYTEST_XDIST_TESTRUNUID; both must carry the run uid.
+    monkeypatch.setenv("RSTEST_WORKER_COUNT", "4")
+    monkeypatch.setenv("RSTEST_RUN_UID", "abc123")
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "inherited")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw9")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "99")
+    config = _WiConfig()
+    StreamPlugin._build_workerinput(config, "gw1")
+    assert config.workerinput is not None
+    assert config.workerinput["testrunuid"] == "abc123"
+    assert config.workerinput["testrun_uid"] == "abc123"
+    import os
+
+    assert os.environ["PYTEST_XDIST_TESTRUNUID"] == "abc123"
+
+
+def _fdef(func, baseid=""):
+    """Minimal FixtureDef stand-in: is_visibility_more_specific falls back to
+    baseid comparison when node is None."""
+    return SimpleNamespace(func=func, node=None, baseid=baseid)
+
+
+def _bound(p, name):
+    """The bound method pytest's parsefactories stores as FixtureDef.func."""
+    return getattr(p, name)._get_wrapped_function()
+
+
+def _session_with_defs(defs_by_name):
+    fm = SimpleNamespace(_arg2fixturedefs=defs_by_name)
+    return SimpleNamespace(_fixturemanager=fm)
+
+
+def test_identity_fixtures_moved_after_other_global_plugins():
+    # rstest's plugin registers before setuptools plugins, so xdist's global
+    # `worker_id` lands last and would win. The trylast sessionstart hook must
+    # move ours behind it.
+    p = _plugin()
+    ours_wid, ours_uid = _fdef(_bound(p, "worker_id")), _fdef(_bound(p, "testrun_uid"))
+    xdist_wid, xdist_uid = _fdef(lambda request: "gw0"), _fdef(lambda request: "x")
+    defs = {"worker_id": [ours_wid, xdist_wid], "testrun_uid": [ours_uid, xdist_uid]}
+    p.pytest_sessionstart_identity_fixtures(_session_with_defs(defs))
+    assert defs["worker_id"] == [xdist_wid, ours_wid]
+    assert defs["testrun_uid"] == [xdist_uid, ours_uid]
+
+
+def test_identity_fixtures_still_yield_to_conftest_override():
+    # A conftest/module-level override is more specific and must keep winning.
+    p = _plugin()
+    ours = _fdef(_bound(p, "worker_id"))
+    xdist = _fdef(lambda request: "gw0")
+    conftest = _fdef(lambda request: "mine", baseid="tests")
+    defs = {"worker_id": [ours, xdist, conftest]}
+    p.pytest_sessionstart_identity_fixtures(_session_with_defs(defs))
+    assert defs["worker_id"] == [xdist, ours, conftest]
+
+
+def test_identity_fixtures_reorder_tolerates_missing_state():
+    p = _plugin()
+    p.pytest_sessionstart_identity_fixtures(SimpleNamespace())  # no fixture manager
+    defs = {"worker_id": [_fdef(lambda request: "x")]}
+    p.pytest_sessionstart_identity_fixtures(_session_with_defs(defs))  # none of ours
+    assert len(defs["worker_id"]) == 1
+
+
+class _FakeXdistPlugin:
+    """Mirrors pytest-xdist's fixtures: identity whenever `workerinput` exists,
+    uid from workerinput["testrunuid"]. Its pytest_configure stands in for the
+    `--reruns` one-worker pool, which builds workerinput with workercount 1."""
+
+    def pytest_configure(self, config):
+        config.workerinput = {
+            "workerid": "gw0",
+            "workercount": 1,
+            "testrunuid": "pooluid",
+            "testrun_uid": "pooluid",
+        }
+
+    @pytest.fixture(scope="session")
+    def worker_id(self, request):
+        if hasattr(request.config, "workerinput"):
+            return request.config.workerinput["workerid"]
+        return "master"
+
+    @pytest.fixture(scope="session")
+    def testrun_uid(self, request):
+        if hasattr(request.config, "workerinput"):
+            return request.config.workerinput["testrunuid"]
+        return "fresh"
+
+
+def test_identity_fixtures_win_over_xdist_in_real_session(tmp_path, monkeypatch):
+    # End to end through a real pytest session: the xdist-like plugin is
+    # registered after StreamPlugin (as setuptools plugins are), yet the test
+    # sees rstest's single-worker answer.
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "test_ids.py").write_text(
+        "def test_ids(worker_id, testrun_uid):\n"
+        "    assert worker_id == 'master'\n"
+        "    assert testrun_uid != 'pooluid' and len(testrun_uid) == 32\n"
+    )
+    rc = pytest.main(
+        ["-q", "-p", "no:cacheprovider", str(tmp_path / "test_ids.py")],
+        plugins=[_plugin(), _FakeXdistPlugin()],
+    )
+    assert rc == 0
+
+
 # ── _call_configure_node / plugin_registered ───────────────────────────────
 
 
@@ -337,6 +447,7 @@ _BUILD_SEEDED_KEYS = frozenset(
         "workercount",  # pytest-cov, xdist-compat sniffers
         "mainargv",  # xdist-compat prog-name reconstruction
         "testrun_uid",  # shared run id (xdist testrun_uid contract)
+        "testrunuid",  # same id, the spelling xdist's own `testrun_uid` fixture reads
         "cov_master_host",  # pytest-cov worker mode
         "cov_master_topdir",  # pytest-cov worker mode
     }
@@ -347,7 +458,6 @@ _BUILD_SEEDED_KEYS = frozenset(
 #   follower_ident   -> _XdistNodeShim configure_node emulation (sqlalchemy)
 #   sock_port,       -> pytest-rerunfailures, unregistered wholesale
 #   statusdb_token       (_neutralize_rerunfailures)
-#   testrunuid       -> read only by xdist itself; absent when xdist uninstalled
 
 
 def test_build_workerinput_seeds_every_direct_seed_crash_key(monkeypatch):

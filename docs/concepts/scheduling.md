@@ -7,7 +7,7 @@ mode.
 
 Every worker collects the identical session (same args, same ini, same
 conftest semantics). Workers verify agreement by item count + hash of the
-node-id list; one designated worker ships the full list. Divergent
+node-id list; worker `gw0` ships the full list. Divergent
 collections (typically a randomizing plugin without a fixed seed) abort
 the run before any misassignment.
 
@@ -32,8 +32,25 @@ workers may have started by then.
    when a worker half-drains.
 
 The duration cache (`.rstest_cache/durations.json`) is written after every
-run, so the first run is collection-ordered and every later run is
-duration-aware.
+normal run (not under [`--dist each`](#broadcast-mode-dist-each)), so the
+first run is collection-ordered and every later run is duration-aware.
+
+### Fail-fast ordering (`--order fail-fast`)
+
+!!! note "Unreleased"
+    Not in rstest 0.7.0 (the latest release); available when installing from
+    source, and in the next release.
+
+The order above is `--order throughput`, the default. [`--order
+fail-fast`](../reference/cli.md#-order-throughputfail-fast) re-sequences the
+`--dist load` queue for the earliest red signal instead: tests that recently
+hard-failed go first (most recent first), then flaky tests (most recent
+flake first), both read from `.rstest_cache/flakes.json` and each dispatched
+on its own; at most 128 lead, and quarantined tests are never pulled
+forward. The remaining tests follow in throughput order. With neither the
+flag nor `[tool.rstest] order` set, rstest picks `fail-fast` under
+`--watch` and `throughput` otherwise. Affinity modes and `--collect lazy`
+ignore it.
 
 ## The nextitem invariant
 
@@ -50,7 +67,8 @@ scheduler's edge cases (three deadlocks' worth).
 ## The serial phase
 
 `@pytest.mark.serial` items are excluded from the parallel queue. One
-designated worker is held open; when every other worker's session has
+designated worker (the lowest alive one, promoted if it crashes) is held
+open; when every other worker's session has
 fully finished (fixtures torn down, ports released), the serial items run
 there exclusively, in collection order.
 

@@ -19,10 +19,13 @@ $ rstest --watch
 ```text
 2 passed in 0.13s
 
-[watch] waiting for changes... (Ctrl+C to quit, last exit: 0)
+[watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
 [watch] test_w.py changed; rerunning changed files
 2 passed in 0.13s
-[watch] helper.py changed; rerunning full selection
+
+[watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
+[watch] helper.py changed; rerunning affected tests
+1 passed in 0.11s
 ```
 
 The rerun-selection policy is import-graph based, so you don't rerun the whole suite on every keystroke:
@@ -32,7 +35,7 @@ The rerun-selection policy is import-graph based, so you don't rerun the whole s
 - Changes to pytest config (`pyproject.toml`, `pytest.ini`, `setup.cfg`, `tox.ini`) trigger a full rerun.
 - VCS internals, `__pycache__`, virtualenvs, and rstest's own caches are ignored.
 
-Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. `Ctrl+C` exits.
+Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. Type `q` and Enter between runs, or press `Ctrl+C`, to exit (`q` is Unreleased: not in 0.7.0, and not offered under `-s`/`--pdb`; see [Watch mode](watch-mode.md)).
 
 **Every rerun is a clean run.** Each cycle spawns fresh Python worker processes and tears them down when it finishes, at every worker count, including `-n 0`/`-n 1`. Nothing is reused between cycles, so an edited module is always re-imported from scratch; watch mode cannot show a stale-import false green.
 

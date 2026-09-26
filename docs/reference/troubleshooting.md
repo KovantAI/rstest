@@ -34,6 +34,15 @@ loadfile`, or a clock mock.
 
 ## `workers collected different test sets; cannot dispatch safely`
 
+The full error reads:
+
+```text
+workers collected different test sets (N vs M items); cannot dispatch safely.
+Common causes: pytest-randomly without a fixed seed, or parametrize IDs
+derived from time/randomness. Workarounds: -p no:randomly, stable
+parametrize ids, or -n 0
+```
+
 Your collection is nondeterministic: typically a randomizing plugin
 (pytest-randomly without a fixed seed) or test parametrization built from
 an unordered source (set iteration, directory listing). rstest refuses to

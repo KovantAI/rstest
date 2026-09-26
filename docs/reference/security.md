@@ -1,7 +1,7 @@
 # Security & supply chain
 
-rstest ships a compiled Rust orchestrator plus a vendored pytest core inside
-a Python wheel. That is a wider trust surface than a pure-Python package, so
+rstest ships a compiled Rust orchestrator binary plus a vendored pytest core
+inside a Python wheel. That is a wider trust surface than a pure-Python package, so
 this page states (in one place) how releases are built and signed, what the
 runner does and does not do on your machine, and how the vendored pytest is
 sourced and kept current. For the reporting process and the exact policy text,
@@ -45,8 +45,9 @@ not from a maintainer's laptop. Two properties follow:
   repository or CI. The publisher is scoped to this repo and workflow.
 
 Wheels are built as per-platform binaries (manylinux, musllinux, macOS arm64,
-Windows x86_64/arm64): they contain a compiled Rust extension, so they are
-**not** pure-Python and are not bit-for-bit reproducible; provenance is
+Windows x86_64/arm64): each contains the compiled standalone `rstest`
+executable (not a Python extension module; maturin `bindings = "bin"`), so
+they are **not** pure-Python and are not bit-for-bit reproducible; provenance is
 established by attestation, not by reproducible builds. Each release also
 ships a `SHA256SUMS` file.
 
@@ -74,7 +75,7 @@ licensing is in [License](license.md#vendored-software). Key points:
 ### Handling pytest security fixes
 
 When upstream pytest ships a security fix affecting the vendored code, an
-rstest release with the re-vendored core is **aimed for within two weeks** of
+rstest release with the re-vendored core is expected **within two weeks** of
 the upstream release. Because the vendored tree is verbatim, re-vendoring is
 mechanical; the two-week budget covers re-running the compatibility battery,
 not the patch itself.
@@ -185,10 +186,11 @@ boundary is worth stating plainly:
 
 ### No telemetry; network only when you ask for a remote cache
 
-**rstest collects no telemetry and has no analytics SDK.** By default its
-only socket use is **local inter-process communication** between the
-orchestrator and its worker processes (a Unix domain socket / Windows named
-pipe carrying msgpack, never a TCP/UDP connection to a remote host).
+**rstest collects no telemetry and has no analytics SDK.** By default it
+opens no network connections: orchestrator and workers talk over
+**anonymous pipes** created per worker (`pipe()` on Unix, `CreatePipe` on
+Windows) carrying msgpack, never a socket and never a TCP/UDP connection to
+a remote host.
 
 The one exception is the shared cache, and only when you opt in with
 `--cache-remote` (or `RSTEST_CACHE_REMOTE`):
@@ -229,6 +231,13 @@ default-branch runs should push; PR jobs (especially from forks) should pull
 only. See [Caching: trust boundary](../concepts/caching.md#trust-boundary).
 
 ### GitHub action inputs
+
+!!! note "Unreleased: ships in 0.8.0"
+    The two protections below are on `main` and ship in rstest 0.8.0. The
+    action tagged `v0.7.0` does **not** have them: it pastes some inputs
+    straight into shell code and has no `warm-from-event` input. Until 0.8.0
+    is released, pin the action to a `main` commit SHA
+    (`uses: KovantAI/rstest/.github/actions/rstest@<sha>`) to get them.
 
 The composite action passes every input to its scripts through `env:`
 variables, never by pasting `${{ }}` expressions into shell code, so an input

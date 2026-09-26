@@ -36,7 +36,9 @@ pub fn plan_shares_with_fixed(
 /// A project's own `[tool.rstest] numprocesses`, when it is a NUMBER
 /// ("auto" or absent leaves the planner in charge).
 pub fn project_fixed_n(project: &Path) -> Option<usize> {
-    let settings = crate::config::rstest_settings(project, &mut std::io::stderr());
+    // Quiet: the project's own child run reads the same pyproject and
+    // reports any malformed or invalid [tool.rstest] itself.
+    let settings = crate::config::rstest_settings(project, &mut std::io::sink());
     settings.numprocesses.as_deref()?.parse().ok()
 }
 
@@ -82,12 +84,14 @@ pub fn plan_shares(costs: &[Option<f64>], budget: usize) -> Vec<usize> {
 /// whole-suite wall (fixture setup/teardown included), falling back to the sum
 /// of call durations for caches written before wall tracking existed. Weighting
 /// by call time alone starves a fixture-bound project (near-zero call time, tens
-/// of seconds of fixtures) to a single worker on the warm run.
-pub fn project_cost(project: &Path) -> Option<f64> {
-    if let Some(wall) = crate::scheduling::durations::load_wall_in(project) {
+/// of seconds of fixtures) to a single worker on the warm run. `cache_dir` is
+/// the project's cache dir as its child run sees it (see
+/// [`crate::cache::mono_override`]).
+pub fn project_cost(cache_dir: &Path) -> Option<f64> {
+    if let Some(wall) = crate::scheduling::durations::load_wall_in(cache_dir) {
         return Some(wall);
     }
-    crate::scheduling::durations::sum_secs_in(project)
+    crate::scheduling::durations::sum_secs_in(cache_dir)
 }
 
 #[cfg(test)]
@@ -148,7 +152,7 @@ mod cost_tests {
         )
         .unwrap();
         std::fs::write(dir.join(".rstest_cache/wall.json"), b"35.3").unwrap();
-        assert_eq!(project_cost(&dir), Some(35.3));
+        assert_eq!(project_cost(&dir.join(".rstest_cache")), Some(35.3));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -161,7 +165,7 @@ mod cost_tests {
             br#"{"t::a":1.5,"t::b":0.5}"#,
         )
         .unwrap();
-        assert_eq!(project_cost(&dir), Some(2.0));
+        assert_eq!(project_cost(&dir.join(".rstest_cache")), Some(2.0));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

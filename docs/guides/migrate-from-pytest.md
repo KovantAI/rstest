@@ -19,10 +19,15 @@ against real suites in rstest's compatibility battery. Most plugin flags
 forward like any other pytest flag; the exceptions are in
 [Flags rstest owns](#flags-rstest-owns) below.
 
-**Your configuration.** `pyproject.toml [tool.pytest.ini_options]`,
-`pytest.ini`, `setup.cfg`, `tox.ini` (including `addopts`, `testpaths`,
-`python_files`, `markers`, `filterwarnings`) are read by the vendored core
-exactly as pytest reads them. One catch: rstest's *own* flags are read only
+**Your configuration.** Every pytest 9 config file (`pytest.toml`,
+`.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml` with
+`[tool.pytest]` or `[tool.pytest.ini_options]`, `tox.ini`, `setup.cfg`),
+including `addopts`, `testpaths`, `python_files`, `markers` and
+`filterwarnings`, is read by the vendored core exactly as pytest reads it.
+rstest's own lookup (for `-n auto` sizing, `--collect lazy`, `--watch` and
+monorepo discovery) follows the same file order (**Unreleased**: rstest
+0.7.0's own lookup knew only `pytest.ini`, `pyproject.toml`, `tox.ini` and
+`setup.cfg`). One catch: rstest's *own* flags are read only
 from the command line and `[tool.rstest]`, never from `addopts` (see
 [below](#addopts-and-pytest_addopts)).
 
@@ -65,9 +70,16 @@ there behaves as the *plugin's* flag, with the plugin's limits:
   written**.
 - `addopts = --html=report.html`: same pattern; pytest-html writes nothing
   in the pool.
+- `addopts = -n 4 --dist loadgroup` (pytest-xdist): rstest reads neither.
+  The worker count falls back to rstest's default (`auto`), the pool
+  distributes with `load`, and `@pytest.mark.xdist_group` co-location is
+  lost without a warning. xdist itself stays inert inside the workers; once
+  pytest-xdist is uninstalled, pytest rejects these options as unknown
+  (exit 4).
 
-Move these to the rstest command line (or `[tool.rstest]` where a key
-exists, such as `reruns`) when you switch.
+Move these to the rstest command line or `[tool.rstest]` (keys exist for
+`reruns`, `numprocesses` and `dist`, e.g. `dist = "loadgroup"`) when you
+switch.
 
 ## What changes
 
@@ -138,7 +150,10 @@ change as long as you keep the pytest side intact during the rollout:
 3. **Switch.** Make the rstest job required and the old job optional.
    Leave pytest-xdist and its `addopts` (`-n 4`, `--dist ...`) in place for
    now: rstest neutralizes them inside its workers, and the old job still
-   needs them.
+   needs them. rstest does not read them, though, so copy any `--dist` mode
+   to `[tool.rstest] dist` (for example `dist = "loadgroup"`, or
+   `xdist_group` co-location is lost) and pass `-n` to rstest if you want a
+   fixed count.
 4. **Clean up** once you're confident: remove the old job, then the xdist
    flags from `addopts`, then pytest-xdist itself.
 
@@ -158,15 +173,20 @@ One worker, one pytest session, pytest's exact per-test outcomes (only the
 behaves differently under rstest's parallel mode, this is the first
 diagnostic: if it also fails at `-n 0`, it's not parallelism.
 
-Flags that need pytest's own terminal switch to this mode automatically:
-`--co`, `-s` / `--capture=no`, `--pdb`, `--trace`.
+Flags that need pytest's own terminal or a single global order switch to
+this mode automatically: `--co`/`--collect-only`, `-s`, `--capture=...`,
+`--pdb`, `--trace`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
+`--sw-reset`/`--stepwise-reset`, and rstest's `--debug` (see
+[Passthrough-IO flags](../reference/cli.md#passthrough-io-flags)).
 
 ## If your suite already uses pytest-xdist
 
 rstest neutralizes xdist inside its workers automatically: an `addopts =
 -n 4` in your ini will not spawn nested workers. Keep it while your pytest
 job still runs (see [the staged rollout](#rolling-out-in-stages-and-rolling-back)),
-then remove it and pass `-n` to rstest instead. See
+then remove it and pass `-n` to rstest instead. A `--dist` mode in `addopts`
+is not read by rstest either: set it as `[tool.rstest] dist` (see
+[above](#addopts-and-pytest_addopts)). See
 [Migrating from pytest-xdist](migrate-from-xdist.md).
 
 ## Just want to know if it's worth it?
@@ -224,12 +244,15 @@ unstable* id, classified by why:
 
 - **address / uuid**: the id embeds a per-process value (a `repr()`-fallback
   `0x…` address, or a uuid). Every worker collects a different id, so the
-  workers can't agree on the test set and rstest is forced to `-n 0`. Reported
-  as **WILL bail**, a hard blocker. Fix: give the `parametrize` a stable
-  `ids=`.
-- **time**: a timestamp/date in the id. Usually stable enough *within* one
-  run (workers collect near-simultaneously), so it typically runs fine at
-  `-n auto`. Reported as **may bail**.
+  workers can't agree on the test set and rstest refuses to dispatch
+  (`workers collected different test sets ...`); nothing runs in parallel
+  until you fix the ids or choose `-n 0`. Reported as **WILL bail**, a hard
+  blocker. Fix: give the `parametrize` a stable `ids=`.
+- **time**: a timestamp/date in the id. A coarse one (seconds or dates)
+  usually matches across workers, since they collect near-simultaneously,
+  but a run whose collection crosses a second boundary hits the same refusal,
+  so it fails intermittently; a sub-second timestamp differs every time.
+  Reported as **may bail**. Fix: a stable `ids=`.
 
 If a WILL-bail id is found it stops here: fix the ids first, since nothing
 runs in parallel until they're stable.

@@ -315,7 +315,8 @@ fn build_worker_command(
         // (rstest_worker assigns these per worker).
         command
             .env_remove("PYTEST_XDIST_WORKER")
-            .env_remove("PYTEST_XDIST_WORKER_COUNT");
+            .env_remove("PYTEST_XDIST_WORKER_COUNT")
+            .env_remove("PYTEST_XDIST_TESTRUNUID");
     }
     if env.doctor {
         command.env("RSTEST_DOCTOR", "1");
@@ -756,7 +757,11 @@ mod tests {
             .iter()
             .copied()
             .filter(|k| *k != "RSTEST_SEND_IDS")
-            .chain(["PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT"])
+            .chain([
+                "PYTEST_XDIST_WORKER",
+                "PYTEST_XDIST_WORKER_COUNT",
+                "PYTEST_XDIST_TESTRUNUID",
+            ])
         {
             assert!(removed.iter().any(|r| r == key), "{key} not cleared");
         }

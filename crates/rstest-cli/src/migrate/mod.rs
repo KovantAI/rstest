@@ -126,6 +126,11 @@ pub(super) fn run_session_report(
         .args(config)
         .arg("--report-json")
         .arg(&tmp)
+        // worker instrumentation adds per-test cpu time (cheap) so the
+        // classifier can tell a wait-bound (wall-clock) failure from a real
+        // co-location/isolation one. A hidden flag, never an env var, so a
+        // user's environment can't turn it on for ordinary runs.
+        .arg("--instrument-workers")
         // worker-timeout: a fixed-port / deadlock test (httpx, werkzeug) would
         // otherwise hang the preflight; the stuck test becomes a failure.
         .args(["--worker-timeout", "120"])
@@ -135,10 +140,6 @@ pub(super) fn run_session_report(
         .arg("--")
         .arg("-q")
         .args(args)
-        // doctor instrumentation adds per-test cpu time (cheap) so the
-        // classifier can tell a wait-bound (wall-clock) failure from a real
-        // co-location/isolation one.
-        .env("RSTEST_DOCTOR", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     cmd.status()?; // non-zero is expected when tests fail; the snapshot is truth

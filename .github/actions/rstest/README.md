@@ -36,7 +36,7 @@ it the action installs the latest rstest from PyPI.
 ### PR change-based selection (strict gate)
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@v7
   with:
     fetch-depth: 0            # --changed needs history to diff the base
 - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
@@ -125,7 +125,7 @@ current run); `contents: read` is the checkout. No secrets, no external store:
 permissions: { contents: read, actions: read }
 strategy: { matrix: { shard: [1, 2, 3, 4] } }
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@v7
   - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
     with:
       python-version: "3.13"
@@ -176,21 +176,21 @@ covers GCS / Azure / HTTP.
 
 | input | default | purpose |
 |---|---|---|
-| `args` | `-n auto` | extra rstest flags / paths, appended after the other flags. Split with shell quoting rules (`-k "a and b"` stays one argument), never glob-expanded or evaluated |
+| `args` | `-n auto` | extra rstest flags / paths, appended after the other flags. Split with shell quoting rules (`-k "a and b"` stays one argument), never glob-expanded or evaluated (Unreleased, 0.8.0; `@v0.7.0` word-splits it unquoted) |
 | `python-version` | `""` | run `setup-python` at this version; else assume Python is set up |
 | `runner` | `auto` | `uv` / `plain` / `auto` (uv when `uv.lock` or `[tool.uv]` present) |
 | `install` | `""` | install override; empty = infer from `runner` |
 | `version` | `""` | pin `rstest==X` (plain runner; uv uses the lockfile) |
 | `working-directory` | `.` | project root (monorepo) |
-| `cache` | `true` | restore/save `.rstest_cache` (`actions-cache` backend) |
+| `cache` | `true` | restore/save `.rstest_cache`. Global kill switch: `false` disables caching for **every** backend (`actions-cache`, `artifact`, `remote`) |
 | `cache-key-prefix` | `rstest-cache` | bump to invalidate all cached baselines |
 | `cache-backend` | `actions-cache` | `actions-cache` / `artifact` / `remote`: see [Warm cache as a service](#warm-cache-as-a-service) |
 | `cache-remote` | `""` | dir / `file://` / `s3://` / `gs://` / `http(s)://` remote; non-empty ⇒ `remote` backend |
 | `cache-remote-token` | `""` | bearer for an `http(s)://` remote → `RSTEST_CACHE_REMOTE_TOKEN` |
 | `cache-compact-threshold` | `""` | `--cache-compact-threshold N`: fold loose segments inline on push past N (best-effort) |
 | `warm-from-branch` | `main` | artifact backend: branch whose latest successful run seeds the warm cache |
-| `warm-from-event` | `push` | artifact backend: only warm from a run triggered by this event (empty = any); keeps PR runs from becoming the warm source |
-| `artifact-suffix` | derived | scopes artifact names per matrix leg; default is `<os>-py<version>[-<working-directory>]` |
+| `warm-from-event` | `push` | **Unreleased (0.8.0), not in `@v0.7.0`.** Artifact backend: only warm from a run triggered by this event (empty = any); keeps PR runs from becoming the warm source |
+| `artifact-suffix` | derived | **Unreleased (0.8.0), not in `@v0.7.0`.** Scopes artifact names per matrix leg; default is `<os>-py<version>[-<working-directory>]` |
 | `artifact-cache-dir` | `.rstest-rcache` | artifact backend: workspace dir segments materialize into |
 | `github-token` | job token | artifact backend: token for the cross-run resolve + download (needs `actions: read`) |
 | `output` | `github` | `--output` style: `github` (annotations), `gitlab`, `buildkite`, `teamcity`, `azure`, `tap`, `json`, `dots`, `verbose`, `bar`. An unknown value only warns and falls back to `dots` |
@@ -206,7 +206,7 @@ covers GCS / Azure / HTTP.
 | `doctor-fail-on` | `""` | fail on doctor metrics, e.g. `parallel_efficiency<30, imbalance_pct>60` (each forwarded to native `--doctor-fail-on`; breach fails via exit code, report auto-published to job summary; inapplicable metrics skipped) |
 | `quarantine` | `""` | `--quarantine FILE` |
 | `shard` / `shard-total` | `""` | `--shard K/N` |
-| `fail-under-ratio` | `""` | max tolerated assertion-failure fraction (0–1); non-test exit codes still fail (see [Security and matrix behavior](#security-and-matrix-behavior)) |
+| `fail-under-ratio` | `""` | max tolerated assertion-failure fraction (0–1); non-test exit codes still fail (Unreleased, 0.8.0; see [Security and matrix behavior](#security-and-matrix-behavior)) |
 | `hard-fail-on` | `""` | regex; matching failures fail immediately, bypassing the ratio |
 | `upload-junit` | `false` | upload JUnit as an artifact |
 
@@ -236,6 +236,12 @@ default branch (a normal run of this action on `push` writes the cache); PR runs
 restore the newest matching entry read-only.
 
 ## Security and matrix behavior
+
+> **Unreleased.** Everything in this section describes the action on `main`,
+> which ships with rstest 0.8.0. The `@v0.7.0` action pastes inputs into its
+> scripts, has no `artifact-suffix` or `warm-from-event` input (artifact names
+> are unscoped, and any successful run on `warm-from-branch` can seed the warm
+> cache), and its fail-ratio gate judges only the JUnit ratio.
 
 - **Inputs never reach the shell as code.** Every input is passed to the
   action's scripts through `env:` and quoted, so a value such as a branch name

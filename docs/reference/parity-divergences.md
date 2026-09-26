@@ -106,6 +106,11 @@ reason, rc=4.)
 A few parametrize ids embed `datetime.now()`. These differ between the baseline
 *run* and the rstest *run*, but are **positionally stable across workers**
 within a run (every worker evaluates them at the same collection position).
+marshmallow's ids have one-second resolution and all workers collect within
+the same second, so the id strings match and the collection hash check passes.
+Ids that differ between workers (sub-second resolution, or a collection that
+straddles a second) fail that check and rstest refuses to dispatch; there is
+no automatic `-n 0` fallback.
 
 - **marshmallow** runs at full `-n auto`, 100%, the hashes match and the
   renamed ids pair 1:1 positionally. (`--collect lazy` *breaks* this: its
@@ -254,12 +259,23 @@ and stashes its port for workers. rstest used to null `numprocesses` to keep
 xdist inert, which sent the plugin down its *worker* branch to read a
 `workerinput["server_port"]` no controller had set → `KeyError`.
 
-**Fix (rstest side, done):** xdist's session gates on `dist != "no"`, not
-`numprocesses`, so rstest forces `dist="no"` and leaves `numprocesses` visible.
-The plugin's controller branch then fires per worker (each self-provisions an
-ephemeral `ReportServer`), and `configure_node` hooks that read
-later-stashed state are retried at `pytest_sessionstart`. See
-[xdist hooks](../concepts/xdist-hooks.md). No upstream change required.
+**Fix (rstest side, done).** Two paths, depending on whether pytest-xdist is
+installed next to rstest:
+
+- **xdist installed.** xdist's session gates on `dist != "no"`, not
+  `numprocesses`, so rstest forces `dist="no"` and leaves `numprocesses`
+  visible. The plugin's controller branch then fires per worker (each
+  self-provisions an ephemeral `ReportServer`), and `configure_node` hooks
+  that read later-stashed state are retried at `pytest_sessionstart`. See
+  [xdist hooks](../concepts/xdist-hooks.md). The e2e gate covers this path.
+- **xdist not installed** (the langgraph venv, and most rstest users). The
+  controller branch can't fire, so the plugin takes its worker branch. rstest
+  starts pytest-retry's own `ReportServer` inside each worker and seeds
+  `workerinput["server_port"]` with its port before the plugin reads it. If
+  that server API ever drifts, rstest unregisters the plugin and native
+  `--reruns` remain. This is the path langgraph exercises.
+
+No upstream change required.
 
 ### pytest-rerunfailures `sock_port`
 

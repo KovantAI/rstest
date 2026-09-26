@@ -91,7 +91,9 @@ Two more truths worth knowing before you benchmark:
 
 Fastest way to find out for real: `rstest try` runs your suite under plain
 pytest and under `rstest -n auto`, then reports whether outcomes match and
-how much faster rstest was, no migration, no config.
+how much faster rstest was, no migration, no config. (It runs the baseline
+as `python -m pytest`, so pytest must be installed in the project's
+environment for this one command.)
 
 ## Benchmarks
 
@@ -100,14 +102,15 @@ the pytest baseline: 100% parity *on the measured run* (a few tests flake
 under plain pytest itself; those are catalogued in the docs).
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
-| Suite | Tests | pytest | xdist (`-n 8`) | rstest |
+| Suite | Tests | pytest | xdist | rstest |
 |---|---|---|---|---|
-| aiohttp | 4,469 | 197s | 160s | **68s** warm · 126s cold |
-| pandas | 193,627 | 182s | 61s | 63s (parity, not a win) |
-| django-allauth | 2,050 | 22s | 8s | **8s** (`-n 4`) |
+| aiohttp | 4,469 | 197s | 160s (`-n 8`) | **68s** warm · 126s cold |
+| pandas | 193,627 | 182s | 61s (`-n 8`) | 63s (parity, not a win) |
+| django-allauth | 2,050 | 22s | 8s (`-n 8`) | **8s** (`-n 4`) |
 | rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) |
 
-Apple Silicon, CPython 3.13, pytest-xdist 3.8.
+Apple Silicon, CPython 3.13, pytest-xdist 3.8. rstest ran at `-n 8` unless
+noted; the rich xdist run has no recorded worker count.
 
 **Monorepo** (langchain-ai/langgraph, 6 `libs/*` packages, 4,284 tests, each
 with its own pytest config, a single pytest can't run from the root at all):
@@ -189,16 +192,20 @@ the runner already owns (per-test wall/CPU time, per-fixture setup):
 
 WAIT-BOUND: 95% of test time (176.5s) is waiting, not computing (sleeps / IO / timeouts).
     54.20s waiting of   54.25s  tests/test_proxy_functional.py::test_proxy_https_multi_conn_limit
+    10.97s waiting of   10.97s  tests/test_proxy_functional.py::test_proxy_https_connect
   ... and 33 more
 
 PARALLEL FLOOR: the longest test (54.2s) exceeds the ideal per-worker share (23.2s at -n 8);
-no worker count can finish faster than its longest test.
+no worker count can finish faster than its longest test. Gate tests:
+    54.25s  tests/test_proxy_functional.py::test_proxy_https_multi_conn_limit
 
 FIXTURE HOTSPOTS (setup time across all workers):
      0.79s   4442x  scope=function blockbuster
+     0.54s    157x  scope=function transport
 
 SLOWEST FILES:
    150.46s (81.0%)  tests/test_proxy_functional.py
+     8.60s ( 4.6%)  tests/test_client_functional.py
 ===================================================
 ```
 

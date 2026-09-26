@@ -1,9 +1,9 @@
 # Changelog
 
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
-between 0.0.x releases and are listed here.
+between 0.x releases and are listed here.
 
-## 0.8.0
+## 0.8.0 (Unreleased)
 
 - **GitHub action: the fail-ratio gate no longer masks non-test failures.**
   With `fail-under-ratio` set, the gate used to judge only the JUnit ratio, so
@@ -30,19 +30,70 @@ between 0.0.x releases and are listed here.
   pull_request run, including a fork PR from a branch named `main`, can never
   become the warm source.
 - **GitHub action: warns when the rstest version is unpinned.**
+- **rstest warns when `-s`/`--pdb`/`--capture=no` silently drop `-n`.** Those
+  flags (and `--trace`, stepwise, `--debug`) run the session in one process
+  with pytest's own output, so `rstest -n 4 -s` quietly ran unparallelized
+  with no banner. An explicit worker count above 1 (flag or
+  `[tool.rstest]`) now gets a one-line stderr warning naming the flag. The
+  default `-n auto` and `--co` stay quiet.
 - **Workers no longer inherit rstest's internal variables.** `RSTEST_WORKER_ID`,
   `RSTEST_DOCTOR`, `RSTEST_TIMEOUT` and the other orchestrator-to-worker
   variables (plus `PYTEST_XDIST_WORKER[_COUNT]` outside a pool) are now
   cleared before each worker starts, so a value exported in the shell, in CI,
   or by an outer rstest (a test that runs rstest itself) can no longer reach
-  an `-n 0` test or switch on worker instrumentation. `migrate-check`'s child
-  runs now forward their `RSTEST_DOCTOR` request explicitly instead of relying
-  on that inheritance.
+  an `-n 0` test or switch on worker instrumentation. rstest itself no longer
+  reads `RSTEST_DOCTOR` either: `export RSTEST_DOCTOR=1` has no effect (use
+  `--doctor`), and `migrate-check`'s child runs request their instrumentation
+  through an internal flag instead.
 - **Parallel workers no longer inherit a stale `PYTEST_XDIST_WORKER`.** A
   `PYTEST_XDIST_WORKER` / `PYTEST_XDIST_WORKER_COUNT` already exported in the
   caller's environment used to win over each worker's real values, so every
   worker saw the same id and per-worker resources (test databases, ports,
   temp dirs keyed on it) collided. Workers now always set their own values.
+- **`testrun_uid` works with pytest-xdist installed.** xdist's own
+  `testrun_uid` fixture won over rstest's and read `workerinput["testrunuid"]`,
+  a key rstest did not set, so any test using the fixture failed with
+  `KeyError: 'testrunuid'` at `-n 2` or more. `workerinput` now carries both
+  `testrunuid` (xdist's key) and `testrun_uid`, and `PYTEST_XDIST_TESTRUNUID`
+  is set alongside `PYTEST_XDIST_WORKER`.
+- **rstest's `worker_id` / `testrun_uid` fixtures take precedence over
+  xdist's.** With pytest-xdist installed, the `--reruns` one-worker pool at
+  `-n 0/1` reported `worker_id == "gw0"` (xdist's definition) instead of the
+  documented `"master"`. rstest's definitions now win (a conftest or test
+  module override still wins over both); in a pool of two or more workers the
+  values are unchanged.
+- **Monorepo roots forward more flags, and refuse the rest.** `--timeout`,
+  `--fail-on-leak`, `--durations-regress`, `--require-baseline`,
+  `--reruns-only-known-flaky`, `--collect`, `--incremental`, `--shuffle` and
+  `--html` used to be dropped silently at a monorepo root; they now reach
+  every project. Gates apply per project and a failing project fails the root.
+  `--html` is written per project (`out.html` -> `out.libs-core.html`), and
+  `--shuffle` picks one seed for every project (printed, so `--shuffle=SEED`
+  reproduces the whole run). `--debug`, `--shard`, `--cov-diff-fail-under`,
+  `--cov-diff-json`, `--stream-json` and `--since-green` (without `--changed`)
+  now exit 1 with a message saying to run them inside a project. See
+  [Flags at a monorepo root](docs/concepts/monorepo.md#flags-at-a-monorepo-root).
+- **`RSTEST_CACHE` is namespaced per monorepo project.** Every project's
+  rstest inherited the root's value as-is, so an absolute `RSTEST_CACHE` made
+  all projects share one cache dir (durations and flake history mixed), a
+  relative one resolved inside each project, and the root planner still read
+  `<project>/.rstest_cache`. Each project now gets `<RSTEST_CACHE>/<slug>` (a
+  relative value resolves against the monorepo root), and the planner weights
+  projects from the same dirs. Unset, projects keep their own `.rstest_cache`
+  as before.
+- **`[tool.rstest]` typos are reported.** An unknown key or a wrong-typed value
+  was silently ignored; it now prints one stderr warning naming the file and
+  key (with a `did you mean` hint for a snake_case spelling such as
+  `worker_timeout`) and falls back to the default, as before. Only types are
+  checked at this point; values are validated when the run starts, unchanged.
+- **pytest 9 config files are recognized.** rstest's own config lookup (used
+  for `-n auto` sizing, `--collect lazy`, `--watch`, monorepo discovery and
+  `bisect`) now probes `pytest.toml`, `.pytest.toml`, `pytest.ini`,
+  `.pytest.ini`, `pyproject.toml`, `tox.ini` and `setup.cfg` in pytest 9's
+  order, and reads pyproject's native `[tool.pytest]` table. A `pytest.ini`
+  without a `[pytest]` section now counts as the config file, as in pytest.
+- The "no surviving worker to run pytest_testnodedown" warning no longer
+  carries a run of stray spaces mid-sentence.
 - **Monorepo merged `--report-json` now stamps the current schema.** The merged
   root document hard-coded `"schema": 4` while carrying schema-5 fields
   (`quarantined`); it now shares the single-project writer's version constant.
@@ -74,9 +125,9 @@ between 0.0.x releases and are listed here.
   `--changed` has been coverage-aware since 0.4.0 (a warm
   `.rstest_cache/coverage_index.json` maps changed lines to the exact covering
   tests); it now makes that observable. With a warm map the selection banner
-  shows the savings ratio — `N changed file(s) -> M of K mapped test(s)
-  affected`, with any whole-file fallback targets counted separately. With a **cold** map and a changed non-test source file — exactly
-  where coverage precision would have narrowed the set — it prints a one-line
+  shows the savings ratio (`N changed file(s) -> M of K mapped test(s)
+  affected`), with any whole-file fallback targets counted separately. With a **cold** map and a changed non-test source file (exactly
+  where coverage precision would have narrowed the set), it prints a one-line
   hint that it fell back to the import graph and that a prior
   `--cov --cov-context=test` run enables coverage-precise selection. No new
   flags; the hint is silent for test-only / config / non-Python changes.
@@ -119,13 +170,13 @@ between 0.0.x releases and are listed here.
   `request.addfinalizer`), narrower-scoped dependencies, parametrize
   arguments, or failed/skipped setups are never flagged. See
   [doctor guide](docs/guides/doctor.md#scope-promotion-candidates).
-- **`rstest audit` — one-command parallel-safety check.** Runs the suite at
+- **`rstest audit`: one-command parallel-safety check.** Runs the suite at
   `-n auto` (repeat with `--audit-repeat` to catch probabilistic races), diffs
   against the `-n 0` oracle, and classifies every test that fails *only* in
   parallel (reusing `migrate-check`'s `-n 0` ×2 + `--dist loadfile`
   discriminators and verdicts). Prints the serial-fixable (isolation and
   wall-clock) failures with a ready-to-paste `conftest.py` block that marks
-  exactly those nodeids `@pytest.mark.serial` — one paste, no per-test edits —
+  exactly those nodeids `@pytest.mark.serial` (one paste, no per-test edits),
   plus the real per-verdict fix. Order-dependent failures get a
   `--dist loadfile` recommendation instead, since serial would separate them
   from the tests they depend on. Intrinsic flakes, inconclusive results and
@@ -195,8 +246,8 @@ between 0.0.x releases and are listed here.
   instead of running the listed tests as one project.
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
-  — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
-  `--benchmark*` — now prints a warning before the run naming the plugin and the
+  (`--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,
+  `--benchmark*`) now prints a warning before the run naming the plugin and the
   parallel-safe alternative (native `--report-json` / `--junitxml`, or `-n 0`).
   Argv-driven, so it never flags rstest's own merged `--html` / `--junitxml` /
   `--report-json`, and stays silent at `-n 0`.
@@ -205,15 +256,15 @@ between 0.0.x releases and are listed here.
   the 100 most-downloaded pytest plugins (was 50) for behavior under the
   parallel pool.
 - **pytest-mypy no longer crashes under the pool.** Its worker branch reads
-  `workerinput["mypy_config_stash_serialized"]` — the mypy results-cache path an
-  xdist controller injects — so merely installing it raised
+  `workerinput["mypy_config_stash_serialized"]` (the mypy results-cache path an
+  xdist controller injects), so merely installing it raised
   `KeyError: 'mypy_config_stash_serialized'` at `-n ≥ 2` (rstest runs no
   controller). rstest now seeds a unique per-worker cache path; mypy runs lazily
   on each worker (`MypyResults.from_session`), so type errors surface identically
   at `-n auto` and `-n 0`.
 - **pytest-random-order no longer crashes under the pool.** Its
   `pytest_configure` reads `workerinput["random_order_seed"]` unconditionally
-  whenever `workerinput` exists (even with reordering disabled — the default),
+  whenever `workerinput` exists (even with reordering disabled, the default),
   so merely installing the plugin raised `KeyError: 'random_order_seed'` at
   `-n ≥ 2`. rstest now seeds that key like it does `randomly_seed`: a single
   run-derived value shared by every worker (so the shuffled collection hashes
@@ -221,7 +272,7 @@ between 0.0.x releases and are listed here.
   you opt in with `--random-order[-bucket|-seed]`; an explicit
   `--random-order-seed=<n>` is honored.
 
-## 0.7.0 — 2026-09-10
+## 0.7.0 (2026-09-10)
 
 - **Live progress while testing.** Runs now report ongoing progress as
   tests complete, so long suites give continuous feedback instead of going
@@ -234,16 +285,16 @@ between 0.0.x releases and are listed here.
   port. The target interpreter (`--python`) must have `debugpy` installed;
   without it the run proceeds without a debugger and prints a hint.
 
-## 0.6.1 — 2026-09-08
+## 0.6.1 (2026-09-08)
 
 - The worker record file (`rstest-pytest-record.json`, or the path in
   `RSTEST_RECORD`) is now written atomically: the recorder writes to a
   `.tmp` sibling and `os.replace`s it into place, so a concurrent reader
   never observes a truncated or partially written JSON document.
 
-## 0.6.0 — 2026-09-07
+## 0.6.0 (2026-09-07)
 
-- **BREAKING — run-less modes are now subcommands, not flags.** The four
+- **BREAKING: run-less modes are now subcommands, not flags.** The four
   modes that never run your suite are invoked as a leading subcommand:
   - `rstest --verify-vendor` → `rstest verify-vendor`
   - `rstest --try` → `rstest try`
@@ -260,7 +311,7 @@ between 0.0.x releases and are listed here.
   `--verify-vendor` / `--cache-compact` now forwards them to the pytest session
   (pytest then rejects the unknown argument), so **update CI scripts, aliases,
   and Makefiles**. Also note `rstest migrate-check` is now required to run the
-  preflight — a bare `--migrate-check-json` no longer triggers it implicitly.
+  preflight: a bare `--migrate-check-json` no longer triggers it implicitly.
 
 - pytest-retry now works under the pool without pytest-xdist installed. The
   plugin gates its report server on `has_plugin("xdist")` and only reads
@@ -274,15 +325,15 @@ between 0.0.x releases and are listed here.
 
 - Monorepo worker planning now weights each project by its recorded
   whole-suite **wall time** (fixture setup/teardown included), not by the sum
-  of test *call* durations. A fixture-bound project — one whose per-test call
-  time is near zero but whose fixtures cost tens of seconds — was rated
+  of test *call* durations. A fixture-bound project (one whose per-test call
+  time is near zero but whose fixtures cost tens of seconds) was rated
   near-free on the warm run and starved to a single worker, so it serialized
   and dominated the monorepo wall (a warm run could run *slower* than the
   cold, cache-less run). Projects that pin their own `numprocesses` are
   unaffected; caches predating this release fall back to call-duration
   weighting until their first run under 0.6.0.
 
-## 0.5.0 — 2026-09-06
+## 0.5.0 (2026-09-06)
 
 - Incremental testing based on coverage: `--changed` now leans on the
   recorded coverage index to select only the tests whose coverage touches
@@ -298,9 +349,9 @@ between 0.0.x releases and are listed here.
 - Leak detection: fail a test that leaves open file descriptors behind.
 - Cache: refactored to fix corruption and consistency issues.
 
-## 0.4.0 — 2026-08-31
+## 0.4.0 (2026-08-31)
 
-- Coverage overhaul: full pytest-cov parity under parallelism —
+- Coverage overhaul: full pytest-cov parity under parallelism:
   `--cov=PKG` measured in every worker, all `--cov-report` targets
   (`term`/`term-missing`, `xml`, `html`, `json`, `lcov`, `annotate`)
   rendered by the orchestrator after combining, and `--cov-fail-under=N`
@@ -312,13 +363,17 @@ between 0.0.x releases and are listed here.
   unmeasured/brand-new code falls back to the import graph. `--cov-branch`
   forwards through. See the Coverage guide.
 - `--reruns-only-known-flaky`: with `--reruns` active, spend the rerun
-  budget only on tests the flake history already knows — new failures
+  budget only on tests the flake history already knows: new failures
   fail fast instead of being retried, while genuine known-flakes are
   still rescued. Also settable as `[tool.rstest] reruns-only-known-flaky`.
   See the Flaky tests guide.
 - GitHub Action: run rstest in CI without a manual install/setup step.
 
-## 0.3.1 — 2026-08-30
+## 0.3.1 (2026-08-30)
+
+- Version bump only; no changes since 0.3.0.
+
+## 0.3.0 (2026-08-30)
 
 - Cache invalidation support.
 - `--doctor` threshold option.
@@ -328,18 +383,18 @@ between 0.0.x releases and are listed here.
   handling.
 - Fixed not persisting negative cache keys.
 
-## 0.2.1 — 2026-07-15
+## 0.2.1 (2026-07-15)
 
 - Release CI fixes only; no user-facing behavior changes. Corrected the
   build cache handling in the release workflow and dropped a step
   unsupported on the free tier.
 
-## 0.2.0 — 2026-07-15
+## 0.2.0 (2026-07-15)
 
 - `--doctor` PARALLEL EFFICIENCY section: the realized parallel speedup
   measured from the run just finished (`test time / wall` vs worker
   count), the per-worker busy-time load balance, and the long pole that
-  caps it — the after-the-fact answer to "why isn't `-n auto` faster?".
+  caps it: the after-the-fact answer to "why isn't `-n auto` faster?".
   Emitted for multi-worker runs in the terminal report, `--doctor-md`,
   and `--doctor-json`; the doctor JSON schema is bumped `1` → `2`
   (adds `parallel_efficiency`).
@@ -380,7 +435,7 @@ between 0.0.x releases and are listed here.
   Requires `-n >= 2`; refused with `--shuffle` and `--dist each`. See the
   Sharding guide.
 
-- `--output azure`: Azure Pipelines style — the normal `dots` log plus a
+- `--output azure`: Azure Pipelines style: the normal `dots` log plus a
   `##vso[task.logissue type=error;sourcepath=;linenumber=]` command per
   failure (inline issue on the PR file), and `type=warning` for
   flaky-passed tests.
@@ -395,7 +450,7 @@ between 0.0.x releases and are listed here.
   folded in collapsible job-log sections), `buildkite` (failures under
   auto-expanded `+++` groups), `teamcity` (service messages per test,
   grouped so parallel results never interleave), and `tap` (a pure TAP
-  version 13 stream with a trailing plan — no human chrome). Like
+  version 13 stream with a trailing plan, no human chrome). Like
   `--output json`, `tap` is refused at a monorepo root (concatenated
   child streams would not be one valid TAP document).
 
@@ -413,11 +468,11 @@ between 0.0.x releases and are listed here.
   ignored.
 
 - `--output github`: tests that passed only after reruns now emit a
-  `::warning` annotation (`flaky: passed only after N reruns`) — the
+  `::warning` annotation (`flaky: passed only after N reruns`): the
   run stays green, but the flake shows up inline on the PR.
 
 - Flake history + `--quarantine <file>`: every run records per-test
-  flaky/failed counts to `.rstest_cache/flakes.json` (sparse — only
+  flaky/failed counts to `.rstest_cache/flakes.json` (sparse: only
   tests with events). `--quarantine` demotes failures matching a list
   of nodeids/globs to a non-fatal "quarantined" outcome: own summary
   count and section (with history annotations), junit/report-json
@@ -435,13 +490,13 @@ between 0.0.x releases and are listed here.
   error (fetch-depth: 0), never a silent full skip; an explicit rev
   disables the auto-targeting.
 
-## 0.1.0 — 2026-06-23
+## 0.1.0 (2026-06-23)
 
 - Vendored pytest upgraded 9.0.3 → 9.1.1 (re-extracted verbatim from the
   PyPI wheel; no local modifications). rstest's runner hooks are unaffected;
   the full e2e gate passes.
 
-## 0.0.5 — 2026-06-13
+## 0.0.5 (2026-06-13)
 
 - Windows promoted from experimental to supported: the full test gate
   runs on `windows-latest` in CI every commit (not just a wheel smoke
@@ -449,7 +504,7 @@ between 0.0.x releases and are listed here.
 
 
 - `--report-json` schema 3: the envelope now carries `counts`
-  (pytest-accounting outcome totals — the same numbers as the terminal
+  (pytest-accounting outcome totals, the same numbers as the terminal
   summary line, so consumers never re-derive them by walking `tests`),
   `duration_seconds`, `started_at_epoch`, `workers`, and `argv`. The
   monorepo merged report aggregates grand totals and adds per-project
@@ -457,7 +512,7 @@ between 0.0.x releases and are listed here.
 
 - Monorepo `--report-json` now writes ONE merged document: root-relative
   nodeid keys, merged `meta.exitstatus`, and per-project status (incl.
-  `--changed` skips) under `meta.projects` — no more globbing slugged
+  `--changed` skips) under `meta.projects`: no more globbing slugged
   files and client-side merging. junit stays per-project (one testsuite
   file per package).
 
@@ -471,18 +526,18 @@ between 0.0.x releases and are listed here.
 - `--report-json` schema 2: `meta.schema` version field, `longrepr`
   (failure text, capped 20k) on failed tests, and `crashed: true` on
   outcomes fabricated by the orchestrator (worker crash /
-  `--worker-timeout` kill) — machine consumers no longer re-parse
+  `--worker-timeout` kill), so machine consumers no longer re-parse
   terminal output or mistake a crash for an assertion failure.
 
 - xdist environment parity: workers now set `PYTEST_XDIST_WORKER` and
   `PYTEST_XDIST_WORKER_COUNT`, and `workerinput` carries `testrun_uid`
   (one uid per run, shared across workers; monorepo children inherit
-  the root's) — plugins and conftests that grep the environment work
+  the root's), so plugins and conftests that grep the environment work
   without edits.
 
 - Round-four documentation review fixes: report-json field table
   repaired and version history completed; the CI duration-cache recipe
-  no longer freezes (actions/cache keys are immutable — unique key +
+  no longer freezes (actions/cache keys are immutable: unique key +
   restore-keys); watch-mode rerun policy corrected in two stale pages
   (source changes select via the import graph, not the full
   selection); crash-handling now distinguishes passive worker-id-keyed
@@ -499,13 +554,13 @@ between 0.0.x releases and are listed here.
   N-concurrent-hooks divergence from xdist's serialized master, the
   crash-cleanup ordering hazard and the uuid-ident remedy), `-n 1`
   semantics vs xdist, `--dist each` scope, monorepo `--changed`
-  false-skip warning (declared-metadata edges only — keep merge-queue
+  false-skip warning (declared-metadata edges only; keep merge-queue
   gating on full runs), per-project coverage verified by the gate, and
   the worker-runtime vs tool-install mechanism spelled out.
 
 - Monorepo mode: at a repo root with per-package pytest configs, rstest
   discovers the subprojects and runs each as its own session group in
-  one command — own rootdir/ini/conftest semantics per project (cwd
+  one command: own rootdir/ini/conftest semantics per project (cwd
   switched), merged exit codes, per-project `--junitxml`/`--report-json`
   files, and a summary table. Auto-engages when the cwd has no pytest
   config but subdirectories do; `[tool.rstest] projects = [globs]`
@@ -521,13 +576,13 @@ between 0.0.x releases and are listed here.
   dependency-groups, transitively) run full, unaffected projects are
   skipped, and out-of-project changes run everything. A project-local
   `.venv` is used automatically. Per-project `[tool.rstest]` settings
-  apply per project — a `numprocesses` pin survives the worker planner
+  apply per project: a `numprocesses` pin survives the worker planner
   (`numprocesses = 0` = that project runs pytest-exact while siblings
   split the rest). (`git diff --relative` fix rides along: `--changed`
   from any repo subdirectory now sees its own files.)
 
 - `--collect lazy` (D5 single-point collection): each test file is
-  collected exactly once, on one worker, on demand — instead of every
+  collected exactly once, on one worker, on demand, instead of every
   worker collecting the whole suite. One distributed collection pass;
   the collection-mismatch failure class cannot occur by construction.
   3x faster narrow `-k` selections on big suites (aiohttp). Strict
@@ -536,13 +591,13 @@ between 0.0.x releases and are listed here.
   across per-file collection; module fixtures tear down exactly at
   file boundaries. Suites that depend on whole-suite import side
   effects (sys.modules-reading skipifs, cross-file registries,
-  run-order pollution) should stay on `--collect full` — every
+  run-order pollution) should stay on `--collect full`: every
   divergence found in the corpus reproduces under plain pytest with
   the same isolation or ordering. `[tool.rstest] collect` configures
   it per project.
 
 - `--dist loadscope` and `--dist loadgroup` (with
-  `@pytest.mark.xdist_group`) — xdist's remaining affinity modes.
+  `@pytest.mark.xdist_group`): xdist's remaining affinity modes.
 
 - `--dist each` (xdist's last mode): every worker runs the full suite
   (multi-environment validation). Outcomes are keyed `nodeid [gwN]`,
@@ -552,12 +607,12 @@ between 0.0.x releases and are listed here.
 
 - xdist MASTER-side hooks emulated in workers: `pytest_configure_node`,
   `pytest_testnodeready`, `pytest_testnodedown`. Suites whose conftest
-  fills `node.workerinput` from the controller now run in parallel —
+  fills `node.workerinput` from the controller now run in parallel:
   SQLAlchemy's follower-database provisioning (`follower_ident`) was
   the canonical blocker: its suite now runs at `-n 4` in 76s vs 519s
   under sequential pytest, outcome-identical. The configure_node call
   fires synchronously at plugin registration (sqlalchemy registers its
-  hooks mid-configure and reads the result on the next line — a plain
+  hooks mid-configure and reads the result on the next line; a plain
   trylast hook call misses that window). pytest-cov's and xdist's own
   master hooks are excluded: rstest already emulates those handshakes
   directly. Crash cleanup included: workers ship a
@@ -574,8 +629,8 @@ between 0.0.x releases and are listed here.
   Single-worker runs stay unprefixed.
 
 - `--durations=N` / `--durations-min=X`: pytest's slowest-durations
-  block, rendered by the orchestrator (it was silently swallowed before
-  — worker terminals are captured). Merged across workers, pytest's
+  block, rendered by the orchestrator (it was silently swallowed before,
+  since worker terminals are captured). Merged across workers, pytest's
   phase granularity, hidden-note wording, and `-vv` behavior.
 
 - `--doctest-modules` verified working in pool and single-worker modes
@@ -605,7 +660,7 @@ between 0.0.x releases and are listed here.
   parent's `__main__` file without package context; the worker entry
   point used a relative import (ImportError in the child), ran `main()`
   unguarded, and re-prepended the vendored-pytest path (making child
-  `sys.path` differ from the parent's). Found via anyio's own suite —
+  `sys.path` differ from the parent's). Found via anyio's own suite:
   28 tests, including `test_identical_sys_path`.
 
 - Public-suite corpus: `corpus/run.py` reproduces parity + timing runs
@@ -613,7 +668,7 @@ between 0.0.x releases and are listed here.
   with SHA-pinned checkouts and a strict network-then-offline phase
   split. Baseline pytest is pinned to the vendored version.
 
-## 0.0.4 — 2026-06-11
+## 0.0.4 (2026-06-11)
 
 - `@pytest.mark.flaky(reruns=N)` per-test rerun budgets and
   `--only-rerun REGEX` (pytest-rerunfailures semantics); the plugin is
@@ -623,7 +678,7 @@ between 0.0.x releases and are listed here.
   `numprocesses`, `dist`, `reruns`, `worker-timeout` (CLI wins).
 - Rerun reliability: workers now stay connected after draining, so
   failures in a worker's final batch (including single-test runs) are
-  retried like any other — previously tail-of-queue failures could not
+  retried like any other; previously tail-of-queue failures could not
   rerun. Sessions close via an explicit end-of-run signal.
 
 - Release workflow: tag-triggered wheel builds for linux/macos/windows,
@@ -631,7 +686,7 @@ between 0.0.x releases and are listed here.
   `gh attestation verify`), staged as a draft GitHub release with
   SHA256SUMS.
 
-- `--worker-timeout SECS`: hang backstop — kills and replaces a worker
+- `--worker-timeout SECS`: hang backstop that kills and replaces a worker
   stuck on one test, reporting that test failed (off by default).
 
 - Experimental Windows support: anonymous-pipe worker transport
@@ -642,14 +697,14 @@ between 0.0.x releases and are listed here.
 - JUnit XML: flaky tests (passed after `--reruns`) carry a
   `<property name="flaky" value="true"/>`.
 
-## 0.0.3 — 2026-06-11
+## 0.0.3 (2026-06-11)
 
 - Fixed: `-n auto`'s suite-size heuristic undercounted suites using the
   `*_test.py` naming convention (pytest's default matches both `test_*.py`
   and `*_test.py`), capping parallelism to one worker.
 - Added: gate checks for both test-file naming conventions.
 
-## 0.0.2 — 2026-06-11
+## 0.0.2 (2026-06-11)
 
 - Parallel by default: `-n auto`, suite-aware (capped by test-file count
   and cached suite duration); header line announces the worker count.
@@ -668,7 +723,7 @@ between 0.0.x releases and are listed here.
   `-v` mode.
 - Nested pytest-xdist neutralized inside workers.
 
-## 0.0.1 — 2026-06-10
+## 0.0.1 (2026-06-10)
 
 - Initial wheel: Rust orchestrator + vendored pytest 9.0.3 core
   (`rstest_worker._vendor`), item-level dispatch across workers,

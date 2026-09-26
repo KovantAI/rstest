@@ -95,7 +95,7 @@ struct WasteTest {
     also_covered_by: u64,
 }
 
-/// A test that ended with more threads / open fds than it started — a resource
+/// A test that ended with more threads / open fds than it started: a resource
 /// it opened and never released (its own teardown included).
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]

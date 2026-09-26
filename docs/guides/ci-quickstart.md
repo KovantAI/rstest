@@ -46,7 +46,7 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
         with:
           python-version: "3.13"
@@ -63,6 +63,17 @@ Pin the action to a release tag (as above) or a full commit SHA, and set
 `version:` to pin the rstest wheel; without it the action installs the
 latest rstest from PyPI.
 
+The YAML on these pages references third-party actions by major tag
+(`actions/checkout@v7`) for readability. If your security policy requires it,
+pin those by full commit SHA too; see [Security & supply
+chain](../reference/security.md).
+
+In a matrix, the action on `main` names its artifacts per leg (the
+`artifact-suffix` input, default `<os>-py<version>[-<working-directory>]`) so
+legs never share cache segments or JUnit names. That input is **Unreleased**:
+it is not in the `@v0.7.0` action and ships in 0.8.0. See the
+[action README][action].
+
 [action]: https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest
 
 ### Under the hood
@@ -75,8 +86,8 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -87,7 +98,7 @@ jobs:
 
       # Persist the duration cache: from the second run on, the scheduler
       # starts the slowest tests first.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .rstest_cache
           # Unique key per run: actions/cache never RE-saves an
@@ -111,7 +122,7 @@ jobs:
       # files are written per project as junit.<slug>.xml; glob them
       # in the artifact step.
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit
@@ -153,14 +164,14 @@ jobs:
       DJANGO_SETTINGS_MODULE: myapp.settings.test
       DATABASE_URL: postgres://ci:ci@localhost:5432/app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
       - run: pip install -r requirements.txt && pip install rstest==0.7.0
 
       # The cache is what makes run two fast. Unique key per run (actions/cache
       # never re-saves an existing key); restore-keys picks the newest match.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .rstest_cache
           key: rstest-${{ github.ref_name }}-${{ github.run_id }}
@@ -173,7 +184,7 @@ jobs:
       # (harmless to leave in, useful on self-hosted runners).
       - run: rstest -n auto --reuse-db --output github --junitxml junit.xml
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with: { name: junit, path: junit.xml }
 ```
@@ -243,7 +254,7 @@ jobs:
     outputs:
       projects: ${{ steps.list.outputs.projects }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Emit the matrix from your project layout. Keep this list in sync with
       # [tool.rstest] projects in the root pyproject.toml (single source of truth).
       - id: list
@@ -258,8 +269,8 @@ jobs:
       matrix:
         project: ${{ fromJSON(needs.discover.outputs.projects) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
       - run: pip install -r requirements.txt && pip install rstest==0.7.0
       # Artifact names can't contain "/", so derive a slug (libs/core -> libs-core).
@@ -282,7 +293,7 @@ jobs:
         continue-on-error: true
       # Warm segments land in ./rcache/segments/ (where rstest reads them);
       # upload-artifact strips that prefix on push, so aim the download at it.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: steps.warm.outputs.run-id != ''
         with:
           pattern: "rstest-seg-${{ steps.slug.outputs.slug }}--*"
@@ -309,13 +320,13 @@ jobs:
             grep -qxF "$(basename "$f")" .warm-segs 2>/dev/null || cp "$f" ./push/
           done
         if: always()
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: rstest-seg-${{ steps.slug.outputs.slug }}--${{ github.run_id }}
           path: ./push/seg-*.json
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit-${{ steps.slug.outputs.slug }}
@@ -363,7 +374,7 @@ jobs restore it (GitHub lets PRs read the base branch's cache entries):
         run: rstest -n auto --junitxml junit.xml --doctor-json doctor.json
 
       # Save the baseline on main; restore the latest one on PRs.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: doctor-baseline.json
           key: doctor-baseline-${{ github.sha }}
@@ -419,7 +430,7 @@ leak, order dependency, or unstable-id site sneaks in green. Use
         run: |
           rstest migrate-check --migrate-check-json migrate.json \
                  --migrate-allow tests/legacy/   # known-unsafe backlog, tolerated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: migrate-check
@@ -440,10 +451,13 @@ and just run `rstest`.
   exit **1**, the same as test failures, and a malformed rstest flag caught
   by its argument parser exits **2**. Check the log, not just the code. See
   [Exit codes](../reference/exit-codes.md).
-- **Nothing affected, no reports.** A `--changed` run that selects no tests
-  exits before running and writes no `--junitxml` or `--report-json`. Set
-  `if-no-files-found: ignore` on artifact uploads and make report steps
-  tolerate a missing file. See [Selecting changed tests](changed.md#ci-usage).
+- **Nothing affected, no reports.** A single-project `--changed` run that
+  selects no tests exits before running and writes no `--junitxml` or
+  `--report-json`. Set `if-no-files-found: ignore` on artifact uploads and make
+  report steps tolerate a missing file. At a monorepo root, `--report-json` is
+  still written, with every project marked `"skipped": true` (exit 0, or 5
+  with `--changed-strict`); no JUnit is written. See
+  [Selecting changed tests](changed.md#ci-usage).
 - **`--junitxml`** is rendered by rstest from merged results; point your
   CI's test-report integration at it as you would pytest's.
 - **`--report-json`** emits a per-test outcome snapshot (stable schema) if

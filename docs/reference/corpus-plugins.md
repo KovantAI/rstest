@@ -59,7 +59,7 @@ corpus parity floor under rstest.
 | pytest-pretty | 1 | pydantic | 🔶 `-n 0` only |
 | pytest-randomly | 1 | structlog | ✅ parallel (seed synced across workers) |
 | pytest-recording | 1 | langchain | ✅ parallel |
-| pytest-retry | 1 | langgraph | ✅ parallel (rstest seeds `server_port`) |
+| pytest-retry | 1 | langgraph | ✅ parallel (no xdist in the venv, so rstest seeds `server_port`) |
 | pytest-sugar | 1 | fastapi | ⚠️ loaded only; terminal plugin not painted at `-n ≥ 2` |
 | time-machine | 1 | structlog | ✅ parallel |
 | typeguard | 1 | tenacity | ✅ parallel |
@@ -94,8 +94,11 @@ These three were inferred until the corpus evidence below was confirmed; the
 
 - **syrupy**: snapshot asserts under langchain + langgraph at `-n auto`.
 - **pytest-recording**: VCR cassettes under langchain at `-n auto`.
-- **pytest-retry**: rerun channel under langgraph at `-n auto` (rstest seeds the
-  `server_port` its worker branch reads).
+- **pytest-retry**: rerun channel under langgraph at `-n auto`. The venv has
+  no pytest-xdist, so rstest seeds the `server_port` the plugin's worker branch
+  reads. With xdist installed the plugin instead self-provisions through its
+  controller branch, covered by an e2e gate; see
+  [parity divergences §8](parity-divergences.md#8-plugin-master-hook-gating-rstest-side-fixed).
 
 The reverse also applies: `pytest-examples` and `pytest-pretty` are marked `i`
 in the matrix because their only corpus evidence is the `-n 0` pydantic run.
