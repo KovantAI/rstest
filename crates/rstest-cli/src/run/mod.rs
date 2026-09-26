@@ -1766,7 +1766,8 @@ fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> boo
 /// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
 /// Reports drive progress (suppressed under passthrough, whose IO is inherited)
 /// and the run record; collect errors/skips, doctor fixtures, and warnings
-/// accumulate. Scheduling / lazy events are no-ops in a single session —
+/// accumulate. `CollectionDone` sets the progress total. Other scheduling /
+/// lazy events are no-ops in a single session,
 /// enumerated (not `_`) so a new event type forces a decision here.
 fn fold_run_event(
     event: proto::Event,
@@ -1804,8 +1805,13 @@ fn fold_run_event(
             warnings.extend(entries);
             None
         }
-        proto::Event::CollectionDone { .. }
-        | proto::Event::NodeInput { .. }
+        proto::Event::CollectionDone { count, .. } => {
+            // The single session reports its collected count so the dots and
+            // -v renderers print pytest's `[ NN%]` column.
+            prog.set_total(count as usize);
+            None
+        }
+        proto::Event::NodeInput { .. }
         | proto::Event::ItemStart { .. }
         | proto::Event::ItemDone { .. }
         | proto::Event::Stopped { .. }
@@ -2663,6 +2669,41 @@ mod tests {
         assert_eq!(run.collect_skips, 1);
         assert_eq!(warnings.len(), 1);
         assert_eq!(fixtures.len(), 1);
+    }
+
+    #[test]
+    fn fold_run_event_collection_count_drives_the_percentage() {
+        // The single session reports its collected count, so -v lines carry
+        // pytest's `[ NN%]` column just like `pytest -v`.
+        let mut run = report::Run::default();
+        let mut prog = progress::Progress::default();
+        prog.set_mode(progress::Mode::Verbose);
+        let mut fixtures = Vec::new();
+        let mut warnings = Vec::new();
+        let (mut sink, cap) = Sink::captured();
+        let collected: proto::Event = serde_json::from_value(serde_json::json!({
+            "kind": "collection_done",
+            "payload": {"count": 2, "hash": ""},
+        }))
+        .unwrap();
+        for ev in [
+            collected,
+            proto::Event::Report(report("t.py::a", "passed")),
+            proto::Event::Report(report("t.py::b", "passed")),
+        ] {
+            fold_run_event(
+                ev,
+                false,
+                &mut run,
+                &mut prog,
+                &mut fixtures,
+                &mut warnings,
+                &mut sink,
+            );
+        }
+        let out = cap.out();
+        assert!(out.contains("t.py::a PASSED [ 50%]"), "{out}");
+        assert!(out.contains("t.py::b PASSED [100%]"), "{out}");
     }
 
     #[test]

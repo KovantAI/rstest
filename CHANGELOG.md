@@ -94,6 +94,11 @@ between 0.x releases and are listed here.
   without a `[pytest]` section now counts as the config file, as in pytest.
 - The "no surviving worker to run pytest_testnodedown" warning no longer
   carries a run of stray spaces mid-sentence.
+- **Single-worker mode prints pytest's `[ NN%]` progress column.** `-n 0`/`-n 1`
+  output used to drop it (`..F` instead of `..F [100%]`, and `-v` lines with
+  no percentage) because the session never reported its collected count. The
+  `-s`/`--pdb` passthrough path is unchanged: pytest itself hides the column
+  when capture is off.
 - **Monorepo merged `--report-json` now stamps the current schema.** The merged
   root document hard-coded `"schema": 4` while carrying schema-5 fields
   (`quarantined`); it now shares the single-project writer's version constant.

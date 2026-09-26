@@ -22,7 +22,7 @@ pytest core owns everything *about* the tests.
 
 ## Why a vendored pytest, not a reimplementation
 
-pytest compatibility is not an API, it's ten years of semantics: fixture
+pytest compatibility is not an API; it's ten years of semantics: fixture
 finalization order, conftest discovery rules, assertion rewriting, the
 exact behavior of `importorskip` at collection time. Every prior attempt
 at a pytest-compatible runner died reimplementing this surface.
@@ -60,7 +60,7 @@ points and find exactly the classes they expect.
    on them (`--reruns`). Once every test's outcome is final, an explicit
    end-of-session signal lets each worker run its session-fixture
    finalizers. `@pytest.mark.serial` tests run only after every other
-   worker has finished its session (exclusively, on a single worker) then
+   worker has finished its session (exclusively, on a single worker). Then
    exit codes merge.
 
 The protocol deliberately never rides stdin/stdout: those belong to your
@@ -68,9 +68,8 @@ tests (and to pytest itself under `-s`/`--pdb`).
 
 ## Byte-exact mode
 
-[Byte-exact mode](glossary.md#byte-exact-mode) (also called single-worker
-or pytest-exact mode) is what `-n 0` and `-n 1` run. It skips the
-scheduling layer entirely: rstest (a Rust binary) still starts one Python
+[Byte-exact mode](glossary.md#byte-exact-mode) is what `-n 0` and `-n 1`
+run. It skips the scheduling layer entirely: rstest (a Rust binary) still starts one Python
 process in your interpreter, which runs a single pytest session over your
 args, with no dispatch and no `[gwN]` identity. The orchestrator only relays
 that session's reports, or hands it the terminal when a flag needs pytest's

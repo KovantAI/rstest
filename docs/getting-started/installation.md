@@ -1,17 +1,19 @@
 # Installation
 
+Install rstest from PyPI with pip:
+
 ```console
 $ pip install rstest
 ```
 
-or into a uv-managed project (installs alongside your test deps):
+Or add it to a uv-managed project (installs alongside your test deps):
 
 ```console
 $ uv add --dev rstest
 ```
 
-or as a standalone tool (advanced, the tool env is separate from your
-tests, so the worker runtime must also be in the project env; see
+Or install it as a standalone tool (advanced: the tool env is separate from
+your tests, so the worker runtime must also be in the project env; see
 [Binary vs worker runtime](#binary-vs-worker-runtime-for-tool-scoped-installs)):
 
 ```console
@@ -40,7 +42,7 @@ installed, and it does not conflict with an installed pytest either: the
 vendored pytest core lives inside the `rstest_worker` package and never
 touches your `pytest` installation. (One exception: `rstest try` runs your
 suite under plain `pytest` to produce a baseline, so *that* command needs
-pytest installed, see [`try`](../reference/cli-commands.md#try).)
+pytest installed; see [`try`](../reference/cli-commands.md#try).)
 
 Tests always run on the vendored pytest core (currently 9.1.1), whatever
 pytest version your project or its plugins pin. If a plugin still requires
@@ -59,8 +61,8 @@ A tool-scoped install (`uv tool install rstest`, `uvx rstest`) still runs
 your project's tests: rstest discovers the project interpreter at runtime
 (see [Which Python does rstest use?](#which-python-does-rstest-use)), so the
 tool env and the test env stay separate. Two things therefore live in two
-places: the `rstest` BINARY can live anywhere (tool env, `~/bin`), but the
-WORKER runtime (the `rstest_worker` package and its `msgpack` dependency)
+places: the `rstest` **binary** can live anywhere (tool env, `~/bin`), but the
+**worker** runtime (the `rstest_worker` package and its `msgpack` dependency)
 must be importable by the *project* interpreter, because workers run your
 tests in your environment. `pip install rstest` / `uv add --dev rstest` into
 the project venv provides both at once; a tool-only install needs rstest in

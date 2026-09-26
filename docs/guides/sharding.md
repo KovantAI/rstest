@@ -5,8 +5,8 @@ runs only its `1/N` slice; the jobs never talk to each other. Each job
 partitions the collected tests into `N` balanced buckets and keeps
 bucket `K` (K is **1-based**: `1/4`, `2/4`, `3/4`, `4/4`).
 
-```bash
-rstest -n 4 --shard 2/4 --junitxml junit.2.xml
+```console
+$ rstest -n 4 --shard 2/4 --junitxml junit.2.xml
 ```
 
 (Examples use an explicit `-n 4`, the vCPU count of a standard GitHub
@@ -91,7 +91,7 @@ To pin one snapshot:
       [shared cache](../concepts/caching.md#shared-cache-backend)
       (`--cache-remote … --cache-pull --cache-push`): the shards share a commit,
       so their slices **union on pull** into a full index and a later `--changed`
-      selects correctly, no dedicated unsharded job. Without the shared cache,
+      selects correctly with no dedicated unsharded job. Without the shared cache,
       warm the index from an **unsharded** run (or merge each shard's
       `.coverage`). See [keeping the index warm](changed.md#keeping-the-index-warm).
 
@@ -115,15 +115,18 @@ does exactly this.
 
 Each shard's `--report-json`, written while `--shard` was
 active, carries a `meta.shard` stamp: `k`, `n`, and the sha256
-`collection_hash` and size of the full collected suite. Pass the per-shard
-reports and it reconciles them:
+`collection_hash` and size of the full collected suite. Each shard writes its
+report while sharding:
 
-```bash
-# Each shard writes a report while sharding (the report carries the stamp):
-rstest -n 4 --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
+```console
+$ rstest -n 4 --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
+```
 
-# After the matrix finishes, in a job that has gathered all the shard reports:
-rstest shard-verify shard.*.json
+After the matrix finishes, a job that has gathered all the shard reports passes
+them to `shard-verify`, which reconciles them:
+
+```console
+$ rstest shard-verify shard.*.json
 ```
 
 It exits `0` only when the shards agree on one collection (same
@@ -246,7 +249,7 @@ jobs:
     they agree; a separate full run **saves** a fresh key each run so the
     numbers stay current. Pointing shards at a per-run key would give each
     matrix job a different cache and break the partition. If you'd rather
-    not run a separate full job, let shard 1 save the cache instead: but
+    not run a separate full job, let shard 1 save the cache instead, but
     accept that its timings only cover 1/N of the suite.
 
 !!! tip "Or skip the dance entirely with the shared cache"
@@ -276,11 +279,11 @@ it, live on the per-system pages:
 ## Any other CI (generic)
 
 The only inputs are the 1-based shard number and the total. Wire them
-from whatever your system exposes:
+from whatever your system exposes. With `N` total jobs, where this job is
+number `K` (1..N), pin `-n` per job (not `auto`):
 
-```bash
-# N total jobs; THIS job is number K (1..N). Pin -n per job (not auto).
-rstest -n 4 --shard "$K/$N" --junitxml "junit.$K.xml"
+```console
+$ rstest -n 4 --shard "$K/$N" --junitxml "junit.$K.xml"
 ```
 
 Then collect all `junit.*.xml` artifacts and merge (e.g.

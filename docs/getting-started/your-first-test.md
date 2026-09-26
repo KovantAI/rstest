@@ -4,8 +4,8 @@ This is the five-minute path from nothing to a green run, no existing suite
 required. If you already have a pytest project, skip to
 [Run your existing suite](first-steps.md): rstest runs it as-is.
 
-**You need:** Python 3.10+ and a terminal. That's it, no config, no prior
-pytest knowledge. New to the terms below (worker, byte-exact, `-n`)? The
+**You need:** Python 3.10+ and a terminal. That's it: no config, no prior
+pytest knowledge. New to the terms below (worker, byte-exact mode, `-n`)? The
 [glossary](../concepts/glossary.md) defines them.
 
 ## 1. Set up a folder
@@ -21,7 +21,7 @@ rstest discovers the interpreter from the active virtualenv, so activating
 
 ## 2. Write a test
 
-Create `test_first.py`, pytest's naming rules apply, so a `test_*.py` file
+Create `test_first.py`; pytest's naming rules apply, so a `test_*.py` file
 with `test_*` functions is collected automatically:
 
 ```python
@@ -43,7 +43,7 @@ def test_add_negative():
 ```console
 $ rstest
 rstest 0.7.0 — single worker (pytest-exact mode)
-..
+.. [100%]
 
 2 passed in 0.11s
 ```
@@ -70,7 +70,7 @@ def test_add_wrong():
 ```console
 $ rstest
 rstest 0.7.0 — single worker (pytest-exact mode)
-..F
+..F [100%]
 
 --- FAILED test_first.py::test_add_wrong ---
 def test_add_wrong():
@@ -125,7 +125,7 @@ On a real suite you rarely need `-n`: with many test files, the default
 `rstest -v` prefixes each line with the `[gwN]` worker that ran it, and
 `rstest --doctor` will tell you where a real suite's time goes.
 
-## Where to next
+## Go deeper
 
 - [Run your existing suite](first-steps.md): reading the output in depth, selecting
   tests, controlling parallelism

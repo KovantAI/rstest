@@ -14,10 +14,8 @@ the `pluggy` hook contract. If your suite is warning-clean today, you are
 almost certainly already done: jump to [Verify](#3-verify).
 
 This covers your test code. Your **plugins** must also be pytest-9-compatible
-releases, since they run against the vendored 9.1.1 too and a `pytest<9` pin
-does not change that at runtime. rstest flags such pins: one
-`rstest: warning: <plugin> <version> requires pytest<9, ...` line to stderr
-per run (Unreleased: not in 0.7.0). See
+releases, since they run against the vendored core too and a `pytest<9` pin
+is inert at runtime; see
 [Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
 
 ## The method
@@ -108,14 +106,15 @@ these by hand:
 
 | 9.0 change | Who it bites | Fix / restore |
 |---|---|---|
-| **Duplicate path args are de-duplicated.** `pytest x.py x.py` (or `pytest a/b a/`) now runs the overlap **once**, not twice. | Scripts/CI that pass repeated or nested paths and count on re-runs. | Pass `--keep-duplicates` to restore the old behavior, or stop passing the duplicates. |
+| **Duplicate path args are de-duplicated.** `pytest x.py x.py` (or `pytest a/b a/`) now runs the overlap **once**, not twice. | Scripts/CI that pass repeated or nested paths and count on reruns. | Pass `--keep-duplicates` to restore the old behavior, or stop passing the duplicates. |
 | **CI detection requires a non-empty value.** `$CI` / `$BUILD_NUMBER` must now be set to something non-empty; an empty string no longer triggers CI mode. | Pipelines that export `CI=` empty and rely on CI-mode output. | Set `CI=1` (or any non-empty value) in the job. |
 | **`config.args` holds strings only** (no longer `pathlib.Path`). | conftest/plugins that read `config.args` and expect path objects. | Wrap in `pathlib.Path(...)` at the read site. |
 | **Python 3.9 support dropped.** | Suites still running on 3.9. | The vendored core needs CPython **3.10+**, the floor rstest already requires. Upgrade the interpreter. |
 
 ### 3. Verify
 
-Point rstest at the suite in single-session mode: one worker, one pytest
+Point rstest at the suite in
+[byte-exact mode](../concepts/glossary.md#byte-exact-mode): one worker, one pytest
 session, pytest 9.1.1's exact outcomes:
 
 ```console

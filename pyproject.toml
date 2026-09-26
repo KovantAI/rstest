@@ -63,6 +63,8 @@ dev = [
     # the vendored version (python/VENDOR.md) so pre-commit's ty matches CI's
     # `uvx --with pytest ... ty check`.
     "pytest==9.1.1",
+    # corpus/procmem.py's optional memory sampler; ty resolves it from .venv.
+    "psutil>=5",
 ]
 
 [tool.ruff]
@@ -90,6 +92,11 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
 # e2e/toy holds deliberately-broken fixtures (e.g. a missing-import
 # collect-error case) that must not be type-checked.
 exclude = ["python/rstest_worker/_vendor", "e2e"]
+
+[tool.ty.environment]
+# corpus/ and examples/ scripts import corpus modules as top-level siblings
+# (sys.path insert at runtime), so ty needs corpus on its search path.
+extra-paths = ["corpus"]
 
 [tool.pytest.ini_options]
 # Worker unit tests (helpers that don't need the vendored pytest core). Run with

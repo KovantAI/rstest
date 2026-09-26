@@ -17,7 +17,8 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   line or set `[tool.rstest] dist`: rstest does not read `--dist` from
   `addopts` (see [below](#if-xdist-is-still-in-your-ini)).
 - **`-n 1`**: differs. xdist's `-n 1` is one `gw0` worker with `workerinput`;
-  rstest's `-n 1`, like `-n 0`, is single-worker mode with no worker identity.
+  rstest's `-n 1`, like `-n 0`, is
+  [byte-exact mode](../concepts/glossary.md#byte-exact-mode), with no worker identity.
 - **`--dist no`**: rejected (exit 1). Use `-n 0` for a single worker.
 
 Everything else (`--tx`, `--rsync*`, `-d`, `--maxprocesses`,
@@ -77,7 +78,7 @@ One caveat: `--reruns` at `-n 0/1` runs a one-worker pool where
 report `"master"`. See the
 [xdist support matrix](../reference/xdist-support.md#fixtures-worker-identity).
 
-## Master-side hooks
+## Controller-side hooks
 
 xdist's controller-side hooks (`pytest_configure_node`,
 `pytest_testnodeready`, `pytest_testnodedown`) are emulated: each worker
@@ -88,7 +89,7 @@ resource from them, as in SQLAlchemy's `follower_ident` pattern) produce the sam
 observable result as xdist.
 
 Two things to know if you rely on these hooks: they run **N times
-concurrently in N processes** (controller-side shared state needs rework:
+concurrently in N processes** (controller-side shared state needs rework;
 derive from `gateway.id` or a uuid), and a crashed worker's
 `pytest_testnodedown` runs on a *surviving* worker, so teardown must be a
 function of `node.workerinput` alone. Full semantics, timing, and the crash
@@ -117,10 +118,10 @@ dist = "loadgroup"
 
 - **Single collection authority**: xdist aborts runs when workers collect
   differently ("Different tests were collected..."); rstest verifies by
-  hash and refuses BEFORE misassigning, and its error names the cause
+  hash and refuses **before** misassigning, and its error names the cause
   (usually a randomizing plugin without a fixed seed). `rstest
   migrate-check` finds this *before* the first run: it collects twice,
-  diffs the id sets, and names the exact `parametrize` site with the
+  diffs the nodeid sets, and names the exact `parametrize` site with the
   unstable id (memory address / uuid); see
   [migrate-check](migrate-from-pytest.md#the-migrate-check-preflight).
 - **Crash attribution**: xdist infers the culprit of a crashed worker;
@@ -130,8 +131,8 @@ dist = "loadgroup"
   rstest's default mode splits slow files across workers. On wait-heavy
   suites this more than halves the wall time vs xdist (see
   [Benchmarks](../reference/benchmarks.md)).
-- **One merged output**: summary, `--lf` cache, junitxml, coverage: no
-  per-worker stitching.
+- **One merged output**: summary, `--lf` cache, junitxml, and coverage, with
+  no per-worker stitching.
 - **Pretty parallel output**: `--output bar` gives a pytest-sugar-style per-test
   view (result lines, inline failures, progress bar) *under the pool*.
   pytest-sugar is disabled under xdist because workers can't share the
@@ -178,14 +179,14 @@ gain nothing beyond that test.
   cores × time.
 
 **Oversubscription (numpy/BLAS).** The one place a CPU-bound numerics suite can
-get slower *or* flakier under naive parallelism, under xdist too. numpy/torch/
-BLAS spin their own thread pools; at `-n auto` you get *workers × library-threads*
+get slower *or* flakier under naive parallelism, under xdist too.
+numpy/torch/BLAS spin their own thread pools; at `-n auto` you get *workers × library-threads*
 competing for cores, which both shifts reduction order (a tight `assert x ==
 expected` can flip at `-n 8`) and fights for cores. Pin one thread per worker and
 let rstest own parallelism:
 
-```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 rstest -n auto
+```console
+$ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 rstest -n auto
 ```
 
 (Or cap `-n`.) See [Numeric determinism](parallel-safety.md#numeric-determinism-ml-numerics-suites).
@@ -203,7 +204,7 @@ when sizing.
     per-worker memory model, and no concrete worker×thread sweet-spot formula.
     Measure on your own hardware to tune precisely.
 
-**How to decide for real.** [`rstest try`](migrate-from-pytest.md) runs your own
+**How to decide for real.** [`rstest try`](../reference/cli-commands.md#try) runs your own
 suite under plain pytest and under `rstest -n auto`, reporting parity and speed
 before you change any config. Confirm the parity-not-a-win call on your tests
 and cores, not on pandas'.

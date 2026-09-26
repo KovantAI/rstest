@@ -4,11 +4,13 @@ name: corpus speed ramp
 # public GitHub runner, and posts the measured tables to the job summary. Two
 # views (see corpus/bench.py): a suite spectrum (a sub-1x struggler through a
 # ~4x flat suite up to a monorepo, showing speedup tracks the parallelizable
-# share not raw size) and a worker sweep on one suite (-n 1,2,4, showing the
-# ramp with core count). The default set deliberately mixes strugglers
-# (python-dateutil, httpx), clear gains (fastapi, anyio), and a monorepo
-# (langgraph). Every point is a median of repeated runs; parity is diffed on
-# every run and is the hard gate. Wall time is advisory.
+# share not raw size) and worker sweeps (-n 1,2,4, showing the ramp with core
+# count). The default set deliberately mixes strugglers (python-dateutil,
+# httpx), clear gains (fastapi, anyio), a monorepo (langgraph), and two
+# CPU-bound suites (sympy, pure Python; scikit-learn, numpy) swept against
+# pytest-xdist at the same -n. Every point is a median of repeated runs after
+# an untimed warm-up; parity is diffed on every run and is the hard gate. Wall
+# time is advisory.
 #
 # Weekly + manual, like example-bench.yml: a fresh measured datapoint on public
 # hardware, never a projection. The only hard failure is a real regression —
@@ -19,13 +21,13 @@ on:
     inputs:
       suites:
         description: "spectrum suites (comma-separated, must be in suites.toml)"
-        default: "python-dateutil,httpx,fastapi,anyio,langgraph"
+        default: "python-dateutil,httpx,fastapi,anyio,langgraph,sympy,scikit-learn"
       sweep:
-        description: "worker-sweep suite (must be in suites)"
-        default: "anyio"
+        description: "worker-sweep suites, comma-separated (must be in suites; the first is gated)"
+        default: "anyio,sympy,scikit-learn"
       repeat:
         description: "runs per point (median reported)"
-        default: "2"
+        default: "3"
   schedule:
     - cron: "0 10 * * 1" # Mondays 10:00 UTC (after example-bench at 09:00)
 
@@ -35,7 +37,9 @@ permissions:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 120 # 5 suites incl. a monorepo + the anyio -n sweep, x3 repeats
+    # 7 suites incl. a monorepo + three -n sweeps (anyio, and the CPU-bound
+    # sympy / scikit-learn with a matched-n xdist series), 1 warm-up + 3 repeats.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -65,7 +69,7 @@ jobs:
       # workflow_dispatch values injection-safe.
       - name: prepare corpus subset
         env:
-          SUITES: ${{ inputs.suites || 'python-dateutil,httpx,fastapi,anyio,langgraph' }}
+          SUITES: ${{ inputs.suites || 'python-dateutil,httpx,fastapi,anyio,langgraph,sympy,scikit-learn' }}
         run: |
           WHEEL=$(ls target/wheels/rstest-*.whl | head -n1)
           python corpus/run.py --prepare-only \
@@ -77,14 +81,18 @@ jobs:
       # parity diff, and the soft/hard gates. Report also lands in bench.json.
       - name: measure speed ramp
         env:
-          SUITES: ${{ inputs.suites || 'python-dateutil,httpx,fastapi,anyio,langgraph' }}
-          SWEEP: ${{ inputs.sweep || 'anyio' }}
-          REPEAT: ${{ inputs.repeat || '2' }}
+          SUITES: ${{ inputs.suites || 'python-dateutil,httpx,fastapi,anyio,langgraph,sympy,scikit-learn' }}
+          SWEEP: ${{ inputs.sweep || 'anyio,sympy,scikit-learn' }}
+          REPEAT: ${{ inputs.repeat || '3' }}
         run: |
           WHEEL=$(ls target/wheels/rstest-*.whl | head -n1)
+          # --xdist adds a matched-n pytest-xdist series for every sweep suite
+          # whose venv has pytest-xdist (sympy, scikit-learn); others skip it.
           python corpus/bench.py \
             --only "$SUITES" \
             --sweep "$SWEEP" \
+            --sweep-workers 1,2,4 \
+            --xdist \
             --repeat "$REPEAT" \
             --wheel "$WHEEL" \
             --rstest "$PWD/.bench-venv/bin/rstest"

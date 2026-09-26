@@ -57,7 +57,7 @@ flows. Use `-n 0` when you specifically want a plugin's own rendering.
 
 ## A plugin crashes at `-n ≥ 2` with `KeyError` on a `workerinput` key
 
-The plugin reads a `workerinput` key that pytest-xdist's *master* process
+The plugin reads a `workerinput` key that pytest-xdist's *controller* process
 injects, which rstest has no central controller to set (it runs a
 worker-shaped `workerinput` only). The three common cases are now handled, so
 you should not hit them on current rstest:
@@ -82,16 +82,16 @@ This section is about pytest-html's report, when the flag reaches the plugin.
 
 No crash, no error: the file just isn't written. pytest-html registers its
 report writer only on a node *without* `workerinput` (its xdist "am I the
-master?" check), and every rstest pool worker has a `workerinput`, so nothing
+controller?" check), and every rstest pool worker has a `workerinput`, so nothing
 owns report generation. Producing one file from all workers needs a single
-master process, which rstest doesn't run.
+controller process, which rstest doesn't run.
 
 This only bites when `--html` reaches pytest-html itself: from `addopts` or
 after `--`. A `--html` on the rstest command line is rstest's native merged
 report and is written at every worker count, so the simplest fix is to move
 `--html` out of `addopts` and onto the command line. If you need pytest-html's
-own layout, generate it in a single session with `rstest -n 0 --
---html=report.html` (no `workerinput` is set there); the rest of your suite
+own layout, generate it in byte-exact mode with
+`rstest -n 0 -- --html=report.html` (no `workerinput` is set there); the rest of your suite
 can still run parallel in a separate step.
 
 ## Where did my `tmp_path` go?
@@ -128,8 +128,8 @@ extension), [`--worker-timeout 300`](cli.md#-worker-timeout-secs) is the
 backstop: a worker stuck on one test past the limit is killed, the test
 reported failed, and the run completes. `--timeout` arms it automatically at
 a generous multiple. Caveat: the watchdog covers
-hangs on a TEST (any phase); a hang during collection or session config
-is outside it, wrap the invocation in an external timeout if your
+hangs on a **test** (any phase); a hang during collection or session config
+is outside it, so wrap the invocation in an external timeout if your
 environment can hang before tests start.
 
 ## A worker crashed: what happened to its tests?
@@ -139,7 +139,7 @@ message. By default it is *not* retried: segfault loops are worse. With
 [`--reruns`](cli.md#-reruns-n) (or `@pytest.mark.flaky`) it does get
 another attempt on the replacement worker while budget remains, bounded by
 both the rerun and restart budgets so a repeatable crash can't loop. Its
-remaining tests redistributed to other workers automatically. If you see
+remaining tests are redistributed to other workers automatically. If you see
 `worker terminated unexpectedly` instead, the restart budget was
 exhausted: something is killing workers repeatedly, and the longrepr of
 the first crash is the lead.

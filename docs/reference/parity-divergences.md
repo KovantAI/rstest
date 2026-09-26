@@ -1,6 +1,6 @@
 # Parity divergences & upstream fixes
 
-A catalogue of every reason a public suite diverges from byte-exact parity in
+A catalogue of every reason a public suite diverges from exact parity in
 the [corpus](https://github.com/KovantAI/rstest/blob/main/corpus/README.md), the upstream root cause, and the concrete
 change the **upstream project** could make to remove it. None of these are
 rstest correctness bugs: each is either a deliberate rstest design choice
@@ -13,14 +13,14 @@ The classes, by what actually differs:
 
 | Class | What differs | Suites | Upstream fix |
 |---|---|---|---|
-| Self-referential nodeid | the test id | requests, pydantic | don't parametrize on runtime paths |
-| Non-deterministic nodeid | the test id | pydantic | stable parametrize ids |
-| Run-dependent nodeid | the test id | (marshmallow, arrow: now resolved) | stable parametrize ids |
+| Self-referential nodeid | the nodeid | requests, pydantic | don't parametrize on runtime paths |
+| Non-deterministic nodeid | the nodeid | pydantic | stable parametrize ids |
+| Run-dependent nodeid | the nodeid | (marshmallow, arrow: now resolved) | stable parametrize ids |
 | Isolation defect | the outcome | typer | reset global state per test |
 | Exact assert on a fuzzy value | the outcome | rich | assert the tolerant set |
 | Wall-clock deadline | the outcome | urllib3, anyio, django-allauth | mock the clock |
 | Real OS resource | the outcome | werkzeug, httpx | bind ephemeral / mark serial |
-| Plugin master-hook gating | (was a crash) | pytest-retry, pytest-rerunfailures | (rstest-side, fixed) |
+| Plugin controller-hook gating | (was a crash) | pytest-retry, pytest-rerunfailures | (rstest-side, fixed) |
 | Order-dependent serial baseline | the outcome (baseline side) | sqlalchemy | isolate the order-dependent tests |
 
 ---
@@ -61,7 +61,7 @@ def test_unzipped_paths_unchanged(self, path):
     assert value == extract_zipped_paths(value)
 ```
 
-**rstest side:** none needed, this is intended vendoring (see
+**rstest side:** none needed; this is intended vendoring (see
 [compatibility](../concepts/compatibility.md#vendored-pytest-version)). It is a
 *nodeid* difference, not a behavior difference.
 
@@ -112,13 +112,13 @@ Ids that differ between workers (sub-second resolution, or a collection that
 straddles a second) fail that check and rstest refuses to dispatch; there is
 no automatic `-n 0` fallback.
 
-- **marshmallow** runs at full `-n auto`, 100%, the hashes match and the
+- **marshmallow** runs at full `-n auto` at 100%: the hashes match and the
   renamed ids pair 1:1 positionally. (`--collect lazy` *breaks* this: its
   file-affine reorder destroys the positional pairing → 99.66%.)
 - **arrow** uses `--collect lazy` (one worker per file, no cross-worker hash
   compare) and is 100%.
 
-**Upstream fix (still worthwhile):** ids derived from wall-clock are fragile,
+**Upstream fix (still worthwhile):** ids derived from wall-clock are fragile;
 pin them. `freeze_time` the parametrize source, or give explicit `ids=`. It
 removes the dependence on collection-order stability entirely.
 
@@ -179,7 +179,7 @@ was never hardened the same way.
 assert Syntax.guess_lexer("banana.html", "<%= @foo %>") in ("rhtml", "html+php", "html")
 ```
 
-**rstest side:** none, both runners are affected equally.
+**rstest side:** none; both runners are affected equally.
 
 ---
 
@@ -249,7 +249,7 @@ worker and httpx runs fully parallel.
 
 ---
 
-## 8. Plugin master-hook gating (rstest-side, fixed)
+## 8. Plugin controller-hook gating (rstest-side, fixed)
 
 ### pytest-retry `server_port` (langgraph `checkpoint-sqlite`)
 
@@ -279,10 +279,10 @@ No upstream change required.
 
 ### pytest-rerunfailures `sock_port`
 
-pytest-rerunfailures with pytest-xdist installed splits master vs. worker on
+pytest-rerunfailures with pytest-xdist installed splits controller vs. worker on
 `workerinput` **presence** (not `numprocesses`), so every rstest pool worker
 takes its client branch and reads `workerinput["sock_port"]`: a key only an
-xdist master sets → `KeyError` at configure under `-n ≥ 2`. Unlike pytest-retry
+xdist controller sets → `KeyError` at configure under `-n ≥ 2`. Unlike pytest-retry
 there is no knob to flip it to the self-provisioning branch.
 
 **Fix (rstest side, done):** rstest wants the plugin inert under the pool
@@ -316,7 +316,7 @@ serial run no longer skips them.
 
 ## Summary: the upstream-fix shortlist
 
-For a suite maintainer who wants byte-exact parallel parity:
+For a suite maintainer who wants exact parallel parity:
 
 1. **Never put a runtime path, memory address, or `now()` in a parametrize id.**
    Use `ids=` with stable labels. (requests, pydantic, marshmallow, arrow)

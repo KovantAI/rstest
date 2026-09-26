@@ -94,17 +94,17 @@ supported; keep the matrix in tox/CI and put rstest inside each cell.
 
 The reference target is langchain-ai/langgraph: 8 `libs/*` packages,
 each with its own `[tool.pytest]` config. rstest at the repo root
-discovers all 8 (the JS package is correctly skipped, no Python
-config). The measured subset below is the six libs that need no live
+discovers all 8 (the JS package, which has no Python config, is
+correctly skipped). The measured subset below is the six libs that need no live
 services; the other two (postgres-backed checkpoint stores) require a
 running database under any runner. One command at the root replaces six
-serial pytest invocations and cuts wall time several-fold, with per-lib
+serial pytest invocations and cuts wall time several-fold, with per-project
 outcomes matched to the digit, including the dominant package's
 fail/pass/error signature, which its service-dependent tests produce
 identically under vanilla pytest. The corpus run measured 100% per-test
 parity across all 4,284 tests. The one fragile spot is a TTL timing test
 that langgraph's own source marks `@pytest.mark.flaky`; it lives in
-`checkpoint-sqlite`, a small suite the corpus runs single-worker (`-n 0`).
+`checkpoint-sqlite`, a small suite the corpus runs in byte-exact mode (`-n 0`).
 That pin was once forced by a pytest-retry limitation (`server_port`); it is
 now resolved: pytest-retry runs its `@pytest.mark.flaky` marker correctly
 under the pool too (see [Benchmarks](../reference/benchmarks.md#monorepo) for

@@ -1,11 +1,12 @@
 # Report JSON
 
+`rstest --report-json FILE` writes a per-test outcome snapshot after the run.
+The schema is stable and intended for tooling (dashboards, flake tracking,
+result diffing).
+
 ```console
 $ rstest --report-json results.json
 ```
-
-writes a per-test outcome snapshot after the run. The schema is stable and
-intended for tooling (dashboards, flake tracking, result diffing).
 
 This page is the walkthrough: example documents, what each field means, and
 the version history. For generated, machine-readable JSON Schemas of the
@@ -89,7 +90,7 @@ covered the whole suite.
 
 `collect_errors` lists the file paths of collectors that failed outright.
 
-At a [monorepo](../guides/monorepo.md) root, the document is the MERGED
+At a [monorepo](../guides/monorepo.md) root, the document is the **merged**
 result of every project: test keys are root-relative nodeids
 (`libs/core/tests/test_x.py::test_y`), collect-error paths are prefixed
 the same way, and `meta.projects` maps each project to
@@ -144,7 +145,7 @@ Per-test fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `nodeid` | string | pytest node id (parametrized variants are separate entries) |
+| `nodeid` | string | pytest nodeid (parametrized variants are separate entries) |
 | `file` | string | absolute path to the test file (editor-ready URI) |
 | `lineno` | int / `null` | 0-based source line; `null` when pytest reports none |
 | `markers` | string[] | every pytest marker **name** on the item: own and inherited from class/module (`pytestmark`), sorted and de-duplicated. Includes `serial`, `flaky`, `skip`, `xfail`, `parametrize`, `xdist_group`, and any custom marks. Names only (no args/reason) |
@@ -167,13 +168,15 @@ within it.
 
 ## Streaming JSON
 
+`rstest --output json` produces a **third, separate** shape: a live
+newline-delimited JSON stream on stdout, one object per line, emitted as the
+run proceeds rather than a single document written at the end.
+
 ```console
 $ rstest --output json
 ```
 
-is a **third, separate** shape: a live newline-delimited JSON stream on
-stdout, one object per line, emitted as the run proceeds rather than a
-single document written at the end. It's built for editors and CI tooling
+It's built for editors and CI tooling
 that update a test tree incrementally. See
 [`--output`](cli.md#-output-dotsverbosebargithubjson) for the flag.
 
@@ -195,13 +198,13 @@ Three event kinds, discriminated by `event`:
 ```
 
 One `testreport` is emitted **per phase** (`setup`, `call`, `teardown`), so
-a single test produces up to three lines: mirroring pytest's own report
+a single test produces up to three lines, mirroring pytest's own report
 granularity. Fields:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | always `"testreport"` |
-| `nodeid` | string | pytest node id |
+| `nodeid` | string | pytest nodeid |
 | `when` | string | phase: `setup` / `call` / `teardown` |
 | `outcome` | string | `passed` / `failed` / `skipped` |
 | `duration` | float | phase duration in seconds (rounded to 1e-4) |
@@ -219,7 +222,7 @@ run, so a tree can mark the file red live rather than waiting for
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | always `"collecterror"` |
-| `path` | string | the failing collector: rootdir-relative file or node id |
+| `path` | string | the failing collector: rootdir-relative file or nodeid |
 | `longrepr` | string | the collection traceback |
 
 Under full collection (the default) every worker collects the whole suite, so
@@ -249,15 +252,16 @@ is interleaved, so every line parses on its own.
 
 ## Doctor JSON
 
+`rstest --doctor-json FILE` writes the [`--doctor`](cli.md#-doctor)
+suite-health analysis as a single versioned document: the machine-readable
+surface for CI trending (diff two runs to catch new long poles, fixture-cost
+growth, or wait-time regressions; a ready-made recipe is in the
+[CI quickstart](../guides/ci-quickstart.md#suite-health-trending-with-doctor)).
+
 ```console
 $ rstest --doctor-json doctor.json
 ```
 
-writes the [`--doctor`](cli.md#-doctor) suite-health analysis as a single
-versioned document: the machine-readable surface for CI trending (diff two
-runs to catch new long poles, fixture-cost growth, or wait-time
-regressions; a ready-made recipe is in the
-[CI quickstart](../guides/ci-quickstart.md#suite-health-trending-with-doctor)).
 It is a **separate document** from the run snapshot above; combine with
 `--doctor` to also print the human report.
 
@@ -381,14 +385,17 @@ consumer. Increment-only: incompatible changes bump `schema`.
 
 ## Migrate-check JSON
 
+`rstest migrate-check --migrate-check-json FILE` writes the
+[`migrate-check`](cli-commands.md#migrate-check) parallel-readiness report as a
+single versioned document: the machine-readable surface for CI gating (fail the
+build when a new parallel-unsafe test appears) and for tooling that renders the
+findings.
+
 ```console
 $ rstest migrate-check --migrate-check-json migrate.json
 ```
 
-writes the [`migrate-check`](cli-commands.md#migrate-check) parallel-readiness report
-as a single versioned document: the machine-readable surface for CI gating
-(fail the build when a new parallel-unsafe test appears) and for tooling that
-renders the findings. It is a **separate document** from the run snapshot.
+It is a **separate document** from the run snapshot.
 The flag is only read by the `migrate-check` subcommand, which prints its
 human report as well; passed to a normal run, it does nothing.
 
@@ -466,8 +473,8 @@ Top-level fields:
 | `why` | string | the evidence behind the verdict |
 | `fix` | string | the recommended fix plus rstest stopgap |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |
-| `polluter` | object / `null` | for ORDER-DEPENDENCY / ISOLATION: `{kind: "other_file", file}`, `{kind: "same_file", file}`, or `{kind: "not_reproducible"}`; `null` otherwise |
+| `polluter` | object / `null` | for `ORDER DEPENDENCY` / `ISOLATION / CO-LOCATION`: `{kind: "other_file", file}`, `{kind: "same_file", file}`, or `{kind: "not_reproducible"}`; `null` otherwise |
 
-The exit code is **not** in the document, read it from the process: non-zero
-when any non-allow-listed WILL-bail id or parallel finding exists. Increment-
-only: incompatible changes bump `meta.schema`.
+The exit code is **not** in the document; read it from the process: non-zero
+when any non-allow-listed WILL-bail id or parallel finding exists.
+Increment-only: incompatible changes bump `meta.schema`.

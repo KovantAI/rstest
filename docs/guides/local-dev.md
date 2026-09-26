@@ -30,10 +30,7 @@ $ rstest --watch
 
 The rerun-selection policy is import-graph based, so you don't rerun the whole suite on every keystroke:
 
-- A change set of **only test files** (per your `python_files` patterns) reruns exactly those files, with all your other flags intact.
-- Any other `.py` (source) change reruns the tests **affected by the change** per the project import graph (the same machinery as [`--changed`](changed.md)). A change affecting no tests skips the rerun; anything the graph can't reason about falls back to the full selection.
-- Changes to pytest config (`pyproject.toml`, `pytest.ini`, `setup.cfg`, `tox.ini`) trigger a full rerun.
-- VCS internals, `__pycache__`, virtualenvs, and rstest's own caches are ignored.
+--8<-- "docs/_snippets/watch-rerun-policy.md"
 
 Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. Type `q` and Enter between runs, or press `Ctrl+C`, to exit (`q` is Unreleased: not in 0.7.0, and not offered under `-s`/`--pdb`; see [Watch mode](watch-mode.md)).
 
@@ -51,7 +48,7 @@ The duration cache and last-failed state update on every cycle, so `--lf` (below
 
 **New test files are picked up.** Saving a brand-new file that matches `python_files` counts as a test-file change and reruns exactly that file, even if it sits outside the path you started the session with: reruns keep your flags (`-k`, `-x`, `-n`, ...) but not your positional paths.
 
-**Per-cycle overhead is roughly 0.4s.** From save to result on a one-test project, a cycle takes about 400ms at both `-n 0` and `-n 2`: the 300ms debounce plus about 100ms to spawn fresh workers and collect. Higher `-n` adds a little worker startup, and large trees add the per-save selection latency (tens of milliseconds, see [`--watch`](../reference/cli.md#-watch)). Everything else is your tests' own time. See [Watch mode](watch-mode.md#per-cycle-cost).
+**Per-cycle overhead is roughly 0.4s.** From save to result on a one-test project, a cycle takes about 400ms at both `-n 0` and `-n 2`: the 300ms debounce plus about 100ms to spawn fresh workers and collect. Higher `-n` adds a little worker startup, and large trees add the per-save selection latency (tens of milliseconds; see [`--watch`](../reference/cli.md#-watch)). Everything else is your tests' own time. See [Watch mode](watch-mode.md#per-cycle-cost).
 
 ### 2. Run only what changed: `--changed`
 
@@ -63,10 +60,7 @@ $ rstest --changed
 
 Changes come from git: working tree + untracked vs `HEAD`. Two selection engines back it, and rstest picks the tightest one available:
 
-| Engine | When | Granularity |
-|---|---|---|
-| **Import graph** | always available, zero setup | whole test *files* that transitively import a changed module |
-| **Coverage index** | when a line→test index is warm | individual *tests* whose recorded coverage hit the changed *lines* |
+--8<-- "docs/_snippets/changed-engines.md"
 
 Out of the box you get the import graph, conservative by construction (over-selection is safe, under-selection is not): ambiguous module names select every match, function-local imports count as edges, a changed `conftest.py` selects its whole subtree, and any config or non-Python change falls back to a full run. The one documented gap is dynamic imports (`importlib.import_module`), which produce no edges. Use [`--changed-strict`](../reference/cli.md#-changed-strict) for correctness-critical runs.
 
@@ -116,7 +110,7 @@ Total setup time per fixture. A *function-scoped* fixture that runs on every tes
 
 Doctor's leak section is the first place to look for order-dependent flakiness, because leaked state is a leading cause of it. For the flake *signal* itself, see the next section.
 
-Doctor adds only a few cheap measurements and doesn't change outcomes, so it's fine to run on a whim, and it works at any worker count: a fast suite's usual `-n 0`/`-n 1` still runs a real worker process, so leak and fixture-cost instrumentation apply. (One nuance: the first test each worker runs is skipped from leak detection as a warm-up, so at `-n 0` the very first test isn't leak-checked.) There is also `--doctor-json`/`--doctor-md` for CI, but that's a CI concern, not an inner-loop one.
+Doctor adds only a few cheap measurements and doesn't change outcomes, so it's fine to run on a whim, and it works at any worker count: a fast suite's usual `-n 0`/`-n 1` still runs a real worker process, so leak and fixture-cost instrumentation apply. (One nuance: the first test each worker runs is skipped from leak detection as a warm-up, so at `-n 0` the very first test isn't leak-checked.) There are also `--doctor-json`/`--doctor-md` for CI, but that's a CI concern, not an inner-loop one.
 
 ## Flaky-test handling
 

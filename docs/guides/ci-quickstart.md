@@ -14,12 +14,7 @@ GitLab, Azure, CircleCI, Jenkins, Buildkite, pre-commit), see [More CI
 systems](ci-recipes.md). For a shard matrix that needs a cache no native CI
 cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
 
-!!! tip "Pin for reproducible CI"
-    The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin an exact version (`pip install rstest==0.7.0`) or install from your
-    lockfile, ideally with hashes (`pip install --require-hashes -r
-    requirements.txt`). rstest is pre-1.0, so a range like `~=0.7` can still
-    pull in breaking changes.
+--8<-- "docs/_snippets/ci-pin-tip.md"
 
 ## Which layout do I want?
 
@@ -31,7 +26,7 @@ cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
 | One long suite you split across CI nodes | `--shard K/N` matrix + [shared cache](ci-shared-cache.md) | [Sharding](sharding.md) + [Shared cache](ci-shared-cache.md) |
 
 The rule of thumb: **the unit of CI parallelism should be the project, not the
-root** once you have more packages than runner cores: one job per package
+root** once you have more packages than runner cores. One job per package
 gives each the full runner and its own cache. Reach for `--shard` only when a
 *single* project's suite is itself the long pole.
 
@@ -212,7 +207,7 @@ long pole first. That is a **synthetic** wait-bound example, not a Django app.
 rstest ships no canonical Django timing, and a suite's win depends on its own
 shape (see the self-check table in the
 [README](https://github.com/KovantAI/rstest#will-rstest-speed-up-your-suite)).
-To get *your* real numbers before committing, run [`rstest try`](migrate-from-pytest.md)
+To get *your* real numbers before committing, run [`rstest try`](../reference/cli-commands.md#try)
 locally. It runs your suite under plain pytest and under `rstest -n auto`,
 diffs outcomes, and reports the speedup, with no migration.
 
@@ -242,7 +237,7 @@ at once:
 job per package via a matrix, instead of one root job running everything
 concurrently. Each job runs a single project (`rstest libs/core` opts out of
 monorepo mode and runs that package alone, with the runner's *full* core count
-, no oversubscription), and because it's a single-project run it can use the
+and no oversubscription), and because it's a single-project run it can use the
 [shared cache](ci-shared-cache.md) normally:
 
 ```yaml
@@ -333,9 +328,9 @@ jobs:
           path: "junit.*.xml"
 ```
 
-Each package is its own job: it gets the whole runner, warms its own cache
-segment from the last green main run, and pushes a fresh segment: cold on run
-one, warm from run two, exactly like the single-suite case. Isolation is free
+Each package is its own job. It gets the whole runner, warms its own cache
+segment from the last green main run, and pushes a fresh segment (cold on run
+one, warm from run two, exactly like the single-suite case). Isolation is free
 (matrix jobs don't share a runner), and a slow package no longer steals
 workers from a fast one. The segment-merge mechanics are in
 [Shared cache across CI jobs](ci-shared-cache.md).
@@ -355,7 +350,7 @@ workers from a fast one. The segment-merge mechanics are in
 
 `--doctor-json` writes the doctor analysis as a versioned JSON document
 (see [Suite diagnostics](doctor.md)). Archive it per run and compare a
-PR's report against the main branch's: no extra tooling required, the
+PR's report against the main branch's. No extra tooling is required: the
 document already contains totals, wait-bound tests, parallel-floor gate
 tests, and fixture costs by name.
 
@@ -444,12 +439,11 @@ and just run `rstest`.
 
 ## Notes
 
-- **Exit codes** follow pytest's (0 pass, 1 failures, 2 interrupted, 3
-  internal or worker lost, 4 pytest usage error, 5 nothing collected), merged
-  across workers. Two CI gotchas: rstest's **own** validation errors (bad flag
-  combinations such as `--shard` with one worker, no usable interpreter)
-  exit **1**, the same as test failures, and a malformed rstest flag caught
-  by its argument parser exits **2**. Check the log, not just the code. See
+- **Exit codes** follow pytest's vocabulary (0 pass, 1 failures, 5 nothing
+  collected, ...), merged across workers. The CI gotcha: when rstest itself
+  rejects a run (a bad flag combination, no usable interpreter) it also exits
+  **1**, the same as test failures, so check the log or the report file, not
+  just the code. The full table and each gating flag's codes are in
   [Exit codes](../reference/exit-codes.md).
 - **Nothing affected, no reports.** A single-project `--changed` run that
   selects no tests exits before running and writes no `--junitxml` or
@@ -491,13 +485,15 @@ and just run `rstest`.
   unchanged on `windows-latest` and `macos-latest` (swap the runner image);
   rstest's full test gate runs on all three every commit. On macOS/Windows
   `-n auto` starts from the runner's logical cores (the cgroup/affinity
-  narrowing above is Linux-specific), with the same file and time caps. Two Windows-only behavior differences, both with
-  automatic fallbacks: the per-test timeout has no signal-based interrupt, so
-  `--worker-timeout` (the watchdog) is the only backstop there. See
-  [`--worker-timeout`](../reference/cli.md#-worker-timeout-secs); and
-  file-descriptor leak tracking is unavailable (it reads `/proc/self/fd` or
-  `/dev/fd`), so `--doctor` reports thread leaks but not fd leaks on Windows.
-  See [Resource leaks](resource-leaks.md).
+  narrowing above is Linux-specific), with the same file and time caps.
+  Windows has two behavior differences, both with automatic fallbacks:
+
+    - The per-test timeout has no signal-based interrupt, so
+      `--worker-timeout` (the watchdog) is the only backstop there. See
+      [`--worker-timeout`](../reference/cli.md#-worker-timeout-secs).
+    - File-descriptor leak tracking is unavailable (it reads `/proc/self/fd`
+      or `/dev/fd`), so `--doctor` reports thread leaks but not fd leaks. See
+      [Resource leaks](resource-leaks.md).
 
 ## Go deeper
 

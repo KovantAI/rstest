@@ -1,9 +1,5 @@
 # CLI subcommands
 
-```text
-rstest <COMMAND> [OPTIONS]
-```
-
 These commands don't run your suite as a normal test run. Each is given as
 the first argument (`rstest try`); a path literally named after one is
 disambiguated with `rstest ./try` or `rstest -- try`. `try`,
@@ -11,6 +7,10 @@ disambiguated with `rstest ./try` or `rstest -- try`. `try`,
 own analysis, not as a normal test run. The flags that only apply to a
 subcommand are documented with it; everything else is on
 [CLI flags](cli.md).
+
+```text
+rstest <COMMAND> [OPTIONS]
+```
 
 - **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid)
 - **CI and the shared cache:** [`shard-verify`](#shard-verify), [`cache-compact`](#cache-compact)
@@ -49,51 +49,55 @@ requirement.
 
 ### `migrate-check`
 
-Parallel-readiness preflight, not a run. Collects the suite **twice** and
-diffs the id sets; ids present in only one collection are run-to-run unstable.
-Reports each offending parametrize site, classified by why its id is unstable:
+Parallel-readiness preflight, not a test run. It works in two stages and
+stops as early as it can.
 
-- **address / uuid**: per-process values (a `repr()`-fallback id embedding
-  `0x…`, or a uuid). These differ in *every* worker, so per-worker collections
-  disagree and rstest must bail → the suite is forced to `-n 0`. Reported as
-  **WILL bail**.
-- **time**: a timestamp/date in the id. Usually stable enough *within* one run
-  (all workers collect near-simultaneously), so it typically runs at `-n auto`.
-  Reported as **may bail**.
+**1. Collection stability.** It collects the suite **twice** and diffs the id
+sets; ids present in only one collection are run-to-run unstable. It reports
+each offending parametrize site, classified by why its id is unstable:
 
-If no WILL-bail id is found, it then **runs the suite at `-n auto`** and
-classifies any test that fails only under parallelism. The discriminators
-(`-n 0` twice and `--dist loadfile`) are **scoped to the files containing
-failures**, so cost scales with the number of failing files, not the suite
-size, a clean suite runs no discriminators at all:
+- **address / uuid**: a per-process value (a `repr()`-fallback id embedding
+  `0x…`, or a uuid). These differ in *every* worker, so per-worker
+  collections disagree and rstest refuses to dispatch (`workers collected
+  different test sets ...`): nothing runs in parallel until the ids are fixed
+  or you choose `-n 0`. Reported as **WILL bail**, a hard blocker.
+- **time**: a timestamp/date in the id. A coarse one (seconds or dates) is
+  usually stable enough *within* one run, since all workers collect
+  near-simultaneously, so it typically runs at `-n auto`; but a run whose
+  collection crosses a second boundary hits the same refusal, so it fails
+  intermittently, and a sub-second timestamp differs every time. Reported as
+  **may bail**.
 
-- **NOT PARALLEL-SPECIFIC**: also fails at `-n 0`; a pre-existing bug/env gap,
-  summarized (not a migration concern).
-- **INTRINSIC FLAKE**: serial repeats disagree; flaky under any runner.
-- **INCONCLUSIVE**: missing from a follow-up run (for example an unstable
-  parametrize id), so there is no evidence to classify it. Not counted as a
-  pass.
-- **ORDER DEPENDENCY**: passes serial and under `--dist loadfile`, fails under
-  `load`; run with `loadfile` or fix the in-file coupling.
-- **WALL-CLOCK / LOAD-SENSITIVE**: passes serial, fails parallel, and is
-  wait-bound (wall ≫ cpu): a real-time deadline that misses under
-  oversubscription. Mock the clock / drop the tight upper bound; stopgap `-n 4`.
-- **ISOLATION / CO-LOCATION**: passes serial, fails under both `load` and
-  `loadfile`, and is *not* wait-bound; a leaked-global-state defect. Reset it
-  per test, or `@pytest.mark.serial`.
+The fix for both is a stable `ids=` on the `parametrize`. If a WILL-bail id
+is found, it stops here: nothing runs in parallel until the ids are stable.
+
+**2. Parallel classification.** Otherwise it **runs the suite at `-n auto`**
+and classifies every test that fails only under parallelism. The
+discriminator reruns (`-n 0` twice and `--dist loadfile`) are **scoped to
+the files containing failures**, so cost scales with the number of failing
+files, not the suite size; a clean suite runs no discriminators at all. Each
+failure lands in one class:
+
+| Class | Meaning | Fix it names |
+|---|---|---|
+| **NOT PARALLEL-SPECIFIC** | also fails at `-n 0` | a pre-existing bug or env gap; summarized, not a migration concern |
+| **INTRINSIC FLAKE** | serial repeats disagree | flaky under any runner; fix the flake (`--reruns` only hides it) |
+| **INCONCLUSIVE** | missing from a follow-up run (for example an unstable parametrize id), so there is no evidence either way; not counted as a pass | make the nodeid stable across collections |
+| **ORDER DEPENDENCY** | passes serial and under `--dist loadfile`, fails under `load` | run with `--dist loadfile`, or fix the in-file coupling |
+| **WALL-CLOCK / LOAD-SENSITIVE** | passes serial, fails parallel, and is wait-bound (wall ≫ cpu): a real-time deadline that misses under oversubscription | mock the clock / drop the tight upper bound; stopgap `-n 4` or `@pytest.mark.serial` |
+| **ISOLATION / CO-LOCATION** | passes serial, fails under both `load` and `loadfile`, and is *not* wait-bound: a leaked-global-state defect | reset the leaked state per test; stopgap `@pytest.mark.serial` |
 
 For ORDER-DEPENDENCY and ISOLATION findings it then **bisects the polluter**
-(capped): it binary-searches for the file whose tests, run serially before the
-victim, reproduce the failure, and reports `POLLUTED BY: <file>` (cross-file),
-`SAME-FILE co-location (inspect <file>)`, or (when no serial ordering
-reproduces) that the failure is likely a concurrent-resource race rather than
-state pollution.
+(capped at 3 victims): it binary-searches for the file whose tests, run
+serially before the victim, reproduce the failure, and reports `POLLUTED BY:
+<file>` (cross-file), `SAME-FILE co-location (inspect <file>)`, or (when no
+serial ordering reproduces) that the failure is likely a concurrent-resource
+race rather than state pollution.
 
-Each finding prints the upstream fix (for unstable ids: give the parametrize a
-stable `ids=`) and the rstest stopgap. Exits non-zero if any WILL-bail id or
-parallelism-specific failure is found: usable as a CI gate (see
-`--migrate-check-json` and `--migrate-allow` below for the machine-readable
-form and the known-issue allow-list).
+Each finding prints the upstream fix and the rstest stopgap. Exits non-zero
+if any WILL-bail id or parallelism-specific failure is found: usable as a CI
+gate (see `--migrate-check-json` and `--migrate-allow` below for the
+machine-readable form and the known-issue allow-list).
 
 ### `--migrate-check-json <path>`
 
@@ -191,7 +195,7 @@ its own it is ignored and no file is written.
 
 ### `--audit-repeat <N>`
 
-How many times `audit` re-runs the `-n auto` pass (default `1`). A parallel-only
+How many times `audit` reruns the `-n auto` pass (default `1`). A parallel-only
 failure is probabilistic (a race may not fire every run), so a test that fails
 in **any** repeat is treated as a candidate. Raise it (e.g. `--audit-repeat 5`)
 to shake out intermittent races. The discriminators repeat the same number of
@@ -209,7 +213,7 @@ chance and be listed as a serial candidate.
 
 Order-dependency bisect: the automated answer to "this test only fails when
 run after some other test; *which* one?" Given a failing test's nodeid, it
-finds the **polluter**: the earlier test(s) whose leaked state make the target
+finds the **polluter**: the earlier test(s) whose leaked state makes the target
 fail.
 
 It works entirely at `-n 0` (serial), so it isolates **ordering**, not
@@ -228,7 +232,7 @@ concurrency (for parallel-only failures use
 
 It prints the culprit(s) and a **minimal reproducing command**
 (`rstest -n 0 <culprit…> <victim>`) you can paste to confirm and debug. It
-runs from where you ran bisect: ids are shell-quoted and written relative to
+runs from where you ran bisect: nodeids are shell-quoted and written relative to
 the current directory, and your `--python` and pytest options are carried
 over as given.
 
@@ -401,7 +405,7 @@ comes from `.rstest_cache/`: `durations.json` (last recorded call time),
 footprint, populated by a prior `--cov-context=test` run). Fields whose cache is
 cold are shown as unavailable rather than omitted. In human mode an unknown
 nodeid exits `1` and prints substring suggestions; with `--json` it exits `0`
-with `"found": false` so tooling can probe ids cheaply.
+with `"found": false` so tooling can probe nodeids cheaply.
 
 Note the local caches keep only the *latest* duration per test, not a history
 series, so variance and an ordered last-N-outcomes list are not reported yet;

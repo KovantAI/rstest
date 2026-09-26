@@ -1,0 +1,280 @@
+{
+ "environment": {
+  "date": "2026-09-26",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "logical_cpus": 14,
+  "load_1m_at_start": 14.42,
+  "rstest": "rstest 0.7.0",
+  "rstest_commit": "b477551",
+  "suite_commits": {
+   "aiohttp": "12ea5a580ac02f5062b927ac3fa278000d7abb04",
+   "anyio": "b7ea84c275fde6420ea242844bc7fb0fee6132f7",
+   "arrow": "2224255c4acc594d734cef0bbc83360452a67983",
+   "attrs": "89fae8300f484544c1b7678cea5efe58c551fbb9",
+   "click": "8a1b1a33d739be05b7e91251e3c0dde77c5e152f",
+   "django-allauth": "d7d5d39a8d4c91eb78cf23da21fbf4ea5d5fa01b",
+   "fastapi": "d3e6a2931f95dcb044c09cbfc39e4b0e9e620fd4",
+   "flask": "36e4a824f340fdee7ed50937ba8e7f6bc7d17f81",
+   "freezegun": "92d61b3f5c31942a1039713574487bdcfcdbbfff",
+   "itsdangerous": "672971d66a2ef9f85151e53283113f33d642dabd",
+   "jinja2": "5ef70112a1ff19c05324ff889dd30405b1002044",
+   "jsonschema": "1a77549ded95c324ce0d22fe00c0f4d77141c481",
+   "langchain": "fa942aec719abd92026dcb56cab8e50a38776611",
+   "langgraph": "97320843fe78b93bd5290ce366841ff9850bf379",
+   "markupsafe": "b2e4d9c7687be25695fffbe93a37622302b24fb1",
+   "marshmallow": "27bfa771984afeb65ab3266fbf5d8e3338d4993b",
+   "more-itertools": "5692cd838d2b0b55ff46c5f9934b79a0b069027e",
+   "packaging": "1529771b80cf6a327afdf33a8a0e7a96ac3f428f",
+   "pluggy": "e2c9b6f101ee1a2ce1de5162c03f75d56635b415",
+   "pydantic": "2700a3594d61844eb771abf2b3e36660d501e0dd",
+   "python-dateutil": "48bd1af97e71baf8e96fce5b663d589caac8f147",
+   "requests": "6f66281a1d6326b1b9c4ac09ca30de0fc4e6ef43",
+   "rich": "46cebbb032f920eb096efbaf23cdc6fe9dd541f7",
+   "sqlalchemy": "4e97e0abaf5c980ff04558323974c72757baa46f",
+   "starlette": "45e51dcf99f3a270b0bcec1aec5410b4345863a9",
+   "structlog": "025edaf799c6d6d511ab672d14c2ba8e885c4c36",
+   "sympy": "d701e5949291fcff55903d13dd2b711d75d4ee42",
+   "tenacity": "a49e9d6dd4e4611238dc277263d1975e1cada21e",
+   "trio": "78dfbc2b08e8191c7dd66c1dde3e61d33bbe423f",
+   "typer": "dacdc4349df29dd1d43310d727f80d85cb5643e6",
+   "urllib3": "e8a81de5e1fe6b52dbcbdd93345560097c1e58fb",
+   "werkzeug": "1b00618e787f40dfb21eba29caf8f8be7c8e1d93"
+  },
+  "repeat": 5,
+  "warmup": 1,
+  "rstest_cache": "warm"
+ },
+ "spectrum": [
+  {
+   "suite": "scikit-learn",
+   "pytest_wall": 31.7,
+   "pytest_band": "31.7 (31.4-31.8)",
+   "rstest_wall": 6.9,
+   "rstest_band": "6.9 (6.7-7.0)",
+   "speedup": 4.63,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 0,
+   "baseline_tests": 3941,
+   "candidate_collect_errors": 0
+  }
+ ],
+ "sweeps": [],
+ "memory": [
+  {
+   "suite": "scikit-learn",
+   "rstest": {
+    "points": [
+     {
+      "workers": 1,
+      "max_proc_rss_mib": 410.2,
+      "peak_tree_rss_mib": 920.0,
+      "wall": 32.5
+     },
+     {
+      "workers": 2,
+      "max_proc_rss_mib": 406.4,
+      "peak_tree_rss_mib": 1467.4,
+      "wall": 17.9
+     },
+     {
+      "workers": 4,
+      "max_proc_rss_mib": 399.3,
+      "peak_tree_rss_mib": 2138.2,
+      "wall": 10.6
+     },
+     {
+      "workers": 8,
+      "max_proc_rss_mib": 396.7,
+      "peak_tree_rss_mib": 3669.7,
+      "wall": 7.7
+     },
+     {
+      "workers": 14,
+      "max_proc_rss_mib": 395.4,
+      "peak_tree_rss_mib": 5437.1,
+      "wall": 6.9
+     }
+    ],
+    "fit": {
+     "fixed_mib": 730.6,
+     "per_worker_mib": 344.1,
+     "r2": 0.994
+    }
+   },
+   "xdist": {
+    "points": [
+     {
+      "workers": 1,
+      "max_proc_rss_mib": 410.0,
+      "peak_tree_rss_mib": 1088.3,
+      "wall": 33.0
+     },
+     {
+      "workers": 2,
+      "max_proc_rss_mib": 420.0,
+      "peak_tree_rss_mib": 1798.7,
+      "wall": 18.8
+     },
+     {
+      "workers": 4,
+      "max_proc_rss_mib": 412.0,
+      "peak_tree_rss_mib": 2474.8,
+      "wall": 11.3
+     },
+     {
+      "workers": 8,
+      "max_proc_rss_mib": 418.6,
+      "peak_tree_rss_mib": 4109.5,
+      "wall": 7.0
+     },
+     {
+      "workers": 14,
+      "max_proc_rss_mib": 424.0,
+      "peak_tree_rss_mib": 6082.4,
+      "wall": 6.7
+     }
+    ],
+    "fit": {
+     "fixed_mib": 930.4,
+     "per_worker_mib": 375.9,
+     "r2": 0.993
+    }
+   }
+  }
+ ],
+ "grid": {
+  "suite": "scikit-learn",
+  "threads": [
+   "1",
+   "2",
+   "4",
+   "unset"
+  ],
+  "cells": [
+   {
+    "workers": 1,
+    "threads": "1",
+    "wall": 32.1,
+    "band": "32.1 (32.0-32.4)"
+   },
+   {
+    "workers": 1,
+    "threads": "2",
+    "wall": 32.1,
+    "band": "32.1 (32.0-32.3)"
+   },
+   {
+    "workers": 1,
+    "threads": "4",
+    "wall": 32.1,
+    "band": "32.1 (32.0-32.1)"
+   },
+   {
+    "workers": 1,
+    "threads": "unset",
+    "wall": 32.2,
+    "band": "32.2 (32.1-32.3)"
+   },
+   {
+    "workers": 2,
+    "threads": "1",
+    "wall": 17.9,
+    "band": "17.9 (17.5-18.0)"
+   },
+   {
+    "workers": 2,
+    "threads": "2",
+    "wall": 17.9,
+    "band": "17.9 (17.5-18.0)"
+   },
+   {
+    "workers": 2,
+    "threads": "4",
+    "wall": 17.6,
+    "band": "17.6 (17.5-18.1)"
+   },
+   {
+    "workers": 2,
+    "threads": "unset",
+    "wall": 18.0,
+    "band": "18.0 (17.5-18.1)"
+   },
+   {
+    "workers": 4,
+    "threads": "1",
+    "wall": 11.0,
+    "band": "11.0 (10.6-11.1)"
+   },
+   {
+    "workers": 4,
+    "threads": "2",
+    "wall": 10.9,
+    "band": "10.9 (10.6-11.7)"
+   },
+   {
+    "workers": 4,
+    "threads": "4",
+    "wall": 10.9,
+    "band": "10.9 (10.8-10.9)"
+   },
+   {
+    "workers": 4,
+    "threads": "unset",
+    "wall": 10.9,
+    "band": "10.9 (10.5-11.1)"
+   },
+   {
+    "workers": 10,
+    "threads": "1",
+    "wall": 7.1,
+    "band": "7.1 (7.1-7.1)"
+   },
+   {
+    "workers": 10,
+    "threads": "2",
+    "wall": 7.1,
+    "band": "7.1 (6.5-7.2)"
+   },
+   {
+    "workers": 10,
+    "threads": "4",
+    "wall": 7.1,
+    "band": "7.1 (7.0-7.2)"
+   },
+   {
+    "workers": 10,
+    "threads": "unset",
+    "wall": 7.0,
+    "band": "7.0 (6.5-7.1)"
+   },
+   {
+    "workers": 14,
+    "threads": "1",
+    "wall": 6.1,
+    "band": "6.1 (6.0-7.1)"
+   },
+   {
+    "workers": 14,
+    "threads": "2",
+    "wall": 6.2,
+    "band": "6.2 (6.1-6.5)"
+   },
+   {
+    "workers": 14,
+    "threads": "4",
+    "wall": 6.0,
+    "band": "6.0 (6.0-6.2)"
+   },
+   {
+    "workers": 14,
+    "threads": "unset",
+    "wall": 6.1,
+    "band": "6.1 (6.1-6.4)"
+   }
+  ],
+  "outcome_drift": []
+ }
+}

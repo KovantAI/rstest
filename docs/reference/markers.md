@@ -17,8 +17,8 @@ on a single designated worker, only after every other worker's session has
 fully finished (fixtures torn down, ports and databases released), in
 collection order.
 
-The marker is registered by rstest automatically, no `markers` ini entry
-needed, no `--strict-markers` complaints. Under plain pytest the marker is
+The marker is registered by rstest automatically: no `markers` ini entry
+is needed, and `--strict-markers` does not complain. Under plain pytest the marker is
 inert (unknown markers don't change behavior), so test code stays portable.
 
 Semantics details in [Scheduling](../concepts/scheduling.md#the-serial-phase);
@@ -63,7 +63,7 @@ def test_uses_shared_pool(): ...
 ```
 
 Under [`--dist loadgroup`](cli.md#-dist-loadloadfileloadscopeloadgroupeach),
-all tests sharing a group name run on the same worker: across files.
+all tests sharing a group name run on the same worker, across files.
 pytest-xdist-compatible.
 
 rstest registers the marker automatically, so `--strict-markers` never

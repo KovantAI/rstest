@@ -10,7 +10,7 @@ Exact behavior of flags, files, and outputs.
 - [Report JSON](report-json.md): walkthrough and examples for `--report-json`, discovery, streaming, doctor, and migrate-check output
 - [Output schemas](output-schemas.md): field reference generated from the Rust types
 - [Benchmarks](benchmarks.md): suite timings against pytest and pytest-xdist
-- [Parity divergences & upstream fixes](parity-divergences.md): every reason a public suite isn't byte-exact, and the upstream change that removes it
+- [Parity divergences & upstream fixes](parity-divergences.md): every reason a public suite falls short of exact parity, and the upstream change that removes it
 - [Plugin compatibility (top 100)](top-100-plugins.md): how the 100 most-downloaded pytest plugins behave under the pool, with a verified/inferred column
 - [Plugins exercised by the corpus](corpus-plugins.md): the plugins real corpus suites actually load and pass under rstest
 - [xdist support matrix](xdist-support.md): every pytest-xdist flag and hook, and what rstest does with it
