@@ -223,6 +223,14 @@ fn label_for_instance(t: &InstanceType, o: &SchemaObject) -> String {
     }
 }
 
+/// `schema_with` target for an `Option<T>` field serde always writes (no
+/// `skip_serializing_if`): the key is present, possibly `null`. Routing through
+/// `schema_with` makes schemars list it as required while keeping `null` in the
+/// type, which `#[schemars(required)]` would strip.
+pub fn nullable<T: schemars::JsonSchema>(g: &mut schemars::gen::SchemaGenerator) -> Schema {
+    g.subschema_for::<Option<T>>()
+}
+
 /// `#/definitions/DoctorReport` -> `DoctorReport`.
 fn ref_name(r: &str) -> String {
     r.rsplit('/').next().unwrap_or(r).to_string()
@@ -231,7 +239,7 @@ fn ref_name(r: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     /// Repo root, from this crate's manifest dir (`crates/rstest-cli`).
     fn repo_root() -> PathBuf {
@@ -241,15 +249,14 @@ mod tests {
             .expect("repo root resolves")
     }
 
-    /// The committed schema artifacts must equal what the current Rust types
-    /// generate. Regenerate (bless) with:
-    ///   `RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`
-    #[test]
-    fn generated_schemas_match_committed() {
-        let root = repo_root();
-        let bless = std::env::var_os("RSTEST_BLESS_SCHEMAS").is_some();
+    /// Compare (or, with `bless`, write) `files` under `root`, and flag any file
+    /// in `root/OUT_DIR` no output produces: leftovers from a renamed/removed
+    /// output would otherwise keep being published. Returns the stale/orphaned
+    /// repo-relative paths (always empty after a bless). Line endings are
+    /// normalized so a CRLF checkout (Windows `core.autocrlf`) still matches.
+    fn sync(root: &Path, files: &[GeneratedFile], bless: bool) -> Vec<String> {
         let mut stale = Vec::new();
-        for f in generated_files() {
+        for f in files {
             let path = root.join(&f.rel_path);
             if bless {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -257,15 +264,200 @@ mod tests {
                 continue;
             }
             let current = std::fs::read_to_string(&path).unwrap_or_default();
-            if current != f.contents {
-                stale.push(f.rel_path);
+            if current.replace("\r\n", "\n") != f.contents {
+                stale.push(f.rel_path.clone());
             }
         }
+        let Ok(entries) = std::fs::read_dir(root.join(OUT_DIR)) else {
+            return stale;
+        };
+        for entry in entries {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Only files shaped like our artifacts can be orphans; leave
+            // dotfiles (`.DS_Store`), editor/merge leftovers and dirs alone.
+            let artifact_like = name.ends_with(".schema.json") || name.ends_with(".md");
+            if name.starts_with('.') || !artifact_like || !entry.file_type().unwrap().is_file() {
+                continue;
+            }
+            let rel = format!("{OUT_DIR}/{name}");
+            if files.iter().any(|f| f.rel_path == rel) {
+                continue;
+            }
+            if bless {
+                std::fs::remove_file(root.join(&rel)).unwrap();
+            } else {
+                stale.push(rel);
+            }
+        }
+        stale
+    }
+
+    /// The committed schema artifacts must equal what the current Rust types
+    /// generate. Regenerate (bless) with:
+    ///   `RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`
+    #[test]
+    fn generated_schemas_match_committed() {
+        let bless = std::env::var_os("RSTEST_BLESS_SCHEMAS").is_some();
+        let stale = sync(&repo_root(), &generated_files(), bless);
         assert!(
-            bless || stale.is_empty(),
-            "schema docs are stale: {stale:?}\n\
+            stale.is_empty(),
+            "schema docs are stale or orphaned: {stale:?}\n\
              regenerate with: RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema"
         );
+    }
+
+    #[test]
+    fn sync_reports_missing_stale_and_orphaned_files_and_bless_fixes_them() {
+        let root = std::env::temp_dir().join(format!("rstest-schema-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let file = |name: &str, contents: &str| GeneratedFile {
+            rel_path: format!("{OUT_DIR}/{name}"),
+            contents: contents.to_string(),
+        };
+        let files = [file("a.md", "a\nb\n"), file("a.schema.json", "{}\n")];
+        let dir = root.join(OUT_DIR);
+
+        // Nothing on disk yet (no OUT_DIR at all): every artifact is missing.
+        assert_eq!(sync(&root, &files, false).len(), 2);
+
+        // Bless writes them; a normal run is then clean.
+        assert!(sync(&root, &files, true).is_empty());
+        assert!(sync(&root, &files, false).is_empty());
+
+        // A CRLF checkout of the same content still matches.
+        std::fs::write(dir.join("a.md"), "a\r\nb\r\n").unwrap();
+        assert!(sync(&root, &files, false).is_empty());
+
+        // Drifted content is stale; an unexpected file is orphaned.
+        std::fs::write(dir.join("a.schema.json"), "{\"x\":1}\n").unwrap();
+        std::fs::write(dir.join("old.md"), "gone\n").unwrap();
+        assert_eq!(
+            sync(&root, &files, false),
+            [
+                format!("{OUT_DIR}/a.schema.json"),
+                format!("{OUT_DIR}/old.md")
+            ]
+        );
+
+        // Non-artifacts are neither orphans nor deleted by bless: dotfiles,
+        // other extensions, and directories (even artifact-named ones).
+        std::fs::write(dir.join(".DS_Store"), "").unwrap();
+        std::fs::write(dir.join(".a.md.swp"), "").unwrap();
+        std::fs::write(dir.join("a.md.orig"), "").unwrap();
+        std::fs::create_dir_all(dir.join("examples.md")).unwrap();
+
+        // Bless rewrites the stale file and deletes the orphan.
+        assert!(sync(&root, &files, true).is_empty());
+        assert!(!dir.join("old.md").exists());
+        for keep in [".DS_Store", ".a.md.swp", "a.md.orig", "examples.md"] {
+            assert!(dir.join(keep).exists(), "{keep} should survive bless");
+        }
+        assert!(sync(&root, &files, false).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn label(v: serde_json::Value) -> String {
+        type_label(&serde_json::from_value(v).expect("valid schema"))
+    }
+
+    #[test]
+    fn type_label_covers_every_schema_shape() {
+        use serde_json::json;
+        assert_eq!(type_label(&Schema::Bool(true)), "any");
+        assert_eq!(label(json!({"$ref": "#/definitions/Foo"})), "Foo");
+        assert_eq!(
+            label(json!({"anyOf": [{"$ref": "#/definitions/Foo"}, {"type": "null"}]})),
+            "Foo or null"
+        );
+        assert_eq!(
+            label(json!({"oneOf": [{"type": "integer"}, {"type": "string"}]})),
+            "integer or string"
+        );
+        // An empty union falls through to the declared instance type.
+        assert_eq!(label(json!({"allOf": [], "type": "boolean"})), "boolean");
+        assert_eq!(label(json!({"type": ["number", "null"]})), "number or null");
+        assert_eq!(
+            label(json!({"type": "array", "items": {"type": "string"}})),
+            "array of string"
+        );
+        // Tuple-style items: labelled by the first element.
+        assert_eq!(
+            label(json!({"type": "array", "items": [{"type": "integer"}, {"type": "string"}]})),
+            "array of integer"
+        );
+        assert_eq!(label(json!({"type": "array", "items": []})), "array");
+        assert_eq!(label(json!({"type": "array"})), "array");
+        assert_eq!(
+            label(json!({"type": "object", "additionalProperties": {"type": "number"}})),
+            "object of number"
+        );
+        assert_eq!(label(json!({"type": "object"})), "object");
+        // No instance type: a bare map, or nothing at all.
+        assert_eq!(
+            label(json!({"additionalProperties": {"type": "boolean"}})),
+            "object of boolean"
+        );
+        assert_eq!(label(json!({"properties": {"x": {}}})), "object");
+        assert_eq!(label(json!({})), "object");
+    }
+
+    fn with_description(desc: &str) -> SchemaObject {
+        SchemaObject {
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(desc.to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn description_folds_whitespace_escapes_pipes_and_drops_blank() {
+        assert_eq!(
+            description(&with_description("a\n   b | c")).as_deref(),
+            Some("a b \\| c")
+        );
+        assert_eq!(description(&with_description(" \n ")), None);
+        assert_eq!(description(&SchemaObject::default()), None);
+    }
+
+    #[test]
+    fn render_object_handles_non_object_empty_map_and_bool_fields() {
+        use schemars::schema::ObjectValidation;
+
+        // No object validation: heading, source and description only.
+        let mut s = String::new();
+        render_object(
+            &mut s,
+            "##",
+            "Scalar",
+            "`src`",
+            &with_description("A value."),
+        );
+        assert_eq!(s, "## Scalar\n\nSource: `src`\n\nA value.\n\n\n");
+
+        // An object with neither properties nor a value shape renders no table.
+        let mut s = String::new();
+        let empty = SchemaObject {
+            object: Some(Box::default()),
+            ..Default::default()
+        };
+        render_object(&mut s, "###", "Empty", "", &empty);
+        assert_eq!(s, "### Empty\n\n");
+
+        // A `true` (any) property: typed `any`, no description.
+        let mut ov = ObjectValidation::default();
+        ov.properties.insert("anything".into(), Schema::Bool(true));
+        ov.required.insert("anything".into());
+        let obj = SchemaObject {
+            object: Some(Box::new(ov)),
+            ..Default::default()
+        };
+        let mut s = String::new();
+        render_object(&mut s, "###", "Loose", "", &obj);
+        assert!(s.contains("| `anything` | any | yes |  |"), "{s}");
     }
 
     #[test]

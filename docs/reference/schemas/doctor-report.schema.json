@@ -3,13 +3,17 @@
   "title": "DoctorReport",
   "type": "object",
   "required": [
+    "coverage_waste",
     "cpu_time_seconds",
     "fixtures",
+    "parallel_efficiency",
+    "parallel_floor",
     "rstest_version",
     "schema",
     "slowest_files",
     "test_time_seconds",
     "tests",
+    "wait_bound",
     "wall_seconds",
     "workers"
   ],

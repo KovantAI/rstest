@@ -31,7 +31,7 @@
           "minimum": 0.0
         },
         "last_failed_epoch": {
-          "description": "Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed; see [`FlakeStats::failed_epoch`].",
+          "description": "Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed (readers then fall back to `last_epoch` when `failed` is non-zero).",
           "default": 0,
           "type": "integer",
           "format": "uint64",

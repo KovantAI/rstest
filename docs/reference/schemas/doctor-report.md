@@ -6,18 +6,18 @@ Source: `--doctor-json`
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `coverage_waste` | CoverageWaste or null | no | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
+| `coverage_waste` | CoverageWaste or null | yes | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
 | `cpu_time_seconds` | number | yes | Sum of call-phase CPU time, over tests where it was measured. |
 | `fixtures` | array of FixtureEntry | yes |  |
 | `leaks` | array of Leak | no | Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
-| `parallel_efficiency` | ParallelEfficiency or null | no |  |
-| `parallel_floor` | ParallelFloor or null | no |  |
+| `parallel_efficiency` | ParallelEfficiency or null | yes |  |
+| `parallel_floor` | ParallelFloor or null | yes |  |
 | `rstest_version` | string | yes |  |
 | `schema` | integer | yes |  |
 | `slowest_files` | array of FileEntry | yes |  |
 | `test_time_seconds` | number | yes |  |
 | `tests` | integer | yes |  |
-| `wait_bound` | WaitBound or null | no |  |
+| `wait_bound` | WaitBound or null | yes |  |
 | `wall_seconds` | number | yes |  |
 | `workers` | integer | yes |  |
 
