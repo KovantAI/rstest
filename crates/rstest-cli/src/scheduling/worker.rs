@@ -1424,6 +1424,43 @@ mod tests {
         None
     }
 
+    /// [`worker_python`], with production `worker_pythonpath()` pointed at the
+    /// repo package while the returned guard lives. None => skip.
+    #[cfg(unix)]
+    fn live_python(
+        held: &crate::test_env::Held,
+    ) -> Option<(PathBuf, crate::test_env::VarGuard<'_>)> {
+        let found = worker_python();
+        found
+            .is_none()
+            .then(|| eprintln!("skipping: no python with pytest found"));
+        let (python, worker_path) = found?;
+        let guard = crate::test_env::set_var(held, "RSTEST_WORKER_PATH", &worker_path);
+        Some((python, guard))
+    }
+
+    /// Run `f` with a worker-capable python, holding the env lock throughout:
+    /// [`worker_python`] and the spawn resolve python via PATH, and the spawn
+    /// reads RSTEST_WORKER_PATH. Skips (returns) when no such python exists.
+    #[cfg(unix)]
+    fn with_live_python(f: impl FnOnce(&crate::test_env::Held, &Path)) {
+        let held = crate::test_env::lock();
+        let found = live_python(&held);
+        if let Some((python, _worker_path)) = found {
+            f(&held, &python);
+        }
+    }
+
+    /// A worker's pid: the child's for an owned worker, the tracked one for a
+    /// forked worker (None once it has been forgotten).
+    #[cfg(unix)]
+    fn pid_of(w: &Worker) -> Option<u32> {
+        match &w.proc {
+            super::Proc::Owned(child) => Some(child.id()),
+            super::Proc::Reparented(t) => t.map(|t| t.pid),
+        }
+    }
+
     /// Whether `pid` still exists. A zombie (killed but un-reaped) still counts
     /// as alive here — signal 0 succeeds until the parent `wait()`s it away.
     #[cfg(unix)]
@@ -1441,49 +1478,38 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_then_wait_reaps_the_worker_child() {
-        // Held throughout: worker_python() and the spawn resolve python via
-        // PATH, and the spawn reads RSTEST_WORKER_PATH.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping reap test: no python with pytest found");
-            return;
-        };
-        // Point production `worker_pythonpath()` at the repo package.
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
+        with_live_python(|_, python| {
+            let env = WorkerEnv {
+                run_uid: format!("reap-{}", std::process::id()),
+                doctor: false,
+                timeout: None,
+                leakcheck: false,
+                send_ids: false,
+                debug_port: None,
+                stream_output: false,
+            };
+            // A freshly spawned worker blocks on its first command: alive, and never
+            // sent anything — the decode-error/respawn precondition (child still
+            // running against the pipe, not a clean exit).
+            let mut worker = Worker::spawn(python, None, &env).expect("spawn worker");
+            assert!(!worker.is_forked(), "plain spawn should be Owned");
+            let pid = pid_of(&worker).expect("fresh worker has a pid");
+            assert!(alive(pid), "worker should be alive right after spawn");
 
-        let env = WorkerEnv {
-            run_uid: format!("reap-{}", std::process::id()),
-            doctor: false,
-            timeout: None,
-            leakcheck: false,
-            send_ids: false,
-            debug_port: None,
-            stream_output: false,
-        };
-        // A freshly spawned worker blocks on its first command: alive, and never
-        // sent anything — the decode-error/respawn precondition (child still
-        // running against the pipe, not a clean exit).
-        let mut worker = Worker::spawn(&python, None, &env).expect("spawn worker");
-        let pid = match &worker.proc {
-            super::Proc::Owned(child) => child.id(),
-            #[cfg(unix)]
-            super::Proc::Reparented(t) => t.expect("fresh worker has a pid").pid,
-        };
-        assert!(alive(pid), "worker should be alive right after spawn");
+            // Exactly what the respawn arm now does with the old worker.
+            worker.kill();
+            let _ = worker.wait();
 
-        // Exactly what the respawn arm now does with the old worker.
-        worker.kill();
-        let _ = worker.wait();
-
-        // wait() returning is itself proof the child was reaped; the alive()
-        // probe is the observable proxy. It can in theory false-fail if the
-        // kernel recycles `pid` to another live process between wait() and the
-        // probe, but this thread spawns nothing after wait(), so that window is
-        // negligible (and reuse can only spuriously fail, never falsely pass).
-        assert!(
-            !alive(pid),
-            "worker pid {pid} still present after kill+wait -> orphan or <defunct> zombie"
-        );
+            // wait() returning is itself proof the child was reaped; the alive()
+            // probe is the observable proxy. It can in theory false-fail if the
+            // kernel recycles `pid` to another live process between wait() and the
+            // probe, but this thread spawns nothing after wait(), so that window is
+            // negligible (and reuse can only spuriously fail, never falsely pass).
+            assert!(
+                !alive(pid),
+                "worker pid {pid} still present after kill+wait -> orphan or <defunct> zombie"
+            );
+        });
     }
 
     /// Fork-prewarm spawns N live workers off one zygote, each a distinct
@@ -1494,55 +1520,45 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fork_prewarm_pool_spawns_distinct_live_workers_and_reaps_clean() {
-        // Held throughout: see kill_then_wait_reaps_the_worker_child.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping fork-prewarm test: no python with pytest found");
-            return;
-        };
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
+        with_live_python(|_, python| {
+            let env = WorkerEnv {
+                run_uid: format!("fork-{}", std::process::id()),
+                doctor: false,
+                timeout: None,
+                leakcheck: false,
+                send_ids: false,
+                debug_port: None,
+                stream_output: false,
+            };
+            let n = 3;
+            let workers = Worker::spawn_pool(python, n, &env, true).expect("fork-prewarm pool");
+            assert_eq!(workers.len(), n, "expected {n} forked workers");
 
-        let env = WorkerEnv {
-            run_uid: format!("fork-{}", std::process::id()),
-            doctor: false,
-            timeout: None,
-            leakcheck: false,
-            send_ids: false,
-            debug_port: None,
-            stream_output: false,
-        };
-        let n = 3;
-        let workers = Worker::spawn_pool(&python, n, &env, true).expect("fork-prewarm pool");
-        assert_eq!(workers.len(), n, "expected {n} forked workers");
-
-        let mut pids = Vec::new();
-        for w in &workers {
-            match &w.proc {
-                super::Proc::Reparented(Some(t)) => {
-                    assert!(alive(t.pid), "forked worker pid {} should be alive", t.pid);
-                    pids.push(t.pid);
-                }
-                super::Proc::Reparented(None) => panic!("fresh forked worker lost its pid"),
-                super::Proc::Owned(_) => panic!("fork-prewarm worker should be Reparented"),
+            let mut pids = Vec::new();
+            for w in &workers {
+                assert!(w.is_forked(), "fork-prewarm worker should be Reparented");
+                let pid = pid_of(w).expect("fresh forked worker lost its pid");
+                assert!(alive(pid), "forked worker pid {pid} should be alive");
+                pids.push(pid);
             }
-        }
-        pids.sort_unstable();
-        pids.dedup();
-        assert_eq!(pids.len(), n, "forked worker pids must be distinct");
+            pids.sort_unstable();
+            pids.dedup();
+            assert_eq!(pids.len(), n, "forked worker pids must be distinct");
 
-        // Clean shutdown: each worker blocks on its first command, so Shutdown
-        // ends it. shutdown() waits until the pid is gone, so it must already be
-        // absent on return — a lingering pid would mean wait() returned early or
-        // a leaked/zombied worker.
-        for w in workers {
-            w.shutdown().expect("shutdown forked worker");
-        }
-        for pid in pids {
-            assert!(
-                !alive(pid),
-                "forked worker pid {pid} still alive after shutdown"
-            );
-        }
+            // Clean shutdown: each worker blocks on its first command, so Shutdown
+            // ends it. shutdown() waits until the pid is gone, so it must already be
+            // absent on return — a lingering pid would mean wait() returned early or
+            // a leaked/zombied worker.
+            for w in workers {
+                w.shutdown().expect("shutdown forked worker");
+            }
+            for pid in pids {
+                assert!(
+                    !alive(pid),
+                    "forked worker pid {pid} still alive after shutdown"
+                );
+            }
+        });
     }
 
     /// `reap()` on a forked worker that is exiting on its own (the crash/EOF
@@ -1551,44 +1567,39 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reap_forgets_pid_of_exited_forked_worker() {
-        // Held throughout: see kill_then_wait_reaps_the_worker_child.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping fork-prewarm reap test: no python with pytest found");
-            return;
-        };
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
+        with_live_python(|_, python| {
+            let env = WorkerEnv {
+                run_uid: format!("fork-reap-{}", std::process::id()),
+                doctor: false,
+                timeout: None,
+                leakcheck: false,
+                send_ids: false,
+                debug_port: None,
+                stream_output: false,
+            };
+            let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
+            let mut worker = workers.pop().expect("one forked worker");
+            assert!(
+                worker.is_forked(),
+                "fork-prewarm worker should be Reparented"
+            );
+            let pid = pid_of(&worker).expect("fresh forked worker has a pid");
 
-        let env = WorkerEnv {
-            run_uid: format!("fork-reap-{}", std::process::id()),
-            doctor: false,
-            timeout: None,
-            leakcheck: false,
-            send_ids: false,
-            debug_port: None,
-            stream_output: false,
-        };
-        let mut workers = Worker::spawn_pool(&python, 1, &env, true).expect("fork-prewarm pool");
-        let mut worker = workers.pop().expect("one forked worker");
-        let pid = match &worker.proc {
-            super::Proc::Reparented(Some(t)) => t.pid,
-            _ => panic!("fork-prewarm worker should be Reparented with a pid"),
-        };
+            // The worker exits on its own, as after a crash, before reap runs.
+            worker
+                .send(&crate::scheduling::proto::Command::Shutdown)
+                .expect("send shutdown");
+            worker.reap();
 
-        // The worker exits on its own, as after a crash, before reap runs.
-        worker
-            .send(&crate::scheduling::proto::Command::Shutdown)
-            .expect("send shutdown");
-        worker.reap();
-
-        assert!(
-            !alive(pid),
-            "forked worker pid {pid} still alive after reap"
-        );
-        assert!(
-            matches!(worker.proc, super::Proc::Reparented(None)),
-            "reap must forget the pid of an exited worker"
-        );
+            assert!(
+                !alive(pid),
+                "forked worker pid {pid} still alive after reap"
+            );
+            assert!(
+                matches!(worker.proc, super::Proc::Reparented(None)),
+                "reap must forget the pid of an exited worker"
+            );
+        });
     }
 
     /// `reap` SIGKILLs a still-alive forked worker at once (the watchdog /
@@ -1596,42 +1607,37 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reap_kills_live_forked_worker_without_grace() {
-        // Held throughout: see kill_then_wait_reaps_the_worker_child.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping fork-prewarm kill test: no python with pytest found");
-            return;
-        };
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
+        with_live_python(|_, python| {
+            let mut env = base_env();
+            env.run_uid = format!("fork-kill-{}", std::process::id());
+            let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
+            let mut worker = workers.pop().expect("one forked worker");
+            assert!(
+                worker.is_forked(),
+                "fork-prewarm worker should be Reparented"
+            );
+            let pid = pid_of(&worker).expect("fresh forked worker has a pid");
+            assert!(
+                alive(pid),
+                "forked worker should block on its first command"
+            );
 
-        let mut env = base_env();
-        env.run_uid = format!("fork-kill-{}", std::process::id());
-        let mut workers = Worker::spawn_pool(&python, 1, &env, true).expect("fork-prewarm pool");
-        let mut worker = workers.pop().expect("one forked worker");
-        let pid = match &worker.proc {
-            super::Proc::Reparented(Some(t)) => t.pid,
-            _ => panic!("fork-prewarm worker should be Reparented with a pid"),
-        };
-        assert!(
-            alive(pid),
-            "forked worker should block on its first command"
-        );
+            let started = std::time::Instant::now();
+            worker.reap();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "reap waited for a live worker instead of killing it at once"
+            );
 
-        let started = std::time::Instant::now();
-        worker.reap();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "reap waited for a live worker instead of killing it at once"
-        );
-
-        assert!(
-            !alive(pid),
-            "forked worker pid {pid} survived the SIGKILL fallback"
-        );
-        assert!(matches!(worker.proc, super::Proc::Reparented(None)));
-        // Once forgotten, kill and wait are no-ops (no signal to a recycled pid).
-        worker.kill();
-        worker.wait().expect("wait on a forgotten worker");
+            assert!(
+                !alive(pid),
+                "forked worker pid {pid} survived the SIGKILL fallback"
+            );
+            assert!(matches!(worker.proc, super::Proc::Reparented(None)));
+            // Once forgotten, kill and wait are no-ops (no signal to a recycled pid).
+            worker.kill();
+            worker.wait().expect("wait on a forgotten worker");
+        });
     }
 
     /// A forked worker still running when the exit timeout lapses (stuck in
@@ -1639,54 +1645,44 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wait_kills_forked_worker_stuck_past_exit_timeout() {
-        // Held throughout: see kill_then_wait_reaps_the_worker_child.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping fork-prewarm wait test: no python with pytest found");
-            return;
-        };
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
+        with_live_python(|_, python| {
+            let mut env = base_env();
+            env.run_uid = format!("fork-stuck-{}", std::process::id());
+            let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
+            let mut worker = workers.pop().expect("one forked worker");
+            assert!(
+                worker.is_forked(),
+                "fork-prewarm worker should be Reparented"
+            );
+            let pid = pid_of(&worker).expect("fresh forked worker has a pid");
+            // Never sent Shutdown: it blocks on its first command, i.e. it will not
+            // exit on its own within the (zero) timeout.
+            worker.proc.wait_or_kill(std::time::Duration::ZERO);
 
-        let mut env = base_env();
-        env.run_uid = format!("fork-stuck-{}", std::process::id());
-        let mut workers = Worker::spawn_pool(&python, 1, &env, true).expect("fork-prewarm pool");
-        let mut worker = workers.pop().expect("one forked worker");
-        let pid = match &worker.proc {
-            super::Proc::Reparented(Some(t)) => t.pid,
-            _ => panic!("fork-prewarm worker should be Reparented with a pid"),
-        };
-        // Never sent Shutdown: it blocks on its first command, i.e. it will not
-        // exit on its own within the (zero) timeout.
-        worker.proc.wait_or_kill(std::time::Duration::ZERO);
-
-        assert!(!alive(pid), "stuck forked worker {pid} left running");
-        assert!(matches!(worker.proc, super::Proc::Reparented(None)));
+            assert!(!alive(pid), "stuck forked worker {pid} left running");
+            assert!(matches!(worker.proc, super::Proc::Reparented(None)));
+        });
     }
 
     /// Only `Shutdown` stamps the wind-down deadline, and only the first one.
     #[cfg(unix)]
     #[test]
     fn shutdown_deadline_is_stamped_once_by_first_shutdown() {
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping shutdown stamp test: no python with pytest found");
-            return;
-        };
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
-
-        let mut worker = Worker::spawn(&python, None, &base_env()).expect("spawn worker");
-        assert!(worker.shutdown_sent.is_none());
-        worker
-            .send(&crate::scheduling::proto::Command::Shutdown)
-            .expect("send shutdown");
-        let first = worker.shutdown_sent.expect("stamped by Shutdown");
-        let _ = worker.send(&crate::scheduling::proto::Command::Shutdown);
-        assert_eq!(
-            worker.shutdown_sent,
-            Some(first),
-            "restamped by a later Shutdown"
-        );
-        worker.wait().expect("wait");
+        with_live_python(|_, python| {
+            let mut worker = Worker::spawn(python, None, &base_env()).expect("spawn worker");
+            assert!(worker.shutdown_sent.is_none());
+            worker
+                .send(&crate::scheduling::proto::Command::Shutdown)
+                .expect("send shutdown");
+            let first = worker.shutdown_sent.expect("stamped by Shutdown");
+            let _ = worker.send(&crate::scheduling::proto::Command::Shutdown);
+            assert_eq!(
+                worker.shutdown_sent,
+                Some(first),
+                "restamped by a later Shutdown"
+            );
+            worker.wait().expect("wait");
+        });
     }
 
     #[cfg(unix)]
@@ -1826,27 +1822,55 @@ mod tests {
         );
     }
 
-    /// A worker already dead when first tracked: on Linux (zombie start time
-    /// visible) it stays tracked so the following wait reaps it; on macOS
-    /// (no zombie start time, and launchd is always the reaper) it is dropped.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// A worker already dead when first tracked stays tracked on Linux (a
+    /// zombie's start time is visible), so the following wait reaps it.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn captured_zombie_is_reaped_only_when_its_identity_is_known() {
+    fn captured_zombie_with_known_identity_is_reaped() {
         let pid = zombie_child();
         let mut slot = super::Tracked::capture(pid);
-        if cfg!(target_os = "linux") {
-            assert!(slot.is_some(), "linux exposes a zombie's start time");
-            assert!(super::wait_reparented(&mut slot, std::time::Duration::ZERO));
-            assert_eq!(slot, None);
-            assert_eq!(
-                super::probe(pid),
-                super::Probe::Gone,
-                "zombie left unreaped"
-            );
-        } else {
-            assert_eq!(slot, None);
-            assert!(super::try_reap(pid), "clean up the test zombie");
-        }
+        assert!(slot.is_some(), "linux exposes a zombie's start time");
+        assert!(super::wait_reparented(&mut slot, std::time::Duration::ZERO));
+        assert_eq!(slot, None);
+        assert_eq!(
+            super::probe(pid),
+            super::Probe::Gone,
+            "zombie left unreaped"
+        );
+    }
+
+    /// On macOS a zombie has no start time (and launchd is always the reaper),
+    /// so a worker already dead when first tracked is dropped.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn captured_zombie_without_identity_is_dropped() {
+        let pid = zombie_child();
+        assert_eq!(super::Tracked::capture(pid), None);
+        assert!(super::try_reap(pid), "clean up the test zombie");
+    }
+
+    /// A worker already reaped when first tracked leaves nothing to track.
+    #[cfg(unix)]
+    #[test]
+    fn capture_of_a_reaped_pid_tracks_nothing() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        assert_eq!(super::Tracked::capture(pid), None);
+    }
+
+    /// The signal-0 fallback reports existence only: no start time.
+    #[cfg(unix)]
+    #[test]
+    fn probe_by_signal_reports_liveness_without_start_time() {
+        assert_eq!(
+            super::probe_by_signal(std::process::id()),
+            super::Probe::Alive { start: None }
+        );
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        assert_eq!(super::probe_by_signal(pid), super::Probe::Gone);
     }
 
     /// A zombie whose start time doesn't match the tracked worker (the worker
@@ -1911,44 +1935,30 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reap_kills_and_waits_owned_worker() {
-        // Held throughout: see kill_then_wait_reaps_the_worker_child.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping owned reap test: no python with pytest found");
-            return;
-        };
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
-
-        let mut worker = Worker::spawn(&python, None, &base_env()).expect("spawn worker");
-        let pid = match &worker.proc {
-            super::Proc::Owned(child) => child.id(),
-            super::Proc::Reparented(_) => panic!("plain spawn should be Owned"),
-        };
-        worker.reap();
-        assert!(
-            !alive(pid),
-            "owned worker pid {pid} still present after reap"
-        );
+        with_live_python(|_, python| {
+            let mut worker = Worker::spawn(python, None, &base_env()).expect("spawn worker");
+            assert!(!worker.is_forked(), "plain spawn should be Owned");
+            let pid = pid_of(&worker).expect("owned worker has a pid");
+            worker.reap();
+            assert!(
+                !alive(pid),
+                "owned worker pid {pid} still present after reap"
+            );
+        });
     }
 
     /// Without fork-prewarm, `spawn_pool` spawns `n` independent owned workers.
     #[cfg(unix)]
     #[test]
     fn spawn_pool_without_prewarm_spawns_owned_workers() {
-        // Held throughout: see kill_then_wait_reaps_the_worker_child.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping plain pool test: no python with pytest found");
-            return;
-        };
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
-
-        let workers = Worker::spawn_pool(&python, 2, &base_env(), false).expect("plain pool");
-        assert_eq!(workers.len(), 2);
-        for w in workers {
-            assert!(matches!(w.proc, super::Proc::Owned(_)));
-            w.shutdown().expect("shutdown plain worker");
-        }
+        with_live_python(|_, python| {
+            let workers = Worker::spawn_pool(python, 2, &base_env(), false).expect("plain pool");
+            assert_eq!(workers.len(), 2);
+            for w in workers {
+                assert!(!w.is_forked());
+                w.shutdown().expect("shutdown plain worker");
+            }
+        });
     }
 
     #[cfg(unix)]
@@ -1984,5 +1994,123 @@ mod tests {
         // Per-worker identity is applied post-fork, never on the shared env.
         assert!(!envs.contains_key("RSTEST_WORKER_ID"));
         assert!(!envs.contains_key("RSTEST_SEND_IDS"));
+    }
+
+    /// A read error on the zygote-report pipe (here EISDIR) surfaces as an
+    /// error instead of being retried or treated as EOF.
+    #[cfg(unix)]
+    #[test]
+    fn read_with_timeout_surfaces_read_errors() {
+        let dir = std::fs::File::open(std::env::temp_dir()).expect("open temp dir");
+        let err = super::read_with_timeout(dir, std::time::Duration::from_secs(5)).unwrap_err();
+        assert!(
+            err.downcast_ref::<std::io::Error>().is_some(),
+            "expected an io error, got {err:#}"
+        );
+    }
+
+    /// Run `spawn_pool` with fork-prewarm against a stand-in `rstest_worker`
+    /// package whose `__main__` is `body`, so the zygote misbehaves on cue, and
+    /// assert the pool fails with an error mentioning `needle`.
+    #[cfg(unix)]
+    fn assert_fake_zygote_fails(tag: &str, body: &str, needle: &str) {
+        with_live_python(|held, python| {
+            let root = std::env::temp_dir()
+                .join(format!("rstest-fake-zygote-{}-{tag}", std::process::id()));
+            let pkg = root.join("rstest_worker");
+            std::fs::create_dir_all(&pkg).expect("create fake package");
+            std::fs::write(pkg.join("__init__.py"), "").expect("write __init__");
+            std::fs::write(pkg.join("__main__.py"), body).expect("write __main__");
+            // Shadows the repo package: the explicit worker path leads PYTHONPATH.
+            let fake = crate::test_env::set_var(held, "RSTEST_WORKER_PATH", &root);
+            let result = Worker::spawn_pool(python, 2, &base_env(), true);
+            drop(fake);
+            let _ = std::fs::remove_dir_all(&root);
+            let err = result
+                .err()
+                .expect("a bad zygote report must fail the pool");
+            assert!(format!("{err:#}").contains(needle), "{err:#}");
+        });
+    }
+
+    /// A zygote that exits without reporting any pid fails the pool with the
+    /// count mismatch (and is reaped, not left a zombie).
+    #[cfg(unix)]
+    #[test]
+    fn fork_pool_rejects_a_zygote_that_reports_no_pids() {
+        assert_fake_zygote_fails(
+            "empty",
+            "import sys\nsys.exit(0)\n",
+            "reported 0 worker pids, expected 2",
+        );
+    }
+
+    /// A zygote report that can't be read (not UTF-8) fails the pool with the
+    /// read context.
+    #[cfg(unix)]
+    #[test]
+    fn fork_pool_rejects_an_unreadable_zygote_report() {
+        assert_fake_zygote_fails(
+            "utf8",
+            "import os, sys\nos.write(int(sys.argv[3]), b'\\xff')\n",
+            "reading forked worker pids from zygote",
+        );
+    }
+
+    /// Env var marking the re-executed child of
+    /// [`fork_prewarm_falls_back_to_plain_spawns_on_fd_exhaustion`].
+    #[cfg(unix)]
+    const FD_CHILD: &str = "RSTEST_TEST_FD_EXHAUSTION_CHILD";
+
+    /// When the zygote's ~4n pipe fds don't fit under the fd limit (but the
+    /// plain path's ~2n do), `spawn_pool` falls back to plain spawns instead of
+    /// failing. Lowering the hard limit can't be undone, so the body runs in a
+    /// re-executed copy of this test binary.
+    #[cfg(unix)]
+    #[test]
+    fn fork_prewarm_falls_back_to_plain_spawns_on_fd_exhaustion() {
+        if std::env::var_os(FD_CHILD).is_none() {
+            let (_, module) = module_path!()
+                .split_once("::")
+                .expect("crate-qualified path");
+            let name =
+                format!("{module}::fork_prewarm_falls_back_to_plain_spawns_on_fd_exhaustion");
+            let out = Command::new(std::env::current_exe().expect("test binary"))
+                .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+                .env(FD_CHILD, "1")
+                .output()
+                .expect("re-exec test binary");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "child failed or ran no test:\n{stdout}{stderr}"
+            );
+            return;
+        }
+
+        with_live_python(|_, python| {
+            let n = 8;
+            // Room for the plain path (2 fds per live worker, plus the 4 child ends
+            // and spawn's internal pipe while each spawns), not the zygote's 4n + 4.
+            let open = std::fs::read_dir("/dev/fd").expect("list fds").count() as u64;
+            let limit = open + 2 * n as u64 + 10;
+            let lim = libc::rlimit {
+                rlim_cur: limit as libc::rlim_t,
+                rlim_max: limit as libc::rlim_t,
+            };
+            // SAFETY: `lim` is a valid rlimit; this process is a throwaway child.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) }, 0);
+
+            let workers = Worker::spawn_pool(python, n, &base_env(), true).expect("fallback pool");
+            assert_eq!(workers.len(), n);
+            for w in workers {
+                assert!(
+                    !w.is_forked(),
+                    "fd exhaustion must fall back to plain spawns"
+                );
+                w.shutdown().expect("shutdown fallback worker");
+            }
+        });
     }
 }
