@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from rstest_worker._internal.dispatch import ItemDispatchPlugin, LazyDispatchPlugin
+from rstest_worker._internal.dispatch import ItemDispatchPlugin, LazyDispatchPlugin, _session_roots
 
 
 class FakeConn:
@@ -98,6 +98,101 @@ def test_collection_finish_location_none_lineno_and_no_cache(monkeypatch):
     assert payload["locations"] == [["", None]]  # None file -> "", lineno passthrough
     assert "cache_dir" not in payload
     assert "flaky" not in payload and "groups" not in payload
+
+
+def _roots_config(
+    rootpath, *, testpaths=(), source="INVOCATION_DIR", pyargs=False, inipath=None, **options
+):
+    return SimpleNamespace(
+        rootpath=rootpath,
+        inipath=inipath,
+        getini=lambda name: list(testpaths) if name == "testpaths" else None,
+        option=SimpleNamespace(pyargs=pyargs, **options),
+        args_source=SimpleNamespace(name=source),
+        cache=None,
+    )
+
+
+def test_collection_finish_without_a_cacheprovider(monkeypatch):
+    # `-p no:cacheprovider` leaves config with no `cache` attribute at all;
+    # the id-bearing payload must still ship (no cache_dir), not raise.
+    monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    conn = FakeConn()
+    session = SimpleNamespace(items=[FakeItem("t.py::a")], config=SimpleNamespace())
+    ItemDispatchPlugin(conn).pytest_collection_finish(session)
+    kind, payload = conn.sent[0]
+    assert kind == "collection_done"
+    assert payload["ids"] == ["t.py::a"]
+    assert "cache_dir" not in payload
+
+
+def test_session_roots_absent_without_rootpath():
+    # Fake configs (and any config without rootpath) ship no roots.
+    assert _session_roots(SimpleNamespace(cache=None)) == {}
+
+
+def test_session_roots_globs_testpaths_against_the_rootdir(tmp_path):
+    (tmp_path / "tests" / "b").mkdir(parents=True)
+    (tmp_path / "tests" / "a").mkdir(parents=True)
+    (tmp_path / "docs").mkdir()
+    cfg = _roots_config(tmp_path, testpaths=["tests/*", "missing"], source="ARGS")
+    roots = _session_roots(cfg)
+    assert roots["rootdir"] == str(tmp_path)
+    assert roots["args_source"] == "args"
+    # Globbed from the rootdir (not the cwd), sorted, absolute; no-match
+    # entries drop out.
+    assert roots["root_args"] == [str(tmp_path / "tests" / "a"), str(tmp_path / "tests" / "b")]
+
+
+def test_session_roots_escape_glob_characters_in_the_rootdir(tmp_path):
+    # A rootdir like `proj[v2]` must be matched literally, or every testpaths
+    # glob misses and bisect falls back to collecting the whole rootdir.
+    root = tmp_path / "proj[v2]"
+    (root / "tests").mkdir(parents=True)
+    roots = _session_roots(_roots_config(root, testpaths=["tests"]))
+    assert roots["root_args"] == [str(root / "tests")]
+
+
+def test_session_roots_report_active_order_flags(tmp_path):
+    cfg = _roots_config(
+        tmp_path, newfirst=True, failedfirst=False, lf=True, stepwise=True, maxfail=1
+    )
+    assert _session_roots(cfg)["order_flags"] == ["--nf", "--lf", "--sw", "--maxfail"]
+    # None active (or the options unknown to this config): the key is absent.
+    assert "order_flags" not in _session_roots(_roots_config(tmp_path, maxfail=0))
+    assert "order_flags" not in _session_roots(_roots_config(tmp_path))
+
+
+def test_session_roots_report_the_loaded_config_file(tmp_path):
+    ini = tmp_path / "pytest.ini"
+    assert _session_roots(_roots_config(tmp_path, inipath=ini))["inifile"] == str(ini)
+    # No config file in effect: the key is absent, not null.
+    assert "inifile" not in _session_roots(_roots_config(tmp_path))
+
+
+def test_session_roots_fall_back_to_the_rootdir(tmp_path):
+    # No testpaths, or none that match: a no-arg run collects the rootdir.
+    assert _session_roots(_roots_config(tmp_path))["root_args"] == [str(tmp_path)]
+    cfg = _roots_config(tmp_path, testpaths=["nope/*"])
+    assert _session_roots(cfg)["root_args"] == [str(tmp_path)]
+
+
+def test_session_roots_pyargs_keeps_module_names(tmp_path):
+    cfg = _roots_config(tmp_path, testpaths=["pkg.tests"], pyargs=True, source="TESTPATHS")
+    roots = _session_roots(cfg)
+    assert roots["root_args"] == ["pkg.tests"]
+    assert roots["args_source"] == "testpaths"
+
+
+def test_collection_finish_ships_roots_with_ids(monkeypatch, tmp_path):
+    monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    conn = FakeConn()
+    session = SimpleNamespace(items=[FakeItem("t.py::a")], config=_roots_config(tmp_path))
+    ItemDispatchPlugin(conn).pytest_collection_finish(session)
+    payload = conn.sent[0][1]
+    assert payload["rootdir"] == str(tmp_path)
+    assert payload["args_source"] == "invocation_dir"
+    assert payload["root_args"] == [str(tmp_path)]
 
 
 # ── ItemDispatchPlugin.pytest_runtestloop ───────────────────────────────────
@@ -220,11 +315,11 @@ def test_lazy_collection_announces_ready_and_short_circuits():
     session = SimpleNamespace(
         testscollected=1,
         items=[1],
-        config=SimpleNamespace(cache=SimpleNamespace(_cachedir="/c")),
+        config=SimpleNamespace(cache=SimpleNamespace(_cachedir="/c"), rootpath="/r"),
     )
     assert LazyDispatchPlugin(conn).pytest_collection(session) is True
     assert session.testscollected == 0 and session.items == []
-    assert conn.sent == [("lazy_ready", {"cache_dir": "/c"})]
+    assert conn.sent == [("lazy_ready", {"cache_dir": "/c", "rootdir": "/r"})]
 
 
 def test_lazy_collection_without_cache():

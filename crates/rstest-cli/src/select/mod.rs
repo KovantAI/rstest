@@ -17,17 +17,10 @@ pub use coverage::{
     affected_with_coverage, CoverageFile, CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA,
 };
 pub use git::{changed_files_from_git, changed_line_ranges, changed_new_lines, resolve_base_rev};
-pub use graph::affected_tests;
+pub use graph::{affected_tests_cached, CollectionCache};
 // pub(crate) helpers reused elsewhere in the crate (not part of the public API).
 pub(crate) use coverage::current_sha256;
 pub(crate) use graph::imports_of;
-
-/// Process-wide lock shared by every `select` unit test that mutates
-/// process-global state (the CWD, or env vars git reads). The submodule test
-/// suites live in separate files, so a per-module mutex wouldn't serialize a
-/// CWD change in `git` against one in `coverage` — they must share this one.
-#[cfg(test)]
-pub(crate) static GLOBAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Why a full run is required instead of a selection.
 pub enum Selection {

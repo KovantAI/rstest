@@ -1,11 +1,60 @@
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 use crate::scheduling::proto;
+
+/// Hard ceiling on the bytes a single [`proto::Event`] may consume off the
+/// pipe. The wire is bare, self-describing msgpack (no length framing), so a
+/// worker that emits a value whose length prefix claims a giant array/str/map
+/// would otherwise drive an unbounded read - a crashed or wedged worker turns
+/// into an orchestrator hang, and decode latency stops being predictable.
+/// Capping per message keeps worst-case decode work bounded regardless of the
+/// bytes on the wire. Legit payloads (even a CollectionDone for a millions-item
+/// suite) sit far below this; override via `RSTEST_MAX_MESSAGE_BYTES` for the
+/// rare suite that genuinely exceeds it.
+const DEFAULT_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+
+fn max_message_bytes() -> usize {
+    std::env::var("RSTEST_MAX_MESSAGE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_MESSAGE_BYTES)
+}
+
+/// A `Read` that refuses to yield more than a per-message budget. The budget is
+/// reset before each [`EventReader::recv`], so any single event that tries to
+/// read past the cap fails fast instead of allocating/looping unbounded. The
+/// budget is `Arc<AtomicUsize>` (not a plain field) because the `Deserializer`
+/// owns the reader after construction, yet `recv` still needs to reset it - and
+/// `EventReader` is moved onto a dedicated reader thread, so the handle must be
+/// `Send`.
+struct LimitedReader<R> {
+    inner: R,
+    budget: Arc<AtomicUsize>,
+}
+
+impl<R: Read> Read for LimitedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let allowed = self.budget.load(Ordering::Relaxed);
+        if allowed == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "worker event exceeds RSTEST_MAX_MESSAGE_BYTES cap",
+            ));
+        }
+        let cap = buf.len().min(allowed);
+        let n = self.inner.read(&mut buf[..cap])?;
+        self.budget.fetch_sub(n, Ordering::Relaxed);
+        Ok(n)
+    }
+}
 
 /// Run-wide parameters handed to a worker via its environment at spawn time
 /// (thread-safe), rather than mutating the orchestrator's own process env with
@@ -74,13 +123,33 @@ const REPARENTED_REAP_GRACE: std::time::Duration = std::time::Duration::from_sec
 /// The read half of a worker's event pipe, split off from [`Worker`] so a
 /// reader thread can own it while the orchestrator keeps the write half.
 pub struct EventReader {
-    events: rmp_serde::Deserializer<rmp_serde::decode::ReadReader<BufReader<File>>>,
+    events: rmp_serde::Deserializer<rmp_serde::decode::ReadReader<BufReader<LimitedReader<File>>>>,
+    /// Per-message read budget, reset before every [`recv`] (see
+    /// [`LimitedReader`]).
+    budget: Arc<AtomicUsize>,
+    cap: usize,
 }
 
 impl EventReader {
-    /// Block for the next msgpack [`proto::Event`] from the worker.
+    fn new(evt_r: File) -> Self {
+        let cap = max_message_bytes();
+        let budget = Arc::new(AtomicUsize::new(cap));
+        let reader = LimitedReader {
+            inner: evt_r,
+            budget: Arc::clone(&budget),
+        };
+        EventReader {
+            events: rmp_serde::Deserializer::new(BufReader::new(reader)),
+            budget,
+            cap,
+        }
+    }
+
+    /// Block for the next msgpack [`proto::Event`] from the worker. Each call
+    /// refreshes the read budget so the cap applies per message, not per stream.
     pub fn recv(&mut self) -> Result<proto::Event> {
         use serde::Deserialize;
+        self.budget.store(self.cap, Ordering::Relaxed);
         proto::Event::deserialize(&mut self.events).context("reading worker event")
     }
 }
@@ -138,9 +207,7 @@ impl Worker {
         Ok(Self {
             proc: Proc::Owned(child),
             cmd_w,
-            reader: Some(EventReader {
-                events: rmp_serde::Deserializer::new(BufReader::new(evt_r)),
-            }),
+            reader: Some(EventReader::new(evt_r)),
         })
     }
 
@@ -357,6 +424,15 @@ fn build_worker_command(
         .stdout(match io {
             Stdio::Null => std::process::Stdio::null(),
             Stdio::Inherit => std::process::Stdio::inherit(),
+        })
+        // stdin is only the worker's in passthrough (pdb, `input()` under
+        // -s). Elsewhere it must not inherit: `--watch` keeps a thread
+        // blocked reading stdin for `q`, and on Windows a pending synchronous
+        // read on a pipe blocks the child interpreter's startup probe of fd 0,
+        // hanging every worker.
+        .stdin(match io {
+            Stdio::Null => std::process::Stdio::null(),
+            Stdio::Inherit => std::process::Stdio::inherit(),
         });
     if env.doctor {
         command.env("RSTEST_DOCTOR", "1");
@@ -480,9 +556,7 @@ impl Worker {
             workers.push(Self {
                 proc: Proc::Reparented(Some(pids[i])),
                 cmd_w,
-                reader: Some(EventReader {
-                    events: rmp_serde::Deserializer::new(BufReader::new(evt_r)),
-                }),
+                reader: Some(EventReader::new(evt_r)),
             });
         }
         Ok(workers)
@@ -753,10 +827,62 @@ fn build_pythonpath(explicit: Option<&str>, existing_pythonpath: Option<&str>) -
 
 #[cfg(test)]
 mod tests {
-    use super::{build_worker_command, Endpoint, Stdio, WorkerEnv};
+    use super::{build_worker_command, Endpoint, LimitedReader, Stdio, WorkerEnv};
+    use crate::scheduling::proto;
+    use serde::Deserialize;
     use std::collections::HashMap;
+    use std::io::{BufReader, Cursor, Read};
     use std::path::Path;
     use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// The budget is a hard ceiling: once exhausted, reads fail instead of
+    /// draining the underlying source (which is what bounds decode work).
+    #[test]
+    fn limited_reader_stops_at_budget() {
+        let budget = Arc::new(AtomicUsize::new(10));
+        let mut r = LimitedReader {
+            inner: Cursor::new(vec![0u8; 1000]),
+            budget: Arc::clone(&budget),
+        };
+        let mut sink = Vec::new();
+        // read_to_end surfaces the cap as an error after exactly 10 bytes.
+        let err = r.read_to_end(&mut sink).unwrap_err();
+        assert_eq!(sink.len(), 10);
+        assert_eq!(budget.load(Ordering::Relaxed), 0);
+        assert!(
+            err.to_string().contains("RSTEST_MAX_MESSAGE_BYTES"),
+            "{err}"
+        );
+    }
+
+    /// Decode an event through the same LimitedReader path recv() uses: a frame
+    /// larger than the budget is rejected fast, never read to completion.
+    #[test]
+    fn oversized_event_is_rejected_not_read_to_completion() {
+        // A legit-but-large event: a Stopped with 50k unrun indices.
+        let big = proto::Event::Stopped {
+            unrun: (0..50_000u64).collect(),
+        };
+        let bytes = rmp_serde::encode::to_vec_named(&big).unwrap();
+        assert!(bytes.len() > 1024, "frame should be large: {}", bytes.len());
+
+        let decode_with = |cap: usize| {
+            let budget = Arc::new(AtomicUsize::new(cap));
+            let reader = LimitedReader {
+                inner: Cursor::new(bytes.clone()),
+                budget,
+            };
+            let mut de = rmp_serde::Deserializer::new(BufReader::new(reader));
+            proto::Event::deserialize(&mut de)
+        };
+
+        // Tiny cap trips before the frame is fully read.
+        assert!(decode_with(64).is_err());
+        // Ample cap decodes the exact same bytes fine.
+        assert!(decode_with(bytes.len() + 1).is_ok());
+    }
 
     /// A quiet baseline WorkerEnv (no doctor / timeout / debug / stream).
     fn base_env() -> WorkerEnv {
@@ -967,15 +1093,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_then_wait_reaps_the_worker_child() {
+        // Held throughout: worker_python() and the spawn resolve python via
+        // PATH, and the spawn reads RSTEST_WORKER_PATH.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping reap test: no python with pytest found");
             return;
         };
-        // Point production `worker_pythonpath()` at the repo package. SAFETY:
-        // edition 2021; every worker-spawning test writes this same repo path,
-        // so concurrent writes converge on one value (no divergent read). Left
-        // set on exit, matching serve.rs's live-worker tests.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        // Point production `worker_pythonpath()` at the repo package.
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let env = WorkerEnv {
             run_uid: format!("reap-{}", std::process::id()),
@@ -1020,13 +1146,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fork_prewarm_pool_spawns_distinct_live_workers_and_reaps_clean() {
+        // Held throughout: see kill_then_wait_reaps_the_worker_child.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping fork-prewarm test: no python with pytest found");
             return;
         };
-        // SAFETY: see kill_then_wait_reaps_the_worker_child — every worker test
-        // writes this same repo path, so concurrent writes converge.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let env = WorkerEnv {
             run_uid: format!("fork-{}", std::process::id()),
@@ -1077,13 +1203,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reap_forgets_pid_of_exited_forked_worker() {
+        // Held throughout: see kill_then_wait_reaps_the_worker_child.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping fork-prewarm reap test: no python with pytest found");
             return;
         };
-        // SAFETY: see kill_then_wait_reaps_the_worker_child — every worker test
-        // writes this same repo path, so concurrent writes converge.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let env = WorkerEnv {
             run_uid: format!("fork-reap-{}", std::process::id()),
@@ -1123,13 +1249,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reap_kills_forked_worker_still_alive_after_grace() {
+        // Held throughout: see kill_then_wait_reaps_the_worker_child.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping fork-prewarm kill test: no python with pytest found");
             return;
         };
-        // SAFETY: see kill_then_wait_reaps_the_worker_child — every worker test
-        // writes this same repo path, so concurrent writes converge.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let mut env = base_env();
         env.run_uid = format!("fork-kill-{}", std::process::id());
@@ -1177,13 +1303,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reap_kills_and_waits_owned_worker() {
+        // Held throughout: see kill_then_wait_reaps_the_worker_child.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping owned reap test: no python with pytest found");
             return;
         };
-        // SAFETY: see kill_then_wait_reaps_the_worker_child — every worker test
-        // writes this same repo path, so concurrent writes converge.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let mut worker = Worker::spawn(&python, None, &base_env()).expect("spawn worker");
         let pid = match &worker.proc {
@@ -1201,13 +1327,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_pool_without_prewarm_spawns_owned_workers() {
+        // Held throughout: see kill_then_wait_reaps_the_worker_child.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping plain pool test: no python with pytest found");
             return;
         };
-        // SAFETY: see kill_then_wait_reaps_the_worker_child — every worker test
-        // writes this same repo path, so concurrent writes converge.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let workers = Worker::spawn_pool(&python, 2, &base_env(), false).expect("plain pool");
         assert_eq!(workers.len(), 2);

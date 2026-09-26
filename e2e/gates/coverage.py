@@ -626,7 +626,7 @@ def gate_diff_coverage_gate(g, args, binary):
     check(
         "diff-cov: partial coverage passes a lower threshold",
         r.returncode == 0 and "meets 80%" in r.stderr,
-        f"rc={r.returncode} " + r.stderr[-200:],
+        f"rc={r.returncode} " + r.stderr[-200:] + r.stdout[-1500:],
     )
     # Cover the other branch -> 100%, gate passes.
     g.write(
@@ -641,7 +641,7 @@ def gate_diff_coverage_gate(g, args, binary):
     check(
         "diff-cov: fully-covered diff passes at 100%",
         r.returncode == 0 and "diff coverage 100.0% meets 100%" in r.stderr,
-        f"rc={r.returncode} " + r.stderr[-200:],
+        f"rc={r.returncode} " + r.stderr[-200:] + r.stdout[-1500:],
     )
     # Without --cov there's no coverage data to score: the gate is ignored with
     # a warning and does not fail the run.

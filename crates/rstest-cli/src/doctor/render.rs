@@ -10,15 +10,30 @@ use crate::reporting::sink::Sink;
 /// renderers; classify once here, let each surface word it (the wordings
 /// differ, so this returns the category, not the text).
 enum FixtureAdvice {
-    /// A function-scoped fixture that ran often and cost real time.
+    /// A function-scoped fixture that returned the same immutable value every
+    /// call, with no per-test teardown or narrower-scoped inputs: a likely
+    /// session-scope candidate that saves real time.
+    PromoteScope,
+    /// A function-scoped fixture that ran often and cost real time, but whose
+    /// value we did not verify constant (heuristic only).
     WidenScope,
     /// A session fixture that ran more than once (once per worker).
     SessionPerWorker,
     None,
 }
 
+/// Candidates saving less than this are noise (e.g. a cheap constant that
+/// ran a handful of times); the JSON still carries them.
+const MIN_PROMOTION_SAVING_SECONDS: f64 = 0.01;
+
+fn is_promotion_candidate(f: &FixtureEntry) -> bool {
+    f.constant && f.projected_saving_seconds >= MIN_PROMOTION_SAVING_SECONDS
+}
+
 fn fixture_advice(f: &FixtureEntry) -> FixtureAdvice {
-    if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
+    if is_promotion_candidate(f) {
+        FixtureAdvice::PromoteScope
+    } else if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
         FixtureAdvice::WidenScope
     } else if f.scope == "session" && f.count > 1 {
         FixtureAdvice::SessionPerWorker
@@ -126,16 +141,49 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
         for f in interesting {
             let advice = match fixture_advice(f) {
-                FixtureAdvice::WidenScope => "ran many times; widen scope if value is reusable",
-                FixtureAdvice::SessionPerWorker => {
-                    "session fixture ran once per worker; must be safe to duplicate"
+                FixtureAdvice::PromoteScope => format!(
+                    "same value every call; promote to `scope=\"session\"` to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "ran many times; widen scope if value is reusable".to_string()
                 }
-                FixtureAdvice::None => "",
+                FixtureAdvice::SessionPerWorker => {
+                    "session fixture ran once per worker; must be safe to duplicate".to_string()
+                }
+                FixtureAdvice::None => String::new(),
             };
             let _ = writeln!(
                 md,
                 "| `{}` | {} | {} | {:.1}s | {advice} |",
                 f.name, f.scope, f.count, f.total_seconds
+            );
+        }
+        md.push('\n');
+    }
+
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| is_promotion_candidate(f))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        md.push_str("### Scope-promotion candidates\n\n");
+        md.push_str(
+            "> Function-scoped fixtures that produced the same value on every call. \
+             Promoting to `scope=\"session\"` skips the redundant re-setups \
+             (check the fixture body for side effects first).\n\n",
+        );
+        md.push_str("| Fixture | Runs | Projected saving |\n|---|---:|---:|\n");
+        for f in candidates.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| `{}` | {} | ~{:.2}s |",
+                f.name, f.count, f.projected_saving_seconds
             );
         }
         md.push('\n');
@@ -331,17 +379,47 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         sink.out_line("\nFIXTURE HOTSPOTS (setup time across all workers):");
         for f in interesting {
             let advice = match fixture_advice(f) {
-                FixtureAdvice::WidenScope => "  <- ran many times; widen scope if value is reusable",
-                FixtureAdvice::SessionPerWorker => {
-                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)"
+                FixtureAdvice::PromoteScope => format!(
+                    "  <- same value every call; promote to scope=\"session\" to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "  <- ran many times; widen scope if value is reusable".to_string()
                 }
-                FixtureAdvice::None => "",
+                FixtureAdvice::SessionPerWorker => {
+                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)".to_string()
+                }
+                FixtureAdvice::None => String::new(),
             };
             sink.out_line(&format!(
                 "  {:7.2}s {:6}x  scope={:<8} {}{advice}",
                 f.total_seconds, f.count, f.scope, f.name
             ));
         }
+    }
+
+    // Scope-promotion advisor: candidates verified value-constant, listed even
+    // when below the hotspot threshold, sorted by projected saving.
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| is_promotion_candidate(f))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        sink.out_line(
+            "\nSCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):",
+        );
+        for f in candidates.iter().take(8) {
+            sink.out_line(&format!(
+                "  ~{:6.2}s saved  {:6}x  {}  <- @pytest.fixture(scope=\"session\")",
+                f.projected_saving_seconds, f.count, f.name
+            ));
+        }
+        sink.out_line("  (check the fixture body for side effects before promoting)");
     }
 
     sink.out_line("\nSLOWEST FILES:");
@@ -407,6 +485,12 @@ mod tests {
         assert!(md.contains("| `gw0` | 16.00s | 6 |"));
         assert!(md.contains("### Fixture hotspots"));
         assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
+        // The constant function-scoped `settings` fixture surfaces as a
+        // promotion candidate with its projected saving, and its hotspot row
+        // carries the promote advice.
+        assert!(md.contains("### Scope-promotion candidates"));
+        assert!(md.contains("| `settings` | 40 | ~0.90s |"));
+        assert!(md.contains("promote to `scope=\"session\"` to save ~0.90s"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
     }
@@ -570,5 +654,61 @@ mod tests {
             })
             .collect();
         render(&mut Sink::captured().0, &r); // exercises the len > 10 truncation-tail branch
+    }
+
+    /// Covers every `FixtureAdvice` arm plus candidate sorting (needs two or
+    /// more candidates) in both the terminal and markdown renderers.
+    #[test]
+    fn fixture_advice_arms_and_candidate_order() {
+        use super::super::FixtureEntry;
+        let mut r = report(12);
+        let entry = |name: &str, count, total, constant, saving| FixtureEntry {
+            name: name.into(),
+            scope: "function".into(),
+            count,
+            total_seconds: total,
+            constant,
+            projected_saving_seconds: saving,
+        };
+        r.fixtures.extend([
+            // Many runs, real time, value not verified constant => widen.
+            entry("client", 25, 2.0, false, 0.0),
+            // Hotspot by time but too few runs for any advice.
+            entry("tmpdir", 2, 0.6, false, 0.0),
+            // Second candidate, smaller saving: must sort after `settings`.
+            entry("config", 30, 0.3, true, 0.3),
+        ]);
+
+        let md = render_markdown(&r);
+        assert!(md.contains("| `client` | function | 25 | 2.0s | ran many times; widen scope if value is reusable |"));
+        assert!(md.contains("| `tmpdir` | function | 2 | 0.6s |  |"));
+        let (settings, config) = (
+            md.find("| `settings` | 40 | ~0.90s |").unwrap(),
+            md.find("| `config` | 30 | ~0.30s |").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
+
+        let (mut sink, captured) = Sink::captured();
+        render(&mut sink, &r);
+        let out = captured.out();
+        assert!(out.contains(
+            "scope=function client  <- ran many times; widen scope if value is reusable"
+        ));
+        let tmpdir = out.lines().find(|l| l.contains("tmpdir")).unwrap();
+        assert!(
+            tmpdir.ends_with("scope=function tmpdir"),
+            "no advice: {tmpdir:?}"
+        );
+        let (settings, config) = (
+            out.find("40x  settings  <- @pytest.fixture").unwrap(),
+            out.find("30x  config  <- @pytest.fixture").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
     }
 }

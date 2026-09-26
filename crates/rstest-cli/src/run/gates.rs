@@ -456,7 +456,7 @@ pub(super) fn run_post_gates(
     let mut duration_regressions = 0usize;
     if let Some(ratio) = cli.durations_regress {
         validate_regress_ratio(ratio)?;
-        let baseline = durations::load();
+        let baseline = durations::load_baseline();
         if baseline.is_empty() {
             sink.warn(
                 "rstest: --durations-regress: no duration baseline yet \
@@ -519,7 +519,10 @@ pub(super) fn run_post_gates(
             .env("PYTHONPATH", worker::worker_pythonpath())
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir());
+            .env("RSTEST_CACHE", cache::dir())
+            // Never reads stdin; inheriting it hangs on Windows under
+            // `--watch`, whose `q` listener holds a blocking read on it.
+            .stdin(std::process::Stdio::null());
         if let Some((lp, op)) = &diff_paths {
             cmd.arg("--rstest-diff-lines")
                 .arg(lp)
@@ -546,7 +549,7 @@ pub(super) fn run_post_gates(
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
-        durations::save(&outcome.run);
+        durations::save(&outcome.run, &outcome.sources);
         // Whole-suite wall (fixtures included) for the monorepo planner: a
         // fixture-bound project has near-zero call time in durations.json but
         // real elapsed cost here, so weighting by call time alone starves it
@@ -806,6 +809,14 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
             .and_modify(|m| {
                 m.count += f.count;
                 m.total += f.total;
+                // A promotion candidate only if constant in EVERY worker that
+                // ran it: one worker seeing a varying value vetoes the advice.
+                // Workers that ran it once report `true`, so they don't veto.
+                // Each worker only compares its own calls, so also require
+                // every worker to have seen the same value.
+                m.constant &= f.constant && m.fingerprint == f.fingerprint;
+                m.repeated |= f.repeated;
+                m.redundant = m.redundant.max(f.redundant);
             })
             .or_insert(f);
     }
@@ -904,18 +915,8 @@ mod tests {
     use crate::reporting::sink::Sink;
     use crate::scheduling::pool;
     use crate::scheduling::proto::{FixtureStat, WarningEntry};
+    use crate::test_env;
     use std::time::Instant;
-
-    /// Serializes tests that read or mutate the process-global
-    /// `RSTEST_CACHE_*` env, so a concurrent test can't observe another's
-    /// temporary value (the auto-compact retention path reads env directly).
-    /// Shares the crate-wide lock so it also serializes against the
-    /// `run_cache_compact` tests in the parent module, which touch the same env.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::select::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     // Color-disabled palette: deterministic strings, no tty/env dependence.
     fn plain_palette() -> Palette {
@@ -990,25 +991,84 @@ mod tests {
 
     #[test]
     fn merge_fixtures_sums_by_name_and_scope() {
-        let stat = |name: &str, scope: &str, count, total| FixtureStat {
+        let stat = |name: &str, scope: &str, count, total, constant| FixtureStat {
             name: name.into(),
             scope: scope.into(),
             count,
             total,
+            constant,
+            repeated: false,
+            redundant: 0.0,
+            fingerprint: constant.then(|| "v".to_string()),
         };
         let merged = merge_fixtures(vec![
-            stat("db", "session", 2, 1.0),
-            stat("db", "session", 3, 0.5),   // same key => summed
-            stat("db", "function", 1, 0.25), // different scope => distinct
-            stat("cache", "session", 4, 2.0),
+            stat("db", "session", 2, 1.0, false),
+            stat("db", "session", 3, 0.5, false), // same key => summed
+            stat("db", "function", 1, 0.25, true), // different scope => distinct
+            stat("cache", "session", 4, 2.0, false),
+            // constant in one worker, NOT in another => merged non-constant.
+            stat("cfg", "function", 5, 0.5, true),
+            stat("cfg", "function", 5, 0.5, false),
+            // constant in one worker; another ran it once (reports true) =>
+            // still constant, the light worker does not veto.
+            stat("key", "function", 5, 0.5, true),
+            stat("key", "function", 1, 0.1, true),
         ]);
-        assert_eq!(merged.len(), 3);
+        assert_eq!(merged.len(), 5);
         let db_session = merged
             .iter()
             .find(|f| f.name == "db" && f.scope == "session")
             .unwrap();
         assert_eq!(db_session.count, 5);
         assert!((db_session.total - 1.5).abs() < 1e-9);
+        // One dissenting worker vetoes the promotion candidacy.
+        let cfg = merged.iter().find(|f| f.name == "cfg").unwrap();
+        assert!(!cfg.constant);
+        let key = merged.iter().find(|f| f.name == "key").unwrap();
+        assert!(key.constant);
+        assert_eq!(key.count, 6);
+    }
+
+    #[test]
+    fn merge_fixtures_keeps_per_session_promotion_evidence() {
+        let stat = |count, total, constant, repeated, redundant| FixtureStat {
+            name: "f".into(),
+            scope: "function".into(),
+            count,
+            total,
+            constant,
+            repeated,
+            redundant,
+            fingerprint: constant.then(|| "v".to_string()),
+        };
+        // `--dist loadfile`: one session ran it 12x (11s redundant), others
+        // never touched it. The saving is that session's, not diluted by -n.
+        let pinned = merge_fixtures(vec![stat(12, 12.0, true, true, 11.0)]);
+        assert!(pinned[0].repeated);
+        assert!((pinned[0].redundant - 11.0).abs() < 1e-9);
+
+        // Five one-call sessions (a respawned worker): count 5 > 4 workers, but
+        // no session compared two values, so there is no evidence.
+        let respawn = merge_fixtures((0..5).map(|_| stat(1, 1.0, true, false, 0.0)).collect());
+        assert_eq!(respawn[0].count, 5);
+        assert!(respawn[0].constant && !respawn[0].repeated);
+        assert_eq!(respawn[0].redundant, 0.0);
+
+        // Spread load: the largest per-session saving wins.
+        let spread = merge_fixtures(vec![
+            stat(10, 1.0, true, true, 0.9),
+            stat(6, 0.6, true, true, 0.5),
+        ]);
+        assert!((spread[0].redundant - 0.9).abs() < 1e-9);
+
+        // Constant within each worker but a different value per worker (e.g.
+        // derived from request.module under --dist loadfile): not constant.
+        let mut a = stat(3, 0.3, true, true, 0.2);
+        let mut b = stat(3, 0.3, true, true, 0.2);
+        a.fingerprint = Some("mod_a".into());
+        b.fingerprint = Some("mod_b".into());
+        let per_worker = merge_fixtures(vec![a, b]);
+        assert!(!per_worker[0].constant);
     }
 
     fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {
@@ -1249,7 +1309,7 @@ mod tests {
 
     #[test]
     fn resolve_compact_threshold_flag_then_env() {
-        let _g = env_guard();
+        let held = test_env::lock();
         use crate::cli::Cli;
         use clap::Parser;
         let mut cli = Cli::parse_from(["rstest"]);
@@ -1259,12 +1319,11 @@ mod tests {
 
         let mut cli2 = Cli::parse_from(["rstest"]);
         cli2.cache_compact_threshold = None;
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "3");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "3");
         assert_eq!(resolve_compact_threshold(&cli2).unwrap(), Some(3)); // env fallback
                                                                         // A non-numeric env is a hard error, never a silent None (feature-off).
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
         assert!(resolve_compact_threshold(&cli2).is_err());
-        std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD");
     }
 
     fn auto_compact_root(label: &str) -> std::path::PathBuf {
@@ -1285,7 +1344,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_folds_when_over_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // 3 loose segments, threshold 2 => compaction fires. No env retention
         // window, so all fold into a fresh base and are pruned.
         use crate::cli::Cli;
@@ -1307,7 +1366,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_noop_at_or_under_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // 2 segments, threshold 2 => count (2) is not > 2, no compaction.
         use crate::cli::Cli;
         use crate::remote::{DirTransport, Transport};
@@ -1325,7 +1384,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_off_without_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // No flag, no env => feature off, never touches the remote.
         use crate::cli::Cli;
         use crate::remote::{DirTransport, Transport};
@@ -1377,7 +1436,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_when_listing_fails() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // A failed segment listing is non-fatal: warn and return, never touch
         // the retention/compaction path.
         use crate::cli::Cli;
@@ -1396,7 +1455,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_on_bad_retention_env() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // count over threshold, but RSTEST_CACHE_KEEP_LAST is unparseable =>
         // skip with a warning rather than fold everything.
         use crate::cli::Cli;
@@ -1407,14 +1466,9 @@ mod tests {
         seed_segments(&t, 3);
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = Some(2);
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "notnum");
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert!(
             cap.err().contains("bad retention env"),
             "got: {}",
@@ -1425,13 +1479,12 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_when_compaction_fails() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // Over threshold, retention env clean, but the compaction read fails =>
         // non-fatal warning, no panic.
         use crate::cli::Cli;
         use clap::Parser;
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_KEEP_LAST");
         let t = BrokenTransport {
             ids: vec!["a".into(), "b".into()],
             list_fails: false,
@@ -1441,9 +1494,6 @@ mod tests {
         cli.cache_compact_threshold = Some(0);
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        if let Some(v) = saved {
-            std::env::set_var("RSTEST_CACHE_KEEP_LAST", v);
-        }
         assert!(
             cap.err().contains("auto-compact failed"),
             "got: {}",
@@ -1453,7 +1503,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_on_bad_threshold() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // An unparseable threshold env is non-fatal: warn and return before
         // ever touching the transport.
         use crate::cli::Cli;
@@ -1466,20 +1516,15 @@ mod tests {
         };
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = None;
-        let saved = std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD").ok();
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", v),
-            None => std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD"),
-        }
         assert!(cap.err().contains("bad threshold"), "got: {}", cap.err());
     }
 
     #[test]
     fn maybe_auto_compact_skips_when_keep_last_ge_threshold() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // Over threshold, but a keep-last window >= threshold pins the loose
         // set above it, so folding would run every push. Skip with a warning
         // rather than thrash; segments stay intact.
@@ -1491,14 +1536,9 @@ mod tests {
         seed_segments(&t, 3);
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = Some(2);
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "2"); // keep (2) >= threshold (2)
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "2"); // keep (2) >= threshold (2)
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert!(cap.err().contains("keep-last window"), "got: {}", cap.err());
         assert!(t.read_base().unwrap().is_none(), "no base written");
         assert_eq!(t.list_segment_ids().unwrap().len(), 3, "segments intact");
@@ -1557,6 +1597,7 @@ mod tests {
             collection_hash: None,
             collection_size: 0,
             startup_seconds: 0.0,
+            sources: Default::default(),
         };
         let (mut sink, _cap) = Sink::captured();
         let stream = sink.attach_captured_stream();
