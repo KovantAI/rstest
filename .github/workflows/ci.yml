@@ -147,7 +147,7 @@ jobs:
 
       # corpus gate-classification tests: pure logic, no venvs/network needed.
       - name: corpus bench unit tests
-        run: uvx --python 3.13 --with pytest pytest corpus/test_bench.py
+        run: uvx --python 3.13 --with pytest pytest corpus/test_bench.py corpus/test_plugin_versions.py
 
       - name: upload python coverage
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

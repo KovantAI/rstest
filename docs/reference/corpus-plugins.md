@@ -4,10 +4,10 @@ This maps every pytest plugin that **actually loads** during a
 compatibility-corpus (`corpus/` in the repo) run to the suite(s) that load it.
 It is the runtime-evidence half of the
 [top-100 plugin matrix](top-100-plugins.md): where that table classifies plugins
-(some `V` verified, most `i` inferred), this table records the ones a real suite
+(55 verified `V` or `V*`, 45 inferred `i`), this table records the ones a real suite
 loads *and still meets the corpus parity floor under rstest*.
 
-## What "exercised" means here — and doesn't
+## What "exercised" means here, and doesn't
 
 Each row means: the plugin registers a `pytest11` entry point in that suite's
 venv, so it **loads into the vendored pytest core** during the run, and the suite
@@ -17,11 +17,11 @@ That is genuine runtime evidence the plugin **coexists** with rstest's pool.
 It is **not** proof every plugin feature is verified:
 
 - A suite may load a plugin without exercising its feature (e.g.
-  `pytest-codspeed` / `pytest-benchmark` **auto-disable at `-n ≥ 2`** — loaded,
+  `pytest-codspeed` / `pytest-benchmark` **auto-disable at `-n ≥ 2`**: loaded,
   but their measurement path is inert under the pool; benchmark at `-n 0`).
 - Some suites run pinned below `-n auto` (`-n 0`, `-n 4`, `--collect lazy`); a
   plugin whose *only* corpus evidence is an `-n 0` suite carries **no parallel
-  evidence** — flagged below.
+  evidence**: flagged below.
 
 Promoting a row to `V` in the [top-100 matrix](top-100-plugins.md) still needs a
 targeted micro-suite that exercises the plugin's *feature* and diffs its
@@ -52,7 +52,7 @@ corpus parity floor under rstest.
 | Faker | 1 | pydantic | 🔶 `-n 0` only |
 | langchain-tests | 1 | langchain | ✅ parallel |
 | pytest-aiohttp | 1 | aiohttp | ✅ parallel |
-| pytest-django | 1 | django-allauth | ✅ parallel (`-n 4`; per-worker test DB) |
+| pytest-django | 1 | django-allauth | ✅ parallel (`-n 4`; per-worker test DB naming, but on SQLite `:memory:` only) |
 | pytest-examples | 1 | pydantic | 🔶 `-n 0` only |
 | pytest-httpbin | 1 | requests | ✅ parallel |
 | pytest-memray | 1 | urllib3 | ✅ parallel (`-n 4`) |
@@ -69,12 +69,12 @@ corpus parity floor under rstest.
 > `pytest-xdist`, `pytest-cov`, `pytest-timeout` register `pytest11` entry points
 > but rstest **supersedes** them (native `-n`, `--cov`, `--timeout`); here they
 > confirm *coexistence* (they load without breaking the run), not that you should
-> run both — see the [top-100 matrix](top-100-plugins.md) "🟦 Native" rows.
+> run both: see the [top-100 matrix](top-100-plugins.md) "🟦 Native" rows.
 
-## Weak / no evidence — needs a dedicated micro-suite
+## Weak / no evidence: needs a dedicated micro-suite
 
 - **`-n 0`-only evidence** (no parallel data at all): `Faker`, `pytest-examples`,
-  `pytest-pretty` — their sole corpus carrier (pydantic) runs at `-n 0`.
+  `pytest-pretty`, their sole corpus carrier (pydantic) runs at `-n 0`.
 - **Loaded but feature inert under the pool**: `pytest-codspeed`,
   `pytest-benchmark` (auto-disable at `-n ≥ 2`), `pytest-sugar` (terminal
   plugin, not painted). Coexistence is proven; the *feature* is `-n 0`-only by
@@ -87,16 +87,27 @@ vendored core + fixtures/parametrize/marks only, not plugin compat: **click,
 flask, freezegun, itsdangerous, jsonschema, marshmallow, more-itertools, pluggy,
 rich, trio, typer.**
 
-## Immediate `i` → `V` promotion candidates
+## Promoted from `i` to `V`
 
-Plugins the [top-100 matrix](top-100-plugins.md) currently marks `i` (inferred)
-that this corpus already loads with parallel parity — verify the feature side
-effect, then flip to `V`:
+These three were inferred until the corpus evidence below was confirmed; the
+[top-100 matrix](top-100-plugins.md) now marks them `V`:
 
-- **syrupy** — snapshot asserts under langchain + langgraph at `-n auto`.
-- **pytest-recording** — VCR cassettes under langchain at `-n auto`.
-- **pytest-retry** — rerun channel under langgraph at `-n auto` (rstest seeds the
+- **syrupy**: snapshot asserts under langchain + langgraph at `-n auto`.
+- **pytest-recording**: VCR cassettes under langchain at `-n auto`.
+- **pytest-retry**: rerun channel under langgraph at `-n auto` (rstest seeds the
   `server_port` its worker branch reads).
+
+The reverse also applies: `pytest-examples` and `pytest-pretty` are marked `i`
+in the matrix because their only corpus evidence is the `-n 0` pydantic run.
+
+### What pytest-django's evidence covers
+
+django-allauth, the only corpus suite that loads pytest-django, configures
+SQLite `:memory:`. An in-memory database is private to each process anyway, so
+this run proves the plugin loads and passes under the pool, but it does **not**
+exercise the `test_<name>_gwN` database naming a server-backed database
+(Postgres, MySQL) relies on. Verify that on your own suite, or with
+`rstest migrate-check`.
 
 ## How this table was produced
 

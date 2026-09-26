@@ -2,11 +2,14 @@
 
 import zlib
 
+from rstest_worker._internal import plugincompat
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
+    _pytest_pin_conflicts,
     _random_order_seed,
     _randomly_seed,
+    _warn_pytest_pins,
 )
 
 
@@ -331,3 +334,87 @@ def test_seed_pytest_mypy_falls_back_to_neutralize_on_error(monkeypatch):
     _seed_pytest_mypy(config)
     # reservation failed -> plugin unregistered instead of leaving it to KeyError
     assert config.pluginmanager.unregistered == [plugin]
+
+
+class _Dist:
+    def __init__(self, name, version, requires):
+        self.metadata = {"Name": name}
+        self.project_name = name
+        self.version = version
+        self.requires = requires
+
+
+def test_pin_conflict_flags_a_pin_that_excludes_the_running_pytest():
+    (line,) = _pytest_pin_conflicts([(None, _Dist("pytest-old", "0.3", ["pytest<9,>=7"]))], "9.1.1")
+    assert "pytest-old 0.3 requires pytest<9,>=7" in line
+    assert "vendored pytest 9.1.1" in line
+
+
+def test_pin_conflict_ignores_compatible_and_unrelated_requirements():
+    dists = [
+        (None, _Dist("pytest-asyncio", "1.4.0", ["pytest<10,>=8.4", "typing-extensions>=4.12"])),
+        (None, _Dist("pytest-mock", "3.15.1", ["pytest>=6.2.5"])),
+        (None, _Dist("pytest-bare", "1.0", ["pytest"])),
+        (None, _Dist("no-reqs", "1.0", None)),
+    ]
+    assert _pytest_pin_conflicts(dists, "9.1.1") == []
+
+
+def test_pin_conflict_ignores_extra_gated_and_unparseable_requirements():
+    dists = [
+        (None, _Dist("hypothesis", "6.0", ["pytest<9 ; extra == 'pytest'"])),
+        (None, _Dist("weird", "1.0", ["pytest <<< 9"])),
+    ]
+    assert _pytest_pin_conflicts(dists, "9.1.1") == []
+
+
+def test_pin_conflict_honors_active_markers():
+    dist = _Dist("pytest-marked", "1.0", ["pytest<9 ; python_version >= '3'"])
+    assert len(_pytest_pin_conflicts([(None, dist)], "9.1.1")) == 1
+
+
+def test_pin_conflict_reports_each_distribution_once():
+    # pluggy lists one (plugin, dist) pair per registered module.
+    dist = _Dist("pytest-multi", "1.0", ["pytest<9"])
+    assert len(_pytest_pin_conflicts([(object(), dist), (object(), dist)], "9.1.1")) == 1
+
+
+class _PinConfig:
+    def __init__(self, dists):
+        self.pluginmanager = self
+        self._dists = dists
+        self.calls = 0
+
+    def list_plugin_distinfo(self):
+        self.calls += 1
+        return self._dists
+
+
+def test_warn_pytest_pins_prints_once_per_process(monkeypatch, capsys):
+    monkeypatch.setattr(plugincompat, "_pins_checked", False)
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    config = _PinConfig([(None, _Dist("pytest-old", "0.3", ["pytest<9"]))])
+    _warn_pytest_pins(config)
+    _warn_pytest_pins(config)
+    assert config.calls == 1
+    assert capsys.readouterr().err.count("pytest-old 0.3") == 1
+
+
+def test_warn_pytest_pins_only_on_gw0_in_the_pool(monkeypatch, capsys):
+    monkeypatch.setattr(plugincompat, "_pins_checked", False)
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw1")
+    config = _PinConfig([(None, _Dist("pytest-old", "0.3", ["pytest<9"]))])
+    _warn_pytest_pins(config)
+    assert config.calls == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_pytest_pins_swallows_metadata_errors(monkeypatch, capsys):
+    monkeypatch.setattr(plugincompat, "_pins_checked", False)
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+
+    class _Broken:
+        metadata = property(lambda self: 1 / 0)
+
+    _warn_pytest_pins(_PinConfig([(None, _Broken())]))
+    assert capsys.readouterr().err == ""

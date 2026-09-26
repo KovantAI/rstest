@@ -1,5 +1,7 @@
 # Wait-bound / IO suite playbook
 
+A playbook for suites whose time goes to waiting (sleeps, network, timeouts) rather than computing, where rstest gains the most.
+
 ## Who this is for
 
 You maintain a backend suite that spends most of its time *waiting* (on
@@ -48,7 +50,7 @@ Here is the key move for a wait-bound suite, and it is counter-intuitive:
   available logical core, then caps by what the suite can use (test-file
   count and cached total runtime). It never exceeds your core count, and
   on a few-file suite it may settle *below* it. See
-  [`-n, --numprocesses`](../reference/cli.md#-n---numprocesses-nauto).
+  [`-n, --numprocesses`](../reference/cli.md#-n-numprocesses-nauto).
 - **An explicit `-n N` is a fixed count, regardless.** Pin `-n <k>` and
   you get exactly `k` workers; the auto cap does not apply. So a
   wait-bound suite can set `-n` **above** the logical core count to keep
@@ -59,8 +61,8 @@ This is the same effect doctor reports as **PARALLEL EFFICIENCY over
 cores." Doctor flags efficiency above 100% as normal for wait-bound
 suites and points you back at WAIT-BOUND. (The section is `-n > 1` only.)
 The [scheduler](../concepts/scheduling.md) helps here too: it dispatches
-cached long-poles first, longest first, so a 54-second waiter starts at
-t=0 instead of stacking behind other work.
+slow tests first (a cached duration of 1s or more), longest first, so a
+54-second waiter starts at t=0 instead of stacking behind other work.
 
 **The tuning loop.** Raise `-n` past your core count and watch two doctor
 numbers until they flatten:
@@ -79,7 +81,7 @@ point where you've run out of overlappable waiting. Once tuned, you can
 guard the *outcome* in CI against regressions with a doctor metric that
 tracks how well the run parallelized, e.g. `--doctor-fail-on
 'parallel_efficiency<N'` or a `wall_seconds` ceiling
-([`--doctor-fail-on`](../reference/cli.md#--doctor-fail-on-cond)). (Don't
+([`--doctor-fail-on`](../reference/cli.md#-doctor-fail-on-cond)). (Don't
 gate on `wait_pct` for this; it measures how wait-bound the suite *is*,
 not whether the worker count is well-tuned.)
 
@@ -92,7 +94,7 @@ not whether the worker count is well-tuned.)
 
 **Arm a hang backstop.** A wait-bound suite is exactly the one that hits a
 real hang: a socket that never returns, a timeout that never fires. Set
-[`--worker-timeout`](../reference/cli.md#-worker-timeout-seconds): a test that
+[`--worker-timeout`](../reference/cli.md#-worker-timeout-secs): a test that
 exceeds it is reported **failed** with a timeout message, its worker is killed
 and replaced, and that worker's remaining tests redistribute so the run still
 finishes. Concurrency exposes these; without a backstop one hung test can
@@ -115,7 +117,7 @@ Tests and fixtures read their worker identity from the environment:
 ```python
 import os
 
-worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", "gw1", ...; unset at -n 0/1
+worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", "gw1", ...; unset at -n 0/1 (unless --reruns)
 ```
 
 Plugins that check pytest-xdist's `workerinput` get the same answer via
@@ -127,7 +129,10 @@ runners. Full contract:
 **Django is handled for you.** rstest announces each worker exactly like
 an xdist worker (`gw0`, `gw1`, …), so pytest-django suffixes the test
 database per worker automatically (`test_app_gw0`, `test_app_gw1`, …),
-with no extra flags. See the
+with no extra flags. rstest's own corpus only exercises pytest-django on
+SQLite `:memory:`, where each process has a private database anyway, so
+confirm the suffixing on your Postgres or MySQL setup with one parallel run.
+See the
 [Django on ephemeral CI worked example](ci-quickstart.md#worked-example-django-on-ephemeral-ci).
 The general rule holds for anything else: key the resource on
 `RSTEST_WORKER_ID` (or `workerinput`) so N workers don't collide.
@@ -158,7 +163,7 @@ section 2 to find the actual best wall time.
 - [Suite diagnostics](doctor.md): every doctor section (WAIT-BOUND,
   PARALLEL FLOOR, PARALLEL EFFICIENCY, fixture hotspots, resource leaks)
   and the JSON/markdown/CI-gate outputs.
-- [Scheduling](../concepts/scheduling.md): long-poles-first dispatch and
+- [Scheduling](../concepts/scheduling.md): slow-tests-first dispatch and
   why it beats file-affinity schedulers on wait-heavy suites.
 - [Parallel safety](parallel-safety.md): per-worker isolation, the
   `@pytest.mark.serial` escape hatch, and time-sensitive tests at high
