@@ -290,7 +290,14 @@ It is a **separate document** from the run snapshot above; combine with
   ],
   "slowest_files": [
     { "file": "tests/test_e2e.py", "total_seconds": 84.1, "pct": 20.4 }
-  ]
+  ],
+  "coverage_waste": {
+    "wasted_seconds": 18.4,
+    "redundant_tests": 3,
+    "tests": [
+      { "nodeid": "tests/test_api.py::test_end_to_end_slow", "duration": 12.1, "covered_lines": 240, "also_covered_by": 4 }
+    ]
+  }
 }
 ```
 
@@ -312,6 +319,7 @@ Top-level fields:
 | `parallel_efficiency` | object / `null` | realized parallel speedup and per-worker load; **`null`** unless the run used more than one worker (`workers > 1`) |
 | `fixtures` | array | fixture timings, slowest first (≤ 50) |
 | `slowest_files` | array | per-file totals, slowest first (≤ 20) |
+| `coverage_waste` | object / `null` | slow tests that add no unique coverage; **`null`** unless this run collected per-test coverage (`--cov --cov-context=test`) and at least one slow test qualified |
 
 `wait_bound` (wall ≫ CPU — tests that wait rather than compute):
 
@@ -357,10 +365,21 @@ skipped setups (see the
 `{file, total_seconds, pct}` — `pct` is the file's share of
 `test_time_seconds`.
 
+`coverage_waste` (slow tests that cover no line another test doesn't also
+cover, so they are safe to delete or merge; needs per-test coverage from the
+same run):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `wasted_seconds` | float | summed duration of every redundant slow test (the reclaimable time), not just the shown ones |
+| `redundant_tests` | int | count of redundant slow tests found |
+| `tests` | array | the slowest of them, worst first (≤ 20): `{nodeid, duration, covered_lines, also_covered_by}` — `covered_lines` is how many lines the test hit (all shared), `also_covered_by` how many distinct other tests also cover them |
+
 `schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
 `cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
 `slowest_files`); `2` added the `parallel_efficiency` object; `3` added the
-per-fixture `constant` / `projected_saving_seconds` scope-promotion fields.
+per-fixture `constant` / `projected_saving_seconds` scope-promotion fields
+and the `coverage_waste` object.
 
 `schema` aside, all times are raw seconds (no rounding) — round in your
 consumer. Increment-only: incompatible changes bump `schema`.

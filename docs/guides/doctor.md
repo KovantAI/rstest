@@ -161,6 +161,38 @@ fixture body before promoting.
 Test time aggregated by file — where to look first, and the input for
 deciding what to split under `--dist load`.
 
+### COVERAGE WASTE
+
+Slow tests that add **no unique coverage**: every line each one executes is
+also executed by some other test that is kept, so the flagged tests can all be
+deleted or merged together without dropping a single covered line. Tests that
+duplicate each other are picked slowest first, so of two tests with identical
+coverage only the slower one is flagged. This is the "which time is *wasted*"
+counterpart to SLOWEST FILES.
+
+```text
+COVERAGE WASTE: 18.4s across 3 slow test(s) that cover no line another test doesn't also cover (delete/merge candidates):
+    12.10s  240 line(s), all shared with 4 other test(s)  tests/test_api.py::test_end_to_end_slow
+     4.30s   88 line(s), all shared with 2 other test(s)  tests/test_api.py::test_variant_b
+```
+
+It needs per-test coverage from the **same run**, so run the doctor with
+coverage and per-test contexts:
+
+```bash
+rstest --doctor --cov=. --cov-context=test
+```
+
+An index left by an earlier run (or restored from a cache) is never used: the
+tests or code may have changed since, and a stale "fully shared" verdict could
+recommend deleting a test that is now the only one covering some line. Without
+this run's index the section is simply omitted. Only tests that passed count,
+either as candidates or as the other coverers. Test files are identified by
+your `python_files` patterns, so a product module holding doctests
+(`--doctest-modules`) still counts as product code. Only tests slow enough to
+matter are flagged (a fast redundant test frees no meaningful time when
+deleted).
+
 ### RESOURCE LEAKS
 
 Tests that ended with more live threads or open file descriptors than they
@@ -214,7 +246,8 @@ totals (tests, test time, CPU time, wall, workers, pool `startup_seconds`),
 the wait-bound test list, parallel-floor gate tests, parallel-efficiency
 (realized speedup and per-worker load), fixture timings (each with
 `constant` and `projected_saving_seconds` for the scope-promotion advisor),
-and slowest files.
+slowest files, and the coverage-waste list (`coverage_waste`, `null` unless
+the same run collected per-test coverage with `--cov --cov-context=test`).
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.

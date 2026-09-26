@@ -72,6 +72,46 @@ def test_cmdline_main_noop_outside_worker(monkeypatch):
     assert seen == []
 
 
+# ── pytest_load_initial_conftests: pytest-cov erase race ────────────────────
+
+
+def _cov_append_during_hook(worker_id, monkeypatch, *, cov_source=".", cov_append=False):
+    """cov_append as pytest-cov's impl sees it inside the wrapper, and after."""
+    if worker_id is None:
+        monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    else:
+        monkeypatch.setenv("RSTEST_WORKER_ID", worker_id)
+    ns = SimpleNamespace(cov_source=cov_source, cov_append=cov_append)
+    gen = _plugin().pytest_load_initial_conftests(
+        SimpleNamespace(known_args_namespace=ns), None, []
+    )
+    next(gen)
+    during = ns.cov_append
+    with contextlib.suppress(StopIteration):
+        gen.send(None)
+    return during, ns.cov_append
+
+
+def test_load_initial_conftests_non_first_worker_skips_cov_erase(monkeypatch):
+    assert _cov_append_during_hook("gw1", monkeypatch) == (True, False)
+
+
+def test_load_initial_conftests_gw0_still_erases(monkeypatch):
+    assert _cov_append_during_hook("gw0", monkeypatch) == (False, False)
+
+
+def test_load_initial_conftests_noop_outside_worker(monkeypatch):
+    assert _cov_append_during_hook(None, monkeypatch) == (False, False)
+
+
+def test_load_initial_conftests_noop_without_cov(monkeypatch):
+    assert _cov_append_during_hook("gw1", monkeypatch, cov_source=None) == (False, False)
+
+
+def test_load_initial_conftests_keeps_user_cov_append(monkeypatch):
+    assert _cov_append_during_hook("gw1", monkeypatch, cov_append=True) == (True, True)
+
+
 # ── worker_id / testrun_uid native fixtures ─────────────────────────────────
 
 
