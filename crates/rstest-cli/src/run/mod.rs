@@ -46,17 +46,19 @@ fn head_to_none(rev: &str) -> Option<&str> {
 /// `ControlFlow::Break(code)` means nothing is affected — the caller returns
 /// `code` as the process exit status (advancing the green baseline first under
 /// `--since-green`), so the single `process::exit` stays in `main`.
-/// `since_green`/`head`/`env_fp` are computed by the caller (they outlive
-/// selection, feeding the post-run green-baseline record).
+/// `changed_base` ([`resolve_changed_base`]) and `since_green`/`head`/`env_fp`
+/// are computed by the caller (they outlive selection: the base feeds the
+/// diff-coverage gate, the rest the post-run green-baseline record).
 fn apply_selection(
     cli: &Cli,
     mut args: Vec<String>,
+    changed_base: Option<String>,
     since_green: bool,
     head: &Option<String>,
     env_fp: &str,
     sink: &mut Sink,
 ) -> Result<ControlFlow<i32, Vec<String>>> {
-    let mut effective_changed = resolve_changed_base(cli, sink)?;
+    let mut effective_changed = changed_base;
     if since_green {
         // --since-green owns the diff base: its last-green baseline drives
         // selection, OVERRIDING the "HEAD" base that --changed-strict would
@@ -88,23 +90,55 @@ fn apply_selection(
         // (any --cov-context=test run writes it), else falls back per-file to
         // import-graph reachability, so --changed only ever gets tighter.
         let changes = select::changed_line_ranges(rev)?;
-        match select::affected_with_coverage(
+        // Coverage-map health, for the "of K mapped" ratio and the cold-map hint.
+        let mapped = select::mapped_test_count();
+        let selection = select::affected_with_coverage(
             &project.rootdir,
             &project,
             &changes,
             cli.changed_strict,
             rev,
-        )? {
+        );
+        let selection = selection?;
+        // One-line nudge when the map is cold BUT a source (non-test) .py file
+        // changed — exactly the case where a warm map would have selected fewer
+        // tests than the import graph is about to. Silent when coverage wouldn't
+        // help (test-only / config / non-Python changes), so it never nags a
+        // user who doesn't run coverage - including when such a change forces
+        // a full run alongside a source edit (the graph isn't used then).
+        if mapped.is_none()
+            && !matches!(selection, select::Selection::FullRun(_))
+            && changes.keys().any(|f| {
+                f.extension().and_then(|e| e.to_str()) == Some("py")
+                    && !crate::collect::is_test_file(&project.rootdir.join(f), &project)
+                    // A warm map routes conftest.py to the graph too.
+                    && f.file_name().and_then(|n| n.to_str()) != Some("conftest.py")
+            })
+        {
+            sink.warn(
+                "rstest: --changed is using the import graph (no coverage map). A prior \
+                 `--cov --cov-context=test` run enables coverage-precise selection \
+                 (usually fewer tests).",
+            );
+        }
+        match selection {
             select::Selection::FullRun(reason) => {
                 sink.warn(&format!(
                     "rstest: --changed falling back to full run ({reason})"
                 ));
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
-                sink.out_line(&format!(
-                    "rstest: no tests affected by {} changed file(s)",
-                    changes.len()
-                ));
+                match mapped {
+                    // Keep the cold-map wording as the prefix: scripts grep for it.
+                    Some(m) => sink.out_line(&format!(
+                        "rstest: no tests affected by {} changed file(s) (0 of {m} mapped)",
+                        changes.len()
+                    )),
+                    None => sink.out_line(&format!(
+                        "rstest: no tests affected by {} changed file(s)",
+                        changes.len()
+                    )),
+                }
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
                 // don't force a re-run next time.
@@ -120,11 +154,34 @@ fn apply_selection(
                 return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
-                sink.warn(&format!(
-                    "rstest: {} changed file(s) -> {} affected test target(s)",
-                    changes.len(),
-                    tests.len()
-                ));
+                // With a warm map, report the savings ratio (affected of mapped);
+                // cold, just the affected-target count. Only `file::test` targets
+                // came from the map, so they alone are "of K mapped"; whole-file
+                // targets (graph fallback, changed test files) are counted apart.
+                match mapped {
+                    Some(m) => {
+                        let from_map = tests
+                            .iter()
+                            .filter(|t| t.to_string_lossy().contains("::"))
+                            .count();
+                        let files = tests.len() - from_map;
+                        let extra = if files > 0 {
+                            format!(" + {files} whole-file target(s)")
+                        } else {
+                            String::new()
+                        };
+                        sink.warn(&format!(
+                            "rstest: {} changed file(s) -> {from_map} of {m} mapped test(s) \
+                             affected{extra}",
+                            changes.len(),
+                        ));
+                    }
+                    None => sink.warn(&format!(
+                        "rstest: {} changed file(s) -> {} affected test target(s)",
+                        changes.len(),
+                        tests.len()
+                    )),
+                }
                 let mut selected: Vec<String> =
                     tests.iter().map(|t| t.display().to_string()).collect();
                 // Keep the user's flags; drop any explicit path args in
@@ -152,6 +209,8 @@ struct PostRun<'a> {
     /// Resolved `--cache-remote` (flag or env), already validated non-empty.
     cache_remote: Option<&'a str>,
     shard: Option<(usize, usize)>,
+    /// `--changed`/`--changed-strict` diff base, as resolved for selection.
+    changed_base: Option<&'a str>,
     since_green: bool,
     head: &'a Option<String>,
     env_fp: &'a str,
@@ -459,7 +518,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     };
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
-    let args = match apply_selection(cli, args, since_green, &head, &env_fp, &mut sink)? {
+    // Resolved once: selection and the post-run diff-coverage gate share it, so
+    // a base that fails to resolve aborts here, before any test runs.
+    let changed_base = resolve_changed_base(cli, &mut sink)?;
+    let args = match apply_selection(
+        cli,
+        args,
+        changed_base.clone(),
+        since_green,
+        &head,
+        &env_fp,
+        &mut sink,
+    )? {
         ControlFlow::Continue(args) => args,
         ControlFlow::Break(code) => return Ok(code),
     };
@@ -517,6 +587,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         run_uid: &run_uid,
         cache_remote: cache_remote.as_deref(),
         shard: inc.shard,
+        changed_base: changed_base.as_deref(),
         since_green,
         head: &head,
         env_fp: &env_fp,

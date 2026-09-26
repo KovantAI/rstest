@@ -196,6 +196,23 @@ pub fn render_markdown(r: &DoctorReport) -> String {
             );
         }
     }
+    if let Some(cw) = &r.coverage_waste {
+        let _ = writeln!(
+            md,
+            "### Coverage waste\n\n> {:.1}s across {} slow test(s) that cover no \
+             line another test doesn't also cover (delete/merge candidates).\n",
+            cw.wasted_seconds, cw.redundant_tests
+        );
+        md.push_str("| Duration | Lines | Shared with | Test |\n|---:|---:|---:|---|\n");
+        for t in cw.tests.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| {:.2}s | {} | {} | `{}` |",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            );
+        }
+        md.push('\n');
+    }
     if !r.leaks.is_empty() {
         md.push_str("### Resource leaks\n\n> Net threads/fds still open after teardown.\n\n");
         md.push_str("| Leaked | Test |\n|---|---|\n");
@@ -402,6 +419,26 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         ));
     }
 
+    if let Some(cw) = &r.coverage_waste {
+        sink.out_line(&format!(
+            "\nCOVERAGE WASTE: {:.1}s across {} slow test(s) that cover no line \
+             another test doesn't also cover (delete/merge candidates):",
+            cw.wasted_seconds, cw.redundant_tests
+        ));
+        for t in cw.tests.iter().take(8) {
+            sink.out_line(&format!(
+                "  {:7.2}s  {} line(s), all shared with {} other test(s)  {}",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            ));
+        }
+        if cw.redundant_tests > cw.tests.len().min(8) {
+            sink.out_line(&format!(
+                "  ... and {} more",
+                cw.redundant_tests - cw.tests.len().min(8)
+            ));
+        }
+    }
+
     if !r.leaks.is_empty() {
         sink.out_line("\nRESOURCE LEAKS (net threads/fds still open after teardown):");
         for l in r.leaks.iter().take(10) {
@@ -465,6 +502,9 @@ mod tests {
         assert!(md.contains("promote to `scope=\"session\"` to save ~0.90s"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
+        assert!(md.contains("### Coverage waste"));
+        assert!(md.contains("12.0s across 1 slow test(s)"));
+        assert!(md.contains("| 12.00s | 40 | 3 | `tests/test_a.py::test_redundant` |"));
     }
 
     #[test]
@@ -479,7 +519,19 @@ mod tests {
     // captures stdout) to prove the printing paths don't panic and are covered.
     #[test]
     fn render_terminal_populated_and_empty_dont_panic() {
-        render(&mut Sink::captured().0, &report(12)); // full report: every section printed
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &report(12)); // full report: every section printed
+        let out = cap.out();
+        assert!(
+            out.contains("COVERAGE WASTE: 12.0s across 1 slow test(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "40 line(s), all shared with 3 other test(s)  tests/test_a.py::test_redundant"
+            ),
+            "{out}"
+        );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
     }
 
@@ -526,6 +578,49 @@ mod tests {
         render(&mut Sink::captured().0, &r);
         let md = render_markdown(&r);
         assert!(md.contains("... and")); // truncation tail rendered
+    }
+
+    #[test]
+    fn coverage_waste_terminal_tail_counts_every_unshown_test() {
+        use super::super::WasteTest;
+        let mut r = report(12);
+        let cw = r.coverage_waste.as_mut().unwrap();
+        // 12 redundant tests found, only the 10 slowest kept: the terminal shows
+        // 8 and the tail counts the rest against the full total, not the list.
+        cw.redundant_tests = 12;
+        cw.tests = (0..10)
+            .map(|i| WasteTest {
+                nodeid: format!("tests/test_a.py::dup{i}"),
+                duration: 2.0,
+                covered_lines: 5,
+                also_covered_by: 1,
+            })
+            .collect();
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(out.contains("tests/test_a.py::dup7"), "{out}");
+        assert!(!out.contains("tests/test_a.py::dup8"), "{out}");
+        assert!(out.contains("  ... and 4 more"), "{out}");
+    }
+
+    #[test]
+    fn markdown_coverage_waste_without_slowest_files() {
+        let mut r = report(12);
+        r.slowest_files.clear();
+        let md = render_markdown(&r);
+        assert!(!md.contains("### Slowest files"));
+        assert!(md.contains("### Coverage waste"));
+    }
+
+    #[test]
+    fn no_coverage_index_omits_coverage_waste_section() {
+        let mut r = report(12);
+        r.coverage_waste = None;
+        assert!(!render_markdown(&r).contains("Coverage waste"));
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(!cap.out().contains("COVERAGE WASTE"));
     }
 
     #[test]

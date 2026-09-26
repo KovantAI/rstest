@@ -286,6 +286,30 @@ class StreamPlugin:
             _neutralize_rerunfailures(config)
         return None  # tryfirst, non-firstresult: let pytest's own impl run
 
+    @pytest.hookimpl(wrapper=True)
+    def pytest_load_initial_conftests(self, early_config, parser, args):
+        # pytest-cov builds its plugin here, before workerinput exists, so every
+        # pool worker first starts a throwaway Central controller that erases the
+        # shared plain `.coverage`. N workers deleting one file at once is benign
+        # on POSIX but races on Windows (a delete-pending file raises WinError 5
+        # and the worker dies at collection). Only gw0 clears the stale file;
+        # the rest start as if --cov-append. Workers only write suffixed files,
+        # so gw0's erase never touches this run's data.
+        ns = early_config.known_args_namespace
+        worker_id = os.environ.get("RSTEST_WORKER_ID")
+        skip_erase = (
+            worker_id not in (None, "gw0")
+            and getattr(ns, "cov_source", None)
+            and getattr(ns, "cov_append", None) is False
+        )
+        if skip_erase:
+            ns.cov_append = True
+        try:
+            return (yield)
+        finally:
+            if skip_erase:
+                ns.cov_append = False
+
     @pytest.hookimpl(tryfirst=True)
     def pytest_configure(self, config):
         self._neutralize_xdist(config)

@@ -42,10 +42,34 @@ pub struct CoverageIndex {
 /// when missing, unreadable, corrupt, or an unrecognized schema - every `None`
 /// makes the caller fall back to import-graph selection. A v1 (pre-hash) index
 /// fails the schema check as cold.
-fn load_coverage_index() -> Option<CoverageIndex> {
+pub fn load_coverage_index() -> Option<CoverageIndex> {
     let bytes = std::fs::read(cache::file(COVERAGE_INDEX_FILE)).ok()?;
     let idx: CoverageIndex = serde_json::from_slice(&bytes).ok()?;
     (idx.schema == COVERAGE_INDEX_SCHEMA).then_some(idx)
+}
+
+/// The coverage map's health for the TIA banner: `Some(distinct nodeid count)`
+/// when a schema-current index is on disk (the denominator "X of N mapped tests
+/// impacted"), `None` when the map is cold (missing / unreadable / old schema),
+/// which is the signal that `--impacted` degraded to import-graph selection.
+/// Nodeids whose test file no longer exists (deleted since the index was built)
+/// are not counted - the same stale check selection applies.
+pub fn mapped_test_count() -> Option<usize> {
+    let idx = load_coverage_index()?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for f in idx.files.values() {
+        for ids in f.lines.values() {
+            for id in ids {
+                seen.insert(id.as_str());
+            }
+        }
+    }
+    Some(
+        seen.into_iter()
+            .filter(|id| cwd.join(crate::text::nodeid_file(id)).exists())
+            .count(),
+    )
 }
 
 /// Strip the CR from every CRLF so a CRLF working tree and its LF blob hash equal
@@ -429,6 +453,42 @@ mod tests {
         }
         // Keep the `_` binding to prove the warm-index CoverageFile type is wired.
         let _ = CoverageFile::default();
+    }
+
+    #[test]
+    fn mapped_test_count_dedups_nodeids_across_files_and_lines() {
+        let held = test_env::lock();
+        let dir = fixture("mapcount");
+        // test_a appears on two lines of one file and again in another file:
+        // the distinct-nodeid count must be 2 (test_a, test_b), not 3.
+        // test_gone's file was deleted since the index was built: not counted.
+        let index = cov_index(&[
+            (
+                "s1.py",
+                "H",
+                &[
+                    (1, &["t.py::test_a"]),
+                    (2, &["t.py::test_a", "t.py::test_b", "gone.py::test_gone"]),
+                ],
+            ),
+            ("s2.py", "H", &[(9, &["t.py::test_a"])]),
+        ]);
+        std::fs::write(dir.join("t.py"), "").unwrap();
+        std::fs::write(
+            dir.join(COVERAGE_INDEX_FILE),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let cache_env = test_env::set_var(&held, "RSTEST_CACHE", &dir);
+        let cwd = test_env::set_cwd(&held, &dir);
+        let n = super::mapped_test_count();
+        // A cold cache (no file) reads None.
+        std::fs::remove_file(dir.join(COVERAGE_INDEX_FILE)).unwrap();
+        let cold = super::mapped_test_count();
+        drop(cwd);
+        drop(cache_env);
+        assert_eq!(n, Some(2));
+        assert_eq!(cold, None);
     }
 
     #[test]
