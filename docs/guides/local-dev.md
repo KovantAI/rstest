@@ -46,8 +46,9 @@ $ rstest --watch -n 2          # bounded parallelism while editing
 
 The duration cache and last-failed state update on every cycle, so `--lf` (below) and slow-test-first scheduling stay warm throughout the session.
 
-<!-- TODO(gap): whether saving a brand-new test file (not yet in any selection) is picked up by watch is not stated in watch-mode.md or cli.md. -->
-<!-- TODO(gap): per-cycle watch overhead (fixed cost each rerun adds on top of test time) is not documented in the source files. -->
+**New test files are picked up.** Saving a brand-new file that matches `python_files` counts as a test-file change and reruns exactly that file, even if it sits outside the path you started the session with: reruns keep your flags (`-k`, `-x`, `-n`, ...) but not your positional paths.
+
+**Per-cycle overhead is roughly 0.4s.** From save to result on a one-test project, a cycle takes about 400ms at both `-n 0` and `-n 2`: the 300ms debounce plus about 100ms to spawn fresh workers and collect. Higher `-n` adds a little worker startup, and large trees add the per-save selection latency (tens of milliseconds, see [`--watch`](../reference/cli.md#-watch)). Everything else is your tests' own time. See [Watch mode](watch-mode.md#per-cycle-cost).
 
 ### 2. Run only what changed: `--changed`
 

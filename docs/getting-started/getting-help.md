@@ -2,7 +2,7 @@
 
 - **Bugs and feature requests**: open an issue on the
   [GitHub repository](https://github.com/KovantAI/rstest/issues). For a
-  behavioral difference from pytest, include the `-n 0` result — identical
+  behavioral difference from pytest, include the `-n 0` result: identical
   behavior there is the compatibility contract, and a difference is a bug
   we want.
 - **Parallel-only failures**: work through the
@@ -17,11 +17,11 @@ rstest is **pre-1.0** software under active development. What that means
 honestly:
 
 - Versions are 0.x; CLI flags and the report-json schema aim for
-  stability but may change until 1.0 — every change is listed in the
+  stability but may change until 1.0: every change is listed in the
   repository's `CHANGELOG.md`.
 - The vendored pytest core carries a maintenance commitment: upstream
   pytest security fixes **aim to be re-vendored and released within two
   weeks** ([policy](../concepts/compatibility.md#vendored-pytest-version)).
 - Maintained by **Kovant AB**.
 - Security reports: use GitHub's private vulnerability reporting on the
-  repository — not a public issue.
+  repository, not a public issue.

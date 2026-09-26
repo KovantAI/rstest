@@ -9,6 +9,18 @@ The plugins these suites load (and pass under rstest) are inventoried in
 [docs/reference/corpus-plugins.md](../docs/reference/corpus-plugins.md);
 regenerate it after a `--prepare` refresh (see that file's footer).
 
+Plugins install unpinned, so their versions move between runs. Each run
+records every suite venv's plugins (name, version, declared pytest range)
+under `plugins` in `results.json`; the weekly bench uploads it with
+`bench.json`. Refresh the version table in
+[docs/guides/plugin-stack.md](../docs/guides/plugin-stack.md) from it:
+
+```sh
+python3 corpus/plugin_versions.py                   # from results.json
+python3 corpus/plugin_versions.py --from-venvs      # probe corpus/work/*/venv
+python3 corpus/plugin_versions.py --plugins all     # every plugin seen
+```
+
 ## Running
 
 ```sh

@@ -1,6 +1,7 @@
 # First steps
 
-Run rstest from your project root, exactly where you would run pytest:
+Run rstest from your project root, exactly where you would run pytest (this
+sample is from an 8-core machine):
 
 ```console
 $ rstest
@@ -13,11 +14,11 @@ rstest 0.7.0 — 8 workers (parallel by default; -n 0 for single-worker mode)
 ```
 
 That `dots` output is what you get in CI and in these docs. **On your own
-terminal you'll instead see the `bar` view** — a `✓`/`✗` line per test,
-inline failures, and a live progress bar — because rstest auto-detects the
+terminal you'll instead see the `bar` view** (a `✓`/`✗` line per test,
+inline failures, and a live progress bar) because rstest auto-detects the
 TTY:
 
-```
+```text
  ✓ tests/test_align.py::test_repr
  ✓ tests/test_bar.py::test_pulse
  ...
@@ -29,26 +30,26 @@ Both are the same run, different renderer (details in [Reading the
 output](#reading-the-output)). This page's examples use `dots` for
 stability.
 
-No arguments needed: rstest honors your project's pytest configuration —
-`pyproject.toml` / `pytest.ini` / `setup.cfg` / `tox.ini`, including
-`testpaths`, `addopts`, `python_files`, and markers — because collection
+No arguments needed: rstest honors your project's pytest configuration
+(`pyproject.toml` / `pytest.ini` / `setup.cfg` / `tox.ini`, including
+`testpaths`, `addopts`, `python_files`, and markers) because collection
 runs through a vendored pytest core.
 
 ## Reading the output
 
-On an interactive terminal the default style is **`bar`** — a
+On an interactive terminal the default style is **`bar`**: a
 pytest-sugar-style view (a `✓`/`✗` line per test, inline failures, a live
 progress bar). When output is piped or running in CI it falls back to the
 compact **`dots`** style shown below, so logs stay stable. Pick any style
-explicitly with [`--output dots|verbose|bar|github|json`](../reference/cli.md#-output-dotsverbosebargithubjson)
-— the rest of this page describes `dots`.
+explicitly with [`--output dots|verbose|bar|github|json`](../reference/cli.md#-output-dotsverbosebargithubjson):
+the rest of this page describes `dots`.
 
 - The **header line** states the worker count. rstest is parallel by
   default; this line is the visible reminder.
 - **Dots** stream live as tests finish across all workers: `.` pass, `F`
-  fail, `s` skip, `x` xfail, `X` xpass, `E` error — pytest's vocabulary.
+  fail, `s` skip, `x` xfail, `X` xpass, `E` error, pytest's vocabulary.
 - On a terminal, a **live status footer** shows overall progress with an
-  ETA and, per worker, exactly which test is running and for how long —
+  ETA and, per worker, exactly which test is running and for how long:
   long-running tests are visible the moment they start, not after they
   finish. (Disabled automatically when output is piped or in CI.)
 - **Failures** print with full pytest-style tracebacks (assertion rewriting
@@ -103,24 +104,28 @@ $ rstest -x                             # stop at first failure (globally)
 $ rstest --changed                      # only tests affected by your edits
 ```
 
-`--changed` uses the import graph to run just the tests a change can reach —
+`--changed` uses the import graph to run just the tests a change can reach:
 see [Watch mode](../guides/watch-mode.md) for the on-save version.
 
 ## Controlling parallelism
 
 ```console
 $ rstest -n 4      # four workers
-$ rstest -n auto   # logical cores (the default)
+$ rstest -n auto   # the default: logical cores, capped for small suites
 $ rstest -n 0      # byte-exact pytest session (same as -n 1)
 $ rstest -n 1      # identical to -n 0
 ```
 
-`-n 0` and `-n 1` are the compatibility escape hatch — one in-process
-pytest session, pytest's own behavior in every detail. See
+`-n auto` never starts more workers than you have test files, and once
+timings are cached it also caps by total suite time, so a tiny suite runs
+on one or two workers. Pass an explicit `-n` to override.
+
+`-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
+in a single worker process, pytest's own behavior in every detail. See
 [Byte-exact mode](../concepts/glossary.md#byte-exact-mode) for what that
 guarantees and how it differs from pytest-xdist's `-n 1`.
 
-Commit your defaults so you don't retype flags — `[tool.rstest]` in
+Commit your defaults so you don't retype flags, `[tool.rstest]` in
 `pyproject.toml`:
 
 ```toml
@@ -134,12 +139,13 @@ Command-line flags override these; full key list in
 [CLI → Configuration file](../reference/cli.md#configuration-file).
 
 !!! tip "When to drop to `-n 0`"
-    Under ~10 seconds of serial runtime, parallelism rarely pays — worker
+    Under ~10 seconds of serial runtime, parallelism rarely pays: worker
     startup amortizes poorly and `-n auto` already caps itself low on small
     suites. Reach for `-n 0` deliberately when you want byte-exact pytest
-    behavior: reproducing a difference from pytest, or running an
-    order-dependent suite. Above ~10s, let `-n auto` parallelize. The win
-    grows with suite size and is largest for wait-heavy suites — run
+    behavior: reproducing a difference from pytest, or running a suite
+    whose tests depend on order across files (if the dependency is only
+    within a file, `--dist loadfile` keeps each file on one worker). Above ~10s, let `-n auto` parallelize. The win
+    grows with suite size and is largest for wait-heavy suites: run
     [`--doctor`](../guides/doctor.md) if you're unsure where your time goes.
 
 ## Two runs make it faster
@@ -147,7 +153,7 @@ Command-line flags override these; full key list in
 rstest records per-test durations in `.rstest_cache/`. From the second run
 on, the scheduler starts your slowest tests first, which is what keeps
 workers busy at the end of the run instead of waiting on one long test.
-On wait-heavy suites this is dramatic — aiohttp's suite more than halves
+On wait-heavy suites this is dramatic: aiohttp's suite nearly halves
 between its cold and warm runs (see [Benchmarks](../reference/benchmarks.md)).
 
 ## When something fails
@@ -159,7 +165,7 @@ $ rstest --doctor    # and if the suite feels slow, ask why
 
 !!! tip "Coming from pytest or pytest-xdist?"
     If tests fail *only* under parallelism on a freshly migrated suite, run
-    [`rstest migrate-check`](../reference/cli.md#migrate-check) first — it
+    [`rstest migrate-check`](../reference/cli.md#migrate-check) first: it
     classifies each parallel-only failure (order dependency, isolation leak,
     wall-clock timing, unstable id) and names the fix, so you don't triage by
     hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
@@ -170,14 +176,14 @@ Three commands answer three different questions:
 
 | You want to… | Run | It tells you |
 |---|---|---|
-| Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup — zero risk |
+| Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup: zero risk |
 | Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli.md#migrate-check) | Classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
 | Understand why a passing suite is **slow** | [`rstest --doctor`](../guides/doctor.md) | Plain-English breakdown of where test time goes (wait-bound, a long-pole test, poor parallel balance) |
 
 ## A test that isn't parallel-safe
 
 The one thing that can fail after switching to rstest is a test that quietly
-depended on running alone. Concretely — two tests writing the **same file**:
+depended on running alone. Concretely, two tests writing the **same file**:
 
 ```python
 # Both tests use the same hard-coded path. Serially they take turns;
@@ -192,7 +198,7 @@ def test_writes_other_config():
     assert json.loads(Path("output.json").read_text())["b"] == 2
 ```
 
-Two ways out. **Best** — make them independent with `tmp_path`, pytest's
+Two ways out. **Best**: make them independent with `tmp_path`, pytest's
 per-test temp directory, so they never share a file:
 
 ```python
@@ -202,7 +208,7 @@ def test_writes_config(tmp_path):
     assert json.loads(p.read_text())["a"] == 1
 ```
 
-**Quick fix** — if you can't fix it right now, mark the offending tests
+**Quick fix**: if you can't fix it right now, mark the offending tests
 `serial` so rstest never runs them at the same time as anything else:
 
 ```python
@@ -215,7 +221,7 @@ def test_writes_config():
     ...
 ```
 
-`serial` is the pressure valve, not the goal — it removes the speed win for
+`serial` is the pressure valve, not the goal: it removes the speed win for
 those tests, so fix the sharing when you can. Not sure which tests are
 affected? [`rstest migrate-check`](../reference/cli.md#migrate-check) finds
 and classifies them for you. See [Parallel safety](../guides/parallel-safety.md)

@@ -6,12 +6,15 @@ partitions the collected tests into `N` balanced buckets and keeps
 bucket `K` (K is **1-based**: `1/4`, `2/4`, `3/4`, `4/4`).
 
 ```bash
-rstest -n auto --shard 2/4 --junitxml junit.2.xml
+rstest -n 4 --shard 2/4 --junitxml junit.2.xml
 ```
+
+(Examples use an explicit `-n 4`, the vCPU count of a standard GitHub
+runner; see the limits note below for why not `-n auto`.)
 
 This is the fan-out for the common case: **one large suite is the long
 pole**, and you want it spread across a runner matrix. It is orthogonal
-to `-n` — each shard still runs its slice across local workers — and to
+to `-n` (each shard still runs its slice across local workers) and to
 [monorepo mode](monorepo.md), which splits *across projects on one box*.
 Sharding splits *one suite across many boxes*.
 
@@ -24,7 +27,7 @@ lightest bucket. So a suite with a few dominating tests still splits into
 even *wall-time* slices, not even *counts*.
 
 The split is deterministic: given the same test list and the same
-duration cache, every job computes the identical partition — which is
+duration cache, every job computes the identical partition, which is
 what lets `N` jobs agree on who runs what with zero coordination.
 
 Two consequences for CI:
@@ -35,15 +38,43 @@ Two consequences for CI:
   gating pipeline, prove coverage with the check in
   [Verify no test was dropped](#verify-no-test-was-dropped).
 - **A cold cache falls back to an even count split** (round-robin). The
-  first run is balanced by count; from the second run on — once the cache
-  is populated and restored — it balances by wall time.
+  first run is balanced by count; from the second run on (once the cache
+  is populated and restored) it balances by wall time.
 
-Buckets are always **disjoint and cover the whole suite**, so merging the
-per-shard JUnit reconstructs the full run.
+When every shard sees the same test list and the same duration cache, the
+buckets are **disjoint and cover the whole suite**, so merging the per-shard
+JUnit reconstructs the full run. If the caches differ, that guarantee is gone;
+see [Verify no test was dropped](#verify-no-test-was-dropped).
+
+### Keep one cache snapshot across the matrix
+
+"Restore the same cache" is harder than it sounds, because each shard pulls
+at its own start time:
+
+- **Shared-cache remote backend** (`--cache-remote … --cache-pull --cache-push`):
+  a fast shard can finish and push its segment before a slow shard starts
+  pulling. The slow shard then sees newer durations and computes a different
+  partition.
+- **Artifact backend**: each shard looks up "the latest successful main run"
+  on its own. If a main run finishes while the matrix is starting, shards can
+  warm from different runs.
+
+To pin one snapshot:
+
+- Resolve the warm source **once** in an upstream job (for example the
+  `gh run list` step) and pass the run id to every shard as a job output.
+- Or, during a sharded run, **pull only** (`--cache-pull` without
+  `--cache-push`) and push segments from a single follow-up job, so no
+  shard's write can change what another shard reads.
 
 !!! note "Requirements & limits"
-    - Needs the parallel pool: `-n ≥ 2` (or `-n auto`). Single-worker /
-      `-n 0` runs the session's own full suite with no dispatch filter.
+    - Needs the parallel pool: `-n ≥ 2`. Prefer an explicit `-n 2` or higher
+      over `-n auto` with `--shard`: `auto` is capped by the number of test
+      files and by the cached suite time (about one worker per 2s of tests),
+      so on a 1-vCPU runner, a one-file suite, or a warm cache under ~2s it
+      resolves to one worker and the run fails with `--shard needs the
+      parallel pool` (exit 1). A cold first run can pass and the next, warm
+      run fail.
     - Not combinable with `--shuffle` (a per-run shuffle would break the
       identical-partition guarantee) or `--dist each`.
     - Works with `--collect lazy` too, where it shards at **file**
@@ -58,7 +89,7 @@ per-shard JUnit reconstructs the full run.
     - **A sharded coverage index is partial per job.** Each shard measures only
       its own tests. Push each shard's slice through the
       [shared cache](../concepts/caching.md#shared-cache-backend)
-      (`--cache-remote … --cache-pull --cache-push`) — the shards share a commit,
+      (`--cache-remote … --cache-pull --cache-push`): the shards share a commit,
       so their slices **union on pull** into a full index and a later `--changed`
       selects correctly, no dedicated unsharded job. Without the shared cache,
       warm the index from an **unsharded** run (or merge each shard's
@@ -75,14 +106,19 @@ go green with fewer tests than the suite has. Nothing detects that at runtime.
 
 For a merge-queue or release gate, add a step that proves the shards covered
 the whole suite. The built-in [`rstest shard-verify`](../reference/cli.md#shard-verify)
-does exactly this. Each shard's `--report-json`, written while `--shard` was
+does exactly this.
+
+!!! warning "Unreleased"
+    `shard-verify` and the `meta.shard` report stamp it reads are on `main`
+    but **not in rstest 0.7.0**. On 0.7.0, `rstest shard-verify …` is treated
+    as a test path. Until the next release, use the jq equivalent below. Each shard's `--report-json`, written while `--shard` was
 active, carries a `meta.shard` stamp: `k`, `n`, and the sha256
 `collection_hash` and size of the full collected suite. Pass the per-shard
 reports and it reconciles them:
 
 ```bash
 # Each shard writes a report while sharding (the report carries the stamp):
-rstest -n auto --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
+rstest -n 4 --shard "$K/$N" --report-json "shard.$K.json" --junitxml "junit.$K.xml"
 
 # After the matrix finishes, in a job that has gathered all the shard reports:
 rstest shard-verify shard.*.json
@@ -104,7 +140,7 @@ a lightweight final job. It covers full-collection runs; a `--collect lazy`
 shard run stamps no collection hash and is not verifiable this way.
 
 ??? note "Manual equivalent with jq (no shard-verify)"
-    If you cannot run `shard-verify` (an older rstest, or a policy against extra
+    If you cannot run `shard-verify` (rstest 0.7.0 or older, or a policy against extra
     tooling), reconcile by hand. Collect the full suite once with the **same**
     selection flags the shards use, union the per-shard ran-ids, and compare.
     The report-json `tests` map is keyed by every test that ran (including
@@ -160,7 +196,7 @@ jobs:
             rstest-durations-
 
       - name: test shard ${{ matrix.shard }}
-        run: rstest -n auto --shard ${{ matrix.shard }}/4 --junitxml junit.${{ matrix.shard }}.xml
+        run: rstest -n 4 --shard ${{ matrix.shard }}/4 --junitxml junit.${{ matrix.shard }}.xml
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -208,16 +244,19 @@ jobs:
     they agree; a separate full run **saves** a fresh key each run so the
     numbers stay current. Pointing shards at a per-run key would give each
     matrix job a different cache and break the partition. If you'd rather
-    not run a separate full job, let shard 1 save the cache instead — but
+    not run a separate full job, let shard 1 save the cache instead: but
     accept that its timings only cover 1/N of the suite.
 
 !!! tip "Or skip the dance entirely with the shared cache"
     The restore-key/refresh-job choreography above exists to work around
     `actions/cache` immutability. The [shared-cache backend](../concepts/caching.md#shared-cache-backend)
     removes it: every shard runs `--cache-pull --cache-push`, each pushing its
-    own immutable segment, and they union on the next pull — no single-writer
-    job, no dedicated full run. See
-    [Shared cache across CI jobs](ci-shared-cache.md).
+    own immutable segment, and they union on the next pull, so there is no
+    single-writer job and no dedicated full run. One caveat: shards pull at
+    different times, so a shard that pushes early can change what a later
+    shard pulls in the **same** run. For a gating pipeline, pin one snapshot
+    as described in [Keep one cache snapshot across the matrix](#keep-one-cache-snapshot-across-the-matrix).
+    See [Shared cache across CI jobs](ci-shared-cache.md).
 
 ## GitLab CI
 
@@ -233,7 +272,7 @@ test:
     policy: pull        # shards restore only; don't race to save
   script:
     - pip install -r requirements.txt && pip install rstest
-    - rstest -n auto --shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL} --junitxml junit.xml
+    - rstest -n 4 --shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL} --junitxml junit.xml
   artifacts:
     when: always
     reports:
@@ -256,11 +295,11 @@ jobs:
       - checkout
       - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
       - run: pip install -r requirements.txt && pip install rstest
-      - run: rstest -n auto --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml test-results/junit.xml
+      - run: rstest -n 4 --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml test-results/junit.xml
       - store_test_results: { path: test-results }   # a directory, not a file
 ```
 
-As with GitHub and GitLab, the shards restore that cache read-only —
+As with GitHub and GitLab, the shards restore that cache read-only:
 **something must write it**, or every run partitions cold (even split, no
 wall-time balancing). Add a separate non-parallel job that runs the full
 suite and saves the fresh cache:
@@ -277,7 +316,7 @@ suite and saves the fresh cache:
           paths: [".rstest_cache"]
 ```
 
-Wire both jobs into a workflow — CircleCI runs nothing without a
+Wire both jobs into a workflow, CircleCI runs nothing without a
 `workflows:` block:
 
 ```yaml
@@ -301,7 +340,7 @@ from whatever your system exposes:
 
 ```bash
 # N total jobs; THIS job is number K (1..N). -n auto per job.
-rstest -n auto --shard "$K/$N" --junitxml "junit.$K.xml"
+rstest -n 4 --shard "$K/$N" --junitxml "junit.$K.xml"
 ```
 
 Then collect all `junit.*.xml` artifacts and merge (e.g.
@@ -315,5 +354,5 @@ More shards cut wall time but each pays fixed startup (interpreter,
 imports, session fixtures) and grabs a runner. Past the point where
 startup dominates the slice, adding shards stops helping. Start with the
 suite's total time divided by your target per-job time, then check the
-per-shard wall times are even — if the cache is populated and restored,
+per-shard wall times are even: if the cache is populated and restored,
 they should be.

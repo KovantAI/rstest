@@ -1,8 +1,9 @@
 # Migrating from pytest
 
-The short version: install rstest, replace `pytest` with `rstest` in your
-command, done. This page is the long version: what is identical, what
-differs, and how to fall back.
+The short version: install rstest, run `rstest` where you ran `pytest`, and
+check the list under [What changes](#what-changes) before you rely on it in
+CI. This page is the long version: what is identical, what differs, how to
+roll out in stages, and how to roll back.
 
 ## What stays identical
 
@@ -14,34 +15,93 @@ reimplementation.
 **Your plugins.** Plugins installed in the environment load through the
 normal `pytest11` entry points against the vendored core. pytest-django,
 pytest-asyncio, pytest-aiohttp, pytest-mock, and hypothesis are exercised
-against real suites in rstest's compatibility battery. Plugin flags forward
-like any other pytest flag.
+against real suites in rstest's compatibility battery. Most plugin flags
+forward like any other pytest flag; the exceptions are in
+[Flags rstest owns](#flags-rstest-owns) below.
 
 **Your configuration.** `pyproject.toml [tool.pytest.ini_options]`,
 `pytest.ini`, `setup.cfg`, `tox.ini` (including `addopts`, `testpaths`,
 `python_files`, `markers`, `filterwarnings`) are read by the vendored core
-exactly as pytest reads them.
+exactly as pytest reads them. One catch: rstest's *own* flags are read only
+from the command line and `[tool.rstest]`, never from `addopts` (see
+[below](#addopts-and-pytest_addopts)).
 
-**Your flags.** rstest keeps a handful of its own flags (`-n`, `--dist`,
-`--doctor`, `--watch`, `--junitxml`, `--report-json`, `--python`) and
-forwards everything else to the test session verbatim. `-k`, `-m`, `-x`,
-`--maxfail`, `--lf`, `--ff`, `-W`, `-p`, `--tb`, plugin options, no
-translation table needed.
+## Flags rstest owns
+
+rstest forwards `-k`, `-m`, `-x`, `--maxfail`, `--lf`, `--ff`, `-W`, `-p`,
+`--tb` and plugin options to the test session unchanged. It keeps about 50
+flags for itself (the full list is the [CLI reference](../reference/cli.md)).
+Most have rstest-only names (`--doctor`, `--watch`, `--report-json`,
+`--python`, ...), but a few share a name with pytest core or a popular
+plugin. On the command line, rstest takes these and the plugin never sees
+them:
+
+| Flag | Also defined by | What rstest does with it |
+|---|---|---|
+| `-n`, `--dist` | pytest-xdist | runs its own worker pool; xdist stays inert |
+| `--junitxml` | pytest core | writes one merged JUnit file itself, at every worker count |
+| `--html` | pytest-html | writes rstest's own merged HTML report, at every worker count |
+| `--timeout` | pytest-timeout | rstest's native per-test timeout |
+| `--reruns`, `--only-rerun` | pytest-rerunfailures | rstest's native, crash-aware reruns |
+| `--debug` | pytest core (debug log) | starts debugpy and waits for an editor to attach |
+
+To hand one of these to pytest or its plugin instead, put it after `--`:
+everything after `--` goes to the session untouched. For example
+`rstest -n 0 -- --html=report.html` gets pytest-html's own report, and
+`rstest -n 0 -- --debug` gets pytest's debug log. Several of those plugins
+only do anything at `-n 0`; see [Plugins](plugins.md).
+
+### `addopts` and `PYTEST_ADDOPTS`
+
+rstest does not read `addopts` or `PYTEST_ADDOPTS` for its own flags. Those
+options still reach the vendored pytest session, so a shared-name flag set
+there behaves as the *plugin's* flag, with the plugin's limits:
+
+- `addopts = --reruns 2`: at `-n 0` pytest-rerunfailures reruns as usual.
+  In the pool, rstest unregisters that plugin (it would crash there), so
+  **nothing reruns and nothing warns**.
+- `addopts = --junitxml=report.xml`: at `-n 0` pytest writes the file. In
+  the pool, pytest's JUnit writer skips worker processes, so **no file is
+  written**.
+- `addopts = --html=report.html`: same pattern; pytest-html writes nothing
+  in the pool.
+
+Move these to the rstest command line (or `[tool.rstest]` where a key
+exists, such as `reruns`) when you switch.
 
 ## What changes
 
 **Parallel by default.** This is the headline difference. pytest runs your
 tests one at a time; rstest runs them on `auto` workers and says so in its
-header line. The implications:
+header line. Check each item against your suite:
 
-- *Session/module-scoped fixtures instantiate once per worker*, not once
-  per run, the same semantics as pytest-xdist. A session-scoped database
-  or server fixture must tolerate N concurrent instances. (`rstest
-  --doctor` flags session fixtures that ran more than once.)
-- *Tests run in a different order*, interleaved across workers. Tests that
-  depend on a previous test's side effects need [`--dist
+- [ ] *Session/module-scoped fixtures instantiate once per worker*, not
+  once per run, the same semantics as pytest-xdist. A session-scoped
+  database or server fixture must tolerate N concurrent instances.
+  (`rstest --doctor` flags session fixtures that ran more than once.)
+- [ ] *`pytest_configure`, `pytest_sessionstart` and `pytest_sessionfinish`
+  run in every worker*, concurrently. A conftest hook that creates a shared
+  resource or writes a shared file must be idempotent or keyed on the worker
+  id (`RSTEST_WORKER_ID` / `workerinput["workerid"]`).
+- [ ] *Tests run in a different order*, interleaved across workers. Tests
+  that depend on a previous test's side effects need [`--dist
   loadfile`](parallel-safety.md#file-affinity) or a fix.
-- *Output interleaves across workers* under `-v`, in completion order.
+- [ ] *Reordering in `pytest_collection_modifyitems` is ignored* at
+  `-n ≥ 2` (deselection is honored). rstest schedules by duration instead.
+  This includes plugins that reorder: pytest-django, for example, moves
+  `TestCase` tests ahead of `TransactionTestCase` in that hook, so expect
+  that ordering not to hold in the pool (inferred from the mechanism, not
+  verified against a Django suite). Use `-n 0` or an affinity `--dist` mode
+  where order matters.
+- [ ] *Custom `pytest_terminal_summary` output is not shown* at `-n ≥ 2`:
+  the hook runs in each worker, but rstest renders one merged terminal.
+- [ ] *pytest-rerunfailures is unregistered in pool workers*; rstest's own
+  `--reruns` / `@pytest.mark.flaky` replace it.
+- [ ] *Shared-name flags and `addopts`*: see
+  [Flags rstest owns](#flags-rstest-owns).
+- [ ] *Output interleaves across workers* under `-v`, in completion order.
+
+The full hook contract is in [Plugins: hook coverage](plugins.md#hook-coverage).
 
 **Test output rendering.** rstest renders progress, failures, and summaries
 itself (from the same data pytest would use). Failure tracebacks, captured
@@ -61,9 +121,31 @@ deprecation warnings, plugin version bumps, the usual. `rstest -n 0` is
 the cheap probe: it surfaces exactly what a pytest upgrade would, with
 your installed pytest untouched. Budget the runner switch as
 "pytest upgrade first, then a one-line command change," not one step.
-[Onboarding to pytest 9.1.1](upgrade-to-pytest9.md) is the concrete
+[Upgrading to pytest 9](upgrade-to-pytest9.md) is the concrete
 checklist for that first step: the small set of 8→9 removals that actually
 bite, with the grep and the fix for each.
+
+## Rolling out in stages, and rolling back
+
+rstest doesn't touch your pytest setup, so switching back is a one-line
+change as long as you keep the pytest side intact during the rollout:
+
+1. **Shadow.** Add an rstest job next to your existing pytest (or
+   pytest-xdist) CI job. Keep the old job as the required check. Keep pytest
+   installed: `rstest try` compares against it, and it's your fallback.
+2. **Compare.** Run both for a while. `rstest try` and
+   `rstest migrate-check` (below) tell you where results differ.
+3. **Switch.** Make the rstest job required and the old job optional.
+   Leave pytest-xdist and its `addopts` (`-n 4`, `--dist ...`) in place for
+   now: rstest neutralizes them inside its workers, and the old job still
+   needs them.
+4. **Clean up** once you're confident: remove the old job, then the xdist
+   flags from `addopts`, then pytest-xdist itself.
+
+To roll back at any stage, point CI at `pytest` again. pytest ignores
+`[tool.rstest]` in `pyproject.toml` and the `.rstest_cache/` directory, so
+neither needs removing. If you already did step 4, restore the xdist flags
+and dependency.
 
 ## The escape hatch
 
@@ -71,7 +153,8 @@ bite, with the grep and the fix for each.
 $ rstest -n 0
 ```
 
-One worker, one pytest session, byte-exact pytest behavior. If something
+One worker, one pytest session, pytest's exact per-test outcomes (only the
+[flags rstest owns](#flags-rstest-owns) are still handled by rstest). If something
 behaves differently under rstest's parallel mode, this is the first
 diagnostic: if it also fails at `-n 0`, it's not parallelism.
 
@@ -81,8 +164,9 @@ Flags that need pytest's own terminal switch to this mode automatically:
 ## If your suite already uses pytest-xdist
 
 rstest neutralizes xdist inside its workers automatically: an `addopts =
--n 4` in your ini will not spawn nested workers. Remove the `-n` from
-`addopts` when convenient and pass it to rstest instead. See
+-n 4` in your ini will not spawn nested workers. Keep it while your pytest
+job still runs (see [the staged rollout](#rolling-out-in-stages-and-rolling-back)),
+then remove it and pass `-n` to rstest instead. See
 [Migrating from pytest-xdist](migrate-from-xdist.md).
 
 ## Just want to know if it's worth it?
@@ -92,8 +176,9 @@ $ rstest try
 ```
 
 runs your suite under plain pytest and under `rstest -n auto` and tells you, in
-one shot, whether the results are identical and how much faster rstest is, the
-30-second answer before you commit to anything. If it flags differences, it
+one command, whether the results are identical and how much faster rstest is,
+before you commit to anything. It costs one serial pytest run plus one rstest
+run. If it flags differences, it
 points you at `migrate-check` (below).
 
 ## A migration checklist
@@ -104,7 +189,8 @@ points you at `migrate-check` (below).
    [The migrate-check preflight](#the-migrate-check-preflight) just below for
    what it reports.
 1. `rstest -n 0`: confirm identical results to pytest (this is the
-   contract; report a bug if not).
+   contract; report a bug if not). Move any rstest-owned flags out of
+   `addopts` first ([why](#addopts-and-pytest_addopts)).
 2. `rstest`: run parallel. Green? You're done.
 3. A few tests fail only in parallel? `migrate-check` already classified
    each one and named its fix; [Parallel safety](parallel-safety.md) is the
@@ -173,7 +259,7 @@ It exits non-zero if any WILL-bail id or parallelism-specific failure is
 found, so it doubles as a **CI gate** that blocks new parallel-unsafe tests:
 
 ```console
-$ rstest --migrate-check-json migrate.json \
+$ rstest migrate-check --migrate-check-json migrate.json \
          --migrate-allow tests/legacy/    # tolerate a triaged backlog
 ```
 

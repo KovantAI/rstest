@@ -74,7 +74,7 @@ accepted:
 
 ```yaml
 - run: rstest                                   # the test run, -n auto
-- run: rstest --migrate-check-json mc.json \
+- run: rstest migrate-check --migrate-check-json mc.json \
         --migrate-allow tests/legacy/           # gate: non-zero on new issues
 ```
 

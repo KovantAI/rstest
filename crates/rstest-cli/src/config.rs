@@ -203,7 +203,8 @@ pub struct RstestSettings {
     pub collect: Option<String>,
     /// Dispatch ordering: "throughput" (default) or "fail-fast".
     pub order: Option<String>,
-    /// Terminal output style: "dots" (default), "verbose", or "bar".
+    /// Output style, same values as `--output` (dots, verbose, bar, github,
+    /// gitlab, buildkite, teamcity, azure, tap, json).
     pub output: Option<String>,
 }
 

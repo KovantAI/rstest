@@ -1,5 +1,5 @@
 site_name: rstest
-site_description: A fast, pytest-compatible test runner — parallel by design, with built-in suite diagnostics
+site_description: A fast, pytest-compatible test runner, parallel by design, with built-in suite diagnostics
 site_url: https://python-rstest.readthedocs.io/
 repo_url: https://github.com/KovantAI/rstest
 repo_name: KovantAI/rstest
@@ -76,7 +76,6 @@ markdown_extensions:
       custom_checkbox: true
 
 exclude_docs: |
-  PLAN.md
   # Generated schema partials: embedded via pymdownx snippets into
   # reference/output-schemas.md, not standalone pages. The .schema.json files
   # are kept (copied as static assets) so they are directly downloadable.
@@ -98,12 +97,10 @@ nav:
       - Wait-bound / IO suites: guides/wait-bound.md
       - Local dev / inner loop: guides/local-dev.md
       - Your plugin stack: guides/plugin-stack.md
-      - Migrating from xdist (support matrix): reference/xdist-support.md
-      - Already fast under xdist? (CPU-bound): guides/migrate-from-xdist.md
   - Guides:
       - guides/index.md
       - Migrating from pytest: guides/migrate-from-pytest.md
-      - Onboarding to pytest 9.1.1: guides/upgrade-to-pytest9.md
+      - Upgrading to pytest 9: guides/upgrade-to-pytest9.md
       - Migrating from pytest-xdist: guides/migrate-from-xdist.md
       - Parallel safety: guides/parallel-safety.md
       - Suite diagnostics: guides/doctor.md
@@ -138,9 +135,10 @@ nav:
       - Report JSON: reference/report-json.md
       - Output schemas: reference/output-schemas.md
       - Benchmarks: reference/benchmarks.md
-      - Parity divergences: reference/parity-divergences.md
+      - Parity divergences & upstream fixes: reference/parity-divergences.md
       - Plugin compatibility (top 100): reference/top-100-plugins.md
       - Plugins exercised by the corpus: reference/corpus-plugins.md
+      - xdist support matrix: reference/xdist-support.md
       - Troubleshooting: reference/troubleshooting.md
       - Security & supply chain: reference/security.md
       - License: reference/license.md

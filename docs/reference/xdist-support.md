@@ -1,10 +1,12 @@
 # xdist support matrix
 
+How each pytest-xdist flag, hook and fixture maps onto rstest, for teams moving an xdist suite across.
+
 ## Who this is for
 
 You are moving a suite off pytest-xdist and need one lookup: for each xdist flag, hook, and worker-identity fixture, does rstest support it, emulate it, or drop it? This page answers that and links to the deeper treatment of each item.
 
-The baseline guarantee: at `-n 0` (or `-n 1`) rstest is a single vendored-pytest session and outcomes are **byte-exact** to pytest: any difference there is a bug (see [Compatibility](../concepts/compatibility.md)). rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the two areas below: flags that silently no-op, and hooks that run per-worker instead of once. The worker-identity fixtures (`worker_id`, `testrun_uid`) are provided natively, so they are one thing you do *not* have to worry about.
+The baseline guarantee: at `-n 0` (or `-n 1`) rstest is a single vendored-pytest session and per-test outcomes **match pytest exactly**: any difference there is a bug. (The few flags rstest owns, such as `--junitxml`, `--timeout` and `--reruns`, are still handled by rstest.) (see [Compatibility](../concepts/compatibility.md)). rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the two areas below: flags that silently no-op, and hooks that run per-worker instead of once. The worker-identity fixtures (`worker_id`, `testrun_uid`) are provided natively, so they are one thing you do *not* have to worry about.
 
 For the narrative version see [Migrating from pytest-xdist](../guides/migrate-from-xdist.md).
 
@@ -18,7 +20,7 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 | `--dist loadfile` | `--dist loadfile` | Same. File affinity, in-file order. |
 | `--dist loadscope` / `loadgroup` | same names | Supported, incl. `@pytest.mark.xdist_group`; rejected under `--collect lazy` (needs full collection). See [`--dist`](cli.md). |
 | `--dist each` | `--dist each` (**partial**) | Full suite per worker, but every worker uses the SAME interpreter. Heterogeneous `--tx` gateways have no equivalent. `--reruns` rejected in this mode. |
-| `--dist no` / `--dist=no` | none | **rstest error, exit 2** (`no` is not a valid `--dist` mode); single-worker is `-n 0`. |
+| `--dist no` / `--dist=no` | none | **rstest error, exit 1** (`no` is not a valid `--dist` mode); single-worker is `-n 0`. |
 | `-d` | `--dist load` | `-d` is xdist's load-balancing shorthand, which is rstest's default. Forwarded verbatim (see below), no effect. |
 | `--maxprocesses` | none | Use `-n` (no separate cap). Forwarded verbatim, no effect. |
 | `--max-worker-restart` | none | No equivalent: rstest auto-respawns crashed workers on a fixed, non-tunable budget (see [Crash handling](../concepts/crash-handling.md)). Forwarded verbatim, no effect. |
@@ -26,12 +28,12 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 | `--rsyncdir` / `--rsync` | none | No equivalent: rstest runs local workers, no remote sync. |
 | `-p xdist.looponfail` / `--looponfail` | `--watch` | With import-graph selection. See [`--watch`](cli.md). |
 
-**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` is consumed by rstest's own `--dist` and rejected as an invalid mode (exit 2). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`, `--maxprocesses`) are **forwarded to the vendored pytest session verbatim**, so the outcome depends on whether pytest-xdist is installed:
+**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` is consumed by rstest's own `--dist` and rejected as an invalid mode (exit 1). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`, `--maxprocesses`) are **forwarded to the vendored pytest session verbatim**, so the outcome depends on whether pytest-xdist is installed:
 
 - **pytest-xdist installed** (usual mid-migration): the flag *parses* but has **no effect**: rstest keeps xdist's session inert (`dist = no`), so nothing acts on it. Silently ignored, no error, no warning.
 - **pytest-xdist not installed**: pytest doesn't recognize the option: usage error from the vendored core (exit 4).
 
-Either way these flags don't *do* anything under rstest; remove them from `addopts` once the switch is done. If `addopts = -n 4` with pytest-xdist installed is still in your ini, it is neutralized inside rstest workers automatically (options parse, the xdist session never engages, no nested workers). Remove it at your convenience and pass `-n` to rstest.
+Either way these flags don't *do* anything under rstest; remove them from `addopts` once no pytest-xdist job still depends on them (see [the staged rollout](../guides/migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back)). If `addopts = -n 4` with pytest-xdist installed is still in your ini, it is neutralized inside rstest workers automatically (options parse, the xdist session never engages, no nested workers). Remove it at your convenience and pass `-n` to rstest.
 
 ## Hook matrix
 
@@ -42,11 +44,14 @@ xdist's controller-side ("master") hooks fire in the controller process around e
 | `pytest_configure_node(node)` | **Emulated.** Runs per worker; hooks that are pure functions of the node (read `gateway.id`, fill `workerinput`, provision from them, such as SQLAlchemy's `follower_ident`) produce the same observable result as xdist. |
 | `pytest_testnodeready(node)` | **Emulated.** Runs per worker against the node shim. |
 | `pytest_testnodedown(node, error)` | **Emulated.** Fires at session finish on the normal path; a **crashed** worker's `pytest_testnodedown` runs on a *surviving* worker, so teardown must be a function of `node.workerinput` alone. |
-| `pytest_xdist_auto_num_workers` | Not documented / not emulated. |
-| `pytest_xdist_make_scheduler` | Not documented / not emulated. There is **no custom-scheduler plug point**: `--dist` is a fixed set of modes with no override. |
-| `pytest_xdist_newgateway` | Not documented / not emulated. |
-| `pytest_xdist_setupnodes` | Not documented / not emulated. |
-| `pytest_handlecrashitem` | Not documented / not emulated. |
+| `pytest_xdist_make_scheduler` | **Not emulated** (never called). There is **no custom-scheduler plug point**: `--dist` is a fixed set of modes with no override. |
+| `pytest_xdist_auto_num_workers` | **Not emulated** (never called). The worker count is rstest's decision. |
+| `pytest_xdist_newgateway` | **Not emulated** (never called). There are no execnet gateways. |
+| `pytest_xdist_setupnodes` | **Not emulated** (never called). |
+| `pytest_xdist_node_collection_finished` | **Not emulated** (never called). There is no controller collection phase. |
+| `pytest_handlecrashitem` | **Not emulated** (never called). Crash handling lives in the Rust orchestrator. |
+
+The same list, with the reasons, is in [Plugins: hook coverage](../guides/plugins.md#hook-coverage).
 
 Two structural caveats on the three emulated hooks: they run **N times concurrently in N processes** (controller-side shared state such as counters, registries, and pools needs rework; derive everything from `gateway.id` or a uuid), and crashed-node teardown runs on a survivor that never saw the dead node's `configure_node`. Every **other** conftest hook (`pytest_configure`, `pytest_collection_modifyitems`, `pytest_sessionstart`/`finish`, `pytest_runtest_*`) also runs inside each worker (the same model as xdist), so make shared-state hooks idempotent or key them on `RSTEST_WORKER_ID` / `workerinput["workerid"]`. Note also that `pytest_collection_modifyitems` **reordering does not control parallel run order** at `-n ≥ 2` (deselection is honored; ordering is governed by `--dist` mode, `@pytest.mark.serial`, and `xdist_group`).
 
@@ -71,9 +76,9 @@ Reading the surface directly, instead of via the fixtures, also works:
 worker = getattr(request.config, "workerinput", {}).get("workerid", "master")
 ```
 
-**Values at `-n 0` / `-n 1`.** There is **no `workerinput`** below `-n 2`: `config.workerinput` does not exist and `RSTEST_WORKER_ID`, `PYTEST_XDIST_WORKER`, and `PYTEST_XDIST_WORKER_COUNT` are all unset. The `worker_id` fixture returns `"master"` there and `testrun_uid` a fresh per-session uid. This differs from xdist's `-n 1`, which *does* create a `gw0` worker with `workerinput`. Code that reads `config.workerinput` directly (rather than via the fixtures) must still guard for the single-worker case.
+**Values at `-n 0` / `-n 1`.** There is **no `workerinput`** below `-n 2`: `config.workerinput` does not exist and `RSTEST_WORKER_ID`, `PYTEST_XDIST_WORKER`, and `PYTEST_XDIST_WORKER_COUNT` are all unset. The exception is `--reruns` at `-n 0/1`, which runs a one-worker rerun pool: there the env vars are set (`gw0`, count `1`) and a one-worker `workerinput` exists, though the `worker_id` fixture still returns `"master"`. The `worker_id` fixture returns `"master"` there and `testrun_uid` a fresh per-session uid. This differs from xdist's `-n 1`, which *does* create a `gw0` worker with `workerinput`. Code that reads `config.workerinput` directly (rather than via the fixtures) must still guard for the single-worker case.
 
-Plugins keyed on worker identity work unchanged: pytest-django's per-worker test databases are the canonical case. And `hypothesis`'s shared example DB under many workers can be split per worker with `DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'master')}")` (see [Compatibility](../concepts/compatibility.md)).
+Plugins keyed on worker identity work unchanged: pytest-django's per-worker test databases are the canonical case (in rstest's corpus, exercised only on SQLite `:memory:`; check a Postgres or MySQL setup on your own suite). And `hypothesis`'s shared example DB under many workers can be split per worker with `DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'master')}")` (see [Compatibility](../concepts/compatibility.md)).
 
 ## Known divergences
 

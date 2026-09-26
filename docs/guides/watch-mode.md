@@ -33,6 +33,31 @@ runs the suite once, then watches the project and reruns on every save:
 Save-bursts from editors are debounced (300ms), and the screen clears
 between runs on a terminal.
 
+### New test files
+
+Creating a new test file is picked up like any other save: a new file
+matching `python_files` is a test-file change, so the next cycle reruns
+exactly that file. Reruns keep your flags but drop the positional paths
+you started with, so a session started as `rstest --watch tests/unit`
+still runs a new `tests/other/test_x.py` when you save it. Flags such as
+`-k` still filter it.
+
+## Per-cycle cost
+
+Each cycle spawns fresh workers (nothing is reused between cycles), so a
+rerun has a small fixed cost on top of your tests' own time. Measured from
+save to result on a one-test project on a development laptop:
+
+| Worker count | Save to result |
+|---|---|
+| `-n 0` | ~400ms |
+| `-n 2` | ~405ms |
+
+That is the 300ms debounce plus roughly 100ms for worker startup and
+collection. Worker startup grows slightly with `-n`, and on a large tree
+the incremental import-graph reselection adds tens of milliseconds per save
+(see [`--watch`](../reference/cli.md#-watch)).
+
 ## Combining with other flags
 
 Flags compose; they apply to every rerun:
