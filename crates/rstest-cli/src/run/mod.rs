@@ -46,17 +46,19 @@ fn head_to_none(rev: &str) -> Option<&str> {
 /// `ControlFlow::Break(code)` means nothing is affected — the caller returns
 /// `code` as the process exit status (advancing the green baseline first under
 /// `--since-green`), so the single `process::exit` stays in `main`.
-/// `since_green`/`head`/`env_fp` are computed by the caller (they outlive
-/// selection, feeding the post-run green-baseline record).
+/// `changed_base` ([`resolve_changed_base`]) and `since_green`/`head`/`env_fp`
+/// are computed by the caller (they outlive selection: the base feeds the
+/// diff-coverage gate, the rest the post-run green-baseline record).
 fn apply_selection(
     cli: &Cli,
     mut args: Vec<String>,
+    changed_base: Option<String>,
     since_green: bool,
     head: &Option<String>,
     env_fp: &str,
     sink: &mut Sink,
 ) -> Result<ControlFlow<i32, Vec<String>>> {
-    let mut effective_changed = resolve_changed_base(cli, sink)?;
+    let mut effective_changed = changed_base;
     if since_green {
         // --since-green owns the diff base: its last-green baseline drives
         // selection, OVERRIDING the "HEAD" base that --changed-strict would
@@ -90,15 +92,27 @@ fn apply_selection(
         let changes = select::changed_line_ranges(rev)?;
         // Coverage-map health, for the "of K mapped" ratio and the cold-map hint.
         let mapped = select::mapped_test_count();
+        let selection = select::affected_with_coverage(
+            &project.rootdir,
+            &project,
+            &changes,
+            cli.changed_strict,
+            rev,
+        );
+        let selection = selection?;
         // One-line nudge when the map is cold BUT a source (non-test) .py file
         // changed — exactly the case where a warm map would have selected fewer
         // tests than the import graph is about to. Silent when coverage wouldn't
         // help (test-only / config / non-Python changes), so it never nags a
-        // user who doesn't run coverage.
+        // user who doesn't run coverage - including when such a change forces
+        // a full run alongside a source edit (the graph isn't used then).
         if mapped.is_none()
+            && !matches!(selection, select::Selection::FullRun(_))
             && changes.keys().any(|f| {
                 f.extension().and_then(|e| e.to_str()) == Some("py")
                     && !crate::collect::is_test_file(&project.rootdir.join(f), &project)
+                    // A warm map routes conftest.py to the graph too.
+                    && f.file_name().and_then(|n| n.to_str()) != Some("conftest.py")
             })
         {
             sink.warn(
@@ -107,20 +121,24 @@ fn apply_selection(
                  (usually fewer tests).",
             );
         }
-        match select::affected_with_coverage(
-            &project.rootdir,
-            &project,
-            &changes,
-            cli.changed_strict,
-            rev,
-        )? {
+        match selection {
             select::Selection::FullRun(reason) => {
                 sink.warn(&format!(
                     "rstest: --changed falling back to full run ({reason})"
                 ));
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
-                sink.out_line(&none_affected_message(mapped, changes.len()));
+                match mapped {
+                    // Keep the cold-map wording as the prefix: scripts grep for it.
+                    Some(m) => sink.out_line(&format!(
+                        "rstest: no tests affected by {} changed file(s) (0 of {m} mapped)",
+                        changes.len()
+                    )),
+                    None => sink.out_line(&format!(
+                        "rstest: no tests affected by {} changed file(s)",
+                        changes.len()
+                    )),
+                }
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
                 // don't force a re-run next time.
@@ -136,7 +154,34 @@ fn apply_selection(
                 return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
-                sink.warn(&affected_message(mapped, changes.len(), &tests));
+                // With a warm map, report the savings ratio (affected of mapped);
+                // cold, just the affected-target count. Only `file::test` targets
+                // came from the map, so they alone are "of K mapped"; whole-file
+                // targets (graph fallback, changed test files) are counted apart.
+                match mapped {
+                    Some(m) => {
+                        let from_map = tests
+                            .iter()
+                            .filter(|t| t.to_string_lossy().contains("::"))
+                            .count();
+                        let files = tests.len() - from_map;
+                        let extra = if files > 0 {
+                            format!(" + {files} whole-file target(s)")
+                        } else {
+                            String::new()
+                        };
+                        sink.warn(&format!(
+                            "rstest: {} changed file(s) -> {from_map} of {m} mapped test(s) \
+                             affected{extra}",
+                            changes.len(),
+                        ));
+                    }
+                    None => sink.warn(&format!(
+                        "rstest: {} changed file(s) -> {} affected test target(s)",
+                        changes.len(),
+                        tests.len()
+                    )),
+                }
                 let mut selected: Vec<String> =
                     tests.iter().map(|t| t.display().to_string()).collect();
                 // Keep the user's flags; drop any explicit path args in
@@ -153,38 +198,6 @@ fn apply_selection(
     Ok(ControlFlow::Continue(args))
 }
 
-/// `--changed` summary when nothing was affected; names the mapped-test
-/// denominator when the coverage map is warm.
-fn none_affected_message(mapped: Option<usize>, changed: usize) -> String {
-    match mapped {
-        Some(m) => format!("rstest: 0 of {m} mapped test(s) affected by {changed} changed file(s)"),
-        None => format!("rstest: no tests affected by {changed} changed file(s)"),
-    }
-}
-
-/// `--changed` summary for a non-empty selection.
-fn affected_message(
-    mapped: Option<usize>,
-    changed: usize,
-    targets: &[std::path::PathBuf],
-) -> String {
-    // The savings ratio (affected of mapped) only compares like with like when
-    // every target is a mapped test id. Whole test files (a changed test file,
-    // or an import-graph fallback for files the map doesn't cover) each hold
-    // many tests, so any file target makes "X of M" understate the run; report
-    // the plain count then.
-    let all_nodeids = targets.iter().all(|t| t.to_string_lossy().contains("::"));
-    let n = targets.len();
-    match mapped.filter(|_| all_nodeids) {
-        Some(m) => {
-            format!(
-                "rstest: {changed} changed file(s) -> {n} of {m} mapped test target(s) affected"
-            )
-        }
-        None => format!("rstest: {changed} changed file(s) -> {n} affected test target(s)"),
-    }
-}
-
 /// Run-time context threaded into [`run_post_gates`]: the timing/cache/selection
 /// state the post-run gates need that isn't part of the up-front [`RunConfig`]
 /// (it depends on the actual run — start time, the resolved cache remote, the
@@ -196,6 +209,8 @@ struct PostRun<'a> {
     /// Resolved `--cache-remote` (flag or env), already validated non-empty.
     cache_remote: Option<&'a str>,
     shard: Option<(usize, usize)>,
+    /// `--changed`/`--changed-strict` diff base, as resolved for selection.
+    changed_base: Option<&'a str>,
     since_green: bool,
     head: &'a Option<String>,
     env_fp: &'a str,
@@ -503,7 +518,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     };
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
-    let args = match apply_selection(cli, args, since_green, &head, &env_fp, &mut sink)? {
+    // Resolved once: selection and the post-run diff-coverage gate share it, so
+    // a base that fails to resolve aborts here, before any test runs.
+    let changed_base = resolve_changed_base(cli, &mut sink)?;
+    let args = match apply_selection(
+        cli,
+        args,
+        changed_base.clone(),
+        since_green,
+        &head,
+        &env_fp,
+        &mut sink,
+    )? {
         ControlFlow::Continue(args) => args,
         ControlFlow::Break(code) => return Ok(code),
     };
@@ -561,6 +587,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         run_uid: &run_uid,
         cache_remote: cache_remote.as_deref(),
         shard: inc.shard,
+        changed_base: changed_base.as_deref(),
         since_green,
         head: &head,
         env_fp: &env_fp,
@@ -608,6 +635,16 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 args,
                 cli.migrate_check_json.as_deref(),
                 &cli.migrate_allow,
+                &mut sink,
+            )
+        }),
+        // Auto parallel-safety audit: repeat -n auto, diff vs -n 0, serial fix-list.
+        Command::Audit => python().and_then(|py| {
+            migrate::run_audit(
+                &py,
+                args,
+                cli.audit_repeat.unwrap_or(1),
+                cli.audit_json.as_deref(),
                 &mut sink,
             )
         }),
@@ -1141,6 +1178,9 @@ fn dispatch_run(
                 // Single-worker path never shards (resolve_shard rejects it).
                 collection_hash: None,
                 collection_size: 0,
+                // A single session reports no collection; the duration cache
+                // falls back to its saved rootdir and current file contents.
+                sources: Default::default(),
             }
         } else if path == RunPath::Lazy {
             let cwd = std::env::current_dir()?;
@@ -1738,13 +1778,13 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        affected_message, attach_stream_json, cap_workers_by_files, cap_workers_by_time,
-        check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
-        lazy_should_steal, names_a_selection, none_affected_message, order_ignored_warning,
-        parse_duration_secs, parse_numprocesses, resolve_changed_base, resolve_order,
-        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
-        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
-        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration, RunPath,
+        attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
+        collect_lazy, dispatch_command, fold_run_event, head_to_none, lazy_should_steal,
+        names_a_selection, order_ignored_warning, parse_duration_secs, parse_numprocesses,
+        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
+        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
+        warn_windows_timeout, watchdog_duration, RunPath,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1774,14 +1814,7 @@ mod tests {
         Cli::parse_from(["rstest"])
     }
 
-    /// Serializes tests touching the process-global `RSTEST_CACHE_*` env.
-    /// Shares the crate-wide lock so it also serializes against the auto-compact
-    /// tests in the `gates` submodule, which read the same env.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::select::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
+    use crate::test_env;
 
     #[test]
     fn head_to_none_maps_head_to_working_tree() {
@@ -2137,16 +2170,12 @@ mod tests {
     fn run_cache_compact_errors_without_a_remote() {
         // No --cache-remote flag and no RSTEST_CACHE_REMOTE => hard error, never
         // a silent no-op.
-        let _g = env_guard();
-        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
-        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let held = test_env::lock();
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_REMOTE");
         let mut c = cli();
         c.cache_remote = None;
         let (mut sink, _cap) = Sink::captured();
         let err = run_cache_compact(&c, &mut sink, None, None).unwrap_err();
-        if let Some(v) = saved {
-            std::env::set_var("RSTEST_CACHE_REMOTE", v);
-        }
         assert!(
             err.to_string().contains("needs --cache-remote"),
             "got: {err}"
@@ -2159,7 +2188,7 @@ mod tests {
         // segments fold into a fresh base and are pruned, and the count is
         // reported. No retention window => fold all.
         use crate::remote::transport_for;
-        let _g = env_guard();
+        let held = test_env::lock();
         let root = std::env::temp_dir().join(format!("rstest-run-compact-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let remote_str = root.to_str().unwrap().to_string();
@@ -2167,16 +2196,11 @@ mod tests {
         remote::push(t.as_ref(), &compact_segment("a", 1)).unwrap();
         remote::push(t.as_ref(), &compact_segment("b", 2)).unwrap();
 
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_KEEP_LAST");
         let mut c = cli();
         c.cache_remote = Some(remote_str.clone());
         let (mut sink, cap) = Sink::captured();
         let code = run_cache_compact(&c, &mut sink, None, None).unwrap();
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert_eq!(code, 0);
         assert!(cap.err().contains("compacted"), "got: {}", cap.err());
 
@@ -2191,7 +2215,7 @@ mod tests {
 
     #[test]
     fn resolve_retention_policy_flags_win_and_parse() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         let p = resolve_retention_policy(Some(5), Some("30d")).unwrap();
         assert_eq!(p.keep_last, Some(5));
         assert_eq!(p.max_age, Some(30 * 86400));
@@ -2207,17 +2231,12 @@ mod tests {
     #[test]
     fn resolve_retention_policy_reads_keep_last_env() {
         // No `keep_last` flag => fall through to RSTEST_CACHE_KEEP_LAST.
-        let _g = env_guard();
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "7");
+        let held = test_env::lock();
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "7");
         let p = resolve_retention_policy(None, None).unwrap();
         // A non-numeric env is a hard error, never a silent fold-all.
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "notnum");
         let err = resolve_retention_policy(None, None).unwrap_err();
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert_eq!(p.keep_last, Some(7));
         assert!(err.to_string().contains("invalid RSTEST_CACHE_KEEP_LAST"));
     }
@@ -2244,14 +2263,11 @@ mod tests {
     fn dispatch_cache_compact_without_remote_errors() {
         // cache-compact resolves the remote from the flag or RSTEST_CACHE_REMOTE;
         // with neither set it fails before touching Python or any transport.
-        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
-        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let held = test_env::lock();
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_REMOTE");
         let cli = Cli::parse_from(["rstest", "cache-compact"]);
         let err = dispatch_command(&cli, &["rstest".into(), "cache-compact".into()])
             .expect_err("no remote => error");
-        if let Some(v) = saved {
-            std::env::set_var("RSTEST_CACHE_REMOTE", v);
-        }
         assert!(err
             .to_string()
             .contains("cache-compact needs --cache-remote"));
@@ -2525,6 +2541,10 @@ mod tests {
                     scope: "session".into(),
                     count: 1,
                     total: 0.5,
+                    constant: false,
+                    repeated: false,
+                    redundant: 0.0,
+                    fingerprint: None,
                 }]
             }),
             None
@@ -2653,38 +2673,5 @@ mod tests {
         // Nothing was attached, so emitting is a no-op (no panic writing to a
         // closed/absent stream).
         sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
-    }
-
-    #[test]
-    fn none_affected_message_names_the_mapped_denominator_when_warm() {
-        assert_eq!(
-            none_affected_message(Some(40), 2),
-            "rstest: 0 of 40 mapped test(s) affected by 2 changed file(s)"
-        );
-        assert_eq!(
-            none_affected_message(None, 2),
-            "rstest: no tests affected by 2 changed file(s)"
-        );
-    }
-
-    #[test]
-    fn affected_message_ratio_only_when_every_target_is_a_nodeid() {
-        use std::path::PathBuf;
-        let ids = [PathBuf::from("t.py::a"), PathBuf::from("t.py::b")];
-        assert_eq!(
-            affected_message(Some(40), 1, &ids),
-            "rstest: 1 changed file(s) -> 2 of 40 mapped test target(s) affected"
-        );
-        // A whole-file target would make "X of M" understate the run.
-        let mixed = [PathBuf::from("t.py::a"), PathBuf::from("u.py")];
-        assert_eq!(
-            affected_message(Some(40), 1, &mixed),
-            "rstest: 1 changed file(s) -> 2 affected test target(s)"
-        );
-        // Cold map: plain count.
-        assert_eq!(
-            affected_message(None, 3, &ids),
-            "rstest: 3 changed file(s) -> 2 affected test target(s)"
-        );
     }
 }

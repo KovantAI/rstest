@@ -140,7 +140,7 @@ fn diff_cov_gate(pct: Option<f64>, threshold: f64, exitstatus: i32) -> (i32, Str
 fn build_diff_lines(
     w: &mut dyn Write,
     changed: Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u32>>>,
-) -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     match changed {
         Ok(map) => {
             let pid = std::process::id();
@@ -151,12 +151,14 @@ fn build_diff_lines(
                 .into_iter()
                 .map(|(k, v)| (k.to_string_lossy().replace('\\', "/"), v))
                 .collect();
-            let _ = std::fs::write(&lines_path, serde_json::to_vec(&smap)?);
-            Ok(Some((lines_path, out_path)))
+            // A string-keyed map always serializes; a failed write just leaves
+            // covtool nothing to score, which the gate reports without failing.
+            let _ = std::fs::write(&lines_path, serde_json::to_vec(&smap).unwrap_or_default());
+            Some((lines_path, out_path))
         }
         Err(e) => {
             let _ = writeln!(w, "rstest: --cov-diff-fail-under: {e}");
-            Ok(None)
+            None
         }
     }
 }
@@ -337,9 +339,9 @@ fn write_teamcity_flaky(w: &mut dyn Write, flaky: &[(String, u32)]) {
     }
 }
 
-/// Post-run gates and side-effects, in order: junit/html reports, merged
-/// lastfailed cache, duration-regression gate, coverage combine/report, the
-/// doctor report + `--doctor-fail-on` gate, duration+flake save, `--cache-push`, report-json,
+/// Post-run gates and side-effects, in order: the doctor report + `--doctor-fail-on`
+/// gate, junit/html reports, merged lastfailed cache, duration-regression gate,
+/// coverage combine/report, duration+flake save, `--cache-push`, report-json,
 /// the `--incremental` green-set record, and the `--fail-on-leak` gate. Returns
 /// the reconciled process exit status (starting from the pool's, raised by any
 /// gate breach).
@@ -369,6 +371,7 @@ pub(super) fn run_post_gates(
         run_uid,
         cache_remote,
         shard,
+        changed_base,
         since_green,
         head,
         env_fp,
@@ -380,59 +383,15 @@ pub(super) fn run_post_gates(
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
     warn_doctor_gate_passthrough(sink.err(), doctor_gate.is_empty(), passthrough);
-    // Wall time of the test session itself, taken before coverage combine /
-    // reporting so the doctor's parallel-efficiency math excludes covtool time.
-    let wall = start.elapsed().as_secs_f64();
-    write_run_reports(
-        cli.junitxml.as_deref(),
-        cli.html.as_deref(),
-        &outcome.run,
-        start.elapsed().as_secs_f64(),
-        &build_run_meta(start, outcome.exitstatus, started_epoch, n),
-    )?;
-    // Merged lastfailed: workers' own writes are blocked in pool mode
-    // (each knows only its failures); write the union into pytest's cache
-    // so a follow-up `--lf` behaves exactly as after a serial run.
-    if let Some(cache_dir) = &outcome.cache_dir {
-        let failed = merged_lastfailed(&outcome.run);
-        let dir = std::path::Path::new(cache_dir).join("v/cache");
-        // Only write when serialization succeeds: a serialize error must not
-        // clobber pytest's lastfailed cache with an empty `{}`.
-        if let (Ok(()), Ok(bytes)) = (std::fs::create_dir_all(&dir), serde_json::to_vec(&failed)) {
-            let _ = std::fs::write(dir.join("lastfailed"), bytes);
-        }
-    }
-    // Duration regression gate: must compare BEFORE durations::save
-    // overwrites the baseline with this run's times.
-    let mut duration_regressions = 0usize;
-    if let Some(ratio) = cli.durations_regress {
-        validate_regress_ratio(ratio)?;
-        let baseline = durations::load();
-        if baseline.is_empty() {
-            sink.warn(
-                "rstest: --durations-regress: no duration baseline yet \
-                 (.rstest_cache/durations.json); comparison skipped",
-            );
-        } else {
-            let rows = durations::regressions(&outcome.run, &baseline, ratio);
-            if rows.is_empty() {
-                sink.warn(&format!(
-                    "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
-                ));
-            } else {
-                sink.out_line(&format!(
-                    "\n{}",
-                    palette.bold_red(&format!(
-                        "=========== duration regressions (>= {ratio}x baseline) ==========="
-                    ))
-                ));
-                for (nodeid, old, new) in &rows {
-                    sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
-                }
-                duration_regressions = rows.len();
-            }
-        }
-    }
+    let want_doctor = (cli.doctor
+        || cli.doctor_json.is_some()
+        || cli.doctor_md.is_some()
+        || !doctor_gate.is_empty())
+        && !passthrough;
+    // The doctor and the run reports come after covtool (the doctor needs this
+    // run's coverage index), so pin the suite's wall time here: covtool's own
+    // time is not test time.
+    let suite_wall = start.elapsed().as_secs_f64();
     // Before publishing, drop any coverage index left by --cache-pull: only an
     // index covtool writes for THIS run may be pushed. Unconditional on push (not
     // gated by --cov) so a run that produces no fresh index — no --cov at all, no
@@ -452,39 +411,47 @@ pub(super) fn run_post_gates(
     if want_diff && !has_cov && !passthrough {
         sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
     }
-    // Snapshot the index file's identity before covtool may rewrite it; the
-    // doctor uses it to tell this run's coverage index from a leftover one.
-    let index_before = select::coverage_index_stamp();
+    // Whether covtool rewrote the coverage index during this run (it does only
+    // under per-test contexts): the doctor's coverage-waste input.
+    let index_mtime = || {
+        std::fs::metadata(cache::file(select::COVERAGE_INDEX_FILE))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    let mut fresh_index = false;
     if !passthrough && has_cov {
+        let before = index_mtime();
         sink.out_line("");
         // Diff-coverage gate: hand covtool the diff's added lines + a result
         // path when --cov-diff-fail-under is set; covtool scores them and we
         // gate on the percentage below.
         let diff_paths = if want_diff {
-            let base = super::resolve_changed_base(cli, sink)?;
-            build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))?
+            build_diff_lines(sink.err(), select::changed_new_lines(changed_base))
         } else {
             None
         };
-
         let mut cmd = std::process::Command::new(python);
         cmd.args(["-m", "rstest_worker.covtool"])
             .args(args)
             .env("PYTHONPATH", worker::worker_pythonpath())
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir());
+            .env("RSTEST_CACHE", cache::dir())
+            // Never reads stdin; inheriting it hangs on Windows under
+            // `--watch`, whose `q` listener holds a blocking read on it.
+            .stdin(std::process::Stdio::null());
         if let Some((lp, op)) = &diff_paths {
             cmd.arg("--rstest-diff-lines")
                 .arg(lp)
                 .arg("--rstest-diff-out")
                 .arg(op);
         }
-        exitstatus = reconcile_cov_status(
-            sink.err(),
-            cmd.status().map(|s| s.success()).map_err(|e| e.to_string()),
-            exitstatus,
-        );
+        let cov_status = cmd.status().map(|s| s.success()).map_err(|e| e.to_string());
+        // Freshness is "covtool replaced the file", not "covtool exited 0": a
+        // missed --cov-fail-under exits 1 but still writes this run's index.
+        let after = index_mtime();
+        fresh_index = after.is_some() && after != before;
+        exitstatus = reconcile_cov_status(sink.err(), cov_status, exitstatus);
 
         if let Some((lp, op)) = diff_paths {
             if let Some(threshold) = cli.cov_diff_fail_under {
@@ -497,27 +464,26 @@ pub(super) fn run_post_gates(
             let _ = std::fs::remove_file(&op);
         }
     }
-    // Doctor runs AFTER coverage combine so its coverage-waste section reads
-    // the index this run just wrote, not the previous run's.
     let mut doctor_gate_failed = false;
-    if (cli.doctor
-        || cli.doctor_json.is_some()
-        || cli.doctor_md.is_some()
-        || !doctor_gate.is_empty())
-        && !passthrough
-    {
-        // The coverage-waste section needs a per-test index written by THIS
-        // run's `--cov --cov-context=test` combine above. A leftover index from
-        // an earlier run is stale (a since-deleted test still reads as a
-        // co-coverer, so a live test could look redundant), so it is ignored
-        // and the section omitted.
-        let coverage_index = crate::select::load_coverage_index_written_since(&index_before);
+    if want_doctor {
+        // Coverage waste is judged only from the index covtool wrote for THIS
+        // run: an older one (a previous run, a cache restore, --cache-pull) can
+        // describe tests or files that have since changed, and a stale "fully
+        // shared" verdict would recommend deleting a test that is now unique.
+        let coverage_index = fresh_index.then(select::load_coverage_index).flatten();
+        // Test-file patterns (`python_files`) tell test code from product code.
+        let project = coverage_index.as_ref().map(|_| {
+            crate::config::discover(
+                &std::env::current_dir().unwrap_or_default(),
+                &mut std::io::sink(),
+            )
+        });
         let report = doctor::analyze(
             &outcome.run,
             &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
-            wall,
+            suite_wall,
             n,
-            coverage_index.as_ref(),
+            coverage_index.as_ref().zip(project.as_ref()),
         );
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
@@ -556,10 +522,65 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // Both reports get the pre-covtool wall, as they did when they ran first.
+    let report_meta = report::RunMeta {
+        duration_seconds: suite_wall,
+        ..build_run_meta(start, outcome.exitstatus, started_epoch, n)
+    };
+    write_run_reports(
+        cli.junitxml.as_deref(),
+        cli.html.as_deref(),
+        &outcome.run,
+        suite_wall,
+        &report_meta,
+    )?;
+    // Merged lastfailed: workers' own writes are blocked in pool mode
+    // (each knows only its failures); write the union into pytest's cache
+    // so a follow-up `--lf` behaves exactly as after a serial run.
+    if let Some(cache_dir) = &outcome.cache_dir {
+        let failed = merged_lastfailed(&outcome.run);
+        let dir = std::path::Path::new(cache_dir).join("v/cache");
+        // Only write when serialization succeeds: a serialize error must not
+        // clobber pytest's lastfailed cache with an empty `{}`.
+        if let (Ok(()), Ok(bytes)) = (std::fs::create_dir_all(&dir), serde_json::to_vec(&failed)) {
+            let _ = std::fs::write(dir.join("lastfailed"), bytes);
+        }
+    }
+    // Duration regression gate: must compare BEFORE durations::save
+    // overwrites the baseline with this run's times.
+    let mut duration_regressions = 0usize;
+    if let Some(ratio) = cli.durations_regress {
+        validate_regress_ratio(ratio)?;
+        let baseline = durations::load_baseline();
+        if baseline.is_empty() {
+            sink.warn(
+                "rstest: --durations-regress: no duration baseline yet \
+                 (.rstest_cache/durations.json); comparison skipped",
+            );
+        } else {
+            let rows = durations::regressions(&outcome.run, &baseline, ratio);
+            if rows.is_empty() {
+                sink.warn(&format!(
+                    "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
+                ));
+            } else {
+                sink.out_line(&format!(
+                    "\n{}",
+                    palette.bold_red(&format!(
+                        "=========== duration regressions (>= {ratio}x baseline) ==========="
+                    ))
+                ));
+                for (nodeid, old, new) in &rows {
+                    sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
+                }
+                duration_regressions = rows.len();
+            }
+        }
+    }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" {
-        durations::save(&outcome.run);
+        durations::save(&outcome.run, &outcome.sources);
         // Whole-suite wall (fixtures included) for the monorepo planner: a
         // fixture-bound project has near-zero call time in durations.json but
         // real elapsed cost here, so weighting by call time alone starves it
@@ -819,6 +840,14 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
             .and_modify(|m| {
                 m.count += f.count;
                 m.total += f.total;
+                // A promotion candidate only if constant in EVERY worker that
+                // ran it: one worker seeing a varying value vetoes the advice.
+                // Workers that ran it once report `true`, so they don't veto.
+                // Each worker only compares its own calls, so also require
+                // every worker to have seen the same value.
+                m.constant &= f.constant && m.fingerprint == f.fingerprint;
+                m.repeated |= f.repeated;
+                m.redundant = m.redundant.max(f.redundant);
             })
             .or_insert(f);
     }
@@ -917,18 +946,8 @@ mod tests {
     use crate::reporting::sink::Sink;
     use crate::scheduling::pool;
     use crate::scheduling::proto::{FixtureStat, WarningEntry};
+    use crate::test_env;
     use std::time::Instant;
-
-    /// Serializes tests that read or mutate the process-global
-    /// `RSTEST_CACHE_*` env, so a concurrent test can't observe another's
-    /// temporary value (the auto-compact retention path reads env directly).
-    /// Shares the crate-wide lock so it also serializes against the
-    /// `run_cache_compact` tests in the parent module, which touch the same env.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::select::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     // Color-disabled palette: deterministic strings, no tty/env dependence.
     fn plain_palette() -> Palette {
@@ -1003,25 +1022,84 @@ mod tests {
 
     #[test]
     fn merge_fixtures_sums_by_name_and_scope() {
-        let stat = |name: &str, scope: &str, count, total| FixtureStat {
+        let stat = |name: &str, scope: &str, count, total, constant| FixtureStat {
             name: name.into(),
             scope: scope.into(),
             count,
             total,
+            constant,
+            repeated: false,
+            redundant: 0.0,
+            fingerprint: constant.then(|| "v".to_string()),
         };
         let merged = merge_fixtures(vec![
-            stat("db", "session", 2, 1.0),
-            stat("db", "session", 3, 0.5),   // same key => summed
-            stat("db", "function", 1, 0.25), // different scope => distinct
-            stat("cache", "session", 4, 2.0),
+            stat("db", "session", 2, 1.0, false),
+            stat("db", "session", 3, 0.5, false), // same key => summed
+            stat("db", "function", 1, 0.25, true), // different scope => distinct
+            stat("cache", "session", 4, 2.0, false),
+            // constant in one worker, NOT in another => merged non-constant.
+            stat("cfg", "function", 5, 0.5, true),
+            stat("cfg", "function", 5, 0.5, false),
+            // constant in one worker; another ran it once (reports true) =>
+            // still constant, the light worker does not veto.
+            stat("key", "function", 5, 0.5, true),
+            stat("key", "function", 1, 0.1, true),
         ]);
-        assert_eq!(merged.len(), 3);
+        assert_eq!(merged.len(), 5);
         let db_session = merged
             .iter()
             .find(|f| f.name == "db" && f.scope == "session")
             .unwrap();
         assert_eq!(db_session.count, 5);
         assert!((db_session.total - 1.5).abs() < 1e-9);
+        // One dissenting worker vetoes the promotion candidacy.
+        let cfg = merged.iter().find(|f| f.name == "cfg").unwrap();
+        assert!(!cfg.constant);
+        let key = merged.iter().find(|f| f.name == "key").unwrap();
+        assert!(key.constant);
+        assert_eq!(key.count, 6);
+    }
+
+    #[test]
+    fn merge_fixtures_keeps_per_session_promotion_evidence() {
+        let stat = |count, total, constant, repeated, redundant| FixtureStat {
+            name: "f".into(),
+            scope: "function".into(),
+            count,
+            total,
+            constant,
+            repeated,
+            redundant,
+            fingerprint: constant.then(|| "v".to_string()),
+        };
+        // `--dist loadfile`: one session ran it 12x (11s redundant), others
+        // never touched it. The saving is that session's, not diluted by -n.
+        let pinned = merge_fixtures(vec![stat(12, 12.0, true, true, 11.0)]);
+        assert!(pinned[0].repeated);
+        assert!((pinned[0].redundant - 11.0).abs() < 1e-9);
+
+        // Five one-call sessions (a respawned worker): count 5 > 4 workers, but
+        // no session compared two values, so there is no evidence.
+        let respawn = merge_fixtures((0..5).map(|_| stat(1, 1.0, true, false, 0.0)).collect());
+        assert_eq!(respawn[0].count, 5);
+        assert!(respawn[0].constant && !respawn[0].repeated);
+        assert_eq!(respawn[0].redundant, 0.0);
+
+        // Spread load: the largest per-session saving wins.
+        let spread = merge_fixtures(vec![
+            stat(10, 1.0, true, true, 0.9),
+            stat(6, 0.6, true, true, 0.5),
+        ]);
+        assert!((spread[0].redundant - 0.9).abs() < 1e-9);
+
+        // Constant within each worker but a different value per worker (e.g.
+        // derived from request.module under --dist loadfile): not constant.
+        let mut a = stat(3, 0.3, true, true, 0.2);
+        let mut b = stat(3, 0.3, true, true, 0.2);
+        a.fingerprint = Some("mod_a".into());
+        b.fingerprint = Some("mod_b".into());
+        let per_worker = merge_fixtures(vec![a, b]);
+        assert!(!per_worker[0].constant);
     }
 
     fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {
@@ -1139,7 +1217,7 @@ mod tests {
     #[test]
     fn build_diff_lines_warns_and_yields_none_on_git_error() {
         let mut buf = Vec::new();
-        let out = build_diff_lines(&mut buf, Err(anyhow::anyhow!("bad rev"))).unwrap();
+        let out = build_diff_lines(&mut buf, Err(anyhow::anyhow!("bad rev")));
         assert!(out.is_none());
         assert!(utf8(buf).contains("--cov-diff-fail-under: bad rev"));
     }
@@ -1149,7 +1227,7 @@ mod tests {
         let mut map = std::collections::BTreeMap::new();
         map.insert(std::path::PathBuf::from("pkg/mod.py"), vec![1u32, 2]);
         let mut buf = Vec::new();
-        let (lines_path, out_path) = build_diff_lines(&mut buf, Ok(map)).unwrap().unwrap();
+        let (lines_path, out_path) = build_diff_lines(&mut buf, Ok(map)).unwrap();
         assert!(buf.is_empty());
         let written = std::fs::read(&lines_path).unwrap();
         let smap: std::collections::BTreeMap<String, Vec<u32>> =
@@ -1262,7 +1340,7 @@ mod tests {
 
     #[test]
     fn resolve_compact_threshold_flag_then_env() {
-        let _g = env_guard();
+        let held = test_env::lock();
         use crate::cli::Cli;
         use clap::Parser;
         let mut cli = Cli::parse_from(["rstest"]);
@@ -1272,12 +1350,11 @@ mod tests {
 
         let mut cli2 = Cli::parse_from(["rstest"]);
         cli2.cache_compact_threshold = None;
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "3");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "3");
         assert_eq!(resolve_compact_threshold(&cli2).unwrap(), Some(3)); // env fallback
                                                                         // A non-numeric env is a hard error, never a silent None (feature-off).
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
         assert!(resolve_compact_threshold(&cli2).is_err());
-        std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD");
     }
 
     fn auto_compact_root(label: &str) -> std::path::PathBuf {
@@ -1298,7 +1375,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_folds_when_over_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // 3 loose segments, threshold 2 => compaction fires. No env retention
         // window, so all fold into a fresh base and are pruned.
         use crate::cli::Cli;
@@ -1320,7 +1397,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_noop_at_or_under_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // 2 segments, threshold 2 => count (2) is not > 2, no compaction.
         use crate::cli::Cli;
         use crate::remote::{DirTransport, Transport};
@@ -1338,7 +1415,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_off_without_threshold() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // No flag, no env => feature off, never touches the remote.
         use crate::cli::Cli;
         use crate::remote::{DirTransport, Transport};
@@ -1390,7 +1467,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_when_listing_fails() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         // A failed segment listing is non-fatal: warn and return, never touch
         // the retention/compaction path.
         use crate::cli::Cli;
@@ -1409,7 +1486,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_on_bad_retention_env() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // count over threshold, but RSTEST_CACHE_KEEP_LAST is unparseable =>
         // skip with a warning rather than fold everything.
         use crate::cli::Cli;
@@ -1420,14 +1497,9 @@ mod tests {
         seed_segments(&t, 3);
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = Some(2);
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "notnum");
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert!(
             cap.err().contains("bad retention env"),
             "got: {}",
@@ -1438,13 +1510,12 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_when_compaction_fails() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // Over threshold, retention env clean, but the compaction read fails =>
         // non-fatal warning, no panic.
         use crate::cli::Cli;
         use clap::Parser;
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_KEEP_LAST");
         let t = BrokenTransport {
             ids: vec!["a".into(), "b".into()],
             list_fails: false,
@@ -1454,9 +1525,6 @@ mod tests {
         cli.cache_compact_threshold = Some(0);
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        if let Some(v) = saved {
-            std::env::set_var("RSTEST_CACHE_KEEP_LAST", v);
-        }
         assert!(
             cap.err().contains("auto-compact failed"),
             "got: {}",
@@ -1466,7 +1534,7 @@ mod tests {
 
     #[test]
     fn maybe_auto_compact_warns_on_bad_threshold() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // An unparseable threshold env is non-fatal: warn and return before
         // ever touching the transport.
         use crate::cli::Cli;
@@ -1479,20 +1547,15 @@ mod tests {
         };
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = None;
-        let saved = std::env::var("RSTEST_CACHE_COMPACT_THRESHOLD").ok();
-        std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_COMPACT_THRESHOLD", "notnum");
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_COMPACT_THRESHOLD", v),
-            None => std::env::remove_var("RSTEST_CACHE_COMPACT_THRESHOLD"),
-        }
         assert!(cap.err().contains("bad threshold"), "got: {}", cap.err());
     }
 
     #[test]
     fn maybe_auto_compact_skips_when_keep_last_ge_threshold() {
-        let _g = env_guard();
+        let held = test_env::lock();
         // Over threshold, but a keep-last window >= threshold pins the loose
         // set above it, so folding would run every push. Skip with a warning
         // rather than thrash; segments stay intact.
@@ -1504,14 +1567,9 @@ mod tests {
         seed_segments(&t, 3);
         let mut cli = Cli::parse_from(["rstest"]);
         cli.cache_compact_threshold = Some(2);
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "2"); // keep (2) >= threshold (2)
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "2"); // keep (2) >= threshold (2)
         let (mut sink, cap) = Sink::captured();
         maybe_auto_compact(&cli, &t, "dir", &mut sink);
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert!(cap.err().contains("keep-last window"), "got: {}", cap.err());
         assert!(t.read_base().unwrap().is_none(), "no base written");
         assert_eq!(t.list_segment_ids().unwrap().len(), 3, "segments intact");
@@ -1569,6 +1627,7 @@ mod tests {
             exitstatus: 0,
             collection_hash: None,
             collection_size: 0,
+            sources: Default::default(),
         };
         let (mut sink, _cap) = Sink::captured();
         let stream = sink.attach_captured_stream();

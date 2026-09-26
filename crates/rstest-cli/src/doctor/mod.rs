@@ -18,9 +18,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::config::ProjectConfig;
 use crate::reporting::report::Run;
 use crate::scheduling::proto::FixtureStat;
-use crate::select::CoverageIndex;
+use crate::select::{CoverageFile, CoverageIndex};
 
 /// Bump when the JSON shape changes incompatibly.
 const SCHEMA_VERSION: u32 = 3;
@@ -40,15 +41,27 @@ pub struct DoctorReport {
     test_time_seconds: f64,
     /// Sum of call-phase CPU time, over tests where it was measured.
     cpu_time_seconds: f64,
+    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<WaitBound>"))]
     wait_bound: Option<WaitBound>,
+    #[cfg_attr(
+        test,
+        schemars(schema_with = "crate::schema::nullable::<ParallelFloor>")
+    )]
     parallel_floor: Option<ParallelFloor>,
+    #[cfg_attr(
+        test,
+        schemars(schema_with = "crate::schema::nullable::<ParallelEfficiency>")
+    )]
     parallel_efficiency: Option<ParallelEfficiency>,
     fixtures: Vec<FixtureEntry>,
     slowest_files: Vec<FileEntry>,
-    /// Slow tests that can be deleted together without dropping any covered
-    /// line - delete/merge candidates. `None` unless THIS run wrote a per-test
-    /// coverage index (`--cov --cov-context=test` alongside `--doctor`; an index
-    /// left by an earlier run is ignored as stale) and at least one test qualified.
+    /// Slow tests whose every covered line is also covered by another test -
+    /// delete/merge candidates. `None` unless a per-test coverage index was
+    /// warm (`--cov --cov-context=test`) and at least one test qualified.
+    #[cfg_attr(
+        test,
+        schemars(schema_with = "crate::schema::nullable::<CoverageWaste>")
+    )]
     coverage_waste: Option<CoverageWaste>,
     /// Tests that leaked threads / fds (net positive after teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
@@ -56,17 +69,16 @@ pub struct DoctorReport {
     pub leaks: Vec<Leak>,
 }
 
-/// Slow tests that add no unique coverage: chosen greedily (slowest first) so
-/// that deleting ALL of them together still leaves every covered line covered by
-/// some kept test. Of two tests covering identical lines, only one is listed.
-/// Pure suite bloat on the time axis.
+/// Slow tests that add no unique coverage: every line each one executes is also
+/// executed by some other test, so it can be deleted or merged without dropping
+/// any covered line. Pure suite bloat on the time axis.
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct CoverageWaste {
-    /// Sum of the durations of the whole deletable set (not just the shown
-    /// ones) - the time reclaimable by pruning them together.
+    /// Sum of the durations of every redundant slow test (not just the shown
+    /// ones) - the time reclaimable by pruning them.
     wasted_seconds: f64,
-    /// Size of the deletable set (`tests` shows the slowest of them).
+    /// Count of redundant slow tests found (`tests` shows the slowest of them).
     redundant_tests: usize,
     /// The slowest redundant tests, worst first (capped).
     tests: Vec<WasteTest>,
@@ -77,10 +89,9 @@ struct CoverageWaste {
 struct WasteTest {
     nodeid: String,
     duration: f64,
-    /// Product lines this test covered, all also covered by a kept test.
+    /// Lines this test covered, all shared with at least one other test.
     covered_lines: u64,
-    /// Distinct KEPT tests (not themselves in the deletable set) that between
-    /// them also cover those lines.
+    /// Distinct OTHER tests that between them also cover those lines.
     also_covered_by: u64,
 }
 
@@ -164,6 +175,22 @@ struct FixtureEntry {
     scope: String,
     count: u64,
     total_seconds: f64,
+    /// Scope-promotion advisor: a function-scoped fixture that produced the
+    /// same immutable builtin value on every call in every worker, with no
+    /// per-test teardown or narrower-scoped inputs (checked worker-side), a
+    /// candidate for `@pytest.fixture(scope="session")`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    constant: bool,
+    /// Projected wall-time saved by promoting this candidate to session scope:
+    /// the largest per-worker-session `(calls - 1) * mean_setup`, i.e. the
+    /// redundant re-setups removed on the worker that benefits most.
+    /// 0 unless `constant`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    projected_saving_seconds: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Serialize)]
@@ -179,7 +206,7 @@ pub fn analyze(
     fixtures: &[FixtureStat],
     wall: f64,
     workers: usize,
-    coverage: Option<&CoverageIndex>,
+    coverage: Option<(&CoverageIndex, &ProjectConfig)>,
 ) -> DoctorReport {
     let tests = run.tests();
     let mut durations: Vec<(&String, f64, Option<f64>)> = tests
@@ -290,11 +317,23 @@ pub fn analyze(
     // -- Fixtures ----------------------------------------------------------
     let mut fx: Vec<FixtureEntry> = fixtures
         .iter()
-        .map(|f| FixtureEntry {
-            name: f.name.clone(),
-            scope: f.scope.clone(),
-            count: f.count,
-            total_seconds: f.total,
+        .map(|f| {
+            // Workers report `constant` as "never varied here", including a
+            // session that ran it only once; `repeated` says some session
+            // actually compared two values. Promotion runs the fixture once
+            // per worker session, so each session's redundant setup is every
+            // call after its first; `redundant` is the largest of those, the
+            // wall time saved on the worker that benefits most.
+            let constant = f.constant && f.repeated;
+            let saving = if constant { f.redundant } else { 0.0 };
+            FixtureEntry {
+                name: f.name.clone(),
+                scope: f.scope.clone(),
+                count: f.count,
+                total_seconds: f.total,
+                constant,
+                projected_saving_seconds: saving,
+            }
         })
         .collect();
     fx.sort_by(|a, b| b.total_seconds.total_cmp(&a.total_seconds));
@@ -318,12 +357,20 @@ pub fn analyze(
     files.truncate(20);
 
     // -- Coverage waste (slow tests adding no unique coverage) --------------
-    let coverage_waste = coverage.and_then(|index| {
+    // `coverage` is this run's own per-test index (see run_post_gates), so its
+    // nodeids and line numbers describe the code as it is now. Only PASSED tests
+    // count: a skipped or failed test's call time says nothing about what it
+    // covers, and it is no stand-in for a test that did run.
+    let coverage_waste = coverage.and_then(|(index, project)| {
+        let passed = run.green_nodeids();
         let duration_of: HashMap<&str, f64> = durations
             .iter()
+            .filter(|(id, _, _)| passed.contains(id.as_str()))
             .map(|(id, d, _)| (id.as_str(), *d))
             .collect();
-        coverage_waste(&duration_of, index, WASTE_MIN_SECONDS)
+        coverage_waste(&duration_of, index, WASTE_MIN_SECONDS, |file| {
+            crate::collect::is_test_file(std::path::Path::new(file), project)
+        })
     });
 
     let leaks = detect_leaks(run);
@@ -346,143 +393,110 @@ pub fn analyze(
     }
 }
 
-/// Slow tests whose every covered line is ALSO covered by another test - pure
-/// redundant suite cost, deletable/mergeable without losing any covered line.
-/// `duration_of` maps nodeid -> call duration; only tests at least `min_seconds`
-/// slow qualify. `None` when the index is empty or nothing qualifies.
+/// Slow tests that can be deleted TOGETHER without losing any covered line -
+/// pure redundant suite cost. `duration_of` maps nodeid -> call duration of the
+/// tests eligible to count (passed this run); only tests at least `min_seconds`
+/// slow qualify, and a nodeid absent from it is not counted as a coverer.
+/// `is_test_file` tells test code (excluded) from product code. `None` when the
+/// index is empty or nothing qualifies.
+///
+/// Candidates are picked greedily, slowest first: one is accepted only while
+/// every line it covers is still covered by some other test that is kept. Two
+/// slow tests with the same coverage give one candidate, not two.
 fn coverage_waste(
     duration_of: &HashMap<&str, f64>,
     index: &CoverageIndex,
     min_seconds: f64,
+    is_test_file: impl Fn(&str) -> bool,
 ) -> Option<CoverageWaste> {
     // Measure redundancy over PRODUCT code only. Under `--cov=.` the index also
     // records each test's OWN file, whose body lines only that test executes -
     // counting them would make every test trivially "unique" and hide real
-    // waste. A test file is exactly a file that some nodeid lives in, so the set
-    // of covered test files is derivable from the nodeids with no project config.
-    let mut test_files: HashSet<&str> = HashSet::new();
-    for cov in index.files.values() {
-        for ids in cov.lines.values() {
-            for id in ids {
-                test_files.insert(crate::text::nodeid_file(id));
-            }
-        }
-    }
-    let is_source = |file: &str| !test_files.contains(file);
-
-    // Pass 1, O(total coverage entries): per test, total covered PRODUCT lines
-    // and lines it ALONE covers (a line's coverer list is exactly the tests that
-    // hit it). Lines in test files are skipped (see above).
-    let mut total: HashMap<&str, u64> = HashMap::new();
-    let mut unique: HashMap<&str, u64> = HashMap::new();
-    for (file, cov) in &index.files {
-        if !is_source(file) {
-            continue;
-        }
-        for ids in cov.lines.values() {
-            let solo = ids.len() == 1;
-            for id in ids {
-                *total.entry(id.as_str()).or_default() += 1;
-                if solo {
-                    *unique.entry(id.as_str()).or_default() += 1;
-                }
-            }
-        }
-    }
-    let dur = |id: &str| duration_of.get(id).copied();
-    // Zero unique lines is necessary but not sufficient: two tests covering
-    // exactly the same lines both have zero unique lines, yet deleting BOTH
-    // loses that coverage. Candidates: covered >= 1 line, no solo line, slow
-    // enough to matter - worst first (duration, then nodeid for stability).
-    let mut candidates: Vec<&str> = total
+    // waste. Test files are decided by the project's `python_files` patterns,
+    // not by "some nodeid lives here": a doctest nodeid (`pkg/mod.py::pkg.mod.f`
+    // under `--doctest-modules`) lives in a product module.
+    let source: Vec<(&str, &CoverageFile)> = index
+        .files
         .iter()
-        .filter(|(id, tot)| **tot > 0 && unique.get(**id).copied().unwrap_or(0) == 0)
-        .filter(|(id, _)| dur(id).is_some_and(|d| d >= min_seconds))
-        .map(|(id, _)| *id)
+        .filter(|(file, _)| !is_test_file(file))
+        .map(|(file, cov)| (file.as_str(), cov))
         .collect();
-    if candidates.is_empty() {
-        return None;
-    }
-    candidates.sort_by(|a, b| {
-        dur(b)
-            .unwrap_or(0.0)
-            .total_cmp(&dur(a).unwrap_or(0.0))
-            .then(a.cmp(b))
-    });
-    // Pass 2, bounded to the candidates: each one's product lines, plus a live
-    // coverer count per line (starts at the full coverer list length).
-    let cand_set: HashSet<&str> = candidates.iter().copied().collect();
-    let mut live: HashMap<(&str, u32), usize> = HashMap::new();
-    let mut lines_of: HashMap<&str, Vec<(&str, u32)>> = HashMap::new();
-    for (file, cov) in &index.files {
-        if !is_source(file) {
-            continue;
-        }
-        for (ln, ids) in &cov.lines {
-            let key = (file.as_str(), *ln);
-            for id in ids {
-                if cand_set.contains(id.as_str()) {
-                    live.insert(key, ids.len());
-                    lines_of.entry(id.as_str()).or_default().push(key);
-                }
-            }
-        }
-    }
-    // Greedy, slowest first: a candidate is removable only if every line it
-    // covers still has another live coverer after the earlier removals. Removing
-    // it drops each of its lines' live count, so a duplicate pair yields ONE
-    // redundant test, never both.
-    let mut removed: Vec<&str> = Vec::new();
-    for id in candidates {
-        let lines = lines_of.get(id).map_or(&[][..], Vec::as_slice);
-        if lines.iter().all(|k| live.get(k).copied().unwrap_or(0) >= 2) {
-            for k in lines {
-                if let Some(n) = live.get_mut(k) {
-                    *n -= 1;
-                }
-            }
-            removed.push(id);
-        }
-    }
-    if removed.is_empty() {
-        return None;
-    }
-    let redundant_tests = removed.len();
-    // Headline reclaimable time spans ALL removable slow tests, not just shown.
-    let wasted_seconds: f64 = removed.iter().filter_map(|id| dur(id)).sum();
-    let removed_set: HashSet<&str> = removed.iter().copied().collect();
-    removed.truncate(20);
-    let candidates = removed;
-    let shown: HashSet<&str> = candidates.iter().copied().collect();
-    // Pass 3, bounded to the shown tests: distinct KEPT tests sharing each one's
-    // lines - "covers only lines N other tests already hit". Other removable
-    // tests are excluded, since they are proposed for deletion too.
-    let mut co: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for (file, cov) in &index.files {
-        if !is_source(file) {
-            continue;
-        }
+    let live = |id: &str| duration_of.contains_key(id);
+
+    // Pass 1, O(total coverage entries): per live test, covered PRODUCT lines
+    // and whether it ALONE covers any (a line's live coverers are exactly the
+    // current-run tests that hit it).
+    let mut total: HashMap<&str, u64> = HashMap::new();
+    let mut has_unique: HashSet<&str> = HashSet::new();
+    for (_, cov) in &source {
         for ids in cov.lines.values() {
-            if ids.len() < 2 {
-                continue; // a solo line has no co-coverer (and no candidate is solo)
+            let coverers: Vec<&str> = ids.iter().map(String::as_str).filter(|i| live(i)).collect();
+            for id in &coverers {
+                *total.entry(id).or_default() += 1;
             }
-            for id in ids {
-                if shown.contains(id.as_str()) {
-                    let set = co.entry(id.as_str()).or_default();
-                    set.extend(
-                        ids.iter()
-                            .map(String::as_str)
-                            .filter(|o| !removed_set.contains(o)),
-                    );
-                }
+            if let [solo] = coverers[..] {
+                has_unique.insert(solo);
             }
         }
     }
-    let tests = candidates
+    let dur = |id: &str| duration_of.get(id).copied().unwrap_or(0.0);
+    // Individually redundant: covers >= 1 line, none alone, slow enough.
+    let mut pool: Vec<&str> = total
+        .keys()
+        .copied()
+        .filter(|id| !has_unique.contains(id))
+        .filter(|id| dur(id) >= min_seconds)
+        .collect();
+    if pool.is_empty() {
+        return None;
+    }
+    // Slowest first (then nodeid for stability): greedy maximizes reclaimed time.
+    pool.sort_by(|a, b| dur(b).total_cmp(&dur(a)).then(a.cmp(b)));
+    let in_pool: HashSet<&str> = pool.iter().copied().collect();
+
+    // Pass 2: each pool test's lines, the live coverer count per line, and the
+    // distinct OTHER tests sharing its lines ("shared with N other tests").
+    let mut lines_of: HashMap<&str, Vec<(&str, u32)>> = HashMap::new();
+    let mut remaining: HashMap<(&str, u32), usize> = HashMap::new();
+    let mut co: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (file, cov) in &source {
+        for (line, ids) in &cov.lines {
+            let coverers: Vec<&str> = ids.iter().map(String::as_str).filter(|i| live(i)).collect();
+            let mut pooled = coverers.iter().filter(|i| in_pool.contains(**i)).peekable();
+            if pooled.peek().is_none() {
+                continue;
+            }
+            remaining.insert((file, *line), coverers.len());
+            for id in pooled {
+                lines_of.entry(id).or_default().push((file, *line));
+                co.entry(id)
+                    .or_default()
+                    .extend(coverers.iter().filter(|o| *o != id));
+            }
+        }
+    }
+
+    // Greedy: accept a test only if every one of its lines keeps another coverer.
+    let mut picked: Vec<&str> = Vec::new();
+    for id in pool {
+        let lines = &lines_of[id];
+        if lines.iter().all(|l| remaining[l] >= 2) {
+            for l in lines {
+                *remaining.get_mut(l).expect("counted in pass 2") -= 1;
+            }
+            picked.push(id);
+        }
+    }
+    let redundant_tests = picked.len();
+    // Headline reclaimable time spans ALL picked tests, not just the shown ones.
+    let wasted_seconds: f64 = picked.iter().map(|id| dur(id)).sum();
+    // Already slowest first; keep the slowest for the detail table.
+    picked.truncate(20);
+    let tests = picked
         .iter()
         .map(|id| WasteTest {
             nodeid: (*id).to_string(),
-            duration: dur(id).unwrap_or(0.0),
+            duration: dur(id),
             covered_lines: total.get(id).copied().unwrap_or(0),
             also_covered_by: co.get(id).map_or(0, |s| s.len() as u64),
         })
@@ -579,12 +593,24 @@ pub(crate) mod testutil {
                 imbalance_pct: 12.5,
                 long_pole_seconds: 8.4,
             }),
-            fixtures: vec![FixtureEntry {
-                name: "db".into(),
-                scope: "session".into(),
-                count: 4,
-                total_seconds: 6.1,
-            }],
+            fixtures: vec![
+                FixtureEntry {
+                    name: "db".into(),
+                    scope: "session".into(),
+                    count: 4,
+                    total_seconds: 6.1,
+                    constant: false,
+                    projected_saving_seconds: 0.0,
+                },
+                FixtureEntry {
+                    name: "settings".into(),
+                    scope: "function".into(),
+                    count: 40,
+                    total_seconds: 4.0,
+                    constant: true,
+                    projected_saving_seconds: 0.9,
+                },
+            ],
             slowest_files: vec![FileEntry {
                 file: "tests/test_a.py".into(),
                 total_seconds: 20.0,
@@ -760,6 +786,11 @@ mod tests {
         idx
     }
 
+    /// The fixtures' only test file is `t.py`; everything else is product code.
+    fn test_py(file: &str) -> bool {
+        file == "t.py"
+    }
+
     fn durs<'a>(pairs: &[(&'a str, f64)]) -> HashMap<&'a str, f64> {
         pairs.iter().map(|(id, d)| (*id, *d)).collect()
     }
@@ -777,7 +808,7 @@ mod tests {
             ],
         )]);
         let d = durs(&[("t.py::test_dup", 5.0), ("t.py::test_keep", 5.0)]);
-        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("a waste candidate");
+        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS, test_py).expect("a waste candidate");
         assert_eq!(cw.redundant_tests, 1);
         assert_eq!(cw.tests.len(), 1);
         assert_eq!(cw.tests[0].nodeid, "t.py::test_dup");
@@ -792,7 +823,7 @@ mod tests {
         // Fully redundant, but too fast to be worth deleting for time.
         let idx = cov(&[("mod.py", &[(1, &["t.py::test_dup", "t.py::test_keep"])])]);
         let d = durs(&[("t.py::test_dup", 0.1), ("t.py::test_keep", 0.1)]);
-        assert!(coverage_waste(&d, &idx, WASTE_MIN_SECONDS).is_none());
+        assert!(coverage_waste(&d, &idx, WASTE_MIN_SECONDS, test_py).is_none());
     }
 
     #[test]
@@ -806,7 +837,7 @@ mod tests {
             ],
         )]);
         let d = durs(&[("t.py::test_a", 9.0), ("t.py::test_b", 9.0)]);
-        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("test_b is redundant");
+        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS, test_py).expect("test_b is redundant");
         let ids: Vec<&str> = cw.tests.iter().map(|t| t.nodeid.as_str()).collect();
         assert_eq!(ids, vec!["t.py::test_b"], "only the fully-shared test");
     }
@@ -827,14 +858,12 @@ mod tests {
             ),
         ]);
         let d = durs(&[("t.py::test_dup", 5.0), ("t.py::test_keep", 5.0)]);
-        let cw =
-            coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("still redundant on product code");
+        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS, test_py)
+            .expect("still redundant on product code");
         let ids: Vec<&str> = cw.tests.iter().map(|t| t.nodeid.as_str()).collect();
-        // Both are product-redundant (mod.py:1 shared, no unique product line),
-        // but deleting both loses mod.py:1 - only one (tie -> first nodeid) is.
-        assert_eq!(ids, vec!["t.py::test_dup"], "{ids:?}");
-        assert_eq!(cw.redundant_tests, 1);
-        assert!((cw.wasted_seconds - 5.0).abs() < 1e-6);
+        // mod.py:1 is shared, so one of the pair is product-redundant (the tie
+        // breaks on nodeid); the other must stay to keep the line covered.
+        assert_eq!(ids, vec!["t.py::test_dup"]);
         // covered_lines counts PRODUCT lines only (1), not the test-file body.
         let dup = cw
             .tests
@@ -845,9 +874,10 @@ mod tests {
     }
 
     #[test]
-    fn an_identical_pair_flags_only_one_and_counts_its_time_once() {
-        // test_a and test_b cover exactly the same lines: each has zero unique
-        // lines, but deleting both loses them. Only the slower one is waste.
+    fn identical_coverers_yield_one_candidate_not_both() {
+        // test_a and test_b cover exactly the same lines. Each is individually
+        // redundant, but deleting BOTH drops mod.py:1-2, so only the slower one
+        // (test_a) is a candidate and only its time is reclaimable.
         let idx = cov(&[(
             "mod.py",
             &[
@@ -855,24 +885,98 @@ mod tests {
                 (2, &["t.py::test_a", "t.py::test_b"]),
             ],
         )]);
-        let d = durs(&[("t.py::test_a", 4.0), ("t.py::test_b", 6.0)]);
-        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("one is redundant");
+        let d = durs(&[("t.py::test_a", 7.0), ("t.py::test_b", 3.0)]);
+        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS, test_py).expect("one is redundant");
         let ids: Vec<&str> = cw.tests.iter().map(|t| t.nodeid.as_str()).collect();
-        assert_eq!(ids, vec!["t.py::test_b"], "slowest of the pair");
+        assert_eq!(ids, vec!["t.py::test_a"]);
         assert_eq!(cw.redundant_tests, 1);
-        assert!((cw.wasted_seconds - 6.0).abs() < 1e-6);
-        // Its co-coverer is the kept test only.
-        assert_eq!(cw.tests[0].also_covered_by, 1);
+        assert!((cw.wasted_seconds - 7.0).abs() < 1e-6);
     }
 
     #[test]
-    fn an_identical_triple_keeps_one_coverer() {
-        let ids3: &[&str] = &["t.py::a", "t.py::b", "t.py::c"];
-        let idx = cov(&[("mod.py", &[(1, ids3)])]);
-        let d = durs(&[("t.py::a", 3.0), ("t.py::b", 3.0), ("t.py::c", 3.0)]);
-        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS).expect("two are redundant");
-        assert_eq!(cw.redundant_tests, 2);
-        assert!((cw.wasted_seconds - 6.0).abs() < 1e-6);
+    fn a_nodeid_absent_from_the_run_is_not_a_coverer() {
+        // The index says test_gone also covers mod.py:1, but it was deleted
+        // since the coverage run (no duration). test_slow is now the sole
+        // coverer of that line, so it is not waste.
+        let idx = cov(&[("mod.py", &[(1, &["t.py::test_slow", "t.py::test_gone"])])]);
+        let d = durs(&[("t.py::test_slow", 9.0)]);
+        assert!(coverage_waste(&d, &idx, WASTE_MIN_SECONDS, test_py).is_none());
+    }
+
+    #[test]
+    fn a_doctest_module_is_product_code_not_a_test_file() {
+        // Under --doctest-modules, pkg/mod.py hosts a doctest nodeid. It is
+        // still product code: test_slow's only unique line lives there, so it
+        // is not waste (a "some nodeid lives here" rule would skip the file and
+        // flag test_slow as fully shared).
+        let idx = cov(&[
+            (
+                "pkg/mod.py",
+                &[
+                    (1, &["t.py::test_slow", "pkg/mod.py::pkg.mod.f"]),
+                    (7, &["t.py::test_slow"]),
+                ],
+            ),
+            (
+                "pkg/other.py",
+                &[(1, &["t.py::test_slow", "t.py::test_keep"])],
+            ),
+        ]);
+        let d = durs(&[
+            ("t.py::test_slow", 9.0),
+            ("t.py::test_keep", 5.0),
+            ("pkg/mod.py::pkg.mod.f", 0.1),
+        ]);
+        let cw = coverage_waste(&d, &idx, WASTE_MIN_SECONDS, test_py);
+        let ids: Vec<String> = cw
+            .map(|c| c.tests.into_iter().map(|t| t.nodeid).collect())
+            .unwrap_or_default();
+        assert!(!ids.contains(&"t.py::test_slow".to_string()), "{ids:?}");
+    }
+
+    #[test]
+    fn a_skipped_test_is_not_a_coverer() {
+        // The index says test_skip also covers mod.py:1, but this run it skipped
+        // (a call-phase pytest.skip still has a duration). test_slow is the only
+        // test that really covered the line, so it is not waste.
+        let mut run = Run::default();
+        record_test(&mut run, "tests/test_a.py::test_slow", 0, 9.0);
+        for when in ["setup", "call", "teardown"] {
+            run.record(
+                Some(0),
+                crate::scheduling::proto::Report {
+                    nodeid: "tests/test_a.py::test_skip".into(),
+                    when: when.into(),
+                    outcome: if when == "call" { "skipped" } else { "passed" }.into(),
+                    duration: if when == "call" { 9.0 } else { 0.0 },
+                    longrepr: None,
+                    wasxfail: false,
+                    skip_reason: None,
+                    cpu: None,
+                    thread_delta: None,
+                    fd_delta: None,
+                    sections: Vec::new(),
+                    lineno: None,
+                },
+            );
+        }
+        let idx = cov(&[(
+            "mod.py",
+            &[(
+                1,
+                &["tests/test_a.py::test_slow", "tests/test_a.py::test_skip"],
+            )],
+        )]);
+        let project = ProjectConfig::default();
+        let report = analyze(&run, &[], 9.0, 1, Some((&idx, &project)));
+        assert!(report.coverage_waste.is_none());
+        // Control: with both passing, one of the pair IS waste.
+        let mut both = Run::default();
+        record_test(&mut both, "tests/test_a.py::test_slow", 0, 9.0);
+        record_test(&mut both, "tests/test_a.py::test_skip", 0, 9.0);
+        assert!(analyze(&both, &[], 9.0, 1, Some((&idx, &project)))
+            .coverage_waste
+            .is_some());
     }
 
     #[test]
@@ -881,5 +985,63 @@ mod tests {
         let mut run = Run::default();
         record_test(&mut run, "t.py::a", 0, 5.0);
         assert!(analyze(&run, &[], 5.0, 1, None).coverage_waste.is_none());
+    }
+
+    fn fstat(name: &str, count: u64, total: f64, constant: bool, redundant: f64) -> FixtureStat {
+        FixtureStat {
+            name: name.into(),
+            scope: "function".into(),
+            count,
+            total,
+            constant,
+            repeated: redundant > 0.0,
+            redundant,
+            fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn scope_promotion_projects_largest_per_worker_saving() {
+        let run = Run::default();
+        // Merged stat: the busiest session skipped 1.1s of repeat setup.
+        let fixtures = vec![fstat("cfg", 40, 4.0, true, 1.1)];
+        let r = analyze(&run, &fixtures, 10.0, 4, None);
+        let e = r.fixtures.iter().find(|f| f.name == "cfg").unwrap();
+        assert!(e.constant);
+        assert!((e.projected_saving_seconds - 1.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_constant_and_unrepeated_fixtures_project_no_saving() {
+        let run = Run::default();
+        let fixtures = vec![
+            // Value varied in some session => never a candidate.
+            fstat("varies", 40, 4.0, false, 0.0),
+            // Never varied, but no session ran it twice (e.g. 5 sessions
+            // after a respawn, one call each): no evidence, nothing to save.
+            fstat("once_each", 5, 5.0, true, 0.0),
+        ];
+        let r = analyze(&run, &fixtures, 10.0, 4, None);
+        for f in &r.fixtures {
+            assert_eq!(f.projected_saving_seconds, 0.0, "{}", f.name);
+            assert!(!f.constant, "{}", f.name);
+        }
+    }
+
+    #[test]
+    fn json_omits_zero_saving_and_false_constant() {
+        let r = testutil::report(12);
+        let v = serde_json::to_value(&r).unwrap();
+        let fixtures = v["fixtures"].as_array().unwrap();
+        // `db`: not constant, no saving => both fields skipped.
+        let db = &fixtures[0];
+        assert_eq!(db["name"], "db");
+        assert!(db.get("constant").is_none());
+        assert!(db.get("projected_saving_seconds").is_none());
+        // `settings`: a candidate => both fields serialized.
+        let settings = &fixtures[1];
+        assert_eq!(settings["name"], "settings");
+        assert_eq!(settings["constant"], true);
+        assert_eq!(settings["projected_saving_seconds"], 0.9);
     }
 }

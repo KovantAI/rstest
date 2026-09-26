@@ -116,6 +116,27 @@ pub struct FixtureStat {
     pub scope: String,
     pub count: u64,
     pub total: f64,
+    /// Scope-promotion advisor: this fixture is function-scoped and produced a
+    /// value-identical result on every call this worker session saw (one call
+    /// counts as "no evidence against", so it cannot veto the merge).
+    /// `#[serde(default)]` keeps older/absent payloads decoding to `false`.
+    #[serde(default)]
+    pub constant: bool,
+    /// `constant`, and some session ran it at least twice: actual evidence,
+    /// counted per session so respawned workers can't fake it.
+    #[serde(default)]
+    pub repeated: bool,
+    /// Setup seconds session scope would skip, `(count - 1) * mean` for one
+    /// session. Merged as the max over sessions: the saving on the worker
+    /// that benefits most, a wall-time estimate that holds whether calls were
+    /// spread over the pool or pinned to one worker by `--dist loadfile`.
+    #[serde(default)]
+    pub redundant: f64,
+    /// Digest of the constant value (`None` unless `constant`). Merged
+    /// sessions that report different fingerprints are not constant: the
+    /// value depends on which tests a worker got, not just on the fixture.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +226,10 @@ pub enum Event {
     LazyReady {
         #[serde(default)]
         cache_dir: Option<String>,
+        /// pytest's rootdir (`config.rootpath`): what every nodeid is
+        /// relative to. The duration cache resolves source files against it.
+        #[serde(default)]
+        rootdir: Option<String>,
     },
     /// Lazy mode: one file collected (by exactly one worker). `ids` in
     /// collection order; serial/flaky ride along, keyed by nodeid.
@@ -426,8 +451,11 @@ mod property {
         fn arb_fixture()(
             name in small_str(), scope in small_str(),
             count in any::<u64>(), total in finite_f64(),
+            constant in any::<bool>(), repeated in any::<bool>(),
+            redundant in finite_f64(),
+            fingerprint in proptest::option::of(small_str()),
         ) -> FixtureStat {
-            FixtureStat { name, scope, count, total }
+            FixtureStat { name, scope, count, total, constant, repeated, redundant, fingerprint }
         }
     }
 
@@ -452,6 +480,7 @@ mod property {
             cache_dir in prop::option::of(small_str()),
             flaky in prop::option::of(prop::collection::hash_map(small_str(), any::<u32>(), 0..4)),
             groups in prop::option::of(prop::collection::hash_map(small_str(), small_str(), 0..4)),
+            // Grouped: proptest's tuple strategies stop at 12 elements.
             (rootdir, args_source, root_args, inifile, order_flags, confcutdir) in (
                 prop::option::of(small_str()),
                 prop::option::of(small_str()),
@@ -493,7 +522,8 @@ mod property {
             prop::collection::vec(arb_warning(), 0..4)
                 .prop_map(|entries| Event::Warnings { entries }),
             arb_collection_done(),
-            prop::option::of(small_str()).prop_map(|cache_dir| Event::LazyReady { cache_dir }),
+            (prop::option::of(small_str()), prop::option::of(small_str()))
+                .prop_map(|(cache_dir, rootdir)| Event::LazyReady { cache_dir, rootdir }),
             arb_file_collected(),
         ];
         let group_b = prop_oneof![

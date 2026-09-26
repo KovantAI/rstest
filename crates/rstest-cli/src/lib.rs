@@ -23,6 +23,8 @@ mod scheduling;
 mod schema;
 mod select;
 mod shardverify;
+#[cfg(test)]
+mod test_env;
 mod text;
 mod time;
 mod vendor;

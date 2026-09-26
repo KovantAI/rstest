@@ -519,6 +519,9 @@ size — a clean suite runs no discriminators at all:
 - **NOT PARALLEL-SPECIFIC** — also fails at `-n 0`; a pre-existing bug/env gap,
   summarized (not a migration concern).
 - **INTRINSIC FLAKE** — serial repeats disagree; flaky under any runner.
+- **INCONCLUSIVE**: missing from a follow-up run (for example an unstable
+  parametrize id), so there is no evidence to classify it. Not counted as a
+  pass.
 - **ORDER DEPENDENCY** — passes serial and under `--dist loadfile`, fails under
   `load`; run with `loadfile` or fix the in-file coupling.
 - **WALL-CLOCK / LOAD-SENSITIVE** — passes serial, fails parallel, and is
@@ -561,6 +564,85 @@ parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
 findings, and the build only goes red when a fresh one appears.
 
 The first slice of a broader migration assistant.
+
+### `audit`
+
+Auto parallel-safety audit — the one-command answer to "which of my tests
+aren't parallel-safe, and how do I fix them?" It **runs the suite at `-n auto`**
+(repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
+probabilistic), then diffs against the `-n 0` oracle and classifies every test
+that fails **only** under parallelism — reusing `migrate-check`'s discriminators
+(`-n 0` at least twice + `--dist loadfile`, repeated with `--audit-repeat` and scoped to the failing files) and verdicts
+(ISOLATION / WALL-CLOCK / ORDER-DEPENDENCY / INTRINSIC FLAKE / pre-existing).
+
+Where `migrate-check` is the onboarding preflight (unstable ids first, verbose
+per-verdict classification), `audit` is the focused fix-loop: it prints the
+serial-fixable failures and a **ready-to-paste `conftest.py` block** that marks
+exactly those nodeids `@pytest.mark.serial` (they then run last, alone, after
+the parallel phase) — one paste, no per-test edits:
+
+```python
+import pytest
+
+_RSTEST_SERIAL = {
+    "tests/test_a.py::test_x",
+    "tests/test_b.py::test_z",
+}
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if item.nodeid in _RSTEST_SERIAL:
+            item.add_marker(pytest.mark.serial)
+```
+
+If your `conftest.py` already defines `pytest_collection_modifyitems`, paste
+only `_RSTEST_SERIAL` and add the loop to your existing hook. A second
+definition of the same name replaces the first, so your original hook would
+silently stop running.
+
+Only ISOLATION and WALL-CLOCK failures go in the block. Serial is a **stopgap**
+for those; the report also names the real fix (reset leaked state, mock the
+clock). ORDER-DEPENDENCY failures are listed separately with a `--dist loadfile`
+recommendation instead: they depend on tests that run before them in the same
+file, and the serial phase would run them apart from those tests, so marking
+them serial wouldn't make them pass. Intrinsic flakes (serial repeats disagree)
+and pre-existing `-n 0` failures are also reported separately; serial won't fix
+those. A test that fails under `-n auto` but is missing from a
+follow-up run (for example an unstable parametrize id) is reported as
+**inconclusive** rather than guessed at. Exits non-zero on any parallel-only
+failure (serial-fixable, order-dependent, intrinsic or inconclusive), so it
+gates CI; pre-existing failures don't fail the audit. A selection that matches
+no tests (for example a `-m` with no matching tests) exits `0` with a "no tests
+were selected" note; exit `2` is kept for a run rstest refused to dispatch. [`--audit-json`](#-audit-json-path) writes the findings, the serial set,
+and the conftest block for tooling.
+
+### `--audit-json <path>`
+
+Write the `audit` findings as a versioned JSON document (schema `1`):
+`{meta, ran, parallel_safe, tests, serial_candidates[], serial_conftest,
+order_dependent[], intrinsic_flakes[], inconclusive[], preexisting_failures}`. `serial_candidates[]`
+carries each `{nodeid, verdict, fix}`; `serial_conftest` is the paste-able block
+as a string. The file is written as `{meta, ran: false, parallel_safe: false}`
+before the audit starts and replaced with the full result at the end, so an
+audit that stops early (the `-n auto` pass produced no run, exit `2`, or a child
+session failed) leaves `ran: false` rather than a stale result from an earlier
+run. `-x`/`--maxfail` from your args or `addopts` is lifted for every run the
+audit makes, so the whole suite is checked.
+Only read by the `audit` subcommand (`rstest audit --audit-json out.json`); on
+its own it is ignored and no file is written.
+
+### `--audit-repeat <N>`
+
+How many times `audit` re-runs the `-n auto` pass (default `1`). A parallel-only
+failure is probabilistic — a race may not fire every run — so a test that fails
+in **any** repeat is treated as a candidate. Raise it (e.g. `--audit-repeat 5`)
+to shake out intermittent races. The discriminators repeat the same number of
+times (the `-n 0` oracle at least twice, `--dist loadfile` at least once), so
+an intermittent failure gets as many chances to show up in them as it had in
+the parallel pass. That makes a misclassification less likely but does not rule
+it out: a test that is flaky in every mode can still pass all serial runs by
+chance and be listed as a serial candidate.
 
 ### `bisect <nodeid>`
 
@@ -730,13 +812,16 @@ or non-Python change is still a full run. Over-selection is safe; the fallbacks
 never under-select against unknown code.
 
 **Map-health reporting.** With a warm map the selection banner reports the
-savings ratio — `N changed file(s) -> M of K mapped test target(s) affected` —
-so you can see how much was skipped. If the map is **cold** and a non-test
+savings ratio — `N changed file(s) -> M of K mapped test(s) affected` —
+so you can see how much was skipped. Whole-file targets from the import-graph
+fallback or changed test files are counted separately
+(`... affected + F whole-file target(s)`). If the map is **cold** and a non-test
 `.py` file changed (exactly where coverage precision would have helped),
 `--changed` prints a one-line hint that it fell back to the import graph and
-that a prior `--cov --cov-context=test` run enables coverage-precise selection.
-The hint stays silent for test-only, config, or non-Python changes, so it never
-nags a suite that doesn't use coverage.
+that a prior `--cov --cov-context=test` run enables coverage-precise selection
+(not when the same diff forces a full run anyway).
+The hint stays silent for test-only, `conftest.py`, config, or non-Python
+changes, so it never nags a suite that doesn't use coverage.
 
 Conservative by construction: ambiguous module names select every match,
 function-local imports count, a changed `conftest.py` selects its whole
@@ -932,7 +1017,7 @@ file format, and CI surfaces:
 ### `--doctor-json <path>`
 
 Write the doctor analysis as JSON (stable, versioned schema — currently
-`2`) for CI trending. Implies doctor instrumentation; combine with
+`3`) for CI trending. Implies doctor instrumentation; combine with
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
 
@@ -1042,7 +1127,26 @@ test files reruns exactly those files (with your other flags); a source
 (`.py`) change reruns the tests the import graph says are affected
 (the `--changed` machinery; unresolvable changes fall back to the full
 selection); a pytest-config change reruns the full selection. Ignores
-VCS, caches, and virtualenvs. `Ctrl+C` exits.
+VCS, caches, and virtualenvs. Type `q` then Enter to exit cleanly (`Ctrl+C`
+also works). Closing stdin (`nohup`, `< /dev/null`) does not end the session.
+Started as a background job on a terminal (`rstest --watch &`), rstest leaves
+stdin alone so the shell does not suspend it for tty input; stop it with `kill`
+or bring it back with `fg`. A session moved to the background later (Ctrl+Z,
+then `bg`) may be suspended for tty input; `fg` resumes it.
+With a flag that hands stdin to the test process (`--pdb`, `--trace`, `-s`,
+`--capture=...`, `--debug`), `q` belongs to that process instead, and only
+`Ctrl+C` exits.
+
+Selection is **incremental** across the session. The import graph that maps a
+source change to affected tests is built once and then kept warm: each save
+re-checks every file's modification time and size, and re-reads only the files
+that changed, patching their graph edges in place, instead
+of re-walking and re-parsing the whole tree every save. Adding or deleting a
+`.py` file rebuilds the graph fully (a new module can be imported by files that
+did not themselves change), reusing the cached parse of every untouched file. On
+large suites this is the difference between each save reselecting in tens of
+milliseconds versus hundreds; on a 1,600-file tree it is roughly a 4x cut to the
+per-save selection latency.
 
 Watch reruns default to [`--order fail-fast`](#-order-throughputfail-fast)
 so a fresh failure surfaces first on each save; add `-x`/`--maxfail=1` to

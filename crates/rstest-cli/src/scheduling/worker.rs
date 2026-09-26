@@ -277,6 +277,15 @@ fn build_worker_command(
         .stdout(match io {
             Stdio::Null => std::process::Stdio::null(),
             Stdio::Inherit => std::process::Stdio::inherit(),
+        })
+        // stdin is only the worker's in passthrough (pdb, `input()` under
+        // -s). Elsewhere it must not inherit: `--watch` keeps a thread
+        // blocked reading stdin for `q`, and on Windows a pending synchronous
+        // read on a pipe blocks the child interpreter's startup probe of fd 0,
+        // hanging every worker.
+        .stdin(match io {
+            Stdio::Null => std::process::Stdio::null(),
+            Stdio::Inherit => std::process::Stdio::inherit(),
         });
     if env.doctor {
         command.env("RSTEST_DOCTOR", "1");
@@ -786,15 +795,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_then_wait_reaps_the_worker_child() {
+        // Held throughout: worker_python() and the spawn resolve python via
+        // PATH, and the spawn reads RSTEST_WORKER_PATH.
+        let held = crate::test_env::lock();
         let Some((python, worker_path)) = worker_python() else {
             eprintln!("skipping reap test: no python with pytest found");
             return;
         };
-        // Point production `worker_pythonpath()` at the repo package. SAFETY:
-        // edition 2021; every worker-spawning test writes this same repo path,
-        // so concurrent writes converge on one value (no divergent read). Left
-        // set on exit, matching serve.rs's live-worker tests.
-        std::env::set_var("RSTEST_WORKER_PATH", &worker_path);
+        // Point production `worker_pythonpath()` at the repo package.
+        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
 
         let env = WorkerEnv {
             run_uid: format!("reap-{}", std::process::id()),

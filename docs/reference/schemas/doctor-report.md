@@ -6,30 +6,30 @@ Source: `--doctor-json`
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `coverage_waste` | CoverageWaste or null | no | Slow tests that can be deleted together without dropping any covered line - delete/merge candidates. `None` unless THIS run wrote a per-test coverage index (`--cov --cov-context=test` alongside `--doctor`; an index left by an earlier run is ignored as stale) and at least one test qualified. |
+| `coverage_waste` | CoverageWaste or null | yes | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
 | `cpu_time_seconds` | number | yes | Sum of call-phase CPU time, over tests where it was measured. |
 | `fixtures` | array of FixtureEntry | yes |  |
 | `leaks` | array of Leak | no | Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
-| `parallel_efficiency` | ParallelEfficiency or null | no |  |
-| `parallel_floor` | ParallelFloor or null | no |  |
+| `parallel_efficiency` | ParallelEfficiency or null | yes |  |
+| `parallel_floor` | ParallelFloor or null | yes |  |
 | `rstest_version` | string | yes |  |
 | `schema` | integer | yes |  |
 | `slowest_files` | array of FileEntry | yes |  |
 | `test_time_seconds` | number | yes |  |
 | `tests` | integer | yes |  |
-| `wait_bound` | WaitBound or null | no |  |
+| `wait_bound` | WaitBound or null | yes |  |
 | `wall_seconds` | number | yes |  |
 | `workers` | integer | yes |  |
 
 ### CoverageWaste
 
-Slow tests that add no unique coverage: chosen greedily (slowest first) so that deleting ALL of them together still leaves every covered line covered by some kept test. Of two tests covering identical lines, only one is listed. Pure suite bloat on the time axis.
+Slow tests that add no unique coverage: every line each one executes is also executed by some other test, so it can be deleted or merged without dropping any covered line. Pure suite bloat on the time axis.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `redundant_tests` | integer | yes | Size of the deletable set (`tests` shows the slowest of them). |
+| `redundant_tests` | integer | yes | Count of redundant slow tests found (`tests` shows the slowest of them). |
 | `tests` | array of WasteTest | yes | The slowest redundant tests, worst first (capped). |
-| `wasted_seconds` | number | yes | Sum of the durations of the whole deletable set (not just the shown ones) - the time reclaimable by pruning them together. |
+| `wasted_seconds` | number | yes | Sum of the durations of every redundant slow test (not just the shown ones) - the time reclaimable by pruning them. |
 
 ### FileEntry
 
@@ -43,8 +43,10 @@ Slow tests that add no unique coverage: chosen greedily (slowest first) so that 
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `constant` | boolean | no | Scope-promotion advisor: a function-scoped fixture that produced the same immutable builtin value on every call in every worker, with no per-test teardown or narrower-scoped inputs (checked worker-side), a candidate for `@pytest.fixture(scope="session")`. |
 | `count` | integer | yes |  |
 | `name` | string | yes |  |
+| `projected_saving_seconds` | number | no | Projected wall-time saved by promoting this candidate to session scope: the largest per-worker-session `(calls - 1) * mean_setup`, i.e. the redundant re-setups removed on the worker that benefits most. 0 unless `constant`. |
 | `scope` | string | yes |  |
 | `total_seconds` | number | yes |  |
 
@@ -106,8 +108,8 @@ Realized parallel speedup measured from an actual run. Unlike `ParallelFloor` (a
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `also_covered_by` | integer | yes | Distinct KEPT tests (not themselves in the deletable set) that between them also cover those lines. |
-| `covered_lines` | integer | yes | Product lines this test covered, all also covered by a kept test. |
+| `also_covered_by` | integer | yes | Distinct OTHER tests that between them also cover those lines. |
+| `covered_lines` | integer | yes | Lines this test covered, all shared with at least one other test. |
 | `duration` | number | yes |  |
 | `nodeid` | string | yes |  |
 

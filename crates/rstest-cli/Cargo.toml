@@ -35,19 +35,19 @@ notify = "8"
 sha2 = "0.11"
 ureq = { version = "2", optional = true }
 
-[dev-dependencies]
-# Only used to generate the docs JSON Schemas (see src/schema.rs, a test-only
-# module). Kept out of the shipped binary via `cfg_attr(test, ...)` on the
-# derives.
-schemars = "0.8"
-proptest = "1"
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
-
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[dev-dependencies]
+proptest = "1"
+# Only used to generate the docs JSON Schemas (see src/schema.rs, a test-only
+# module). Kept out of the shipped binary via `cfg_attr(test, ...)` on the
+# derives.
+schemars = "0.8"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 # Wire-protocol decode throughput. Run: cargo bench --bench proto_decode
 [[bench]]

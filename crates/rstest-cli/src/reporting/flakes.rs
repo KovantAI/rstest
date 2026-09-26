@@ -24,7 +24,8 @@ pub struct FlakeStats {
     #[serde(default)]
     pub last_epoch: u64,
     /// Unix epoch of the last hard failure. 0 = none, or a cache written
-    /// before this field existed; see [`FlakeStats::failed_epoch`].
+    /// before this field existed (readers then fall back to
+    /// `last_epoch` when `failed` is non-zero).
     #[serde(default)]
     pub last_failed_epoch: u64,
 }

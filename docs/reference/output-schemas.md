@@ -9,7 +9,8 @@ never silently drift from what the CLI actually emits. A golden test in the
 build regenerates these artifacts and fails CI if a type changes without the
 docs being refreshed (`RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`).
 
-Each schema carries a `schema` version integer; incompatible changes bump it.
+Each versioned output carries a `schema` integer; incompatible changes bump
+it. The flake log is an unversioned cache file.
 For the prose walkthrough of the run snapshot and doctor JSON envelopes, see
 [Report JSON](report-json.md).
 
