@@ -87,7 +87,10 @@ def _fork_pool(argv: list[str]) -> None:
                 _serve(conn)
             except BrokenPipeError:
                 os._exit(0)
-            os._exit(0)
+            # Clean shutdown: exit the way a spawned worker does (atexit
+            # handlers, logging.shutdown, stdio flush, non-daemon thread join),
+            # not os._exit, so --fork-pool matches the plain spawn path.
+            sys.exit(0)
         pids.append(pid)
 
     # Parent: report the child pids to the orchestrator (which tracks them for

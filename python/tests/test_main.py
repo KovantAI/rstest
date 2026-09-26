@@ -166,6 +166,52 @@ def test_fork_pool_parent_reports_pids_and_exits(monkeypatch):
     assert {10, 20, 30, 40} <= set(closed)
 
 
+def test_fork_pool_child_exits_normally_after_serve(monkeypatch):
+    # Drive the CHILD half: os.fork returns 0. After a clean _serve the child
+    # must exit via sys.exit (running atexit/logging/stdio teardown like a
+    # spawned worker), never os._exit.
+    monkeypatch.setattr(worker_main.os, "fork", lambda: 0)
+    monkeypatch.setattr(worker_main.os, "close", lambda fd: None)
+    monkeypatch.setattr(worker_main.protocol, "Connection", lambda c, e: (c, e))
+    served = []
+    monkeypatch.setattr(worker_main, "_serve", served.append)
+    monkeypatch.setattr(worker_main.os, "_exit", lambda code: pytest.fail("child used os._exit"))
+    # The child writes its identity into os.environ; setenv restores it after.
+    monkeypatch.setenv("RSTEST_WORKER_ID", "")
+    monkeypatch.setenv("RSTEST_SEND_IDS", "")
+
+    with pytest.raises(SystemExit) as exc:
+        worker_main._fork_pool(["1", "9", "10", "20"])
+    assert exc.value.code == 0
+    assert served == [(10, 20)]
+    assert os.environ["RSTEST_WORKER_ID"] == "gw0"
+    assert os.environ["RSTEST_SEND_IDS"] == "1"
+
+
+def test_fork_pool_child_swallows_broken_pipe(monkeypatch):
+    # A forked child whose orchestrator already left exits via os._exit(0),
+    # same as the spawned worker's BrokenPipeError path, never a traceback.
+    monkeypatch.setattr(worker_main.os, "fork", lambda: 0)
+    monkeypatch.setattr(worker_main.os, "close", lambda fd: None)
+    monkeypatch.setattr(worker_main.protocol, "Connection", lambda c, e: object())
+
+    def raise_broken(conn):
+        raise BrokenPipeError
+
+    monkeypatch.setattr(worker_main, "_serve", raise_broken)
+
+    def fake_exit(code):
+        raise SystemExit(("os._exit", code))
+
+    monkeypatch.setattr(worker_main.os, "_exit", fake_exit)
+    monkeypatch.setenv("RSTEST_WORKER_ID", "")
+    monkeypatch.setenv("RSTEST_SEND_IDS", "")
+
+    with pytest.raises(SystemExit) as exc:
+        worker_main._fork_pool(["1", "9", "10", "20"])
+    assert exc.value.code == ("os._exit", 0)
+
+
 def test_main_swallows_broken_pipe(monkeypatch):
     monkeypatch.setattr(worker_main.sys, "argv", ["prog", "3", "4"])
     monkeypatch.setattr(worker_main.os, "name", "posix")
