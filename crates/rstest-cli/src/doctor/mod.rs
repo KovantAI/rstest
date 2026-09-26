@@ -31,6 +31,7 @@ const SCHEMA_VERSION: u32 = 3;
 const WASTE_MIN_SECONDS: f64 = 0.5;
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DoctorReport {
     schema: u32,
     rstest_version: &'static str,
@@ -40,14 +41,27 @@ pub struct DoctorReport {
     test_time_seconds: f64,
     /// Sum of call-phase CPU time, over tests where it was measured.
     cpu_time_seconds: f64,
+    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<WaitBound>"))]
     wait_bound: Option<WaitBound>,
+    #[cfg_attr(
+        test,
+        schemars(schema_with = "crate::schema::nullable::<ParallelFloor>")
+    )]
     parallel_floor: Option<ParallelFloor>,
+    #[cfg_attr(
+        test,
+        schemars(schema_with = "crate::schema::nullable::<ParallelEfficiency>")
+    )]
     parallel_efficiency: Option<ParallelEfficiency>,
     fixtures: Vec<FixtureEntry>,
     slowest_files: Vec<FileEntry>,
     /// Slow tests whose every covered line is also covered by another test -
     /// delete/merge candidates. `None` unless a per-test coverage index was
     /// warm (`--cov --cov-context=test`) and at least one test qualified.
+    #[cfg_attr(
+        test,
+        schemars(schema_with = "crate::schema::nullable::<CoverageWaste>")
+    )]
     coverage_waste: Option<CoverageWaste>,
     /// Tests that leaked threads / fds (net positive after teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
@@ -59,6 +73,7 @@ pub struct DoctorReport {
 /// executed by some other test, so it can be deleted or merged without dropping
 /// any covered line. Pure suite bloat on the time axis.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct CoverageWaste {
     /// Sum of the durations of every redundant slow test (not just the shown
     /// ones) - the time reclaimable by pruning them.
@@ -70,6 +85,7 @@ struct CoverageWaste {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WasteTest {
     nodeid: String,
     duration: f64,
@@ -82,6 +98,7 @@ struct WasteTest {
 /// A test that ended with more threads / open fds than it started — a resource
 /// it opened and never released (its own teardown included).
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Leak {
     pub nodeid: String,
     /// Net threads leaked (0 if only fds leaked).
@@ -91,6 +108,7 @@ pub struct Leak {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WaitBound {
     wait_seconds: f64,
     wait_pct: f64,
@@ -98,6 +116,7 @@ struct WaitBound {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WaitTest {
     nodeid: String,
     duration: f64,
@@ -105,6 +124,7 @@ struct WaitTest {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct ParallelFloor {
     longest_seconds: f64,
     ideal_share_seconds: f64,
@@ -112,6 +132,7 @@ struct ParallelFloor {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct GateTest {
     nodeid: String,
     duration: f64,
@@ -121,6 +142,7 @@ struct GateTest {
 /// `ParallelFloor` (a static pre-run estimate), this is the after-the-fact
 /// "why isn't `-n auto` faster?". Only for multi-worker pool runs.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct ParallelEfficiency {
     /// test_time / wall. May exceed `ideal_speedup` for wait-bound suites,
     /// where overlapping sleeps/IO run more tests at once than there are
@@ -139,6 +161,7 @@ struct ParallelEfficiency {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WorkerLoad {
     worker: String,
     busy_seconds: f64,
@@ -146,6 +169,7 @@ struct WorkerLoad {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct FixtureEntry {
     name: String,
     scope: String,
@@ -170,6 +194,7 @@ fn is_zero(v: &f64) -> bool {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct FileEntry {
     file: String,
     total_seconds: f64,

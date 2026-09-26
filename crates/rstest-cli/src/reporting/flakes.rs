@@ -12,6 +12,7 @@ use crate::reporting::report::Run;
 pub const FILE: &str = "flakes.json";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct FlakeStats {
     /// Runs where the test passed only after rerun(s).
     #[serde(default)]
@@ -23,7 +24,8 @@ pub struct FlakeStats {
     #[serde(default)]
     pub last_epoch: u64,
     /// Unix epoch of the last hard failure. 0 = none, or a cache written
-    /// before this field existed; see [`FlakeStats::failed_epoch`].
+    /// before this field existed (readers then fall back to
+    /// `last_epoch` when `failed` is non-zero).
     #[serde(default)]
     pub last_failed_epoch: u64,
 }
