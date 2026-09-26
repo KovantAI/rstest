@@ -475,6 +475,15 @@ pub(crate) fn needs_passthrough_io(session_args: &[String]) -> bool {
     })
 }
 
+/// The first session flag that forces the passthrough path (for messages),
+/// matching [`needs_passthrough_io`].
+pub(crate) fn passthrough_trigger(session_args: &[String]) -> Option<&str> {
+    session_args
+        .iter()
+        .find(|a| needs_passthrough_io(std::slice::from_ref(*a)))
+        .map(String::as_str)
+}
+
 pub(crate) fn is_collect_only(session_args: &[String]) -> bool {
     session_args
         .iter()

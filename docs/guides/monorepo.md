@@ -23,10 +23,9 @@ rstest 0.7.0 — monorepo: 3 projects, 8 workers (libs/cli:-n2, libs/core:-n4, s
 
 ## How projects are found
 
-Monorepo mode engages automatically when the current directory has **no
-pytest configuration of its own** but subdirectories do: rstest discovers
-each package by its pytest config and runs them all. To restrict or pin the
-set, list globs in the root `pyproject.toml`:
+Run `rstest` from a root that has **no pytest configuration of its own**:
+rstest finds each package by its pytest config and runs them all. To
+restrict or pin the set, list globs in the root `pyproject.toml`:
 
 ```toml
 [tool.rstest]
@@ -40,10 +39,12 @@ depth, which config files count, what's pruned) are in
 
 ## How it runs
 
-Each project is an isolated child run: its own rootdir, ini, and conftests,
-no cross-project leakage. Projects run **concurrently** under one worker
-budget, split across them by each project's last-known suite time, so a repo
-dominated by one package finishes in roughly that package's wall time:
+Each project is an isolated child run, and projects run concurrently under
+one worker budget weighted by each project's last-known suite time, so a repo
+dominated by one package finishes in roughly that package's wall time. (How
+isolation and the budget split work:
+[Session isolation](../concepts/monorepo.md#session-isolation) and
+[Worker budget and scheduling](../concepts/monorepo.md#worker-budget-and-scheduling).)
 
 ```console
 $ rstest          # langgraph monorepo, 14-core machine
@@ -56,14 +57,22 @@ The 245.7s figure is the measured cold (first) run. A warm run (planned
 from the duration caches the first run writes) is projected at 121–133s
 (6.6–7.3×); see [Benchmarks](../reference/benchmarks.md#monorepo).
 
-A project can pin its own `[tool.rstest]` (`numprocesses = 0` for byte-exact
-mode, its own `dist`/`reruns`/`worker-timeout`); root command-line flags
-override everywhere. Results merge into one exit code and one
-`--report-json`; JUnit/coverage are written per project. `--changed` is
-monorepo-aware: it skips packages no change can reach. For the exact
-per-flag behavior (exit merge, report-json shape, JUnit slug rules,
-`--changed` dependency edges, `--output json` refusal), see
-[Monorepo mode](../concepts/monorepo.md).
+What to set up and expect:
+
+- **Per-project settings.** A project can pin its own `[tool.rstest]`, e.g.
+  `numprocesses = 0` for an order-sensitive package; root command-line flags
+  override everywhere.
+- **Results.** One merged exit code and one `--report-json` at the root;
+  JUnit and `--doctor-json` files per project (`junit.libs-core.xml`). Point
+  your CI's test-report step at `junit.*.xml`. Exact rules:
+  [Output and artifacts](../concepts/monorepo.md#output-and-artifacts).
+- **PRs.** `--changed` skips packages no change can reach; use
+  `--changed-strict` on gating paths. How the dependency edges are found:
+  [Changed-aware runs](../concepts/monorepo.md#changed-aware-runs).
+- **Small CI runners.** Every project gets at least one worker and all start
+  at once, so many packages on a 2-core runner oversubscribe; split them with
+  `projects` globs or path arguments, or make each package its own CI job
+  ([CI quickstart](ci-quickstart.md)).
 
 ## Environments
 

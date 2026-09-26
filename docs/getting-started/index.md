@@ -12,8 +12,8 @@ $ rstest --doctor             # and find out why the suite is slow
 [Suite diagnostics](../guides/doctor.md).)
 
 - [Installation](installation.md): requirements, pip/uv, from source
-- [Your first test](your-first-test.md): no suite yet? from an empty folder to a green run
-- [First steps](first-steps.md): already have a pytest suite? running, reading output, selecting tests
+- [Start from scratch](your-first-test.md): no suite yet? from an empty folder to a green run
+- [Run your existing suite](first-steps.md): already have a pytest suite? running, reading output, selecting tests
 - [Features](features.md): what rstest adds over pytest
 - [Glossary](../concepts/glossary.md): worker, byte-exact, long pole, and the other terms
 - [Troubleshooting](../reference/troubleshooting.md): first-run errors and common fixes

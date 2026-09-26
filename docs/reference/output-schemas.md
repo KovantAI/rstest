@@ -19,8 +19,10 @@ describes: a field added outside the struct, or an output assembled from
 
 The doctor report carries a `schema` version integer; incompatible changes bump
 it. The flake log is an unversioned cache file.
-For the prose walkthrough of the run snapshot and doctor JSON envelopes, see
-[Report JSON](report-json.md).
+For worked examples, the conditions under which each doctor section is
+present, and version history, see the prose walkthrough:
+[Report JSON: Doctor JSON](report-json.md#doctor-json). The run snapshot
+itself is documented only there, in [Shape](report-json.md#shape).
 
 --8<-- "docs/reference/schemas/doctor-report.md"
 

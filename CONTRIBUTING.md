@@ -67,6 +67,32 @@ Commit the regenerated files. They are embedded into
 `docs/reference/output-schemas.md` via snippets, so the published docs stay in
 lockstep with the code automatically.
 
+### Writing docs
+
+The site is built with MkDocs Material from `docs/` (nav in `mkdocs.yml`).
+Check a docs change with `mkdocs build --strict` (install the tools from
+`docs/requirements.txt`).
+
+- **Where a page goes.** Getting started is for first contact, Playbooks for a
+  whole persona's path (wait-bound suites, the inner loop, a plugin stack),
+  Guides for one task, Concepts for how rstest works, Reference for exact
+  flags, variables, codes and formats. Link to the reference instead of
+  repeating a flag table or field list in a guide.
+- **Headings are URLs.** Every heading becomes an anchor other pages link to.
+  Renaming one breaks those links, so grep `docs/` for the old slug and update
+  it in the same change.
+- **No em dashes in prose.** Use a comma, colon, parentheses or a new sentence.
+  Code blocks and CLI output are exempt.
+- **Admonitions, sparingly:** `!!! warning` for data loss, silent no-ops, or
+  anything that fails without an error; `!!! note` for version caveats such as
+  "Unreleased"; `!!! tip` for an optional shortcut; `??? note` (collapsed) for
+  long reference detail such as a full JSON Schema. Everything else is plain
+  prose.
+- **Tag every code block** (`console` for commands with output, `text` for
+  plain output, the language otherwise).
+- **Generated files** under `docs/reference/schemas/` are never edited by hand
+  (see [Output schemas](#output-schemas)).
+
 ## Vendored pytest
 
 `python/rstest_worker/_vendor/{pytest,_pytest,py.py}` is an **unmodified**

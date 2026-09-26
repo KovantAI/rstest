@@ -1,4 +1,4 @@
-# First steps
+# Run your existing suite
 
 Run rstest from your project root, exactly where you would run pytest (this
 sample is from an 8-core machine):
@@ -165,7 +165,7 @@ $ rstest --doctor    # and if the suite feels slow, ask why
 
 !!! tip "Coming from pytest or pytest-xdist?"
     If tests fail *only* under parallelism on a freshly migrated suite, run
-    [`rstest migrate-check`](../reference/cli.md#migrate-check) first: it
+    [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) first: it
     classifies each parallel-only failure (order dependency, isolation leak,
     wall-clock timing, unstable id) and names the fix, so you don't triage by
     hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
@@ -176,8 +176,8 @@ Three commands answer three different questions:
 
 | You want to… | Run | It tells you |
 |---|---|---|
-| Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup: zero risk |
-| Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli.md#migrate-check) | Classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
+| Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli-commands.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup: zero risk |
+| Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) | Classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
 | Understand why a passing suite is **slow** | [`rstest --doctor`](../guides/doctor.md) | Plain-English breakdown of where test time goes (wait-bound, a long-pole test, poor parallel balance) |
 
 ## A test that isn't parallel-safe
@@ -223,6 +223,6 @@ def test_writes_config():
 
 `serial` is the pressure valve, not the goal: it removes the speed win for
 those tests, so fix the sharing when you can. Not sure which tests are
-affected? [`rstest migrate-check`](../reference/cli.md#migrate-check) finds
+affected? [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) finds
 and classifies them for you. See [Parallel safety](../guides/parallel-safety.md)
 for the full catalogue of sharing patterns and fixes.

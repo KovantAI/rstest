@@ -269,4 +269,4 @@ tooling and trending. `--migrate-allow <substr>` accepts known findings by
 nodeid/site substring, they're still reported (marked `(allowed)`) but don't
 fail the build, so the gate goes red only on **new** issues while you work
 through the backlog. Full flag reference:
-[`migrate-check`](../reference/cli.md#migrate-check).
+[`migrate-check`](../reference/cli-commands.md#migrate-check).

@@ -317,3 +317,22 @@ def test_configure_worker_populates_workerinput(monkeypatch, tmp_path):
     # Master-side node shim installed for this worker.
     assert p._xdist_node is not None
     assert p._xdist_node.workerinput is wi
+
+
+def test_configure_worker_overrides_inherited_xdist_env(monkeypatch, tmp_path):
+    # A PYTEST_XDIST_WORKER[_COUNT] exported by the caller must not win over
+    # the real per-worker values, or every worker would share one id.
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw2")
+    monkeypatch.setenv("RSTEST_WORKER_COUNT", "4")
+    monkeypatch.setenv("RSTEST_RUN_UID", "run-abc")
+    monkeypatch.setenv("RSTEST_BASETEMP", str(tmp_path))
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw9")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "99")
+    p = _plugin(monkeypatch)
+    config, _ = _config(dist="no", numprocesses=None, basetemp=None)
+    p.pytest_configure(config)
+
+    import os
+
+    assert os.environ["PYTEST_XDIST_WORKER"] == "gw2"
+    assert os.environ["PYTEST_XDIST_WORKER_COUNT"] == "4"
