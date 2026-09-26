@@ -14,7 +14,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use crate::cli::{is_collect_only, needs_passthrough_io, parse_durations, parse_maxfail, Cli};
+use crate::cli::{
+    is_collect_only, needs_passthrough_io, parse_durations, parse_maxfail, passthrough_trigger, Cli,
+};
 use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
@@ -368,9 +370,13 @@ fn resolve_run_config(
     // Leak measurement runs under doctor OR --fail-on-leak (doctor already
     // instruments; --fail-on-leak needs the deltas without the full report).
     let leakcheck = doctor || cli.fail_on_leak;
+    // A parent rstest (migrate-check's classifier runs) can ask for the worker
+    // instrumentation alone via RSTEST_DOCTOR=1, without the doctor report.
+    // Read here and forwarded explicitly, because workers never inherit it.
+    let instrument = doctor || std::env::var_os("RSTEST_DOCTOR").is_some_and(|v| v == "1");
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.to_string(),
-        doctor,
+        doctor: instrument,
         timeout: cli.timeout,
         leakcheck,
         send_ids: false,
@@ -540,6 +546,17 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         &cfg.numprocesses,
         &mut sink,
     );
+    // An explicit -n that passthrough silently collapses to one process: say
+    // so, or `rstest -n 4 -s` looks like a parallel run that isn't.
+    let n_explicit = cli.numprocesses.is_some() || settings.numprocesses.is_some();
+    let trigger = if cli.debug.is_some() {
+        Some("--debug")
+    } else {
+        passthrough_trigger(&args)
+    };
+    if let Some(msg) = passthrough_n_warning(n_explicit, cfg.n, trigger, is_collect_only(&args)) {
+        sink.warn(&msg);
+    }
     // Resolve dispatch selection (--shuffle/--shard) and the --incremental skip
     // set in one phase.
     let inc = resolve_incremental(&cfg, cli, &settings, &args, since_green, &mut sink)?;
@@ -890,6 +907,28 @@ fn warn_run_modes(
              (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
         ));
     }
+}
+
+/// `-n N` (N > 1, set on the command line or in `[tool.rstest]`) is ignored when
+/// a passthrough flag (`-s`, `--capture=…`, `--pdb`, `--trace`, stepwise,
+/// `--debug`) routes the run to one process with pytest's own terminal. Warn,
+/// naming the flag. Quiet for the default `-n auto` (plain `rstest -s` is an
+/// ordinary request for pytest's `-s`) and for `--co`, which runs no tests.
+fn passthrough_n_warning(
+    n_explicit: bool,
+    n: usize,
+    trigger: Option<&str>,
+    collect_only: bool,
+) -> Option<String> {
+    let trigger = trigger?;
+    if !n_explicit || n <= 1 || collect_only {
+        return None;
+    }
+    Some(format!(
+        "rstest: {trigger} runs the session in a single process with pytest's own \
+         output, so -n {n} is ignored (no parallel workers); drop {trigger} to \
+         run in parallel"
+    ))
 }
 
 /// Resolved dispatch selection (`--shuffle`/`--shard`) plus the `--incremental`
@@ -2067,6 +2106,50 @@ mod tests {
     #[test]
     fn resolve_order_rejects_unknown() {
         assert!(resolve_order(&cli(), &settings_order(Some("sideways"))).is_err());
+    }
+
+    #[test]
+    fn passthrough_n_warning_only_for_explicit_parallel_n() {
+        // Explicit -n 4 with -s: warn, naming the flag and the ignored count.
+        let msg = super::passthrough_n_warning(true, 4, Some("-s"), false).unwrap();
+        assert!(
+            msg.contains("-s") && msg.contains("-n 4 is ignored"),
+            "{msg}"
+        );
+        // --debug is named too.
+        assert!(
+            super::passthrough_n_warning(true, 2, Some("--debug"), false)
+                .unwrap()
+                .contains("--debug")
+        );
+        // No passthrough flag, default -n auto, -n 0/1, or --co: quiet.
+        assert_eq!(super::passthrough_n_warning(true, 4, None, false), None);
+        assert_eq!(
+            super::passthrough_n_warning(false, 8, Some("-s"), false),
+            None
+        );
+        assert_eq!(
+            super::passthrough_n_warning(true, 1, Some("-s"), false),
+            None
+        );
+        assert_eq!(
+            super::passthrough_n_warning(true, 4, Some("--co"), true),
+            None
+        );
+    }
+
+    #[test]
+    fn passthrough_trigger_names_the_first_forcing_flag() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            crate::cli::passthrough_trigger(&args(&["-k", "x", "-s"])),
+            Some("-s")
+        );
+        assert_eq!(
+            crate::cli::passthrough_trigger(&args(&["--capture=no", "--pdb"])),
+            Some("--capture=no")
+        );
+        assert_eq!(crate::cli::passthrough_trigger(&args(&["-q", "-x"])), None);
     }
 
     #[test]

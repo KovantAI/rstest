@@ -30,6 +30,19 @@ between 0.0.x releases and are listed here.
   pull_request run, including a fork PR from a branch named `main`, can never
   become the warm source.
 - **GitHub action: warns when the rstest version is unpinned.**
+- **Workers no longer inherit rstest's internal variables.** `RSTEST_WORKER_ID`,
+  `RSTEST_DOCTOR`, `RSTEST_TIMEOUT` and the other orchestrator-to-worker
+  variables (plus `PYTEST_XDIST_WORKER[_COUNT]` outside a pool) are now
+  cleared before each worker starts, so a value exported in the shell, in CI,
+  or by an outer rstest (a test that runs rstest itself) can no longer reach
+  an `-n 0` test or switch on worker instrumentation. `migrate-check`'s child
+  runs now forward their `RSTEST_DOCTOR` request explicitly instead of relying
+  on that inheritance.
+- **Parallel workers no longer inherit a stale `PYTEST_XDIST_WORKER`.** A
+  `PYTEST_XDIST_WORKER` / `PYTEST_XDIST_WORKER_COUNT` already exported in the
+  caller's environment used to win over each worker's real values, so every
+  worker saw the same id and per-worker resources (test databases, ports,
+  temp dirs keyed on it) collided. Workers now always set their own values.
 - **Monorepo merged `--report-json` now stamps the current schema.** The merged
   root document hard-coded `"schema": 4` while carrying schema-5 fields
   (`quarantined`); it now shares the single-project writer's version constant.
@@ -118,7 +131,7 @@ between 0.0.x releases and are listed here.
   from the tests they depend on. Intrinsic flakes, inconclusive results and
   pre-existing `-n 0` failures are called out separately. Exits non-zero on any parallel-only failure (CI-gateable);
   `--audit-json` writes the findings, the serial set, and the conftest block.
-  See [`audit`](docs/reference/cli.md#audit).
+  See [`audit`](docs/reference/cli-commands.md#audit).
 - **Fail-fast dispatch ordering (`--order fail-fast`).** A new
   `--order <throughput|fail-fast>` flag chooses how `--dist load` sequences the
   ready queue. `throughput` (default) keeps the slow-tests-first packing that
@@ -144,7 +157,7 @@ between 0.0.x releases and are listed here.
   OS argv limit, and forwards pytest options given after `--`. Exits `0` when a culprit is found, `1` when the test isn't
   order-dependent (fails alone / no reproduction from order), `2` for an
   unknown nodeid. `--bisect-json` writes the result. See
-  [`bisect`](docs/reference/cli.md#bisect-nodeid).
+  [`bisect`](docs/reference/cli-commands.md#bisect-nodeid).
 - **`rstest shard-verify`: prove a `--shard` matrix covered the whole suite.**
   Sharding partitions the suite independently in each job, so a divergent
   duration cache or a differently collected suite could silently drop or
@@ -157,13 +170,13 @@ between 0.0.x releases and are listed here.
   missing or duplicate shard, or divergent collection. Reads only the JSON
   files, so it needs no interpreter. Full-collection runs only (`--collect
   lazy` shards stamp no hash). See
-  [`shard-verify`](docs/reference/cli.md#shard-verify).
+  [`shard-verify`](docs/reference/cli-commands.md#shard-verify).
 - **`rstest explain <nodeid>`: one test's dossier from the caches.** Merges
   the duration cache, flake/fail log, last-green outcome set, and coverage
   index for a single nodeid (last duration, flake history, last outcome, files
   and lines covered) without running anything or needing an interpreter.
   `--json` prints a schema-stamped object for editors and CI steps. See
-  [`explain`](docs/reference/cli.md#explain).
+  [`explain`](docs/reference/cli-commands.md#explain).
 - **`migrate-check` child runs honor `--python`.** Its serial, loadfile and
   polluter discriminator runs re-resolved an interpreter from the environment
   and could land on a different one than the collection used; they are now

@@ -84,7 +84,7 @@ present only on a [`--shard K/N`](cli.md#-shard-kn) run (full collection, not
 `--collect lazy`). It carries `{ "k", "n", "collection_hash", "collection_size" }`
 where `collection_hash` is the sha256 of the full ordered nodeid list and
 `collection_size` its length, identical across every shard of one run.
-[`rstest shard-verify`](cli.md#shard-verify) consumes it to prove a shard matrix
+[`rstest shard-verify`](cli-commands.md#shard-verify) consumes it to prove a shard matrix
 covered the whole suite.
 
 `collect_errors` lists the file paths of collectors that failed outright.
@@ -313,80 +313,61 @@ It is a **separate document** from the run snapshot above; combine with
 }
 ```
 
-For the machine-readable JSON Schema of this document (generated from the Rust
-type, always current), see [Output schemas](output-schemas.md#doctor-report).
+Every field, with its type and whether it is always present, is listed in the
+generated [Doctor report field reference](output-schemas.md#doctor-report),
+which is built from the Rust type and so always matches the code. What that
+reference doesn't spell out:
 
-Top-level fields:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `schema` | int | document version, currently `3` |
-| `rstest_version` | string | the rstest version that wrote it |
-| `workers` | int | worker count for this run (`-n`) |
-| `wall_seconds` | float | total wall-clock time; **depends on worker count**: compare across runs only at equal `-n` |
-| `tests` | int | number of tests with a recorded duration |
-| `test_time_seconds` | float | summed per-test call durations (worker-count-independent: the stable trending metric) |
-| `cpu_time_seconds` | float | summed call-phase CPU time, over tests where it was measured |
-| `wait_bound` | object / `null` | wait-bound analysis; **`null`** unless CPU time was measured and waiting is significant (`wait_pct ≥ 20%` and `wait_seconds ≥ 1`) |
-| `parallel_floor` | object / `null` | parallel-floor analysis; **`null`** unless the longest test exceeds the ideal per-worker share |
-| `parallel_efficiency` | object / `null` | realized parallel speedup and per-worker load; **`null`** unless the run used more than one worker (`workers > 1`) |
-| `fixtures` | array | fixture timings, slowest first (≤ 50) |
-| `slowest_files` | array | per-file totals, slowest first (≤ 20) |
-| `coverage_waste` | object / `null` | slow tests that add no unique coverage; **`null`** unless this run collected per-test coverage (`--cov --cov-context=test`) and at least one slow test qualified |
-| `leaks` | array | tests that leaked threads or file descriptors (net positive after teardown): `{nodeid, threads, fds}`. **Omitted** when empty, and empty unless leak checking ran (`--doctor` or [`--fail-on-leak`](cli.md#-fail-on-leak)) |
-
-`wait_bound` (wall ≫ CPU, tests that wait rather than compute):
-
-| Field | Type | Meaning |
-|---|---|---|
-| `wait_seconds` | float | total `test_time − cpu_time` |
-| `wait_pct` | float | `wait_seconds` as a percent of `test_time_seconds` |
-| `tests` | array | the worst offenders (`duration ≥ 0.2s` and ≥ 60% waiting), by wait descending (≤ 50): `{nodeid, duration, wait}`, all seconds |
-
-`parallel_floor` (the tests that cap any `-n`):
-
-| Field | Type | Meaning |
-|---|---|---|
-| `longest_seconds` | float | duration of the single longest test |
-| `ideal_share_seconds` | float | `test_time_seconds / workers`: the per-worker floor if work split perfectly |
-| `gate_tests` | array | up to 10 tests longer than that share: `{nodeid, duration}` (seconds) |
-
-`parallel_efficiency` (realized speedup vs the worker budget, measured from
-this run, `null` for single-worker runs):
-
-| Field | Type | Meaning |
-|---|---|---|
-| `realized_speedup` | float | `test_time_seconds / wall_seconds`. May exceed `ideal_speedup` for wait-bound suites (overlapping sleeps/IO run more tests at once than there are cores) |
-| `ideal_speedup` | int | worker count (`-n`): the ceiling for a purely CPU-bound suite |
-| `efficiency_pct` | float | `100 × realized_speedup / ideal_speedup`; over 100% signals wait-bound overlap |
-| `workers_busy` | array | busy time per worker, busiest first, every worker (the terminal report shows at most 8; the JSON is not truncated): `{worker, busy_seconds, tests}`. Tests with no recorded worker are bucketed as `"serial"` |
-| `imbalance_pct` | float | `100 × (busiest − idlest) / busiest`: load spread across workers |
-| `long_pole_seconds` | float | slowest single test: the hard floor no worker count beats |
-
-`fixtures[]`: `{name, scope, count, total_seconds, constant?,
-projected_saving_seconds?}`, fixture name, pytest scope, setup count,
-summed setup time. `constant` (present only when `true`) marks a
-function-scoped fixture that returned the same immutable builtin value on
-every call in every worker, a scope-promotion candidate; `projected_saving_seconds`
-(present only when non-zero) is the wall time promoting it to session scope
-would save: the largest per-worker-session `(calls − 1) × mean setup`.
-`constant` also requires some worker session to have run it at least
-twice, and is never set for fixtures with per-test teardown or
-narrower-scoped dependencies, for parametrize arguments, or for failed or
-skipped setups (see [Suite diagnostics](../guides/doctor.md#scope-promotion-candidates)).
-`slowest_files[]`:
-`{file, total_seconds, pct}`, `pct` is the file's share of
-`test_time_seconds`.
-
-`coverage_waste` (slow tests that cover no line another test doesn't also
-cover, so they are safe to delete or merge; needs per-test coverage from the
-same run):
-
-| Field | Type | Meaning |
-|---|---|---|
-| `wasted_seconds` | float | summed duration of every redundant slow test (the reclaimable time), not just the shown ones |
-| `redundant_tests` | int | count of redundant slow tests found |
-| `tests` | array | the slowest of them, worst first (≤ 20): `{nodeid, duration, covered_lines, also_covered_by}`, `covered_lines` is how many lines the test hit (all shared), `also_covered_by` how many distinct other tests also cover them |
+- **`schema`** is the document version, currently `3`.
+- **`wall_seconds` depends on the worker count**: compare it across runs only
+  at equal `-n`. **`test_time_seconds`** (summed per-test call durations) is
+  worker-count-independent and is the stable metric to trend.
+  `cpu_time_seconds` sums call-phase CPU time over the tests where it was
+  measured; `tests` counts tests with a recorded duration.
+- **When the analysis objects are `null`:**
+    - `wait_bound` unless CPU time was measured and waiting is significant
+      (`wait_pct ≥ 20%` and `wait_seconds ≥ 1`);
+    - `parallel_floor` unless the longest test exceeds the ideal per-worker
+      share;
+    - `parallel_efficiency` unless the run used more than one worker
+      (`workers > 1`);
+    - `coverage_waste` unless this run collected per-test coverage
+      (`--cov --cov-context=test`) and at least one slow test qualified.
+- **`leaks`** (`{nodeid, threads, fds}`) is omitted when empty, and empty
+  unless leak checking ran (`--doctor` or
+  [`--fail-on-leak`](cli.md#-fail-on-leak)).
+- **`wait_bound`** (wall ≫ CPU: tests that wait rather than compute):
+  `wait_seconds` is total `test_time − cpu_time`, `wait_pct` is that as a
+  percent of `test_time_seconds`, and `tests` lists the worst offenders
+  (`duration ≥ 0.2s` and ≥ 60% waiting) by wait, descending, at most 50.
+- **`parallel_floor`** (the tests that cap any `-n`): `longest_seconds` is the
+  single longest test, `ideal_share_seconds` is `test_time_seconds / workers`
+  (the per-worker floor if work split perfectly), and `gate_tests` lists up to
+  10 tests longer than that share.
+- **`parallel_efficiency`** (realized speedup against the worker budget):
+  `realized_speedup` is `test_time_seconds / wall_seconds` and can exceed
+  `ideal_speedup` (the worker count) on wait-bound suites, so `efficiency_pct`
+  over 100% signals wait-bound overlap. `workers_busy` covers every worker,
+  busiest first (the terminal report shows at most 8; the JSON is not
+  truncated); tests with no recorded worker are bucketed as `"serial"`.
+  `imbalance_pct` is `100 × (busiest − idlest) / busiest`.
+- **`fixtures[]`**: fixture name, pytest scope, setup count and summed setup
+  time, slowest first, at most 50. `constant` (present only when `true`)
+  marks a function-scoped fixture that returned the same immutable builtin
+  value on every call in every worker, a scope-promotion candidate;
+  `projected_saving_seconds` (present only when non-zero) is the wall time
+  promoting it to session scope would save: the largest per-worker-session
+  `(calls − 1) × mean setup`. `constant` also requires some worker session to
+  have run it at least twice, and is never set for fixtures with per-test
+  teardown or narrower-scoped dependencies, for parametrize arguments, or for
+  failed or skipped setups (see
+  [Suite diagnostics](../guides/doctor.md#scope-promotion-candidates)).
+- **`slowest_files[]`**: per-file totals, slowest first, at most 20; `pct` is
+  the file's share of `test_time_seconds`.
+- **`coverage_waste`** (slow tests that cover no line another test doesn't
+  also cover, so they are safe to delete or merge): `wasted_seconds` sums
+  every redundant slow test, not just the shown ones; `tests` shows the
+  slowest of them, worst first, at most 20.
 
 `schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
 `cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
@@ -404,7 +385,7 @@ consumer. Increment-only: incompatible changes bump `schema`.
 $ rstest migrate-check --migrate-check-json migrate.json
 ```
 
-writes the [`migrate-check`](cli.md#migrate-check) parallel-readiness report
+writes the [`migrate-check`](cli-commands.md#migrate-check) parallel-readiness report
 as a single versioned document: the machine-readable surface for CI gating
 (fail the build when a new parallel-unsafe test appears) and for tooling that
 renders the findings. It is a **separate document** from the run snapshot.

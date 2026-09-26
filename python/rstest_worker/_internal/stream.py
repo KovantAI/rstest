@@ -380,11 +380,11 @@ class StreamPlugin:
         import socket
 
         # The most-grepped xdist env vars: plugins (and conftests we
-        # cannot edit) read these directly.
-        os.environ.setdefault("PYTEST_XDIST_WORKER", worker_id)
-        os.environ.setdefault(
-            "PYTEST_XDIST_WORKER_COUNT", os.environ.get("RSTEST_WORKER_COUNT", "1")
-        )
+        # cannot edit) read these directly. Assigned, not setdefault: a value
+        # inherited from the caller's environment would give every worker the
+        # same id and collide on per-worker resources.
+        os.environ["PYTEST_XDIST_WORKER"] = worker_id
+        os.environ["PYTEST_XDIST_WORKER_COUNT"] = os.environ.get("RSTEST_WORKER_COUNT", "1")
         run_uid = os.environ.get("RSTEST_RUN_UID", "")
         config.workerinput = {
             "workerid": worker_id,

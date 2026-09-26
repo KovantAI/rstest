@@ -43,7 +43,8 @@ def gate_monorepo(g, args, binary):
     doc = json.loads(rep.read_text(encoding="utf-8"))
     check(
         "mono: merged report, root-relative keys",
-        doc["meta"]["schema"] == 4
+        # Same version as a single-project report (was a stale 4 in 0.7.0).
+        doc["meta"]["schema"] == 5
         and any(k.startswith("libs/a/") for k in doc["tests"])
         and any(k.startswith("libs/b/") for k in doc["tests"]),
         str(list(doc["tests"])[:4]),

@@ -238,6 +238,23 @@ impl Worker {
     }
 }
 
+/// Orchestrator-to-worker variables, set per run in [`build_worker_command`]
+/// and never inherited. Deliberately absent: `RSTEST_RUN_UID` (a monorepo
+/// parent hands it to each project's rstest so they share one run id, and
+/// every worker gets it set explicitly anyway), `RSTEST_WORKER_PATH` and
+/// `RSTEST_MAX_MESSAGE_BYTES` (user settings rstest honors).
+const INTERNAL_ENV: &[&str] = &[
+    "RSTEST_WORKER_ID",
+    "RSTEST_WORKER_COUNT",
+    "RSTEST_BASETEMP",
+    "RSTEST_SEND_IDS",
+    "RSTEST_DOCTOR",
+    "RSTEST_TIMEOUT",
+    "RSTEST_LEAKCHECK",
+    "RSTEST_DEBUGPY_PORT",
+    "RSTEST_STREAM_OUTPUT",
+];
+
 /// Build the worker's [`Command`] (argv + per-run child environment + stdio)
 /// without spawning it. Split out of [`Worker::spawn_with_io`] so the arg/env
 /// wiring is unit-testable via `Command::get_args`/`get_envs` — no live process.
@@ -287,6 +304,19 @@ fn build_worker_command(
             Stdio::Null => std::process::Stdio::null(),
             Stdio::Inherit => std::process::Stdio::inherit(),
         });
+    // Clear every internal variable first so only what this run sets reaches
+    // the worker: a value inherited from the caller's shell, CI, or an outer
+    // rstest (a test that itself runs rstest) must not leak in.
+    for key in INTERNAL_ENV {
+        command.env_remove(key);
+    }
+    if worker.is_none() {
+        // Outside a pool there is no xdist identity; the pool sets its own
+        // (rstest_worker assigns these per worker).
+        command
+            .env_remove("PYTEST_XDIST_WORKER")
+            .env_remove("PYTEST_XDIST_WORKER_COUNT");
+    }
     if env.doctor {
         command.env("RSTEST_DOCTOR", "1");
     }
@@ -704,6 +734,58 @@ mod tests {
         let e1 = envs_of(&cmd1);
         assert_eq!(e1["RSTEST_WORKER_ID"], "gw1");
         assert_eq!(e1["RSTEST_SEND_IDS"], "0");
+    }
+
+    /// Keys the command explicitly removes (`env_remove` shows up in
+    /// `get_envs` as a `None` value).
+    fn removed_of(cmd: &Command) -> Vec<String> {
+        cmd.get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn build_command_clears_inherited_internal_env() {
+        // A lone (-n 0) worker must not inherit RSTEST_WORKER_ID & co. or a
+        // stale xdist identity from the caller: each is removed, not left to
+        // fall through from the parent environment.
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &base_env(), 3, 4);
+        let removed = removed_of(&cmd);
+        for key in super::INTERNAL_ENV
+            .iter()
+            .copied()
+            .filter(|k| *k != "RSTEST_SEND_IDS")
+            .chain(["PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT"])
+        {
+            assert!(removed.iter().any(|r| r == key), "{key} not cleared");
+        }
+        // User settings and the shared run uid still pass through.
+        for kept in ["RSTEST_WORKER_PATH", "RSTEST_MAX_MESSAGE_BYTES"] {
+            assert!(
+                !removed.iter().any(|r| r == kept),
+                "{kept} must stay inherited"
+            );
+        }
+        assert_eq!(envs_of(&cmd)["RSTEST_RUN_UID"], "uid-1");
+    }
+
+    #[test]
+    fn build_command_pool_worker_sets_identity_over_cleared_env() {
+        // In a pool the identity is cleared and then set: the explicit value
+        // wins, and the xdist vars are left for rstest_worker to assign.
+        let cmd = build_worker_command(
+            Path::new("python3"),
+            Some((2, 4)),
+            Stdio::Null,
+            &base_env(),
+            3,
+            4,
+        );
+        let envs = envs_of(&cmd);
+        assert_eq!(envs["RSTEST_WORKER_ID"], "gw2");
+        assert_eq!(envs["RSTEST_WORKER_COUNT"], "4");
+        assert!(!removed_of(&cmd).iter().any(|r| r == "PYTEST_XDIST_WORKER"));
     }
 
     #[test]

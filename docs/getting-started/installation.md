@@ -40,7 +40,7 @@ installed, and it does not conflict with an installed pytest either: the
 vendored pytest core lives inside the `rstest_worker` package and never
 touches your `pytest` installation. (One exception: `rstest try` runs your
 suite under plain `pytest` to produce a baseline, so *that* command needs
-pytest installed, see [`try`](../reference/cli.md#try).)
+pytest installed, see [`try`](../reference/cli-commands.md#try).)
 
 First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
 it covers the common install/first-run failures (missing `msgpack`, wrong
