@@ -1121,6 +1121,7 @@ fn dispatch_run(
         worker_timeout: watchdog,
         known_flaky,
         worker_env,
+        fork_prewarm: cli.fork_pool,
         quarantine,
     };
     let path = if passthrough {
@@ -1181,6 +1182,9 @@ fn dispatch_run(
                 // A single session reports no collection; the duration cache
                 // falls back to its saved rootdir and current file contents.
                 sources: Default::default(),
+                // No worker pool spawned here (one passthrough worker).
+                startup_seconds: 0.0,
+                fork_prewarmed: false,
             }
         } else if path == RunPath::Lazy {
             let cwd = std::env::current_dir()?;

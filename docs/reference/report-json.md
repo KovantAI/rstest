@@ -253,6 +253,8 @@ It is a **separate document** from the run snapshot above; combine with
   "rstest_version": "0.7.0",
   "workers": 8,
   "wall_seconds": 68.4,
+  "startup_seconds": 0.6,
+  "fork_prewarm": false,
   "tests": 2048,
   "test_time_seconds": 412.9,
   "cpu_time_seconds": 120.3,
@@ -310,6 +312,8 @@ Top-level fields:
 | `rstest_version` | string | the rstest version that wrote it |
 | `workers` | int | worker count for this run (`-n`) |
 | `wall_seconds` | float | total wall-clock time; **depends on worker count** — compare across runs only at equal `-n` |
+| `startup_seconds` | float | wall from pool spawn to every worker's first event (import + collect start); part of `wall_seconds`. `0.0` on single-worker runs. Cut by [`--fork-pool`](cli.md#-fork-pool) |
+| `fork_prewarm` | bool | whether this run used [`--fork-pool`](cli.md#-fork-pool) |
 | `tests` | int | number of tests with a recorded duration |
 | `test_time_seconds` | float | summed per-test call durations (worker-count-independent — the stable trending metric) |
 | `cpu_time_seconds` | float | summed call-phase CPU time, over tests where it was measured |

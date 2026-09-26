@@ -37,6 +37,14 @@ pub struct DoctorReport {
     rstest_version: &'static str,
     workers: usize,
     wall_seconds: f64,
+    /// Wall from pool spawn to every worker's first event (imported core +
+    /// started collecting), part of `wall_seconds`. A fixed per-run tax that
+    /// `--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs.
+    /// Surfaced so a startup-bound suite is legible.
+    startup_seconds: f64,
+    /// Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates
+    /// the "try --fork-pool" hint so it isn't suggested when already on.
+    fork_prewarm: bool,
     tests: usize,
     test_time_seconds: f64,
     /// Sum of call-phase CPU time, over tests where it was measured.
@@ -205,6 +213,8 @@ pub fn analyze(
     run: &Run,
     fixtures: &[FixtureStat],
     wall: f64,
+    startup: f64,
+    fork_prewarm: bool,
     workers: usize,
     coverage: Option<(&CoverageIndex, &ProjectConfig)>,
 ) -> DoctorReport {
@@ -380,6 +390,8 @@ pub fn analyze(
         rstest_version: env!("CARGO_PKG_VERSION"),
         workers,
         wall_seconds: wall,
+        startup_seconds: startup,
+        fork_prewarm,
         tests: durations.len(),
         test_time_seconds: test_time,
         cpu_time_seconds: cpu_time,
@@ -554,6 +566,8 @@ pub(crate) mod testutil {
             rstest_version: "test",
             workers: 4,
             wall_seconds: 9.0,
+            startup_seconds: 0.3,
+            fork_prewarm: false,
             tests,
             test_time_seconds: 30.0,
             cpu_time_seconds: 6.0,
@@ -706,7 +720,7 @@ mod tests {
         for i in 0..4 {
             record_test(&mut run, &format!("t.py::t{i}"), 0, 2.0);
         }
-        let pe = analyze(&run, &[], 8.0, 8, None)
+        let pe = analyze(&run, &[], 8.0, 0.0, false, 8, None)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 1);
@@ -727,7 +741,7 @@ mod tests {
         let mut run = Run::default();
         record_test(&mut run, "t.py::a", 0, 10.0);
         record_test(&mut run, "t.py::b", 1, 10.0);
-        let pe = analyze(&run, &[], 10.0, 2, None)
+        let pe = analyze(&run, &[], 10.0, 0.0, false, 2, None)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 2);
@@ -749,7 +763,7 @@ mod tests {
         record_test(&mut run, "t.py::a", 0, 8.0);
         record_test(&mut run, "t.py::b", 1, 4.0);
         record_test(&mut run, "t.py::c", 2, 4.0);
-        let pe = analyze(&run, &[], 9.0, 4, None)
+        let pe = analyze(&run, &[], 9.0, 0.0, false, 4, None)
             .parallel_efficiency
             .expect("multi-worker run has efficiency");
         assert_eq!(pe.workers_busy.len(), 3);
@@ -968,15 +982,17 @@ mod tests {
             )],
         )]);
         let project = ProjectConfig::default();
-        let report = analyze(&run, &[], 9.0, 1, Some((&idx, &project)));
+        let report = analyze(&run, &[], 9.0, 0.0, false, 1, Some((&idx, &project)));
         assert!(report.coverage_waste.is_none());
         // Control: with both passing, one of the pair IS waste.
         let mut both = Run::default();
         record_test(&mut both, "tests/test_a.py::test_slow", 0, 9.0);
         record_test(&mut both, "tests/test_a.py::test_skip", 0, 9.0);
-        assert!(analyze(&both, &[], 9.0, 1, Some((&idx, &project)))
-            .coverage_waste
-            .is_some());
+        assert!(
+            analyze(&both, &[], 9.0, 0.0, false, 1, Some((&idx, &project)))
+                .coverage_waste
+                .is_some()
+        );
     }
 
     #[test]
@@ -984,7 +1000,9 @@ mod tests {
         // analyze without an index never produces a waste section.
         let mut run = Run::default();
         record_test(&mut run, "t.py::a", 0, 5.0);
-        assert!(analyze(&run, &[], 5.0, 1, None).coverage_waste.is_none());
+        assert!(analyze(&run, &[], 5.0, 0.0, false, 1, None)
+            .coverage_waste
+            .is_none());
     }
 
     fn fstat(name: &str, count: u64, total: f64, constant: bool, redundant: f64) -> FixtureStat {
@@ -1005,7 +1023,7 @@ mod tests {
         let run = Run::default();
         // Merged stat: the busiest session skipped 1.1s of repeat setup.
         let fixtures = vec![fstat("cfg", 40, 4.0, true, 1.1)];
-        let r = analyze(&run, &fixtures, 10.0, 4, None);
+        let r = analyze(&run, &fixtures, 10.0, 0.0, false, 4, None);
         let e = r.fixtures.iter().find(|f| f.name == "cfg").unwrap();
         assert!(e.constant);
         assert!((e.projected_saving_seconds - 1.1).abs() < 1e-9);
@@ -1021,7 +1039,7 @@ mod tests {
             // after a respawn, one call each): no evidence, nothing to save.
             fstat("once_each", 5, 5.0, true, 0.0),
         ];
-        let r = analyze(&run, &fixtures, 10.0, 4, None);
+        let r = analyze(&run, &fixtures, 10.0, 0.0, false, 4, None);
         for f in &r.fixtures {
             assert_eq!(f.projected_saving_seconds, 0.0, "{}", f.name);
             assert!(!f.constant, "{}", f.name);
