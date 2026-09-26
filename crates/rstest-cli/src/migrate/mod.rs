@@ -7,7 +7,7 @@
 
 mod audit;
 mod bisect;
-mod check;
+pub(crate) mod check;
 mod classify;
 mod try_cmd;
 

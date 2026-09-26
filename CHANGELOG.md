@@ -9,8 +9,11 @@ between 0.0.x releases and are listed here.
   publish a machine-readable [JSON Schema](https://json-schema.org/) (draft-07)
   plus a field-reference table, generated directly from the Rust types
   (`schemars`) and embedded into the docs so they can never drift from what the
-  CLI emits. Covers `--doctor-json` and the `flakes.json` flake log to start;
-  see the new *Output schemas* reference page. A golden test enforces
+  CLI emits. Covers every stable JSON surface: `--report-json`, `--doctor-json`,
+  `--collect-only --report-json` (discovery), `migrate-check --migrate-check-json`,
+  and the `flakes.json` flake log; see the new *Output schemas* reference page.
+  The three previously hand-built (`serde_json::json!`) outputs are now emitted
+  from typed structs with unchanged bytes. A golden test enforces schema
   freshness (`RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`).
 - **`--doctor` coverage-waste section: slow tests that add no unique coverage.**
   When the doctor run itself collects per-test coverage

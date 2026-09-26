@@ -13,6 +13,7 @@ mod render;
 /// (rstest-research/harness/recorder.py) so `diff_snapshots.py` can gate
 /// rstest output directly against pytest baselines.
 #[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TestEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup: Option<String>,
@@ -87,6 +88,58 @@ pub struct RunMeta {
     pub argv: Vec<String>,
     /// Present only for a `--shard K/N` run; drives `shard-verify`.
     pub shard: Option<ShardMeta>,
+}
+
+/// The `--report-json` document (schema 5). Fields are declared alphabetically
+/// to match the historical output; borrows the run's data so the writer and the
+/// HTML embed serialize the same source without cloning.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct Snapshot<'a> {
+    /// Paths of collectors that failed to import/collect.
+    pub collect_errors: Vec<&'a String>,
+    pub meta: SnapshotMeta<'a>,
+    /// Per-test outcomes, keyed by node id.
+    pub tests: &'a BTreeMap<String, TestEntry>,
+}
+
+/// Run-level envelope for the report document.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct SnapshotMeta<'a> {
+    /// The process argv the run was invoked with.
+    pub argv: &'a [String],
+    /// Outcome counts (pytest accounting); all keys always present.
+    pub counts: BTreeMap<&'static str, u64>,
+    /// Wall-clock run duration, rounded to two decimals.
+    pub duration_seconds: f64,
+    /// Process exit status.
+    pub exitstatus: i32,
+    /// Constant producer tag: always `"rstest"`.
+    pub runner: &'static str,
+    /// Document schema version.
+    pub schema: u32,
+    /// Sharding identity; present only under `--shard K/N`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shard: Option<ShardJson<'a>>,
+    /// Unix epoch (seconds) the run started.
+    pub started_at_epoch: u64,
+    /// Worker count for the run (`-n`).
+    pub workers: usize,
+}
+
+/// Sharding identity block (only under `--shard`).
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct ShardJson<'a> {
+    /// sha256 of the full ordered nodeid list (identical across shards).
+    pub collection_hash: &'a str,
+    /// Number of collected nodeids.
+    pub collection_size: u64,
+    /// This shard's index (1-based).
+    pub k: usize,
+    /// Total shard count.
+    pub n: usize,
 }
 
 /// A recorded failure: (nodeid, longrepr, sections of (header, body)).
@@ -364,53 +417,50 @@ impl Run {
         counts
     }
 
-    /// The schema-5 report document as a JSON value: the single source shared by
-    /// the `--report-json` file writer and the HTML report's embedded data blob,
-    /// so the two can never drift.
-    pub fn snapshot_value(&self, run_meta: &RunMeta) -> serde_json::Value {
-        let mut meta = serde_json::Map::new();
-        meta.insert("runner".into(), "rstest".into());
-        // Schema history: 2 added longrepr/crashed+version; 3 added the
-        // envelope (counts, duration_seconds, started_at_epoch, workers, argv);
-        // 4 added per-test lineno; 5 added quarantined.
-        meta.insert("schema".into(), 5.into());
-        meta.insert("exitstatus".into(), run_meta.exitstatus.into());
-        meta.insert(
-            "counts".into(),
-            serde_json::to_value(self.counts()).unwrap_or_default(),
-        );
-        meta.insert(
-            "duration_seconds".into(),
-            ((run_meta.duration_seconds * 100.0).round() / 100.0).into(),
-        );
-        meta.insert("started_at_epoch".into(), run_meta.started_at_epoch.into());
-        meta.insert("workers".into(), run_meta.workers.into());
-        meta.insert(
-            "argv".into(),
-            serde_json::to_value(&run_meta.argv).unwrap_or_default(),
-        );
-        // Sharding identity (only under --shard): lets `shard-verify` reconcile
-        // the per-shard reports. Optional field, no schema bump (like `cpu`).
-        if let Some(s) = &run_meta.shard {
-            meta.insert(
-                "shard".into(),
-                serde_json::json!({
-                    "k": s.k,
-                    "n": s.n,
-                    "collection_hash": s.collection_hash,
-                    "collection_size": s.collection_size,
+    /// The schema-5 report document: the single typed source shared by the
+    /// `--report-json` file writer and the HTML report's embedded blob, so the
+    /// two can never drift. Field order is alphabetical throughout, matching the
+    /// historical `serde_json::Map` output (no `preserve_order`).
+    fn snapshot<'a>(&'a self, run_meta: &'a RunMeta) -> Snapshot<'a> {
+        Snapshot {
+            collect_errors: self.collect_errors.iter().map(|(p, _)| p).collect(),
+            meta: SnapshotMeta {
+                argv: &run_meta.argv,
+                counts: self.counts(),
+                // Two-decimal rounding preserved from the original emitter.
+                duration_seconds: (run_meta.duration_seconds * 100.0).round() / 100.0,
+                exitstatus: run_meta.exitstatus,
+                runner: "rstest",
+                // Schema history: 2 added longrepr/crashed+version; 3 added the
+                // envelope (counts, duration_seconds, started_at_epoch, workers,
+                // argv); 4 added per-test lineno; 5 added quarantined.
+                schema: 5,
+                // Sharding identity (only under --shard): lets `shard-verify`
+                // reconcile the per-shard reports. Optional, no schema bump.
+                shard: run_meta.shard.as_ref().map(|s| ShardJson {
+                    collection_hash: &s.collection_hash,
+                    collection_size: s.collection_size,
+                    k: s.k,
+                    n: s.n,
                 }),
-            );
+                started_at_epoch: run_meta.started_at_epoch,
+                workers: run_meta.workers,
+            },
+            tests: &self.tests,
         }
-        let collect_errors: Vec<&String> = self.collect_errors.iter().map(|(p, _)| p).collect();
-        serde_json::json!({
-            "meta": meta,
-            "collect_errors": collect_errors,
-            "tests": &self.tests,
-        })
+    }
+
+    /// The schema-5 report as a JSON value (the shared surface for the HTML
+    /// embed and the tests). Serializing the typed [`Snapshot`] through a
+    /// `Value` alphabetizes every key, exactly as the previous hand-built map
+    /// did, so the bytes are unchanged.
+    pub fn snapshot_value(&self, run_meta: &RunMeta) -> serde_json::Value {
+        serde_json::to_value(self.snapshot(run_meta)).unwrap_or_default()
     }
 
     pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
+        // Serialize through the `Value` (like the HTML embed) so every key stays
+        // alphabetical, byte-for-byte identical to the pre-typed-struct output.
         std::fs::write(path, serde_json::to_vec(&self.snapshot_value(run_meta))?)?;
         Ok(())
     }

@@ -1,0 +1,235 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Snapshot",
+  "description": "The `--report-json` document (schema 5). Fields are declared alphabetically to match the historical output; borrows the run's data so the writer and the HTML embed serialize the same source without cloning.",
+  "type": "object",
+  "required": [
+    "collect_errors",
+    "meta",
+    "tests"
+  ],
+  "properties": {
+    "collect_errors": {
+      "description": "Paths of collectors that failed to import/collect.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "meta": {
+      "$ref": "#/definitions/SnapshotMeta"
+    },
+    "tests": {
+      "description": "Per-test outcomes, keyed by node id.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TestEntry"
+      }
+    }
+  },
+  "definitions": {
+    "ShardJson": {
+      "description": "Sharding identity block (only under `--shard`).",
+      "type": "object",
+      "required": [
+        "collection_hash",
+        "collection_size",
+        "k",
+        "n"
+      ],
+      "properties": {
+        "collection_hash": {
+          "description": "sha256 of the full ordered nodeid list (identical across shards).",
+          "type": "string"
+        },
+        "collection_size": {
+          "description": "Number of collected nodeids.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "k": {
+          "description": "This shard's index (1-based).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "n": {
+          "description": "Total shard count.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SnapshotMeta": {
+      "description": "Run-level envelope for the report document.",
+      "type": "object",
+      "required": [
+        "argv",
+        "counts",
+        "duration_seconds",
+        "exitstatus",
+        "runner",
+        "schema",
+        "started_at_epoch",
+        "workers"
+      ],
+      "properties": {
+        "argv": {
+          "description": "The process argv the run was invoked with.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "counts": {
+          "description": "Outcome counts (pytest accounting); all keys always present.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        },
+        "duration_seconds": {
+          "description": "Wall-clock run duration, rounded to two decimals.",
+          "type": "number",
+          "format": "double"
+        },
+        "exitstatus": {
+          "description": "Process exit status.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "shard": {
+          "description": "Sharding identity; present only under `--shard K/N`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ShardJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started_at_epoch": {
+          "description": "Unix epoch (seconds) the run started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "workers": {
+          "description": "Worker count for the run (`-n`).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TestEntry": {
+      "description": "Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-research/harness/recorder.py) so `diff_snapshots.py` can gate rstest output directly against pytest baselines.",
+      "type": "object",
+      "required": [
+        "cached",
+        "crashed",
+        "flaky",
+        "quarantined",
+        "wasxfail"
+      ],
+      "properties": {
+        "cached": {
+          "description": "Not executed this run: unchanged since the last green run, so its prior pass was carried forward (`--incremental`). Still counts as passed.",
+          "type": "boolean"
+        },
+        "call": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cpu": {
+          "description": "Call-phase CPU time (process_time), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "crashed": {
+          "description": "The outcome was fabricated because the worker died on this test (crash or --worker-timeout kill), not produced by pytest.",
+          "type": "boolean"
+        },
+        "duration": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "flaky": {
+          "description": "Passed only after one or more reruns (--reruns).",
+          "type": "boolean"
+        },
+        "lineno": {
+          "description": "Source line of the test (0-based, from pytest's report.location), for editor mapping. None when pytest reports no location.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "longrepr": {
+          "description": "Failure text (assertion repr / traceback), failures only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quarantined": {
+          "description": "Failed, but matched the --quarantine list: reported distinctly, never fatal to the run.",
+          "type": "boolean"
+        },
+        "setup": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skip_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "teardown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wasxfail": {
+          "type": "boolean"
+        },
+        "worker": {
+          "description": "Worker that produced the final outcome (pool runs only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}
