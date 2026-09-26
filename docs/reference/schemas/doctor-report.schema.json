@@ -166,6 +166,10 @@
         "total_seconds"
       ],
       "properties": {
+        "constant": {
+          "description": "Scope-promotion advisor: a function-scoped fixture that produced the same immutable builtin value on every call in every worker, with no per-test teardown or narrower-scoped inputs (checked worker-side), a candidate for `@pytest.fixture(scope=\"session\")`.",
+          "type": "boolean"
+        },
         "count": {
           "type": "integer",
           "format": "uint64",
@@ -173,6 +177,11 @@
         },
         "name": {
           "type": "string"
+        },
+        "projected_saving_seconds": {
+          "description": "Projected wall-time saved by promoting this candidate to session scope: the largest per-worker-session `(calls - 1) * mean_setup`, i.e. the redundant re-setups removed on the worker that benefits most. 0 unless `constant`.",
+          "type": "number",
+          "format": "double"
         },
         "scope": {
           "type": "string"

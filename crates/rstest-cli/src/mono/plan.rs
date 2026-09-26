@@ -87,13 +87,7 @@ pub fn project_cost(project: &Path) -> Option<f64> {
     if let Some(wall) = crate::scheduling::durations::load_wall_in(project) {
         return Some(wall);
     }
-    let bytes = std::fs::read(crate::cache::file_in(
-        project,
-        crate::scheduling::durations::FILE,
-    ))
-    .ok()?;
-    let map: std::collections::HashMap<String, f64> = serde_json::from_slice(&bytes).ok()?;
-    Some(map.values().sum())
+    crate::scheduling::durations::sum_secs_in(project)
 }
 
 #[cfg(test)]

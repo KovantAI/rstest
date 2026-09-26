@@ -141,6 +141,8 @@ pub fn run_lazy_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        // Lazy never reorders by flake history, so quarantine is post-run only.
+        quarantine: _,
     } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();
@@ -166,6 +168,7 @@ pub fn run_lazy_pool(
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
     let mut cache_dir: Option<String> = None;
+    let mut sources = crate::scheduling::durations::Collected::default();
     let mut total_items = 0usize;
     let mut requeued: VecDeque<String> = VecDeque::new();
     let mut serial: VecDeque<String> = VecDeque::new();
@@ -244,9 +247,15 @@ pub fn run_lazy_pool(
                 // Each skipped collector is seen by exactly one worker.
                 run.collect_skips += 1;
             }
-            Ok(Event::LazyReady { cache_dir: cd }) => {
+            Ok(Event::LazyReady {
+                cache_dir: cd,
+                rootdir,
+            }) => {
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
+                }
+                if let Some(rd) = &rootdir {
+                    sources.set_rootdir(rd);
                 }
                 states[idx].ready = true;
             }
@@ -258,6 +267,7 @@ pub fn run_lazy_pool(
             }) => {
                 total_items += ids.len();
                 prog.set_total(total_items);
+                sources.record(&ids);
                 let s = &mut states[idx];
                 if let Some(pos) = s.uncollected_files.iter().position(|f| *f == path) {
                     s.uncollected_files.remove(pos);
@@ -601,6 +611,7 @@ pub fn run_lazy_pool(
         // hash, so shard-verify does not cover lazy runs (no shard meta stamped).
         collection_hash: None,
         collection_size: 0,
+        sources,
     })
 }
 

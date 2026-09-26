@@ -52,8 +52,11 @@ pub fn load_coverage_index() -> Option<CoverageIndex> {
 /// when a schema-current index is on disk (the denominator "X of N mapped tests
 /// impacted"), `None` when the map is cold (missing / unreadable / old schema),
 /// which is the signal that `--impacted` degraded to import-graph selection.
+/// Nodeids whose test file no longer exists (deleted since the index was built)
+/// are not counted - the same stale check selection applies.
 pub fn mapped_test_count() -> Option<usize> {
     let idx = load_coverage_index()?;
+    let cwd = std::env::current_dir().unwrap_or_default();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for f in idx.files.values() {
         for ids in f.lines.values() {
@@ -62,7 +65,11 @@ pub fn mapped_test_count() -> Option<usize> {
             }
         }
     }
-    Some(seen.len())
+    Some(
+        seen.into_iter()
+            .filter(|id| cwd.join(crate::text::nodeid_file(id)).exists())
+            .count(),
+    )
 }
 
 /// Strip the CR from every CRLF so a CRLF working tree and its LF blob hash equal
@@ -291,7 +298,7 @@ mod tests {
     use super::{ChangedLines, Selection};
     use crate::config::ProjectConfig;
     use crate::select::git::FileChange;
-    use crate::select::GLOBAL_TEST_LOCK as GLOBAL;
+    use crate::test_env::{self, Held};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -337,22 +344,6 @@ mod tests {
         d.canonicalize().unwrap()
     }
 
-    struct Cwd {
-        orig: PathBuf,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    impl Drop for Cwd {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.orig);
-        }
-    }
-    fn enter(dir: &Path) -> Cwd {
-        let lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
-        let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        Cwd { orig, _lock: lock }
-    }
-
     fn git(dir: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .args(args)
@@ -362,7 +353,9 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
-    fn init_repo(name: &str) -> PathBuf {
+    /// Takes the held lock: it spawns `git`, which resolves through PATH that
+    /// a sibling test may be shimming.
+    fn init_repo(_held: &Held, name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("rstest-cov-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -381,11 +374,12 @@ mod tests {
 
     #[test]
     fn old_side_sha256_hashes_committed_content_and_none_when_absent() {
-        let repo = init_repo("oldside");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "oldside");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
         // Present at HEAD: a hash matching the working-tree content (unchanged).
         let h = old_side_sha256("HEAD", Path::new("a.py")).expect("committed file hashes");
         assert_eq!(h.len(), 64);
@@ -399,11 +393,12 @@ mod tests {
 
     #[test]
     fn diff_old_side_resolves_triple_dot_via_merge_base() {
-        let repo = init_repo("tripledot");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "tripledot");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
         let head = {
             let out = std::process::Command::new("git")
                 .args(["rev-parse", "HEAD"])
@@ -421,7 +416,7 @@ mod tests {
 
     #[test]
     fn conftest_change_falls_back_to_the_graph_with_a_warm_index() {
-        let _lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let held = test_env::lock();
         let root = std::env::temp_dir().join(format!("rstest-cov-conftest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -442,17 +437,12 @@ mod tests {
             serde_json::to_vec(&index).unwrap(),
         )
         .unwrap();
-        let saved = std::env::var("RSTEST_CACHE").ok();
-        std::env::set_var("RSTEST_CACHE", &cache_dir);
+        let cache_env = test_env::set_var(&held, "RSTEST_CACHE", &cache_dir);
 
         let mut changes: ChangedLines = ChangedLines::new();
         changes.insert(PathBuf::from("pkg/conftest.py"), FileChange::default());
         let sel = affected_with_coverage(&root, &ProjectConfig::default(), &changes, false, None);
-
-        match saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE", v),
-            None => std::env::remove_var("RSTEST_CACHE"),
-        }
+        drop(cache_env);
 
         // A changed conftest routes to the graph (Rule 2), selecting its subtree.
         match sel.unwrap() {
@@ -467,36 +457,36 @@ mod tests {
 
     #[test]
     fn mapped_test_count_dedups_nodeids_across_files_and_lines() {
-        let _lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let held = test_env::lock();
         let dir = fixture("mapcount");
         // test_a appears on two lines of one file and again in another file:
         // the distinct-nodeid count must be 2 (test_a, test_b), not 3.
+        // test_gone's file was deleted since the index was built: not counted.
         let index = cov_index(&[
             (
                 "s1.py",
                 "H",
                 &[
                     (1, &["t.py::test_a"]),
-                    (2, &["t.py::test_a", "t.py::test_b"]),
+                    (2, &["t.py::test_a", "t.py::test_b", "gone.py::test_gone"]),
                 ],
             ),
             ("s2.py", "H", &[(9, &["t.py::test_a"])]),
         ]);
+        std::fs::write(dir.join("t.py"), "").unwrap();
         std::fs::write(
             dir.join(COVERAGE_INDEX_FILE),
             serde_json::to_vec(&index).unwrap(),
         )
         .unwrap();
-        let saved = std::env::var("RSTEST_CACHE").ok();
-        std::env::set_var("RSTEST_CACHE", &dir);
+        let cache_env = test_env::set_var(&held, "RSTEST_CACHE", &dir);
+        let cwd = test_env::set_cwd(&held, &dir);
         let n = super::mapped_test_count();
         // A cold cache (no file) reads None.
         std::fs::remove_file(dir.join(COVERAGE_INDEX_FILE)).unwrap();
         let cold = super::mapped_test_count();
-        match saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE", v),
-            None => std::env::remove_var("RSTEST_CACHE"),
-        }
+        drop(cwd);
+        drop(cache_env);
         assert_eq!(n, Some(2));
         assert_eq!(cold, None);
     }
@@ -532,6 +522,7 @@ mod tests {
 
     #[test]
     fn index_hit_selects_the_covered_nodeid_and_skips_the_graph() {
+        let held = test_env::lock();
         // Drift hash matches and the changed old-side line is indexed to a live
         // test: the exact coverage nodeid is picked, with no graph fallback.
         let root = fixture("hit");
@@ -541,7 +532,7 @@ mod tests {
             "test_src.py",
             "import src\ndef test_a():\n    assert src.x\n",
         );
-        let _cwd = enter(&root);
+        let _cwd = test_env::set_cwd(&held, &root);
         let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], false));
@@ -564,6 +555,7 @@ mod tests {
 
     #[test]
     fn drift_hash_mismatch_routes_the_file_to_the_graph() {
+        let held = test_env::lock();
         // The base content no longer hashes to what the index recorded, so the
         // index entry is treated as absent and the file goes to the import graph -
         // which selects the WHOLE test file, not a (possibly wrong) coverage nodeid.
@@ -574,7 +566,7 @@ mod tests {
             "test_src.py",
             "import src\ndef test_a():\n    assert src.x\n",
         );
-        let _cwd = enter(&root);
+        let _cwd = test_env::set_cwd(&held, &root);
         let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], false));
@@ -601,6 +593,7 @@ mod tests {
 
     #[test]
     fn a_changed_line_absent_from_the_index_falls_back_to_the_graph() {
+        let held = test_env::lock();
         // Drift hash matches, but the changed old-side line has no nodeid in the
         // index (a def/decorator/blank line). Selecting from the index would pick
         // ZERO tests, so the file must fall back to the graph instead.
@@ -611,7 +604,7 @@ mod tests {
             "test_src.py",
             "import src\ndef test_a():\n    assert src.x\n",
         );
-        let _cwd = enter(&root);
+        let _cwd = test_env::set_cwd(&held, &root);
         // The index knows line 1 only; the change touches the uncovered line 2.
         let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
         let mut changes = ChangedLines::new();
@@ -633,6 +626,7 @@ mod tests {
 
     #[test]
     fn a_stale_nodeid_demotes_its_file_to_the_graph_and_is_not_selected() {
+        let held = test_env::lock();
         // The index points a covered line at a test file that no longer exists
         // (renamed/deleted since the warm run). Handing that stale nodeid to pytest
         // would error or skip real coverage, so the file is demoted to the graph
@@ -644,7 +638,7 @@ mod tests {
             "test_src.py",
             "import src\ndef test_a():\n    assert src.x\n",
         );
-        let _cwd = enter(&root);
+        let _cwd = test_env::set_cwd(&held, &root);
         let index = cov_index(&[("src.py", "H", &[(1, &["gone_test.py::test_dead"])])]);
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], false));
@@ -672,6 +666,7 @@ mod tests {
 
     #[test]
     fn new_code_forces_the_graph_and_dedups_the_redundant_nodeid() {
+        let held = test_env::lock();
         // A changed file with an indexed line hit AND brand-new code: the index
         // hit yields a `file::test` nodeid, but has_new_code also routes it to the
         // graph, which selects the WHOLE test file. The whole-file result makes the
@@ -683,7 +678,7 @@ mod tests {
             "test_src.py",
             "import src\ndef test_a():\n    assert src.x\n",
         );
-        let _cwd = enter(&root);
+        let _cwd = test_env::set_cwd(&held, &root);
         let index = cov_index(&[("src.py", "H", &[(1, &["test_src.py::test_a"])])]);
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("src.py"), file_change(&[(1, 1)], true));
@@ -706,11 +701,12 @@ mod tests {
 
     #[test]
     fn a_changed_test_file_selects_itself_directly() {
+        let held = test_env::lock();
         // A changed test file always runs its own tests (fixtures/assertions may
         // have changed) - selected directly, never consulting the index.
         let root = fixture("direct");
         write(&root, "test_src.py", "def test_a():\n    pass\n");
-        let _cwd = enter(&root);
+        let _cwd = test_env::set_cwd(&held, &root);
         let index = cov_index(&[]);
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("test_src.py"), file_change(&[(1, 1)], false));
@@ -731,10 +727,11 @@ mod tests {
 
     #[test]
     fn a_deleted_test_file_is_skipped_not_handed_to_pytest() {
+        let held = test_env::lock();
         // A changed test file whose name matches but is no longer on disk (git
         // reports deletions) must be skipped rather than dispatched as a missing path.
         let root = fixture("deleted");
-        let _cwd = enter(&root); // test_gone.py is deliberately never written.
+        let _cwd = test_env::set_cwd(&held, &root); // test_gone.py is deliberately never written.
         let index = cov_index(&[]);
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("test_gone.py"), file_change(&[(1, 1)], false));
@@ -755,12 +752,13 @@ mod tests {
 
     #[test]
     fn a_direct_test_files_existence_is_checked_against_cwd_not_rootdir() {
+        let held = test_env::lock();
         // rootdir differs from the git cwd: the changed key is cwd-relative and the
         // file exists only under cwd. Resolving it against rootdir would misjudge it
         // deleted; it must be selected.
         let root = fixture("cwd-exist");
         write(&root, "sub/test_x.py", "def test_x():\n    pass\n");
-        let _cwd = enter(&root.join("sub"));
+        let _cwd = test_env::set_cwd(&held, &root.join("sub"));
         let index = cov_index(&[]);
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("test_x.py"), file_change(&[(1, 1)], false));
@@ -781,13 +779,14 @@ mod tests {
 
     #[test]
     fn strict_fallback_that_reaches_no_test_propagates_a_full_run() {
+        let held = test_env::lock();
         // A source file no test imports, routed to the graph under --strict: the
         // graph can't prove reachability, so its FullRun must propagate out rather
         // than silently selecting nothing (a false skip).
         let root = fixture("strict");
         write(&root, "lonely.py", "x = 1\n");
         write(&root, "test_other.py", "def test_o():\n    pass\n");
-        let _cwd = enter(&root);
+        let _cwd = test_env::set_cwd(&held, &root);
         let index = cov_index(&[]); // cold for lonely.py => graph fallback
         let mut changes = ChangedLines::new();
         changes.insert(PathBuf::from("lonely.py"), file_change(&[], true));

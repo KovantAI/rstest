@@ -410,6 +410,15 @@ def gate_doctor(g, args, binary):
         str(d.get("coverage_waste"))[:300],
     )
 
+    # Without coverage in the doctor run itself, the index left by the runs
+    # above may be stale, so the section must be omitted rather than trusted.
+    r = g.run("cw", "--doctor")
+    check(
+        "doctor coverage-waste ignores an index from an earlier run",
+        "COVERAGE WASTE" not in r.stdout and "DOCTOR" in r.stdout.upper(),
+        r.stdout[-400:],
+    )
+
     # --doctor-fail-on: turn the doctor signal into a CI gate. The DOCTOR
     # suite is ~all wait (test_sleepy), so wait_pct is high.
     r = g.run("doc", "-n", "2", "--doctor-fail-on", "wait_pct>50")

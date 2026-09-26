@@ -13,23 +13,119 @@ between 0.0.x releases and are listed here.
   see the new *Output schemas* reference page. A golden test enforces
   freshness (`RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`).
 - **`--doctor` coverage-waste section: slow tests that add no unique coverage.**
-  When a per-test coverage index is warm (any prior `--cov --cov-context=test`
-  run), `--doctor` now flags slow tests whose every executed line is also
-  executed by another test, so they can be deleted or merged without dropping a
-  covered line. Reports the reclaimable time, the count, and per-test detail
+  When the doctor run itself collects per-test coverage
+  (`--doctor --cov --cov-context=test`), `--doctor` now flags slow passing tests
+  whose every executed product line is also executed by another kept passing
+  test, so they can all be deleted or merged together without dropping a
+  covered line (duplicates are picked slowest first). An index from an earlier
+  run or a cache is never used. Reports the reclaimable time, the count, and per-test detail
   (lines covered, distinct other tests sharing them). Emitted in the terminal
   report, the markdown report, and `--doctor-json` as `coverage_waste` (doctor
-  JSON `schema` bumped to `3`). Silent when no coverage index is present.
+  JSON `schema` bumped to `3`). Silent without this run's coverage index.
 - **`--changed` now reports coverage-map health (test impact analysis).**
   `--changed` has been coverage-aware since 0.4.0 (a warm
   `.rstest_cache/coverage_index.json` maps changed lines to the exact covering
   tests); it now makes that observable. With a warm map the selection banner
-  shows the savings ratio — `N changed file(s) -> M of K mapped test target(s)
-  affected`. With a **cold** map and a changed non-test source file — exactly
+  shows the savings ratio — `N changed file(s) -> M of K mapped test(s)
+  affected`, with any whole-file fallback targets counted separately. With a **cold** map and a changed non-test source file — exactly
   where coverage precision would have narrowed the set — it prints a one-line
   hint that it fell back to the import graph and that a prior
   `--cov --cov-context=test` run enables coverage-precise selection. No new
   flags; the hint is silent for test-only / config / non-Python changes.
+- **`--watch` reselects incrementally and quits on `q`.** The import graph
+  behind affected-test selection is kept warm for the session: each save
+  re-checks every file's mtime and size and re-reads only the changed ones, and
+  adding or deleting a `.py` file re-resolves every
+  import against the new file set while reusing each untouched file's parse.
+  Typing `q` then Enter now ends the session cleanly with exit 0 (`Ctrl+C` still
+  works); closing stdin does not, and in modes that hand stdin to the test
+  process (`--pdb`, `-s`, `--debug`, ...) only `Ctrl+C` exits. A watch started
+  in the background (`rstest --watch &`) never reads the terminal, so the shell
+  does not suspend it.
+- **The duration cache self-heals when tests change.** `durations.json` now
+  tags each entry with its test file's path and a sha256 of its contents. On
+  load, an entry whose source file changed (edited body) or vanished
+  (deleted/renamed) is dropped, so an edited test re-times on fresh numbers
+  rather than scheduling on stale ones, and gone tests stop accumulating in the
+  file forever. The hash is content-based and ignores line endings, so a
+  restored cache still matches after a fresh clone or CI checkout. The path is
+  recorded from the rootdir pytest reports on the run that timed the test, so
+  runs with different rootdirs share one cache, and a test edited mid-run
+  re-times next run. Entries a run cannot locate (such as `-n 0` runs of tests
+  never timed in parallel) are kept untagged, as before. `--durations-regress`
+  still compares an edited file's tests against their previous timings. `wall.json`,
+  a whole-suite aggregate with no per-test source to fingerprint, instead ages
+  out on `RSTEST_WALL_TTL_DAYS` (default 30, `0` disables). Both formats are
+  read back-compatibly, so an upgrade keeps existing caches. (Issue #18.)
+- **Fixture scope-promotion advisor in `--doctor`.** Doctor already flags hot
+  function-scoped fixtures; it now *checks* the case for promoting them. Under
+  `--doctor` each function-scoped fixture's produced value is fingerprinted on
+  every call, and a fixture that returned the same value every time (in every
+  worker) is reported as a `scope="session"` candidate with a projected saving:
+  the largest per-worker `(calls − 1) × mean setup time`, the redundant
+  re-setups removed, as wall time. New terminal "SCOPE-PROMOTION CANDIDATES"
+  section and markdown table; the `--doctor-json` document (now `schema: 3`) carries `constant` and
+  `projected_saving_seconds` per fixture. Conservative: only immutable
+  builtin values (`str`, numbers, `bytes`, and tuples/frozensets of them)
+  qualify, and fixtures with per-test teardown (`yield`,
+  `request.addfinalizer`), narrower-scoped dependencies, parametrize
+  arguments, or failed/skipped setups are never flagged. See
+  [doctor guide](docs/guides/doctor.md#scope-promotion-candidates).
+- **`rstest audit` — one-command parallel-safety check.** Runs the suite at
+  `-n auto` (repeat with `--audit-repeat` to catch probabilistic races), diffs
+  against the `-n 0` oracle, and classifies every test that fails *only* in
+  parallel (reusing `migrate-check`'s `-n 0` ×2 + `--dist loadfile`
+  discriminators and verdicts). Prints the serial-fixable (isolation and
+  wall-clock) failures with a ready-to-paste `conftest.py` block that marks
+  exactly those nodeids `@pytest.mark.serial` — one paste, no per-test edits —
+  plus the real per-verdict fix. Order-dependent failures get a
+  `--dist loadfile` recommendation instead, since serial would separate them
+  from the tests they depend on. Intrinsic flakes, inconclusive results and
+  pre-existing `-n 0` failures are called out separately. Exits non-zero on any parallel-only failure (CI-gateable);
+  `--audit-json` writes the findings, the serial set, and the conftest block.
+  See [`audit`](docs/reference/cli.md#audit).
+- **Fail-fast dispatch ordering (`--order fail-fast`).** A new
+  `--order <throughput|fail-fast>` flag chooses how `--dist load` sequences the
+  ready queue. `throughput` (default) keeps the slow-tests-first packing that
+  optimizes wall-clock. `fail-fast` orders for the earliest red signal:
+  recently-failed tests first, then the flakiest (both from
+  `.rstest_cache/flakes.json`), then the usual throughput order for clean
+  tests, so a broken run paired with `--maxfail`/`-x` dies in seconds. Both
+  input signals were already cached; no new data collection. Auto-selected under
+  `--watch`; also settable as `[tool.rstest] order`. See
+  [`--order`](docs/reference/cli.md#-order-throughputfail-fast).
+- **`rstest bisect <nodeid>`: order-dependency polluter finder.** For a test
+  that fails only when run after some other test, bisect delta-debugs the
+  predecessor set at `-n 0` (`ddmin`) down to the minimal set of earlier tests
+  that reproduce the failure (the polluters) and prints a shell-quoted minimal
+  reproducing command (`rstest -n 0 <culprit…> <victim>`). Serial by
+  construction, so it isolates ordering (not concurrency); handles a single
+  polluter and interacting pairs, bounded to ~80 child runs. Uses pytest's
+  own rootdir and collects the whole suite even from a subdirectory, keeps
+  child runs on the collection's interpreter, rootdir and config file,
+  disables pytest-randomly and uses a private cleared cache so the victim
+  always runs last (`--ff`/`--lf`/`-x` in `addopts` included; `--nf`/`--sw`
+  are refused by name), leaves your `.pytest_cache` untouched, scales past the
+  OS argv limit, and forwards pytest options given after `--`. Exits `0` when a culprit is found, `1` when the test isn't
+  order-dependent (fails alone / no reproduction from order), `2` for an
+  unknown nodeid. `--bisect-json` writes the result. See
+  [`bisect`](docs/reference/cli.md#bisect-nodeid).
+- **`migrate-check` child runs honor `--python`.** Its serial, loadfile and
+  polluter discriminator runs re-resolved an interpreter from the environment
+  and could land on a different one than the collection used; they are now
+  pinned to the same interpreter. Its polluter search also disables
+  pytest-randomly, which could shuffle the candidates after the victim.
+- **`migrate-check` discriminator runs ignore rstest `reruns`.** A configured
+  `[tool.rstest] reruns` routed its serial runs through the one-worker pool
+  (duration-ordered) and a passing rerun could hide the failure being
+  classified; the child runs now pin `--reruns 0`, and pass their pytest args
+  after `--` so no rstest flag among them changes how the child runs.
+- **Id-bearing collection works with `-p no:cacheprovider`.** The worker read
+  `config.cache` unguarded, so with the cacheprovider disabled the collection
+  report was never sent.
+- **A pytest `@argsfile` counts as an explicit selection.** At a monorepo root
+  with no pytest config, `rstest @tests.txt` fanned out over every subproject
+  instead of running the listed tests as one project.
 - **Heads-up when a parallel run pairs with a "dark" report plugin.** At
   `-n ≥ 2`, invoking a flag whose plugin aggregates on the (absent) xdist master
   — `--json-report`, `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`,

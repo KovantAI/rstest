@@ -43,8 +43,10 @@ Slow tests that add no unique coverage: every line each one executes is also exe
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `constant` | boolean | no | Scope-promotion advisor: a function-scoped fixture that produced the same immutable builtin value on every call in every worker, with no per-test teardown or narrower-scoped inputs (checked worker-side), a candidate for `@pytest.fixture(scope="session")`. |
 | `count` | integer | yes |  |
 | `name` | string | yes |  |
+| `projected_saving_seconds` | number | no | Projected wall-time saved by promoting this candidate to session scope: the largest per-worker-session `(calls - 1) * mean_setup`, i.e. the redundant re-setups removed on the worker that benefits most. 0 unless `constant`. |
 | `scope` | string | yes |  |
 | `total_seconds` | number | yes |  |
 
