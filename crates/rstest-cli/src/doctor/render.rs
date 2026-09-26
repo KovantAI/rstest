@@ -581,6 +581,49 @@ mod tests {
     }
 
     #[test]
+    fn coverage_waste_terminal_tail_counts_every_unshown_test() {
+        use super::super::WasteTest;
+        let mut r = report(12);
+        let cw = r.coverage_waste.as_mut().unwrap();
+        // 12 redundant tests found, only the 10 slowest kept: the terminal shows
+        // 8 and the tail counts the rest against the full total, not the list.
+        cw.redundant_tests = 12;
+        cw.tests = (0..10)
+            .map(|i| WasteTest {
+                nodeid: format!("tests/test_a.py::dup{i}"),
+                duration: 2.0,
+                covered_lines: 5,
+                also_covered_by: 1,
+            })
+            .collect();
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(out.contains("tests/test_a.py::dup7"), "{out}");
+        assert!(!out.contains("tests/test_a.py::dup8"), "{out}");
+        assert!(out.contains("  ... and 4 more"), "{out}");
+    }
+
+    #[test]
+    fn markdown_coverage_waste_without_slowest_files() {
+        let mut r = report(12);
+        r.slowest_files.clear();
+        let md = render_markdown(&r);
+        assert!(!md.contains("### Slowest files"));
+        assert!(md.contains("### Coverage waste"));
+    }
+
+    #[test]
+    fn no_coverage_index_omits_coverage_waste_section() {
+        let mut r = report(12);
+        r.coverage_waste = None;
+        assert!(!render_markdown(&r).contains("Coverage waste"));
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(!cap.out().contains("COVERAGE WASTE"));
+    }
+
+    #[test]
     fn leak_delta_pluralizes_and_combines() {
         use super::super::Leak;
         let d = |threads, fds| {

@@ -140,7 +140,7 @@ fn diff_cov_gate(pct: Option<f64>, threshold: f64, exitstatus: i32) -> (i32, Str
 fn build_diff_lines(
     w: &mut dyn Write,
     changed: Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u32>>>,
-) -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     match changed {
         Ok(map) => {
             let pid = std::process::id();
@@ -151,12 +151,14 @@ fn build_diff_lines(
                 .into_iter()
                 .map(|(k, v)| (k.to_string_lossy().replace('\\', "/"), v))
                 .collect();
-            let _ = std::fs::write(&lines_path, serde_json::to_vec(&smap)?);
-            Ok(Some((lines_path, out_path)))
+            // A string-keyed map always serializes; a failed write just leaves
+            // covtool nothing to score, which the gate reports without failing.
+            let _ = std::fs::write(&lines_path, serde_json::to_vec(&smap).unwrap_or_default());
+            Some((lines_path, out_path))
         }
         Err(e) => {
             let _ = writeln!(w, "rstest: --cov-diff-fail-under: {e}");
-            Ok(None)
+            None
         }
     }
 }
@@ -369,6 +371,7 @@ pub(super) fn run_post_gates(
         run_uid,
         cache_remote,
         shard,
+        changed_base,
         since_green,
         head,
         env_fp,
@@ -389,10 +392,6 @@ pub(super) fn run_post_gates(
     // run's coverage index), so pin the suite's wall time here: covtool's own
     // time is not test time.
     let suite_wall = start.elapsed().as_secs_f64();
-    // The doctor used to run first, so a later step's error never cost its
-    // output. It now waits for covtool, so an error before it (diff-coverage
-    // setup) is held here and returned once the doctor has reported.
-    let mut deferred_err: Option<anyhow::Error> = None;
     // Before publishing, drop any coverage index left by --cache-pull: only an
     // index covtool writes for THIS run may be pushed. Unconditional on push (not
     // gated by --cov) so a run that produces no fresh index — no --cov at all, no
@@ -427,48 +426,42 @@ pub(super) fn run_post_gates(
         // path when --cov-diff-fail-under is set; covtool scores them and we
         // gate on the percentage below.
         let diff_paths = if want_diff {
-            super::resolve_changed_base(cli, sink).and_then(|base| {
-                build_diff_lines(sink.err(), select::changed_new_lines(base.as_deref()))
-            })
+            build_diff_lines(sink.err(), select::changed_new_lines(changed_base))
         } else {
-            Ok(None)
+            None
         };
-        // A diff-setup error still aborts the run before covtool, as before;
-        // it is just returned after the doctor instead of right away.
-        match diff_paths {
-            Err(e) => deferred_err = Some(e),
-            Ok(diff_paths) => {
-                let mut cmd = std::process::Command::new(python);
-                cmd.args(["-m", "rstest_worker.covtool"])
-                    .args(args)
-                    .env("PYTHONPATH", worker::worker_pythonpath())
-                    // Same cache dir the Rust side reads (cache::dir()) so the index
-                    // lands where load_coverage_index / --cache-push look for it.
-                    .env("RSTEST_CACHE", cache::dir());
-                if let Some((lp, op)) = &diff_paths {
-                    cmd.arg("--rstest-diff-lines")
-                        .arg(lp)
-                        .arg("--rstest-diff-out")
-                        .arg(op);
-                }
-                let cov_status = cmd.status().map(|s| s.success()).map_err(|e| e.to_string());
-                // Freshness is "covtool replaced the file", not "covtool exited 0": a
-                // missed --cov-fail-under exits 1 but still writes this run's index.
-                let after = index_mtime();
-                fresh_index = after.is_some() && after != before;
-                exitstatus = reconcile_cov_status(sink.err(), cov_status, exitstatus);
+        let mut cmd = std::process::Command::new(python);
+        cmd.args(["-m", "rstest_worker.covtool"])
+            .args(args)
+            .env("PYTHONPATH", worker::worker_pythonpath())
+            // Same cache dir the Rust side reads (cache::dir()) so the index
+            // lands where load_coverage_index / --cache-push look for it.
+            .env("RSTEST_CACHE", cache::dir())
+            // Never reads stdin; inheriting it hangs on Windows under
+            // `--watch`, whose `q` listener holds a blocking read on it.
+            .stdin(std::process::Stdio::null());
+        if let Some((lp, op)) = &diff_paths {
+            cmd.arg("--rstest-diff-lines")
+                .arg(lp)
+                .arg("--rstest-diff-out")
+                .arg(op);
+        }
+        let cov_status = cmd.status().map(|s| s.success()).map_err(|e| e.to_string());
+        // Freshness is "covtool replaced the file", not "covtool exited 0": a
+        // missed --cov-fail-under exits 1 but still writes this run's index.
+        let after = index_mtime();
+        fresh_index = after.is_some() && after != before;
+        exitstatus = reconcile_cov_status(sink.err(), cov_status, exitstatus);
 
-                if let Some((lp, op)) = diff_paths {
-                    if let Some(threshold) = cli.cov_diff_fail_under {
-                        exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
-                    }
-                    if let Some(dst) = &cli.cov_diff_json {
-                        copy_diff_cov_json(sink.err(), &op, dst);
-                    }
-                    let _ = std::fs::remove_file(&lp);
-                    let _ = std::fs::remove_file(&op);
-                }
+        if let Some((lp, op)) = diff_paths {
+            if let Some(threshold) = cli.cov_diff_fail_under {
+                exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
             }
+            if let Some(dst) = &cli.cov_diff_json {
+                copy_diff_cov_json(sink.err(), &op, dst);
+            }
+            let _ = std::fs::remove_file(&lp);
+            let _ = std::fs::remove_file(&op);
         }
     }
     let mut doctor_gate_failed = false;
@@ -583,9 +576,6 @@ pub(super) fn run_post_gates(
                 duration_regressions = rows.len();
             }
         }
-    }
-    if let Some(e) = deferred_err {
-        return Err(e);
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
@@ -1227,7 +1217,7 @@ mod tests {
     #[test]
     fn build_diff_lines_warns_and_yields_none_on_git_error() {
         let mut buf = Vec::new();
-        let out = build_diff_lines(&mut buf, Err(anyhow::anyhow!("bad rev"))).unwrap();
+        let out = build_diff_lines(&mut buf, Err(anyhow::anyhow!("bad rev")));
         assert!(out.is_none());
         assert!(utf8(buf).contains("--cov-diff-fail-under: bad rev"));
     }
@@ -1237,7 +1227,7 @@ mod tests {
         let mut map = std::collections::BTreeMap::new();
         map.insert(std::path::PathBuf::from("pkg/mod.py"), vec![1u32, 2]);
         let mut buf = Vec::new();
-        let (lines_path, out_path) = build_diff_lines(&mut buf, Ok(map)).unwrap().unwrap();
+        let (lines_path, out_path) = build_diff_lines(&mut buf, Ok(map)).unwrap();
         assert!(buf.is_empty());
         let written = std::fs::read(&lines_path).unwrap();
         let smap: std::collections::BTreeMap<String, Vec<u32>> =
