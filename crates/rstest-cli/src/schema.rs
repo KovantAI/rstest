@@ -87,6 +87,10 @@ fn render_md(o: &Output) -> String {
             render_object(&mut s, "###", name, "", obj);
         }
     }
+    // Exactly one trailing newline, matching pre-commit's end-of-file-fixer.
+    let trimmed = s.trim_end().len();
+    s.truncate(trimmed);
+    s.push('\n');
     s
 }
 
