@@ -133,8 +133,12 @@ def test_main_routes_fork_pool(monkeypatch):
 def test_fork_pool_parent_reports_pids_and_exits(monkeypatch):
     # Drive only the PARENT half: os.fork returns fake child pids, so the child
     # branch is never entered. The parent must write the pids to the report fd,
-    # close the inherited worker fds, and os._exit(0).
+    # close the inherited worker fds, wait for the release pipe's EOF, and
+    # os._exit(0).
     report_r, report_w = os.pipe()
+    release_r, release_w = os.pipe()
+    # The orchestrator has already released the zygote: read sees EOF at once.
+    os.close(release_w)
 
     forks = iter([111, 222])
     monkeypatch.setattr(worker_main.os, "fork", lambda: next(forks))
@@ -153,14 +157,15 @@ def test_fork_pool_parent_reports_pids_and_exits(monkeypatch):
         worker_main.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code))
     )
 
-    # count=2, report_fd, then cmd0 evt0 cmd1 evt1
-    argv = ["2", str(report_w), "10", "20", "30", "40"]
+    # count=2, report_fd, release_fd, then cmd0 evt0 cmd1 evt1
+    argv = ["2", str(report_w), str(release_r), "10", "20", "30", "40"]
     with pytest.raises(SystemExit) as exc:
         worker_main._fork_pool(argv)
     assert exc.value.code == 0
 
     pids = os.read(report_r, 64).decode()
     real_close(report_r)
+    real_close(release_r)
     assert pids.split() == ["111", "222"]
     # All four inherited worker fds were closed in the parent before exit.
     assert {10, 20, 30, 40} <= set(closed)
@@ -181,7 +186,7 @@ def test_fork_pool_child_exits_normally_after_serve(monkeypatch):
     monkeypatch.setenv("RSTEST_SEND_IDS", "")
 
     with pytest.raises(SystemExit) as exc:
-        worker_main._fork_pool(["1", "9", "10", "20"])
+        worker_main._fork_pool(["1", "9", "8", "10", "20"])
     assert exc.value.code == 0
     assert served == [(10, 20)]
     assert os.environ["RSTEST_WORKER_ID"] == "gw0"
@@ -208,7 +213,7 @@ def test_fork_pool_child_swallows_broken_pipe(monkeypatch):
     monkeypatch.setenv("RSTEST_SEND_IDS", "")
 
     with pytest.raises(SystemExit) as exc:
-        worker_main._fork_pool(["1", "9", "10", "20"])
+        worker_main._fork_pool(["1", "9", "8", "10", "20"])
     assert exc.value.code == ("os._exit", 0)
 
 

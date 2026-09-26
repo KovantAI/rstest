@@ -180,6 +180,10 @@ pub struct PoolOutcome {
     /// per-worker spawns), for `--doctor` startup reporting. 0.0 on paths that
     /// don't spawn a pool (single-worker).
     pub startup_seconds: f64,
+    /// Whether the initial pool was actually fork-prewarmed off a zygote (not
+    /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
+    /// don't spawn a pool). Feeds the `--doctor` report.
+    pub fork_prewarmed: bool,
     /// pytest's rootdir and the collected test files' fingerprints, which the
     /// duration cache tags this run's timings with.
     pub sources: crate::scheduling::durations::Collected,
@@ -247,6 +251,11 @@ pub fn run_pool(
     let spawn_start = std::time::Instant::now();
     let workers =
         crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
+    // What actually happened, not what was asked: spawn_pool falls back to
+    // plain spawns when the zygote can't get its fds.
+    let fork_prewarmed = workers
+        .first()
+        .is_some_and(crate::scheduling::worker::Worker::is_forked);
     let mut states = Vec::new();
     for (idx, worker) in workers.into_iter().enumerate() {
         let worker = start_into(worker, idx, args, &tx)?;
@@ -981,6 +990,7 @@ pub fn run_pool(
         collection_hash,
         collection_size,
         startup_seconds,
+        fork_prewarmed,
         sources,
     })
 }

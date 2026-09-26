@@ -1113,6 +1113,7 @@ fn dispatch_run(
                 sources: Default::default(),
                 // No worker pool spawned here (one passthrough worker).
                 startup_seconds: 0.0,
+                fork_prewarmed: false,
             }
         } else if path == RunPath::Lazy {
             let cwd = std::env::current_dir()?;

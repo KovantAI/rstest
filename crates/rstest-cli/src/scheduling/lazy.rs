@@ -152,6 +152,11 @@ pub fn run_lazy_pool(
     let spawn_start = std::time::Instant::now();
     let workers =
         crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
+    // What actually happened, not what was asked: spawn_pool falls back to
+    // plain spawns when the zygote can't get its fds.
+    let fork_prewarmed = workers
+        .first()
+        .is_some_and(crate::scheduling::worker::Worker::is_forked);
     let mut states = Vec::new();
     for (idx, worker) in workers.into_iter().enumerate() {
         let worker = start_into(worker, idx, args, &tx)?;
@@ -627,6 +632,7 @@ pub fn run_lazy_pool(
         collection_hash: None,
         collection_size: 0,
         startup_seconds,
+        fork_prewarmed,
         sources,
     })
 }

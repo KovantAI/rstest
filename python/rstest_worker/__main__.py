@@ -50,7 +50,7 @@ def main() -> None:
 
 
 def _fork_pool(argv: list[str]) -> None:
-    """Zygote entry: `--fork-pool <count> <report_fd> <cmd0> <evt0> ...`.
+    """Zygote entry: `--fork-pool <count> <report_fd> <release_fd> <cmd0> <evt0> ...`.
 
     The vendored pytest core is imported once (module load, above); each child
     inherits it copy-on-write, so the per-worker import cost the plain spawn path
@@ -61,13 +61,19 @@ def _fork_pool(argv: list[str]) -> None:
     the one zygote environment the orchestrator set. Run-wide vars (RUN_UID,
     WORKER_COUNT, BASETEMP, DOCTOR, ...) are identical across workers and ride
     the inherited environment untouched.
+
+    After reporting, the zygote stays alive until the orchestrator closes the
+    release pipe. Until then it is every child's parent, so a child that dies
+    early stays a zombie and its pid can't be recycled while the orchestrator
+    records each child's identity (pid + start time).
     """
     count = int(argv[0])
     report_fd = int(argv[1])
-    fds = [int(a) for a in argv[2:]]
+    release_fd = int(argv[2])
+    fds = [int(a) for a in argv[3:]]
     # cmd/evt fds are interleaved per worker: [cmd0, evt0, cmd1, evt1, ...].
     pairs = [(fds[2 * i], fds[2 * i + 1]) for i in range(count)]
-    all_fds = set(fds) | {report_fd}
+    all_fds = set(fds) | {report_fd, release_fd}
 
     pids = []
     for idx, (cmd_fd, evt_fd) in enumerate(pairs):
@@ -94,8 +100,9 @@ def _fork_pool(argv: list[str]) -> None:
         pids.append(pid)
 
     # Parent: report the child pids to the orchestrator (which tracks them for
-    # kill/watchdog), then exit. The children are reparented to init/launchd,
-    # which reaps them on exit, so the orchestrator never needs to waitpid them.
+    # kill/watchdog), wait for its release, then exit. The children are then
+    # reparented to init/launchd, which reaps them on exit, so the orchestrator
+    # never needs to waitpid them.
     report = os.fdopen(report_fd, "w")
     report.write("\n".join(str(p) for p in pids) + "\n")
     report.flush()
@@ -104,6 +111,11 @@ def _fork_pool(argv: list[str]) -> None:
     for fd in set(fds):
         with contextlib.suppress(OSError):
             os.close(fd)
+    # Block until the orchestrator closes the release pipe's write end (EOF),
+    # which it does once it has recorded every child. Also EOF if it died.
+    with contextlib.suppress(OSError):
+        while os.read(release_fd, 1):
+            pass
     os._exit(0)
 
 
