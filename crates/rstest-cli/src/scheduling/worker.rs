@@ -415,8 +415,9 @@ impl Worker {
     /// Whether [`Worker::spawn_pool`] with these arguments tries to fork off a
     /// zygote (Unix only, and only for a non-empty pool). It may still fall
     /// back to plain spawns; see [`Worker::is_forked`] for what happened.
+    #[cfg(unix)]
     fn prewarms(fork_prewarm: bool, n: usize) -> bool {
-        cfg!(unix) && fork_prewarm && n > 0
+        fork_prewarm && n > 0
     }
 
     /// Whether this worker was actually forked off a zygote (vs spawned).
@@ -532,7 +533,8 @@ impl Proc {
         #[cfg(unix)]
         self.wait_or_kill(timeout);
         #[cfg(not(unix))]
-        if let Proc::Owned(child) = self {
+        {
+            let Proc::Owned(child) = self;
             let _ = child.wait();
         }
     }
