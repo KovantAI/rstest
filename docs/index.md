@@ -1,8 +1,13 @@
 # rstest
 
-A fast, pytest-compatible test runner. Rust orchestration, your tests
-unchanged: same plugins, same fixtures, same outcomes, parallel by design,
-with built-in suite diagnostics (`--doctor`).
+A fast, pytest-compatible test runner. Rust orchestration; runs most pytest
+suites unchanged, with the same plugins and fixtures: byte-exact per-test
+outcomes at `-n 0`, and in parallel the same caveats as pytest-xdist (see
+[Known gaps](concepts/compatibility.md#known-gaps)). Parallel by design, with
+built-in suite diagnostics (`--doctor`).
+
+Evaluating rstest for your team? Start with
+[Evaluating rstest](getting-started/evaluating.md).
 
 !!! note "Not the Rust crate"
     This is the Python test runner on PyPI (`pip install rstest`). It is not
@@ -11,7 +16,7 @@ with built-in suite diagnostics (`--doctor`).
 
 ```console
 $ pip install rstest
-$ rstest -n 4
+$ rstest -n 4      # -n is optional; plain `rstest` picks a worker count
 rstest 0.7.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 34%]
 ........................................................................ [ 69%]
@@ -27,7 +32,10 @@ rstest 0.7.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
   marks, and your installed pytest plugins (pytest-django, pytest-asyncio,
   hypothesis, pytest-mock, ...) load as under pytest. Most pytest flags
   (`-k`, `-m`, `-x`, `--lf`, plugin flags) forward unchanged; a few names
-  such as `--timeout`, `--reruns` and `--html` are rstest's own. In parallel
+  such as `--timeout`, `--reruns` and `--html` are rstest's own, taking the
+same basic syntax as pytest-timeout, pytest-rerunfailures and pytest-html
+(`--timeout SECS`, `--reruns N`, `--html PATH`; the plugins' companion options
+such as `--reruns-delay` are not implemented). In parallel
   you get xdist's semantics (session fixtures once per worker) plus a
   [short list of differences](guides/migrate-from-pytest.md#what-changes);
   at `-n 0` outcomes match pytest exactly.
@@ -47,7 +55,7 @@ rstest 0.7.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ## Measured
 
 Outcome parity is measured per-test against pytest baselines across four
-real suites (201,127 tests total):
+real suites (201,343 tests total):
 
 --8<-- "docs/reference/benchmarks.md:suite-table"
 
@@ -55,11 +63,11 @@ Parity means identical per-test setup/call/teardown outcomes, including
 skips, xfails, and expected failures, with the suites' real plugins loaded.
 See [Benchmarks](reference/benchmarks.md) for methodology and caveats.
 
-Read the speed numbers honestly: the wins come from suite *shape*, not magic.
+Reading the speed numbers: the wins come from suite *shape*, not magic.
 Wait-bound suites (aiohttp) gain most, and only on a **warm** duration cache:
 the first run is cold, since duration-aware scheduling needs one run of timing
 data. CPU-bound suites already split well under xdist, so rstest lands at
-parity there, not a win (pandas): see [Already fast under
+parity there, not a win (sympy, [measured](reference/benchmarks.md#cpu-bound-suites)): see [Already fast under
 xdist?](guides/migrate-from-xdist.md#already-fast-cpu-bound) for what's still
 worth it. In ephemeral CI, cache `.rstest_cache`
 across runs or expect cold-run timing.

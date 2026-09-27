@@ -32,7 +32,7 @@ The rerun-selection policy is import-graph based, so you don't rerun the whole s
 
 --8<-- "docs/_snippets/watch-rerun-policy.md"
 
-Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. Type `q` and Enter between runs, or press `Ctrl+C`, to exit (`q` is Unreleased: not in 0.7.0, and not offered under `-s`/`--pdb`; see [Watch mode](watch-mode.md)).
+Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. Type `q` and Enter between runs, or press `Ctrl+C`, to exit (`q` is Unreleased: not in 0.7.0, and not offered under `-s`, `--pdb` and the other flags that hand pytest the terminal; quitting exits 0 whatever the last result; see [Watch mode](watch-mode.md)).
 
 **Every rerun is a clean run.** Each cycle spawns fresh Python worker processes and tears them down when it finishes, at every worker count, including `-n 0`/`-n 1`. Nothing is reused between cycles, so an edited module is always re-imported from scratch; watch mode cannot show a stale-import false green.
 
@@ -45,6 +45,10 @@ $ rstest --watch -n 2          # bounded parallelism while editing
 ```
 
 The duration cache and last-failed state update on every cycle, so `--lf` (below) and slow-test-first scheduling stay warm throughout the session.
+
+**Reruns go fail-fast first.** Watch reruns default to [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast): tests that recently failed or flaked (from `flakes.json`) run first, then the rest in slow-first throughput order, so a red surfaces as early as possible on each save. Pair it with `-x` to stop at that first red; pass `--order throughput` (or set `[tool.rstest] order`) to opt out. Ordering only applies with two or more workers.
+
+**Small suites may run one worker.** Without `-n`, rstest uses `-n auto`, which caps the pool by test-file count and by cached suite time (about one worker per 2s of tests). A small, fast suite with a warm cache therefore often runs a single worker locally: [byte-exact mode](../concepts/glossary.md#byte-exact-mode), no worker identity, and fail-fast ordering has no effect. Parallel-only failures you see in CI won't reproduce that way; pass `-n 2` or more (`rstest --watch -n 2`) when you want local runs to parallelize like CI.
 
 **New test files are picked up.** Saving a brand-new file that matches `python_files` counts as a test-file change and reruns exactly that file, even if it sits outside the path you started the session with: reruns keep your flags (`-k`, `-x`, `-n`, ...) but not your positional paths.
 

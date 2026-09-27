@@ -71,14 +71,25 @@ build:
   commands:
     - rstest -n 4 --shard "$SHARD/$SHARDS"
         --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
-        --cache-compact-threshold 500 --junitxml "junit.$SHARD.xml"
+        --cache-compact-threshold 50 --junitxml "junit.$SHARD.xml"
 ```
 
 `--cache-compact-threshold` folds the loose segments inline once they exceed N,
-so no maintenance job is needed. `aws s3 sync … ./rcache` + `--cache-remote
+so no maintenance job is needed. Keep N low (20 to 50): each pull reads every
+loose segment with its own `aws` process, one after another. `aws s3 sync … ./rcache` + `--cache-remote
 ./rcache` remains valid if you prefer materializing a dir. The build's service
 role needs `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix
-(`Delete` only for the inline compaction).
+(`Delete` only for the inline compaction). Give that write role only to
+builds of your default branch; pull-request builds should get a read-only
+role and drop `--cache-push`
+([trust boundary](../concepts/caching.md#trust-boundary)).
+
+Every shard in this recipe pulls and pushes the live prefix, so a shard that
+finishes early can change what a later-starting shard pulls, and their
+partitions can disagree. For a gating pipeline, snapshot once and push from one
+follow-up job, and gate on `shard-verify`; see
+[Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix)
+and the [object-store layout](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets).
 
 ## Google Cloud Build
 
@@ -131,11 +142,20 @@ steps:
         pip install -r requirements.txt && pip install rstest
         rstest -n 4 --shard "$_SHARD/$_SHARDS" \
           --cache-remote gs://$PROJECT_ID-ci-cache/rstest --cache-pull --cache-push \
-          --cache-compact-threshold 500 --junitxml junit.xml
+          --cache-compact-threshold 50 --junitxml junit.xml
 ```
 
 The Cloud Build service account needs `storage.objects.{list,get,create,delete}`
-on the bucket/prefix (`roles/storage.objectAdmin` scoped to it).
+on the bucket/prefix (`roles/storage.objectAdmin` scoped to it). Keep the
+compaction threshold low (20 to 50): a pull spawns one `gcloud` process per
+loose segment, sequentially.
+
+Every shard in this recipe pulls and pushes the live prefix, so a shard that
+finishes early can change what a later-starting shard pulls, and their
+partitions can disagree. For a gating pipeline, snapshot once and push from one
+follow-up job, and gate on `shard-verify`; see
+[Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix)
+and the [object-store layout](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets).
 
 ## GitLab CI
 
@@ -168,8 +188,10 @@ test:
 ```
 
 `-n auto` uses the runner's cores; size the runner (or set `-n <k>`) to
-the parallelism you want. For a monorepo root, glob `junit.*.xml` in
-`artifacts:paths` and widen the cache to `**/.rstest_cache/`.
+the parallelism you want. For a monorepo root, glob `junit.*.xml` in both
+`artifacts:paths` and `artifacts:reports:junit` (rstest writes one
+`junit.<slug>.xml` per project, and no `junit.xml`), and widen the cache to
+`**/.rstest_cache/`.
 
 **Sharding (`parallel:`).** GitLab exposes `CI_NODE_INDEX` (1-based) and
 `CI_NODE_TOTAL` when you set `parallel:`, which map straight onto
@@ -177,11 +199,15 @@ the parallelism you want. For a monorepo root, glob `junit.*.xml` in
 read-only so they partition identically:
 
 ```yaml
+stages: [test, durations]
+
 test:
+  stage: test
   image: python:3.13
   parallel: 4
   cache:
     key: rstest-durations-$CI_COMMIT_REF_SLUG
+    fallback_keys: [rstest-durations-$CI_DEFAULT_BRANCH]   # new branch: warm from the default branch
     paths: [.rstest_cache]
     policy: pull        # shards restore only; don't race to save
   script:
@@ -191,12 +217,31 @@ test:
     when: always
     reports:
       junit: junit.xml   # GitLab merges per-job JUnit natively
+
+# The one writer: a full run in a LATER stage, so it saves only after every
+# shard has restored (a save mid-matrix would give later shards a different
+# cache and a different partition).
+durations:
+  stage: durations
+  needs: [test]
+  when: always          # refresh timings even when a shard failed
+  image: python:3.13
+  cache:
+    key: rstest-durations-$CI_COMMIT_REF_SLUG
+    fallback_keys: [rstest-durations-$CI_DEFAULT_BRANCH]
+    paths: [.rstest_cache]
+    policy: pull-push
+  script:
+    - pip install -r requirements.txt && pip install rstest
+    - rstest -n auto -q
 ```
 
-Something has to write that cache: add a separate non-parallel job with
-`policy: pull-push` that runs the full suite, as in the
-[GitHub Actions sharding example](sharding.md#github-actions). The shared
-cache below removes the need for that job.
+GitLab keeps separate caches for protected and unprotected branches by
+default, so an unprotected merge-request branch does not fall back to a
+protected default branch's cache unless that project setting is turned off.
+Leaving it on is also the [trust boundary](../concepts/caching.md#trust-boundary)
+you want: unprotected branches can't write the cache the default branch reads.
+The shared cache below removes the need for the `durations` job.
 
 **Shared cache (parallel matrix).** GitLab's `cache:` is one blob per key. It
 can't merge segments across `parallel:` jobs. For a duration-balanced matrix,
@@ -213,11 +258,22 @@ test:
   script:
     - rstest -n 4 --shard "$CI_NODE_INDEX/$CI_NODE_TOTAL"
         --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
-        --cache-compact-threshold 500 --output gitlab --junitxml junit.xml
+        --cache-compact-threshold 50 --output gitlab --junitxml junit.xml
   artifacts: { when: always, reports: { junit: junit.xml } }
 ```
 
 A shared runner mount (`--cache-remote /cache/rstest`) needs no bookends at all.
+Keep the compaction threshold low (20 to 50) on `s3://` / `gs://`: a pull reads
+each loose segment with its own CLI process, one after another. Give only
+default-branch pipelines credentials that can write the prefix; merge-request
+pipelines should pull only.
+
+Every shard in this recipe pulls and pushes the live prefix, so a shard that
+finishes early can change what a later-starting shard pulls, and their
+partitions can disagree. For a gating pipeline, snapshot once and push from one
+follow-up job, and gate on `shard-verify`; see
+[Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix)
+and the [object-store layout](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets).
 
 ## Azure Pipelines
 
@@ -271,13 +327,16 @@ dir. Two supported paths:
   The immutable, uniquely-named segments make the up/download safe across shards.
 
   ```yaml
+  strategy:
+    parallel: 4         # sets System.JobPositionInPhase (1-based) / TotalJobsInPhase
+  steps:
   - script: |
       # download-batch keeps blob names, so rstest/segments/seg-*.json lands in
       # ./rcache/rstest/segments/; point --cache-remote at ./rcache/rstest.
       az storage blob download-batch -d ./rcache -s ci-cache --pattern 'rstest/*' || true
       mkdir -p ./rcache/rstest/segments
       ls ./rcache/rstest/segments > .warm-segs
-      rstest -n 4 --shard "$(shard)/4" \
+      rstest -n 4 --shard "$(System.JobPositionInPhase)/$(System.TotalJobsInPhase)" \
         --cache-remote ./rcache/rstest --cache-pull --cache-push --junitxml junit.xml
       # Upload only this run's new segment(s), back under rstest/segments/.
       mkdir -p ./push
@@ -291,6 +350,10 @@ dir. Two supported paths:
 
   The pipeline's service connection / managed identity needs **Storage Blob Data
   Contributor** on the container (the `az` batch calls read, write, and delete).
+  Each shard downloads at its own start time while others upload, so shards can
+  see different segment sets; for a gating pipeline download once, upload from
+  one follow-up job, and gate on `shard-verify` (see
+  [Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix)).
 
 - **Authenticated `https://` endpoint**: front the store with a static file
   server honoring the [listing contract](../concepts/caching.md#transports) and
@@ -313,10 +376,12 @@ jobs:
     steps:
       - checkout
       # Persist the duration cache between runs.
+      # Newest cache for this branch, else the newest from main. No bare
+      # "rstest-" fallback: that would let main restore any branch's cache.
       - restore_cache:
           keys:
-            - rstest-{{ .Branch }}
-            - rstest-
+            - rstest-{{ .Branch }}-
+            - rstest-main-
       - run: pip install -r requirements.txt
       - run: pip install rstest
       - run: rstest -n auto --junitxml test-results/junit.xml
@@ -350,7 +415,7 @@ jobs:
     parallelism: 4
     steps:
       - checkout
-      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
+      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}-", "rstest-durations-main-"] }
       - run: pip install -r requirements.txt && pip install rstest
       - run: rstest -n 4 --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml test-results/junit.xml
       - store_test_results: { path: test-results }   # a directory, not a file
@@ -359,7 +424,7 @@ jobs:
       - image: cimg/python:3.13
     steps:
       - checkout
-      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
+      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}-", "rstest-durations-main-"] }
       - run: pip install -r requirements.txt && pip install rstest
       - run: rstest -n auto -q
       - save_cache:
@@ -369,7 +434,10 @@ workflows:
   test-and-cache:
     jobs:
       - test
-      - durations
+      # After the shards, so a save can't land mid-matrix and hand later
+      # containers a different cache.
+      - durations:
+          requires: [test]
 ```
 
 CircleCI keys are immutable once written, so the `{{ .Revision }}` suffix
@@ -388,8 +456,18 @@ container pushes its segment and pulls the union:
 - run: |
     rstest -n 4 --shard "$((CIRCLE_NODE_INDEX+1))/$CIRCLE_NODE_TOTAL" \
       --cache-remote s3://ci-cache/rstest --cache-pull --cache-push \
-      --cache-compact-threshold 500 --junitxml test-results/junit.xml
+      --cache-compact-threshold 50 --junitxml test-results/junit.xml
 ```
+
+Keep the compaction threshold low (20 to 50): a pull spawns one `aws` /
+`gcloud` process per loose segment, sequentially. Give the write-capable
+context or OIDC role only to default-branch builds; other branches should pull
+only. Every shard in this recipe pulls and pushes the live prefix, so a shard that
+finishes early can change what a later-starting shard pulls, and their
+partitions can disagree. For a gating pipeline, snapshot once and push from one
+follow-up job, and gate on `shard-verify`; see
+[Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix)
+and the [object-store layout](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets).
 
 ## Jenkins
 
@@ -441,6 +519,14 @@ sh '''
 
 No mount? Point `--cache-remote` at `s3://…` / `gs://…` (the agent's cloud CLI
 drives it) instead.
+
+Every parallel stage here pulls and pushes the same live cache, so a stage that
+finishes early can change what a later-starting stage pulls, and their
+partitions can disagree. For a gating pipeline, snapshot once and push from one
+follow-up stage, and gate on `shard-verify`; see
+[Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix).
+Only builds of your default branch should be able to write the mount or bucket
+([trust boundary](../concepts/caching.md#trust-boundary)).
 
 ## Buildkite
 

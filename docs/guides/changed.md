@@ -122,6 +122,36 @@ with the PR base branch (auto-detected from `GITHUB_BASE_REF`,
 of the PR commit still selects exactly the PR's files. Full base-detection and
 shallow-clone rules: [`--changed`](../reference/cli.md#-changedrev).
 
+The value is optional, so it needs `=`: write `--changed=origin/main`. With a
+space, `--changed origin/main` is bare `--changed` plus a test path
+`origin/main`, and diffs against `HEAD`.
+
+!!! warning "Bare `--changed` outside a PR selects nothing and passes"
+    Base auto-detection only fires on pull/merge-request jobs. On a push,
+    schedule or manual GitHub workflow, or a GitLab branch pipeline (no
+    `GITHUB_BASE_REF`, no `CI_MERGE_REQUEST_*`), bare `--changed` diffs a
+    clean checkout against `HEAD`, finds 0 changed files, prints
+    `rstest: no tests affected by 0 changed file(s)`, writes no report
+    files, and **exits 0**. The job is green without running a test. Guard
+    the step by event, or give push jobs an explicit base, and add
+    [`--changed-strict`](../reference/cli.md#-changed-strict) so an empty
+    selection exits 5 instead of 0:
+
+    ```yaml
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0          # the merge-base needs the base branch history
+    - name: Changed tests (PR)
+      if: github.event_name == 'pull_request'
+      run: rstest --changed --changed-strict
+    - name: Changed tests (push)
+      if: github.event_name == 'push'
+      run: rstest --changed=${{ github.event.before }} --changed-strict
+    ```
+
+    On the first push of a new branch, `github.event.before` is all zeros,
+    which is not a commit: run the full suite there instead.
+
 A typical layout: a scheduled main-branch job runs full coverage
 (`--cov-context=test`) and saves `.rstest_cache`; PR jobs restore it and run
 `rstest --changed` for a tight per-commit gate, falling back to the import

@@ -135,6 +135,10 @@ pub enum Mode {
     /// failure (`type=warning` for flaky-passed), emitted at end-of-run and
     /// surfaced inline on the PR file view.
     Azure,
+    /// Byte-exact mode's default: the single pytest session writes its own
+    /// terminal output to the inherited stdout, so rstest renders nothing
+    /// live and no summary. Only chosen when no `--output` is set.
+    Pytest,
 }
 
 /// Orchestrator-side rendering of the live test stream: the per-test glyph/
@@ -226,6 +230,9 @@ impl Progress {
     /// 'X' xpass, 'E' setup/teardown error. One char per TEST: on the call
     /// report, a non-passed setup (no call follows), or a failed teardown.
     pub fn on_report(&mut self, sink: &mut Sink, worker: Option<usize>, r: &Report) {
+        if self.mode == Mode::Pytest {
+            return;
+        }
         if self.mode == Mode::Json {
             return Self::on_report_json(sink, worker, r);
         }
@@ -384,7 +391,7 @@ impl Progress {
         }
         if matches!(
             self.mode,
-            Mode::Verbose | Mode::Bar | Mode::Tap | Mode::Teamcity
+            Mode::Verbose | Mode::Bar | Mode::Tap | Mode::Teamcity | Mode::Pytest
         ) {
             return;
         }

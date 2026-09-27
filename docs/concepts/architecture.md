@@ -24,8 +24,9 @@ pytest core owns everything *about* the tests.
 
 pytest compatibility is not an API; it's ten years of semantics: fixture
 finalization order, conftest discovery rules, assertion rewriting, the
-exact behavior of `importorskip` at collection time. Every prior attempt
-at a pytest-compatible runner died reimplementing this surface.
+exact behavior of `importorskip` at collection time. Reimplementing that
+surface means matching all of it, and every gap shows up as a suite that
+behaves differently.
 
 There's a second, harder constraint: **plugins import pytest internals.**
 Many of the most widely used pytest plugins import from `_pytest.*`, and
@@ -76,5 +77,8 @@ that session's reports, or hands it the terminal when a flag needs pytest's
 own terminal: `--co`/`--collect-only`, `-s`, `--capture=...`, `--pdb`,
 `--trace`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
 `--sw-reset`/`--stepwise-reset`, or rstest's `--debug`. Those flags switch
-to this mode automatically. It is the compatibility anchor: byte-exact
-pytest behavior.
+to this mode automatically. With no `--output` set, the session's own
+terminal output is what you see, and rstest only appends its extras after
+it (**Unreleased**; see
+[`--output`](../reference/cli.md#-output-dotsverbosebargithubjson)). It is
+the compatibility anchor: byte-exact pytest behavior.

@@ -19,10 +19,13 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   a fixture-bound project by its real cost. It carries no per-test source to
   fingerprint, so it ages out on time instead: entries older than
   `RSTEST_WALL_TTL_DAYS` (default 30, `0` disables) are ignored on read.
-- `flakes.json`: sparse record of tests that have passed only on rerun
-  ([`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`), used to
-  surface repeat offenders. Auto-written, safe to delete, persisted the same
-  way as `durations.json`.
+- `flakes.json`: sparse record of tests that flaked (passed only on rerun,
+  via [`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`) or
+  hard-failed, quarantined failures included. Used to surface repeat
+  offenders, by `--reruns-only-known-flaky`, and by `--order fail-fast`.
+  Entries with no event inside `RSTEST_FLAKE_RETENTION_DAYS` (default 90,
+  `0` keeps history forever) are ignored on read. Auto-written, safe to
+  delete, persisted the same way as `durations.json`.
 - `coverage_index.json`: line→test index (which tests' coverage executed
   each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
@@ -88,7 +91,7 @@ live:
 | a directory path / `file://…` | local dir, NFS/EFS mount, or a dir a CI step materializes (`download-artifact`, `aws s3 sync`) |
 | `s3://bucket/prefix` | the `aws` CLI on the runner (creds from the environment) |
 | `gs://bucket/prefix` | `gcloud storage` (or `gsutil`) on the runner |
-| `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` |
+| `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` (use `https://`: over plain `http://` the bearer token is sent in cleartext) |
 
 The `s3`/`gs` transports shell out to the cloud CLI already installed and
 authenticated in CI: no SDK, no secrets in the URL. Any other `scheme://` is

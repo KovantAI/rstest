@@ -86,6 +86,20 @@ Because of these, the report is **advisory under `--doctor`**. Reach for
 `--fail-on-leak` once your suite is clean, so the gate flags *new* leaks rather
 than a pre-existing fixture pattern.
 
+In parallel the attribution also **moves between runs**. A session- or
+module-scoped fixture's resources land on whichever test first uses the
+fixture *on each worker*, and which test that is depends on how the
+scheduler distributed the tests this time (duration cache, worker count). So
+the same suite can pass `--fail-on-leak` on one run and fail it on the next,
+with a different test named. For a gated leak job, pin the order:
+
+- `rstest -n 0 --fail-on-leak`: one worker, fixed test order, so the same
+  test is charged every run.
+- `rstest --dist loadfile --fail-on-leak`: keeps each file's tests on one
+  worker in file order, which pins module-scoped fixtures to the file's first
+  user. A session fixture used across files can still land on a different
+  test, because which file a worker runs first can change.
+
 ## Fixing a leak
 
 - **Close what you open**, ideally in a fixture teardown so it runs even when

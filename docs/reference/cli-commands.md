@@ -30,10 +30,15 @@ rough CI-time saving. No flags, no config.
 $ rstest try
 ================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
-  ⚡ speed:   pytest 96s  →  rstest 21s   (4.6× at -n auto)
+  ⚡ speed:   pytest 1m36s  →  rstest 21.0s   (4.6× at -n auto)
+  💸 saves   1m15s per run
 ================================================
-  → drop-in ready: `rstest` is `pytest`, in parallel.
+  → drop-in ready: `rstest` is `pytest`, in parallel. Switch with confidence.
 ```
+
+The `saves` line appears only when rstest saved at least one second. In a git
+checkout it also projects the saving over the last 30 days, counting each
+commit in that window as one CI run.
 
 Exit 0 when outcomes are identical, 1 when they differ (it then points you at
 `migrate-check` to classify the differences, usually an unstable parametrize
@@ -41,11 +46,19 @@ id or a parallel-only failure), 2 when it couldn't run pytest or rstest refused
 to dispatch. A pre-existing red pytest run is reported as such, not blamed on
 rstest.
 
-`try` is the one command that needs **pytest installed on its own** (it runs
-your suite under plain `pytest` for the baseline). rstest itself vendors its
-core and doesn't otherwise require an external pytest; if `pytest` isn't on
-PATH, `try` exits 2. `migrate-check` and normal runs have no such
-requirement.
+`try` is the one command that needs **pytest installed on its own**. It runs
+the baseline as `python -m pytest` with the same interpreter rstest uses (the
+project's `.venv`, or whatever [`--python`](cli.md#-python-path-or-version)
+selects), so pytest must be importable there. A `pytest` on `PATH` from pipx
+or another environment doesn't count. If that baseline can't run (pytest
+missing, or the suite doesn't collect), `try` exits 2; check with
+`python -m pytest -q` in the same environment. rstest itself vendors its core,
+so `migrate-check` and normal runs have no such requirement.
+
+The baseline uses the pytest version installed in that environment. If it is
+older than the vendored pytest 9.1.1 (for example a `pytest<9` pin), a
+difference `try` reports may come from the pytest version rather than from
+rstest; see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
 
 ### `migrate-check`
 
@@ -195,7 +208,8 @@ its own it is ignored and no file is written.
 
 ### `--audit-repeat <N>`
 
-How many times `audit` reruns the `-n auto` pass (default `1`). A parallel-only
+How many times `audit` reruns the `-n auto` pass (default `1`; `0` is treated
+as `1`). A parallel-only
 failure is probabilistic (a race may not fire every run), so a test that fails
 in **any** repeat is treated as a candidate. Raise it (e.g. `--audit-repeat 5`)
 to shake out intermittent races. The discriminators repeat the same number of
@@ -363,6 +377,14 @@ With no retention flags it folds **all** segments. To keep a recent window loose
 - `--max-age DURATION`: retain segments younger than DURATION (a bare number is
   seconds, or a `s`/`m`/`h`/`d`/`w` suffix, e.g. `30d`); fold older ones. Env:
   `RSTEST_CACHE_MAX_AGE`.
+
+Both flags belong to the subcommand and must come **after** it:
+`rstest cache-compact --cache-remote s3://ci-cache/rstest --keep-last 200`.
+Anywhere else, including before the subcommand (`rstest --keep-last 200
+cache-compact ...`), they are a usage error (`unexpected argument
+'--keep-last' found`, exit `2`). On a normal run, the inline
+[`--cache-compact-threshold`](cli.md#-cache-compact-threshold-n) compaction
+reads the retention window from the env vars instead.
 
 A segment retained by **either** rule stays loose. A bad flag/env value is a hard
 error, never a silent fold-all.

@@ -11,6 +11,7 @@ $ rstest --doctor             # and find out why the suite is slow
 (`--doctor` shines on a real suite, not a toy two-test folder; see
 [Suite diagnostics](../guides/doctor.md).)
 
+- [Evaluating rstest](evaluating.md): what it speeds up, when not to adopt, maturity, cost of adopting and backing out
 - [Installation](installation.md): requirements, pip/uv, from source
 - [Start from scratch](your-first-test.md): no suite yet? from an empty folder to a green run
 - [Run your existing suite](first-steps.md): already have a pytest suite? running, reading output, selecting tests

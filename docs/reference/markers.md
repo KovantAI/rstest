@@ -18,8 +18,14 @@ fully finished (fixtures torn down, ports and databases released), in
 collection order.
 
 The marker is registered by rstest automatically: no `markers` ini entry
-is needed, and `--strict-markers` does not complain. Under plain pytest the marker is
-inert (unknown markers don't change behavior), so test code stays portable.
+is needed, and `--strict-markers` does not complain under rstest.
+
+Under plain pytest (no rstest) the marker is **unregistered**. It changes no
+behavior, but pytest warns `PytestUnknownMarkWarning`, so a run with
+`--strict-markers` (or `-W error`) fails at collection. The same applies to
+`flaky` and `timeout` when pytest-rerunfailures / pytest-timeout are not
+installed. To keep such a run working, add the names to your `markers` ini
+entry. See [What ties you to rstest](../guides/migrate-from-pytest.md#what-ties-you-to-rstest).
 
 Semantics details in [Scheduling](../concepts/scheduling.md#the-serial-phase);
 when to use it in [Parallel safety](../guides/parallel-safety.md).
@@ -86,6 +92,9 @@ Per-test deadline in seconds, overriding the global
 [`--timeout`](cli.md#-timeout-secs). The test is interrupted in-process at the
 deadline and fails with a traceback at the stuck line. pytest-timeout-compatible
 marker name; no plugin needed.
+
+`timeout(0)` or a negative value disables the timeout for that test, even
+when a global `--timeout` is set.
 
 The marker arms rstest's own timer at every worker count, including `-n 0`,
 even when you pass no `--timeout` and even with pytest-timeout installed

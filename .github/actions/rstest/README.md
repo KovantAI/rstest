@@ -156,7 +156,7 @@ steps:
     with:
       python-version: "3.13"
       cache-remote: s3://ci-cache/rstest        # gs://… or https://… too
-      cache-compact-threshold: "500"            # fold segments inline past N
+      cache-compact-threshold: "50"             # fold segments inline past N (keep 20-50)
       shard: ${{ matrix.shard }}
       shard-total: 4
 ```
@@ -257,12 +257,16 @@ restore the newest matching entry read-only.
   `doctor-fail-on` fired, or rstest refused the run). When tests failed *and* a
   gating flag fired, the gate can't tell them apart and judges by the ratio.
 - **Each matrix leg gets its own artifact names.** Segments are named
-  `rstest-seg-<suffix>--<run_id>-<shard>` and JUnit artifacts
+  `rstest-seg-<suffix>--<run_id>-<attempt>-<shard>` and JUnit artifacts
   `rstest-junit-<suffix>[-shard-K]`, where `<suffix>` is `artifact-suffix`
   (default: runner OS, Python version and `working-directory`, e.g.
   `Linux-py3.13-libs-core`). The warm step pulls only its own leg's segments, so
   interpreters and projects never mix. Set `artifact-suffix` yourself when legs
   differ in something else (a dependency matrix, say).
+- **"Re-run failed jobs" works.** Artifact names are unique per run across
+  attempts, so segment names carry `github.run_attempt`, and the next warm
+  merges the segments of every attempt. The JUnit artifact keeps its stable
+  name and is overwritten, so it always holds the latest attempt's result.
 - **Only trusted runs seed the artifact cache.** The warm lookup takes the
   latest successful run on `warm-from-branch` triggered by `warm-from-event`
   (default `push`), so a pull_request run, including one from a fork with a

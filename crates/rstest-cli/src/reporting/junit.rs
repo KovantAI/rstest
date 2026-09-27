@@ -1,111 +1,328 @@
 //! Orchestrator-side junitxml: under a worker pool every session writing
 //! `--junitxml` would clobber the same file, so rstest intercepts the flag
-//! and renders the merged result here (pytest junit_family="xunit2" shape).
+//! and writes the merged document here.
+//!
+//! The document is pytest's own: each worker runs pytest's `LogXML` and
+//! streams every finished `<testcase>` element (`JunitCase`) plus the suite
+//! attributes (`JunitSuite`), so `junit_family`, `junit_logging`,
+//! `junit_suite_name`, `--junit-prefix` and the `record_*` fixtures all come
+//! out exactly as under pytest. rstest only adds its own signals as standard
+//! `<property>` extensions (`quarantined`, `flaky`), drops the `<failure>` of
+//! a quarantined test so junit-gating CI stays green, and synthesizes an
+//! element, in pytest's shape, for a test no worker finished (a crash, a
+//! `--worker-timeout` kill, an `--incremental` cached pass).
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Result;
 
-use crate::reporting::report::Run;
+use crate::reporting::report::{Run, TestEntry};
 
-pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
-    let mut tests = 0u64;
-    let mut failures = 0u64;
-    let mut errors = 0u64;
-    let mut skipped = 0u64;
-    let mut body = String::new();
+/// The junit pieces streamed by the workers during a run.
+#[derive(Debug, Default)]
+pub struct JunitParts {
+    /// nodeid -> serialized `<testcase>` element(s) of its last attempt.
+    cases: HashMap<String, Vec<String>>,
+    /// nodeids in the order their first element arrived (pytest's own order
+    /// in a single session).
+    arrival: Vec<String>,
+    /// Collection order, when a pool knows it: the merged document follows it
+    /// instead of the interleaved arrival order.
+    collection: Option<Vec<String>>,
+    suite: Option<Suite>,
+    /// `record_testsuite_property` elements, deduplicated across workers.
+    properties: Vec<String>,
+    /// Never-finalized testcases (collection/internal errors). Every pool
+    /// worker collects, so these are deduplicated.
+    extra: Vec<String>,
+}
 
-    for (nodeid, entry) in run.tests() {
-        tests += 1;
-        let (classname, name) = split_nodeid(nodeid);
-        let time = entry.duration.unwrap_or(0.0);
-        let _ = write!(
-            body,
-            r#"<testcase classname="{}" name="{}" time="{time:.3}""#,
-            esc(&classname),
-            esc(&name)
-        );
-        // Route off the shared outcome bucket rather than re-deriving phase
-        // logic here, so junit can never disagree with the summary/report-json
-        // over what a given entry IS. xpassed lands in the `_` arm (a plain
-        // pass in junit terms); xfailed rides the skipped arm, as pytest does.
-        match entry.outcome() {
-            "quarantined" => {
-                // No <failure>/<error> element (junit-gating CI must stay
-                // green) but flagged the property way, like flaky, so
-                // dashboards can track the quarantine set.
-                body.push_str(
-                    "><properties><property name=\"quarantined\" value=\"true\"/></properties></testcase>",
-                );
-            }
-            "errors" => {
-                errors += 1;
-                let text = run.failure_text(nodeid).unwrap_or("error");
-                let _ = write!(
-                    body,
-                    "><error message=\"{}\">{}</error></testcase>",
-                    esc("error"),
-                    esc(text)
-                );
-            }
-            "failed" => {
-                failures += 1;
-                let text = run.failure_text(nodeid).unwrap_or("failed");
-                let _ = write!(
-                    body,
-                    "><failure message=\"{}\">{}</failure></testcase>",
-                    esc("failed"),
-                    esc(text)
-                );
-            }
-            "skipped" | "xfailed" => {
-                skipped += 1;
-                let reason = entry.skip_reason.as_deref().unwrap_or("skipped");
-                let _ = write!(body, "><skipped message=\"{}\"/></testcase>", esc(reason));
-            }
-            _ if entry.flaky => {
-                // Passed only after reruns: JUnit has no standard flaky element,
-                // so flag it the standard-extension way (a testcase property)
-                // for dashboards that read junit rather than --report-json.
-                body.push_str(
-                    "><properties><property name=\"flaky\" value=\"true\"/></properties></testcase>",
-                );
-            }
-            _ => {
-                body.push_str("/>");
-            }
+#[derive(Debug)]
+struct Suite {
+    name: String,
+    timestamp: String,
+    hostname: String,
+}
+
+impl JunitParts {
+    pub fn record_case(&mut self, nodeid: String, cases: Vec<String>) {
+        if !self.cases.contains_key(&nodeid) {
+            self.arrival.push(nodeid.clone());
         }
-        body.push('\n');
+        self.cases.insert(nodeid, cases);
     }
 
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<testsuites>
-<testsuite name="rstest" errors="{errors}" failures="{failures}" skipped="{skipped}" tests="{tests}" time="{suite_seconds:.3}">
-{body}</testsuite>
-</testsuites>
-"#
+    pub fn record_suite(
+        &mut self,
+        name: String,
+        timestamp: String,
+        hostname: String,
+        properties: Vec<String>,
+        extra: Vec<String>,
+    ) {
+        // The first session to finish names the suite and dates it.
+        self.suite.get_or_insert(Suite {
+            name,
+            timestamp,
+            hostname,
+        });
+        for p in properties {
+            if !self.properties.contains(&p) {
+                self.properties.push(p);
+            }
+        }
+        for e in extra {
+            if !self.extra.contains(&e) {
+                self.extra.push(e);
+            }
+        }
+    }
+
+    pub fn set_collection_order(&mut self, ids: &[String]) {
+        self.collection = Some(ids.to_vec());
+    }
+
+    /// Document order: collection order when known, else arrival order, then
+    /// any test with no streamed element (synthesized), sorted.
+    fn order<'a>(&'a self, run: &'a Run) -> Vec<&'a str> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut out = Vec::new();
+        let primary: Box<dyn Iterator<Item = &String>> = match &self.collection {
+            Some(ids) => Box::new(ids.iter().chain(self.arrival.iter())),
+            None => Box::new(self.arrival.iter()),
+        };
+        for id in primary.chain(run.tests().keys()) {
+            let known = self.cases.contains_key(id) || run.tests().contains_key(id);
+            if known && seen.insert(id.as_str()) {
+                out.push(id.as_str());
+            }
+        }
+        out
+    }
+}
+
+pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
+    let parts = &run.junit;
+    // pytest opens collection-error testcases during collection, so they
+    // precede every test's element.
+    let mut cases: Vec<String> = parts.extra.clone();
+    for nodeid in parts.order(run) {
+        let entry = run.tests().get(nodeid);
+        match (parts.cases.get(nodeid), entry) {
+            // A crash's outcome is rstest's, not pytest's: synthesize it.
+            (Some(streamed), Some(e)) if !e.crashed => {
+                cases.extend(streamed.iter().map(|c| decorate(c, e)));
+            }
+            (Some(streamed), None) => cases.extend(streamed.iter().cloned()),
+            (_, Some(e)) => cases.push(synthesize(nodeid, e, run)),
+            (None, None) => {}
+        }
+    }
+
+    let (mut failures, mut errors, mut skipped) = (0usize, 0usize, 0usize);
+    for c in &cases {
+        failures += count_tag(c, "failure");
+        errors += count_tag(c, "error");
+        skipped += count_tag(c, "skipped");
+    }
+    let (name, stamp) = match &parts.suite {
+        Some(s) => (
+            s.name.as_str(),
+            format!(
+                r#" timestamp="{}" hostname="{}""#,
+                esc_attr(&s.timestamp),
+                esc_attr(&s.hostname)
+            ),
+        ),
+        None => ("pytest", String::new()),
+    };
+    let mut xml = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="{}" errors="{errors}" failures="{failures}" skipped="{skipped}" tests="{}" time="{suite_seconds:.3}"{stamp}"#,
+        esc_attr(name),
+        cases.len(),
     );
+    if parts.properties.is_empty() && cases.is_empty() {
+        xml.push_str(" />");
+    } else {
+        xml.push('>');
+        if !parts.properties.is_empty() {
+            xml.push_str("<properties>");
+            parts.properties.iter().for_each(|p| xml.push_str(p));
+            xml.push_str("</properties>");
+        }
+        cases.iter().for_each(|c| xml.push_str(c));
+        xml.push_str("</testsuite>");
+    }
+    xml.push_str("</testsuites>");
     std::fs::write(path, xml)?;
     Ok(())
 }
 
-/// pytest classname convention: path components + classes joined with dots,
-/// file extension dropped; name = the final component (with params).
-fn split_nodeid(nodeid: &str) -> (String, String) {
-    // Not `nodeid_file`: a bare-file nodeid (collection error, no `::`) must
-    // yield an empty classname here, whereas `nodeid_file` returns the file.
-    let mut parts: Vec<&str> = nodeid.split("::").collect();
-    let name = parts.pop().unwrap_or(nodeid).to_string();
-    let file = parts.first().copied().unwrap_or("");
-    let module = file.trim_end_matches(".py").replace(['/', '\\'], ".");
-    let mut classname = module;
-    for cls in parts.iter().skip(1) {
-        classname.push('.');
-        classname.push_str(cls);
+/// Add rstest's signals to a streamed pytest element.
+fn decorate(case: &str, e: &TestEntry) -> String {
+    let mut case = case.to_string();
+    if e.quarantined {
+        // Non-fatal by contract: no <failure>/<error>, so junit gates agree
+        // with rstest's exit status; the property keeps it trackable.
+        case = strip_element(&strip_element(&case, "failure"), "error");
+        case = add_property(&case, "quarantined");
     }
-    (classname, name)
+    if e.flaky {
+        // Passed only after reruns; JUnit has no standard flaky element.
+        case = add_property(&case, "flaky");
+    }
+    case
+}
+
+/// A `<testcase>` in pytest's xunit2 shape for a test no worker finished.
+fn synthesize(nodeid: &str, e: &TestEntry, run: &Run) -> String {
+    let (classname, name) = split_nodeid(nodeid);
+    let head = format!(
+        r#"<testcase classname="{}" name="{}" time="{:.3}""#,
+        esc_attr(&classname),
+        esc_attr(&name),
+        e.duration.unwrap_or(0.0)
+    );
+    let text = run.failure_text(nodeid).unwrap_or("");
+    let body = match e.outcome() {
+        "quarantined" => {
+            r#"<properties><property name="quarantined" value="true" /></properties>"#.to_string()
+        }
+        "errors" => format!(
+            r#"<error message="{}">{}</error>"#,
+            esc_attr(&crash_message(text, "error")),
+            esc(text)
+        ),
+        "failed" => format!(
+            r#"<failure message="{}">{}</failure>"#,
+            esc_attr(&crash_message(text, "failed")),
+            esc(text)
+        ),
+        "skipped" => format!(
+            r#"<skipped type="pytest.skip" message="{}" />"#,
+            esc_attr(e.skip_reason.as_deref().unwrap_or(""))
+        ),
+        "xfailed" => format!(
+            r#"<skipped type="pytest.xfail" message="{}" />"#,
+            esc_attr(e.skip_reason.as_deref().unwrap_or(""))
+        ),
+        _ if e.flaky => {
+            r#"<properties><property name="flaky" value="true" /></properties>"#.to_string()
+        }
+        _ => String::new(),
+    };
+    if body.is_empty() {
+        format!("{head} />")
+    } else {
+        format!("{head}>{body}</testcase>")
+    }
+}
+
+/// pytest's `message` is the crash line; from a rendered traceback that is
+/// the last `E   ` line (else the first non-empty line, else `fallback`).
+fn crash_message(text: &str, fallback: &str) -> String {
+    text.lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("E   "))
+        .or_else(|| text.lines().find(|l| !l.trim().is_empty()))
+        .unwrap_or(fallback)
+        .trim()
+        .to_string()
+}
+
+/// Occurrences of a `<tag` start in serialized XML. Text and attribute values
+/// are escaped (`&lt;`), so every literal `<tag` is a real element.
+fn count_tag(xml: &str, tag: &str) -> usize {
+    let open = format!("<{tag}");
+    xml.match_indices(&open)
+        .filter(|(i, _)| matches!(xml.as_bytes().get(i + open.len()), Some(b' ' | b'>' | b'/')))
+        .count()
+}
+
+/// Remove every `<tag ...>...</tag>` / `<tag ... />` element.
+fn strip_element(xml: &str, tag: &str) -> String {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(i) = rest.find(&open) {
+        if !matches!(
+            rest.as_bytes().get(i + open.len()),
+            Some(b' ' | b'>' | b'/')
+        ) {
+            out.push_str(&rest[..i + open.len()]);
+            rest = &rest[i + open.len()..];
+            continue;
+        }
+        out.push_str(&rest[..i]);
+        let Some(gt) = rest[i..].find('>') else {
+            return out + &rest[i..];
+        };
+        let after_start = i + gt + 1;
+        rest = if rest[..after_start].ends_with("/>") {
+            &rest[after_start..]
+        } else {
+            match rest[after_start..].find(&close) {
+                Some(j) => &rest[after_start + j + close.len()..],
+                None => "",
+            }
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Add `<property name=NAME value="true" />` to a `<testcase>`, after any
+/// properties pytest already wrote (properties come first, per the schema).
+fn add_property(case: &str, name: &str) -> String {
+    let prop = format!(r#"<property name="{name}" value="true" />"#);
+    let Some(gt) = case.find('>') else {
+        return case.to_string();
+    };
+    if case[..gt].ends_with('/') {
+        let head = case[..gt - 1].trim_end();
+        return format!("{head}><properties>{prop}</properties></testcase>");
+    }
+    if let Some(end) = case.find("</properties>") {
+        return format!("{}{prop}{}", &case[..end], &case[end..]);
+    }
+    format!(
+        "{}<properties>{prop}</properties>{}",
+        &case[..=gt],
+        &case[gt + 1..]
+    )
+}
+
+/// pytest's `mangle_test_address`: params stay whole, path components and
+/// classes join with dots, `.py` dropped; name = the final component.
+fn split_nodeid(nodeid: &str) -> (String, String) {
+    let (path, params) = match nodeid.find('[') {
+        Some(i) => nodeid.split_at(i),
+        None => (nodeid, ""),
+    };
+    let mut names: Vec<String> = path.split("::").map(str::to_string).collect();
+    if let Some(first) = names.first_mut() {
+        let dotted = first.replace(['/', '\\'], ".");
+        *first = dotted.strip_suffix(".py").unwrap_or(&dotted).to_string();
+    }
+    if names.len() == 1 {
+        // A bare file (collection error): pytest's classname is empty.
+        names.insert(0, String::new());
+    }
+    let mut name = names.pop().unwrap_or_default();
+    name.push_str(params);
+    (names.join("."), name)
+}
+
+/// ElementTree's attribute escaping: text escaping plus whitespace as
+/// character references, so values roundtrip.
+fn esc_attr(s: &str) -> String {
+    esc(s)
+        .replace('\n', "&#10;")
+        .replace('\r', "&#13;")
+        .replace('\t', "&#09;")
 }
 
 fn esc(s: &str) -> String {
@@ -181,6 +398,103 @@ mod tests {
         assert_eq!(esc("a\u{1f600}b"), "a\u{1f600}b");
     }
 
+    fn write_xml(run: &Run, tag: &str) -> String {
+        let path =
+            std::env::temp_dir().join(format!("rstest-junit-{tag}-{}.xml", std::process::id()));
+        write(&path, run, 1.0).unwrap();
+        let xml = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        xml
+    }
+
+    #[test]
+    fn streamed_elements_are_written_verbatim_in_pytest_order_and_shape() {
+        let mut run = Run::default();
+        run.record(None, rep("b.py::t", "call", "passed", None));
+        run.record(None, rep("a.py::t", "call", "failed", None));
+        // Arrival order (b before a) is pytest's own order in one session.
+        run.junit.record_case(
+            "b.py::t".into(),
+            vec![r#"<testcase classname="b" name="t" time="0.001" />"#.into()],
+        );
+        run.junit.record_case(
+            "a.py::t".into(),
+            vec![r#"<testcase classname="a" name="t" time="0.002"><failure message="assert 1 == 2">E</failure></testcase>"#.into()],
+        );
+        run.junit.record_suite(
+            "mysuite".into(),
+            "2026-09-27T12:00:00+03:00".into(),
+            "host".into(),
+            vec![r#"<property name="k" value="v" />"#.into()],
+            vec![r#"<testcase classname="" name="c" time="0.000"><error message="collection failure">x</error></testcase>"#.into()],
+        );
+        let xml = write_xml(&run, "streamed");
+        assert!(
+            xml.starts_with(r#"<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="mysuite" errors="1" failures="1" skipped="0" tests="3" time="1.000" timestamp="2026-09-27T12:00:00+03:00" hostname="host"><properties><property name="k" value="v" /></properties><testcase classname="" name="c""#),
+            "{xml}"
+        );
+        let b = xml.find(r#"classname="b""#).unwrap();
+        let a = xml.find(r#"classname="a""#).unwrap();
+        assert!(b < a, "arrival order kept: {xml}");
+        assert!(xml.ends_with("</testsuite></testsuites>"), "{xml}");
+    }
+
+    #[test]
+    fn collection_order_wins_over_arrival_in_a_pool() {
+        let mut run = Run::default();
+        for id in ["b.py::t", "a.py::t"] {
+            run.record(None, rep(id, "call", "passed", None));
+            let (c, n) = split_nodeid(id);
+            run.junit.record_case(
+                id.into(),
+                vec![format!(
+                    r#"<testcase classname="{c}" name="{n}" time="0.000" />"#
+                )],
+            );
+        }
+        run.junit
+            .set_collection_order(&["a.py::t".into(), "b.py::t".into()]);
+        let xml = write_xml(&run, "collorder");
+        assert!(xml.find(r#"classname="a""#).unwrap() < xml.find(r#"classname="b""#).unwrap());
+    }
+
+    #[test]
+    fn quarantine_strips_failure_and_flaky_adds_property() {
+        let failed = r#"<testcase classname="a" name="q" time="0.1"><properties><property name="user" value="1" /></properties><failure message="m">E</failure></testcase>"#;
+        let mut e = TestEntry {
+            quarantined: true,
+            ..TestEntry::default()
+        };
+        assert_eq!(
+            decorate(failed, &e),
+            r#"<testcase classname="a" name="q" time="0.1"><properties><property name="user" value="1" /><property name="quarantined" value="true" /></properties></testcase>"#
+        );
+        e.quarantined = false;
+        e.flaky = true;
+        assert_eq!(
+            decorate(r#"<testcase classname="a" name="f" time="0.1" />"#, &e),
+            r#"<testcase classname="a" name="f" time="0.1"><properties><property name="flaky" value="true" /></properties></testcase>"#
+        );
+    }
+
+    #[test]
+    fn empty_run_is_a_self_closed_suite() {
+        let xml = write_xml(&Run::default(), "empty");
+        assert!(
+            xml.ends_with(r#"tests="0" time="1.000" /></testsuites>"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn counts_only_real_element_starts() {
+        assert_eq!(
+            count_tag(r#"<failure message="&lt;failure">x</failure>"#, "failure"),
+            1
+        );
+        assert_eq!(count_tag("<errors/><error />", "error"), 1);
+    }
+
     #[test]
     fn nodeid_to_classname() {
         assert_eq!(
@@ -194,6 +508,12 @@ mod tests {
             split_nodeid("test_a.py::test_plain"),
             ("test_a".to_string(), "test_plain".to_string())
         );
+        // Params stay whole even with `::` or `/` inside (pytest partitions at `[`).
+        assert_eq!(
+            split_nodeid("t.py::test_x[a::b/c]"),
+            ("t".to_string(), "test_x[a::b/c]".to_string())
+        );
+        assert_eq!(split_nodeid("t.py"), (String::new(), "t".to_string()));
     }
 
     #[test]
@@ -227,7 +547,7 @@ mod tests {
         assert!(xml.contains(r#"failures="1""#), "{xml}");
         assert!(xml.contains(r#"tests="2""#), "{xml}");
         assert!(
-            xml.contains(r#"<property name="flaky" value="true"/>"#),
+            xml.contains(r#"<property name="flaky" value="true" />"#),
             "{xml}"
         );
         assert!(xml.contains("assert 1 == 2"), "{xml}");
@@ -274,14 +594,17 @@ mod tests {
         assert!(xml.contains(r#"tests="4""#), "{xml}");
         assert!(xml.contains(r#"errors="1""#), "{xml}");
         assert!(xml.contains(r#"skipped="1""#), "{xml}");
-        assert!(xml.contains("<error message=\"error\">"), "{xml}");
-        assert!(xml.contains(r#"<skipped message="no mac"/>"#), "{xml}");
+        assert!(xml.contains("<error message=\"boom\">"), "{xml}");
         assert!(
-            xml.contains(r#"<property name="quarantined" value="true"/>"#),
+            xml.contains(r#"<skipped type="pytest.skip" message="no mac" />"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r#"<property name="quarantined" value="true" />"#),
             "{xml}"
         );
         // The plain pass is a self-closed testcase with no child element.
-        assert!(xml.contains(r#"name="plain" time="0.000"/>"#), "{xml}");
+        assert!(xml.contains(r#"name="plain" time="0.000" />"#), "{xml}");
         // Quarantined failure must NOT surface as a <failure> (gate stays green).
         assert!(!xml.contains("<failure"), "{xml}");
     }
@@ -306,7 +629,7 @@ mod tests {
 
         assert!(xml.contains(r#"skipped="1""#), "{xml}");
         assert!(
-            xml.contains(r#"<skipped message="expected fail"/>"#),
+            xml.contains(r#"<skipped type="pytest.xfail" message="expected fail" />"#),
             "{xml}"
         );
     }

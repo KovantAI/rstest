@@ -1,5 +1,11 @@
 # Run your existing suite
 
+!!! tip "First time? Run `rstest try`"
+    In a project where plain pytest already works, `rstest try` runs your
+    suite once under pytest and once under rstest, then reports whether the
+    outcomes match and how much faster rstest was. It takes as long as both
+    runs; see [`try`](../reference/cli-commands.md#try).
+
 Run rstest from your project root, exactly where you would run pytest. This
 sample is django-allauth's 2,050-test suite at `-n 4`, the run recorded in
 [Benchmarks](../reference/benchmarks.md) (the middle lines are elided):
@@ -62,7 +68,9 @@ pytest-sugar-style view (a `✓`/`✗` line per test, inline failures, a live
 progress bar). When output is piped or running in CI it falls back to the
 compact **`dots`** style shown above, so logs stay stable. Pick any style
 explicitly with [`--output dots|verbose|bar|github|json`](../reference/cli.md#-output-dotsverbosebargithubjson):
-the rest of this page describes `dots`.
+the rest of this page describes `dots`. On a single worker with no
+`--output` set, rstest prints pytest's own terminal output instead
+(**Unreleased**; see [below](#controlling-parallelism)).
 
 - The **header line** states the worker count. rstest is parallel by
   default; this line is the visible reminder.
@@ -78,7 +86,7 @@ it is disabled automatically when output is piped or in CI. It is what
 makes long-running tests visible the moment they start, not after they
 finish.
 
-Add `-v` for one line per test. In parallel mode each line is prefixed with
+Add `-v` for pytest's classic `PASSED`/`FAILED` lines. In parallel mode each line is prefixed with
 the worker that ran it (`gw0`, `gw1`, ...), and lines interleave as workers
 finish:
 
@@ -106,13 +114,21 @@ E       assert 401 == 200
 tests/test_login.py:3: AssertionError
 ```
 
-At `-n 0`/`-n 1` there is no worker, so the prefix is omitted:
+At `-n 0`/`-n 1` there is no worker, so there is no prefix: the single
+pytest session prints its own `-v` output, exactly as pytest does
+(**Unreleased**: rstest 0.7.0 printed its own `verbose` view here, which
+`--output verbose` still gives you):
 
 ```console
 $ rstest -n 0 -v
-rstest 0.7.0 — single worker (pytest-exact mode)
-tests/test_first.py::test_add PASSED [ 16%]
-tests/test_first.py::test_add_negative PASSED [ 33%]
+============================= test session starts ==============================
+platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0 -- /path/to/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /path/to/project
+collecting ... collected 6 items
+
+tests/test_first.py::test_add PASSED                                     [ 16%]
+tests/test_first.py::test_add_zero PASSED                                [ 33%]
 ...
 ```
 
@@ -127,6 +143,12 @@ $ rstest -k "login and not slow"        # keyword filter
 $ rstest -m integration                 # marker filter
 $ rstest --lf                           # only last failures
 $ rstest -x                             # stop at first failure (globally)
+```
+
+rstest adds one selector of its own (not a pytest flag; needs a git
+checkout):
+
+```console
 $ rstest --changed                      # only tests affected by your edits
 ```
 
@@ -148,10 +170,13 @@ timings are cached it also caps by total suite time, so a tiny suite runs
 on one or two workers. Pass an explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
-in a single worker process, pytest's own behavior in every detail. You will
-see this one mode under three names: *byte-exact* in these docs,
-*pytest-exact* in its run banner, and *single-worker* in the `-n 0` hint of
-the parallel banner. See
+in a single worker process, pytest's own behavior in every detail. With no
+`--output` set, the terminal output is pytest's own too, byte for byte
+(**Unreleased**), and rstest only appends its extras (doctor, coverage, gate
+messages) after pytest's summary line. You will see this one mode under
+three names: *byte-exact* in these docs, *pytest-exact* in its run banner
+(printed only when you pin rstest's renderer with `--output`), and
+*single-worker* in the `-n 0` hint of the parallel banner. See
 [Byte-exact mode](../concepts/glossary.md#byte-exact-mode) for what that
 guarantees and how it differs from pytest-xdist's `-n 1`.
 
@@ -217,6 +242,10 @@ The one thing that can fail after switching to rstest is a test that quietly
 depended on running alone. Concretely, two tests writing the **same file**:
 
 ```python
+import json
+from pathlib import Path
+
+
 # Both tests use the same hard-coded path. Serially they take turns;
 # in parallel they clobber each other and one fails intermittently.
 def test_writes_config():
@@ -233,6 +262,9 @@ Two ways out. **Best**: make them independent with `tmp_path`, pytest's
 per-test temp directory, so they never share a file:
 
 ```python
+import json
+
+
 def test_writes_config(tmp_path):
     p = tmp_path / "output.json"  # unique dir per test
     p.write_text('{"a": 1}')
@@ -243,6 +275,8 @@ def test_writes_config(tmp_path):
 `serial` so rstest never runs them at the same time as anything else:
 
 ```python
+from pathlib import Path
+
 import pytest
 
 
@@ -257,3 +291,38 @@ those tests, so fix the sharing when you can. Not sure which tests are
 affected? [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) finds
 and classifies them for you. See [Parallel safety](../guides/parallel-safety.md)
 for the full catalogue of sharing patterns and fixes.
+
+## Session fixtures run once per worker
+
+The other common surprise: a `scope="session"` fixture runs once **per
+worker**, not once per run (the same as pytest-xdist). A session fixture
+that creates a fixed file collides across workers:
+
+```python
+import sqlite3
+
+import pytest
+
+
+@pytest.fixture(scope="session")
+def db():
+    conn = sqlite3.connect("test.db")  # every worker opens the same file
+    yield conn
+    conn.close()
+```
+
+Give each worker its own copy. `tmp_path_factory` is already per worker
+under rstest, so this is the simplest fix:
+
+```python
+@pytest.fixture(scope="session")
+def db(tmp_path_factory):
+    conn = sqlite3.connect(tmp_path_factory.mktemp("db") / "test.db")
+    yield conn
+    conn.close()
+```
+
+For a resource outside the temp directory (a database name, a port), key it
+on the `worker_id` fixture: `gw0`, `gw1`, ... at `-n ≥ 2`, and `"master"`
+below `-n 2`, where there is only one process. See
+[Parallel safety](../guides/parallel-safety.md#session-scoped-fixtures-duplicate).
