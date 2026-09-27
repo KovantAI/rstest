@@ -9,7 +9,9 @@
 //! Frames are built as msgpack maps (exactly how the Python worker encodes
 //! them), then decoded into the real `Event` type.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rstest_cli::proto::Event;
 
 fn frame(v: serde_json::Value) -> Vec<u8> {

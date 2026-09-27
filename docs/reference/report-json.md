@@ -278,6 +278,8 @@ It is a **separate document** from the run snapshot above; combine with
   "rstest_version": "0.7.0",
   "workers": 8,
   "wall_seconds": 68.4,
+  "startup_seconds": 0.6,
+  "fork_prewarm": false,
   "tests": 2048,
   "test_time_seconds": 412.9,
   "cpu_time_seconds": 120.3,
@@ -335,6 +337,10 @@ reference doesn't spell out:
   worker-count-independent and is the stable metric to trend.
   `cpu_time_seconds` sums call-phase CPU time over the tests where it was
   measured; `tests` counts tests with a recorded duration.
+- **`startup_seconds`** is the wall time from pool spawn to every worker's
+  first event (import + collect start), part of `wall_seconds`, and `0.0` on
+  single-worker runs. [`--fork-pool`](cli.md#-fork-pool) cuts it;
+  **`fork_prewarm`** records whether this run used it.
 - **When the analysis objects are `null`:**
     - `wait_bound` unless CPU time was measured and waiting is significant
       (`wait_pct ≥ 20%` and `wait_seconds ≥ 1`);
@@ -361,7 +367,8 @@ reference doesn't spell out:
   over 100% signals wait-bound overlap. `workers_busy` covers every worker,
   busiest first (the terminal report shows at most 8; the JSON is not
   truncated); tests with no recorded worker are bucketed as `"serial"`.
-  `imbalance_pct` is `100 × (busiest − idlest) / busiest`.
+  `imbalance_pct` is `100 × (busiest − idlest) / busiest`. `long_pole_seconds`
+  is the slowest single test, the hard floor no worker count beats.
 - **`fixtures[]`**: fixture name, pytest scope, setup count and summed setup
   time, slowest first, at most 50. `constant` (present only when `true`)
   marks a function-scoped fixture that returned the same immutable builtin
