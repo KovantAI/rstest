@@ -71,7 +71,7 @@ a mode switch are pytest-html and pytest-sugar.
 rstest vendors **pytest 9.1.1**, unmodified, and plugins load *into* that
 core, so each plugin's own code must support pytest 9 (its scorecard status
 above is about parallel behavior only) and a `pytest<9` install pin is inert
-at runtime; rstest warns when it sees one (**Unreleased**: not in 0.7.0). The full rule is in
+at runtime; rstest warns when it sees one. The full rule is in
 [Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
 
 **`rstest -n 0` exercises every installed plugin against vendored pytest

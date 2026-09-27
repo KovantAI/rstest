@@ -55,8 +55,8 @@ Worker count. Default `auto` (logical cores, capped as described below).
   pytest semantics; identical to each other, with no worker identity below
   `-n 2`. Exception: with `--reruns`, `-n 0/1` runs a one-worker pool instead
   (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). With no
-  `--output` set, the session prints pytest's own terminal output
-  (**Unreleased**); see [`--output`](#-output-dotsverbosebargithubjson).
+  `--output` set, the session prints pytest's own terminal output; see
+  [`--output`](#-output-dotsverbosebargithubjson).
   See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
   (and, for migrators, how it differs from pytest-xdist's `-n 1`).
 
@@ -129,11 +129,6 @@ All five are pytest-xdist-compatible mode names.
 
 ### `--order <throughput|fail-fast>`
 
-!!! note "Unreleased"
-    Not in rstest 0.7.0 (the latest release); available when installing from
-    source, and in the next release. The same applies to the
-    `[tool.rstest] order` key.
-
 Dispatch **ordering** within `--dist load` (the other dist modes carry an
 affinity order that is the point, so they ignore this).
 
@@ -183,8 +178,7 @@ are refused (not silently ignored; a run probing for order
 dependence must not quietly run ordered).
 
 At a monorepo root the seed is chosen once and shared by every project, so one
-`--shuffle=SEED` reproduces the whole run (**Unreleased**: rstest 0.7.0 did not
-forward `--shuffle` to projects).
+`--shuffle=SEED` reproduces the whole run.
 
 ### `--shard <K/N>`
 
@@ -794,7 +788,7 @@ Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
 to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
 
-!!! note "Unreleased: pytest's own output in byte-exact mode"
+!!! note "pytest's own output in byte-exact mode"
     In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
     or `-n auto` capped to one worker, without `--reruns`) with no `--output`
     flag and no `[tool.rstest] output` key, the default is neither `bar` nor
@@ -809,8 +803,8 @@ to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
     [`--junitxml`](#-junitxml-path) for how that document matches pytest's).
     An explicit `--output` style, on the command line or in
     `[tool.rstest]`, keeps rstest's own renderer, under a
-    `single worker (pytest-exact mode)` banner. rstest 0.7.0 always used its
-    own renderer. At `-n 2` and above nothing changes.
+    `single worker (pytest-exact mode)` banner. At `-n 2` and above nothing
+    changes.
 
 `dots` is pytest's one-char-per-test (`.`/`F`/`s`/…) with a running
 percentage. `verbose` is the `-v` equivalent: one `nodeid OUTCOME` line
@@ -922,15 +916,13 @@ snapshot document to a file.
 Write merged results as JUnit XML. Intercepted by rstest (rather than
 forwarded) because per-worker sessions would clobber a shared file.
 
-**Unreleased:** the document is pytest's own at every worker count. Each
+The document is pytest's own at every worker count. Each
 worker runs pytest's junitxml plugin and streams every finished
 `<testcase>` element to rstest, which merges them in collection order
 (pytest's run order at `-n 0`). Suite name and attributes, `junit_family`,
 `junit_logging`, `junit_suite_name`, `--junit-prefix`, `record_property`,
 `record_xml_attribute` and `record_testsuite_property` all come out exactly
 as under pytest; only `time`, `timestamp` and `hostname` vary between runs.
-(rstest 0.7.0 wrote its own document: suite `rstest`, tests sorted by
-nodeid, generic `message` attributes.)
 
 rstest adds its own signals only as standard `<property>` extensions:
 
@@ -1013,8 +1005,7 @@ directory named exactly `.git`, `__pycache__`, `.pytest_cache`,
 `.rstest_cache`, `.venv`, `.gate-venv`, `node_modules` or `target` are
 ignored; other virtualenv or tool directories (`venv/`, `.tox/`, `.nox/`) are
 watched. Type `q` then Enter to exit cleanly (`Ctrl+C`
-also works; **Unreleased:** `q` is not in rstest 0.7.0, where only `Ctrl+C`
-exits). Closing stdin (`nohup`, `< /dev/null`) does not end the session.
+also works). Closing stdin (`nohup`, `< /dev/null`) does not end the session.
 Started as a background job on a terminal (`rstest --watch &`), rstest leaves
 stdin alone so the shell does not suspend it for tty input; stop it with `kill`
 or bring it back with `fg`. A session moved to the background later (Ctrl+Z,
@@ -1093,8 +1084,7 @@ projects = ["libs/*", "services/api"]   # monorepo subprojects; replaces auto-di
 These are the only keys read; other rstest flags (`--timeout`, `--html`,
 `--junitxml`, `--fail-on-leak`, `--doctor-fail-on`, ...) are command-line only.
 Keys use kebab-case. `worker-timeout` takes whole seconds (an integer), like
-the `--worker-timeout` flag. The `order` key is **Unreleased** (not in rstest
-0.7.0).
+the `--worker-timeout` flag.
 
 Precedence: command line > `[tool.rstest]` > built-in defaults. rstest reads
 the `[tool.rstest]` of the **nearest** `pyproject.toml`, walking up from the
@@ -1106,8 +1096,7 @@ one up. pytest's own options stay where they always were
 in `addopts` or `PYTEST_ADDOPTS` are **not** read by rstest (see the warning at
 the top of this page).
 
-**Invalid entries are reported, then ignored** (**Unreleased**: rstest 0.7.0
-dropped them silently). An unknown key or a wrong-typed value prints one
+**Invalid entries are reported, then ignored.** An unknown key or a wrong-typed value prints one
 warning to stderr per run, and that setting falls back to its default:
 
 ```text
@@ -1141,10 +1130,9 @@ unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 `--ff`, `-W`, `-p`, `--tb`, `--color`, `--basetemp`, plugin flags, ...
 
 Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
-and subcommand list) and `-V` / `--version` (`rstest 0.7.0`). In 0.7.0 pytest's
-help is not reachable through rstest: `rstest -- --help` prints only the
-banner and exits `0`. **Unreleased:** in byte-exact mode with no `--output`
-set, it prints the vendored pytest's help instead. To list pytest's and
+and subcommand list) and `-V` / `--version` (`rstest 0.8.0`). In byte-exact
+mode with no `--output` set, `rstest -- --help` prints the vendored pytest's
+help; at `-n 2` and above or with an explicit `--output` it does not. To list pytest's and
 your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows
 that installed version's flags).
 

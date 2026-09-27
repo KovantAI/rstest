@@ -42,29 +42,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
         with:
           python-version: "3.13"
           args: "-n auto"
           upload-junit: true
 ```
 
-!!! warning "The `@v0.7.0` action pastes some inputs into shell code"
-    The action tagged `v0.7.0` interpolates some inputs straight into its
-    shell steps, and it lacks the `warm-from-event` guard on the artifact
-    cache backend. Both are fixed on `main` and ship in 0.8.0. Until then,
-    pin the action to a `main` commit SHA
-    (`uses: KovantAI/rstest/.github/actions/rstest@<sha>`) instead of the tag.
-    See [Security: GitHub action inputs](../reference/security.md#github-action-inputs).
+!!! note "Use `@v0.8.0` or later"
+    Action tags before `v0.8.0` interpolate some inputs straight into their
+    shell steps and lack the `warm-from-event` guard on the artifact cache
+    backend. See
+    [Security: GitHub action inputs](../reference/security.md#github-action-inputs).
 
 That defaults `--output github` (so failures show as `::error` annotations and
 flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
 `junit.xml`. See the [action README][action] for all inputs (`changed`,
 `durations-regress`, `reruns`/`rerun-on`, `fail-under-ratio`, `shard`, …).
 
-Pin the action to a release tag or a full commit SHA (for 0.7.0, a SHA; see
-the warning above), and set
-`version:` to pin the rstest wheel; without it the action installs the
+Pin the action to a release tag (`v0.8.0` or later) or a full commit SHA,
+and set `version:` to pin the rstest wheel; without it the action installs the
 latest rstest from PyPI.
 
 The YAML on these pages references third-party actions by major tag
@@ -72,11 +69,9 @@ The YAML on these pages references third-party actions by major tag
 pin those by full commit SHA too; see [Security & supply
 chain](../reference/security.md).
 
-In a matrix, the action on `main` names its artifacts per leg (the
-`artifact-suffix` input, default `<os>-py<version>[-<working-directory>]`) so
-legs never share cache segments or JUnit names. That input is **Unreleased**:
-it is not in the `@v0.7.0` action and ships in 0.8.0. See the
-[action README][action].
+In a matrix, the action names its artifacts per leg (the `artifact-suffix`
+input, default `<os>-py<version>[-<working-directory>]`) so legs never share
+cache segments or JUnit names. See the [action README][action].
 
 [action]: https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest
 
@@ -178,7 +173,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
-      - run: pip install -r requirements.txt && pip install rstest==0.7.0
+      - run: pip install -r requirements.txt && pip install rstest==0.8.0
 
       # The cache is what makes run two fast. Keyed like the bundled action
       # (OS + Python + lockfile hash), unique per run (actions/cache never
@@ -284,8 +279,7 @@ jobs:
         project: ${{ fromJSON(needs.discover.outputs.projects) }}
     steps:
       - uses: actions/checkout@v7
-      # Pin a main commit SHA: per-leg artifact names are Unreleased (0.8.0).
-      - uses: KovantAI/rstest/.github/actions/rstest@<sha>
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
         with:
           python-version: "3.13"
           # Run inside the package, not `rstest libs/core` from the root:
@@ -473,7 +467,7 @@ if you're unsure of the name.
 
 ```console
 $ rstest replay --journal ci-replay/latest.json
-rstest: replay: run 18d93d9429580fb015f7d (0.7.0 recorded), 4 worker(s), 22 test(s) across 4 slot(s)
+rstest: replay: run 18d93d9429580fb015f7d (0.8.0 recorded), 4 worker(s), 22 test(s) across 4 slot(s)
 ...
 --- FAILED [gw0] tests/test_m2.py::test_victim ---
 ```
@@ -570,8 +564,8 @@ not show up at all.
   on GitHub Actions.
 - **Reproducing order-dependent failures**: `--shuffle` prints its seed;
   rerun with `--shuffle=SEED` to replay the same order. `rstest bisect
-  <nodeid>` (on `main`, not in 0.7.0) narrows a test that fails only after
-  others down to the polluting test(s).
+  <nodeid>` narrows a test that fails only after others down to the
+  polluting test(s).
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` if your CI renders ANSI.
 - **Platform**: these recipes are written for Linux runners but work

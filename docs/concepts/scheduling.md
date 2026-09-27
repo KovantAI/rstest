@@ -37,10 +37,6 @@ first run is collection-ordered and every later run is duration-aware.
 
 ### Fail-fast ordering (`--order fail-fast`)
 
-!!! note "Unreleased"
-    Not in rstest 0.7.0 (the latest release); available when installing from
-    source, and in the next release.
-
 The order above is `--order throughput`, the default. [`--order
 fail-fast`](../reference/cli.md#-order-throughputfail-fast) re-sequences the
 `--dist load` queue for the earliest red signal instead: tests that recently

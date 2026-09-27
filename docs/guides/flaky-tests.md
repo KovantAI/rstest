@@ -48,9 +48,9 @@ Every run (except `--dist each`) merges its events into
 - `flaky`: runs where the test passed only after rerun(s)
 - `failed`: runs where it hard-failed (quarantined failures included)
 - `last_epoch`: when it last misbehaved; also drives **aging** (below)
-- `last_failed_epoch`: when it last hard-failed (`0` = never). **Unreleased:**
-  added after 0.7.0; caches written by 0.7.0 lack it, and readers fall back to
-  `last_epoch` when `failed` is non-zero. Full field reference:
+- `last_failed_epoch`: when it last hard-failed (`0` = never). Older
+  caches lack it; readers fall back to `last_epoch` when `failed` is
+  non-zero. Full field reference:
   [flake log schema](../reference/output-schemas.md#flake-log).
 
 The file is **sparse**: only tests that ever flaked or failed get an

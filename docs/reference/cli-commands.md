@@ -137,10 +137,6 @@ The first slice of a broader migration assistant.
 
 ### `audit`
 
-!!! note "Unreleased"
-    Not in rstest 0.7.0 (the latest release); available when installing from
-    source, and in the next release.
-
 Auto parallel-safety audit: the one-command answer to "which of my tests
 aren't parallel-safe, and how do I fix them?" It **runs the suite at `-n auto`**
 (repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
@@ -220,10 +216,6 @@ it out: a test that is flaky in every mode can still pass all serial runs by
 chance and be listed as a serial candidate.
 
 ### `bisect <nodeid>`
-
-!!! note "Unreleased"
-    Not in rstest 0.7.0 (the latest release); available when installing from
-    source, and in the next release.
 
 Order-dependency bisect: the automated answer to "this test only fails when
 run after some other test; *which* one?" Given a failing test's nodeid, it
@@ -390,10 +382,6 @@ interpreter.
 
 ### `shard-verify`
 
-!!! note "Unreleased"
-    Not in rstest 0.7.0 (the latest release); available when installing from
-    source, and in the next release.
-
 Prove a `--shard` matrix covered the whole suite. Sharding partitions the suite
 independently in each job with no coordination, so a divergent duration cache or
 a differently-collected suite can silently drop or double-run tests and still
@@ -459,10 +447,6 @@ error, never a silent fold-all.
 ## Inspection and integrity
 
 ### `explain`
-
-!!! note "Unreleased"
-    Not in rstest 0.7.0 (the latest release); available when installing from
-    source, and in the next release.
 
 Print one test's dossier from the caches without running anything. rstest
 accretes rich per-test data across runs (the duration cache, the flake/fail log,

@@ -232,12 +232,10 @@ only. See [Caching: trust boundary](../concepts/caching.md#trust-boundary).
 
 ### GitHub action inputs
 
-!!! note "Unreleased: ships in 0.8.0"
-    The two protections below are on `main` and ship in rstest 0.8.0. The
-    action tagged `v0.7.0` does **not** have them: it pastes some inputs
-    straight into shell code and has no `warm-from-event` input. Until 0.8.0
-    is released, pin the action to a `main` commit SHA
-    (`uses: KovantAI/rstest/.github/actions/rstest@<sha>`) to get them.
+!!! note "Pin `v0.8.0` or later"
+    Action tags before `v0.8.0` paste some inputs straight into shell code
+    and have no `warm-from-event` input. Pin the action to the `v0.8.0` tag
+    or a full commit SHA of that release or later.
 
 The composite action passes every input to its scripts through `env:`
 variables, never by pasting `${{ }}` expressions into shell code, so an input
@@ -265,7 +263,7 @@ lockfile, e.g. pip:
 $ pip install --require-hashes -r requirements.txt
 ```
 
-or pin an exact version (`pip install rstest==0.7.0`). See
+or pin an exact version (`pip install rstest==0.8.0`). See
 [Installation](../getting-started/installation.md#verifying-a-downloaded-wheel)
 for the `SHA256SUMS` file and building from source.
 

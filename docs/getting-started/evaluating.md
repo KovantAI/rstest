@@ -57,8 +57,8 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
 
 ## Maturity
 
-- **Releases:** first release 0.0.1 on 2026-06-10; 15 releases through 0.7.0
-  (2026-09-10), every change listed in the
+- **Releases:** first release 0.0.1 on 2026-06-10; 16 releases through 0.8.0
+  (2026-09-28), every change listed in the
   [CHANGELOG](https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md).
 - **Maintainer:** Kovant AB ([Security](../reference/security.md)).
 - **Security support:** fixes land on the latest release only; there are no

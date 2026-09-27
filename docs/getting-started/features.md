@@ -30,12 +30,12 @@ Everything pytest does (via a vendored pytest core), plus:
 | Crash recovery | automatic | crashed test reported failed; worker respawns; run completes |
 | Flaky handling | `--reruns N`, `@pytest.mark.flaky`, `--only-rerun` | failed-then-passed = flaky (green run, counted, listed); crash-aware. Works at any `-n`: at `-n 0/1`, `--reruns` runs a one-worker pool (not byte-exact) |
 | Live status footer | automatic on a terminal | per-worker current test + elapsed, progress + ETA |
-| Output styles | `--output dots/verbose/bar/github/json` (+ `gitlab/buildkite/teamcity/azure/tap`; see [CLI](../reference/cli.md#-output-dotsverbosebargithubjson)) | `bar` (the TTY default) = pytest-sugar-style per-test lines, inline failures, progress bar; works under the parallel pool. `github` emits CI annotations; `json` is a live NDJSON event stream. With no `--output` set, byte-exact mode prints pytest's own terminal output instead (Unreleased) |
+| Output styles | `--output dots/verbose/bar/github/json` (+ `gitlab/buildkite/teamcity/azure/tap`; see [CLI](../reference/cli.md#-output-dotsverbosebargithubjson)) | `bar` (the TTY default) = pytest-sugar-style per-test lines, inline failures, progress bar; works under the parallel pool. `github` emits CI annotations; `json` is a live NDJSON event stream. With no `--output` set, byte-exact mode prints pytest's own terminal output instead |
 | Smart selection | `--changed[=REV]` | run only tests affected by changed files |
 | Coverage | `--cov`, `--cov-report`, `--cov-fail-under` | pytest-cov (install it in your project), combined across workers; see [Coverage](../guides/coverage.md) |
 | Per-test timeout | `--timeout SECS`, `@pytest.mark.timeout` | interrupts the test in-process with a traceback; no pytest-timeout needed |
 | Hang watchdog | `--worker-timeout SECS` | kills + replaces a worker stuck on one test |
-| Project config | `[tool.rstest]` in pyproject | committed defaults for `-n`, `--dist`, `--reruns`, `--reruns-only-known-flaky`, `--worker-timeout`, `--collect`, output, monorepo `projects`, and `order` (Unreleased) ([keys](../reference/cli.md#configuration-file)) |
+| Project config | `[tool.rstest]` in pyproject | committed defaults for `-n`, `--dist`, `--reruns`, `--reruns-only-known-flaky`, `--worker-timeout`, `--collect`, output, monorepo `projects`, and `order` ([keys](../reference/cli.md#configuration-file)) |
 | Worker attribution | automatic | `[gwN]` on `-v` lines and failure headers |
 | JUnit XML | `--junitxml` | rendered from merged results; flaky tests flagged via property |
 | Machine-readable results | `--report-json` | per-test outcome snapshot |

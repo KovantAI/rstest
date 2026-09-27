@@ -119,11 +119,6 @@ For a merge-queue or release gate, add a step that proves the shards covered
 the whole suite. The built-in [`rstest shard-verify`](../reference/cli-commands.md#shard-verify)
 does exactly this.
 
-!!! warning "Unreleased"
-    `shard-verify` and the `meta.shard` report stamp it reads are on `main`
-    but **not in rstest 0.7.0**. On 0.7.0, `rstest shard-verify …` is treated
-    as a test path. Until the next release, use the jq equivalent below.
-
 Each shard's `--report-json`, written while `--shard` was
 active, carries a `meta.shard` stamp: `k`, `n`, and the sha256
 `collection_hash` and size of the full collected suite. Each shard writes its
@@ -156,9 +151,9 @@ a lightweight final job. It covers full-collection runs; a `--collect lazy`
 shard run stamps no collection hash and is not verifiable this way.
 
 ??? note "Manual equivalent with jq (no shard-verify)"
-    If you cannot run `shard-verify` (rstest 0.7.0 or older, or a policy against extra
-    tooling), reconcile by hand. Collect the full suite once with the **same**
-    selection flags the shards use, union the per-shard ran-ids, and compare.
+    If you cannot run `shard-verify` (a policy against extra tooling),
+    reconcile by hand. Collect the full suite once with the **same** selection
+    flags the shards use, union the per-shard ran-ids, and compare.
     The report-json `tests` map is keyed by every test that ran (including
     skipped and xfailed), so the union is complete.
 
@@ -272,8 +267,6 @@ jobs:
           pattern: shard-*
           merge-multiple: true
       # Gate: fail unless the shards covered the whole suite exactly once.
-      # Unreleased: shard-verify is not in rstest 0.7.0; there, use the jq
-      # check under "Verify no test was dropped" instead.
       - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
       - run: pip install rstest && rstest shard-verify shard.*.json

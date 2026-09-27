@@ -103,9 +103,7 @@ result of every project: test keys are root-relative nodeids
 the same way, and `meta.projects` maps each project to
 `{"exitstatus": N, "counts": {...}}` or `{"skipped": true}`;
 `meta.counts` holds the grand totals across projects. It carries the same
-`meta.schema` as a single-project document. (rstest 0.7.0 stamped merged
-documents `"schema": 4` although they carried schema-5 fields; treat those as
-schema 5.)
+`meta.schema` as a single-project document.
 
 For *suite-health* data (timings analysis, wait-bound tests, fixture
 costs) use [`--doctor-json`](cli.md#-doctor-json-path) instead; the two
@@ -275,7 +273,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 3,
-  "rstest_version": "0.7.0",
+  "rstest_version": "0.8.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "startup_seconds": 0.6,

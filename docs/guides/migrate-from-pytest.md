@@ -25,9 +25,7 @@ forward like any other pytest flag; the exceptions are in
 including `addopts`, `testpaths`, `python_files`, `markers` and
 `filterwarnings`, is read by the vendored core exactly as pytest reads it.
 rstest's own lookup (for `-n auto` sizing, `--collect lazy`, `--watch` and
-monorepo discovery) follows the same file order (**Unreleased**: rstest
-0.7.0's own lookup knew only `pytest.ini`, `pyproject.toml`, `tox.ini` and
-`setup.cfg`). One catch: rstest's *own* flags are read only
+monorepo discovery) follows the same file order. One catch: rstest's *own* flags are read only
 from the command line and `[tool.rstest]`, never from `addopts` (see
 [below](#addopts-and-pytest_addopts)).
 
