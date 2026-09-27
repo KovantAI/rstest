@@ -11,12 +11,7 @@ persist `.rstest_cache` between runs so scheduling stays warm. Where a
 provider's native cache can't merge across a shard matrix, each recipe points
 at the [shared-cache backend](ci-shared-cache.md) instead.
 
-!!! tip "Pin for reproducible CI"
-    The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin an exact version (`pip install rstest==0.7.0`) or install from your
-    lockfile, ideally with hashes (`pip install --require-hashes -r
-    requirements.txt`). rstest is pre-1.0, so a range like `~=0.7` can still
-    pull in breaking changes.
+--8<-- "docs/_snippets/ci-pin-tip.md"
 
 ## AWS CodeBuild
 
@@ -66,10 +61,10 @@ read-only; one separate full job saves the fresh one), or the shards will
 race to write divergent duration caches and their partitions will drift.
 
 **Shared cache (sharding, no write race).** Drop the `cache:` block and the
-single-writer discipline entirely: the build's IAM role already reaches S3, so
+single-writer discipline entirely. The build's IAM role already reaches S3, so
 point [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
 at a bucket and every batch shard pushes its own immutable segment (no
-clobber), pulls the union:
+clobber) and pulls the union:
 
 ```yaml
 build:
@@ -80,7 +75,7 @@ build:
 ```
 
 `--cache-compact-threshold` folds the loose segments inline once they exceed N,
-so no maintenance job is needed. `gsutil rsync … ./rcache` + `--cache-remote
+so no maintenance job is needed. `aws s3 sync … ./rcache` + `--cache-remote
 ./rcache` remains valid if you prefer materializing a dir. The build's service
 role needs `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix
 (`Delete` only for the inline compaction).
@@ -122,9 +117,9 @@ downstream test-reporting tool.
 
 **Shared cache (sharding, no rsync bookends).** The build's service account
 already reaches GCS, so point [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
-straight at a `gs://` bucket: rstest drives the `gcloud storage` (or `gsutil`)
-CLI on the step, immutable segments make concurrent shard pushes safe, no
-start/end sync:
+straight at a `gs://` bucket. rstest drives the `gcloud storage` (or `gsutil`)
+CLI on the step, and immutable segments make concurrent shard pushes safe with
+no start/end sync:
 
 ```yaml
 steps:

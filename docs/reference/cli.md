@@ -1,26 +1,22 @@
 # CLI flags
 
-```text
-rstest [RSTEST FLAGS] [PATHS] [PYTEST FLAGS]
-rstest <COMMAND> [OPTIONS]
-```
-
 rstest owns the flags listed on this page, grouped by topic below;
 **everything else forwards to the test session verbatim**, so the rest of the
 pytest flag surface, including flags added by your plugins, works without
 translation.
 
+```text
+rstest [RSTEST FLAGS] [PATHS] [PYTEST FLAGS]
+rstest <COMMAND> [OPTIONS]
+```
+
 !!! warning "Owned flags that shadow plugin or pytest flags"
     A few rstest-owned flags share a name with a pytest or plugin flag. rstest
-    consumes them, so the plugin never sees them:
+    consumes them, so the plugin never sees them (put one after `--` to hand
+    it to pytest or the plugin instead):
+    { #shadowed-flags }
 
-    | Flag | Also defined by | What rstest does instead |
-    |---|---|---|
-    | `--timeout` | pytest-timeout | rstest's own per-test timeout ([`--timeout`](#-timeout-secs)) |
-    | `--reruns`, `--only-rerun` | pytest-rerunfailures | rstest's orchestrator-side reruns ([`--reruns`](#-reruns-n)) |
-    | `--html` | pytest-html | rstest's own merged HTML report ([`--html`](#-html-path)) |
-    | `--debug` | pytest core (`--debug` trace log) | starts debugpy ([`--debug`](#-debugport)) |
-    | `--junitxml` | pytest core | rstest writes one merged file ([`--junitxml`](#-junitxml-path)) |
+    --8<-- "docs/_snippets/shadowed-flags.md"
 
     **Owned flags are read only from the command line and
     [`[tool.rstest]`](#configuration-file).** An owned flag placed in pytest's
@@ -35,6 +31,11 @@ bisect`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
 `rstest verify-vendor`) and their own flags are on [CLI
 subcommands](cli-commands.md).
 
+At a [monorepo](../concepts/monorepo.md) root, rstest forwards most of these
+flags to every project, gives output files a per-project name, and refuses the
+few that need one project's session. The per-flag table is in
+[Flags at a monorepo root](../concepts/monorepo.md#flags-at-a-monorepo-root).
+
 ## Parallelism and scheduling
 
 ### `-n, --numprocesses <N|auto>`
@@ -47,14 +48,14 @@ Worker count. Default `auto` (logical cores, capped as described below).
   warm, at most one worker per ~2 s of cached suite time. On Linux the core
   count honors the process CPU affinity mask and cgroup CPU quota, so a
   CPU-limited container (`docker run --cpus=2`, a constrained CI runner) sees
-  its allocation, not the host's core count, no over-subscription. Pin `-n
+  its allocation, not the host's core count (no oversubscription). Pin `-n
   <k>` if you want a fixed count regardless.
 - `-n 4`: four workers
-- `-n 0` or `-n 1`: **single-worker mode**, one pytest session, byte-exact
+- `-n 0` or `-n 1`: **byte-exact mode**, one pytest session with byte-exact
   pytest semantics; identical to each other, with no worker identity below
   `-n 2`. Exception: with `--reruns`, `-n 0/1` runs a one-worker pool instead
   (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
-  (and, for migrators, how it differs from pytest-xdist's `-n 1`)
+  (and, for migrators, how it differs from pytest-xdist's `-n 1`).
 
 **An explicit `-n <k>` is not capped by core count.** Only `auto` caps down.
 A literal `-n 16` on an 8-core box runs 16 workers. This is the knob for
@@ -69,6 +70,10 @@ single worker (one test file, or a warm cache under ~2 s), and
 [wait-bound playbook](../guides/wait-bound.md#2-tune-the-worker-count).
 Conversely, load-sensitive suites (tight timing assertions) may need `-n`
 *capped* below cores; see [Parallel safety](../guides/parallel-safety.md#choosing-the-worker-count).
+
+`-s`, `--capture=…`, `--pdb`, `--trace`, `--debug` and the stepwise flags
+override `-n` and run one process (rstest warns when you set `-n` above 1);
+see [Passthrough-IO flags](#passthrough-io-flags).
 
 ### `--fork-pool`
 
@@ -97,29 +102,34 @@ Run `--doctor` to see the `startup:` line and whether it's worth turning on.
 
 Distribution mode. Default `load`.
 
-- `load`: test-granular, dynamic, duration-aware: cached slow tests
+- `load`: test-granular, dynamic and duration-aware. Cached slow tests
   dispatch first and individually; the rest flows in contiguous chunks
   that preserve module-fixture locality.
 - `loadfile`: whole files stay on one worker, in file order. For
   order-dependent suites.
-- `loadscope`: fixture-scope affinity: a class's tests stay together,
+- `loadscope`: fixture-scope affinity. A class's tests stay together,
   module-level functions stay with their module. For expensive
   class/module fixtures that must not duplicate.
 - `loadgroup`: `@pytest.mark.xdist_group("name")` affinity, across
   files; unmarked tests distribute individually.
-- `each`: every worker runs the FULL suite. Counts are per-worker
+- `each`: every worker runs the **full** suite. Counts are per-worker
   totals and outcomes are keyed `nodeid [gwN]`; `--reruns` is
   rejected (the mode exists to *expose* per-worker outcome
   differences, and rerunning failures would mask exactly the
   flakiness `each` is there to surface); the duration cache is not
   updated. Honest scope note:
   every worker uses the same interpreter, so this validates isolation
-  and shakes out flakiness, xdist's heterogeneous-environment use
+  and shakes out flakiness; xdist's heterogeneous-environment use
   (`--tx` gateways) has no rstest equivalent.
 
 All five are pytest-xdist-compatible mode names.
 
 ### `--order <throughput|fail-fast>`
+
+!!! note "Unreleased"
+    Not in rstest 0.7.0 (the latest release); available when installing from
+    source, and in the next release. The same applies to the
+    `[tool.rstest] order` key.
 
 Dispatch **ordering** within `--dist load` (the other dist modes carry an
 affinity order that is the point, so they ignore this).
@@ -139,9 +149,12 @@ affinity order that is the point, so they ignore this).
 
 **Auto:** with neither the flag nor `[tool.rstest] order` set, rstest
 picks `fail-fast` under [`--watch`](#-watch) (you want the failure now, on
-each save) and `throughput` otherwise. An explicit `--order fail-fast` on
-an affinity dist or `--collect lazy` warns, as does one passed on the command line to a single-worker or `-s`/`--pdb` run, since
-it has no effect there; combining it with `--shuffle` is an error. A cold `flakes.json`
+each save) and `throughput` otherwise. An explicit `--order fail-fast` (flag
+or config) warns where it has no effect: an affinity dist
+(`loadfile`/`loadscope`/`loadgroup`), `--dist each` (no dispatch queue), and
+`--collect lazy`. On a single-worker run or a passthrough run (`-s`, `--pdb`,
+`--co`, `--debug`, ...) it warns only when passed on the command line.
+Combining it with `--shuffle` is an error. A cold `flakes.json`
 just means no test has a failure/flake signal yet, so fail-fast matches
 `throughput`. Monorepo runs forward `--order` to every project. Config `[tool.rstest] order`.
 
@@ -159,9 +172,13 @@ Affinity modes (`loadfile`/`loadscope`/`loadgroup`) shuffle the group
 order and keep in-group order intact: in-group order is the affinity
 contract. In `load` mode the shuffle replaces duration-aware
 sequencing for that run. Requires the parallel pool with full
-collection: single-worker mode, `--collect lazy`, and `--dist each`
-are refused (not silently ignored, a run probing for order
+collection: byte-exact mode, `--collect lazy`, and `--dist each`
+are refused (not silently ignored; a run probing for order
 dependence must not quietly run ordered).
+
+At a monorepo root the seed is chosen once and shared by every project, so one
+`--shuffle=SEED` reproduces the whole run (**Unreleased**: rstest 0.7.0 did not
+forward `--shuffle` to projects).
 
 ### `--shard <K/N>`
 
@@ -194,12 +211,20 @@ suite (identical sessions, hash-verified). `lazy`: each test file is
 collected exactly once, on one worker, on demand, a distributed single
 collection pass. Big win for narrow `-k`/`-m` selections on large
 suites; full runs of suites with a few giant files prefer `full` (or
-`lazy` with an explicit `--dist load`, which enables work-stealing).
+`lazy` with an explicitly chosen `load`, from `--dist load` or
+`[tool.rstest] dist = "load"`, which enables work-stealing; the implicit
+default keeps strict file affinity).
 See [Lazy collection](../concepts/lazy-collection.md) for semantics and
 the compatibility trade. Configurable via `[tool.rstest] collect`.
 
-With `--collect lazy`, `--dist loadscope|loadgroup` are rejected, and
-nodeid/`--pyargs` arguments fall back to full collection.
+`--collect lazy` accepts only `--dist load` and `loadfile`; `loadscope`,
+`loadgroup` and `each` are rejected (exit 1):
+
+```text
+--collect lazy is file-affine and cannot honor --dist loadscope (only load/loadfile: loadscope/loadgroup need a global id list and each runs the full suite on every worker; use --collect full)
+```
+
+Nodeid/`--pyargs` arguments fall back to full collection.
 
 ### `--doctest-modules`
 
@@ -245,13 +270,13 @@ Conservative by construction: ambiguous module names select every match,
 function-local imports count, a changed `conftest.py` selects its whole
 subtree, and any config or non-Python change falls back to a full run.
 Known gap: dynamic imports (`importlib.import_module`) produce no graph
-edges, for correctness-critical runs, use `--changed-strict` below.
+edges; for correctness-critical runs, use `--changed-strict` below.
 With nothing affected, the run prints
 `no tests affected by N changed file(s)` and exits 0 without running.
 
 PR-aware in CI: on a pull-request / merge-request job, bare `--changed`
 diffs against the merge-base with the PR base branch instead of `HEAD`,
-a clean checkout of the PR commit still selects exactly the PR's files.
+so a clean checkout of the PR commit still selects exactly the PR's files.
 The base is auto-detected from the CI environment:
 
 | CI | Variable | Base |
@@ -274,7 +299,7 @@ variable: pass one explicitly or expose a build parameter as env.
 (vs `HEAD`) when `--changed` isn't given. Three behavior changes:
 
 - **A changed source file the import graph cannot connect to any test
-  forces a FULL run** (naming the file) instead of silently selecting
+  forces a full run** (naming the file) instead of silently selecting
   nothing for it: the dynamic-import / unused-module / deleted-file
   cases stop being false skips.
 - **Monorepos: undeclared cross-project imports count as dependency
@@ -289,7 +314,7 @@ variable: pass one explicitly or expose a build parameter as env.
 
 Residual risk it cannot remove: imports constructed at runtime from
 strings the scanner can't see (`importlib.import_module(f"plugins.{name}")`)
-still produce no edges, name such modules in a test file import, or
+still produce no edges; name such modules in a test file import, or
 keep full runs on the gating path.
 
 ### `--since-green`
@@ -387,7 +412,7 @@ immediately, without retrying.
 
 The motivation is deterministic mass-failures: one root cause (a missing
 migration, a broken import) fails many tests *identically*, and a plain
-`--reruns 1` re-runs every one of them for zero recovery, pure wall-time
+`--reruns 1` reruns every one of them for zero recovery: pure wall-time
 waste. Those tests were never flaky, so they carry no flaky history and this
 flag skips their reruns, while genuine known-flakes are still rescued.
 
@@ -458,7 +483,7 @@ file format, and CI surfaces:
 Per-test deadline: fail any test whose **call phase** runs longer than SECS.
 The test is interrupted **in-process** (a signal in the worker), so the
 failure's traceback points at the exact line it was stuck on: the
-pytest-timeout behaviour, built in, no plugin required and working under the
+pytest-timeout behavior, built in, no plugin required and working under the
 parallel pool.
 
 ```console
@@ -485,11 +510,11 @@ thread; on platforms without it (Windows), the watchdog alone applies.
 Hang backstop, off by default: a worker stuck on **one test** for longer than SECS, in any phase (setup, call, or teardown), is killed. The test is reported failed with a timeout message, the
 worker's other tests redistribute, and a replacement worker joins (the
 crash-recovery machinery, same budgets). This is the coarse hang backstop;
-for ordinary per-test limits use [`--timeout`](#-timeout-secs) (below).
+for ordinary per-test limits use [`--timeout`](#-timeout-secs) (above).
 `--worker-timeout` catches what an in-process timeout can't interrupt:
 tests hard-blocked inside C extensions or deadlocked threads. Under
 `--reruns`, a timed-out test is retried within the budget (deadlocks can be
-races). Hangs OUTSIDE a test (during collection or session config) are not
+races). Hangs **outside** a test (during collection or session config) are not
 covered by this watchdog.
 
 ## Durations and regression gates
@@ -507,7 +532,7 @@ get a line.
 
 Gate CI on per-test duration regressions. After the run, each test's
 wall time is compared against the duration cache
-(`.rstest_cache/durations.json`: the same file LPT scheduling uses;
+(`.rstest_cache/durations.json`: the same file LPT (longest-processing-time-first) scheduling uses;
 restore it from your CI cache). Any test that grew past `RATIO` × its
 baseline is listed and the run exits 1:
 
@@ -567,8 +592,8 @@ blob, there is no single-writer job: every shard just runs
 `--cache-pull --cache-push`. See [Shared cache](../concepts/caching.md#shared-cache-backend).
 
 `--cache-remote` on its own (without pull/push/compact) does nothing and warns.
-Pull/push are **not** supported in [monorepo mode](../guides/monorepo.md): each
-project keeps its own `.rstest_cache`, so run rstest per project for shared
+Pull/push are **not** supported at a [monorepo root](../concepts/monorepo.md#flags-at-a-monorepo-root):
+each project has its own cache dir, so run rstest per project for shared
 caching there (rstest errors rather than silently no-op).
 
 ### `--cache-compact-threshold <N>`
@@ -587,9 +612,9 @@ redundant. Leave it unset to keep compaction an explicit `cache-compact` step.
 
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time),
 parallel-floor analysis (the tests that cap any `-n`), parallel efficiency
-(realized speedup and per-worker load imbalance, `-n > 1` only), fixture
+(realized speedup and per-worker load imbalance, `-n ≥ 2` only), fixture
 hotspots (with scope advice), slowest files, and **resource leaks** (tests
-that ended with more threads / open file descriptors than they started, see
+that ended with more threads / open file descriptors than they started; see
 the [Resource leaks](../guides/resource-leaks.md) guide). Adds a few cheap
 measurements to the run; outcomes are unaffected.
 
@@ -615,7 +640,7 @@ and publish the file as an artifact.
 
 ### `--doctor-fail-on <COND>`
 
-Fail the run when a doctor metric breaches a threshold: turning the
+Fail the run when a doctor metric breaches a threshold, turning the
 otherwise-advisory doctor signal into a CI gate. Repeatable; the run fails
 if *any* condition fires. Implies doctor instrumentation.
 
@@ -695,8 +720,8 @@ green session that fails the gate still shows `"exitstatus": 0` there. Key CI
 success off the process exit code, not the envelope field (same as
 [`--durations-regress`](#-durations-regress-ratio)).
 
-The conditions can live in your CI config or `pyproject.toml` invocation, so
-non-GitHub CIs get the same gate the composite action offers externally.
+`--fail-on-leak` and `--doctor-fail-on` are command-line only (neither is a
+`[tool.rstest]` key): put them in the CI step that invokes rstest.
 
 ## Coverage
 
@@ -786,9 +811,10 @@ diff:
 ::error file=<path>,title=<nodeid>,line=<n>::<traceback>
 ```
 
-`file` comes from the nodeid path; `line` is 1-based: the annotator adds 1 to
-pytest's 0-based `report.location`. (The `lineno` field in the JSON reports
-stays 0-based, so `line` = `lineno + 1`.) It comes from pytest's report location, omitted when none is available. The traceback is escaped per the
+`file` comes from the nodeid path. `line` is 1-based (the annotator adds 1 to
+pytest's 0-based `report.location`) and is omitted when no location is
+available. (The `lineno` field in the JSON reports stays 0-based, so
+`line` = `lineno + 1`.) The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
 
 Tests that passed only after reruns (`--reruns` /
@@ -884,7 +910,7 @@ outcome, duration, source line, xfail flag, and skip reason. Stable schema
 intended for tooling; see [Report JSON](report-json.md).
 
 Combined with `--collect-only` (or `--co`) it writes a **discovery**
-document instead: node ids, absolute file paths, source lines, and
+document instead: nodeids, absolute file paths, source lines, and
 markers, without running the suite. See
 [Discovery JSON](report-json.md#discovery-json).
 
@@ -922,7 +948,8 @@ test files reruns exactly those files (with your other flags); a source
 (the `--changed` machinery; unresolvable changes fall back to the full
 selection); a pytest-config change reruns the full selection. Ignores
 VCS, caches, and virtualenvs. Type `q` then Enter to exit cleanly (`Ctrl+C`
-also works). Closing stdin (`nohup`, `< /dev/null`) does not end the session.
+also works; **Unreleased:** `q` is not in rstest 0.7.0, where only `Ctrl+C`
+exits). Closing stdin (`nohup`, `< /dev/null`) does not end the session.
 Started as a background job on a terminal (`rstest --watch &`), rstest leaves
 stdin alone so the shell does not suspend it for tty input; stop it with `kill`
 or bring it back with `fg`. A session moved to the background later (Ctrl+Z,
@@ -993,11 +1020,46 @@ projects = ["libs/*", "services/api"]   # monorepo subprojects; replaces auto-di
 ```
 
 These are the only keys read; other rstest flags (`--timeout`, `--html`,
-`--junitxml`, ...) are command-line only. Precedence: command line >
-`[tool.rstest]` > built-in defaults. pytest's own options stay where they
-always were (`[tool.pytest.ini_options]`, `addopts`, ...), but rstest-owned
-flags placed in `addopts` or `PYTEST_ADDOPTS` are **not** read by rstest (see
-the warning at the top of this page).
+`--junitxml`, `--fail-on-leak`, `--doctor-fail-on`, ...) are command-line only.
+Keys use kebab-case. `worker-timeout` takes whole seconds (an integer), like
+the `--worker-timeout` flag. The `order` key is **Unreleased** (not in rstest
+0.7.0).
+
+Precedence: command line > `[tool.rstest]` > built-in defaults. rstest reads
+the `[tool.rstest]` of the **nearest** `pyproject.toml`, walking up from the
+working directory, and stops there even if that file has no `[tool.rstest]`
+table. pytest's own options stay where they always were
+(`[tool.pytest.ini_options]`, `addopts`, ...), but rstest-owned flags placed
+in `addopts` or `PYTEST_ADDOPTS` are **not** read by rstest (see the warning at
+the top of this page).
+
+**Invalid entries are reported, then ignored** (**Unreleased**: rstest 0.7.0
+dropped them silently). An unknown key or a wrong-typed value prints one
+warning to stderr per run, and that setting falls back to its default:
+
+```text
+rstest: /repo/pyproject.toml: ignoring unknown [tool.rstest] key `worker_timeout` (did you mean `worker-timeout`?)
+rstest: /repo/pyproject.toml: ignoring [tool.rstest] reruns = "2" (expected a non-negative integer)
+```
+
+The `did you mean` hint appears only when the kebab-case spelling is a real
+key. The expected types are: a non-negative integer (`reruns`,
+`worker-timeout`), a non-negative integer or `"auto"` (`numprocesses`),
+`true` or `false` (`reruns-only-known-flaky`), a string (`dist`, `collect`,
+`order`, `output`), and a list of glob strings (`projects`). Only the type is
+checked here; a string with an unknown value (`dist = "bogus"`) is still
+validated when the run starts, exactly as the same value passed as a flag.
+
+**Monorepo roots read only `projects`.** At a
+[monorepo](../concepts/monorepo.md) root, the root `[tool.rstest]` supplies the
+project list and nothing else: the worker budget comes from the command-line
+`-n` (else `auto`), and `dist`, `order`, `output`, `reruns` and
+`worker-timeout` reach the projects only when given on the root command line.
+Each project runs as its own rstest and reads its own nearest `pyproject.toml`,
+so a project with a `pyproject.toml` never sees the root's keys, while a
+project without one (configured by `pytest.toml`, `pytest.ini`, `tox.ini` or
+`setup.cfg`) finds the root `pyproject.toml` and uses its `[tool.rstest]`. See
+[Monorepo mode](../concepts/monorepo.md#session-isolation).
 
 ## Forwarded pytest flags
 
@@ -1007,7 +1069,7 @@ unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 
 Three of them get extra orchestration on top of their per-session meaning:
 
-- **`-x` / `--maxfail=N`**: coordinated globally: when the threshold is
+- **`-x` / `--maxfail=N`**: coordinated globally. When the threshold is
   reached across all workers, dispatch halts and every worker winds down.
   In-flight tests finish (bounded overshoot, as with pytest-xdist).
 - **`--lf` / `--ff`**: the last-failed cache is written by rstest from
@@ -1027,15 +1089,24 @@ with inherited stdio, and pytest renders its own output:
 --collect-only / --co     -s / --capture=...     --pdb     --trace     --debug
 ```
 
-This **overrides any `-n` value or `[tool.rstest]` worker count without
-error**, e.g. `rstest -n 8 --pdb` runs one session, not eight. `--reruns`
-is likewise inert on this path (unlike plain `-n 0/1`, where `--reruns`
-runs a one-worker pool). Drop the passthrough flag to get the pool back.
+This **overrides any `-n` value or `[tool.rstest]` worker count**, e.g.
+`rstest -n 8 --pdb` runs one session, not eight, and prints no worker
+banner. When the worker count was set explicitly (above 1), rstest warns on
+stderr, naming the flag:
+
+```text
+rstest: -s runs the session in a single process with pytest's own output, so -n 8 is ignored (no parallel workers); drop -s to run in parallel
+```
+
+The default `-n auto` stays quiet (plain `rstest -s` is an ordinary request
+for pytest's `-s`), and so does `--co`, which runs no tests. `--reruns` is
+likewise inert on this path (unlike plain `-n 0/1`, where `--reruns` runs a
+one-worker pool). Drop the passthrough flag to get the pool back.
 
 The stepwise flags also force single-worker mode, but for sequencing rather
 than IO: stepwise resumes from a single nodeid cursor into one global
 collection order, which parallel, duration-ordered dispatch cannot
-reproduce (the same constraint xdist has, stepwise wants `-n 0`):
+reproduce (xdist has the same constraint; stepwise wants `-n 0`):
 
 ```text
 --sw / --stepwise     --sw-skip / --stepwise-skip     --sw-reset / --stepwise-reset

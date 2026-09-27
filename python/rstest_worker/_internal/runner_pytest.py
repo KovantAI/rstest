@@ -21,6 +21,7 @@ import sys
 import pytest
 
 from rstest_worker._internal import fixturecompat
+from rstest_worker._internal import messages as m
 from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
@@ -34,6 +35,7 @@ fixturecompat.install()
 __all__ = [
     "ItemDispatchPlugin",
     "LazyDispatchPlugin",
+    "SessionStreamPlugin",
     "StreamPlugin",
     "run",
     "run_lazy_session",
@@ -206,7 +208,17 @@ def run(args: list[str], conn) -> int:
     # `rstest --debug` routes here (single-worker passthrough): wait for the
     # editor to attach before pytest collects, so early breakpoints hold.
     _maybe_start_debugpy()
-    return _contained(lambda: pytest.main(list(args), plugins=[StreamPlugin(conn)]), conn)
+    return _contained(lambda: pytest.main(list(args), plugins=[SessionStreamPlugin(conn)]), conn)
+
+
+class SessionStreamPlugin(StreamPlugin):
+    """StreamPlugin for the single-session path (`run`): also reports the
+    collected count so the orchestrator can print pytest's `[ NN%]` column.
+    The dispatch plugins send their own (hash-verified) collection_done."""
+
+    def pytest_collection_finish(self, session):
+        payload: m.CollectionDonePayload = {"count": len(session.items), "hash": ""}
+        self._conn.send("collection_done", payload)
 
 
 def _contained(session_fn, conn) -> int:

@@ -10,8 +10,8 @@ Start here: the terms you actually hit first coming from pytest.
 interpreter with the vendored pytest core; executes tests and streams
 reports to the orchestrator.
 
-**Orchestrator**: the `rstest` binary: spawns workers, dispatches tests,
-merges results, renders output.
+**Orchestrator**: the `rstest` binary, which spawns workers, dispatches
+tests, merges results, and renders output.
 
 **`-n` (worker count)**: how many parallel worker processes run your tests.
 `-n auto` (the default) uses your cores, but never more workers than test
@@ -20,10 +20,10 @@ files, and fewer on a suite whose cached run time is only a few seconds;
 turns parallelism off and runs one plain pytest session. You rarely need to
 set it. See [Byte-exact mode](#byte-exact-mode) for what `-n 0` gives you.
 
-**Collection**: pytest's first phase: *finding* your tests before running any.
+**Collection**: pytest's first phase, *finding* your tests before running any.
 It imports your test files and builds the list of test items. "Workers
 collected different test sets" means two workers disagreed on that list,
-usually a randomized or time-based test id (see
+usually a randomized or time-based nodeid (see
 [Troubleshooting](../reference/troubleshooting.md)).
 
 **pytest-xdist (xdist)**: the original pytest plugin for running tests in
@@ -61,20 +61,22 @@ cores on *one* machine; `--shard` uses multiple machines. You only need this
 for very large suites in CI. See [Sharding](../guides/sharding.md).
 
 **Warm vs cold run**: rstest remembers how long each test took (in
-`.rstest_cache/`). The **first** run is "cold", no timings yet, so scheduling
+`.rstest_cache/`). The **first** run is "cold" (no timings yet), so scheduling
 isn't optimal. From the **second** ("warm") run on, it starts the slowest
 tests first and gets faster. **Don't judge rstest's speed on the first run.**
 
-**Byte-exact mode**{#byte-exact-mode}: `-n 0` and `-n 1` are identical: one pytest
-session in a single Python process, no scheduling, no `[gwN]` attribution,
-byte-exact pytest behavior: the compatibility anchor. Also called
+**Byte-exact mode**{#byte-exact-mode}: `-n 0` and `-n 1` are identical. Both run one
+pytest session in a single Python process, with no scheduling and no `[gwN]`
+attribution, for byte-exact pytest behavior (the compatibility anchor). Also called
 **single-worker mode** (the `-n` help and banner hint), **pytest-exact mode**
 (the run banner), or **passthrough** when a terminal flag forces it; all
 name this same mode. There is no worker identity below
-`-n 2` (unlike pytest-xdist, whose `-n 1` spawns a `gw0` worker: see
+`-n 2` (unlike pytest-xdist, whose `-n 1` spawns a `gw0` worker; see
 [xdist migration](../guides/migrate-from-xdist.md)). The flags that need
-pytest's own terminal (`--co`, `-s`, `--capture`, `--pdb`, `--trace`)
-switch to this mode automatically. See [Compatibility](compatibility.md)
+pytest's own terminal (`--co`/`--collect-only`, `-s`, `--capture=...`,
+`--pdb`, `--trace`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
+`--sw-reset`/`--stepwise-reset`, and rstest's `--debug`) switch to this mode
+automatically. See [Compatibility](compatibility.md)
 for the guarantee and [Architecture](architecture.md) for how it falls
 back. One opt-in exception: passing [`--reruns`](../reference/cli.md#-reruns-n)
 runs `-n 0`/`-n 1` as a degenerate one-worker pool so retries fire, trading
@@ -85,25 +87,29 @@ byte-exactness for the reruns you asked for.
 counted and listed.
 
 **Selection**: the set of tests chosen to run; under
-[`--changed`](../reference/cli.md#-changedrev), derived from the import
-graph.
+[`--changed`](../reference/cli.md#-changedrev), derived from the
+per-test coverage index when it is warm, with the import graph as the
+fallback (see [Caching](caching.md)).
 
 ## Internals
 
 The machinery below the everyday surface: useful when you're debugging
 scheduling or reading the architecture docs, not for day-to-day use.
 
-**Master / controller**: pytest-xdist's term for its central coordinating
-process. rstest has no such process (the Rust **orchestrator** plays that
-role), so "master-side" xdist hooks are *emulated* per worker. See
+**Controller (xdist "master")**: pytest-xdist's central coordinating
+process, called "master" in older xdist code and in the `"master"`
+`worker_id` value. rstest has no such process (the Rust **orchestrator**
+plays that role), so controller-side xdist hooks are *emulated* per worker. See
 [xdist hook emulation](xdist-hooks.md).
 
 **Vendored core**: the unmodified copy of pytest shipped inside
 `rstest_worker._vendor`; provides all test semantics. Never conflicts with
 an installed pytest.
 
-**Item dispatch**: distributing individual tests (not files) to workers
-by index into the verified collection.
+**Item dispatch**: distributing individual tests (not files) to workers.
+In the default eager mode a test travels as its index into the verified
+collection; under [lazy collection](lazy-collection.md) (`--collect lazy`)
+it travels by nodeid, since lazy workers share no index space.
 
 **Long pole**: the slowest single test in the run (`long_pole_seconds` in
 the doctor report). No worker count can finish the run faster than it. When
@@ -120,8 +126,10 @@ preserving module-fixture locality.
 it knows the successor (teardown scoping requires it); queues must always
 end explicitly.
 
-**Designate**: the worker chosen to host the serial phase and to ship the
-full collection id list.
+**Designate**: the worker chosen to host the serial phase, which is the
+lowest alive worker (promoted to the next one if it crashes). (The full
+collection nodeid list is always shipped by worker `gw0`; the others verify their
+collection against it by count and hash.)
 
 **Serial phase**{#serial-phase}: `@pytest.mark.serial` tests running exclusively on the
 designate after all other workers finish.

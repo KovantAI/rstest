@@ -29,26 +29,38 @@ cargo build --release
 uv sync
 ```
 
-Install the pre-commit hooks once per clone:
+Install the pre-commit hooks once per clone (pre-commit is not in the dev
+dependency group, so run it through `uvx`):
 
 ```sh
-pre-commit install
+uvx pre-commit install
 ```
 
 ## Checks before opening a PR
 
-The CI gate runs these on Linux, macOS, and Windows, run them locally
-first:
+CI runs these; run them locally first. Formatting and clippy run on Linux
+only; the build, Rust tests, and end-to-end gate run on Linux, macOS, and
+Windows:
 
 ```sh
-cargo fmt --check                          # formatting
-cargo clippy --release -- -D warnings      # lints (warnings are errors)
-cargo build --release                      # build
-cargo test --release                       # Rust tests
-python e2e/gate.py                         # end-to-end test gate
+cargo fmt --check                                        # formatting
+cargo clippy --all-targets --all-features -- -D warnings # lints (warnings are errors)
+cargo build --release                                    # build
+cargo test --release                                     # Rust tests
+python e2e/gate.py                                       # end-to-end test gate
 ```
 
-`pre-commit run --all-files` covers formatting, clippy, `cargo check`, and
+The Python worker has its own checks (Linux in CI):
+
+```sh
+uv lock --check                                          # lockfile up to date
+uvx ruff@0.16.5 check python/rstest_worker python/tests
+uvx ruff@0.16.5 format --check python/rstest_worker python/tests
+uvx --with msgpack --with pytest --with coverage ty@0.0.75 check python/rstest_worker
+uvx --with msgpack --with coverage --with pytest-cov pytest python/tests
+```
+
+`uvx pre-commit run --all-files` covers formatting, clippy, `cargo check`, and
 the file hygiene hooks.
 
 ### Output schemas

@@ -27,7 +27,7 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
   the changed lines. Safe to delete: `--changed` falls back to the import
-  graph without it; rebuild by re-running coverage with `--cov-context=test`.
+  graph without it; rebuild by rerunning coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
   union into a full index (see [Shared cache backend](#shared-cache-backend)).
 
@@ -49,7 +49,7 @@ reader never sees a half-written file.
 
 Instead of hand-wiring `actions/cache` (with its per-key immutability dance and
 a dedicated refresh job), rstest can publish and warm `.rstest_cache` to a
-**shared remote** directly: see [`--cache-remote`](../reference/cli.md#-cache-remote-urldir-cache-pull-cache-push).
+**shared remote** directly. See [`--cache-remote`](../reference/cli.md#-cache-remote-urldir-cache-pull-cache-push).
 
 It is **segmented, merge-on-read**: each run pushes its own immutable segment
 rather than overwriting one shared blob, so concurrent shards and PRs never
@@ -68,7 +68,7 @@ clobber each other.
     - *coverage index*: unioned per file. Segments that agree on a file's
       content hash merge their line→test maps; a different hash keeps the newer
       segment's map (same-second ties broken deterministically by hash). Because
-      the shards of one run share a commit their hashes match, so their partial
+      the shards of one run share a commit, their hashes match, so their partial
       slices **union into a full index**; if a file's content differs between
       segments the newer wins and `--changed` falls back to the import graph for
       that file: still correct, only coarser.
@@ -91,12 +91,12 @@ live:
 | `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` |
 
 The `s3`/`gs` transports shell out to the cloud CLI already installed and
-authenticated in CI, no SDK, no secrets in the URL. Any other `scheme://` is
+authenticated in CI: no SDK, no secrets in the URL. Any other `scheme://` is
 rejected loudly rather than silently written to a junk local directory.
 
 **Permissions.** Every transport needs four operations on the `<root>` prefix:
-**list** and **read** (pull), **write** (push a segment), and **delete**,
-delete only for compaction/retention (`cache-compact`, `--cache-compact-threshold`).
+**list** and **read** (pull), **write** (push a segment), and **delete**
+(compaction and retention only, via `cache-compact` or `--cache-compact-threshold`).
 A pull/push-only job that never compacts can drop delete. Least privilege: scope
 the credential to the cache prefix, not the whole bucket. Concretely:
 

@@ -19,13 +19,24 @@ this from its queue, which can misattribute; the explicit signal cannot.)
 2. The worker's other outstanding tests requeue at the head of the
    dispatch queue and run elsewhere.
 3. A replacement worker spawns under the same identity (`gw3` stays
-   `gw3`: PASSIVE per-worker resources keyed on worker id, like
+   `gw3`: **passive** per-worker resources keyed on worker id, like
    pytest-django's `test_db_gw3`, stay bounded and get reused),
    re-collects, verifies its collection by hash, and rejoins. Note the
-   distinction: resources PROVISIONED by master-side hooks should use
-   uuid idents, not worker-id-derived ones, the replacement's
+   distinction: resources **provisioned** by controller-side hooks should use
+   uuid idents, not worker-id-derived ones, because the replacement's
    re-provisioning can race the crashed node's cleanup (see
    [xdist hook emulation](xdist-hooks.md)).
+
+## Hung tests (`--worker-timeout`)
+
+A test that hangs instead of crashing goes through the same machinery when
+[`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs) is set
+(off by default). A worker stuck on one test for longer than SECS, in any
+phase, is killed; the test is reported failed with a timeout message
+instead of the crash message, and steps 2 and 3 above follow unchanged.
+Under `--reruns` the timed-out test is retried within the budget, and the
+kill counts against the same restart cap below. Hangs outside a test
+(collection, session config) are not covered.
 
 ## Budgets
 
@@ -36,7 +47,7 @@ during collection are not restarted (an import-time crash would recur).
 
 ## Cleanup hooks and the serial phase
 
-If the suite uses xdist's master-side hooks, a crashed worker's
+If the suite uses xdist's controller-side hooks, a crashed worker's
 `pytest_testnodedown` still runs, on a surviving worker, against the
 dead worker's `workerinput` snapshot (details and the ordering caveat
 with deterministic idents: [xdist hook

@@ -47,4 +47,8 @@ class Recorder:
 
 
 def pytest_configure(config):
+    # Under pytest-xdist (the bench's xdist series) the controller receives every
+    # worker's reports; recording in the workers too would race on one file.
+    if hasattr(config, "workerinput"):
+        return
     config.pluginmanager.register(Recorder(), "rstest-recorder")

@@ -80,6 +80,9 @@ exclude_docs: |
   # reference/output-schemas.md, not standalone pages. The .schema.json files
   # are kept (copied as static assets) so they are directly downloadable.
   reference/schemas/*.md
+  # Shared partials embedded via pymdownx snippets (--8<--), one canonical
+  # copy for content that appears on several pages.
+  _snippets/
 
 plugins:
   - search
@@ -137,7 +140,7 @@ nav:
       - Output schemas: reference/output-schemas.md
       - Benchmarks: reference/benchmarks.md
       - Parity divergences & upstream fixes: reference/parity-divergences.md
-      - Plugin compatibility (top 100): reference/top-100-plugins.md
+      - Top 100 plugins: reference/top-100-plugins.md
       - Plugins exercised by the corpus: reference/corpus-plugins.md
       - xdist support matrix: reference/xdist-support.md
       - Troubleshooting: reference/troubleshooting.md

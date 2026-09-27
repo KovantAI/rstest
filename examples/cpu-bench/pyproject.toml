@@ -1,0 +1,6 @@
+# Standalone config so this example is its own pytest rootdir: the `blas`
+# workload is opt-in (`-m blas`), everything else runs by default.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-m", "not blas"]
+markers = ["blas: numpy/BLAS-bound workload, for the worker x thread grid (needs numpy)"]

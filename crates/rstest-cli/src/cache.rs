@@ -29,10 +29,19 @@ pub fn file(name: &str) -> PathBuf {
     dir().join(name)
 }
 
-/// A named cache file inside a specific project dir. Monorepo children keep
-/// their own `.rstest_cache`, independent of `RSTEST_CACHE`.
+/// A named cache file inside a specific project dir's `.rstest_cache`,
+/// independent of `RSTEST_CACHE`.
 pub fn file_in(project: &Path, name: &str) -> PathBuf {
     project.join(DIR_NAME).join(name)
+}
+
+/// The `RSTEST_CACHE` a monorepo root hands the child for project `slug`:
+/// `<RSTEST_CACHE>/<slug>` (a relative value anchors at `root`), so projects
+/// never share one dir and their ids never collide. `None` when RSTEST_CACHE
+/// is unset: each child keeps its own `.rstest_cache`.
+pub fn mono_override(root: &Path, slug: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("RSTEST_CACHE")?;
+    Some(root.join(base).join(slug))
 }
 
 /// Atomic, crash-durable write: fully write + `fsync` a uniquely-named tmp file
@@ -205,6 +214,35 @@ fn sync_dir(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mono_override_namespaces_rstest_cache_per_project() {
+        let held = crate::test_env::lock();
+        let root = Path::new("/repo");
+        {
+            let _unset = crate::test_env::remove_var(&held, "RSTEST_CACHE");
+            // Unset: children keep their own .rstest_cache.
+            assert_eq!(mono_override(root, "libs-a"), None);
+        }
+        {
+            let abs = if cfg!(windows) {
+                r"C:\ci\cache"
+            } else {
+                "/ci/cache"
+            };
+            let _abs = crate::test_env::set_var(&held, "RSTEST_CACHE", abs);
+            assert_eq!(
+                mono_override(root, "libs-a"),
+                Some(Path::new(abs).join("libs-a"))
+            );
+        }
+        let _rel = crate::test_env::set_var(&held, "RSTEST_CACHE", "cache");
+        // A relative value anchors at the monorepo root, not each child's cwd.
+        assert_eq!(
+            mono_override(root, "libs-a"),
+            Some(PathBuf::from("/repo/cache/libs-a"))
+        );
+    }
 
     #[test]
     fn file_in_uses_project_dir_and_name() {
