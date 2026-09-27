@@ -24,7 +24,7 @@ keep working.
 
 **What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` is
 consumed by rstest's own `--dist` and rejected as an invalid mode (exit
-2). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`,
+1). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`,
 `--maxprocesses`) are **forwarded to the vendored pytest session
 verbatim**, so the outcome depends on whether pytest-xdist is installed:
 
@@ -36,16 +36,22 @@ verbatim**, so the outcome depends on whether pytest-xdist is installed:
   it's a usage error from the vendored core (exit 4).
 
 Either way these flags don't *do* anything under rstest. Remove them from
-your `addopts` once the switch is done.
+your `addopts` only once nothing runs pytest-xdist any more: while an old
+xdist CI job is still your fallback, it needs them (see
+[the staged rollout](migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back)).
 
 pytest-rerunfailures maps: `--reruns N`,
 `@pytest.mark.flaky(reruns=N)`, and `--only-rerun REGEX` work natively
 in parallel modes (and crash-aware: a test that kills its worker
-retries on the replacement). The plugin itself is neutralized inside
-pool workers so nothing double-reruns; at `-n 0` the plugin keeps its
-native behavior and handles reruns itself. Scope note: rstest's `--reruns`
-fire at every worker count, including `-n 0/1` (a degenerate one-worker rerun
-pool), but are rejected under `--dist each` (that mode exists to expose
+retries on the replacement). The plugin itself is unregistered inside
+pool workers so nothing double-reruns. A command-line `--reruns` is always
+rstest's own, at every worker count: at `-n 0/1` it switches to a one-worker
+rerun pool, so the plugin is unregistered there too. Only at `-n 0` *without*
+rstest's `--reruns` (for example with `--reruns` in `addopts`, or after `--`)
+does the plugin keep its native behavior. In the pool, a `--reruns` in
+`addopts` does nothing, silently; pass it on the rstest command line instead
+([why](migrate-from-pytest.md#addopts-and-pytest_addopts)). rstest's
+`--reruns` are rejected under `--dist each` (that mode exists to expose
 per-worker outcome differences, so retrying failures would defeat it; see
 [`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
 
@@ -58,8 +64,11 @@ rstest workers announce themselves exactly like xdist workers.
 `PYTEST_XDIST_WORKER` and `PYTEST_XDIST_WORKER_COUNT` environment
 variables are set too, so plugins and conftests that grep the
 environment keep working as-is. Plugins
-keying per-worker resources on worker identity (pytest-django's
-per-worker test databases being the canonical case) work unchanged.
+keying per-worker resources on worker identity work unchanged. The canonical
+case is pytest-django's per-worker test database (`test_<name>_gw0`, ...),
+which follows from the `workerid` above; note that rstest's corpus only
+exercises pytest-django on SQLite `:memory:`, so check a server-backed
+database (Postgres, MySQL) on your own suite.
 
 `RSTEST_WORKER_ID` (same `gwN` values) is also set if you want to
 detect rstest specifically.
@@ -91,7 +100,8 @@ race: [xdist hook emulation](../concepts/xdist-hooks.md).
 
 `addopts = -n 4` with pytest-xdist installed is neutralized inside rstest
 workers automatically: options parse, the xdist session never engages, no
-nested workers. Remove it at your convenience and pass `-n` to rstest.
+nested workers. Keep it while a pytest-xdist job is still your fallback, then
+remove it and pass `-n` to rstest.
 
 ## What improves
 

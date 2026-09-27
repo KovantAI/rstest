@@ -315,6 +315,91 @@ def gate_pytest_benchmark_autodisable(g, args, binary):
     )
 
 
+def gate_pytest_html_real_plugin(g, args, binary):
+    print("== pytest-html (real plugin: ini --html at -n 0 vs pool) ==")
+    # rstest owns a command-line --html (native report, gated in reporting.py),
+    # so the real plugin only sees --html when it comes from ini addopts. There
+    # it writes its own report at -n 0 and nothing at -n >= 2 (its writer is
+    # gated on the xdist master). This pins the documented 🔴 Silent verdict.
+    gh = _plugin_gate(binary, args, "-html", ["pytest-html"])
+    gh.write("hp/test_h.py", _OK_BAD)
+    gh.write("hp/pytest.ini", "[pytest]\naddopts = --html=plugin.html\n")
+    hp = gh.tmp / "hp"
+    out = hp / "plugin.html"
+    r = gh.run("-n", "0", cwd=hp)
+    doc = out.read_text() if out.exists() else ""
+    check(
+        "html plugin: writes its own report at -n 0",
+        "1 failed, 1 passed" in r.stdout and "pytest-html" in doc,
+        f"exists={out.exists()} {r.stdout[-200:]}",
+    )
+    out.unlink(missing_ok=True)
+    r = gh.run("-n", "2", cwd=hp)
+    check(
+        "html plugin: silent (no report) at -n 2",
+        "1 failed, 1 passed" in r.stdout and not out.exists(),
+        f"exists={out.exists()} {r.stdout[-200:]}",
+    )
+    # The documented recipe: `--` hands --html to pytest (and so the plugin).
+    gh.write("hp/pytest.ini", "[pytest]\n")
+    passed = hp / "passed.html"
+    r = gh.run("-n", "0", "--", f"--html={passed}", cwd=hp)
+    doc = passed.read_text() if passed.exists() else ""
+    check(
+        "html plugin: `-n 0 -- --html=...` reaches the plugin",
+        "pytest-html" in doc,
+        f"exists={passed.exists()} {r.stdout[-200:]}",
+    )
+    native = hp / "native.html"
+    r = gh.run("-n", "0", "--html", str(native), cwd=hp)
+    doc = native.read_text() if native.exists() else ""
+    check(
+        "html plugin: a command-line --html is rstest's native report, even at -n 0",
+        native.exists() and "pytest-html" not in doc,
+        f"exists={native.exists()}",
+    )
+
+
+_OLDPIN_PYPROJECT = """[project]
+name = "pytest-oldpin"
+version = "0.3"
+dependencies = ["pytest>=7,<9"]
+
+[project.entry-points.pytest11]
+oldpin = "pytest_oldpin"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"""
+
+
+def gate_pytest_pin_warning(g, args, binary):
+    print("== plugin pinned to pytest<9 (inert pin warned once) ==")
+    # A pytest11 plugin declaring `pytest<9` still runs against the vendored
+    # pytest 9.1.1; rstest says so once per run (the standalone session, or gw0
+    # in the pool), and the run itself is unaffected.
+    src = Path(args.venv + "-oldpin-src").resolve()
+    (src / "pytest_oldpin").mkdir(parents=True, exist_ok=True)
+    (src / "pyproject.toml").write_text(_OLDPIN_PYPROJECT)
+    (src / "pytest_oldpin" / "__init__.py").write_text("def pytest_configure(config):\n    pass\n")
+    gp = _plugin_gate(binary, args, "-oldpin", [str(src)])
+    gp.write("pin/test_pin.py", "def test_a(): pass\ndef test_b(): pass\ndef test_c(): pass\n")
+    needle = "pytest-oldpin 0.3 requires pytest"
+    for n in ("0", "2"):
+        r = gp.run("pin", "-n", n)
+        check(
+            f"pin warning: run passes at -n {n}",
+            "3 passed" in r.stdout and r.returncode == 0,
+            r.stdout[-200:],
+        )
+        check(
+            f"pin warning: printed exactly once at -n {n}",
+            r.stderr.count(needle) == 1 and "vendored pytest 9.1.1" in r.stderr,
+            r.stderr[-400:],
+        )
+
+
 def gate_pytest_memray_limit_memory(g, args, binary):
     print("== pytest-memray (limit_memory enforced in parallel) ==")
     if WINDOWS:

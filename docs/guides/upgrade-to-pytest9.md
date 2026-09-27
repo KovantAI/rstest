@@ -1,7 +1,7 @@
-# Onboarding to pytest 9.1.1
+# Upgrading to pytest 9
 
 rstest runs a **vendored pytest 9.1.1** core, so adopting rstest adopts
-pytest 9's behavior — whatever pytest version is installed elsewhere in
+pytest 9's behavior, whatever pytest version is installed elsewhere in
 your environment. This page is the small, concrete checklist for getting a
 suite that runs on **pytest 8.x** or **pytest 9.0.x** clean on 9.1.1
 *before* you switch the runner, so the switch itself stays a one-line
@@ -11,7 +11,7 @@ It is deliberately short. pytest 9 is a **cleanup major**, not a redesign:
 it removes APIs that already emitted `DeprecationWarning` throughout 8.x and
 keeps the collection model, fixture engine, `_pytest.*` import paths, and
 the `pluggy` hook contract. If your suite is warning-clean today, you are
-almost certainly already done — jump to [Verify](#3-verify).
+almost certainly already done: jump to [Verify](#3-verify).
 
 This covers your test code. Your **plugins** must also be pytest-9-compatible
 releases, since they run against the vendored 9.1.1 too and a `pytest<9` pin
@@ -20,26 +20,36 @@ does not change that at runtime. See
 
 ## The method
 
-You don't need to guess which *removed APIs* apply. Turn deprecations into
-errors on **your current pytest**, and the suite names each one — with your
-installed pytest untouched. A short list of warning-free **behavioral**
+You don't need to guess which *removed APIs* apply. Turn pytest's own
+deprecation warnings into errors on **your current pytest**, and the suite
+names each one, with your installed pytest untouched. A short list of warning-free **behavioral**
 changes (below) you check by hand; then `rstest -n 0` is the backstop that
 runs the suite under the real 9.1.1 core.
 
 ### 1. Surface the warnings
 
-Run your existing suite with deprecation warnings promoted to errors:
+Run your existing suite with pytest's deprecation warnings promoted to
+errors:
 
 ```console
-$ pytest -W error::DeprecationWarning -W error::PendingDeprecationWarning
+$ pytest -W error::pytest.PytestDeprecationWarning
 ```
 
-Every failure is one thing to fix. A clean run here means **nothing below
-applies to you** — go to step 3.
+`PytestDeprecationWarning` is the base class of every pytest deprecation,
+including `PytestRemovedIn9Warning` on pytest 8.x, and the filter works on
+both 8.x and 9.x. It only matches warnings pytest itself raises, so a
+Django `RemovedInDjango…Warning` or a third-party library's
+`DeprecationWarning` won't fail the run. Every failure is one thing to fix.
+A clean run here means **nothing below applies to you**: go to step 3.
 
 !!! tip "No config change needed"
     `-W` is a command-line flag; it overrides your `filterwarnings` ini for
-    this one run. Don't commit it yet — it's a probe, not the fix.
+    this one run. Don't commit it yet: it's a probe, not the fix.
+
+Optionally, once that is clean, run the broad probe
+`pytest -W error::DeprecationWarning -W error::PendingDeprecationWarning`.
+It also fails on every framework and library deprecation (on a Django app,
+many of them), which is useful housekeeping but not needed for pytest 9.
 
 ### 2. Fix what fired
 
@@ -55,7 +65,7 @@ actually bite real suites (grounded in the upstream
 | **9.1** | `importorskip("x")` **swallowed a real `ImportError`** | It now only skips on `ModuleNotFoundError`. If you relied on catching a deeper `ImportError`, pass `exc_type=ImportError` explicitly. |
 | **9.1** | `SomeCollector.from_parent(..., fspath=...)` | Pass `path=<pathlib.Path>` instead of `fspath=<py.path.local>`. |
 
-Hook-argument renames (9.0) — old name → new name, same value as a
+Hook-argument renames (9.0), old name → new name, same value as a
 `pathlib.Path`:
 
 | Hook | Old arg | New arg |
@@ -82,7 +92,7 @@ $ grep -rn "def pytest_\(ignore_collect\|collect_file\|pycollect_makemodule\|rep
 
 Step 1 promotes *deprecation warnings* to errors, so it finds every removed
 API. But pytest 9.0 also made a few **behavioral** changes that emit **no
-warning** — the probe stays green and they bite at runtime instead. Check
+warning**: the probe stays green and they bite at runtime instead. Check
 these by hand:
 
 | 9.0 change | Who it bites | Fix / restore |
@@ -90,25 +100,25 @@ these by hand:
 | **Duplicate path args are de-duplicated.** `pytest x.py x.py` (or `pytest a/b a/`) now runs the overlap **once**, not twice. | Scripts/CI that pass repeated or nested paths and count on re-runs. | Pass `--keep-duplicates` to restore the old behavior, or stop passing the duplicates. |
 | **CI detection requires a non-empty value.** `$CI` / `$BUILD_NUMBER` must now be set to something non-empty; an empty string no longer triggers CI mode. | Pipelines that export `CI=` empty and rely on CI-mode output. | Set `CI=1` (or any non-empty value) in the job. |
 | **`config.args` holds strings only** (no longer `pathlib.Path`). | conftest/plugins that read `config.args` and expect path objects. | Wrap in `pathlib.Path(...)` at the read site. |
-| **Python 3.9 support dropped.** | Suites still running on 3.9. | The vendored core needs CPython **3.10+** — the floor rstest already requires. Upgrade the interpreter. |
+| **Python 3.9 support dropped.** | Suites still running on 3.9. | The vendored core needs CPython **3.10+**, the floor rstest already requires. Upgrade the interpreter. |
 | **`PytestRemovedIn9Warning` is now an error by default.** | Anything using an API slated for removal in 9.1. | Fix it (that's the point), or stopgap `filterwarnings = ignore::pytest.PytestRemovedIn9Warning` in your ini while you work through them. |
 
 ### 3. Verify
 
-Point rstest at the suite in single-session mode — one worker, one pytest
-session, **byte-exact** pytest 9.1.1 behavior:
+Point rstest at the suite in single-session mode: one worker, one pytest
+session, pytest 9.1.1's exact outcomes:
 
 ```console
 $ rstest -n 0
 ```
 
 Green here means your suite is pytest-9.1.1-clean. Now drop `-n 0` to go
-parallel — that's a *different* migration
+parallel. That's a *different* migration
 ([parallel safety](parallel-safety.md)), not a pytest-version one.
 
 ## Already on pytest 9.0.x?
 
-Then you're nearly done — the 9.0 → 9.1 delta is only **two** items, both in
+Then you're nearly done: the 9.0 → 9.1 delta is only **two** items, both in
 the table above:
 
 1. `importorskip` catches only `ModuleNotFoundError` by default (pass
@@ -119,13 +129,13 @@ Run step 1's `-W error` probe once to confirm, and you're on 9.1.1.
 
 ## Done criteria
 
-- [ ] `pytest -W error::DeprecationWarning` runs clean on your current pytest
+- [ ] `pytest -W error::pytest.PytestDeprecationWarning` runs clean on your current pytest
 - [ ] `grep` for the renamed hooks is empty (or all renamed)
 - [ ] the warning-free behavioral changes above checked (dup args, CI var, `config.args`, Python ≥ 3.10)
 - [ ] `rstest -n 0` is green
 
-Three greens and the pytest-version step is finished. What's left — running
-in parallel — is covered by [Migrating from pytest](migrate-from-pytest.md)
+Four greens and the pytest-version step is finished. What's left, running
+in parallel, is covered by [Migrating from pytest](migrate-from-pytest.md)
 and [Parallel safety](parallel-safety.md).
 
 ## Why this is a separate step

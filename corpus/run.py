@@ -127,6 +127,14 @@ class Suite:
         if r.returncode != 0:
             raise RuntimeError(f"install failed: {specs}\n{r.stderr[-800:]}")
 
+    def plugin_versions(self):
+        """The pytest plugins installed in this suite's venv (offline), as
+        `[{name, version, requires_pytest}]`; see corpus/plugin_probe.py."""
+        r = sh([str(self.venv / "bin" / "python"), str(HERE / "plugin_probe.py")])
+        if r.returncode != 0:
+            raise RuntimeError(f"plugin probe failed: {r.stderr[-400:]}")
+        return json.loads(r.stdout)
+
     # -- PREPARE (network) ------------------------------------------------
     def fetch(self, lock):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -468,6 +476,17 @@ def diff(baseline_path, candidate_path):
     }
 
 
+def _record_plugins(suite, res):
+    """Record the suite venv's plugin versions into its result row. Plugins
+    install unpinned, so versions move between runs; the docs' plugin-version
+    tables are refreshed from this (corpus/plugin_versions.py). A probe
+    failure is logged and never costs the suite its run."""
+    try:
+        res["plugins"] = suite.plugin_versions()
+    except Exception as e:
+        log(f"  {suite.name}: plugin probe failed: {str(e)[:200]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", help="comma-separated suite names")
@@ -507,6 +526,7 @@ def main():
                     results[name]["commit"] = sha[:12]
                 suite.install()
                 results[name]["prepared"] = True
+                _record_plugins(suite, results[name])
             except subprocess.TimeoutExpired as e:
                 results[name].update(status="prepare-timeout", error=str(e.cmd[:3]))
                 log(f"  {name}: PREPARE TIMEOUT")
@@ -531,6 +551,8 @@ def main():
             res.setdefault("status", "not-prepared")
             continue
         log(f"[{i}/{len(suites)}] execute {name}")
+        if "plugins" not in res:  # --execute-only: PREPARE didn't record them
+            _record_plugins(suite, res)
         try:
             base, base_wall = suite.run_pytest()
             res["pytest_wall"] = round(base_wall, 1)

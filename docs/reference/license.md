@@ -34,6 +34,6 @@ licensed:
 
 The vendored copy is unmodified (`python/VENDOR.md` in the repository
 documents provenance and the update procedure). rstest's runtime depends
-on [pluggy](https://github.com/pytest-dev/pluggy) (MIT) — pytest's own
-plugin framework — as a regular dependency, so plugins keep class identity
+on [pluggy](https://github.com/pytest-dev/pluggy) (MIT), pytest's own
+plugin framework, as a regular dependency, so plugins keep class identity
 with the real library.

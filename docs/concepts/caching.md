@@ -1,8 +1,10 @@
 # Caching
 
+rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `.pytest_cache/`, and can optionally share its cache across CI jobs through a remote backend.
+
 ## `.rstest_cache/` (rstest's own)
 
-- `durations.json` — per-test call durations, merged over runs (a filtered
+- `durations.json`: per-test call durations, merged over runs (a filtered
   run updates only the tests it ran). Drives
   [long-pole-first scheduling](scheduling.md#dispatch-order) and the
   suite-size heuristic behind `-n auto`. Each entry records its test file's
@@ -12,19 +14,19 @@
   mtime, and ignores line endings, a cache restored onto a fresh checkout (for
   example with CI's cache action) still matches. Safe to delete
   at any time; the next run rebuilds it (and is scheduled in collection order).
-- `wall.json` — the whole suite's last wall-clock time for this project
+- `wall.json`: the whole suite's last wall-clock time for this project
   (fixture setup and teardown included), used by the monorepo planner to weight
   a fixture-bound project by its real cost. It carries no per-test source to
   fingerprint, so it ages out on time instead: entries older than
   `RSTEST_WALL_TTL_DAYS` (default 30, `0` disables) are ignored on read.
-- `flakes.json` — sparse record of tests that have passed only on rerun
+- `flakes.json`: sparse record of tests that have passed only on rerun
   ([`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`), used to
   surface repeat offenders. Auto-written, safe to delete, persisted the same
   way as `durations.json`.
-- `coverage_index.json` — line→test index (which tests' coverage executed
+- `coverage_index.json`: line→test index (which tests' coverage executed
   each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
-  the changed lines. Safe to delete — `--changed` falls back to the import
+  the changed lines. Safe to delete: `--changed` falls back to the import
   graph without it; rebuild by re-running coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
   union into a full index (see [Shared cache backend](#shared-cache-backend)).
@@ -47,30 +49,30 @@ reader never sees a half-written file.
 
 Instead of hand-wiring `actions/cache` (with its per-key immutability dance and
 a dedicated refresh job), rstest can publish and warm `.rstest_cache` to a
-**shared remote** directly — see [`--cache-remote`](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push).
+**shared remote** directly: see [`--cache-remote`](../reference/cli.md#-cache-remote-urldir-cache-pull-cache-push).
 
 It is **segmented, merge-on-read**: each run pushes its own immutable segment
 rather than overwriting one shared blob, so concurrent shards and PRs never
 clobber each other.
 
-```
+```text
 <remote>/
   base.json                       # compacted merged state
   segments/seg-<id>.json          # one immutable segment per run/shard
 ```
 
 - **Pull** merges `base.json` and every segment into the local cache, per data type:
-    - *durations* — newest value per test;
-    - *flake counts* — summed per-run events, deduped by segment id so a re-pull
+    - *durations*: newest value per test;
+    - *flake counts*: summed per-run events, deduped by segment id so a re-pull
       never double-counts;
-    - *coverage index* — unioned per file. Segments that agree on a file's
+    - *coverage index*: unioned per file. Segments that agree on a file's
       content hash merge their line→test maps; a different hash keeps the newer
       segment's map (same-second ties broken deterministically by hash). Because
       the shards of one run share a commit their hashes match, so their partial
       slices **union into a full index**; if a file's content differs between
       segments the newer wins and `--changed` falls back to the import graph for
-      that file — still correct, only coarser.
-- **Push** writes just this run's segment (`--cache-push`) — its *slice* of the
+      that file: still correct, only coarser.
+- **Push** writes just this run's segment (`--cache-push`): its *slice* of the
   durations, flake events, and coverage index this run measured.
 - **Compact** (`cache-compact`) folds segments into a new base and prunes
   them; a segment already folded is recorded in the base's absorbed-id set, so
@@ -89,11 +91,11 @@ live:
 | `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` |
 
 The `s3`/`gs` transports shell out to the cloud CLI already installed and
-authenticated in CI — no SDK, no secrets in the URL. Any other `scheme://` is
+authenticated in CI, no SDK, no secrets in the URL. Any other `scheme://` is
 rejected loudly rather than silently written to a junk local directory.
 
 **Permissions.** Every transport needs four operations on the `<root>` prefix:
-**list** and **read** (pull), **write** (push a segment), and **delete** —
+**list** and **read** (pull), **write** (push a segment), and **delete**,
 delete only for compaction/retention (`cache-compact`, `--cache-compact-threshold`).
 A pull/push-only job that never compacts can drop delete. Least privilege: scope
 the credential to the cache prefix, not the whole bucket. Concretely:
@@ -101,7 +103,7 @@ the credential to the cache prefix, not the whole bucket. Concretely:
 | Backend | Grant |
 |---|---|
 | S3 (`s3://bucket/prefix`) | `s3:ListBucket` (on the bucket, condition `prefix`), `s3:GetObject`/`s3:PutObject`/`s3:DeleteObject` on `bucket/prefix/*` |
-| GCS (`gs://bucket/prefix`) | `storage.objects.{list,get,create,delete}` — e.g. `roles/storage.objectAdmin` scoped to the bucket/prefix |
+| GCS (`gs://bucket/prefix`) | `storage.objects.{list,get,create,delete}`, e.g. `roles/storage.objectAdmin` scoped to the bucket/prefix |
 | Azure Blob (dir-materialize) | `Storage Blob Data Contributor` on the container (the `az` CLI needs read+write+delete) |
 | `http(s)://` | endpoint enforces its own authz; rstest sends `Authorization: Bearer $RSTEST_CACHE_REMOTE_TOKEN` |
 | dir / mount (`/path`, `file://`) | filesystem read+write+delete on the directory |
@@ -113,14 +115,44 @@ segment names (filenames or full keys/URLs) and support `GET` / `PUT` / `DELETE`
 on the blobs. A static file server with autoindex-as-JSON, an S3 REST bucket, or
 a tiny custom endpoint all satisfy it.
 
+### Trust boundary
+
+Anything that can **push** a segment can influence later runs that **pull**
+it. rstest merges segments without checking who wrote them, so treat write
+access to the cache prefix as write access to your test selection. A crafted
+or corrupted segment can:
+
+- make [`--changed`](../guides/changed.md) select **too few tests**, because
+  the coverage index is trusted for the lines it records;
+- inflate flake counts in `flakes.json`, so `--reruns-only-known-flaky`
+  retries (and hides) failures it should not;
+- skew durations, which unbalances shards and can make `--durations-regress`
+  pass or fail wrongly.
+
+Recommended setup:
+
+- **Only trusted events write.** Give `--cache-push` (and the credential that
+  allows it) to runs on your default branch (`push` events, merge queue,
+  schedule). PR jobs, especially from forks, run **pull-only**, or push to a
+  separate PR prefix that main never pulls.
+- **Filter the warm-source lookup to trusted runs.** With the artifact
+  backend, resolve the prior run with
+  `gh run list --branch main --event push --status success`. Without
+  `--event push`, a successful PR run whose head branch is also named `main`
+  (for example from a fork) could match. The GitHub action does this by
+  default (`warm-from-event: push`).
+- **Don't let the cache decide what a gate skips.** On merge-queue or release
+  pipelines, run the full suite, or use `--changed-strict` so files the index
+  can't connect fall back to a full run.
+
 ### Retention
 
 `cache-compact` folds **all** segments by default. To bound the segment set
 without discarding fresh history, keep a recent window loose:
 
-- `cache-compact --keep-last N` / `RSTEST_CACHE_KEEP_LAST` — retain the newest N.
-- `cache-compact --max-age 30d` / `RSTEST_CACHE_MAX_AGE` — retain the young.
-- `--cache-compact-threshold N` / `RSTEST_CACHE_COMPACT_THRESHOLD` — fold **on
+- `cache-compact --keep-last N` / `RSTEST_CACHE_KEEP_LAST`: retain the newest N.
+- `cache-compact --max-age 30d` / `RSTEST_CACHE_MAX_AGE`: retain the young.
+- `--cache-compact-threshold N` / `RSTEST_CACHE_COMPACT_THRESHOLD`: fold **on
   push** when the loose count exceeds N (honoring the window above), so no
   separate maintenance job is needed. Best-effort: never fails the run.
 
@@ -130,14 +162,14 @@ Recipes: [Shared cache across CI jobs](../guides/ci-shared-cache.md).
 
 Workers read it normally (`--lf`/`--ff` deselection happens inside the
 vendored core). Writes to the run-level keys (`lastfailed`, `nodeids`,
-`stepwise`) are blocked in workers — each worker sees only its own slice —
+`stepwise`) are blocked in workers (each worker sees only its own slice)
 and the orchestrator writes the merged truth after the run. Other plugins'
 cache writes pass through untouched.
 
 ## Worker temp directories
 
 Each worker gets a disjoint `tmp_path` root under `$TMPDIR/rstest-<pid>/gwN/`
-(one subdirectory per worker id — the same per-worker isolation xdist gets
+(one subdirectory per worker id: the same per-worker isolation xdist gets
 from its `popen-gwN` roots), preventing numbered-directory cleanup races
 between sibling workers. A user-provided `--basetemp` is honored and left
 alone.

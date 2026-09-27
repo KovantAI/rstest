@@ -140,13 +140,6 @@
     "TestEntry": {
       "description": "Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-research/harness/recorder.py) so `diff_snapshots.py` can gate rstest output directly against pytest baselines.",
       "type": "object",
-      "required": [
-        "cached",
-        "crashed",
-        "flaky",
-        "quarantined",
-        "wasxfail"
-      ],
       "properties": {
         "cached": {
           "description": "Not executed this run: unchanged since the last green run, so its prior pass was carried forward (`--incremental`). Still counts as passed.",

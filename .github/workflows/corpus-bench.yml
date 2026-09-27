@@ -94,5 +94,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: corpus-bench
-          path: corpus/bench.json
+          # results.json carries each suite's installed plugin versions
+          # (refresh docs tables with corpus/plugin_versions.py).
+          path: |
+            corpus/bench.json
+            corpus/results.json
           if-no-files-found: ignore

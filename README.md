@@ -11,19 +11,23 @@
 [![GitHub stars](https://img.shields.io/github/stars/KovantAI/rstest)](https://github.com/KovantAI/rstest/stargazers)
 
 **Run your existing pytest suite in parallel, unchanged.** Same fixtures,
-same plugins, same outcomes — just faster. Rust-orchestrated, parallel by
+same plugins, same outcomes, usually faster. Rust-orchestrated, parallel by
 default, with built-in suite diagnostics (`--doctor`) that tell you *where
 your test time actually goes*.
+
+> **Note:** This is the Python test runner on PyPI (`pip install rstest`). It is
+> not related to the Rust fixture crate [`rstest`](https://crates.io/crates/rstest)
+> on crates.io.
 
 ```text
 aiohttp, 4,469 tests:   pytest 197s  →  rstest 68s warm (126s cold)
 ```
 
 <p align="center">
-  <img src="docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (197s), then rstest (68s, 8 parallel workers), then rstest --doctor pinpointing the wait-bound file that gates the suite" width="820">
+  <img src="https://raw.githubusercontent.com/KovantAI/rstest/main/docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (197s), then rstest (68s, 8 parallel workers), then rstest --doctor pinpointing the wait-bound file that gates the suite" width="820">
 </p>
 
-<p align="center"><sub>Same suite, same outcomes: <b>pytest 197s → rstest 68s</b> (warm, <code>-n 8</code>), then <code>--doctor</code> shows <i>where the time goes</i>. Numbers from <a href="docs/reference/benchmarks.md">benchmarks</a>.</sub></p>
+<p align="center"><sub>Same suite, same outcomes: <b>pytest 197s → rstest 68s</b> (warm, <code>-n 8</code>), then <code>--doctor</code> shows <i>where the time goes</i>. Numbers from <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
 
@@ -39,18 +43,28 @@ rstest
 Also works with your tool of choice:
 
 ```bash
-uv add rstest           # uv projects
-poetry add rstest       # Poetry
-pdm add rstest          # PDM
-pipx install rstest     # isolated CLI install
+uv add --dev rstest           # uv projects
+poetry add --group dev rstest # Poetry
+pdm add -dG test rstest       # PDM
 ```
 
-No config. No test changes. If `pytest` runs it, `rstest` runs it — in
-parallel (`-n auto`), out of the box.
+Install rstest into the same environment as your tests: workers run in
+that interpreter. (A `pipx` / `uv tool` install also needs rstest in the
+project environment; see
+[Installation](https://python-rstest.readthedocs.io/en/stable/getting-started/installation/).)
 
-- Tests that can't run in parallel → `@pytest.mark.serial` (run exclusively,
-  after the parallel phase).
-- Order-dependent suites → `--dist loadfile`.
+Requires Python 3.10+ on macOS, Linux, or Windows. rstest is alpha (0.x):
+expect breaking changes between minor versions until 1.0.
+
+No config and no test changes needed: rstest runs your pytest suite in
+parallel (`-n auto`) out of the box. As with pytest-xdist, each worker is a
+separate process, so session- and module-scoped fixtures run once per
+worker, not once per run.
+
+- Tests that can't run in parallel (shared files, ports, databases) →
+  `@pytest.mark.serial` (run exclusively, after the parallel phase).
+- Tests that depend on order within a file → `--dist loadfile`; across
+  files → `rstest -n 0`.
 - Want byte-exact pytest semantics → `rstest -n 0` (single pytest session).
 
 ## Will rstest speed up *your* suite?
@@ -59,10 +73,10 @@ The wins come from suite *shape*, not magic. Quick self-check:
 
 | Your suite | What to expect |
 |---|---|
-| Wait-bound (IO, sleeps, network, timeouts) | **Biggest win** — test-granular dispatch splits the slow files xdist pins to one worker. |
-| CPU-bound, already splits well under xdist | **Parity, not a win** — gain up to core count, same as xdist (pandas: 63s vs 61s). |
-| Gated by one long test | **No win beyond that test** — no worker count beats the long pole. `--doctor` names it. |
-| Small (< ~10s serial) | **Little wall-time change** — value is `--watch`, `--changed`, `--doctor`, not raw speed. |
+| Wait-bound (IO, sleeps, network, timeouts) | **Biggest win**: test-granular dispatch splits the slow files xdist pins to one worker. |
+| CPU-bound, already splits well under xdist | **Parity, not a win**, gain up to core count, same as xdist (pandas: 63s vs 61s). |
+| Gated by one long test | **No win beyond that test**, no worker count beats the long pole. `--doctor` names it. |
+| Small (< ~10s serial) | **Little wall-time change**: value is `--watch`, `--changed`, `--doctor`, not raw speed. |
 | Many tiny per-service suites | Speedup is per-suite; the aggregate CI win depends on your largest suites. |
 
 Two more truths worth knowing before you benchmark:
@@ -77,15 +91,15 @@ Two more truths worth knowing before you benchmark:
 
 Fastest way to find out for real: `rstest try` runs your suite under plain
 pytest and under `rstest -n auto`, then reports whether outcomes match and
-how much faster rstest was — no migration, no config.
+how much faster rstest was, no migration, no config.
 
 ## Benchmarks
 
 Real open-source suites, end-to-end, with per-test outcome diffing against
-the pytest baseline — 100% parity *on the measured run* (a few tests flake
+the pytest baseline: 100% parity *on the measured run* (a few tests flake
 under plain pytest itself; those are catalogued in the docs).
 
-<!-- SOURCE OF TRUTH: docs/reference/benchmarks.md — keep numbers in sync -->
+<!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | Suite | Tests | pytest | xdist (`-n 8`) | rstest |
 |---|---|---|---|---|
 | aiohttp | 4,469 | 197s | 160s | **68s** warm · 126s cold |
@@ -96,17 +110,17 @@ under plain pytest itself; those are catalogued in the docs).
 Apple Silicon, CPython 3.13, pytest-xdist 3.8.
 
 **Monorepo** (langchain-ai/langgraph, 6 `libs/*` packages, 4,284 tests, each
-with its own pytest config — a single pytest can't run from the root at all):
+with its own pytest config, a single pytest can't run from the root at all):
 
-<!-- SOURCE OF TRUTH: docs/reference/benchmarks.md — keep numbers in sync -->
+<!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | | wall | parity |
 |---|---|---|
-| pytest — 6 serial invocations | 880.4s | baseline |
+| pytest: 6 serial invocations | 880.4s | baseline |
 | rstest at the root, cold | **245.7s** (3.6×) | 100% (measured) |
 | rstest at the root, warm | 121–133s (6.6–7.3×) | *projected* |
 
 The cold run is measured. The warm figure is a **projection**, not a
-recorded run — the cold run's per-package duration caches predict where the
+recorded run: the cold run's per-package duration caches predict where the
 planner lands once warm, so it carries no parity number. Discount it until
 you measure your own.
 
@@ -117,10 +131,11 @@ Full methodology:
 
 | | pytest | pytest-xdist | rstest |
 |---|:---:|:---:|:---:|
-| Runs your suite unchanged | ✅ | mostly | ✅ |
+| Runs your suite unchanged | ✅ | mostly | ✅ at `-n 0`; in parallel, same caveats as xdist |
 | Parallel by default | ❌ | ⚙️ opt-in | ✅ |
 | Duration-aware scheduling | ❌ | ❌ | ✅ |
-| Crashed workers respawn mid-run | ❌ | ❌ | ✅ |
+| Crashed workers replaced mid-run | ❌ | ✅ | ✅ |
+| Crash pinned to the exact test | ❌ | inferred from queue | ✅ explicit per-test signal |
 | Suite diagnostics | ❌ | ❌ | ✅ `--doctor` |
 | Watch mode | plugin | ❌ | ✅ built-in |
 
@@ -139,10 +154,10 @@ Full methodology:
 <details>
 <summary><strong>Compatibility contract</strong></summary>
 
-At `-n 0`, outcomes are byte-exact — one vendored-pytest session; any
+At `-n 0`, outcomes are byte-exact: one vendored-pytest session; any
 difference at `-n 0` is a bug. In parallel modes, outcomes are preserved for
 parallel-safe tests; tests with hidden time/ordering/shared-state
-assumptions can flake under high concurrency — exactly as under
+assumptions can flake under high concurrency: exactly as under
 pytest-xdist. `rstest --doctor` and lower `-n` values help find and contain
 them; `@pytest.mark.serial` is the escape hatch.
 
@@ -150,23 +165,24 @@ them; `@pytest.mark.serial` is the escape hatch.
 adopting rstest adopts pytest 9's behavior regardless of the pytest version
 installed. The 8→9 gap is a cleanup major (removes already-deprecated APIs);
 a suite warning-clean on recent pytest 8.x is almost always pytest-9-clean.
-If it isn't, clear the deprecations first — the same upgrade you'd owe pytest
+If it isn't, clear the deprecations first: the same upgrade you'd owe pytest
 anyway. There is one vendored core, tracked forward; no older-core build.
 
 **Silent-at-`-n ≥ 2` plugins.** A few plugins that need a single master
-process are no-ops in parallel: `--html` (pytest-html) writes nothing (no
-crash) — generate reports at `-n 0`/`-n 1`. Terminal-UI plugins (pytest-sugar
-and friends) don't paint; data-level behavior is unaffected. Full list:
+process are no-ops in parallel: report plugins such as pytest-reportlog and
+pytest-json-report write nothing (no crash), and terminal-UI plugins
+(pytest-sugar and friends) don't paint; data-level behavior is unaffected.
+`--html` is handled by rstest itself and works at any worker count. Full list:
 [Known gaps](https://python-rstest.readthedocs.io/en/stable/concepts/compatibility/#known-gaps).
 
 </details>
 
 ## `rstest --doctor`
 
-Runs your suite, then answers *where does the time actually go?* — from data
+Runs your suite, then answers *where does the time actually go?*, from data
 the runner already owns (per-test wall/CPU time, per-fixture setup):
 
-<!-- SOURCE OF TRUTH: docs/guides/doctor.md — keep sample in sync -->
+<!-- SOURCE OF TRUTH: docs/guides/doctor.md, keep sample in sync -->
 ```text
 ================== rstest doctor ==================
 4442 tests, 185.8s test time (wall 67.7s, 8 workers)
@@ -186,7 +202,7 @@ SLOWEST FILES:
 ===================================================
 ```
 
-That's aiohttp's real suite — one file is 81% of total test time, almost all
+That's aiohttp's real suite: one file is 81% of total test time, almost all
 of it waiting on 10-second proxy timeouts.
 [More →](https://python-rstest.readthedocs.io/en/stable/guides/doctor/)
 
@@ -205,8 +221,8 @@ of it waiting on 10-second proxy timeouts.
 
 Licensed under either of
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/KovantAI/rstest/blob/main/LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](https://github.com/KovantAI/rstest/blob/main/LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
 
