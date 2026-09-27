@@ -104,7 +104,11 @@ jobs:
       # starts the slowest tests first.
       - uses: actions/cache@v6
         with:
-          path: .rstest_cache
+          # Replay journals are per-run; upload them on failure instead
+          # (see "Replaying a CI-only failure locally" below).
+          path: |
+            .rstest_cache
+            !.rstest_cache/replay
           # Same components as the bundled action: OS + Python + lockfile
           # hash, so a 3.12 or Windows run never seeds a 3.13 Linux one.
           # Unique per run: actions/cache never RE-saves an existing key,
@@ -181,7 +185,9 @@ jobs:
       # re-saves an existing key); restore-keys picks the newest match.
       - uses: actions/cache@v6
         with:
-          path: .rstest_cache
+          path: |
+            .rstest_cache
+            !.rstest_cache/replay
           key: rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
           restore-keys: |
             rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
@@ -417,6 +423,98 @@ This is heavier than a normal run (it collects twice and reruns the failing
 files under discriminators), so run it on its own job or a schedule rather than
 every push if the suite is large. Once the suite reports `ready`, drop the gate
 and just run `rstest`.
+
+## Replaying a CI-only failure locally
+
+A test that fails on CI but passes on your machine is usually an ordering
+problem: on CI it shared a worker with a test that leaked state, and locally
+the scheduler put them apart. Every parallel run (`-n >= 2`) records which
+worker ran which tests, in what order, to `.rstest_cache/replay/latest.json`.
+Keep that file when a job fails and [`rstest replay`](../reference/cli-commands.md#replay)
+re-runs the same schedule on your machine.
+
+**1. In CI, upload the journal when the tests fail.** With the bundled action,
+add one step after it:
+
+```yaml
+      - uses: KovantAI/rstest/.github/actions/rstest@v1
+        with:
+          python-version: "3.13"
+          args: "-n auto"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
+          path: .rstest_cache/replay/latest.json
+```
+
+The job name and matrix index in the artifact name keep the uploads apart
+when a matrix (Python versions, OSes) fails in several jobs at once:
+`upload-artifact@v4` refuses a second artifact with the same name in a run.
+Outside a matrix, `strategy.job-index` is `0`.
+
+With raw YAML, put the same `upload-artifact` step after your `rstest -n auto`
+step. On other CI systems, save `.rstest_cache/replay/latest.json` as a
+failure artifact the same way you save `junit.xml`. If the action runs with a
+`working-directory`, prefix the path with it.
+
+**2. Locally, check out the failing commit and download the journal.**
+
+```console
+$ git checkout <failing-sha>
+$ pip install -r requirements.txt          # same deps as CI (use your lockfile)
+$ gh run download <run-id> -n rstest-replay-tests-0 -D ci-replay   # job "tests", matrix index 0
+```
+
+Run `gh run download <run-id>` with no `-n` to fetch every artifact of the run
+if you're unsure of the name.
+
+**3. Replay it.**
+
+```console
+$ rstest replay --journal ci-replay/latest.json
+rstest: replay: run 18d93d9429580fb015f7d (0.7.0 recorded), 4 worker(s), 22 test(s) across 4 slot(s)
+...
+--- FAILED [gw0] tests/test_m2.py::test_victim ---
+```
+
+Replay forces the recorded worker count (even on a laptop with fewer cores),
+runs each worker's recorded tests in the recorded order, and turns off reruns
+(`@pytest.mark.flaky` and `[tool.rstest] reruns` included), work stealing and
+shuffling. `@pytest.mark.serial` tests still run alone, after every other
+worker has finished, as they did on CI. A worker that crashes is replaced and
+the replacement picks up where it died. The test args (paths, `-k`, `-m`) come
+from the journal, so pass none. Recorded `--lf`/`--sw` are ignored with a note:
+they would select by your local pytest cache, not CI's. The failing test's `[gwN]` tag tells you which worker
+to look at: the tests that ran before it on that worker hold the likely
+polluter. Once you have a fix, run the same command again. Green means the
+fix holds for the schedule that broke CI.
+
+Things that keep a journal portable:
+
+- **Run from the same directory as CI.** Nodeids are relative to the rootdir,
+  so in a monorepo replay from the package directory the CI job ran in.
+- **Keep test paths inside the project.** Absolute paths under the directory
+  rstest ran in (`$GITHUB_WORKSPACE/tests`) are stored relative to it, so they
+  resolve on your checkout. A path outside it is stored as given; replay
+  warns when such a path doesn't exist on your machine.
+- **Match the code and dependencies.** If the suite changed since the
+  recording, replay says so, runs the tests that still match, and reports how
+  many recorded tests no longer collect. The reproduction may then be lost.
+- **Only parallel eager runs record.** `-n 0`/`-n 1`, `--dist each`,
+  `--shard` and `--collect lazy` write no journal.
+- **Keep journals out of the CI cache.** The bundled action already leaves
+  `.rstest_cache/replay` out of the cache it persists. If you cache
+  `.rstest_cache` yourself (raw YAML, or another CI system's cache), exclude
+  that directory too (`!.rstest_cache/replay` for `actions/cache`). Otherwise
+  every save carries up to 11 journals, several MB each on a large suite, and
+  a job that recorded nothing can upload an older `latest.json` it restored.
+
+Replay reproduces what each worker ran and in what order, which is what
+state-leak and ordering failures depend on. How the workers' timing lines up
+with each other is not reproduced, so a true timing race (two workers touching
+the same file or port at the same moment) may need several replays or may
+not show up at all.
 
 ## Notes
 

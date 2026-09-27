@@ -115,6 +115,13 @@ from gates.plugins import (
     gate_testnodedown_for_crashed_workers,
     gate_xdist_master_side_hooks,
 )
+from gates.replay import (
+    gate_replay,
+    gate_replay_crash,
+    gate_replay_journal_validation,
+    gate_replay_serial,
+    gate_replay_side_effects,
+)
 from gates.reporting import (
     gate_collect_only_discovery_json,
     gate_doctor,
@@ -208,6 +215,11 @@ def main():
         gate_lazy_work_stealing,
         gate_dist_each_crash_remnant,
         gate_crash_restart_exhaustion,
+        gate_replay,
+        gate_replay_serial,
+        gate_replay_crash,
+        gate_replay_journal_validation,
+        gate_replay_side_effects,
         gate_lf,
         gate_junitxml,
         gate_html_report,
