@@ -2,26 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "DoctorReport",
   "type": "object",
-  "required": [
-    "coverage_waste",
-    "cpu_time_seconds",
-    "fixtures",
-    "fork_prewarm",
-    "parallel_efficiency",
-    "parallel_floor",
-    "rstest_version",
-    "schema",
-    "slowest_files",
-    "startup_seconds",
-    "test_time_seconds",
-    "tests",
-    "wait_bound",
-    "wall_seconds",
-    "workers"
-  ],
   "properties": {
     "coverage_waste": {
-      "description": "Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified.",
+      "description": "Slow tests whose every covered line is also covered by another test -\ndelete/merge candidates. `None` unless a per-test coverage index was\nwarm (`--cov --cov-context=test`) and at least one test qualified.",
       "anyOf": [
         {
           "$ref": "#/definitions/CoverageWaste"
@@ -43,11 +26,11 @@
       }
     },
     "fork_prewarm": {
-      "description": "Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates the \"try --fork-pool\" hint so it isn't suggested when already on.",
+      "description": "Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates\nthe \"try --fork-pool\" hint so it isn't suggested when already on.",
       "type": "boolean"
     },
     "leaks": {
-      "description": "Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).",
+      "description": "Tests that leaked threads / fds (net positive after teardown). Empty\nunless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).",
       "type": "array",
       "items": {
         "$ref": "#/definitions/Leak"
@@ -79,7 +62,7 @@
     "schema": {
       "type": "integer",
       "format": "uint32",
-      "minimum": 0.0
+      "minimum": 0
     },
     "slowest_files": {
       "type": "array",
@@ -88,7 +71,7 @@
       }
     },
     "startup_seconds": {
-      "description": "Wall from pool spawn to every worker's first event (imported core + started collecting), part of `wall_seconds`. A fixed per-run tax that `--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs. Surfaced so a startup-bound suite is legible.",
+      "description": "Wall from pool spawn to every worker's first event (imported core +\nstarted collecting), part of `wall_seconds`. A fixed per-run tax that\n`--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs.\nSurfaced so a startup-bound suite is legible.",
       "type": "number",
       "format": "double"
     },
@@ -99,7 +82,7 @@
     "tests": {
       "type": "integer",
       "format": "uint",
-      "minimum": 0.0
+      "minimum": 0
     },
     "wait_bound": {
       "anyOf": [
@@ -118,24 +101,36 @@
     "workers": {
       "type": "integer",
       "format": "uint",
-      "minimum": 0.0
+      "minimum": 0
     }
   },
+  "required": [
+    "schema",
+    "rstest_version",
+    "workers",
+    "wall_seconds",
+    "startup_seconds",
+    "fork_prewarm",
+    "tests",
+    "test_time_seconds",
+    "cpu_time_seconds",
+    "wait_bound",
+    "parallel_floor",
+    "parallel_efficiency",
+    "fixtures",
+    "slowest_files",
+    "coverage_waste"
+  ],
   "definitions": {
     "CoverageWaste": {
-      "description": "Slow tests that add no unique coverage: every line each one executes is also executed by some other test, so it can be deleted or merged without dropping any covered line. Pure suite bloat on the time axis.",
+      "description": "Slow tests that add no unique coverage: every line each one executes is also\nexecuted by some other test, so it can be deleted or merged without dropping\nany covered line. Pure suite bloat on the time axis.",
       "type": "object",
-      "required": [
-        "redundant_tests",
-        "tests",
-        "wasted_seconds"
-      ],
       "properties": {
         "redundant_tests": {
           "description": "Count of redundant slow tests found (`tests` shows the slowest of them).",
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "tests": {
           "description": "The slowest redundant tests, worst first (capped).",
@@ -145,19 +140,19 @@
           }
         },
         "wasted_seconds": {
-          "description": "Sum of the durations of every redundant slow test (not just the shown ones) - the time reclaimable by pruning them.",
+          "description": "Sum of the durations of every redundant slow test (not just the shown\nones) - the time reclaimable by pruning them.",
           "type": "number",
           "format": "double"
         }
-      }
+      },
+      "required": [
+        "wasted_seconds",
+        "redundant_tests",
+        "tests"
+      ]
     },
     "FileEntry": {
       "type": "object",
-      "required": [
-        "file",
-        "pct",
-        "total_seconds"
-      ],
       "properties": {
         "file": {
           "type": "string"
@@ -170,31 +165,30 @@
           "type": "number",
           "format": "double"
         }
-      }
+      },
+      "required": [
+        "file",
+        "total_seconds",
+        "pct"
+      ]
     },
     "FixtureEntry": {
       "type": "object",
-      "required": [
-        "count",
-        "name",
-        "scope",
-        "total_seconds"
-      ],
       "properties": {
         "constant": {
-          "description": "Scope-promotion advisor: a function-scoped fixture that produced the same immutable builtin value on every call in every worker, with no per-test teardown or narrower-scoped inputs (checked worker-side), a candidate for `@pytest.fixture(scope=\"session\")`.",
+          "description": "Scope-promotion advisor: a function-scoped fixture that produced the\nsame immutable builtin value on every call in every worker, with no\nper-test teardown or narrower-scoped inputs (checked worker-side), a\ncandidate for `@pytest.fixture(scope=\"session\")`.",
           "type": "boolean"
         },
         "count": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "name": {
           "type": "string"
         },
         "projected_saving_seconds": {
-          "description": "Projected wall-time saved by promoting this candidate to session scope: the largest per-worker-session `(calls - 1) * mean_setup`, i.e. the redundant re-setups removed on the worker that benefits most. 0 unless `constant`.",
+          "description": "Projected wall-time saved by promoting this candidate to session scope:\nthe largest per-worker-session `(calls - 1) * mean_setup`, i.e. the\nredundant re-setups removed on the worker that benefits most.\n0 unless `constant`.",
           "type": "number",
           "format": "double"
         },
@@ -205,14 +199,16 @@
           "type": "number",
           "format": "double"
         }
-      }
+      },
+      "required": [
+        "name",
+        "scope",
+        "count",
+        "total_seconds"
+      ]
     },
     "GateTest": {
       "type": "object",
-      "required": [
-        "duration",
-        "nodeid"
-      ],
       "properties": {
         "duration": {
           "type": "number",
@@ -221,16 +217,15 @@
         "nodeid": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "nodeid",
+        "duration"
+      ]
     },
     "Leak": {
-      "description": "A test that ended with more threads / open fds than it started — a resource it opened and never released (its own teardown included).",
+      "description": "A test that ended with more threads / open fds than it started — a resource\nit opened and never released (its own teardown included).",
       "type": "object",
-      "required": [
-        "fds",
-        "nodeid",
-        "threads"
-      ],
       "properties": {
         "fds": {
           "description": "Net open fds leaked (0 if only threads leaked).",
@@ -245,19 +240,16 @@
           "type": "integer",
           "format": "int64"
         }
-      }
+      },
+      "required": [
+        "nodeid",
+        "threads",
+        "fds"
+      ]
     },
     "ParallelEfficiency": {
-      "description": "Realized parallel speedup measured from an actual run. Unlike `ParallelFloor` (a static pre-run estimate), this is the after-the-fact \"why isn't `-n auto` faster?\". Only for multi-worker pool runs.",
+      "description": "Realized parallel speedup measured from an actual run. Unlike\n`ParallelFloor` (a static pre-run estimate), this is the after-the-fact\n\"why isn't `-n auto` faster?\". Only for multi-worker pool runs.",
       "type": "object",
-      "required": [
-        "efficiency_pct",
-        "ideal_speedup",
-        "imbalance_pct",
-        "long_pole_seconds",
-        "realized_speedup",
-        "workers_busy"
-      ],
       "properties": {
         "efficiency_pct": {
           "description": "100 * realized / ideal. >100% signals wait-bound overlap.",
@@ -268,7 +260,7 @@
           "description": "Worker count (`-n`) - the ceiling for a purely CPU-bound suite.",
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "imbalance_pct": {
           "description": "100 * (busiest - idlest) / busiest. High = uneven distribution.",
@@ -281,7 +273,7 @@
           "format": "double"
         },
         "realized_speedup": {
-          "description": "test_time / wall. May exceed `ideal_speedup` for wait-bound suites, where overlapping sleeps/IO run more tests at once than there are cores.",
+          "description": "test_time / wall. May exceed `ideal_speedup` for wait-bound suites,\nwhere overlapping sleeps/IO run more tests at once than there are\ncores.",
           "type": "number",
           "format": "double"
         },
@@ -292,15 +284,18 @@
             "$ref": "#/definitions/WorkerLoad"
           }
         }
-      }
+      },
+      "required": [
+        "realized_speedup",
+        "ideal_speedup",
+        "efficiency_pct",
+        "workers_busy",
+        "imbalance_pct",
+        "long_pole_seconds"
+      ]
     },
     "ParallelFloor": {
       "type": "object",
-      "required": [
-        "gate_tests",
-        "ideal_share_seconds",
-        "longest_seconds"
-      ],
       "properties": {
         "gate_tests": {
           "type": "array",
@@ -316,15 +311,15 @@
           "type": "number",
           "format": "double"
         }
-      }
+      },
+      "required": [
+        "longest_seconds",
+        "ideal_share_seconds",
+        "gate_tests"
+      ]
     },
     "WaitBound": {
       "type": "object",
-      "required": [
-        "tests",
-        "wait_pct",
-        "wait_seconds"
-      ],
       "properties": {
         "tests": {
           "type": "array",
@@ -340,15 +335,15 @@
           "type": "number",
           "format": "double"
         }
-      }
+      },
+      "required": [
+        "wait_seconds",
+        "wait_pct",
+        "tests"
+      ]
     },
     "WaitTest": {
       "type": "object",
-      "required": [
-        "duration",
-        "nodeid",
-        "wait"
-      ],
       "properties": {
         "duration": {
           "type": "number",
@@ -361,28 +356,27 @@
           "type": "number",
           "format": "double"
         }
-      }
+      },
+      "required": [
+        "nodeid",
+        "duration",
+        "wait"
+      ]
     },
     "WasteTest": {
       "type": "object",
-      "required": [
-        "also_covered_by",
-        "covered_lines",
-        "duration",
-        "nodeid"
-      ],
       "properties": {
         "also_covered_by": {
           "description": "Distinct OTHER tests that between them also cover those lines.",
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "covered_lines": {
           "description": "Lines this test covered, all shared with at least one other test.",
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "duration": {
           "type": "number",
@@ -391,15 +385,16 @@
         "nodeid": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "nodeid",
+        "duration",
+        "covered_lines",
+        "also_covered_by"
+      ]
     },
     "WorkerLoad": {
       "type": "object",
-      "required": [
-        "busy_seconds",
-        "tests",
-        "worker"
-      ],
       "properties": {
         "busy_seconds": {
           "type": "number",
@@ -408,12 +403,17 @@
         "tests": {
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "worker": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "worker",
+        "busy_seconds",
+        "tests"
+      ]
     }
   }
 }

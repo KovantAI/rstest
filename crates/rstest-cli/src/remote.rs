@@ -915,57 +915,48 @@ impl RealHttpClient {
             .ok()
             .filter(|s| !s.is_empty())
             .map(|t| format!("Bearer {t}"));
+        // Non-2xx statuses come back as `Ok` so `exec` can fold them into
+        // `HttpResp`; only transport failures are `Err`.
+        let config = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build();
         Self {
-            agent: ureq::agent(),
+            agent: ureq::Agent::new_with_config(config),
             auth,
         }
     }
-    fn with_auth(&self, req: ureq::Request) -> ureq::Request {
+    fn with_auth<B>(&self, req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
         match &self.auth {
-            Some(v) => req.set("Authorization", v),
+            Some(v) => req.header("Authorization", v),
             None => req,
         }
     }
-    /// Execute a request, folding a non-2xx *status* into `HttpResp` (only a
-    /// transport-level failure is an `Err`).
-    fn exec(req: ureq::Request, body: Option<&[u8]>) -> Result<HttpResp> {
+    /// Read a response (any status) into `HttpResp`. The body reader is
+    /// unbounded, matching ureq 2's `into_reader`: cache artifacts can exceed
+    /// ureq's 10 MiB `read_to_vec` default.
+    fn collect(outcome: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<HttpResp> {
         use std::io::Read;
-        let outcome = match body {
-            Some(b) => req.send_bytes(b),
-            None => req.call(),
-        };
-        match outcome {
-            Ok(resp) => {
-                let status = resp.status();
-                let mut buf = Vec::new();
-                resp.into_reader()
-                    .read_to_end(&mut buf)
-                    .context("reading HTTP response body")?;
-                Ok(HttpResp { status, body: buf })
-            }
-            Err(ureq::Error::Status(code, resp)) => {
-                let mut buf = Vec::new();
-                let _ = resp.into_reader().read_to_end(&mut buf);
-                Ok(HttpResp {
-                    status: code,
-                    body: buf,
-                })
-            }
-            Err(e) => Err(anyhow::Error::new(e).context("HTTP request failed")),
-        }
+        let resp = outcome.map_err(|e| anyhow::Error::new(e).context("HTTP request failed"))?;
+        let status = resp.status().as_u16();
+        let mut buf = Vec::new();
+        resp.into_body()
+            .into_reader()
+            .read_to_end(&mut buf)
+            .context("reading HTTP response body")?;
+        Ok(HttpResp { status, body: buf })
     }
 }
 
 #[cfg(feature = "http-cache")]
 impl HttpClient for RealHttpClient {
     fn get(&self, url: &str) -> Result<HttpResp> {
-        Self::exec(self.with_auth(self.agent.get(url)), None)
+        Self::collect(self.with_auth(self.agent.get(url)).call())
     }
     fn put(&self, url: &str, body: &[u8]) -> Result<HttpResp> {
-        Self::exec(self.with_auth(self.agent.put(url)), Some(body))
+        Self::collect(self.with_auth(self.agent.put(url)).send(body))
     }
     fn delete(&self, url: &str) -> Result<HttpResp> {
-        Self::exec(self.with_auth(self.agent.delete(url)), None)
+        Self::collect(self.with_auth(self.agent.delete(url)).call())
     }
 }
 

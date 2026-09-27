@@ -12,8 +12,9 @@
 
 use std::collections::HashMap;
 
-use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec};
-use schemars::schema_for;
+use schemars::generate::SchemaSettings;
+use schemars::{JsonSchema, Schema};
+use serde_json::{Map, Value};
 
 /// Directory (repo-relative) the committed schema artifacts live in.
 const OUT_DIR: &str = "docs/reference/schemas";
@@ -24,7 +25,15 @@ struct Output {
     name: &'static str,
     title: &'static str,
     source: &'static str,
-    schema: RootSchema,
+    schema: Schema,
+}
+
+/// Root schema for `T`. Pinned to draft-07 (schemars 1 defaults to 2020-12) so
+/// the published dialect and `#/definitions/...` refs stay stable for consumers.
+fn schema_of<T: JsonSchema>() -> Schema {
+    SchemaSettings::draft07()
+        .into_generator()
+        .into_root_schema_for::<T>()
 }
 
 /// The outputs whose schema is published. Every stable JSON surface the CLI
@@ -35,31 +44,31 @@ fn outputs() -> Vec<Output> {
             name: "report-json",
             title: "Run report",
             source: "`--report-json`",
-            schema: schema_for!(crate::reporting::report::Snapshot<'static>),
+            schema: schema_of::<crate::reporting::report::Snapshot<'static>>(),
         },
         Output {
             name: "doctor-report",
             title: "Doctor report",
             source: "`--doctor-json`",
-            schema: schema_for!(crate::doctor::DoctorReport),
+            schema: schema_of::<crate::doctor::DoctorReport>(),
         },
         Output {
             name: "discovery",
             title: "Discovery",
             source: "`--collect-only --report-json`",
-            schema: schema_for!(crate::run::discovery::DiscoveryDoc),
+            schema: schema_of::<crate::run::discovery::DiscoveryDoc>(),
         },
         Output {
             name: "migrate-check",
             title: "Migrate-check",
             source: "`migrate-check --migrate-check-json`",
-            schema: schema_for!(crate::migrate::check::MigrateCheckDoc),
+            schema: schema_of::<crate::migrate::check::MigrateCheckDoc>(),
         },
         Output {
             name: "flake-log",
             title: "Flake log",
             source: "`.rstest_cache/flakes.json`",
-            schema: schema_for!(HashMap<String, crate::reporting::flakes::FlakeStats>),
+            schema: schema_of::<HashMap<String, crate::reporting::flakes::FlakeStats>>(),
         },
     ]
 }
@@ -89,6 +98,14 @@ pub fn generated_files() -> Vec<GeneratedFile> {
     files
 }
 
+/// `obj`'s entries sorted by key, so output order never depends on whether
+/// serde_json's `preserve_order` feature is on somewhere in the build.
+fn sorted(obj: &Map<String, Value>) -> Vec<(&String, &Value)> {
+    let mut entries: Vec<_> = obj.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+}
+
 /// The generated markdown for one output: the root object, then a table per
 /// referenced sub-type (definitions), in a stable (alphabetical) order.
 fn render_md(o: &Output) -> String {
@@ -98,10 +115,14 @@ fn render_md(o: &Output) -> String {
          Do not edit by hand; regenerate with RSTEST_BLESS_SCHEMAS=1. -->\n\n",
     );
     // Root type at `##`, its referenced sub-types at `###`, for clean toc nesting.
-    render_object(&mut s, "##", o.title, o.source, &o.schema.schema);
-    for (name, sch) in &o.schema.definitions {
-        if let Schema::Object(obj) = sch {
-            render_object(&mut s, "###", name, "", obj);
+    let empty = Map::new();
+    let root = o.schema.as_object().unwrap_or(&empty);
+    render_object(&mut s, "##", o.title, o.source, root);
+    if let Some(Value::Object(defs)) = root.get("definitions") {
+        for (name, sch) in sorted(defs) {
+            if let Value::Object(obj) = sch {
+                render_object(&mut s, "###", name, "", obj);
+            }
         }
     }
     // Exactly one trailing newline, matching pre-commit's end-of-file-fixer.
@@ -114,7 +135,13 @@ fn render_md(o: &Output) -> String {
 /// Render one object schema as a `heading` (markdown level marker) + optional
 /// description + a property table. Also handles a map root (no properties, just
 /// `additionalProperties`), which is how `flakes.json` is shaped.
-fn render_object(s: &mut String, level: &str, heading: &str, source: &str, obj: &SchemaObject) {
+fn render_object(
+    s: &mut String,
+    level: &str,
+    heading: &str,
+    source: &str,
+    obj: &Map<String, Value>,
+) {
     use std::fmt::Write;
 
     let _ = write!(s, "{level} {heading}\n\n");
@@ -125,14 +152,19 @@ fn render_object(s: &mut String, level: &str, heading: &str, source: &str, obj: 
         let _ = write!(s, "{desc}\n\n");
     }
 
-    let Some(ov) = &obj.object else {
+    let props = match obj.get("properties") {
+        Some(Value::Object(p)) => Some(p),
+        _ => None,
+    };
+    let ap = obj.get("additionalProperties");
+    if props.is_none() && ap.is_none() {
         s.push('\n');
         return;
-    };
+    }
 
     // A map type (e.g. nodeid -> record): no fixed properties, one value shape.
-    if ov.properties.is_empty() {
-        if let Some(ap) = &ov.additional_properties {
+    let Some(props) = props.filter(|p| !p.is_empty()) else {
+        if let Some(ap) = ap {
             let _ = write!(
                 s,
                 "An object mapping each key to a {} value.\n\n",
@@ -140,21 +172,22 @@ fn render_object(s: &mut String, level: &str, heading: &str, source: &str, obj: 
             );
         }
         return;
-    }
+    };
 
+    let required: Vec<&str> = obj
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     s.push_str("| Field | Type | Required | Description |\n|---|---|---|---|\n");
-    // `properties` is a BTreeMap, so iteration is already alphabetical & stable.
-    for (field, sch) in &ov.properties {
-        let required = if ov.required.contains(field) {
+    for (field, sch) in sorted(props) {
+        let required = if required.contains(&field.as_str()) {
             "yes"
         } else {
             "no"
         };
         let ty = type_label(sch);
-        let desc = match sch {
-            Schema::Object(o) => description(o).unwrap_or_default(),
-            Schema::Bool(_) => String::new(),
-        };
+        let desc = sch.as_object().and_then(description).unwrap_or_default();
         let _ = writeln!(s, "| `{field}` | {ty} | {required} | {desc} |");
     }
     s.push('\n');
@@ -162,81 +195,70 @@ fn render_object(s: &mut String, level: &str, heading: &str, source: &str, obj: 
 
 /// A cell-safe one-line description from a schema's metadata (newlines folded,
 /// `|` escaped so it can't break the table).
-fn description(obj: &SchemaObject) -> Option<String> {
-    let raw = obj.metadata.as_ref()?.description.clone()?;
+fn description(obj: &Map<String, Value>) -> Option<String> {
+    let raw = obj.get("description")?.as_str()?;
     let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     (!flat.is_empty()).then(|| flat.replace('|', "\\|"))
 }
 
 /// A short human type label for a field schema: a referenced type name, a
 /// primitive, `array of X`, `object of X`, or `X or null` for a nullable field.
-fn type_label(schema: &Schema) -> String {
-    match schema {
-        Schema::Bool(_) => "any".to_string(),
-        Schema::Object(o) => type_label_obj(o),
-    }
-}
-
-fn type_label_obj(o: &SchemaObject) -> String {
-    if let Some(r) = &o.reference {
+fn type_label(schema: &Value) -> String {
+    let Value::Object(o) = schema else {
+        // `true`/`false` schemas (and anything malformed) accept any value.
+        return "any".to_string();
+    };
+    if let Some(r) = o.get("$ref").and_then(Value::as_str) {
         return ref_name(r);
     }
     // Option<T> / unions surface as anyOf/oneOf.
-    if let Some(sub) = &o.subschemas {
-        for group in [&sub.any_of, &sub.one_of, &sub.all_of]
-            .into_iter()
-            .flatten()
-        {
-            let parts: Vec<String> = group.iter().map(type_label).collect();
-            if !parts.is_empty() {
-                return parts.join(" or ");
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(Value::Array(group)) = o.get(key) {
+            if !group.is_empty() {
+                return group
+                    .iter()
+                    .map(type_label)
+                    .collect::<Vec<_>>()
+                    .join(" or ");
             }
         }
     }
-    if let Some(it) = &o.instance_type {
-        return match it {
-            SingleOrVec::Single(t) => label_for_instance(t, o),
-            SingleOrVec::Vec(ts) => ts
+    match o.get("type") {
+        Some(Value::String(t)) => return label_for_instance(t, o),
+        Some(Value::Array(ts)) => {
+            return ts
                 .iter()
+                .filter_map(Value::as_str)
                 .map(|t| label_for_instance(t, o))
                 .collect::<Vec<_>>()
-                .join(" or "),
-        };
+                .join(" or ");
+        }
+        _ => {}
     }
     // A bare map with only additionalProperties (no declared instance type).
-    if let Some(ov) = &o.object {
-        if let Some(ap) = &ov.additional_properties {
-            return format!("object of {}", type_label(ap));
-        }
+    if let Some(ap) = o.get("additionalProperties") {
+        return format!("object of {}", type_label(ap));
     }
     "object".to_string()
 }
 
 /// Label a single instance type, expanding `array`/`object` into their element
 /// / value shape when the schema declares one.
-fn label_for_instance(t: &InstanceType, o: &SchemaObject) -> String {
+fn label_for_instance(t: &str, o: &Map<String, Value>) -> String {
     match t {
-        InstanceType::Null => "null".to_string(),
-        InstanceType::Boolean => "boolean".to_string(),
-        InstanceType::Number => "number".to_string(),
-        InstanceType::Integer => "integer".to_string(),
-        InstanceType::String => "string".to_string(),
-        InstanceType::Array => match o.array.as_ref().and_then(|a| a.items.as_ref()) {
-            Some(SingleOrVec::Single(item)) => format!("array of {}", type_label(item)),
-            Some(SingleOrVec::Vec(items)) => items
+        "array" => match o.get("items") {
+            Some(Value::Array(items)) => items
                 .first()
                 .map(|i| format!("array of {}", type_label(i)))
                 .unwrap_or_else(|| "array".to_string()),
+            Some(item) => format!("array of {}", type_label(item)),
             None => "array".to_string(),
         },
-        InstanceType::Object => match o
-            .object
-            .as_ref()
-            .and_then(|ov| ov.additional_properties.as_ref())
-        {
+        "object" => match o.get("additionalProperties") {
             Some(ap) => format!("object of {}", type_label(ap)),
             None => "object".to_string(),
         },
+        other => other.to_string(),
     }
 }
 
@@ -244,7 +266,7 @@ fn label_for_instance(t: &InstanceType, o: &SchemaObject) -> String {
 /// `skip_serializing_if`): the key is present, possibly `null`. Routing through
 /// `schema_with` makes schemars list it as required while keeping `null` in the
 /// type, which `#[schemars(required)]` would strip.
-pub fn nullable<T: schemars::JsonSchema>(g: &mut schemars::gen::SchemaGenerator) -> Schema {
+pub fn nullable<T: JsonSchema>(g: &mut schemars::SchemaGenerator) -> Schema {
     g.subschema_for::<Option<T>>()
 }
 
@@ -376,13 +398,13 @@ mod tests {
     }
 
     fn label(v: serde_json::Value) -> String {
-        type_label(&serde_json::from_value(v).expect("valid schema"))
+        type_label(&v)
     }
 
     #[test]
     fn type_label_covers_every_schema_shape() {
         use serde_json::json;
-        assert_eq!(type_label(&Schema::Bool(true)), "any");
+        assert_eq!(label(json!(true)), "any");
         assert_eq!(label(json!({"$ref": "#/definitions/Foo"})), "Foo");
         assert_eq!(
             label(json!({"anyOf": [{"$ref": "#/definitions/Foo"}, {"type": "null"}]})),
@@ -420,60 +442,48 @@ mod tests {
         assert_eq!(label(json!({})), "object");
     }
 
-    fn with_description(desc: &str) -> SchemaObject {
-        SchemaObject {
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(desc.to_string()),
-                ..Default::default()
-            })),
-            ..Default::default()
+    fn obj(v: serde_json::Value) -> Map<String, Value> {
+        match v {
+            Value::Object(m) => m,
+            other => panic!("not an object: {other}"),
         }
     }
 
     #[test]
     fn description_folds_whitespace_escapes_pipes_and_drops_blank() {
+        use serde_json::json;
         assert_eq!(
-            description(&with_description("a\n   b | c")).as_deref(),
+            description(&obj(json!({"description": "a\n   b | c"}))).as_deref(),
             Some("a b \\| c")
         );
-        assert_eq!(description(&with_description(" \n ")), None);
-        assert_eq!(description(&SchemaObject::default()), None);
+        assert_eq!(description(&obj(json!({"description": " \n "}))), None);
+        assert_eq!(description(&Map::new()), None);
     }
 
     #[test]
     fn render_object_handles_non_object_empty_map_and_bool_fields() {
-        use schemars::schema::ObjectValidation;
+        use serde_json::json;
 
-        // No object validation: heading, source and description only.
+        // No object keywords: heading, source and description only.
         let mut s = String::new();
         render_object(
             &mut s,
             "##",
             "Scalar",
             "`src`",
-            &with_description("A value."),
+            &obj(json!({"description": "A value."})),
         );
         assert_eq!(s, "## Scalar\n\nSource: `src`\n\nA value.\n\n\n");
 
         // An object with neither properties nor a value shape renders no table.
         let mut s = String::new();
-        let empty = SchemaObject {
-            object: Some(Box::default()),
-            ..Default::default()
-        };
-        render_object(&mut s, "###", "Empty", "", &empty);
+        render_object(&mut s, "###", "Empty", "", &obj(json!({"properties": {}})));
         assert_eq!(s, "### Empty\n\n");
 
         // A `true` (any) property: typed `any`, no description.
-        let mut ov = ObjectValidation::default();
-        ov.properties.insert("anything".into(), Schema::Bool(true));
-        ov.required.insert("anything".into());
-        let obj = SchemaObject {
-            object: Some(Box::new(ov)),
-            ..Default::default()
-        };
+        let loose = obj(json!({"properties": {"anything": true}, "required": ["anything"]}));
         let mut s = String::new();
-        render_object(&mut s, "###", "Loose", "", &obj);
+        render_object(&mut s, "###", "Loose", "", &loose);
         assert!(s.contains("| `anything` | any | yes |  |"), "{s}");
     }
 

@@ -1,21 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "MigrateCheckDoc",
-  "description": "The `--migrate-check-json` document (schema 1). Field order is alphabetical to match the historical `serde_json` map output (no `preserve_order`), so the emitted bytes are unchanged by the move to typed structs.",
+  "description": "The `--migrate-check-json` document (schema 1). Field order is alphabetical\nto match the historical `serde_json` map output (no `preserve_order`), so\nthe emitted bytes are unchanged by the move to typed structs.",
   "type": "object",
-  "required": [
-    "meta",
-    "ready",
-    "tests_collected",
-    "unstable_ids",
-    "will_bail_count"
-  ],
   "properties": {
     "meta": {
       "$ref": "#/definitions/MigrateMeta"
     },
     "parallel": {
-      "description": "Parallel-phase result: `null` when the phase was skipped (WILL-bail ids force `-n 0`) or could not capture outcomes.",
+      "description": "Parallel-phase result: `null` when the phase was skipped (WILL-bail ids\nforce `-n 0`) or could not capture outcomes.",
       "anyOf": [
         {
           "$ref": "#/definitions/ParallelReport"
@@ -33,7 +26,7 @@
       "description": "Tests collected (union across the two collection runs).",
       "type": "integer",
       "format": "uint",
-      "minimum": 0.0
+      "minimum": 0
     },
     "unstable_ids": {
       "description": "Unstable-nodeid findings, grouped by test site.",
@@ -46,20 +39,20 @@
       "description": "Count of per-process-unstable ids that force `-n 0`.",
       "type": "integer",
       "format": "uint",
-      "minimum": 0.0
+      "minimum": 0
     }
   },
+  "required": [
+    "meta",
+    "ready",
+    "tests_collected",
+    "unstable_ids",
+    "will_bail_count"
+  ],
   "definitions": {
     "Finding": {
       "description": "One parallel-only failure finding.",
       "type": "object",
-      "required": [
-        "allowed",
-        "fix",
-        "nodeid",
-        "verdict",
-        "why"
-      ],
       "properties": {
         "allowed": {
           "description": "Whether this nodeid is on the allow list.",
@@ -92,16 +85,18 @@
           "description": "Why it fails only under parallelism.",
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "allowed",
+        "fix",
+        "nodeid",
+        "verdict",
+        "why"
+      ]
     },
     "MigrateMeta": {
       "description": "Envelope metadata for the migrate-check document.",
       "type": "object",
-      "required": [
-        "kind",
-        "runner",
-        "schema"
-      ],
       "properties": {
         "kind": {
           "description": "Constant discriminator: always `\"migrate-check\"`.",
@@ -115,16 +110,18 @@
           "description": "Document schema version.",
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "kind",
+        "runner",
+        "schema"
+      ]
     },
     "ParallelReport": {
-      "description": "Result of the `-n auto` parallel phase. Fields other than `ran` are absent when the phase did not actually run to completion.",
+      "description": "Result of the `-n auto` parallel phase. Fields other than `ran` are absent\nwhen the phase did not actually run to completion.",
       "type": "object",
-      "required": [
-        "ran"
-      ],
       "properties": {
         "findings": {
           "description": "Per-test parallel-only findings (empty when ready).",
@@ -143,7 +140,7 @@
             "null"
           ],
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "ran": {
           "description": "Whether the parallel phase actually ran.",
@@ -156,14 +153,14 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "ran"
+      ]
     },
     "PolluterJson": {
       "description": "A finding's polluter: the file that, run first, reproduces the failure.",
       "type": "object",
-      "required": [
-        "kind"
-      ],
       "properties": {
         "file": {
           "description": "The polluting file (absent for `not_reproducible`).",
@@ -176,19 +173,14 @@
           "description": "Polluter kind: `other_file`, `same_file`, or `not_reproducible`.",
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "kind"
+      ]
     },
     "UnstableSite": {
       "description": "One unstable-nodeid finding, grouped by test site (`file::test`).",
       "type": "object",
-      "required": [
-        "allowed",
-        "fix",
-        "kinds",
-        "sample",
-        "site",
-        "will_bail"
-      ],
       "properties": {
         "allowed": {
           "description": "Whether this site is on the `--allow-unstable` list.",
@@ -204,7 +196,7 @@
           "additionalProperties": {
             "type": "integer",
             "format": "uint",
-            "minimum": 0.0
+            "minimum": 0
           }
         },
         "sample": {
@@ -219,7 +211,15 @@
           "description": "Whether the site WILL bail at `-n auto` (per-process-unstable id).",
           "type": "boolean"
         }
-      }
+      },
+      "required": [
+        "allowed",
+        "fix",
+        "kinds",
+        "sample",
+        "site",
+        "will_bail"
+      ]
     }
   }
 }
