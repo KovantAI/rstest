@@ -1,34 +1,43 @@
 # Selecting changed tests (`--changed`)
 
 `rstest --changed` runs only the tests affected by your changes instead of the
-whole suite — the fast inner-loop and per-commit-CI gate. Changes come from git
+whole suite: the fast inner-loop and per-commit-CI gate. Changes come from git
 (working tree + untracked vs `HEAD`, or vs a `REV` like `--changed=origin/main`
 in CI).
 
 Two selection engines back it, and rstest picks the tightest one available:
 
-| Engine | When | Granularity |
-|---|---|---|
-| **Import graph** | always available, zero setup | whole test *files* that transitively import a changed module |
-| **Coverage index** | when a line→test index is warm | individual *tests* whose recorded coverage hit the changed *lines* |
+--8<-- "docs/_snippets/changed-engines.md"
 
 The coverage engine is strictly tighter and turns on automatically once the
-index exists — there is no flag to set and nothing to remember beyond keeping
+index exists: there is no flag to set and nothing to remember beyond keeping
 the index warm.
 
 ## Import graph (default, no setup)
 
 With no coverage index, `--changed` maps each changed `.py` file through the
 project's import graph to every test file that could reach it, and runs those.
-It is conservative by construction — ambiguous module names select every
+It is conservative by construction: ambiguous module names select every
 match, function-local imports still count as edges, a changed `conftest.py`
 selects its whole subtree, and any config or non-Python change falls back to a
 full run. The one documented gap is dynamic imports
 (`importlib.import_module`), which produce no edges; use
-[`--changed-strict`](../reference/cli.md#-changed-strict) for correctness-
-critical runs.
+[`--changed-strict`](../reference/cli.md#-changed-strict) for
+correctness-critical runs.
 
-Editing a widely-imported module reselects most of the suite — correct, but
+!!! warning "Django and other string-wired frameworks"
+    Django loads much of an app by string, not by `import`: `INSTALLED_APPS`,
+    `ROOT_URLCONF` and `include("app.urls")`, signal handlers connected in
+    `AppConfig.ready()`, middleware and settings paths. Those links produce no
+    import-graph edges. A change to a handler or URLconf can therefore affect
+    tests that the graph doesn't connect to it. `--changed-strict` catches the
+    case where a changed file connects to **no** test (it forces a full run),
+    but not the case where it connects to some tests and silently affects
+    others. For Django, prefer the [coverage index](#coverage-index-tighter-when-warm),
+    which records what each test actually executed, and keep full runs on
+    gating paths.
+
+Editing a widely-imported module reselects most of the suite: correct, but
 coarse. That is what the coverage index tightens.
 
 ## Coverage index (tighter, when warm)
@@ -39,8 +48,8 @@ Run your suite once with coverage contexts:
 $ rstest -n auto --cov=src --cov-context=test
 ```
 
-That writes `.rstest_cache/coverage_index.json` — a map of *which tests'
-coverage executed each source line* — as a side effect (see
+That writes `.rstest_cache/coverage_index.json` (a map of *which tests'
+coverage executed each source line*) as a side effect (see
 [Coverage → per-test contexts](coverage.md#per-test-contexts-cov-contexttest)).
 From then on, `--changed` maps the *changed lines* to only the tests that
 actually executed them:
@@ -61,7 +70,7 @@ results:
 | Change | Selected |
 |---|---|
 | a line the index recorded coverage for | exactly the tests whose coverage hit it |
-| **new** code (inserted lines — no prior coverage) | import-graph fallback for that file |
+| **new** code (inserted lines, no prior coverage) | import-graph fallback for that file |
 | a file the index never measured | import-graph fallback for that file |
 | an untracked file | import-graph fallback for that file |
 | a file whose content **drifted** since the index was warmed | import-graph fallback for that file |
@@ -76,7 +85,7 @@ index is only trusted for the lines it actually recorded.
 
 Each index entry carries a SHA-256 of the source it was built from. Because the
 index is keyed by line number, its lookups are only valid while a file's
-content still matches — once commits land that shift a file's lines (or the
+content still matches: once commits land that shift a file's lines (or the
 index was warmed on a dirty tree), those line numbers point at the wrong code.
 `--changed` detects this per file by hashing the file's content at the diff base
 and comparing: on any mismatch the file drifts to the import graph rather than
@@ -86,13 +95,13 @@ the tightest selection.
 ## Keeping the index warm
 
 The index reflects coverage *as of the run that wrote it*. It is trusted for
-the lines it recorded, so a stale index can miss a test added since — keep it
+the lines it recorded, so a stale index can miss a test added since. Keep it
 fresh:
 
 - **Rebuild on your coverage runs.** Any `--cov-context=test` run refreshes it.
   A nightly or per-merge coverage job on the main branch keeps it current for
   PRs.
-- **Persist `.rstest_cache` across CI runs** — the same cache you persist for
+- **Persist `.rstest_cache` across CI runs**: the same cache you persist for
   [duration-aware scheduling](../concepts/scheduling.md) carries the index
   along (see [CI quickstart](ci-quickstart.md)). The
   [shared cache backend](../concepts/caching.md#shared-cache-backend) also
@@ -100,7 +109,7 @@ fresh:
   `--changed` simply falls back to the import graph, so a cold cache is never
   wrong, only coarser.
 - **Rebuild periodically to shed stale entries.** A same-hash file's line→test
-  map only grows on union — nodeids for deleted or renamed tests linger until the
+  map only grows on union: nodeids for deleted or renamed tests linger until the
   file's content changes (resetting its map) or you rebuild. A dead nodeid on a
   changed line demotes that file to the import graph: safe, only coarser.
 - **Safe to delete** at any time; the next `--cov-context=test` run rebuilds it.
@@ -118,6 +127,20 @@ A typical layout: a scheduled main-branch job runs full coverage
 `rstest --changed` for a tight per-commit gate, falling back to the import
 graph for anything the index doesn't cover yet.
 
+**No affected tests means no report files.** When nothing is affected, rstest
+prints `rstest: no tests affected by N changed file(s)` and exits (0, or 5
+under `--changed-strict`) before running anything, so `--junitxml` and
+`--report-json` are **not written**. CI steps that expect those files
+(GitLab `reports: junit`, test-report publishers, `upload-artifact`, a JUnit
+ratio gate) should tolerate their absence, e.g. `if-no-files-found: ignore` on
+`actions/upload-artifact`. That applies to single-project runs. At a
+[monorepo](monorepo.md) root, the merged `--report-json` is still written,
+with every project marked `"skipped": true` (same exit code); only the
+per-project JUnit files are absent.
+
+Keep the default-branch runs that feed the cache **full**, not `--changed`:
+a `--changed` run only records durations and coverage for the tests it ran.
+
 ## Interactions
 
 - **Sharding.** A sharded coverage run only measures the tests in its shard, so
@@ -126,8 +149,11 @@ graph for anything the index doesn't cover yet.
   (`--cache-pull --cache-push`) and they **union on pull** into a full index;
   otherwise warm the index from an **unsharded** coverage run (or merge shard
   data before building it). See [Sharding](sharding.md).
-- **Monorepos.** `--changed` is forwarded to each affected project, which
-  narrows within its own tree against its own `.rstest_cache`. See
-  [Monorepos](monorepo.md).
+- **Monorepos.** At the root, rstest classifies projects once against the
+  repo-wide change set. A project with changed files of its own gets
+  `--changed` and narrows within its own tree against its own `.rstest_cache`;
+  a project that only depends on a changed one runs its full suite; the rest
+  are skipped. See [Monorepos](monorepo.md) and
+  [Monorepo mode](../concepts/monorepo.md).
 - **Watch mode.** [`--watch`](watch-mode.md) uses import-graph selection for
   its targeted reruns.

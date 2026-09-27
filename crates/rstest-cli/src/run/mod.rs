@@ -14,7 +14,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use crate::cli::{is_collect_only, needs_passthrough_io, parse_durations, parse_maxfail, Cli};
+use crate::cli::{
+    is_collect_only, needs_passthrough_io, parse_durations, parse_maxfail, passthrough_trigger, Cli,
+};
 use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
@@ -369,9 +371,14 @@ fn resolve_run_config(
     // Leak measurement runs under doctor OR --fail-on-leak (doctor already
     // instruments; --fail-on-leak needs the deltas without the full report).
     let leakcheck = doctor || cli.fail_on_leak;
+    // A parent rstest (migrate-check's classifier runs) can ask for the worker
+    // instrumentation alone via the hidden --instrument-workers flag, without
+    // the doctor report. Never read from the environment: an exported
+    // RSTEST_DOCTOR in a shell or CI must not switch it on.
+    let instrument = doctor || cli.instrument_workers;
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.to_string(),
-        doctor,
+        doctor: instrument,
         timeout: cli.timeout,
         leakcheck,
         send_ids: false,
@@ -541,6 +548,17 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         &cfg.numprocesses,
         &mut sink,
     );
+    // An explicit -n that passthrough silently collapses to one process: say
+    // so, or `rstest -n 4 -s` looks like a parallel run that isn't.
+    let n_explicit = cli.numprocesses.is_some() || settings.numprocesses.is_some();
+    let trigger = if cli.debug.is_some() {
+        Some("--debug")
+    } else {
+        passthrough_trigger(&args)
+    };
+    if let Some(msg) = passthrough_n_warning(n_explicit, cfg.n, trigger, is_collect_only(&args)) {
+        sink.warn(&msg);
+    }
     // Resolve dispatch selection (--shuffle/--shard) and the --incremental skip
     // set in one phase.
     let inc = resolve_incremental(&cfg, cli, &settings, &args, since_green, &mut sink)?;
@@ -790,7 +808,7 @@ fn maybe_dispatch_monorepo(
     if projects.len() < threshold {
         return Ok(ControlFlow::Continue(()));
     }
-    // Each project keeps its OWN .rstest_cache (cache::file_in), and the per-run
+    // Each project keeps its OWN cache dir (cache::mono_override), and the per-run
     // push/pull wiring lives in the single-project path that execute_monorepo
     // bypasses — so a cache flag here would silently no-op (push) or warm the
     // wrong root cache (pull). Fail loud; run rstest per project for shared caching.
@@ -891,6 +909,28 @@ fn warn_run_modes(
              (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
         ));
     }
+}
+
+/// `-n N` (N > 1, set on the command line or in `[tool.rstest]`) is ignored when
+/// a passthrough flag (`-s`, `--capture=…`, `--pdb`, `--trace`, stepwise,
+/// `--debug`) routes the run to one process with pytest's own terminal. Warn,
+/// naming the flag. Quiet for the default `-n auto` (plain `rstest -s` is an
+/// ordinary request for pytest's `-s`) and for `--co`, which runs no tests.
+fn passthrough_n_warning(
+    n_explicit: bool,
+    n: usize,
+    trigger: Option<&str>,
+    collect_only: bool,
+) -> Option<String> {
+    let trigger = trigger?;
+    if !n_explicit || n <= 1 || collect_only {
+        return None;
+    }
+    Some(format!(
+        "rstest: {trigger} runs the session in a single process with pytest's own \
+         output, so -n {n} is ignored (no parallel workers); drop {trigger} to \
+         run in parallel"
+    ))
 }
 
 /// Resolved dispatch selection (`--shuffle`/`--shard`) plus the `--incremental`
@@ -1344,6 +1384,8 @@ fn order_ignored_warning(
          single-worker mode runs in session order"
             .to_string()
     } else if dist_name == "each" {
+        // Pool path only: collect_lazy rejects --dist each, so Lazy never
+        // reaches here with it.
         "rstest: --order fail-fast has no effect with --dist each (every worker \
          runs the full suite; there is no dispatch queue)"
             .to_string()
@@ -1401,7 +1443,8 @@ fn collect_lazy(
             if !matches!(dist_name, "load" | "loadfile") {
                 anyhow::bail!(
                     "--collect lazy is file-affine and cannot honor --dist {dist_name} \
-                     (loadscope/loadgroup need a global id list; use --collect full)"
+                     (only load/loadfile: loadscope/loadgroup need a global id list and \
+                     each runs the full suite on every worker; use --collect full)"
                 );
             }
             // Single-test selection by nodeid wants exact-item dispatch;
@@ -1774,7 +1817,8 @@ fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> boo
 /// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
 /// Reports drive progress (suppressed under passthrough, whose IO is inherited)
 /// and the run record; collect errors/skips, doctor fixtures, and warnings
-/// accumulate. Scheduling / lazy events are no-ops in a single session —
+/// accumulate. `CollectionDone` sets the progress total. Other scheduling /
+/// lazy events are no-ops in a single session,
 /// enumerated (not `_`) so a new event type forces a decision here.
 fn fold_run_event(
     event: proto::Event,
@@ -1812,8 +1856,13 @@ fn fold_run_event(
             warnings.extend(entries);
             None
         }
-        proto::Event::CollectionDone { .. }
-        | proto::Event::NodeInput { .. }
+        proto::Event::CollectionDone { count, .. } => {
+            // The single session reports its collected count so the dots and
+            // -v renderers print pytest's `[ NN%]` column.
+            prog.set_total(count as usize);
+            None
+        }
+        proto::Event::NodeInput { .. }
         | proto::Event::ItemStart { .. }
         | proto::Event::ItemDone { .. }
         | proto::Event::Stopped { .. }
@@ -2094,6 +2143,12 @@ mod tests {
         // loadscope/loadgroup need a global id list; lazy is file-affine.
         assert!(collect_lazy(&cli(), &s, "loadscope", &[], &mut Sink::captured().0).is_err());
         assert!(collect_lazy(&cli(), &s, "loadgroup", &[], &mut Sink::captured().0).is_err());
+        // each runs the whole suite per worker: no file-level dispatch either.
+        let err = collect_lazy(&cli(), &s, "each", &[], &mut Sink::captured().0).unwrap_err();
+        assert!(
+            err.to_string().contains("each runs the full suite"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2175,6 +2230,50 @@ mod tests {
     }
 
     #[test]
+    fn passthrough_n_warning_only_for_explicit_parallel_n() {
+        // Explicit -n 4 with -s: warn, naming the flag and the ignored count.
+        let msg = super::passthrough_n_warning(true, 4, Some("-s"), false).unwrap();
+        assert!(
+            msg.contains("-s") && msg.contains("-n 4 is ignored"),
+            "{msg}"
+        );
+        // --debug is named too.
+        assert!(
+            super::passthrough_n_warning(true, 2, Some("--debug"), false)
+                .unwrap()
+                .contains("--debug")
+        );
+        // No passthrough flag, default -n auto, -n 0/1, or --co: quiet.
+        assert_eq!(super::passthrough_n_warning(true, 4, None, false), None);
+        assert_eq!(
+            super::passthrough_n_warning(false, 8, Some("-s"), false),
+            None
+        );
+        assert_eq!(
+            super::passthrough_n_warning(true, 1, Some("-s"), false),
+            None
+        );
+        assert_eq!(
+            super::passthrough_n_warning(true, 4, Some("--co"), true),
+            None
+        );
+    }
+
+    #[test]
+    fn passthrough_trigger_names_the_first_forcing_flag() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            crate::cli::passthrough_trigger(&args(&["-k", "x", "-s"])),
+            Some("-s")
+        );
+        assert_eq!(
+            crate::cli::passthrough_trigger(&args(&["--capture=no", "--pdb"])),
+            Some("--capture=no")
+        );
+        assert_eq!(crate::cli::passthrough_trigger(&args(&["-q", "-x"])), None);
+    }
+
+    #[test]
     fn order_ignored_warning_emits_one_actionable_message() {
         use pool::Order::{FailFast, Throughput};
         use RunPath::{Lazy, Passthrough, Pool, SingleWorker};
@@ -2206,8 +2305,8 @@ mod tests {
             .contains("only reorders --dist load"));
         // Pool path on load, auto-pick, or throughput: silent.
         assert!(w("load", Pool).is_none());
-        assert!(order_ignored_warning(FailFast, false, false, "each", Lazy).is_none());
-        assert!(order_ignored_warning(Throughput, true, true, "each", Lazy).is_none());
+        assert!(order_ignored_warning(FailFast, false, false, "load", Lazy).is_none());
+        assert!(order_ignored_warning(Throughput, true, true, "load", Lazy).is_none());
     }
 
     #[test]
@@ -2675,6 +2774,41 @@ mod tests {
         assert_eq!(run.collect_skips, 1);
         assert_eq!(warnings.len(), 1);
         assert_eq!(fixtures.len(), 1);
+    }
+
+    #[test]
+    fn fold_run_event_collection_count_drives_the_percentage() {
+        // The single session reports its collected count, so -v lines carry
+        // pytest's `[ NN%]` column just like `pytest -v`.
+        let mut run = report::Run::default();
+        let mut prog = progress::Progress::default();
+        prog.set_mode(progress::Mode::Verbose);
+        let mut fixtures = Vec::new();
+        let mut warnings = Vec::new();
+        let (mut sink, cap) = Sink::captured();
+        let collected: proto::Event = serde_json::from_value(serde_json::json!({
+            "kind": "collection_done",
+            "payload": {"count": 2, "hash": ""},
+        }))
+        .unwrap();
+        for ev in [
+            collected,
+            proto::Event::Report(report("t.py::a", "passed")),
+            proto::Event::Report(report("t.py::b", "passed")),
+        ] {
+            fold_run_event(
+                ev,
+                false,
+                &mut run,
+                &mut prog,
+                &mut fixtures,
+                &mut warnings,
+                &mut sink,
+            );
+        }
+        let out = cap.out();
+        assert!(out.contains("t.py::a PASSED [ 50%]"), "{out}");
+        assert!(out.contains("t.py::b PASSED [100%]"), "{out}");
     }
 
     #[test]

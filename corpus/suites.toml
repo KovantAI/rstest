@@ -271,3 +271,25 @@ projects = [
     "libs/model-profiles",
     "libs/langchain_v1",
 ]
+
+[sympy]
+# CPU-bound headline suite for the benchmarks: pure-Python symbolic math, no
+# BLAS. Subset only (the whole suite is far too long serially): polys + solvers,
+# ~1.5 min serial on an M4 Max, ~2,900 tests. pytest-xdist is installed for the
+# bench's matched-n xdist series (`bench.py --xdist`); it is inert otherwise.
+repo = "https://github.com/sympy/sympy"
+install = ["-e .", "pytest", "hypothesis", "pytest-xdist"]
+args = ["sympy/polys", "sympy/solvers"]
+
+[scikit-learn]
+# Realistic numpy/BLAS suite for the benchmarks, and the subject of the memory
+# and worker x thread measurements. Pinned wheel, tests run from the package.
+# linear_model, not ensemble: ensemble's tests start their own joblib pools,
+# which blurs the per-worker scaling this suite is here to show.
+# BLAS pinned to one thread per worker for the headline sweep; the thread
+# effect is measured separately (`bench.py --grid`, which overrides these).
+# VECLIB_MAXIMUM_THREADS covers numpy's Accelerate build on macOS arm64.
+mode = "pyargs"
+package = "sklearn.linear_model"
+install = ["scikit-learn", "pytest", "pytest-xdist"]
+env = { OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1", MKL_NUM_THREADS = "1", VECLIB_MAXIMUM_THREADS = "1" }

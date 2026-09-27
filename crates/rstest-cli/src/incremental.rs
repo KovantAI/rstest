@@ -163,13 +163,53 @@ fn is_first_party_dist(scope: &Path, dist_info: &Path) -> bool {
     let local_in_scope = doc
         .get("url")
         .and_then(serde_json::Value::as_str)
-        .and_then(|u| u.strip_prefix("file://"))
+        .and_then(file_url_path)
         .is_some_and(|p| {
-            let p = Path::new(p);
             let canon = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
-            canon(p).starts_with(canon(scope))
+            canon(&p).starts_with(canon(scope))
         });
     editable || local_in_scope
+}
+
+/// The local path a PEP 610 `file://` URL names. pip percent-encodes the path
+/// (`%20` for a space) and writes a Windows path as `file:///C:/dir`, so the
+/// slash before the drive letter is dropped there. `None` for any other scheme
+/// or a remote host.
+fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (bytes[i], bytes.get(i + 1), bytes.get(i + 2)) {
+            (b'%', Some(&h), Some(&l)) if hex(h).is_some() && hex(l).is_some() => {
+                out.push((hex(h)? * 16 + hex(l)?) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    let d = path.as_bytes();
+    let path = if cfg!(windows)
+        && d.len() >= 3
+        && d[0] == b'/'
+        && d[1].is_ascii_alphabetic()
+        && d[2] == b':'
+    {
+        &path[1..]
+    } else {
+        &path[..]
+    };
+    Some(PathBuf::from(path))
 }
 
 /// Fold every installed distribution's identity into `h`, order-stable: the
@@ -488,6 +528,30 @@ mod tests {
     }
 
     #[test]
+    fn file_url_path_decodes_pip_urls() {
+        assert_eq!(
+            file_url_path("file:///home/me/my%20proj"),
+            Some(PathBuf::from("/home/me/my proj"))
+        );
+        assert_eq!(
+            file_url_path("file://localhost/srv/p"),
+            Some(PathBuf::from("/srv/p"))
+        );
+        assert_eq!(
+            file_url_path("file:///a/100%"),
+            Some(PathBuf::from("/a/100%"))
+        );
+        assert_eq!(file_url_path("file://host/share"), None);
+        assert_eq!(file_url_path("https://example.com/x"), None);
+        let drive = file_url_path("file:///C:/proj").unwrap();
+        if cfg!(windows) {
+            assert_eq!(drive, PathBuf::from("C:/proj"));
+        } else {
+            assert_eq!(drive, PathBuf::from("/C:/proj"));
+        }
+    }
+
+    #[test]
     fn first_party_dist_version_bump_keeps_the_fingerprint() {
         // An editable (or in-project local) install renamed by a git-derived
         // version bump must NOT move the fp; a third-party bump still must.
@@ -513,9 +577,14 @@ mod tests {
         // A non-editable local install from inside the project counts too.
         let local = sp.join("local-1.0.dist-info");
         install(&sp, "local-1.0.dist-info", b"x\n");
+        // pip's form: forward slashes, `file:///C:/...` on Windows.
         let url = format!(
-            r#"{{"url": "file://{}", "dir_info": {{}}}}"#,
-            scope.display()
+            r#"{{"url": "file:///{}", "dir_info": {{}}}}"#,
+            scope
+                .display()
+                .to_string()
+                .replace('\\', "/")
+                .trim_start_matches('/')
         );
         std::fs::write(local.join("direct_url.json"), url).unwrap();
         assert!(is_first_party_dist(&scope, &local));

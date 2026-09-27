@@ -20,17 +20,18 @@ run one job (no shard matrix), you do not need this: the
 
 ## GitHub-native, no external cloud, no secrets
 
-`download-artifact@v4`'s `pattern` + `merge-multiple` is exactly the
+`download-artifact@v8`'s `pattern` + `merge-multiple` is exactly the
 merge-all-segments primitive:
 
 ```yaml
 permissions: { contents: read, actions: read }   # actions:read reaches prior-run artifacts
 jobs:
   test:
+    runs-on: ubuntu-latest
     strategy: { matrix: { shard: [1, 2, 3, 4] } }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
       - run: pip install -r requirements.txt && pip install rstest
 
@@ -39,10 +40,11 @@ jobs:
       # sees the CURRENT run; run-id + github-token reach a prior run's artifacts.
       - name: resolve warm-cache run
         id: warm
-        env: { GH_TOKEN: ${{ github.token }} }
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "${{ github.workflow }}" --branch main \
+                  --workflow "${{ github.workflow }}" --branch main --event push \
                   --status success --limit 1 \
                   --json databaseId --jq '.[0].databaseId // ""')
           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
@@ -51,10 +53,12 @@ jobs:
       # reads them (--cache-remote <dir> looks in <dir>/segments/). upload-artifact
       # strips the segments/ prefix from the pushed glob, so aim the download at
       # .../segments to reconstruct the layout.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: steps.warm.outputs.run-id != ''
         with:
-          pattern: "rstest-seg-*"
+          # Scope the prefix to this suite + interpreter (see "One prefix per
+          # suite" below). The "--" stops a prefix matching a longer one.
+          pattern: "rstest-seg-py3.13--*"
           merge-multiple: true
           path: ./rcache/segments
           github-token: ${{ github.token }}
@@ -69,7 +73,7 @@ jobs:
       # that --changed consumes. --cov-report= suppresses the textual report (we
       # want only the index side-effect). Drop the --cov flags if you don't use
       # --changed. Replace <your_package> with your importable package/source dir.
-      - run: rstest -n auto --shard ${{ matrix.shard }}/4
+      - run: rstest -n 4 --shard ${{ matrix.shard }}/4
                --cov=<your_package> --cov-context=test --cov-report=
                --cache-remote ./rcache --cache-pull --cache-push
                --junitxml junit.${{ matrix.shard }}.xml
@@ -84,10 +88,10 @@ jobs:
             grep -qxF "$(basename "$f")" .warm-segs 2>/dev/null || cp "$f" ./push/
           done
         if: always()
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: rstest-seg-${{ github.run_id }}-${{ matrix.shard }}
+          name: rstest-seg-py3.13--${{ github.run_id }}-${{ matrix.shard }}
           path: ./push/seg-*.json
           if-no-files-found: ignore
 ```
@@ -101,6 +105,16 @@ your default branch too**, so those runs publish the segments PR jobs warm from
 (a scheduled run works as well). The first run, or any cold pull, has nothing to
 union and falls back to the import graph (correct, only coarser). Artifact
 retention gives free segment eviction.
+
+Those default-branch runs must be **full runs**, not `--changed` runs. The
+artifact backend warms from exactly one prior run, so if that run only
+executed the tests `--changed` picked, the warm cache holds durations and
+coverage for those tests only.
+
+The pull and push in this example run on every event, which is fine for a
+private repo with trusted contributors. If PRs come from forks or
+less-trusted branches, make PR jobs pull-only; see
+[Trust boundary](../concepts/caching.md#trust-boundary).
 
 !!! note "How the cross-run pull works"
     Artifacts are run-scoped, so warming reaches back to **one** prior run by id.
@@ -123,7 +137,7 @@ permissions: { id-token: write, contents: read }
 steps:
   - uses: aws-actions/configure-aws-credentials@v4
     with: { role-to-assume: arn:aws:iam::…:role/ci, aws-region: us-east-1 }
-  - run: rstest -n auto --shard ${{ matrix.shard }}/4
+  - run: rstest -n 4 --shard ${{ matrix.shard }}/4
            --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
            --cache-compact-threshold 500
 ```
@@ -137,7 +151,7 @@ via `RSTEST_CACHE_REMOTE_TOKEN`. Still prefer syncing to a local dir? The
 
 ## Self-hosted shared mount: zero glue
 
-`--cache-remote /mnt/ci-cache/rstest` directly; the mount is the remote, no
+`--cache-remote /mnt/ci-cache/rstest` directly; the mount is the remote, with no
 pull/push bookends beyond the flags.
 
 ## Reliability
@@ -145,12 +159,43 @@ pull/push bookends beyond the flags.
 Add `--require-baseline` to `--durations-regress` so a cold or failed pull is a
 hard error, never a silent green:
 
-```bash
-rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
+```console
+$ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
 ```
 
-(`actions/cache` is **not** recommended for this: one blob per key, it can't
-list-and-merge every segment: the exact limitation this design removes.)
+(`actions/cache` is **not** recommended for this. It keeps one blob per key, so
+it can't list-and-merge every segment, which is the exact limitation this design
+removes.)
+
+## One prefix per suite, interpreter, and project
+
+Nodeids in the cache are **project-relative** (`tests/test_x.py::test_x`)
+and carry no interpreter tag. Give each distinct suite its own remote prefix
+(or artifact name), or their entries collide and mix:
+
+- a monorepo matrix with one job per package: `s3://ci-cache/rstest/libs-core`,
+  `s3://ci-cache/rstest/libs-cli`, …
+- a Python-version or OS matrix: add the version, e.g.
+  `s3://ci-cache/rstest/py3.13`, since durations and flakiness differ per
+  interpreter.
+- the GitHub artifact backend: put the scope in the artifact name, before a
+  `--` separator, as the example above does (`rstest-seg-py3.13--<run_id>-<shard>`,
+  downloaded with `pattern: "rstest-seg-py3.13--*"`). The bundled action on
+  `main` does this for you via its `artifact-suffix` input (default
+  `<os>-py<version>[-<working-directory>]`). **Unreleased:** that input is not
+  in the `@v0.7.0` action; it ships in 0.8.0.
+
+## One prefix per suite, interpreter, and project
+
+Test ids in the cache are **project-relative** (`tests/test_x.py::test_x`)
+and carry no interpreter tag. Give each distinct suite its own remote prefix
+(or artifact name), or their entries collide and mix:
+
+- a monorepo matrix with one job per package: `s3://ci-cache/rstest/libs-core`,
+  `s3://ci-cache/rstest/libs-cli`, …
+- a Python-version or OS matrix: add the version, e.g.
+  `s3://ci-cache/rstest/py3.13`, since durations and flakiness differ per
+  interpreter.
 
 ## Permissions
 

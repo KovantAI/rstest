@@ -579,7 +579,10 @@ mod tests {
 
     #[test]
     fn scope_prefixes_cover_dotted_src_and_absolute_forms() {
-        let root = Path::new("/proj");
+        // Absolute on every OS: a Windows path needs a drive.
+        let root = Path::new(if cfg!(windows) { r"C:\proj" } else { "/proj" });
+        let abs = |v: &str| root.join(v).to_string_lossy().into_owned();
+        let elsewhere = root.parent().unwrap().join("elsewhere").join("pkg");
         let p = |v: &str| scope_prefixes(root, v);
         assert_eq!(
             p("pkg"),
@@ -596,10 +599,10 @@ mod tests {
         );
         assert_eq!(p("src/pkg"), vec![PathBuf::from("src/pkg")]);
         assert_eq!(
-            p("/proj/pkg"),
+            p(&abs("pkg")),
             vec![PathBuf::from("pkg"), PathBuf::from("src/pkg")]
         );
-        assert!(p("/elsewhere/pkg").is_empty());
+        assert!(p(&elsewhere.to_string_lossy()).is_empty());
         let dotted = p("pkg.mod");
         assert!(in_prefixes(Path::new("pkg/mod.py"), &dotted));
         assert!(!in_prefixes(Path::new("pkg/other.py"), &dotted));
