@@ -21,6 +21,7 @@ import sys
 import pytest
 
 from rstest_worker._internal import fixturecompat
+from rstest_worker._internal import messages as m
 from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
@@ -34,6 +35,7 @@ fixturecompat.install()
 __all__ = [
     "ItemDispatchPlugin",
     "LazyDispatchPlugin",
+    "SessionStreamPlugin",
     "StreamPlugin",
     "run",
     "run_lazy_session",
@@ -58,15 +60,79 @@ def _prime_coverage_core(args: list[str]) -> None:
         os.environ["COVERAGE_CORE"] = "ctrace"
 
 
+def _cov_config(args: list[str]) -> str:
+    """The `--cov-config` value pytest-cov would hand coverage (its default)."""
+    for i, a in enumerate(args):
+        if a.startswith("--cov-config="):
+            return a.split("=", 1)[1]
+        if a == "--cov-config" and i + 1 < len(args):
+            return args[i + 1]
+    return ".coveragerc"
+
+
+def _erase_coverage_data(config_file: str) -> None:
+    """Erase the run's `.coverage` data, riding out transient Windows locks.
+
+    A just-written data file can be briefly held (antivirus scan, a sibling's
+    handle closing) and `os.remove` then fails with WinError 5. Retry briefly;
+    if it never clears, warn and keep the worker alive.
+    """
+    import time
+
+    import coverage
+
+    for delay in (0.05, 0.1, 0.2, 0.4, 0.8, None):
+        try:
+            coverage.Coverage(config_file=config_file).erase()
+            return
+        except PermissionError as exc:
+            if delay is None:
+                print(
+                    f"rstest: could not erase stale coverage data: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            time.sleep(delay)
+
+
+def _pool_coverage_args(args: list[str]) -> list[str]:
+    """Make exactly one pool worker erase the previous run's coverage data.
+
+    pytest-cov starts a Central controller in `pytest_load_initial_conftests`,
+    before rstest sets `workerinput`, and that controller erases `.coverage`.
+    Every worker doing so at once races on the same file (on Windows the loser
+    dies with WinError 5, taking the id-carrier with it). The erase itself is
+    load-bearing - covtool's combine merges any `.coverage` left on disk - so
+    gw0 does it up front and every worker runs with `--cov-append` to skip
+    pytest-cov's own. A user-passed `--cov-append` / `--no-cov` is honored.
+    """
+    worker_id = os.environ.get("RSTEST_WORKER_ID")
+    if worker_id is None:
+        return args
+    if not any(a == "--cov" or a.startswith("--cov=") for a in args):
+        return args
+    if "--cov-append" in args or "--no-cov" in args:
+        return args
+    if worker_id == "gw0":
+        try:
+            _erase_coverage_data(_cov_config(args))
+        except ImportError:
+            return args  # no coverage installed: pytest-cov will report it
+    return ["--cov-append", *args]
+
+
 def run_session(args: list[str], conn) -> int:
     """Item-dispatch session (pool mode)."""
     _prime_coverage_core(args)
+    args = _pool_coverage_args(args)
     return _contained(lambda: pytest.main(list(args), plugins=[ItemDispatchPlugin(conn)]), conn)
 
 
 def run_lazy_session(args: list[str], conn) -> int:
     """Lazy-collection session (pool mode, --collect lazy)."""
     _prime_coverage_core(args)
+    args = _pool_coverage_args(args)
     return _contained(lambda: pytest.main(list(args), plugins=[LazyDispatchPlugin(conn)]), conn)
 
 
@@ -142,7 +208,17 @@ def run(args: list[str], conn) -> int:
     # `rstest --debug` routes here (single-worker passthrough): wait for the
     # editor to attach before pytest collects, so early breakpoints hold.
     _maybe_start_debugpy()
-    return _contained(lambda: pytest.main(list(args), plugins=[StreamPlugin(conn)]), conn)
+    return _contained(lambda: pytest.main(list(args), plugins=[SessionStreamPlugin(conn)]), conn)
+
+
+class SessionStreamPlugin(StreamPlugin):
+    """StreamPlugin for the single-session path (`run`): also reports the
+    collected count so the orchestrator can print pytest's `[ NN%]` column.
+    The dispatch plugins send their own (hash-verified) collection_done."""
+
+    def pytest_collection_finish(self, session):
+        payload: m.CollectionDonePayload = {"count": len(session.items), "hash": ""}
+        self._conn.send("collection_done", payload)
 
 
 def _contained(session_fn, conn) -> int:

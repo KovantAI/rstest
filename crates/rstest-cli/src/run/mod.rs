@@ -3,7 +3,7 @@
 //! lives in [`monorepo`], the post-run gates/reports in [`gates`], and the
 //! `--collect-only` discovery doc in [`discovery`].
 
-mod discovery;
+pub(crate) mod discovery;
 mod gates;
 mod monorepo;
 
@@ -14,7 +14,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use crate::cli::{is_collect_only, needs_passthrough_io, parse_durations, parse_maxfail, Cli};
+use crate::cli::{
+    is_collect_only, needs_passthrough_io, parse_durations, parse_maxfail, passthrough_trigger, Cli,
+};
 use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
@@ -46,17 +48,19 @@ fn head_to_none(rev: &str) -> Option<&str> {
 /// `ControlFlow::Break(code)` means nothing is affected — the caller returns
 /// `code` as the process exit status (advancing the green baseline first under
 /// `--since-green`), so the single `process::exit` stays in `main`.
-/// `since_green`/`head`/`env_fp` are computed by the caller (they outlive
-/// selection, feeding the post-run green-baseline record).
+/// `changed_base` ([`resolve_changed_base`]) and `since_green`/`head`/`env_fp`
+/// are computed by the caller (they outlive selection: the base feeds the
+/// diff-coverage gate, the rest the post-run green-baseline record).
 fn apply_selection(
     cli: &Cli,
     mut args: Vec<String>,
+    changed_base: Option<String>,
     since_green: bool,
     head: &Option<String>,
     env_fp: &str,
     sink: &mut Sink,
 ) -> Result<ControlFlow<i32, Vec<String>>> {
-    let mut effective_changed = resolve_changed_base(cli, sink)?;
+    let mut effective_changed = changed_base;
     if since_green {
         // --since-green owns the diff base: its last-green baseline drives
         // selection, OVERRIDING the "HEAD" base that --changed-strict would
@@ -88,23 +92,55 @@ fn apply_selection(
         // (any --cov-context=test run writes it), else falls back per-file to
         // import-graph reachability, so --changed only ever gets tighter.
         let changes = select::changed_line_ranges(rev)?;
-        match select::affected_with_coverage(
+        // Coverage-map health, for the "of K mapped" ratio and the cold-map hint.
+        let mapped = select::mapped_test_count();
+        let selection = select::affected_with_coverage(
             &project.rootdir,
             &project,
             &changes,
             cli.changed_strict,
             rev,
-        )? {
+        );
+        let selection = selection?;
+        // One-line nudge when the map is cold BUT a source (non-test) .py file
+        // changed — exactly the case where a warm map would have selected fewer
+        // tests than the import graph is about to. Silent when coverage wouldn't
+        // help (test-only / config / non-Python changes), so it never nags a
+        // user who doesn't run coverage - including when such a change forces
+        // a full run alongside a source edit (the graph isn't used then).
+        if mapped.is_none()
+            && !matches!(selection, select::Selection::FullRun(_))
+            && changes.keys().any(|f| {
+                f.extension().and_then(|e| e.to_str()) == Some("py")
+                    && !crate::collect::is_test_file(&project.rootdir.join(f), &project)
+                    // A warm map routes conftest.py to the graph too.
+                    && f.file_name().and_then(|n| n.to_str()) != Some("conftest.py")
+            })
+        {
+            sink.warn(
+                "rstest: --changed is using the import graph (no coverage map). A prior \
+                 `--cov --cov-context=test` run enables coverage-precise selection \
+                 (usually fewer tests).",
+            );
+        }
+        match selection {
             select::Selection::FullRun(reason) => {
                 sink.warn(&format!(
                     "rstest: --changed falling back to full run ({reason})"
                 ));
             }
             select::Selection::Tests(tests) if tests.is_empty() => {
-                sink.out_line(&format!(
-                    "rstest: no tests affected by {} changed file(s)",
-                    changes.len()
-                ));
+                match mapped {
+                    // Keep the cold-map wording as the prefix: scripts grep for it.
+                    Some(m) => sink.out_line(&format!(
+                        "rstest: no tests affected by {} changed file(s) (0 of {m} mapped)",
+                        changes.len()
+                    )),
+                    None => sink.out_line(&format!(
+                        "rstest: no tests affected by {} changed file(s)",
+                        changes.len()
+                    )),
+                }
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
                 // don't force a re-run next time.
@@ -120,20 +156,39 @@ fn apply_selection(
                 return Ok(ControlFlow::Break(if cli.changed_strict { 5 } else { 0 }));
             }
             select::Selection::Tests(tests) => {
-                sink.warn(&format!(
-                    "rstest: {} changed file(s) -> {} affected test target(s)",
-                    changes.len(),
-                    tests.len()
-                ));
+                // With a warm map, report the savings ratio (affected of mapped);
+                // cold, just the affected-target count. Only `file::test` targets
+                // came from the map, so they alone are "of K mapped"; whole-file
+                // targets (graph fallback, changed test files) are counted apart.
+                match mapped {
+                    Some(m) => {
+                        let from_map = tests
+                            .iter()
+                            .filter(|t| t.to_string_lossy().contains("::"))
+                            .count();
+                        let files = tests.len() - from_map;
+                        let extra = if files > 0 {
+                            format!(" + {files} whole-file target(s)")
+                        } else {
+                            String::new()
+                        };
+                        sink.warn(&format!(
+                            "rstest: {} changed file(s) -> {from_map} of {m} mapped test(s) \
+                             affected{extra}",
+                            changes.len(),
+                        ));
+                    }
+                    None => sink.warn(&format!(
+                        "rstest: {} changed file(s) -> {} affected test target(s)",
+                        changes.len(),
+                        tests.len()
+                    )),
+                }
                 let mut selected: Vec<String> =
                     tests.iter().map(|t| t.display().to_string()).collect();
                 // Keep the user's flags; drop any explicit path args in
                 // favor of the selection.
-                selected.extend(
-                    args.iter()
-                        .filter(|a| a.starts_with('-') || !std::path::Path::new(a).exists())
-                        .cloned(),
-                );
+                selected.extend(crate::cli::without_path_args(&args));
                 args = selected;
             }
         }
@@ -152,6 +207,8 @@ struct PostRun<'a> {
     /// Resolved `--cache-remote` (flag or env), already validated non-empty.
     cache_remote: Option<&'a str>,
     shard: Option<(usize, usize)>,
+    /// `--changed`/`--changed-strict` diff base, as resolved for selection.
+    changed_base: Option<&'a str>,
     since_green: bool,
     head: &'a Option<String>,
     env_fp: &'a str,
@@ -160,6 +217,11 @@ struct PostRun<'a> {
     /// Coverage index snapshotted BEFORE the run (drives carry-forward after).
     prev_index: &'a select::CoverageIndex,
     baseline: &'a coverage_skip::Baseline,
+    /// `rstest replay`: a diagnostic re-run, not a data point. It skips the
+    /// duration / wall / flake-history writes (a debugging loop would pile
+    /// `failed` counts onto one test, and a forced CI worker count on a smaller
+    /// machine skews the duration baseline).
+    replay: bool,
 }
 
 /// The resolved run configuration for a single (non-watch) run: everything
@@ -174,6 +236,11 @@ struct RunConfig {
     n: usize,
     /// `--dist` name, validated but kept as a string (lazy/each check it).
     dist_name: String,
+    /// Resolved `--order` (validated up front like `--dist`).
+    order: pool::Order,
+    /// Whether `--order` came from the flag or `[tool.rstest]` (vs the auto
+    /// pick), so conflicts with an explicit request warn or refuse.
+    order_explicit: bool,
     reruns: u32,
     known_flaky: Option<std::collections::HashSet<String>>,
     worker_timeout: Option<u64>,
@@ -234,7 +301,7 @@ fn resolve_run_config(
     };
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     warn_windows_timeout(sink.err(), cfg!(windows), cli.timeout, worker_timeout);
-    let n = parse_numprocesses(&numprocesses)?;
+    let n = parse_numprocesses(&numprocesses, args)?;
     // `--debug` runs one worker with inherited stdio (like --pdb) so debugpy
     // owns a single process and its console; route it through the passthrough
     // path regardless of the session flags.
@@ -243,6 +310,10 @@ fn resolve_run_config(
     // the rerun loop is orchestrator-side (rerunfailures neutralized inside).
     // Passthrough can't be pooled, so reruns stay inert there.
     let single_worker_reruns = reruns > 0 && n <= 1 && !passthrough;
+    // Resolve `--order` here, not at pool dispatch, so a bad value errors on
+    // every run path (same rule as `--dist` above).
+    let order = resolve_order(cli, settings)?;
+    let order_explicit = cli.order.is_some() || settings.order.is_some();
     // A one-worker rerun pool is 1 worker everywhere downstream (banner,
     // doctor, report-json meta), never 0.
     let n = if single_worker_reruns { 1 } else { n };
@@ -253,17 +324,27 @@ fn resolve_run_config(
     for warning in silent_master_plugin_warnings(n, args) {
         sink.warn(&warning);
     }
-    let verbose = args
+    // pytest counts every -v, clustered (`-sv`) or repeated (`-v -v`).
+    let verbosity: usize = args
         .iter()
-        .any(|a| a == "--verbose" || (a.starts_with("-v") && a.chars().skip(1).all(|c| c == 'v')));
+        .map(|a| {
+            if a == "--verbose" {
+                1
+            } else {
+                crate::cli::short_switches(a)
+                    .iter()
+                    .filter(|&&c| c == 'v')
+                    .count()
+            }
+        })
+        .sum();
+    let verbose = verbosity >= 1;
     // -vv (or more): pytest shows ALL durations, no hidden-cutoff note.
-    let very_verbose = args.iter().filter(|a| *a == "--verbose").count() >= 2
-        || args
-            .iter()
-            .any(|a| a.starts_with("-vv") && a.chars().skip(1).all(|c| c == 'v'));
-    // Output style: --output > [tool.rstest] output > (-v ? verbose : tty ?
-    // bar : dots). Auto-promote to the sugar bar on a tty, stay on plain dots
-    // off-tty so logs stay byte-stable (the live footer self-disables there).
+    let very_verbose = verbosity >= 2;
+    // Output style: --output > [tool.rstest] output > (byte-exact mode ?
+    // pytest's own terminal : -v ? verbose : tty ? bar : dots). Auto-promote
+    // to the sugar bar on a tty, stay on plain dots off-tty so logs stay
+    // byte-stable (the live footer self-disables there).
     let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
         Some("bar") => progress::Mode::Bar,
         Some("verbose") => progress::Mode::Verbose,
@@ -282,6 +363,7 @@ fn resolve_run_config(
             ));
             progress::Mode::Dots
         }
+        None if n <= 1 && !single_worker_reruns && !passthrough => progress::Mode::Pytest,
         None if verbose => progress::Mode::Verbose,
         None if std::io::stdout().is_terminal() => progress::Mode::Bar,
         None => progress::Mode::Dots,
@@ -300,9 +382,14 @@ fn resolve_run_config(
     // Leak measurement runs under doctor OR --fail-on-leak (doctor already
     // instruments; --fail-on-leak needs the deltas without the full report).
     let leakcheck = doctor || cli.fail_on_leak;
+    // A parent rstest (migrate-check's classifier runs) can ask for the worker
+    // instrumentation alone via the hidden --instrument-workers flag, without
+    // the doctor report. Never read from the environment: an exported
+    // RSTEST_DOCTOR in a shell or CI must not switch it on.
+    let instrument = doctor || cli.instrument_workers;
     let worker_env = worker::WorkerEnv {
         run_uid: run_uid.to_string(),
-        doctor,
+        doctor: instrument,
         timeout: cli.timeout,
         leakcheck,
         send_ids: false,
@@ -310,6 +397,7 @@ fn resolve_run_config(
         // Ship captured stdout/stderr on every report (not just failures) when a
         // live JSON consumer is attached, so editors get per-passing-test output.
         stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
+        junitxml: cli.junitxml.as_ref().map(|p| p.display().to_string()),
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -321,6 +409,8 @@ fn resolve_run_config(
         numprocesses,
         n,
         dist_name,
+        order,
+        order_explicit,
         reruns,
         known_flaky,
         worker_timeout,
@@ -360,6 +450,16 @@ fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
 /// (doctor, junit, lastfailed, duration-regression, cache push, report-json),
 /// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
+    execute_inner(cli, args, None)
+}
+
+/// The run pipeline. `pinned` is `Some` only under `rstest replay`, carrying the
+/// recorded per-worker schedule to re-pin; a normal run passes `None`.
+pub(crate) fn execute_inner(
+    cli: &Cli,
+    args: &[String],
+    pinned: Option<&crate::replay::PinnedSchedule>,
+) -> Result<i32> {
     let args = args.to_vec();
     // The single output sink for this run: owns stdout/stderr and the resolved
     // palette. Built up front so every diagnostic below (cache maintenance,
@@ -448,7 +548,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     };
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
-    let args = match apply_selection(cli, args, since_green, &head, &env_fp, &mut sink)? {
+    // Resolved once: selection and the post-run diff-coverage gate share it, so
+    // a base that fails to resolve aborts here, before any test runs.
+    let changed_base = resolve_changed_base(cli, &mut sink)?;
+    let args = match apply_selection(
+        cli,
+        args,
+        changed_base.clone(),
+        since_green,
+        &head,
+        &env_fp,
+        &mut sink,
+    )? {
         ControlFlow::Continue(args) => args,
         ControlFlow::Break(code) => return Ok(code),
     };
@@ -459,9 +570,27 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         &cfg.numprocesses,
         &mut sink,
     );
+    // An explicit -n that passthrough silently collapses to one process: say
+    // so, or `rstest -n 4 -s` looks like a parallel run that isn't.
+    let n_explicit = cli.numprocesses.is_some() || settings.numprocesses.is_some();
+    let trigger = if cli.debug.is_some() {
+        Some("--debug")
+    } else {
+        passthrough_trigger(&args)
+    };
+    if let Some(msg) = passthrough_n_warning(n_explicit, cfg.n, trigger, is_collect_only(&args)) {
+        sink.warn(&msg);
+    }
     // Resolve dispatch selection (--shuffle/--shard) and the --incremental skip
     // set in one phase.
     let inc = resolve_incremental(&cfg, cli, &settings, &args, since_green, &mut sink)?;
+    // Load the --quarantine list once, before dispatch: fail-fast ordering needs
+    // it (a quarantined test must not lead the queue and trip -x), and the
+    // post-run demotion reuses it. Inert under passthrough.
+    let quarantine = match &cli.quarantine {
+        Some(p) if !passthrough => Some(gates::quarantine_matcher(p, &mut sink)?),
+        _ => None,
+    };
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -471,11 +600,19 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         DispatchSelection {
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
+            quarantine: quarantine.as_ref(),
         },
+        pinned,
         &mut sink,
     )?;
 
-    apply_quarantine(cli, &mut outcome, passthrough, &mut sink)?;
+    apply_quarantine(
+        cli,
+        quarantine.as_ref(),
+        &mut outcome,
+        passthrough,
+        &mut sink,
+    )?;
     gates::finalize_output(
         &mut outcome,
         passthrough,
@@ -492,6 +629,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         run_uid: &run_uid,
         cache_remote: cache_remote.as_deref(),
         shard: inc.shard,
+        changed_base: changed_base.as_deref(),
         since_green,
         head: &head,
         env_fp: &env_fp,
@@ -499,54 +637,81 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         config_fp: &inc.config_fp,
         prev_index: &inc.prev_index,
         baseline: &inc.baseline,
+        replay: pinned.is_some(),
     };
     gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
 }
 
-/// Dispatch a run-less subcommand (`rstest verify-vendor` / `try` /
-/// `migrate-check` / `cache-compact`). Returns `Some(exit)` when a subcommand
-/// ran, `None` for a normal run (the caller falls through to watch/`execute`).
-/// These modes bypass the run pipeline, so the interpreter is resolved here
-/// rather than pulled through [`resolve_run_config`].
+/// Dispatch a subcommand (`rstest verify-vendor` / `try` / `migrate-check` /
+/// `cache-compact` / `shard-verify` / `explain` / `replay`). Returns
+/// `Some(exit)` when a subcommand ran, `None` for a normal run (the caller falls
+/// through to watch/`execute`). The interpreter-free ones (`cache-compact`,
+/// `shard-verify`, `explain`) return before Python is resolved; `replay` runs
+/// the full pipeline (resolving its own interpreter through `execute`) with the
+/// recorded schedule pinned; the rest resolve Python here.
 pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     use crate::cli::Command;
     let Some(command) = &cli.command else {
         return Ok(None);
     };
     let mut sink = Sink::stdio(color::Palette::detect(args));
-    // cache-compact and shard-verify are interpreter-free (they only touch
-    // cache/report files); the rest resolve Python first.
-    if let Command::CacheCompact { keep_last, max_age } = command {
-        return Ok(Some(run_cache_compact(
-            cli,
-            &mut sink,
-            *keep_last,
-            max_age.as_deref(),
-        )?));
-    }
-    if let Command::ShardVerify { reports } = command {
-        return Ok(Some(crate::shardverify::run_shard_verify(
-            &mut sink, reports,
-        )?));
-    }
+    // cache-compact, shard-verify and explain are interpreter-free (they only touch
+    // cache/report files); the rest resolve Python first, lazily, so the
+    // interpreter-free modes never probe one. One `?` for every arm.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let python = discover::resolve(&scope, cli.python.as_deref())?;
+    let python = || discover::resolve(&scope, cli.python.as_deref());
     let code = match command {
+        Command::CacheCompact { keep_last, max_age } => {
+            run_cache_compact(cli, &mut sink, *keep_last, max_age.as_deref())
+        }
+        Command::ShardVerify { reports } => {
+            crate::shardverify::run_shard_verify(&mut sink, reports)
+        }
+        Command::Explain { nodeid, json } => crate::explain::run_explain(&mut sink, nodeid, *json),
         // Verify the vendored pytest tree against the packaged manifest.
-        Command::VerifyVendor => crate::vendor::run_verify(&python)?,
+        Command::VerifyVendor => python().and_then(|py| crate::vendor::run_verify(&py)),
         // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
-        Command::Try => migrate::run_try(&python, args, &mut sink)?,
+        Command::Try => python().and_then(|py| migrate::run_try(&py, args, &mut sink)),
         // Parallel-readiness preflight: its own collect-twice path, not a run.
-        Command::MigrateCheck => migrate::run_migrate_check(
-            &python,
-            args,
-            cli.migrate_check_json.as_deref(),
-            &cli.migrate_allow,
-            &mut sink,
-        )?,
-        Command::CacheCompact { .. } => unreachable!("handled above"),
-        Command::ShardVerify { .. } => unreachable!("handled above"),
-    };
+        Command::MigrateCheck => python().and_then(|py| {
+            migrate::run_migrate_check(
+                &py,
+                args,
+                cli.migrate_check_json.as_deref(),
+                &cli.migrate_allow,
+                &mut sink,
+            )
+        }),
+        // Auto parallel-safety audit: repeat -n auto, diff vs -n 0, serial fix-list.
+        Command::Audit => python().and_then(|py| {
+            migrate::run_audit(
+                &py,
+                args,
+                cli.audit_repeat.unwrap_or(1),
+                cli.audit_json.as_deref(),
+                &mut sink,
+            )
+        }),
+        // Order-dependency bisect: delta-debug the predecessor set at -n 0.
+        Command::Bisect {
+            nodeid,
+            pytest_args,
+        } => python().and_then(|py| {
+            migrate::run_bisect(
+                &py,
+                cli.python.as_deref(),
+                nodeid,
+                pytest_args,
+                cli.bisect_json.as_deref(),
+                &mut sink,
+            )
+        }),
+        // `replay` runs the suite (it resolves its own interpreter through the
+        // run pipeline) and returns the run's exit code.
+        Command::Replay { run_id, journal } => {
+            crate::replay::run_replay(cli, run_id.as_deref(), journal.as_deref(), &mut sink)
+        }
+    }?;
     Ok(Some(code))
 }
 
@@ -665,10 +830,7 @@ fn maybe_dispatch_monorepo(
         return Ok(ControlFlow::Continue(()));
     }
     let cwd = std::env::current_dir()?;
-    let path_args = args
-        .iter()
-        .any(|a| !a.starts_with('-') && std::path::Path::new(a).exists());
-    if path_args || config::has_pytest_config(&cwd, sink.err()) {
+    if names_a_selection(args) || config::has_pytest_config(&cwd, sink.err()) {
         return Ok(ControlFlow::Continue(()));
     }
     let projects = mono::discover_projects(&cwd, settings.projects.as_deref());
@@ -676,7 +838,7 @@ fn maybe_dispatch_monorepo(
     if projects.len() < threshold {
         return Ok(ControlFlow::Continue(()));
     }
-    // Each project keeps its OWN .rstest_cache (cache::file_in), and the per-run
+    // Each project keeps its OWN cache dir (cache::mono_override), and the per-run
     // push/pull wiring lives in the single-project path that execute_monorepo
     // bypasses — so a cache flag here would silently no-op (push) or warm the
     // wrong root cache (pull). Fail loud; run rstest per project for shared caching.
@@ -686,7 +848,20 @@ fn maybe_dispatch_monorepo(
              (each project has its own .rstest_cache); run rstest per project"
         );
     }
+    // The root never reaches resolve_run_config, so validate --order here: a
+    // bad value errors once, not once per child. Children get it forwarded.
+    if let Some(o) = &cli.order {
+        o.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?;
+    }
     monorepo::execute_monorepo(cli, args, &cwd, projects, run_uid, sink).map(ControlFlow::Break)
+}
+
+/// Do the session args name tests explicitly? An existing path does, and so
+/// does a pytest `@argsfile` (its lines are the selection, e.g. `bisect`'s
+/// child runs): either keeps the run single-project instead of fanning out
+/// over every subproject and ignoring what was asked for.
+fn names_a_selection(args: &[String]) -> bool {
+    !crate::cli::path_args(args).is_empty()
 }
 
 /// require-baseline: with the durations-regress gate active, an absent baseline
@@ -724,7 +899,7 @@ fn print_run_banner(
         sink.out_line("TAP version 13");
         return;
     }
-    if mode == progress::Mode::Json {
+    if matches!(mode, progress::Mode::Json | progress::Mode::Pytest) {
         return;
     }
     let worker_desc = if single_worker_reruns {
@@ -761,6 +936,28 @@ fn warn_run_modes(
              (not byte-exact); use -n 0/1 without --reruns for the byte-exact session"
         ));
     }
+}
+
+/// `-n N` (N > 1, set on the command line or in `[tool.rstest]`) is ignored when
+/// a passthrough flag (`-s`, `--capture=…`, `--pdb`, `--trace`, stepwise,
+/// `--debug`) routes the run to one process with pytest's own terminal. Warn,
+/// naming the flag. Quiet for the default `-n auto` (plain `rstest -s` is an
+/// ordinary request for pytest's `-s`) and for `--co`, which runs no tests.
+fn passthrough_n_warning(
+    n_explicit: bool,
+    n: usize,
+    trigger: Option<&str>,
+    collect_only: bool,
+) -> Option<String> {
+    let trigger = trigger?;
+    if !n_explicit || n <= 1 || collect_only {
+        return None;
+    }
+    Some(format!(
+        "rstest: {trigger} runs the session in a single process with pytest's own \
+         output, so -n {n} is ignored (no parallel workers); drop {trigger} to \
+         run in parallel"
+    ))
 }
 
 /// Resolved dispatch selection (`--shuffle`/`--shard`) plus the `--incremental`
@@ -814,6 +1011,10 @@ fn resolve_incremental(
         dist_name,
         sink,
     )?;
+    // An explicit fail-fast order and --shuffle both claim the dispatch queue;
+    // refuse rather than let the shuffle silently discard the requested order.
+    // The --watch auto-pick yields to --shuffle without complaint.
+    check_order_shuffle(cfg.order, cfg.order_explicit, shuffle_seed.is_some())?;
     // --shard K/N: partition the suite and keep bucket K. Purely an
     // orchestrator-side node-id (or, in lazy mode, file) filter.
     let shard = resolve_shard(
@@ -903,18 +1104,21 @@ fn resolve_incremental(
 /// demoted outcomes consistently. Inert under passthrough (no aggregate Run).
 fn apply_quarantine(
     cli: &Cli,
+    matcher: Option<&regex::RegexSet>,
     outcome: &mut pool::PoolOutcome,
     passthrough: bool,
     sink: &mut Sink,
 ) -> Result<()> {
-    let Some(qpath) = &cli.quarantine else {
+    if cli.quarantine.is_none() {
         return Ok(());
-    };
+    }
     if passthrough {
         warn_quarantine_passthrough(sink.err());
         return Ok(());
     }
-    let matcher = gates::quarantine_matcher(qpath, sink)?;
+    let Some(matcher) = matcher else {
+        return Ok(());
+    };
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
     // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
@@ -925,24 +1129,29 @@ fn apply_quarantine(
 }
 
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
-/// the argument budget: the resolved `--shuffle` seed and `--shard` bucket.
-struct DispatchSelection {
+/// the argument budget: the resolved `--shuffle` seed, `--shard` bucket, and
+/// `--quarantine` matcher (fail-fast keeps quarantined tests out of the front).
+struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    quarantine: Option<&'a regex::RegexSet>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_run(
     cfg: &RunConfig,
     cli: &Cli,
     settings: &config::RstestSettings,
     args: &[String],
     skip_ids: &std::collections::HashSet<String>,
-    selection: DispatchSelection,
+    selection: DispatchSelection<'_>,
+    pinned: Option<&crate::replay::PinnedSchedule>,
     sink: &mut Sink,
 ) -> Result<pool::PoolOutcome> {
     let DispatchSelection {
         shuffle_seed,
         shard,
+        quarantine,
     } = selection;
     let RunConfig {
         n,
@@ -952,6 +1161,8 @@ fn dispatch_run(
         single_worker_reruns,
         mode,
         durations,
+        order,
+        order_explicit,
         ref dist_name,
         ref known_flaky,
         ref worker_env,
@@ -961,6 +1172,15 @@ fn dispatch_run(
     let python = python.as_path();
     let worker_env: &worker::WorkerEnv = worker_env;
     let known_flaky = known_flaky.as_ref();
+    // Replay pins a recorded schedule, which only the eager pool can honor.
+    // The command layer forces `-n <recorded>` + `--collect full` and no
+    // passthrough flags, so this is a guard against a stray incompatible arg.
+    if pinned.is_some() && (passthrough || n <= 1) {
+        anyhow::bail!(
+            "replay needs the parallel pool (-n >= 2, no passthrough flags like -s/--pdb); \
+             the journal was recorded from a pool run"
+        );
+    }
     let watchdog = watchdog_duration(worker_timeout, cli.timeout);
     // Compiled once and shared by both pool paths (a config-struct field, so it
     // must outlive the borrow); the passthrough path below ignores it.
@@ -980,106 +1200,145 @@ fn dispatch_run(
         worker_timeout: watchdog,
         known_flaky,
         worker_env,
+        fork_prewarm: cli.fork_pool,
+        quarantine,
     };
-    Ok(if passthrough || (n <= 1 && !single_worker_reruns) {
-        let io = if passthrough {
-            worker::Stdio::Inherit
-        } else {
-            worker::Stdio::Null
-        };
-        let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
-        w.send(&proto::Command::RunTests {
-            args: args.to_vec(),
-        })?;
-        let mut run = report::Run::default();
-        run.track_phase_durations = durations.is_some();
-        let mut prog = progress::Progress::default();
-        prog.set_mode(mode);
-        let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
-        let mut warnings: Vec<proto::WarningEntry> = Vec::new();
-        let exitstatus = loop {
-            if let Some(code) = fold_run_event(
-                w.recv()?,
-                passthrough,
-                &mut run,
-                &mut prog,
-                &mut fixtures,
-                &mut warnings,
-                sink,
-            ) {
-                break code;
-            }
-        };
-        w.shutdown()?;
-        pool::PoolOutcome {
-            run,
-            prog,
-            fixtures,
-            warnings,
-            cache_dir: None,
-            exitstatus,
-            // Single-worker path never shards (resolve_shard rejects it).
-            collection_hash: None,
-            collection_size: 0,
-        }
+    let path = if passthrough {
+        RunPath::Passthrough
+    } else if n <= 1 && !single_worker_reruns {
+        RunPath::SingleWorker
     } else if collect_lazy(cli, settings, dist_name, args, n, sink)? {
-        // Auto-picked (neither --collect nor the setting present)? Say so once,
-        // here at the single dispatch site, so the choice is observable.
-        if cli.collect.is_none() && settings.collect.is_none() {
-            sink.warn(&format!(
-                "rstest: auto-selected lazy collection ({} known tests x {n} workers); \
-                 pass --collect full to force eager collection",
-                durations::load().len()
-            ));
-        }
-        let cwd = std::env::current_dir()?;
-        let project = config::discover(&cwd, sink.err());
-        let paths: Vec<PathBuf> = args
-            .iter()
-            .filter(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
-            .map(PathBuf::from)
-            .collect();
-        let mut files = collect::collect_test_files(&paths, &project)?;
-        if let Some((k, total)) = shard {
-            let before = files.len();
-            files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
-            sink.warn(&format!(
-                "rstest: shard {k}/{total} -> {} of {before} test file(s)",
-                files.len()
-            ));
-        }
-        let cfg = pool::PoolConfig {
-            n: n.min(files.len().max(1)),
-            ..base_cfg
-        };
-        lazy::run_lazy_pool(
-            &cfg,
-            files,
-            // Steal (split files across workers) only on an EXPLICIT --dist
-            // load: lazy defaults to strict file affinity, since stealing
-            // exposes cross-file/in-file order dependence affinity doesn't.
-            lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
-            sink,
-        )?
+        RunPath::Lazy
     } else {
-        let dist = dist_name
-            .parse::<pool::Dist>()
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if dist == pool::Dist::Each && reruns > 0 {
-            anyhow::bail!(
-                "--reruns is not supported with --dist each (every worker runs the \
+        RunPath::Pool
+    };
+    if let Some(w) =
+        order_ignored_warning(order, order_explicit, cli.order.is_some(), dist_name, path)
+    {
+        sink.warn(&w);
+    }
+    Ok(
+        if matches!(path, RunPath::Passthrough | RunPath::SingleWorker) {
+            // Byte-exact output: pytest's own terminal writer prints.
+            let io = if passthrough || mode == progress::Mode::Pytest {
+                worker::Stdio::Inherit
+            } else {
+                worker::Stdio::Null
+            };
+            let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
+            w.send(&proto::Command::RunTests {
+                args: args.to_vec(),
+            })?;
+            let mut run = report::Run::default();
+            run.track_phase_durations = durations.is_some();
+            let mut prog = progress::Progress::default();
+            prog.set_mode(mode);
+            let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
+            let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+            let exitstatus = loop {
+                if let Some(code) = fold_run_event(
+                    w.recv()?,
+                    passthrough,
+                    &mut run,
+                    &mut prog,
+                    &mut fixtures,
+                    &mut warnings,
+                    sink,
+                ) {
+                    break code;
+                }
+            };
+            w.shutdown()?;
+            pool::PoolOutcome {
+                run,
+                prog,
+                fixtures,
+                warnings,
+                cache_dir: None,
+                exitstatus,
+                // Single-worker path never shards (resolve_shard rejects it).
+                collection_hash: None,
+                collection_size: 0,
+                // A single session reports no collection; the duration cache
+                // falls back to its saved rootdir and current file contents.
+                sources: Default::default(),
+                // No worker pool spawned here (one passthrough worker).
+                startup_seconds: 0.0,
+                fork_prewarmed: false,
+            }
+        } else if path == RunPath::Lazy {
+            // Auto-picked (neither --collect nor the setting present)? Say so once,
+            // here at the single dispatch site, so the choice is observable.
+            if cli.collect.is_none() && settings.collect.is_none() {
+                sink.warn(&format!(
+                    "rstest: auto-selected lazy collection ({} known tests x {n} workers); \
+                     pass --collect full to force eager collection",
+                    durations::load().len()
+                ));
+            }
+            let cwd = std::env::current_dir()?;
+            let project = config::discover(&cwd, sink.err());
+            let paths: Vec<PathBuf> = crate::cli::path_args(args)
+                .into_iter()
+                .filter(|a| !a.starts_with('@'))
+                .map(PathBuf::from)
+                .collect();
+            let mut files = collect::collect_test_files(&paths, &project)?;
+            if let Some((k, total)) = shard {
+                let before = files.len();
+                files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
+                sink.warn(&format!(
+                    "rstest: shard {k}/{total} -> {} of {before} test file(s)",
+                    files.len()
+                ));
+            }
+            let cfg = pool::PoolConfig {
+                n: n.min(files.len().max(1)),
+                ..base_cfg
+            };
+            lazy::run_lazy_pool(
+                &cfg,
+                files,
+                // Steal (split files across workers) only on an EXPLICIT --dist
+                // load: lazy defaults to strict file affinity, since stealing
+                // exposes cross-file/in-file order dependence affinity doesn't.
+                lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
+                sink,
+            )?
+        } else {
+            let dist = dist_name
+                .parse::<pool::Dist>()
+                .map_err(|e| anyhow::anyhow!(e))?;
+            if dist == pool::Dist::Each && reruns > 0 {
+                anyhow::bail!(
+                    "--reruns is not supported with --dist each (every worker runs the \
                  full suite; rerun-on-another-worker semantics do not apply)"
-            );
-        }
-        pool::run_pool(
-            &base_cfg,
-            dist,
-            durations.is_some(),
-            shuffle_seed,
-            shard,
-            skip_ids,
-            sink,
-        )?
+                );
+            }
+            pool::run_pool(
+                &base_cfg,
+                dist,
+                order,
+                durations.is_some(),
+                shuffle_seed,
+                shard,
+                skip_ids,
+                pinned,
+                sink,
+            )?
+        },
+    )
+}
+
+/// Resolve dispatch ordering (CLI > [tool.rstest] > auto). Auto picks
+/// fail-fast under `--watch` (surface a red as fast as possible on each save),
+/// throughput otherwise. Where the order has no effect is reported once, at
+/// dispatch, by [`order_ignored_warning`].
+fn resolve_order(cli: &Cli, settings: &config::RstestSettings) -> Result<pool::Order> {
+    Ok(match cli.order.as_deref().or(settings.order.as_deref()) {
+        Some(s) => s.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?,
+        None if cli.watch => pool::Order::FailFast,
+        None => pool::Order::Throughput,
     })
 }
 
@@ -1109,6 +1368,90 @@ fn auto_lazy(dist_name: &str, args: &[String], n: usize, tests: usize) -> bool {
         && tests.saturating_mul(n) >= AUTO_LAZY_MIN_WORK
 }
 
+/// Which run path [`dispatch_run`] takes, as far as `--order` cares.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RunPath {
+    /// `-s`/`--pdb`/`--co`/`--debug`: one worker, inherited stdio.
+    Passthrough,
+    /// `-n <= 1` (explicit, or `auto` capped down on a small suite).
+    SingleWorker,
+    /// Parallel pool with `--collect lazy`.
+    Lazy,
+    /// Parallel pool with full collection: the only path that reorders.
+    Pool,
+}
+
+/// Heads-up when an explicit `--order fail-fast` lands on a run path that
+/// never builds a `--dist load` dispatch queue. At most ONE warning, and it
+/// names the actual cause, so following it enables the reordering. The
+/// `--watch` auto-pick stays quiet: it was never asked for. The single-worker
+/// paths warn only for an `--order` typed on the command line (`from_cli`): a
+/// `[tool.rstest] order` means "when it applies", and `-n auto` legitimately
+/// drops to one worker on small suites, so warning there would fire every run.
+fn order_ignored_warning(
+    order: pool::Order,
+    explicit: bool,
+    from_cli: bool,
+    dist_name: &str,
+    path: RunPath,
+) -> Option<String> {
+    if !explicit || order != pool::Order::FailFast {
+        return None;
+    }
+    let msg = if path == RunPath::Passthrough {
+        if !from_cli {
+            return None;
+        }
+        "rstest: --order fail-fast has no effect under -s/--pdb/--co/--debug \
+         (one worker runs the session in its own order)"
+            .to_string()
+    } else if path == RunPath::SingleWorker {
+        if !from_cli {
+            return None;
+        }
+        "rstest: --order fail-fast needs the parallel pool (-n >= 2); \
+         single-worker mode runs in session order"
+            .to_string()
+    } else if dist_name == "each" {
+        // Pool path only: collect_lazy rejects --dist each, so Lazy never
+        // reaches here with it.
+        "rstest: --order fail-fast has no effect with --dist each (every worker \
+         runs the full suite; there is no dispatch queue)"
+            .to_string()
+    } else if path == RunPath::Lazy {
+        let dist_hint = if dist_name == "load" {
+            ""
+        } else {
+            " --dist load"
+        };
+        format!(
+            "rstest: --order fail-fast is ignored under --collect lazy (lazy \
+             dispatches whole files); use --collect full{dist_hint}"
+        )
+    } else if dist_name != "load" {
+        format!(
+            "rstest: --order fail-fast only reorders --dist load; --dist {dist_name} \
+             keeps its affinity order"
+        )
+    } else {
+        return None;
+    };
+    Some(msg)
+}
+
+/// An explicit fail-fast order and `--shuffle` both claim the dispatch queue;
+/// refuse rather than let the shuffle silently discard the requested order.
+/// The `--watch` auto-pick yields to `--shuffle` without complaint.
+fn check_order_shuffle(order: pool::Order, explicit: bool, shuffled: bool) -> Result<()> {
+    if shuffled && explicit && order == pool::Order::FailFast {
+        anyhow::bail!(
+            "--shuffle cannot be combined with --order fail-fast (the shuffle \
+             replaces the dispatch order); drop one of them"
+        );
+    }
+    Ok(())
+}
+
 /// Resolve the collection strategy (CLI > [tool.rstest] > auto) and validate
 /// lazy-mode constraints. When neither the flag nor the setting is present,
 /// [`auto_lazy`] decides from suite size and worker count.
@@ -1127,7 +1470,8 @@ fn collect_lazy(
             if !matches!(dist_name, "load" | "loadfile") {
                 anyhow::bail!(
                     "--collect lazy is file-affine and cannot honor --dist {dist_name} \
-                     (loadscope/loadgroup need a global id list; use --collect full)"
+                     (only load/loadfile: loadscope/loadgroup need a global id list and \
+                     each runs the full suite on every worker; use --collect full)"
                 );
             }
             // Single-test selection by nodeid wants exact-item dispatch;
@@ -1281,9 +1625,9 @@ fn watchdog_duration(
         })
 }
 
-fn parse_numprocesses(value: &str) -> Result<usize> {
+fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
     if value == "auto" {
-        return Ok(auto_workers());
+        return Ok(auto_workers(args));
     }
     Ok(value.parse()?)
 }
@@ -1291,7 +1635,9 @@ fn parse_numprocesses(value: &str) -> Result<usize> {
 /// `auto` = logical cores, capped by what the suite can use (worker startup
 /// costs real time). Two best-effort signals: test-file count from an
 /// ini-aware walk, and the duration cache (a few-second suite needs ~2 workers).
-fn auto_workers() -> usize {
+/// A walk with no Python file at all (an empty folder) means one worker,
+/// unless `args` name a path the walk didn't cover.
+fn auto_workers(args: &[String]) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
@@ -1303,6 +1649,12 @@ fn auto_workers() -> usize {
         let project = config::discover(&cwd, &mut std::io::stderr());
         if let Ok(files) = collect::collect_test_files(&[], &project) {
             n = cap_workers_by_files(n, files.len());
+            if files.is_empty()
+                && !names_existing_path(args)
+                && collect::has_python_files(&[], &project).is_ok_and(|found| !found)
+            {
+                n = 1;
+            }
         }
     }
 
@@ -1312,6 +1664,17 @@ fn auto_workers() -> usize {
     }
 
     n.max(1)
+}
+
+/// Whether the args select something on disk: a path, or a nodeid
+/// (`file.py::test`) whose file exists. Over-matching only keeps the
+/// empty-walk shortcut off, which is the safe direction.
+fn names_existing_path(args: &[String]) -> bool {
+    !crate::cli::path_args(args).is_empty()
+        || args.iter().any(|a| {
+            a.split_once("::")
+                .is_some_and(|(file, _)| std::path::Path::new(file).exists())
+        })
 }
 
 /// Cap the worker count by test-file count: never more workers than files. An
@@ -1508,7 +1871,8 @@ fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> boo
 /// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
 /// Reports drive progress (suppressed under passthrough, whose IO is inherited)
 /// and the run record; collect errors/skips, doctor fixtures, and warnings
-/// accumulate. Scheduling / lazy events are no-ops in a single session —
+/// accumulate. `CollectionDone` sets the progress total. Other scheduling /
+/// lazy events are no-ops in a single session,
 /// enumerated (not `_`) so a new event type forces a decision here.
 fn fold_run_event(
     event: proto::Event,
@@ -1546,8 +1910,13 @@ fn fold_run_event(
             warnings.extend(entries);
             None
         }
-        proto::Event::CollectionDone { .. }
-        | proto::Event::NodeInput { .. }
+        proto::Event::CollectionDone { count, .. } => {
+            // The single session reports its collected count so the dots and
+            // -v renderers print pytest's `[ NN%]` column.
+            prog.set_total(count as usize);
+            None
+        }
+        proto::Event::NodeInput { .. }
         | proto::Event::ItemStart { .. }
         | proto::Event::ItemDone { .. }
         | proto::Event::Stopped { .. }
@@ -1556,6 +1925,21 @@ fn fold_run_event(
         | proto::Event::ItemStartId { .. }
         | proto::Event::ItemDoneId { .. }
         | proto::Event::StoppedIds { .. } => None,
+        proto::Event::JunitCase { nodeid, cases } => {
+            run.junit.record_case(nodeid, cases);
+            None
+        }
+        proto::Event::JunitSuite {
+            name,
+            timestamp,
+            hostname,
+            properties,
+            extra,
+        } => {
+            run.junit
+                .record_suite(name, timestamp, hostname, properties, extra);
+            None
+        }
         proto::Event::Done { exitstatus } => Some(exitstatus),
     }
 }
@@ -1563,33 +1947,44 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time, collect_lazy,
-        dispatch_command, fold_run_event, head_to_none, lazy_should_steal, parse_duration_secs,
-        parse_numprocesses, resolve_changed_base, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, watchdog_duration, AUTO_LAZY_MIN_TESTS,
+        attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
+        check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
+        lazy_should_steal, names_a_selection, names_existing_path, order_ignored_warning,
+        parse_duration_secs, parse_numprocesses, resolve_changed_base, resolve_order,
+        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
+        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration, RunPath,
+        AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
     use crate::remote;
     use crate::reporting::sink::Sink;
     use crate::reporting::{progress, report};
+    use crate::scheduling::pool;
     use crate::scheduling::proto;
     use clap::Parser;
+
+    #[test]
+    fn an_argsfile_counts_as_an_explicit_selection() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("rstest-sel-{}.txt", std::process::id()));
+        std::fs::write(&file, "t.py::a\n").unwrap();
+        let at = |p: &std::path::Path| vec![format!("@{}", p.display())];
+        let has_file = names_a_selection(&at(&file));
+        let missing = names_a_selection(&at(&dir.join("rstest-no-such-argsfile.txt")));
+        let _ = std::fs::remove_file(&file);
+        assert!(has_file, "an existing @argsfile names tests");
+        assert!(!missing, "a missing @argsfile names nothing");
+        assert!(names_a_selection(&[dir.display().to_string()]));
+        assert!(!names_a_selection(&["-k".into(), "smoke".into()]));
+    }
 
     fn cli() -> Cli {
         Cli::parse_from(["rstest"])
     }
 
-    /// Serializes tests touching the process-global `RSTEST_CACHE_*` env.
-    /// Shares the crate-wide lock so it also serializes against the auto-compact
-    /// tests in the `gates` submodule, which read the same env.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::select::GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
+    use crate::test_env;
 
     #[test]
     fn head_to_none_maps_head_to_working_tree() {
@@ -1716,10 +2111,10 @@ mod tests {
 
     #[test]
     fn parse_numprocesses_parses_and_rejects() {
-        assert_eq!(parse_numprocesses("4").unwrap(), 4);
-        assert_eq!(parse_numprocesses("0").unwrap(), 0);
-        assert!(parse_numprocesses("abc").is_err());
-        assert!(parse_numprocesses("-1").is_err());
+        assert_eq!(parse_numprocesses("4", &[]).unwrap(), 4);
+        assert_eq!(parse_numprocesses("0", &[]).unwrap(), 0);
+        assert!(parse_numprocesses("abc", &[]).is_err());
+        assert!(parse_numprocesses("-1", &[]).is_err());
     }
 
     #[test]
@@ -1766,6 +2161,12 @@ mod tests {
         // loadscope/loadgroup need a global id list; lazy is file-affine.
         assert!(collect_lazy(&cli(), &s, "loadscope", &[], 8, &mut Sink::captured().0).is_err());
         assert!(collect_lazy(&cli(), &s, "loadgroup", &[], 8, &mut Sink::captured().0).is_err());
+        // each runs the whole suite per worker: no file-level dispatch either.
+        let err = collect_lazy(&cli(), &s, "each", &[], 8, &mut Sink::captured().0).unwrap_err();
+        assert!(
+            err.to_string().contains("each runs the full suite"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1804,6 +2205,154 @@ mod tests {
             &mut Sink::captured().0
         )
         .is_err());
+    }
+
+    fn settings_order(mode: Option<&str>) -> RstestSettings {
+        RstestSettings {
+            order: mode.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_order_defaults_throughput_and_watch_auto_failfast() {
+        let none = settings_order(None);
+        // No flag, no watch => throughput.
+        assert_eq!(
+            resolve_order(&cli(), &none).unwrap(),
+            pool::Order::Throughput
+        );
+        // --watch auto-selects fail-fast.
+        let mut w = cli();
+        w.watch = true;
+        assert_eq!(resolve_order(&w, &none).unwrap(), pool::Order::FailFast);
+    }
+
+    #[test]
+    fn resolve_order_explicit_beats_watch_and_config() {
+        // Explicit --order throughput overrides the watch auto-pick.
+        let mut w = cli();
+        w.watch = true;
+        w.order = Some("throughput".into());
+        assert_eq!(
+            resolve_order(&w, &settings_order(None)).unwrap(),
+            pool::Order::Throughput
+        );
+        // Config supplies it when the flag is absent.
+        assert_eq!(
+            resolve_order(&cli(), &settings_order(Some("fail-fast"))).unwrap(),
+            pool::Order::FailFast
+        );
+    }
+
+    #[test]
+    fn resolve_order_rejects_unknown() {
+        assert!(resolve_order(&cli(), &settings_order(Some("sideways"))).is_err());
+    }
+
+    #[test]
+    fn passthrough_n_warning_only_for_explicit_parallel_n() {
+        // Explicit -n 4 with -s: warn, naming the flag and the ignored count.
+        let msg = super::passthrough_n_warning(true, 4, Some("-s"), false).unwrap();
+        assert!(
+            msg.contains("-s") && msg.contains("-n 4 is ignored"),
+            "{msg}"
+        );
+        // --debug is named too.
+        assert!(
+            super::passthrough_n_warning(true, 2, Some("--debug"), false)
+                .unwrap()
+                .contains("--debug")
+        );
+        // No passthrough flag, default -n auto, -n 0/1, or --co: quiet.
+        assert_eq!(super::passthrough_n_warning(true, 4, None, false), None);
+        assert_eq!(
+            super::passthrough_n_warning(false, 8, Some("-s"), false),
+            None
+        );
+        assert_eq!(
+            super::passthrough_n_warning(true, 1, Some("-s"), false),
+            None
+        );
+        assert_eq!(
+            super::passthrough_n_warning(true, 4, Some("--co"), true),
+            None
+        );
+    }
+
+    #[test]
+    fn passthrough_trigger_names_the_first_forcing_flag() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            crate::cli::passthrough_trigger(&args(&["-k", "x", "-s"])),
+            Some("-s")
+        );
+        assert_eq!(
+            crate::cli::passthrough_trigger(&args(&["--capture=no", "--pdb"])),
+            Some("--capture=no")
+        );
+        assert_eq!(crate::cli::passthrough_trigger(&args(&["-q", "-x"])), None);
+    }
+
+    #[test]
+    fn order_ignored_warning_emits_one_actionable_message() {
+        use pool::Order::{FailFast, Throughput};
+        use RunPath::{Lazy, Passthrough, Pool, SingleWorker};
+        let w = |dist, path| order_ignored_warning(FailFast, true, true, dist, path);
+        // Passthrough names -s/--pdb, not -n (which may already be >= 2).
+        let pt = w("load", Passthrough).unwrap();
+        assert!(
+            pt.contains("-s/--pdb") && !pt.contains("-n >= 2"),
+            "got {pt}"
+        );
+        assert!(w("loadfile", SingleWorker)
+            .unwrap()
+            .contains("needs the parallel pool"));
+        // --dist each: no dispatch queue, not "affinity order".
+        let each = w("each", Pool).unwrap();
+        assert!(each.contains("no dispatch queue"), "got {each}");
+        // Lazy + affinity dist: ONE message naming both changes.
+        let lazy_file = w("loadfile", Lazy).unwrap();
+        assert!(
+            lazy_file.contains("--collect full --dist load"),
+            "got {lazy_file}"
+        );
+        assert!(!lazy_file.contains("affinity"));
+        // Lazy + load: only the collect hint.
+        assert!(w("load", Lazy).unwrap().ends_with("use --collect full"));
+        // Full collection, affinity dist.
+        assert!(w("loadscope", Pool)
+            .unwrap()
+            .contains("only reorders --dist load"));
+        // Pool path on load, auto-pick, or throughput: silent.
+        assert!(w("load", Pool).is_none());
+        assert!(order_ignored_warning(FailFast, false, false, "load", Lazy).is_none());
+        assert!(order_ignored_warning(Throughput, true, true, "load", Lazy).is_none());
+    }
+
+    #[test]
+    fn order_ignored_warning_single_worker_quiet_for_config_order() {
+        use pool::Order::FailFast;
+        use RunPath::{Lazy, Passthrough, SingleWorker};
+        // [tool.rstest] order (explicit, not from CLI): -n auto capping to 1 or
+        // a -s run must not warn every time.
+        assert!(order_ignored_warning(FailFast, true, false, "load", SingleWorker).is_none());
+        assert!(order_ignored_warning(FailFast, true, false, "load", Passthrough).is_none());
+        // A config-level misconfiguration on the pool path still warns.
+        assert!(order_ignored_warning(FailFast, true, false, "load", Lazy).is_some());
+    }
+
+    #[test]
+    fn check_order_shuffle_refuses_explicit_failfast_only() {
+        use pool::Order::{FailFast, Throughput};
+        assert!(check_order_shuffle(FailFast, true, true)
+            .unwrap_err()
+            .to_string()
+            .contains("--shuffle cannot be combined"));
+        // --watch auto-pick yields to --shuffle; no shuffle => no conflict.
+        assert!(check_order_shuffle(FailFast, false, true).is_ok());
+        assert!(check_order_shuffle(FailFast, true, false).is_ok());
+        assert!(check_order_shuffle(Throughput, true, true).is_ok());
     }
 
     #[test]
@@ -1903,16 +2452,12 @@ mod tests {
     fn run_cache_compact_errors_without_a_remote() {
         // No --cache-remote flag and no RSTEST_CACHE_REMOTE => hard error, never
         // a silent no-op.
-        let _g = env_guard();
-        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
-        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let held = test_env::lock();
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_REMOTE");
         let mut c = cli();
         c.cache_remote = None;
         let (mut sink, _cap) = Sink::captured();
         let err = run_cache_compact(&c, &mut sink, None, None).unwrap_err();
-        if let Some(v) = saved {
-            std::env::set_var("RSTEST_CACHE_REMOTE", v);
-        }
         assert!(
             err.to_string().contains("needs --cache-remote"),
             "got: {err}"
@@ -1925,7 +2470,7 @@ mod tests {
         // segments fold into a fresh base and are pruned, and the count is
         // reported. No retention window => fold all.
         use crate::remote::transport_for;
-        let _g = env_guard();
+        let held = test_env::lock();
         let root = std::env::temp_dir().join(format!("rstest-run-compact-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let remote_str = root.to_str().unwrap().to_string();
@@ -1933,16 +2478,11 @@ mod tests {
         remote::push(t.as_ref(), &compact_segment("a", 1)).unwrap();
         remote::push(t.as_ref(), &compact_segment("b", 2)).unwrap();
 
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::remove_var("RSTEST_CACHE_KEEP_LAST");
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_KEEP_LAST");
         let mut c = cli();
         c.cache_remote = Some(remote_str.clone());
         let (mut sink, cap) = Sink::captured();
         let code = run_cache_compact(&c, &mut sink, None, None).unwrap();
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert_eq!(code, 0);
         assert!(cap.err().contains("compacted"), "got: {}", cap.err());
 
@@ -1957,7 +2497,7 @@ mod tests {
 
     #[test]
     fn resolve_retention_policy_flags_win_and_parse() {
-        let _g = env_guard();
+        let _held = test_env::lock();
         let p = resolve_retention_policy(Some(5), Some("30d")).unwrap();
         assert_eq!(p.keep_last, Some(5));
         assert_eq!(p.max_age, Some(30 * 86400));
@@ -1973,33 +2513,43 @@ mod tests {
     #[test]
     fn resolve_retention_policy_reads_keep_last_env() {
         // No `keep_last` flag => fall through to RSTEST_CACHE_KEEP_LAST.
-        let _g = env_guard();
-        let saved = std::env::var("RSTEST_CACHE_KEEP_LAST").ok();
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "7");
+        let held = test_env::lock();
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "7");
         let p = resolve_retention_policy(None, None).unwrap();
         // A non-numeric env is a hard error, never a silent fold-all.
-        std::env::set_var("RSTEST_CACHE_KEEP_LAST", "notnum");
+        let _env = test_env::set_var(&held, "RSTEST_CACHE_KEEP_LAST", "notnum");
         let err = resolve_retention_policy(None, None).unwrap_err();
-        match &saved {
-            Some(v) => std::env::set_var("RSTEST_CACHE_KEEP_LAST", v),
-            None => std::env::remove_var("RSTEST_CACHE_KEEP_LAST"),
-        }
         assert_eq!(p.keep_last, Some(7));
         assert!(err.to_string().contains("invalid RSTEST_CACHE_KEEP_LAST"));
+    }
+
+    #[test]
+    fn dispatch_shard_verify_surfaces_an_unreadable_report() {
+        // shard-verify is interpreter-free: a missing report errors straight
+        // through dispatch, no Python resolved.
+        let cli = Cli::parse_from(["rstest", "shard-verify", "/nonexistent/rstest-report.json"]);
+        let err = dispatch_command(&cli, &[]).expect_err("missing report => error");
+        assert!(err.to_string().contains("reading"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_resolves_python_only_for_the_modes_that_need_it() {
+        // verify-vendor needs an interpreter: an unusable --python fails it in
+        // dispatch, before the mode runs.
+        let cli = Cli::parse_from(["rstest", "verify-vendor", "--python", "/nonexistent/python"]);
+        let err = dispatch_command(&cli, &[]).expect_err("no interpreter => error");
+        assert!(err.to_string().contains("no usable Python"), "{err}");
     }
 
     #[test]
     fn dispatch_cache_compact_without_remote_errors() {
         // cache-compact resolves the remote from the flag or RSTEST_CACHE_REMOTE;
         // with neither set it fails before touching Python or any transport.
-        let saved = std::env::var("RSTEST_CACHE_REMOTE").ok();
-        std::env::remove_var("RSTEST_CACHE_REMOTE");
+        let held = test_env::lock();
+        let _env = test_env::remove_var(&held, "RSTEST_CACHE_REMOTE");
         let cli = Cli::parse_from(["rstest", "cache-compact"]);
         let err = dispatch_command(&cli, &["rstest".into(), "cache-compact".into()])
             .expect_err("no remote => error");
-        if let Some(v) = saved {
-            std::env::set_var("RSTEST_CACHE_REMOTE", v);
-        }
         assert!(err
             .to_string()
             .contains("cache-compact needs --cache-remote"));
@@ -2202,6 +2752,19 @@ mod tests {
     }
 
     #[test]
+    fn names_existing_path_counts_paths_and_nodeids_not_flags() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // Cargo runs unit tests from the crate root, where Cargo.toml exists.
+        assert!(names_existing_path(&s(&["Cargo.toml"])));
+        assert!(names_existing_path(&s(&["Cargo.toml::test_x"])));
+        assert!(!names_existing_path(&s(&["-q", "--maxfail=1"])));
+        assert!(!names_existing_path(&s(&[
+            "nope.py::test_x",
+            "missing_dir"
+        ])));
+    }
+
+    #[test]
     fn cap_workers_helpers_shrink_but_never_below_one() {
         // Files: never more workers than files; an empty walk is a no-op.
         assert_eq!(cap_workers_by_files(8, 3), 3);
@@ -2273,6 +2836,10 @@ mod tests {
                     scope: "session".into(),
                     count: 1,
                     total: 0.5,
+                    constant: false,
+                    repeated: false,
+                    redundant: 0.0,
+                    fingerprint: None,
                 }]
             }),
             None
@@ -2298,6 +2865,41 @@ mod tests {
         assert_eq!(run.collect_skips, 1);
         assert_eq!(warnings.len(), 1);
         assert_eq!(fixtures.len(), 1);
+    }
+
+    #[test]
+    fn fold_run_event_collection_count_drives_the_percentage() {
+        // The single session reports its collected count, so -v lines carry
+        // pytest's `[ NN%]` column just like `pytest -v`.
+        let mut run = report::Run::default();
+        let mut prog = progress::Progress::default();
+        prog.set_mode(progress::Mode::Verbose);
+        let mut fixtures = Vec::new();
+        let mut warnings = Vec::new();
+        let (mut sink, cap) = Sink::captured();
+        let collected: proto::Event = serde_json::from_value(serde_json::json!({
+            "kind": "collection_done",
+            "payload": {"count": 2, "hash": ""},
+        }))
+        .unwrap();
+        for ev in [
+            collected,
+            proto::Event::Report(report("t.py::a", "passed")),
+            proto::Event::Report(report("t.py::b", "passed")),
+        ] {
+            fold_run_event(
+                ev,
+                false,
+                &mut run,
+                &mut prog,
+                &mut fixtures,
+                &mut warnings,
+                &mut sink,
+            );
+        }
+        let out = cap.out();
+        assert!(out.contains("t.py::a PASSED [ 50%]"), "{out}");
+        assert!(out.contains("t.py::b PASSED [100%]"), "{out}");
     }
 
     #[test]

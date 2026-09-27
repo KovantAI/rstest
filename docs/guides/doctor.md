@@ -1,13 +1,13 @@
 # Suite diagnostics
 
+`rstest --doctor` runs your suite normally, then answers the question every
+slow suite raises: *where does the time actually go?* The diagnosis comes
+from data the runner already owns (per-test wall time, per-test CPU time,
+and per-fixture setup time), so it adds almost nothing to the run.
+
 ```console
 $ rstest --doctor
 ```
-
-runs your suite normally, then answers the question every slow suite
-raises: *where does the time actually go?* The diagnosis comes from data
-the runner already owns — per-test wall time, per-test CPU time, and
-per-fixture setup time — so it adds almost nothing to the run.
 
 ## A real report
 
@@ -38,11 +38,11 @@ SLOWEST FILES:
 all of it waiting on 10-second proxy timeouts.)
 
 The `4442 tests` count is tests with a **recorded call duration**, which is
-what doctor analyzes — slightly fewer than the 4,469 the suite *collects*
+what doctor analyzes: slightly fewer than the 4,469 the suite *collects*
 ([benchmarks](../reference/benchmarks.md)), because skips and zero-duration
 tests contribute no timing. This suite is heavily wait-bound, so its
 **PARALLEL EFFICIENCY** section (see below) reports over 100% and is omitted
-from the sample for brevity; it appears in any `-n > 1` run.
+from the sample for brevity; it appears in any `-n ≥ 2` run.
 
 [aiohttp]: https://github.com/aio-libs/aiohttp
 
@@ -51,7 +51,7 @@ from the sample for brevity; it appears in any `-n > 1` run.
 ### WAIT-BOUND
 
 Compares each test's wall time with its CPU time. A test whose wall time
-vastly exceeds its CPU time isn't computing — it's sleeping, waiting on a
+vastly exceeds its CPU time isn't computing: it's sleeping, waiting on a
 socket, or waiting out a timeout. These tests waste wall-clock no matter
 how fast the runner is; fixing them (mock the clock, shrink the timeout,
 use event-driven waits) is usually the single biggest speedup available in
@@ -65,20 +65,21 @@ spends 95% waiting on proxy timeouts.
 
 No worker count can finish faster than the longest single test. If your
 longest test exceeds the ideal per-worker share, the report names the gate
-tests — splitting or shrinking them raises your parallel ceiling.
+tests: splitting or shrinking them raises your parallel ceiling.
 
 ### PARALLEL EFFICIENCY
 
 Where PARALLEL FLOOR is a static ceiling, this is the *realized* speedup
 measured from the run just finished: `test time / wall`, compared against
 the worker count. "1.5× realized of 4× possible (38%)" means the run
-converted only 38% of its worker budget into wall-clock savings — the
+converted only 38% of its worker budget into wall-clock savings: the
 direct answer to "why isn't `-n auto` faster?".
 
 Two things cap it, both named in the section:
 
-- **long pole** — the slowest single test (same floor as PARALLEL FLOOR).
-- **worker load** — busy time summed per worker, plus the imbalance
+- **long pole**: the slowest single test. When it exceeds the ideal
+  per-worker share, it is also the PARALLEL FLOOR above.
+- **worker load**: busy time summed per worker, plus the imbalance
   between the busiest and idlest worker. A high imbalance means the
   scheduler couldn't spread the work evenly (usually a few long tests
   pinned to one worker); consider splitting them or `--dist load`.
@@ -92,21 +93,111 @@ it and points back at WAIT-BOUND. Only emitted for multi-worker runs.
 Total setup time per fixture, with two pieces of advice:
 
 - A *function-scoped* fixture that ran hundreds of times and costs real
-  time is a candidate for a wider scope — one real-world suite re-parsed
+  time is a candidate for a wider scope: one real-world suite re-parsed
   the same RSA key 206 times (≈20% of its total runtime) in what could
   have been a session fixture.
 - A *session-scoped* fixture that ran more than once ran **once per
-  worker** — the report reminds you it must be safe to duplicate.
+  worker**: the report reminds you it must be safe to duplicate.
+
+### SCOPE-PROMOTION CANDIDATES
+
+The advisor upgrade to the hotspot heuristic. Under `--doctor`, rstest
+fingerprints each function-scoped fixture's **produced value** on every
+call. A fixture that returned the *same immutable value every time* (in
+every worker), with no per-test teardown and only session-scoped inputs,
+is a candidate for `scope="session"`, and the report attaches a concrete
+number:
+
+```text
+SCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):
+  ~  0.52s saved     206x  feature_flags  <- @pytest.fixture(scope="session")
+  (check the fixture body for side effects before promoting)
+```
+
+Promoting to session scope runs the fixture once per worker session
+instead of once per call, so every call after a worker's first is a
+redundant re-setup. Each worker session totals its own
+`(calls − 1) × mean setup time`, and the projected saving is the largest
+of those: the wall time saved on the worker that benefits most. That
+holds whether the calls were spread across the pool or pinned to one
+worker by `--dist loadfile`. A fixture is only flagged when some worker
+session actually ran it twice, so a run where every worker (including a
+respawned one) called it once is not evidence. Candidates are listed even
+when below the hotspot threshold (from 0.01s up), biggest saving first.
+
+The check is deliberately narrow. Only **immutable builtin values**
+qualify: `str`, `bytes`, `int`, `float`, `bool`, `complex`, and tuples or
+frozensets built from them (up to 10,000 items in total). Looking at any
+other object can't prove it is safe to share, so these are **never**
+flagged:
+
+- mutable values, even when they look the same each call: a fresh `[]`
+  or `{}` is usually exactly what each test must get its own copy of;
+- any other object: user classes, settings models, mocks, numpy arrays,
+  DataFrames, lazy objects. rstest never calls their `repr`, so `--doctor`
+  runs no extra user code;
+- `None`, since side-effect fixtures (reset a global, truncate tables)
+  return it every call;
+- a fixture with per-test teardown: a `yield` fixture, or one that calls
+  `request.addfinalizer`;
+- a fixture that depends on anything narrower than session scope
+  (`monkeypatch`, `tmp_path`, a per-test database), whether as an argument
+  or fetched with `request.getfixturevalue(...)` in its body: promoting it
+  would raise `ScopeMismatch`, and its per-test effects are the point;
+- a fixture that returned a different value in different workers (say,
+  one built from `request.module` under `--dist loadfile`): the value
+  depends on which tests a worker got;
+- a fixture whose setup failed or skipped;
+- a `@pytest.mark.parametrize` argument, which pytest serves through an
+  internal fixture there is nothing to promote.
+
+So a fixture returning a settings object or a key is not suggested even
+when sharing it would be fine; the advisor only speaks when it is sure
+about the value. It still can't see side effects that leave no trace
+(writing a file, setting a global), so treat it as *advice* and check the
+fixture body before promoting.
 
 ### SLOWEST FILES
 
-Test time aggregated by file — where to look first, and the input for
+Test time aggregated by file: where to look first, and the input for
 deciding what to split under `--dist load`.
+
+### COVERAGE WASTE
+
+Slow tests that add **no unique coverage**: every line each one executes is
+also executed by some other test that is kept, so the flagged tests can all be
+deleted or merged together without dropping a single covered line. Tests that
+duplicate each other are picked slowest first, so of two tests with identical
+coverage only the slower one is flagged. This is the "which time is *wasted*"
+counterpart to SLOWEST FILES.
+
+```text
+COVERAGE WASTE: 18.4s across 3 slow test(s) that cover no line another test doesn't also cover (delete/merge candidates):
+    12.10s  240 line(s), all shared with 4 other test(s)  tests/test_api.py::test_end_to_end_slow
+     4.30s   88 line(s), all shared with 2 other test(s)  tests/test_api.py::test_variant_b
+```
+
+It needs per-test coverage from the **same run**, so run the doctor with
+coverage and per-test contexts:
+
+```console
+$ rstest --doctor --cov=. --cov-context=test
+```
+
+An index left by an earlier run (or restored from a cache) is never used: the
+tests or code may have changed since, and a stale "fully shared" verdict could
+recommend deleting a test that is now the only one covering some line. Without
+this run's index the section is simply omitted. Only tests that passed count,
+either as candidates or as the other coverers. Test files are identified by
+your `python_files` patterns, so a product module holding doctests
+(`--doctest-modules`) still counts as product code. Only tests slow enough to
+matter are flagged (a fast redundant test frees no meaningful time when
+deleted).
 
 ### RESOURCE LEAKS
 
 Tests that ended with more live threads or open file descriptors than they
-started — a resource opened and never released, its own teardown included.
+started: a resource opened and never released, its own teardown included.
 
 ```text
 RESOURCE LEAKS (net threads/fds still open after teardown):
@@ -120,6 +211,22 @@ flakiness. Full model, false-positive cases, and fixes:
 [Resource leaks](resource-leaks.md). To make it a CI gate, use
 [`--fail-on-leak`](../reference/cli.md#-fail-on-leak).
 
+### startup
+
+A one-line summary under the header reports how long spawning the worker pool
+took — wall from spawn to every worker's first event (import + collection start):
+
+```text
+startup: 0.22s spawning 16 workers (54% of wall) — try --fork-pool to prewarm the pool
+```
+
+When that startup is a real fraction of a short multi-worker run on Unix, the
+line suggests [`--fork-pool`](../reference/cli.md#-fork-pool), which imports the
+vendored pytest core once in a zygote and forks the workers off it instead of
+re-importing per worker. The hint is dropped once the run already uses
+`--fork-pool`, on Windows, and on single-worker runs. It's a fixed per-run tax,
+so it matters most on short / cold suites and is negligible on long ones.
+
 ## Workflow
 
 Doctor is cheap enough to run on a whim and most valuable on a cadence:
@@ -131,38 +238,50 @@ $ rstest -n 4 --doctor     # diagnosing parallel scaling
 
 ## JSON output for CI
 
+`rstest --doctor-json doctor.json` writes the same analysis as a versioned
+JSON document ([field reference and schema version](../reference/report-json.md#doctor-json)):
+
 ```console
 $ rstest --doctor-json doctor.json
 ```
 
-writes the same analysis as a versioned JSON document (`"schema": 2`):
-totals (tests, test time, CPU time, wall, workers), the wait-bound test
-list, parallel-floor gate tests, parallel-efficiency (realized speedup and
-per-worker load), fixture timings, and slowest files.
+The document holds totals (tests, test time, CPU time, wall, workers, pool
+`startup_seconds`), the wait-bound test list, parallel-floor gate tests,
+parallel-efficiency (realized speedup and per-worker load), fixture timings
+(each with `constant` and `projected_saving_seconds` for the scope-promotion
+advisor), slowest files, and the coverage-waste list (`coverage_waste`, `null`
+unless the same run collected per-test coverage with `--cov --cov-context=test`).
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.
 
 Persist it as a CI artifact per run and you have suite-health trending:
-diff two reports to see what a PR added — new long-poles, fixture cost
-growth, wait-time regressions. A ready-made GitHub Actions recipe
+diff two reports to see what a PR added (new long poles, fixture cost
+growth, wait-time regressions). A ready-made GitHub Actions recipe
 (baseline via the actions cache, jq comparison into the job summary)
 is in [CI quickstart](ci-quickstart.md#suite-health-trending-with-doctor).
 
 ## Markdown output and GitHub job summaries
 
 Under GitHub Actions, any doctor run appends the report to
-`$GITHUB_STEP_SUMMARY` automatically — `rstest --doctor-json doctor.json`
-in a workflow puts the analysis on the run page with no extra step. To
-write the markdown to a custom path instead (or outside Actions):
+`$GITHUB_STEP_SUMMARY` automatically: `rstest --doctor-json doctor.json`
+in a workflow puts the analysis on the run page with no extra step. On
+Buildkite, the same markdown is piped to `buildkite-agent annotate` as an
+info annotation (best-effort: a missing agent never fails the run).
+
+To also write the markdown to a file of your own (for an artifact, or on a
+CI with no native summary):
 
 ```console
 $ rstest --doctor-md doctor.md
 ```
 
+`--doctor-md` is additive: under GitHub Actions or Buildkite the automatic
+summary is still published.
+
 ## Gating a PR on doctor metrics
 
-JSON trending is advisory — someone has to look. To make the signal
+JSON trending is advisory: someone has to look. To make the signal
 *enforce* itself, gate the run on a threshold with `--doctor-fail-on`:
 
 ```console
@@ -172,7 +291,7 @@ $ rstest -n auto --doctor-fail-on 'parallel_efficiency<30' \
 
 The run exits non-zero if any condition fires (here: efficiency below 30%,
 or more than half of test time spent waiting). Repeatable; the gate is the
-union of all conditions. A metric that didn't apply to the run — e.g.
-`parallel_efficiency` at `-n 1` — is skipped, never failed, and a typo'd
+union of all conditions. A metric that didn't apply to the run (e.g.
+`parallel_efficiency` at `-n 1`) is skipped, never failed, and a typo'd
 metric aborts before the run rather than silently passing. Full metric and
-operator list: [`--doctor-fail-on`](../reference/cli.md#--doctor-fail-on-cond).
+operator list: [`--doctor-fail-on`](../reference/cli.md#-doctor-fail-on-cond).

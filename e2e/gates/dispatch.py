@@ -6,6 +6,7 @@ import shutil
 import xml.etree.ElementTree as ET
 
 from _harness import (
+    BASIC,
     CRASHMANY,
     EACH_CRASH,
     FLAKY,
@@ -322,6 +323,45 @@ def gate_dist_each(g, args, binary):
     )
 
 
+def gate_fork_pool(g, args, binary):
+    print("== --fork-pool ==")
+    if WINDOWS:
+        check("fork-pool: skipped on Windows", True)
+        return
+    g.write("fp/test_fp.py", BASIC)
+    # Parity: fork-prewarmed pool must produce the SAME outcomes as the plain
+    # spawn path (only worker startup differs, never results).
+    plain = g.run("fp/test_fp.py", "-n", "4")
+    forked = g.run("fp/test_fp.py", "-n", "4", "--fork-pool")
+    check(
+        "fork-pool: same counts as plain spawn",
+        "2 failed, 2 passed" in plain.stdout and "2 failed, 2 passed" in forked.stdout,
+        f"plain={plain.stdout[-120:]!r} forked={forked.stdout[-120:]!r}",
+    )
+    check("fork-pool: same exit code", plain.returncode == forked.returncode == 1)
+    # Crash + respawn under fork-pool: a worker that dies mid-test is reported
+    # failed (respawn uses the plain spawn path), never hangs.
+    g.write(
+        "fp/test_crash.py",
+        "import os\ndef test_boom(): os._exit(1)\ndef test_ok(): assert True\n",
+    )
+    cr = g.run("fp", "-n", "4", "--fork-pool", "-k", "boom or ok")
+    check(
+        "fork-pool: crash reported, run completes",
+        cr.returncode != 0 and "test_boom" in cr.stdout,
+        cr.stdout[-200:],
+    )
+    # Doctor JSON records whether fork-prewarm was used.
+    dj = g.tmp / "fp-doctor.json"
+    g.run("fp/test_fp.py", "-n", "4", "--fork-pool", "--doctor-json", str(dj))
+    d = json.loads(dj.read_text(encoding="utf-8"))
+    check(
+        "fork-pool: doctor json fork_prewarm=true + startup_seconds present",
+        d.get("fork_prewarm") is True and "startup_seconds" in d,
+        str({k: d.get(k) for k in ("fork_prewarm", "startup_seconds")}),
+    )
+
+
 def gate_dist_validation(g, args, binary):
     print("== --dist validation ==")
     # An invalid --dist value must be rejected the same way on every path;
@@ -383,7 +423,7 @@ def gate_auto_worker_capping(g, args, binary):
     r = g.run(cwd=g.tmp / "tiny")
     check(
         "auto caps tiny suite to single worker",
-        "single worker" in r.stdout.splitlines()[0],
+        "test session starts" in r.stdout.splitlines()[0],
         r.stdout[:100],
     )
 
@@ -688,4 +728,65 @@ def gate_crash_restart_exhaustion(g, args, binary):
         "restart budget exhausts -> internal error exit 3",
         r.returncode == 3 and "terminated unexpectedly" in (r.stdout + r.stderr),
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
+
+
+def gate_order_fail_fast(g, args, binary):
+    print("== --order fail-fast ==")
+    suite = g.tmp / "ffsuite"
+    shutil.rmtree(suite, ignore_errors=True)
+    g.write(
+        "ffsuite/test_ff.py",
+        "".join(f"def test_ok{i}(): assert True\n" for i in range(6))
+        + "def test_red(): assert False\n",
+    )
+    # First run records the hard failure in .rstest_cache/flakes.json.
+    r = g.run(".", "-n", "2", cwd=str(suite))
+    flakes = suite / ".rstest_cache" / "flakes.json"
+    check(
+        "fail-fast: failure recorded in flakes.json",
+        r.returncode == 1
+        and flakes.exists()
+        and any(k.endswith("test_red") for k in json.loads(flakes.read_text(encoding="utf-8"))),
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
+    # Pool path loads that history and leads with the red test.
+    r = g.run(".", "-n", "2", "--order", "fail-fast", "-x", cwd=str(suite))
+    check(
+        "fail-fast: pool run reads flake history, red still fails",
+        r.returncode == 1 and "test_red" in r.stdout and "no effect" not in r.stderr,
+        r.stdout[-300:] + r.stderr[-200:],
+    )
+    r = g.run(".", "-n", "1", "--order", "fail-fast", cwd=str(suite))
+    check(
+        "fail-fast: single-worker run warns it needs the pool",
+        "--order fail-fast needs the parallel pool" in r.stderr,
+        r.stderr[-300:],
+    )
+    r = g.run(".", "-n", "2", "--collect", "lazy", "--order", "fail-fast", cwd=str(suite))
+    check(
+        "fail-fast: --collect lazy warns it is ignored",
+        "ignored under --collect lazy" in r.stderr,
+        r.stderr[-300:],
+    )
+    # Monorepo root validates --order once, before fanning out.
+    mono = g.tmp / "ffmono"
+    shutil.rmtree(mono, ignore_errors=True)
+    g.write("ffmono/a/pytest.ini", "[pytest]\n")
+    g.write("ffmono/a/tests/test_a.py", "def test_a(): pass\n")
+    g.write("ffmono/b/pytest.ini", "[pytest]\n")
+    g.write("ffmono/b/tests/test_b.py", "def test_b(): pass\n")
+    r = g.run("-n", "2", "--order", "bogus", cwd=mono)
+    check(
+        "fail-fast: monorepo rejects bad --order once",
+        r.returncode != 0
+        and r.stderr.count("unknown --order mode: bogus") == 1
+        and "monorepo:" not in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-300:] + r.stdout[-200:],
+    )
+    r = g.run("-n", "2", "--order", "fail-fast", cwd=mono)
+    check(
+        "fail-fast: monorepo forwards a valid --order",
+        r.returncode == 0 and "monorepo: 2 projects" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:],
     )

@@ -39,12 +39,17 @@ const SCHEMA: u32 = 2;
 /// Config files whose change invalidates the whole skip decision: markers,
 /// addopts, and coverage config aren't reflected in per-test coverage, so a
 /// change to any of them disables skipping for that run.
-const CONFIG_FILES: [&str; 5] = [
+/// The pytest 9 names are appended (not merged into probe order) so an existing
+/// project's fingerprint is unchanged by their addition.
+const CONFIG_FILES: [&str; 8] = [
     "pyproject.toml",
     "pytest.ini",
     "setup.cfg",
     "tox.ini",
     ".coveragerc",
+    "pytest.toml",
+    ".pytest.toml",
+    ".pytest.ini",
 ];
 
 /// Directories never worth descending into when hunting for `conftest.py`:
@@ -217,6 +222,19 @@ pub fn load(scope: &Path, config_fp: &str) -> Baseline {
             test_file_hashes: o.test_file_hashes,
             test_lines: o.test_lines,
         })
+        .unwrap_or_default()
+}
+
+/// The last run's green set and per-nodeid def line, ungated by the config
+/// fingerprint. `load` returns empty when the config changed (skipping is off);
+/// `explain` reports *history* rather than skip-eligibility, so it wants the raw
+/// record regardless. Empty on absent / corrupt / schema-mismatched store.
+pub fn load_raw(scope: &Path) -> (HashSet<String>, HashMap<String, u64>) {
+    std::fs::read(cache::file_in(scope, FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Outcomes>(&b).ok())
+        .filter(|o| o.schema == SCHEMA)
+        .map(|o| (o.green, o.test_lines))
         .unwrap_or_default()
 }
 

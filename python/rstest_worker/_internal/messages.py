@@ -34,6 +34,16 @@ class FixtureStat(TypedDict):
     scope: str
     count: int
     total: float
+    # Scope-promotion advisor: function-scoped, and value-identical on every
+    # call in this worker session (a single call counts as "no evidence against").
+    constant: bool
+    # `constant` and this session ran it at least twice (actual evidence).
+    repeated: bool
+    # Setup seconds session scope would skip in this session: (count-1) * mean.
+    redundant: float
+    # Digest of the constant value (None unless `constant`), compared across
+    # workers so a per-worker-varying value is not reported constant.
+    fingerprint: str | None
 
 
 class _ReportRequired(TypedDict):
@@ -62,7 +72,17 @@ class _CollectionDoneRequired(TypedDict):
     hash: str  # sha256 of the newline-joined nodeids
 
 
-class CollectionDonePayload(_CollectionDoneRequired, total=False):
+class SessionRootsPayload(TypedDict, total=False):
+    rootdir: str  # pytest's config.rootpath
+    args_source: str  # config.args_source: "args" | "invocation_dir" | "testpaths"
+    root_args: list[str]  # what a no-arg run from the rootdir would collect
+    inifile: str  # config.inipath, when a config file is in effect
+    confcutdir: str  # the conftest cutoff in effect, absolute
+    order_flags: list[str]  # active "--nf" "--ff" "--lf" "--sw" "--sw-skip" "--maxfail"
+    maxfail: int  # resolved -x/--maxfail (argv + addopts), only when > 0
+
+
+class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=False):
     # Only worker 0 (RSTEST_SEND_IDS=1) ships the id-bearing fields.
     ids: list[str]
     locations: list[list[str | int | None]]  # [relpath, lineno] per item
@@ -85,6 +105,8 @@ class FileCollectedPayload(_FileCollectedRequired, total=False):
 
 class LazyReadyPayload(TypedDict, total=False):
     cache_dir: str
+    rootdir: str  # pytest's config.rootpath
+    maxfail: int  # resolved -x/--maxfail (argv + addopts), only when > 0
 
 
 class DonePayload(TypedDict):
@@ -137,6 +159,19 @@ class NodeInputPayload(TypedDict):
     workerinput: dict[str, object]  # _wire_safe'd, arbitrary map
 
 
+class JunitCasePayload(TypedDict):
+    nodeid: str
+    cases: list[str]  # serialized <testcase> elements of one test attempt
+
+
+class JunitSuitePayload(TypedDict):
+    name: str  # junit_suite_name
+    timestamp: str  # session start, local ISO 8601 (pytest's format)
+    hostname: str
+    properties: list[str]  # serialized record_testsuite_property <property>s
+    extra: list[str]  # never-finalized <testcase>s (collection/internal errors)
+
+
 EventKind = Literal[
     "report",
     "collect_error",
@@ -154,6 +189,8 @@ EventKind = Literal[
     "item_done",
     "stopped",
     "done",
+    "junit_case",
+    "junit_suite",
 ]
 
 

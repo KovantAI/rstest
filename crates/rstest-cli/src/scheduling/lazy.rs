@@ -141,13 +141,34 @@ pub fn run_lazy_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        fork_prewarm,
+        // Lazy never reorders by flake history, so quarantine is post-run only.
+        quarantine: _,
     } = cfg;
+    // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
+    let mut maxfail = maxfail;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
+    // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
+    // otherwise n independent spawns. Each worker then gets its lazy-session
+    // command + reader via start_into. Time the spawn for --doctor startup.
+    let spawn_start = std::time::Instant::now();
+    let workers =
+        crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
+    // What actually happened, not what was asked: spawn_pool falls back to
+    // plain spawns when the zygote can't get its fds.
+    let fork_prewarmed = workers
+        .first()
+        .is_some_and(crate::scheduling::worker::Worker::is_forked);
     let mut states = Vec::new();
-    for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
+    for (idx, worker) in workers.into_iter().enumerate() {
+        let worker = start_into(worker, idx, args, &tx)?;
         states.push(WorkerState::fresh(worker));
     }
+    // "Pool ready" = every initial worker has emitted its first event; stamped
+    // in the event loop below. See run_pool for why spawn duration is not a fair
+    // startup metric.
+    let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut startup_seconds = 0.0f64;
 
     let duration_cache = crate::scheduling::durations::load();
     let cwd = std::env::current_dir()?;
@@ -166,6 +187,7 @@ pub fn run_lazy_pool(
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
     let mut cache_dir: Option<String> = None;
+    let mut sources = crate::scheduling::durations::Collected::default();
     let mut total_items = 0usize;
     let mut requeued: VecDeque<String> = VecDeque::new();
     let mut serial: VecDeque<String> = VecDeque::new();
@@ -194,6 +216,9 @@ pub fn run_lazy_pool(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        if ready_workers.len() < n && ready_workers.insert(idx) && ready_workers.len() == n {
+            startup_seconds = spawn_start.elapsed().as_secs_f64();
+        }
         match event {
             Ok(Event::Report(r)) => {
                 if let Some(id) = &states[idx].running {
@@ -230,6 +255,16 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
+            Ok(Event::JunitSuite {
+                name,
+                timestamp,
+                hostname,
+                properties,
+                extra,
+            }) => run
+                .junit
+                .record_suite(name, timestamp, hostname, properties, extra),
             Ok(Event::Warnings { entries }) => {
                 // Files are disjoint across lazy workers, so collect and
                 // runtest warnings are each seen once; only config-phase
@@ -244,9 +279,22 @@ pub fn run_lazy_pool(
                 // Each skipped collector is seen by exactly one worker.
                 run.collect_skips += 1;
             }
-            Ok(Event::LazyReady { cache_dir: cd }) => {
+            Ok(Event::LazyReady {
+                cache_dir: cd,
+                rootdir,
+                maxfail: reported_maxfail,
+            }) => {
+                // pytest's own `-x`/`--maxfail` resolution (argv + ini
+                // `addopts` / PYTEST_ADDOPTS) is authoritative; every worker
+                // reports the same value before its first RunFiles.
+                if reported_maxfail.is_some() {
+                    maxfail = reported_maxfail;
+                }
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
+                }
+                if let Some(rd) = &rootdir {
+                    sources.set_rootdir(rd);
                 }
                 states[idx].ready = true;
             }
@@ -258,6 +306,7 @@ pub fn run_lazy_pool(
             }) => {
                 total_items += ids.len();
                 prog.set_total(total_items);
+                sources.record(&ids);
                 let s = &mut states[idx];
                 if let Some(pos) = s.uncollected_files.iter().position(|f| *f == path) {
                     s.uncollected_files.remove(pos);
@@ -601,9 +650,14 @@ pub fn run_lazy_pool(
         // hash, so shard-verify does not cover lazy runs (no shard meta stamped).
         collection_hash: None,
         collection_size: 0,
+        startup_seconds,
+        fork_prewarmed,
+        sources,
     })
 }
 
+/// Respawn path: one fresh, independently spawned lazy worker. The initial pool
+/// uses [`Worker::spawn_pool`] + [`start_into`] so it can fork-prewarm.
 fn spawn_into(
     python: &Path,
     idx: usize,
@@ -612,7 +666,18 @@ fn spawn_into(
     tx: &mpsc::Sender<(usize, Result<Event>)>,
     env: &crate::scheduling::worker::WorkerEnv,
 ) -> Result<Worker> {
-    let mut worker = Worker::spawn(python, Some((idx, n)), env)?;
+    let worker = Worker::spawn(python, Some((idx, n)), env)?;
+    start_into(worker, idx, args, tx)
+}
+
+/// Send the lazy-session command to an already-spawned worker and start its
+/// reader thread. Shared by [`spawn_into`] and the fork-prewarmed initial pool.
+fn start_into(
+    mut worker: Worker,
+    idx: usize,
+    args: &[String],
+    tx: &mpsc::Sender<(usize, Result<Event>)>,
+) -> Result<Worker> {
     worker.send(&proto::Command::RunLazySession {
         args: args.to_vec(),
     })?;

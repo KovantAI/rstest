@@ -1,0 +1,78 @@
+name: example bench (CPU-bound sweep)
+
+# Runs examples/cpu-bench on a standard GitHub runner: the pure-Python,
+# CPU-bound suite at -n 1,2,4 under rstest and pytest-xdist, against the serial
+# pytest baseline, then the numpy worker x BLAS-thread grid (OpenBLAS). Posts
+# the measured tables to the job summary. Manual + weekly,
+# so there's always a fresh measured datapoint on public CI hardware. Shared
+# runners are noisy, so the table carries the min-max spread and is advisory:
+# never gate CI on it. Headline numbers come from the primary machine
+# documented in docs/reference/benchmarks.md, not from here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "comma-separated -n values"
+        default: "1,2,4"
+      repeat:
+        description: "timed runs per point (median reported)"
+        default: "3"
+  schedule:
+    - cron: "30 9 * * 1" # Mondays 09:30 UTC (between example-bench and corpus-bench)
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90 # sweep + a 12-cell BLAS grid on a 4 vCPU runner
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # The wheel provides the `rstest` CLI and rstest_worker (with its vendored
+      # pytest). pytest is pinned to the vendored version so the baseline and
+      # xdist runs use the same pytest rstest does.
+      - name: build + install rstest
+        run: |
+          python -m venv .bench-venv
+          . .bench-venv/bin/activate
+          pip install --quiet maturin "pytest==9.1.1" pytest-xdist numpy
+          maturin build --release --manifest-path crates/rstest-cli/Cargo.toml --out dist
+          pip install --quiet dist/rstest-*.whl
+
+      # Inputs go through env (never interpolated into the shell) to keep
+      # workflow_dispatch values injection-safe.
+      - name: measure worker sweep
+        env:
+          WORKERS: ${{ inputs.workers || '1,2,4' }}
+          REPEAT: ${{ inputs.repeat || '3' }}
+        run: |
+          . .bench-venv/bin/activate
+          cd examples/cpu-bench
+          python measure.py --workers "$WORKERS" --repeat "$REPEAT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # numpy's Linux wheels use OpenBLAS (macOS arm64 uses Accelerate), so this
+      # is the OpenBLAS data point for the worker x thread guidance.
+      - name: measure worker x BLAS-thread grid (OpenBLAS)
+        env:
+          REPEAT: ${{ inputs.repeat || '3' }}
+        run: |
+          . .bench-venv/bin/activate
+          cd examples/cpu-bench
+          python measure.py --grid --workers 1,2,4 --threads 1,2,4,unset --repeat "$REPEAT" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: upload results.json
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cpu-bench
+          path: examples/cpu-bench/results.json
+          if-no-files-found: ignore

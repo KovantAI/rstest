@@ -26,7 +26,7 @@ mod state;
 
 pub(crate) use dispatch::chunk_size;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -39,7 +39,7 @@ use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
-use io::{dispatch_to, spawn_into};
+use io::{dispatch_to, spawn_into, start_into};
 use state::WorkerState;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -83,6 +83,49 @@ impl std::str::FromStr for Dist {
     }
 }
 
+/// Dispatch ordering under `--dist load`. Ignored by the affinity/each modes
+/// (their order is the affinity contract, not a tunable).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Order {
+    /// Slow tests first, to pack workers (best wall-clock throughput).
+    #[default]
+    Throughput,
+    /// Recently failed, then flaky tests first, then the throughput order for
+    /// the rest: earliest red signal, for `--watch` and PR CI (compose with
+    /// `--maxfail`).
+    FailFast,
+}
+
+impl std::str::FromStr for Order {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "throughput" => Order::Throughput,
+            // Accept the hyphen spelling (the flag/doc form) and the
+            // underscore for convenience.
+            "fail-fast" | "failfast" | "fail_fast" => Order::FailFast,
+            other => {
+                return Err(format!(
+                    "unknown --order mode: {other} (use throughput|fail-fast)"
+                ))
+            }
+        })
+    }
+}
+
+/// Drop quarantined ids from the flake history fail-fast ranks on, so they
+/// fall into the normal (clean) tail instead of leading the queue.
+fn without_quarantined(
+    mut history: std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
+    quarantine: Option<&regex::RegexSet>,
+) -> std::collections::HashMap<String, crate::reporting::flakes::FlakeStats> {
+    if let Some(q) = quarantine {
+        history.retain(|id, _| !q.is_match(id));
+    }
+    history
+}
+
 /// Worker-pool parameters common to the eager (`run_pool`) and lazy
 /// (`run_lazy_pool`) orchestrators. Bundled so each entry point takes a handful
 /// of mode-specific args on top rather than one flat ~17-arg list.
@@ -99,6 +142,14 @@ pub struct PoolConfig<'a> {
     /// flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     pub known_flaky: Option<&'a std::collections::HashSet<String>>,
     pub worker_env: &'a crate::scheduling::worker::WorkerEnv,
+    /// `--fork-pool`: fork-prewarm the initial pool off one warm zygote (Unix
+    /// only; ignored elsewhere / on the crash-respawn path). Pays the vendored
+    /// pytest import once per run instead of once per worker.
+    pub fork_prewarm: bool,
+    /// `--quarantine` matcher. Fail-fast ordering drops matching ids from the
+    /// suspect set: a quarantined test fails every run by design, so leading
+    /// with it would trip `-x`/`--maxfail` and then be forgiven post-run.
+    pub quarantine: Option<&'a regex::RegexSet>,
 }
 
 /// Everything the orchestrator loop produces from one pool run, handed back to
@@ -125,6 +176,88 @@ pub struct PoolOutcome {
     /// Number of collected tests (the reference count all workers agreed on);
     /// 0 when unknown.
     pub collection_size: u64,
+    /// Wall time to spawn the initial worker pool (fork-prewarm zygote or plain
+    /// per-worker spawns), for `--doctor` startup reporting. 0.0 on paths that
+    /// don't spawn a pool (single-worker).
+    pub startup_seconds: f64,
+    /// Whether the initial pool was actually fork-prewarmed off a zygote (not
+    /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
+    /// don't spawn a pool). Feeds the `--doctor` report.
+    pub fork_prewarmed: bool,
+    /// pytest's rootdir and the collected test files' fingerprints, which the
+    /// duration cache tags this run's timings with.
+    pub sources: crate::scheduling::durations::Collected,
+}
+
+/// The `--dist` name for a mode, for the replay journal (inverse of the
+/// `FromStr` above; kept beside it so the two never drift).
+fn dist_name(dist: Dist) -> &'static str {
+    match dist {
+        Dist::Load => "load",
+        Dist::Loadfile => "loadfile",
+        Dist::Loadscope => "loadscope",
+        Dist::Loadgroup => "loadgroup",
+        Dist::Each => "each",
+    }
+}
+
+/// Warn once at replay time if this run's collection differs from the recorded
+/// one (tests added/removed/renamed since the journal). Replay proceeds with the
+/// tests that still match; the exact interleaving may differ.
+fn warn_replay_drift(
+    sink: &mut Sink,
+    pin: &crate::replay::PinnedSchedule,
+    reference: &Option<(u64, String)>,
+) {
+    let Some((count, hash)) = reference else {
+        return;
+    };
+    let size_drift = pin.collection_size != 0 && pin.collection_size != *count;
+    let hash_drift = pin
+        .collection_hash
+        .as_deref()
+        .is_some_and(|h| h != hash.as_str());
+    if *count == 0 && pin.collection_size > 0 {
+        // Nothing collected is not "the suite changed": it is almost always
+        // the wrong directory or a recorded path that doesn't exist here.
+        sink.warn(&format!(
+            "rstest: replay: collected no tests here (the journal had {}). Run replay from \
+             the directory the recording ran in, and check that the recorded test paths \
+             exist on this machine.",
+            pin.collection_size
+        ));
+    } else if size_drift || hash_drift {
+        sink.warn(&format!(
+            "rstest: replay: the suite changed since the journal was recorded \
+             (now {count} test(s), journal had {}). Replaying the tests that still \
+             match; the exact interleaving may differ.",
+            pin.collection_size
+        ));
+    }
+}
+
+/// Replay: hand `indices` to a worker and release its held last item. Chunked
+/// and best-effort like `dispatch_to`: a failed send means the worker is dying,
+/// and its crash event handles the remnant (already in `outstanding`). Called
+/// again for a slot's serial tail; the worker keeps draining, so items sent
+/// after a NoMoreItems still run.
+fn pin_send(s: &mut WorkerState, indices: Vec<u64>) {
+    if indices.is_empty() {
+        return;
+    }
+    s.outstanding.extend(indices.iter().copied());
+    for chunk in indices.chunks(4096) {
+        if s.worker
+            .send(&proto::Command::RunItems {
+                indices: chunk.to_vec(),
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+    s.finishing = true;
+    let _ = s.worker.send(&proto::Command::NoMoreItems);
 }
 
 /// The clean nodeid for a dispatched index, from the designate's id list.
@@ -152,9 +285,14 @@ fn known_flaky_ok(
     })
 }
 
+// The eager pool's knobs (dist/order/shuffle/shard/skip/pinned) are genuinely
+// independent run-shaping inputs; bundling them buys no clarity over the named
+// params, so this one call site keeps them flat.
+#[allow(clippy::too_many_arguments)]
 pub fn run_pool(
     cfg: &PoolConfig,
     dist: Dist,
+    order: Order,
     track_durations: bool,
     shuffle: Option<u64>,
     shard: Option<(usize, usize)>,
@@ -162,6 +300,10 @@ pub fn run_pool(
     // is unchanged. Collected but never dispatched; carried forward as cached
     // passes. Empty = feature off.
     skip_ids: &std::collections::HashSet<String>,
+    // `rstest replay`: a recorded per-worker schedule to re-pin. When Some, the
+    // dynamic dispatch queue is bypassed entirely — each worker runs exactly its
+    // recorded nodeids in order — and no new journal is written.
+    pinned: Option<&crate::replay::PinnedSchedule>,
     sink: &mut Sink,
 ) -> Result<PoolOutcome> {
     let &PoolConfig {
@@ -175,18 +317,51 @@ pub fn run_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        fork_prewarm,
+        quarantine,
     } = cfg;
+    // Widened by the designate's CollectionDone when `-x`/`--maxfail` comes
+    // from ini `addopts` / PYTEST_ADDOPTS, which the argv parse can't see.
+    let mut maxfail = maxfail;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
+    // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
+    // otherwise this is n independent spawns. Each worker then gets its session
+    // command + reader thread via start_into. Time the spawn so --doctor can
+    // report pool startup cost (the lever --fork-pool moves).
+    let spawn_start = std::time::Instant::now();
+    let workers =
+        crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
+    // What actually happened, not what was asked: spawn_pool falls back to
+    // plain spawns when the zygote can't get its fds.
+    let fork_prewarmed = workers
+        .first()
+        .is_some_and(crate::scheduling::worker::Worker::is_forked);
     let mut states = Vec::new();
-    for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
+    for (idx, worker) in workers.into_iter().enumerate() {
+        let worker = start_into(worker, idx, args, &tx)?;
         states.push(WorkerState::fresh(worker));
     }
+    // "Pool ready" = every initial worker has emitted its first event (imported
+    // its core + started collecting). This is the startup window --fork-pool
+    // shrinks; stamped in the event loop when all n have responded. Timing the
+    // spawn call itself would be unfair — the plain path returns before its
+    // workers import (that cost is paid async, off-thread), while the zygote
+    // blocks on the shared import, so spawn duration understates one and
+    // overstates the other.
+    let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut startup_seconds = 0.0f64;
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
     // explicit done_workers break, not channel disconnect.
 
     let duration_cache = crate::scheduling::durations::load();
+    // Flake history feeds fail-fast ordering; empty (and untouched) under the
+    // throughput default so a cold cache costs nothing.
+    let flake_history = if order == Order::FailFast {
+        without_quarantined(crate::reporting::flakes::load(), quarantine)
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut run = Run::default();
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
@@ -217,6 +392,7 @@ pub fn run_pool(
     // rstest routes it to a sibling).
     let mut pending_downs: VecDeque<(serde_json::Value, String)> = VecDeque::new();
     let mut cache_dir: Option<String> = None;
+    let mut sources = crate::scheduling::durations::Collected::default();
     let mut rerun_used: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
     // @pytest.mark.flaky(reruns=N) budgets, from the designate's payload.
     let mut flaky_budget: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
@@ -232,6 +408,50 @@ pub fn run_pool(
     // bounded overshoot, same trade xdist makes).
     let mut stopping = false;
 
+    // Replay journaling: record each worker's ordered item_starts so the
+    // schedule can be re-pinned later. Off during a replay (don't re-journal),
+    // for --dist each (every worker runs everything — nothing to replay), for a
+    // shard (partial suite), or when opted out. Nodeid, not index, so the
+    // journal survives a machine hop (CI -> local).
+    // Also off for a one-worker pool (`-n 1 --reruns N` runs through here): it
+    // has no parallel schedule to reproduce, replay rejects it, and writing it
+    // would clobber the last parallel run's latest.json.
+    let journaling = pinned.is_none()
+        && n >= 2
+        && dist != Dist::Each
+        && shard.is_none()
+        && crate::replay::journaling_enabled();
+    let mut recorder: Vec<Vec<String>> = if journaling {
+        vec![Vec::new(); n]
+    } else {
+        Vec::new()
+    };
+    // Indices already journaled: a --reruns retry (same or another worker)
+    // re-announces item_start, but the journal keeps only the FIRST attempt,
+    // the one whose schedule produced the failure. Replay runs with reruns off,
+    // so a duplicate entry would just run the test twice.
+    let mut journaled: HashSet<u64> = HashSet::new();
+    // Replay: state for translating the recorded assignment into this run's
+    // indices and reporting drift/missing once.
+    let mut pin_warned_drift = false;
+    let mut pin_missing = 0usize;
+    let mut pin_missing_warned = false;
+    // Replay: nodeid -> this run's collected indices (ascending), built once
+    // when the id list arrives. A queue per nodeid so a nodeid collected at
+    // several positions (duplicate parametrize ids) maps each recorded
+    // occurrence to its own position instead of running the first one twice.
+    let mut pin_index: Option<HashMap<String, VecDeque<u64>>> = None;
+    // Replay: a crashed worker's not-yet-run pinned remainder (this run's
+    // indices, recorded order), handed to its replacement instead of the
+    // whole recorded list. Mirrors `each_remnant`.
+    let mut pin_remnant: Vec<Option<Vec<u64>>> = vec![None; n];
+    // Replay: this run's @serial indices, and each slot's pinned serial tail
+    // held back until every other worker has finished. The recording ran them
+    // in the serial phase (alone); replaying them as soon as their worker got
+    // there would run them concurrently with other workers' tests.
+    let mut pin_serial: HashSet<u64> = HashSet::new();
+    let mut pin_serial_held: Vec<Option<Vec<u64>>> = vec![None; n];
+
     loop {
         let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok(pair) => pair,
@@ -245,6 +465,11 @@ pub fn run_pool(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        // First response from an initial worker (Ok event or a startup crash):
+        // when all n have responded, the pool is warm — record the window.
+        if ready_workers.len() < n && ready_workers.insert(idx) && ready_workers.len() == n {
+            startup_seconds = spawn_start.elapsed().as_secs_f64();
+        }
         match event {
             Ok(Event::Report(mut r)) => {
                 if dist == Dist::Each {
@@ -279,6 +504,16 @@ pub fn run_pool(
                 run.collect_error(path, longrepr);
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
+            Ok(Event::JunitSuite {
+                name,
+                timestamp,
+                hostname,
+                properties,
+                extra,
+            }) => run
+                .junit
+                .record_suite(name, timestamp, hostname, properties, extra),
             Ok(Event::Warnings { entries }) => {
                 // Per-test warnings are disjoint across workers; config and
                 // collection warnings repeat in every session, so count those
@@ -307,11 +542,33 @@ pub fn run_pool(
                 groups,
                 locations: _,
                 marks: _,
+                rootdir,
+                args_source: _,
+                root_args: _,
+                inifile: _,
+                order_flags: _,
+                confcutdir: _,
+                maxfail: reported_maxfail,
             }) => {
+                // pytest's own resolution (argv + addopts, last wins) is
+                // authoritative; it arrives before any item is dispatched.
+                if reported_maxfail.is_some() {
+                    maxfail = reported_maxfail;
+                }
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
                 }
-                if dist != Dist::Each {
+                if let Some(rd) = &rootdir {
+                    sources.set_rootdir(rd);
+                }
+                if let Some(ids) = &ids {
+                    sources.record(ids);
+                    run.junit.set_collection_order(ids);
+                }
+                // Replay runs with reruns off, @mark.flaky included: a retried
+                // attempt would be requeued onto a dispatch queue replay never
+                // builds, silently dropping the failure being reproduced.
+                if dist != Dist::Each && pinned.is_none() {
                     if let Some(f) = flaky {
                         for (k, v) in f {
                             if let Ok(i) = k.parse::<u64>() {
@@ -349,7 +606,12 @@ pub fn run_pool(
                     }
                 }
                 if let Some(ids) = ids {
-                    if dispatch.is_none() && dist != Dist::Each {
+                    if pinned.is_some() {
+                        pin_serial.extend(serial.iter().flatten().copied());
+                    }
+                    // Replay pins the exact per-worker lists, so the dynamic
+                    // dispatch queue is never built; seeding happens below.
+                    if dispatch.is_none() && dist != Dist::Each && pinned.is_none() {
                         // --shard: keep only bucket K's node-ids, deselecting
                         // the rest. Under an affinity dist mode we partition at
                         // group granularity so a group is never split (its contract).
@@ -435,15 +697,17 @@ pub fn run_pool(
                             cached_ids.append(&mut cached);
                             Some(run_idx)
                         };
-                        dispatch = Some(build_dispatch(
+                        dispatch = build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
                             groups.unwrap_or_default(),
                             &duration_cache,
+                            &flake_history,
                             dist,
+                            order,
                             shuffle,
                             keep.as_ref(),
-                        )?);
+                        );
                     }
                     ids_store.get_or_insert(ids);
                 }
@@ -455,9 +719,15 @@ pub fn run_pool(
             Ok(Event::ItemStart { index }) => {
                 states[idx].running = Some(index);
                 states[idx].running_since = Some(std::time::Instant::now());
-                let nodeid = nodeid_at(&ids_store, index)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("<item #{index}>"));
+                let resolved = nodeid_at(&ids_store, index).map(str::to_string);
+                // Journal the emergent schedule: worker `idx` started this
+                // nodeid, in order. Recorded per worker so replay can re-pin it.
+                if journaling && journaled.insert(index) {
+                    if let Some(id) = &resolved {
+                        recorder[idx].push(id.clone());
+                    }
+                }
+                let nodeid = resolved.unwrap_or_else(|| format!("<item #{index}>"));
                 prog.item_started(sink, idx, nodeid);
             }
             Ok(Event::Stopped { unrun }) => {
@@ -622,6 +892,20 @@ pub fn run_pool(
                                 .filter(|&i| Some(i) != crashed_orig)
                                 .collect(),
                         );
+                    } else if pinned.is_some() && states[idx].seeded {
+                        // Replay: the replacement runs only what this worker
+                        // had left, in order. Without this it would be seeded
+                        // with the full recorded list and re-run tests that
+                        // already finished (including the crasher, in a loop
+                        // until the restart budget ran out). A worker that died
+                        // before it was seeded ran nothing, so its replacement
+                        // takes the full recorded list (no remnant).
+                        pin_remnant[idx] = Some(
+                            orphaned
+                                .into_iter()
+                                .filter(|&i| Some(i) != crashed_orig)
+                                .collect(),
+                        );
                     } else if let Some(d) = dispatch.as_mut() {
                         for i in orphaned.into_iter().filter(|&i| Some(i) != crashed_orig) {
                             d.requeued.push_back(i);
@@ -699,7 +983,8 @@ pub fn run_pool(
                 }
                 None => {
                     sink.warn(
-                        "rstest: no surviving worker to run pytest_testnodedown                          for a crashed worker; per-worker resources may leak",
+                        "rstest: no surviving worker to run pytest_testnodedown \
+                         for a crashed worker; per-worker resources may leak",
                     );
                     break;
                 }
@@ -708,8 +993,16 @@ pub fn run_pool(
 
         // If the designated id-carrier died before delivering ids, fall
         // back to identity order rather than stalling. Serial marks are
-        // unknown in that case, so warn.
-        if dist != Dist::Each && dispatch.is_none() && reference.is_some() && states[0].dead {
+        // unknown in that case, so warn. Not under replay: its `dispatch` is
+        // always None by design (the pinned lists replace the queue), so a
+        // gw0 that simply finished would otherwise trip this and hand the
+        // whole suite to whichever workers are still open.
+        if dist != Dist::Each
+            && pinned.is_none()
+            && dispatch.is_none()
+            && reference.is_some()
+            && states[0].dead
+        {
             sink.warn(
                 "rstest: id-carrier worker died before reporting; \
                  falling back to collection order (serial marks unknown)",
@@ -745,6 +1038,119 @@ pub fn run_pool(
                 dispatch_to(s, d, chunk, true)?;
                 dispatch_to(s, d, chunk, true)?;
             }
+        }
+
+        // Replay: seed each worker with its recorded nodeids (resolved to this
+        // run's indices), in the recorded order. Bypasses the dynamic queue
+        // entirely, so like --dist each it drains and EndSessions on its own.
+        if let Some(pin) = pinned {
+            // Seed only once the id list has arrived (it rides on the designate's
+            // CollectionDone, which may lag another worker's). Each worker is
+            // seeded as it becomes collected (staggered, like the each-branch),
+            // so there is no latch that could skip a late collector.
+            if let Some(ids) = ids_store.as_ref() {
+                if !pin_warned_drift {
+                    pin_warned_drift = true;
+                    warn_replay_drift(sink, pin, &reference);
+                }
+                let index_of = pin_index.get_or_insert_with(|| {
+                    let mut m: HashMap<String, VecDeque<u64>> = HashMap::with_capacity(ids.len());
+                    for (i, id) in ids.iter().enumerate() {
+                        m.entry(id.clone()).or_default().push_back(i as u64);
+                    }
+                    m
+                });
+                for (i, s) in states
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(_, s)| s.collected && !s.seeded && !s.dead)
+                {
+                    s.seeded = true;
+                    if stopping {
+                        let _ = s.worker.send(&proto::Command::EndSession);
+                        s.ended = true;
+                        continue;
+                    }
+                    let indices: Vec<u64> = match pin_remnant[i].take() {
+                        // A crash replacement: only the dead worker's remainder.
+                        Some(rest) => rest,
+                        None => pin
+                            .assignment
+                            .get(i)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|id| {
+                                let at =
+                                    index_of.get_mut(id.as_str()).and_then(VecDeque::pop_front);
+                                if at.is_none() {
+                                    pin_missing += 1;
+                                }
+                                at
+                            })
+                            .collect(),
+                    };
+                    let (serial_tail, indices): (Vec<u64>, Vec<u64>) =
+                        indices.into_iter().partition(|i| pin_serial.contains(i));
+                    if !serial_tail.is_empty() {
+                        pin_serial_held[i]
+                            .get_or_insert_with(Vec::new)
+                            .extend(serial_tail);
+                    }
+                    pin_send(s, indices);
+                }
+                // Serial phase: release one slot's held serial tail once every
+                // other worker has finished its session (Done), the rule the
+                // normal serial phase uses. A worker that is itself idle and
+                // waiting on a serial tail doesn't block; the lowest such slot
+                // goes first and the next goes after it ends, so serial tests
+                // never overlap anything.
+                // A slot that died for good (restart budget spent) is skipped: its tail
+                // is lost with it (already reported as a worker failure), and
+                // waiting on it would stall every later slot.
+                if let Some(i) =
+                    (0..states.len()).find(|&i| pin_serial_held[i].is_some() && !states[i].dead)
+                {
+                    if stopping {
+                        pin_serial_held.iter_mut().for_each(|h| *h = None);
+                    } else {
+                        let idle = |s: &WorkerState| s.seeded && s.outstanding.is_empty();
+                        let others_done = states.iter().enumerate().all(|(j, o)| {
+                            j == i || o.dead || (pin_serial_held[j].is_some() && idle(o))
+                        });
+                        let s = &mut states[i];
+                        if others_done && !s.dead && idle(s) {
+                            let tail = pin_serial_held[i].take().unwrap_or_default();
+                            pin_send(s, tail);
+                        }
+                    }
+                }
+                // Once every worker is seeded, report any recorded tests that no
+                // longer collect (renamed/removed since the journal), just once.
+                // Skipped when nothing collected: the drift note already
+                // explained that, and "renamed or removed" would mislead.
+                if !pin_missing_warned
+                    && pin_missing > 0
+                    && !ids.is_empty()
+                    && states.iter().all(|s| s.seeded || s.dead)
+                {
+                    pin_missing_warned = true;
+                    sink.warn(&format!(
+                        "rstest: replay: {pin_missing} recorded test(s) are no longer collected \
+                         (renamed or removed since the journal) and were skipped"
+                    ));
+                }
+            }
+            for (_, s) in states.iter_mut().enumerate().filter(|(i, s)| {
+                s.seeded
+                    && !s.dead
+                    && !s.ended
+                    && s.outstanding.is_empty()
+                    && pin_serial_held[*i].is_none()
+            }) {
+                let _ = s.worker.send(&proto::Command::EndSession);
+                s.ended = true;
+            }
+            continue;
         }
 
         // Each-mode: a verified worker is seeded with the FULL suite (or a
@@ -866,6 +1272,20 @@ pub fn run_pool(
         Some((count, hash)) => (count, Some(hash)),
         None => (0, None),
     };
+    // Persist the schedule for `rstest replay`. Best-effort; a write failure
+    // never affects the run's outcome.
+    if journaling {
+        crate::replay::write(&crate::replay::Journal::record(
+            worker_env.run_uid.clone(),
+            n,
+            dist_name(dist).to_string(),
+            shuffle,
+            args.to_vec(),
+            collection_hash.clone(),
+            collection_size,
+            std::mem::take(&mut recorder),
+        ));
+    }
     Ok(PoolOutcome {
         run,
         prog,
@@ -875,6 +1295,9 @@ pub fn run_pool(
         exitstatus,
         collection_hash,
         collection_size,
+        startup_seconds,
+        fork_prewarmed,
+        sources,
     })
 }
 
@@ -931,6 +1354,35 @@ fn partition_skip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_quarantined_drops_only_matching_ids() {
+        use crate::reporting::flakes::FlakeStats;
+        let red = FlakeStats {
+            failed: 3,
+            ..Default::default()
+        };
+        let h = std::collections::HashMap::from([
+            ("q.py::always_red".to_string(), red),
+            ("a.py::real_red".to_string(), red),
+        ]);
+        let q = regex::RegexSet::new(["^q\\.py::.*$"]).unwrap();
+        let kept = without_quarantined(h.clone(), Some(&q));
+        assert!(!kept.contains_key("q.py::always_red"));
+        assert!(kept.contains_key("a.py::real_red"));
+        // No --quarantine: history untouched.
+        assert_eq!(without_quarantined(h, None).len(), 2);
+    }
+
+    #[test]
+    fn order_from_str_parses_and_rejects() {
+        assert_eq!("throughput".parse::<Order>().unwrap(), Order::Throughput);
+        assert_eq!("fail-fast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!("failfast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!("fail_fast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!(Order::default(), Order::Throughput);
+        assert!("sideways".parse::<Order>().is_err());
+    }
 
     #[test]
     fn partition_skip_dedups_and_splits() {

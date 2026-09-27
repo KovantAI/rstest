@@ -10,15 +10,30 @@ use crate::reporting::sink::Sink;
 /// renderers; classify once here, let each surface word it (the wordings
 /// differ, so this returns the category, not the text).
 enum FixtureAdvice {
-    /// A function-scoped fixture that ran often and cost real time.
+    /// A function-scoped fixture that returned the same immutable value every
+    /// call, with no per-test teardown or narrower-scoped inputs: a likely
+    /// session-scope candidate that saves real time.
+    PromoteScope,
+    /// A function-scoped fixture that ran often and cost real time, but whose
+    /// value we did not verify constant (heuristic only).
     WidenScope,
     /// A session fixture that ran more than once (once per worker).
     SessionPerWorker,
     None,
 }
 
+/// Candidates saving less than this are noise (e.g. a cheap constant that
+/// ran a handful of times); the JSON still carries them.
+const MIN_PROMOTION_SAVING_SECONDS: f64 = 0.01;
+
+fn is_promotion_candidate(f: &FixtureEntry) -> bool {
+    f.constant && f.projected_saving_seconds >= MIN_PROMOTION_SAVING_SECONDS
+}
+
 fn fixture_advice(f: &FixtureEntry) -> FixtureAdvice {
-    if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
+    if is_promotion_candidate(f) {
+        FixtureAdvice::PromoteScope
+    } else if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
         FixtureAdvice::WidenScope
     } else if f.scope == "session" && f.count > 1 {
         FixtureAdvice::SessionPerWorker
@@ -43,6 +58,9 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         "**{} tests** — test time {:.1}s (wall {:.1}s, {} workers)\n",
         r.tests, r.test_time_seconds, r.wall_seconds, r.workers
     );
+    if let Some(line) = startup_line(r) {
+        let _ = writeln!(md, "{line}\n");
+    }
 
     if let Some(w) = &r.wait_bound {
         let _ = writeln!(
@@ -123,16 +141,49 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
         for f in interesting {
             let advice = match fixture_advice(f) {
-                FixtureAdvice::WidenScope => "ran many times; widen scope if value is reusable",
-                FixtureAdvice::SessionPerWorker => {
-                    "session fixture ran once per worker; must be safe to duplicate"
+                FixtureAdvice::PromoteScope => format!(
+                    "same value every call; promote to `scope=\"session\"` to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "ran many times; widen scope if value is reusable".to_string()
                 }
-                FixtureAdvice::None => "",
+                FixtureAdvice::SessionPerWorker => {
+                    "session fixture ran once per worker; must be safe to duplicate".to_string()
+                }
+                FixtureAdvice::None => String::new(),
             };
             let _ = writeln!(
                 md,
                 "| `{}` | {} | {} | {:.1}s | {advice} |",
                 f.name, f.scope, f.count, f.total_seconds
+            );
+        }
+        md.push('\n');
+    }
+
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| is_promotion_candidate(f))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        md.push_str("### Scope-promotion candidates\n\n");
+        md.push_str(
+            "> Function-scoped fixtures that produced the same value on every call. \
+             Promoting to `scope=\"session\"` skips the redundant re-setups \
+             (check the fixture body for side effects first).\n\n",
+        );
+        md.push_str("| Fixture | Runs | Projected saving |\n|---|---:|---:|\n");
+        for f in candidates.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| `{}` | {} | ~{:.2}s |",
+                f.name, f.count, f.projected_saving_seconds
             );
         }
         md.push('\n');
@@ -147,6 +198,23 @@ pub fn render_markdown(r: &DoctorReport) -> String {
                 f.file, f.total_seconds, f.pct
             );
         }
+    }
+    if let Some(cw) = &r.coverage_waste {
+        let _ = writeln!(
+            md,
+            "### Coverage waste\n\n> {:.1}s across {} slow test(s) that cover no \
+             line another test doesn't also cover (delete/merge candidates).\n",
+            cw.wasted_seconds, cw.redundant_tests
+        );
+        md.push_str("| Duration | Lines | Shared with | Test |\n|---:|---:|---:|---|\n");
+        for t in cw.tests.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| {:.2}s | {} | {} | `{}` |",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            );
+        }
+        md.push('\n');
     }
     if !r.leaks.is_empty() {
         md.push_str("### Resource leaks\n\n> Net threads/fds still open after teardown.\n\n");
@@ -222,6 +290,27 @@ fn buildkite_annotate(sink: &mut Sink, md: &str) {
     }
 }
 
+/// One-line pool-startup summary, or None when there's nothing to say (no pool
+/// spawned, i.e. single-worker). When startup is a notable share of wall on a
+/// multi-worker run, append the `--fork-pool` hint (Unix): that's exactly the
+/// tax the fork-prewarm path cuts.
+fn startup_line(r: &DoctorReport) -> Option<String> {
+    if r.startup_seconds <= 0.0 {
+        return None;
+    }
+    let pct = 100.0 * r.startup_seconds / r.wall_seconds.max(f64::EPSILON);
+    let mut line = format!(
+        "startup: {:.2}s spawning {} workers ({:.0}% of wall)",
+        r.startup_seconds, r.workers, pct
+    );
+    // Advisory only when it matters and isn't already on: a real chunk of a
+    // short multi-worker run, on Unix, without --fork-pool.
+    if cfg!(unix) && !r.fork_prewarm && r.workers > 1 && pct >= 15.0 && r.startup_seconds >= 0.1 {
+        line.push_str(" — try --fork-pool to prewarm the pool");
+    }
+    Some(line)
+}
+
 pub fn render(sink: &mut Sink, r: &DoctorReport) {
     if r.tests == 0 {
         sink.out_line("\n== rstest doctor: no timing data collected ==");
@@ -232,6 +321,10 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         "{} tests, {:.1}s test time (wall {:.1}s, {} workers)",
         r.tests, r.test_time_seconds, r.wall_seconds, r.workers
     ));
+
+    if let Some(line) = startup_line(r) {
+        sink.out_line(&line);
+    }
 
     if let Some(w) = &r.wait_bound {
         sink.out_line(&format!(
@@ -303,11 +396,17 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         sink.out_line("\nFIXTURE HOTSPOTS (setup time across all workers):");
         for f in interesting {
             let advice = match fixture_advice(f) {
-                FixtureAdvice::WidenScope => "  <- ran many times; widen scope if value is reusable",
-                FixtureAdvice::SessionPerWorker => {
-                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)"
+                FixtureAdvice::PromoteScope => format!(
+                    "  <- same value every call; promote to scope=\"session\" to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "  <- ran many times; widen scope if value is reusable".to_string()
                 }
-                FixtureAdvice::None => "",
+                FixtureAdvice::SessionPerWorker => {
+                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)".to_string()
+                }
+                FixtureAdvice::None => String::new(),
             };
             sink.out_line(&format!(
                 "  {:7.2}s {:6}x  scope={:<8} {}{advice}",
@@ -316,12 +415,56 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         }
     }
 
+    // Scope-promotion advisor: candidates verified value-constant, listed even
+    // when below the hotspot threshold, sorted by projected saving.
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| is_promotion_candidate(f))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        sink.out_line(
+            "\nSCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):",
+        );
+        for f in candidates.iter().take(8) {
+            sink.out_line(&format!(
+                "  ~{:6.2}s saved  {:6}x  {}  <- @pytest.fixture(scope=\"session\")",
+                f.projected_saving_seconds, f.count, f.name
+            ));
+        }
+        sink.out_line("  (check the fixture body for side effects before promoting)");
+    }
+
     sink.out_line("\nSLOWEST FILES:");
     for f in r.slowest_files.iter().take(5) {
         sink.out_line(&format!(
             "  {:7.2}s ({:4.1}%)  {}",
             f.total_seconds, f.pct, f.file
         ));
+    }
+
+    if let Some(cw) = &r.coverage_waste {
+        sink.out_line(&format!(
+            "\nCOVERAGE WASTE: {:.1}s across {} slow test(s) that cover no line \
+             another test doesn't also cover (delete/merge candidates):",
+            cw.wasted_seconds, cw.redundant_tests
+        ));
+        for t in cw.tests.iter().take(8) {
+            sink.out_line(&format!(
+                "  {:7.2}s  {} line(s), all shared with {} other test(s)  {}",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            ));
+        }
+        if cw.redundant_tests > cw.tests.len().min(8) {
+            sink.out_line(&format!(
+                "  ... and {} more",
+                cw.redundant_tests - cw.tests.len().min(8)
+            ));
+        }
     }
 
     if !r.leaks.is_empty() {
@@ -379,8 +522,61 @@ mod tests {
         assert!(md.contains("| `gw0` | 16.00s | 6 |"));
         assert!(md.contains("### Fixture hotspots"));
         assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
+        // The constant function-scoped `settings` fixture surfaces as a
+        // promotion candidate with its projected saving, and its hotspot row
+        // carries the promote advice.
+        assert!(md.contains("### Scope-promotion candidates"));
+        assert!(md.contains("| `settings` | 40 | ~0.90s |"));
+        assert!(md.contains("promote to `scope=\"session\"` to save ~0.90s"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
+        assert!(md.contains("### Coverage waste"));
+        assert!(md.contains("12.0s across 1 slow test(s)"));
+        assert!(md.contains("| 12.00s | 40 | 3 | `tests/test_a.py::test_redundant` |"));
+    }
+
+    #[test]
+    fn startup_line_reports_and_hints_conditionally() {
+        // No pool spawned (single-worker): nothing to report.
+        let mut r = report(12);
+        r.startup_seconds = 0.0;
+        assert!(startup_line(&r).is_none());
+
+        // A notable share of a short multi-worker run: line + hint (Unix only).
+        let mut r = report(12);
+        r.startup_seconds = 0.5;
+        r.wall_seconds = 1.0;
+        r.workers = 8;
+        r.fork_prewarm = false;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            line.contains("0.50s spawning 8 workers (50% of wall)"),
+            "{line}"
+        );
+        assert_eq!(
+            line.contains("--fork-pool"),
+            cfg!(unix),
+            "hint gated on unix"
+        );
+
+        // Already forked: report the line, never suggest --fork-pool again.
+        r.fork_prewarm = true;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            !line.contains("--fork-pool"),
+            "no hint when already forked: {line}"
+        );
+
+        // Tiny share: line still shown, but no hint (not worth acting on).
+        let mut r = report(12);
+        r.startup_seconds = 0.02;
+        r.wall_seconds = 9.0;
+        r.fork_prewarm = false;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            !line.contains("--fork-pool"),
+            "no hint for a tiny share: {line}"
+        );
     }
 
     #[test]
@@ -395,7 +591,19 @@ mod tests {
     // captures stdout) to prove the printing paths don't panic and are covered.
     #[test]
     fn render_terminal_populated_and_empty_dont_panic() {
-        render(&mut Sink::captured().0, &report(12)); // full report: every section printed
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &report(12)); // full report: every section printed
+        let out = cap.out();
+        assert!(
+            out.contains("COVERAGE WASTE: 12.0s across 1 slow test(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "40 line(s), all shared with 3 other test(s)  tests/test_a.py::test_redundant"
+            ),
+            "{out}"
+        );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
     }
 
@@ -442,6 +650,49 @@ mod tests {
         render(&mut Sink::captured().0, &r);
         let md = render_markdown(&r);
         assert!(md.contains("... and")); // truncation tail rendered
+    }
+
+    #[test]
+    fn coverage_waste_terminal_tail_counts_every_unshown_test() {
+        use super::super::WasteTest;
+        let mut r = report(12);
+        let cw = r.coverage_waste.as_mut().unwrap();
+        // 12 redundant tests found, only the 10 slowest kept: the terminal shows
+        // 8 and the tail counts the rest against the full total, not the list.
+        cw.redundant_tests = 12;
+        cw.tests = (0..10)
+            .map(|i| WasteTest {
+                nodeid: format!("tests/test_a.py::dup{i}"),
+                duration: 2.0,
+                covered_lines: 5,
+                also_covered_by: 1,
+            })
+            .collect();
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(out.contains("tests/test_a.py::dup7"), "{out}");
+        assert!(!out.contains("tests/test_a.py::dup8"), "{out}");
+        assert!(out.contains("  ... and 4 more"), "{out}");
+    }
+
+    #[test]
+    fn markdown_coverage_waste_without_slowest_files() {
+        let mut r = report(12);
+        r.slowest_files.clear();
+        let md = render_markdown(&r);
+        assert!(!md.contains("### Slowest files"));
+        assert!(md.contains("### Coverage waste"));
+    }
+
+    #[test]
+    fn no_coverage_index_omits_coverage_waste_section() {
+        let mut r = report(12);
+        r.coverage_waste = None;
+        assert!(!render_markdown(&r).contains("Coverage waste"));
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(!cap.out().contains("COVERAGE WASTE"));
     }
 
     #[test]
@@ -498,5 +749,61 @@ mod tests {
             })
             .collect();
         render(&mut Sink::captured().0, &r); // exercises the len > 10 truncation-tail branch
+    }
+
+    /// Covers every `FixtureAdvice` arm plus candidate sorting (needs two or
+    /// more candidates) in both the terminal and markdown renderers.
+    #[test]
+    fn fixture_advice_arms_and_candidate_order() {
+        use super::super::FixtureEntry;
+        let mut r = report(12);
+        let entry = |name: &str, count, total, constant, saving| FixtureEntry {
+            name: name.into(),
+            scope: "function".into(),
+            count,
+            total_seconds: total,
+            constant,
+            projected_saving_seconds: saving,
+        };
+        r.fixtures.extend([
+            // Many runs, real time, value not verified constant => widen.
+            entry("client", 25, 2.0, false, 0.0),
+            // Hotspot by time but too few runs for any advice.
+            entry("tmpdir", 2, 0.6, false, 0.0),
+            // Second candidate, smaller saving: must sort after `settings`.
+            entry("config", 30, 0.3, true, 0.3),
+        ]);
+
+        let md = render_markdown(&r);
+        assert!(md.contains("| `client` | function | 25 | 2.0s | ran many times; widen scope if value is reusable |"));
+        assert!(md.contains("| `tmpdir` | function | 2 | 0.6s |  |"));
+        let (settings, config) = (
+            md.find("| `settings` | 40 | ~0.90s |").unwrap(),
+            md.find("| `config` | 30 | ~0.30s |").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
+
+        let (mut sink, captured) = Sink::captured();
+        render(&mut sink, &r);
+        let out = captured.out();
+        assert!(out.contains(
+            "scope=function client  <- ran many times; widen scope if value is reusable"
+        ));
+        let tmpdir = out.lines().find(|l| l.contains("tmpdir")).unwrap();
+        assert!(
+            tmpdir.ends_with("scope=function tmpdir"),
+            "no advice: {tmpdir:?}"
+        );
+        let (settings, config) = (
+            out.find("40x  settings  <- @pytest.fixture").unwrap(),
+            out.find("30x  config  <- @pytest.fixture").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
     }
 }

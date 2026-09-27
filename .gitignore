@@ -22,6 +22,8 @@ site/
 corpus/work/
 corpus/lock.json
 corpus/results.json
+# bench.py's latest run; published runs are archived in corpus/bench-results/.
+corpus/bench.json
 .claude/*
 # Ship the migrate-to-rstest skill as part of the source; keep the rest of
 # .claude (local settings) and the eval scratch workspace ignored.

@@ -20,7 +20,8 @@ pub(crate) enum Command {
 
     /// Zero-config proof: run the suite under plain pytest and under rstest
     /// (-n auto), then report whether outcomes are identical and how much
-    /// faster rstest is. The 30-second "should I switch?" answer.
+    /// faster rstest is. The one-command "should I switch?" answer (costs one
+    /// serial pytest run plus one rstest run).
     Try,
 
     /// Parallel-readiness preflight: collect twice and report tests with
@@ -28,6 +29,29 @@ pub(crate) enum Command {
     /// (polluter bisected). Exits non-zero on any such finding. Combine with
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
+
+    /// Auto parallel-safety audit: run the suite under -n auto (repeat with
+    /// `--audit-repeat` to catch probabilistic flakes), diff against the -n 0
+    /// oracle, and print the tests that fail ONLY in parallel with a
+    /// ready-to-paste `@pytest.mark.serial` fix-list. Exits non-zero on any
+    /// parallel-only failure. `--audit-json` writes the findings for CI.
+    Audit,
+
+    /// Order-dependency bisect: for a test that fails only when run after some
+    /// other test, delta-debug the predecessor set at -n 0 to the minimal set of
+    /// earlier tests that reproduce the failure — the polluter(s). Prints the
+    /// culprits and a minimal reproducing command. `--bisect-json` writes it.
+    Bisect {
+        /// The failing test's nodeid (`path::test[param]`), rootdir- or
+        /// cwd-relative.
+        #[arg(value_name = "NODEID")]
+        nodeid: String,
+        /// pytest options after `--` (`-p plugin`, `-o key=val`, `-m expr`),
+        /// applied to the collection and every child run. Not test paths:
+        /// bisect selects tests by nodeid itself.
+        #[arg(last = true, value_name = "PYTEST_ARGS")]
+        pytest_args: Vec<String>,
+    },
 
     /// Maintenance: fold remote segments into a fresh base and prune them, then
     /// exit without running tests. Needs `--cache-remote`. With no retention
@@ -56,6 +80,39 @@ pub(crate) enum Command {
         #[arg(value_name = "REPORT_JSON", required = true, num_args = 1..)]
         reports: Vec<PathBuf>,
     },
+
+    /// Re-run a recorded parallel schedule. Every pool run (`-n >= 2`) journals
+    /// its exact per-worker assignment + order to `.rstest_cache/replay/`;
+    /// `replay` pins that schedule so a parallel-only failure reproduces. The
+    /// journal keys on nodeid, so a run journaled on CI replays locally: upload
+    /// `.rstest_cache/replay/latest.json` as an artifact and pass it with
+    /// `--journal`. Reruns and work-stealing are off; the recorded shuffle is
+    /// already baked into the pinned order.
+    Replay {
+        /// Which recorded run to replay: a run-uid (the journal file stem under
+        /// `.rstest_cache/replay/`). Omit to replay the most recent local run.
+        #[arg(value_name = "RUN_ID")]
+        run_id: Option<String>,
+        /// Replay a journal FILE directly (typically a downloaded CI artifact)
+        /// instead of one from the local cache. Takes precedence over RUN_ID.
+        #[arg(long, value_name = "FILE")]
+        journal: Option<PathBuf>,
+    },
+
+    /// Print one test's dossier from the caches without running anything:
+    /// last recorded duration, flake/fail history, last-green outcome, and the
+    /// coverage footprint (files it covered). Merges `durations.json`,
+    /// `flakes.json`, `incremental_outcomes.json`, and `coverage_index.json`
+    /// for the given nodeid. Reads only cache files, so it needs no interpreter.
+    Explain {
+        /// The test nodeid to explain, e.g. `tests/test_x.py::test_y`.
+        #[arg(value_name = "NODEID", required = true)]
+        nodeid: String,
+        /// Emit the dossier as JSON (schema-stamped) to stdout for tooling,
+        /// instead of the human-readable report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
@@ -79,6 +136,13 @@ pub struct Cli {
     /// Config: `[tool.rstest] numprocesses`. [default: auto]
     #[arg(short = 'n', long = "numprocesses")]
     pub(crate) numprocesses: Option<String>,
+
+    /// Fork-prewarm the worker pool (Unix only): import the vendored pytest core
+    /// once in a zygote, then fork the workers off it instead of paying that
+    /// import in every freshly spawned worker. Cuts pool startup at high `-n`;
+    /// no effect on Windows or single-worker runs. [default: off]
+    #[arg(long = "fork-pool")]
+    pub(crate) fork_pool: bool,
 
     /// Python interpreter to run workers with: a path, or a version request
     /// (`3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t`). Defaults to the active
@@ -119,6 +183,13 @@ pub struct Cli {
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,
 
+    /// Internal: turn on the workers' cpu/fixture instrumentation without the
+    /// doctor report. Passed only by a parent rstest (migrate-check's
+    /// classifier runs); a flag rather than an env var so a user's shell or CI
+    /// environment can never switch it on.
+    #[arg(long = "instrument-workers", hide = true)]
+    pub(crate) instrument_workers: bool,
+
     /// Write the migrate-check findings as JSON (stable, versioned schema) for
     /// CI gating. Used with the `migrate-check` subcommand.
     #[arg(long, global = true)]
@@ -130,11 +201,35 @@ pub struct Cli {
     #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
 
+    /// Write the `audit` findings as JSON (stable, versioned schema) for CI
+    /// gating. Used with the `audit` subcommand.
+    #[arg(long, global = true)]
+    pub(crate) audit_json: Option<PathBuf>,
+
+    /// How many times `audit` repeats the `-n auto` run; a parallel flake is
+    /// probabilistic, so more repeats catch more of them. [default: 1]
+    #[arg(long, global = true, value_name = "N")]
+    pub(crate) audit_repeat: Option<u32>,
+
+    /// Write the `bisect` result as JSON (culprits + reproduce command) for
+    /// tooling. Used with the `bisect` subcommand.
+    #[arg(long, global = true)]
+    pub(crate) bisect_json: Option<PathBuf>,
+
     /// Distribution mode: "load" (dynamic, duration-aware), "loadfile",
     /// "loadscope", "loadgroup" (xdist_group marker affinity), or "each"
     /// (every test on every worker). [default: load]
     #[arg(long)]
     pub(crate) dist: Option<String>,
+
+    /// Dispatch ordering under `--dist load`: "throughput" (slow tests first,
+    /// to pack workers — the default) or "fail-fast" (recently-failed, then
+    /// flaky tests first, then the throughput order for the rest, for the
+    /// earliest possible red signal). Pairs with `--maxfail`/`-x` for true
+    /// early exit. Auto-selects fail-fast under `--watch`. Config
+    /// `[tool.rstest] order`.
+    #[arg(long, value_name = "MODE")]
+    pub(crate) order: Option<String>,
 
     /// Write merged results as junit XML (intercepted: per-worker sessions
     /// would clobber a shared file).
@@ -196,9 +291,13 @@ pub struct Cli {
     #[arg(long, value_name = "SECS")]
     pub(crate) timeout: Option<f64>,
 
-    /// Run only tests affected by changed files (import-graph selection).
-    /// Without a value: working tree + untracked vs HEAD. With a value:
-    /// vs that git rev (e.g. --changed=origin/main in CI).
+    /// Run only tests affected by changed files. Coverage-aware when a warm
+    /// coverage map is present (any prior `--cov --cov-context=test` run writes
+    /// it): changed lines map to the exact covering tests, and the run reports
+    /// how many of the mapped tests are affected. A cold map degrades to
+    /// import-graph reachability with a one-line hint. Without a value: working
+    /// tree + untracked vs HEAD. With a value: vs that git rev (e.g.
+    /// --changed=origin/main in CI).
     #[arg(long, num_args = 0..=1, default_missing_value = "HEAD", value_name = "REV")]
     pub(crate) changed: Option<String>,
 
@@ -259,21 +358,27 @@ pub struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "random", value_name = "SEED")]
     pub(crate) shuffle: Option<String>,
 
-    /// Terminal output style: "dots", "verbose" (like -v), or "bar"
-    /// (pytest-sugar-style live progress). Config `[tool.rstest] output`.
-    /// Default "bar" on a tty ("verbose" with -v), "dots" off-tty.
+    /// Output style: "dots", "verbose" (like -v), or "bar" (pytest-sugar-style
+    /// live progress) for terminals; "github", "gitlab", "buildkite",
+    /// "teamcity", or "azure" for CI annotations; "tap" or "json" for
+    /// machine-readable streams. Config `[tool.rstest] output`. Default "bar"
+    /// on a tty ("verbose" with -v), "dots" off-tty. An unknown style warns and
+    /// falls back to "dots".
     #[arg(long, value_name = "STYLE")]
     pub(crate) output: Option<String>,
 
     /// Split the suite across N independent CI jobs and run only shard K
     /// (`--shard K/N`, K 1-based), balanced by the duration cache. Buckets are
-    /// disjoint, so merging per-job JUnit reconstructs the full run.
+    /// disjoint when every job sees the same collection and duration cache;
+    /// `rstest shard-verify` proves it after the fact. Needs `-n 2` or more.
     #[arg(long, value_name = "K/N")]
     pub(crate) shard: Option<String>,
 
     /// Shared-cache remote: a directory / `file://` path (local, an NFS/EFS
-    /// mount, or a dir a CI step materializes), or an `s3://` / `gs://` bucket
-    /// URL driven through the `aws` / `gcloud` CLI already on the runner. Also
+    /// mount, or a dir a CI step materializes), an `s3://` / `gs://` bucket
+    /// URL driven through the `aws` / `gcloud` CLI already on the runner, or an
+    /// `http(s)://` endpoint (bearer token from `RSTEST_CACHE_REMOTE_TOKEN`;
+    /// needs the default `http-cache` build feature). Also
     /// settable via `RSTEST_CACHE_REMOTE`. Enables `--cache-pull` /
     /// `--cache-push` / the `cache-compact` subcommand.
     #[arg(long, value_name = "URL|DIR", global = true)]
@@ -323,19 +428,180 @@ pub struct Cli {
     pub(crate) stream_json: Option<PathBuf>,
 }
 
+/// pytest short options that take a value. In a cluster (`-rA`, `-ksmoke`,
+/// `-pno:cov`) everything after one of these is its value, not more switches.
+const SHORT_VALUE_FLAGS: &[char] = &['k', 'm', 'p', 'c', 'o', 'W', 'r', 'n'];
+
+/// The short switches in one pytest argv token, the way argparse expands a
+/// cluster: `-sv` -> `['s', 'v']`, `-xrA` -> `['x', 'r']` (`A` is `-r`'s value).
+/// Empty for long options, a bare `-`, and positionals.
+pub(crate) fn short_switches(arg: &str) -> Vec<char> {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return Vec::new();
+    };
+    if rest.starts_with('-') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for c in rest.chars() {
+        out.push(c);
+        if SHORT_VALUE_FLAGS.contains(&c) {
+            break;
+        }
+    }
+    out
+}
+
+/// Does this argv token set short switch `c`, alone or clustered (`-x`, `-xv`)?
+pub(crate) fn has_short(arg: &str, c: char) -> bool {
+    short_switches(arg).contains(&c)
+}
+
+/// Session (pytest and common plugin) long options whose value can be the
+/// next token (`--ignore tests/slow`). Mined from the vendored core's
+/// `addoption` calls, plus the logging options and the plugins rstest's
+/// docs name. A plugin option missing here still works in `--opt=value` form.
+const SESSION_VALUE_FLAGS: &[&str] = &[
+    // pytest core
+    "--assert",
+    "--basetemp",
+    "--capture",
+    "--code-highlight",
+    "--color",
+    "--confcutdir",
+    "--config-file",
+    "--deselect",
+    "--doctest-glob",
+    "--doctest-report",
+    "--durations",
+    "--durations-min",
+    "--ignore",
+    "--ignore-glob",
+    "--import-mode",
+    "--junit-prefix",
+    "--junit-xml",
+    "--junitprefix",
+    "--junitxml",
+    "--last-failed-no-failures",
+    "--lfnf",
+    "--log-auto-indent",
+    "--log-cli-date-format",
+    "--log-cli-format",
+    "--log-cli-level",
+    "--log-date-format",
+    "--log-disable",
+    "--log-file",
+    "--log-file-date-format",
+    "--log-file-format",
+    "--log-file-level",
+    "--log-file-mode",
+    "--log-format",
+    "--log-level",
+    "--max-warnings",
+    "--maxfail",
+    "--override-ini",
+    "--pastebin",
+    "--pdbcls",
+    "--pythonwarnings",
+    "--report-chars",
+    "--rootdir",
+    "--show-capture",
+    "--tb",
+    "--verbosity",
+    // plugins
+    "--cov-config",
+    "--cov-context",
+    "--cov-fail-under",
+    "--cov-report",
+    "--dc",
+    "--ds",
+    "--hypothesis-profile",
+    "--hypothesis-seed",
+    "--max-worker-restart",
+    "--maxprocesses",
+    "--randomly-seed",
+    "--report-log",
+    "--rerun-except",
+    "--reruns-delay",
+    "--rsyncdir",
+    "--rsyncignore",
+    "--timeout-method",
+    "--tx",
+];
+
+/// Session options with an *optional* value (argparse `nargs="?"`): the next
+/// token is the value unless it looks like another option (`--cov src`).
+const SESSION_OPT_VALUE_FLAGS: &[&str] = &["--cache-show", "--cov"];
+
+/// Which session args are positionals (paths, nodeids, `@argsfile`) rather
+/// than options or an option's separate value, the way pytest's argparse
+/// reads them: `-k api` / `--ignore tests/slow` / `-xk api` name no path,
+/// even when `api` or `tests/slow` exists on disk.
+pub(crate) fn positional_mask(args: &[String]) -> Vec<bool> {
+    let mut mask = vec![false; args.len()];
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let takes_next = if a == "--" {
+            mask[i + 1..].iter_mut().for_each(|m| *m = true);
+            break;
+        } else if a.starts_with("--") {
+            !a.contains('=')
+                && (SESSION_VALUE_FLAGS.contains(&a)
+                    || (SESSION_OPT_VALUE_FLAGS.contains(&a)
+                        && args.get(i + 1).is_some_and(|n| !n.starts_with('-'))))
+        } else if a.len() > 1 && a.starts_with('-') {
+            // `-k VALUE` / `-xk VALUE`: the cluster ends on a value flag
+            // with nothing attached, so the value is the next token.
+            let sw = short_switches(a);
+            sw.len() == a.len() - 1 && sw.last().is_some_and(|c| SHORT_VALUE_FLAGS.contains(c))
+        } else {
+            mask[i] = true;
+            false
+        };
+        i += if takes_next { 2 } else { 1 };
+    }
+    mask
+}
+
+/// Positional session args naming an existing path (a pytest `@argsfile`
+/// counts by its file): the explicit selection.
+pub(crate) fn path_args(args: &[String]) -> Vec<&String> {
+    args.iter()
+        .zip(positional_mask(args))
+        .filter(|(a, pos)| *pos && std::path::Path::new(a.strip_prefix('@').unwrap_or(a)).exists())
+        .map(|(a, _)| a)
+        .collect()
+}
+
+/// The session args minus the explicit path selection: the flags, with
+/// their values, to keep when rstest substitutes its own selection
+/// (`--changed`, `--watch` reruns).
+pub(crate) fn without_path_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .zip(positional_mask(args))
+        .filter(|(a, pos)| {
+            !*pos || !std::path::Path::new(a.strip_prefix('@').unwrap_or(a)).exists()
+        })
+        .map(|(a, _)| a.clone())
+        .collect()
+}
+
 /// -x / --maxfail=N from the session args (also forwarded: each worker
 /// session stops itself; the orchestrator does the global coordination).
+/// Argv only: a limit from ini `addopts` arrives later, from the workers.
 pub(crate) fn parse_maxfail(args: &[String]) -> Option<u64> {
     let mut limit = None;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "-x" | "--exitfirst" => limit = Some(1),
+            "--exitfirst" => limit = Some(1),
             "--maxfail" => {
                 if let Some(v) = it.peek().and_then(|v| v.parse().ok()) {
                     limit = Some(v);
                 }
             }
+            _ if has_short(a, 'x') => limit = Some(1),
             _ => {
                 if let Some(v) = a.strip_prefix("--maxfail=").and_then(|v| v.parse().ok()) {
                     limit = Some(v);
@@ -385,23 +651,33 @@ pub(crate) fn parse_durations(args: &[String]) -> Option<(usize, f64)> {
 /// worker with inherited stdio and let the vendored core render. Stepwise is
 /// here too because it is inherently sequential and wants `-n 0` like xdist.
 pub(crate) fn needs_passthrough_io(session_args: &[String]) -> bool {
-    session_args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--collect-only"
-                | "--co"
-                | "-s"
-                | "--capture=no"
-                | "--pdb"
-                | "--trace"
-                | "--sw"
-                | "--stepwise"
-                | "--sw-skip"
-                | "--stepwise-skip"
-                | "--sw-reset"
-                | "--stepwise-reset"
-        ) || a.starts_with("--capture=")
-    })
+    passthrough_trigger(session_args).is_some()
+}
+
+/// The first session flag that forces the passthrough path (for messages),
+/// matching [`needs_passthrough_io`]. `-s` counts clustered too (`-sv`), and
+/// `--capture` in both its `=VALUE` and two-token (`--capture no`) forms.
+pub(crate) fn passthrough_trigger(session_args: &[String]) -> Option<&str> {
+    session_args
+        .iter()
+        .find(|a| {
+            matches!(
+                a.as_str(),
+                "--collect-only"
+                    | "--co"
+                    | "--capture"
+                    | "--pdb"
+                    | "--trace"
+                    | "--sw"
+                    | "--stepwise"
+                    | "--sw-skip"
+                    | "--stepwise-skip"
+                    | "--sw-reset"
+                    | "--stepwise-reset"
+            ) || a.starts_with("--capture=")
+                || has_short(a, 's')
+        })
+        .map(String::as_str)
 }
 
 pub(crate) fn is_collect_only(session_args: &[String]) -> bool {
@@ -424,8 +700,10 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
 /// `BOOL_FLAGS`: switches that consume no value.
 const BOOL_FLAGS: &[&str] = &[
     "--doctor",
+    "--fork-pool",
     "--watch",
     "--fail-on-leak",
+    "--instrument-workers",
     "--reruns-only-known-flaky",
     "--since-green",
     "--incremental",
@@ -449,8 +727,12 @@ const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
     "migrate-check",
+    "audit",
+    "bisect",
     "cache-compact",
     "shard-verify",
+    "replay",
+    "explain",
 ];
 
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
@@ -470,6 +752,9 @@ const VALUE_FLAGS: &[&str] = &[
     "--cache-remote",
     "--migrate-check-json",
     "--migrate-allow",
+    "--audit-json",
+    "--audit-repeat",
+    "--bisect-json",
     "--durations-regress",
     "--only-rerun",
     "--cov-diff-fail-under",
@@ -486,6 +771,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--dist",
     "--shard",
     "--collect",
+    "--order",
     "--keep-last",
     "--max-age",
     "--cache-compact-threshold",
@@ -524,10 +810,16 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
     {
         let sub = argv.next().unwrap();
-        // `shard-verify` runs no pytest session: every token after it is a clap
-        // positional (report-json paths), so route them all to `own` rather than
-        // forwarding non-flag tokens to the (nonexistent) session.
-        let consumes_all = sub == "shard-verify";
+        // `shard-verify` (report-json paths), `replay` (a run-id / `--journal`),
+        // `bisect` (a single nodeid) and `explain` (a nodeid) build no pytest
+        // session from argv: every token after them is a clap positional or a
+        // subcommand-local flag, so route them all to `own` rather than
+        // forwarding non-flag tokens to the (nonexistent argv-built) session.
+        // The nodeids contain `::`, which the flag tables would otherwise route
+        // to the session and hide from clap. `replay` gets its real session
+        // args from the journal, not argv.
+        let consumes_all =
+            sub == "shard-verify" || sub == "replay" || sub == "bisect" || sub == "explain";
         own.push(sub);
         if consumes_all {
             own.extend(argv.by_ref());
@@ -583,6 +875,120 @@ mod tests {
     }
 
     #[test]
+    fn replay_routes_run_id_and_journal_to_clap() {
+        use clap::Parser;
+        // `replay` builds no session from argv: the run-id positional and
+        // `--journal` are clap tokens, nothing forwards to pytest.
+        let (own, session) = split_args(v(&["replay", "myrun", "--journal", "ci.json"]));
+        assert_eq!(
+            own,
+            v(&["rstest", "replay", "myrun", "--journal", "ci.json"])
+        );
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Replay { run_id: Some(ref r), journal: Some(ref j) })
+                if r == "myrun" && j == std::path::Path::new("ci.json")
+        ));
+        // Bare `replay` => replay the latest local run.
+        let (own, _) = split_args(v(&["replay"]));
+        assert!(matches!(
+            Cli::parse_from(&own).command,
+            Some(Command::Replay {
+                run_id: None,
+                journal: None
+            })
+        ));
+    }
+
+    #[test]
+    fn explain_routes_nodeid_and_json_to_clap() {
+        use clap::Parser;
+        // `explain` runs no session: the nodeid positional and `--json` are clap
+        // tokens, not forwarded to pytest, even though the nodeid is a non-flag.
+        let (own, session) = split_args(v(&["explain", "t/x.py::test_a", "--json"]));
+        assert_eq!(own, v(&["rstest", "explain", "t/x.py::test_a", "--json"]));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Explain { ref nodeid, json: true }) if nodeid == "t/x.py::test_a"
+        ));
+    }
+
+    #[test]
+    fn bisect_routes_the_nodeid_to_clap() {
+        // The nodeid contains `::` and `[param]`; it must reach clap as the
+        // positional, not be forwarded to a (nonexistent) pytest session.
+        let (own, session) = split_args(v(&[
+            "bisect",
+            "tests/test_a.py::test_v[1-x]",
+            "--bisect-json",
+            "out.json",
+        ]));
+        assert_eq!(
+            own,
+            v(&[
+                "rstest",
+                "bisect",
+                "tests/test_a.py::test_v[1-x]",
+                "--bisect-json",
+                "out.json",
+            ])
+        );
+        assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn bisect_keeps_pytest_args_after_double_dash_for_clap() {
+        // `--` after `bisect` must not trigger the forward-everything-to-the-
+        // session rule: the pytest args belong to bisect's own positional.
+        let argv = ["bisect", "t.py::v", "--", "-p", "no:randomly", "-o", "x=1"];
+        let (own, session) = split_args(v(&argv));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::try_parse_from(own).unwrap();
+        assert_eq!(
+            bisect_parts(&cli),
+            Some(("t.py::v", v(&["-p", "no:randomly", "-o", "x=1"])))
+        );
+    }
+
+    /// The `bisect` subcommand's (nodeid, pytest args), or `None` for any other
+    /// command line.
+    fn bisect_parts(cli: &Cli) -> Option<(&str, Vec<String>)> {
+        match &cli.command {
+            Some(Command::Bisect {
+                nodeid,
+                pytest_args,
+            }) => Some((nodeid.as_str(), pytest_args.clone())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn bisect_parses_nodeid_and_json_path() {
+        let cli = Cli::try_parse_from(v(&[
+            "rstest",
+            "bisect",
+            "t.py::test_v",
+            "--bisect-json",
+            "b.json",
+        ]))
+        .unwrap();
+        assert_eq!(bisect_parts(&cli), Some(("t.py::test_v", vec![])));
+        // Any other command line is not a bisect.
+        assert_eq!(bisect_parts(&Cli::parse_from(["rstest"])), None);
+        assert_eq!(
+            cli.bisect_json.as_deref(),
+            Some(std::path::Path::new("b.json"))
+        );
+
+        // The nodeid is required.
+        assert!(Cli::try_parse_from(v(&["rstest", "bisect"])).is_err());
+    }
+
+    #[test]
     fn maxfail_forms() {
         assert_eq!(parse_maxfail(&v(&["-x"])), Some(1));
         assert_eq!(parse_maxfail(&v(&["--exitfirst"])), Some(1));
@@ -591,6 +997,84 @@ mod tests {
         // maxfail=0 means "no limit" in pytest.
         assert_eq!(parse_maxfail(&v(&["--maxfail=0"])), None);
         assert_eq!(parse_maxfail(&v(&["-k", "x"])), None);
+        // Clustered, either position; `-x` after a value flag is its value.
+        assert_eq!(parse_maxfail(&v(&["-xv"])), Some(1));
+        assert_eq!(parse_maxfail(&v(&["-vx"])), Some(1));
+        assert_eq!(parse_maxfail(&v(&["-kx"])), None);
+        assert_eq!(parse_maxfail(&v(&["-rx"])), None);
+    }
+
+    #[test]
+    fn short_switches_expand_clusters_up_to_a_value_flag() {
+        assert_eq!(short_switches("-sv"), vec!['s', 'v']);
+        assert_eq!(short_switches("-xrA"), vec!['x', 'r']);
+        assert_eq!(short_switches("-ksmoke"), vec!['k']);
+        assert!(short_switches("--verbose").is_empty());
+        assert!(short_switches("tests/").is_empty());
+        assert!(short_switches("-").is_empty());
+    }
+
+    #[test]
+    fn passthrough_sees_clustered_s_and_two_token_capture() {
+        for args in [
+            &["-sv"][..],
+            &["-vs"],
+            &["-xsv"],
+            &["--capture", "no"],
+            &["--capture=no"],
+        ] {
+            assert!(
+                needs_passthrough_io(&v(args)),
+                "{args:?} should force passthrough"
+            );
+        }
+        // `-rs` / `-ks`: `s` is the value of `-r` / `-k`.
+        for args in [&["-v"][..], &["-rs"], &["-ks"]] {
+            assert!(
+                !needs_passthrough_io(&v(args)),
+                "{args:?} must not force passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn path_args_skip_option_values_that_exist_on_disk() {
+        // `src` exists (cwd is the crate dir under cargo test): as a value it
+        // is not a selection, as a positional it is.
+        let args = v(&[
+            "-k",
+            "src",
+            "--ignore",
+            "src",
+            "--cov",
+            "src",
+            "-xk",
+            "src",
+            "--tb=short",
+            "src",
+        ]);
+        assert_eq!(path_args(&args), vec!["src"]);
+        assert_eq!(
+            without_path_args(&args),
+            v(&[
+                "-k",
+                "src",
+                "--ignore",
+                "src",
+                "--cov",
+                "src",
+                "-xk",
+                "src",
+                "--tb=short"
+            ])
+        );
+        // `--cov` without a value leaves the next positional alone.
+        assert_eq!(path_args(&v(&["--cov", "-q", "src"])), vec!["src"]);
+        // After `--` everything is positional.
+        assert_eq!(path_args(&v(&["--", "src"])), vec!["src"]);
+        // `@argsfile` counts by its file; a missing path isn't a selection.
+        assert_eq!(path_args(&v(&["@src", "no/such/dir"])), vec!["@src"]);
+        assert_eq!(without_path_args(&v(&["@src", "-q"])), v(&["-q"]));
     }
 
     #[test]
@@ -751,6 +1235,24 @@ mod tests {
                 max_age: Some(ref d),
             }) if d == "30d"
         ));
+    }
+
+    #[test]
+    fn instrument_workers_is_a_hidden_owned_flag() {
+        use clap::{CommandFactory, Parser};
+        // Owned by clap (never forwarded to pytest) and parsed as a switch.
+        let (own, session) = split_args(v(&["--instrument-workers", "tests/"]));
+        assert_eq!(own, v(&["rstest", "--instrument-workers"]));
+        assert_eq!(session, v(&["tests/"]));
+        assert!(Cli::parse_from(&own).instrument_workers);
+        assert!(!Cli::parse_from(["rstest"]).instrument_workers);
+        // Internal plumbing for a parent rstest: kept out of --help.
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some("instrument-workers"))
+            .unwrap();
+        assert!(arg.is_hide_set());
     }
 
     #[test]

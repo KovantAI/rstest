@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.13"
       - name: scaffold uv project
@@ -133,6 +133,26 @@ jobs:
           set -euo pipefail
           test "${{ steps.hard.outcome }}" = "failure" \
             || { echo "expected hard-fail-on to fail the gate, got ${{ steps.hard.outcome }}"; exit 1; }
+
+      # The gate tolerates test failures only: a run that collects nothing
+      # (exit 5) must still fail the job, even with a permissive ratio.
+      - name: scaffold empty suite
+        run: mkdir -p empty && echo "x = 1" > empty/helper.py
+      - uses: ./.github/actions/rstest
+        id: nothing
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: empty
+          args: "-n 2"
+          fail-under-ratio: "1.0"
+          cache: false
+      - name: assert non-test exit code is not masked
+        run: |
+          set -euo pipefail
+          test "${{ steps.nothing.outcome }}" = "failure" \
+            || { echo "expected exit ${{ steps.nothing.outputs.exit-code }} to fail the ratio gate, got ${{ steps.nothing.outcome }}"; exit 1; }
 
   doctor-gate:
     name: doctor-metric gate

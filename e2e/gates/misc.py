@@ -11,7 +11,8 @@ def gate_basics(g, args, binary):
     check("parallel exit 1", r.returncode == 1)
     check("header line", r.stdout.startswith("rstest "), r.stdout[:80])
     r = g.run("basic/test_basic.py", "-n", "0", "-k", "passes")
-    check("-n 0 exact mode + -k", "2 passed" in r.stdout and "pytest-exact" in r.stdout)
+    # Byte-exact mode prints pytest's own terminal output (its session header).
+    check("-n 0 exact mode + -k", "2 passed" in r.stdout and "test session starts" in r.stdout)
     r = g.run("basic/test_basic.py", "--co", "-q")
     check("--co passthrough", "test_basic.py::test_passes" in r.stdout)
     r = g.run("basic/test_basic.py", "-n", "2", "-v")
@@ -37,3 +38,34 @@ def gate_collection_error_semantics(g, args, binary):
         r.returncode == 2 and " passed" not in r.stdout,
         f"rc={r.returncode} " + r.stdout[-200:],
     )
+
+
+def gate_worker_identity_fixtures(g, args, binary):
+    print("== worker identity fixtures (worker_id / testrun_uid) ==")
+    # The gate venv has NO pytest-xdist installed, so these fixtures resolve
+    # only because rstest ships them natively. This is the migrate-off-xdist
+    # landmine: a suite that drops pytest-xdist from its config keeps
+    # `def test(worker_id)` working.
+    g.write(
+        "widfix/test_wid.py",
+        "def test_worker_id(worker_id):\n"
+        "    assert worker_id == 'master' or worker_id.startswith('gw')\n"
+        "def test_testrun_uid(testrun_uid):\n"
+        "    assert isinstance(testrun_uid, str) and testrun_uid\n",
+    )
+    r = g.run("widfix/test_wid.py", "-n", "0")
+    check("fixtures resolve at -n 0", "2 passed" in r.stdout, r.stdout[-300:])
+    r = g.run("widfix/test_wid.py", "-n", "2")
+    check("fixtures resolve under the pool", "2 passed" in r.stdout, r.stdout[-300:])
+    # Pin the -n 0 value: single-worker mode has no worker identity, so
+    # worker_id is "master" (xdist parity).
+    g.write(
+        "widfix/test_master.py",
+        "def test_master(worker_id):\n    assert worker_id == 'master'\n",
+    )
+    r = g.run("widfix/test_master.py", "-n", "0")
+    check("worker_id is 'master' at -n 0", "1 passed" in r.stdout, r.stdout[-300:])
+    # --reruns at -n 0 runs a one-worker pool (workerinput is built); still
+    # single-worker mode, so still "master".
+    r = g.run("widfix/test_master.py", "-n", "0", "--reruns", "1")
+    check("worker_id is 'master' at -n 0 --reruns", "1 passed" in r.stdout, r.stdout[-300:])

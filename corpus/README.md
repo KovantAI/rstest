@@ -9,6 +9,18 @@ The plugins these suites load (and pass under rstest) are inventoried in
 [docs/reference/corpus-plugins.md](../docs/reference/corpus-plugins.md);
 regenerate it after a `--prepare` refresh (see that file's footer).
 
+Plugins install unpinned, so their versions move between runs. Each run
+records every suite venv's plugins (name, version, declared pytest range)
+under `plugins` in `results.json`; the weekly bench uploads it with
+`bench.json`. Refresh the version table in
+[docs/guides/plugin-stack.md](../docs/guides/plugin-stack.md) from it:
+
+```sh
+python3 corpus/plugin_versions.py                   # from results.json
+python3 corpus/plugin_versions.py --from-venvs      # probe corpus/work/*/venv
+python3 corpus/plugin_versions.py --plugins all     # every plugin seen
+```
+
 ## Running
 
 ```sh
@@ -64,6 +76,24 @@ runners is noisy. Each rstest run is still diffed against pytest — parity belo
 `--parity-floor` fails, so a fast-but-wrong run is never counted as a win (all
 five defaults are documented at 100% parity). Report → stdout +
 `$GITHUB_STEP_SUMMARY`, data → `bench.json`.
+
+Options for the CPU-bound benchmarks (sympy, scikit-learn; see
+[docs/reference/benchmarks.md](../docs/reference/benchmarks.md#cpu-bound-suites)):
+
+```sh
+# Sweep any -n values, with pytest-xdist at the same -n (needs xdist in the venv).
+python3 corpus/bench.py --only sympy,scikit-learn --sweep sympy,scikit-learn \
+    --sweep-workers 1,2,4,8,10,14 --xdist --repeat 5
+# Peak memory per -n, and the -n x BLAS-thread grid (psutil for the tree total).
+python3 corpus/bench.py --only scikit-learn --sweep '' --memory scikit-learn \
+    --grid scikit-learn --grid-workers 1,2,4,10,14 --grid-threads 1,2,4,unset
+```
+
+Every point gets `--warmup` untimed runs first (default 1). rstest is warm
+unless `--cold` (drops `.rstest_cache` before every run). A run the machine
+slept through is detected (wall clock vs monotonic clock) and re-run; on macOS,
+wrap long runs in `caffeinate -ims` anyway. `bench.json` holds the latest run;
+runs published in the docs are archived in `bench-results/`.
 
 Runs weekly (+ manual) on a standard GitHub runner via
 `.github/workflows/corpus-bench.yml` — a fresh measured datapoint on public

@@ -1,29 +1,51 @@
 # Compatibility
 
+What rstest promises about matching pytest's behavior, how that promise is measured against real suites, and the known gaps.
+
 ## The contract
 
-1. **At `-n 0`: byte-exact.** One vendored-pytest session over your
-   arguments. Any behavioral difference at `-n 0` is a bug in rstest.
+1. **At `-n 0`: pytest's exact outcomes.** One vendored-pytest session
+   over your arguments. Any difference in per-test outcomes at `-n 0` is a
+   bug in rstest. The named exceptions are the
+   [flags rstest shares with pytest or a plugin](../reference/cli.md#shadowed-flags)
+   (`--junitxml`, `--html`, `--timeout`, `--reruns`, `--debug`, ...): rstest
+   handles them itself at every worker count, so they behave the same at
+   `-n 0` as in parallel rather than as in pytest. `@pytest.mark.timeout` is
+   rstest's native timeout too (its SIGALRM timer is armed for marked tests
+   even without `--timeout`). To give one of these flags to pytest instead,
+   pass it after `--`. With no `--output` set, the terminal output at `-n 0`
+   is pytest's own too (**Unreleased**; rstest 0.7.0 printed its own view),
+   with rstest's extras (doctor, coverage, gate messages) appended after
+   pytest's summary line; an explicit `--output` switches back to rstest's
+   renderer. `--junitxml` is pytest's own document at every worker count
+   (**Unreleased**), plus rstest's `flaky` / `quarantined` properties; see
+   [`--junitxml`](../reference/cli.md#-junitxml-path).
 2. **In parallel modes: outcomes preserved for parallel-safe tests.**
    Identical per-test outcomes (setup/call/teardown, skips, xfails) for
    tests without hidden timing/ordering/shared-state assumptions. Tests
-   *with* such assumptions can flake under concurrency — the same class of
-   flake pytest-xdist produces — and the
+   *with* such assumptions can flake under concurrency (the same class of
+   flake pytest-xdist produces) and the
    [parallel safety](../guides/parallel-safety.md) rails exist for them.
 
 ## What "verified" means
 
 Compatibility is measured, not asserted: rstest's battery runs four real
-suites — pandas (193,627 tests), aiohttp, django-allauth, rich — under
+suites, pandas (193,843 tests), aiohttp, django-allauth and rich, under
 pytest and under rstest, and diffs **per-test outcomes** (every phase,
-every skip reason class, xfail flags). All four measure 100% parity per run
-at the worker counts in [benchmarks](../reference/benchmarks.md) (`-n 8` for
-the big suites, `-n 4` for the small ones), re-run on every release, with
-their real plugins loaded: pytest-django, pytest-asyncio, pytest-aiohttp,
-hypothesis, pytest-mock, pytest-cov installed. (Two suites contain tests
-that flake *under plain pytest itself* — rich, django-allauth — so on some
-runs the baseline and rstest disagree at ~99.x%; every such case is
-catalogued in [Parity divergences](../reference/parity-divergences.md).)
+every skip reason class, xfail flags). Their real plugins are loaded:
+pytest-django, pytest-asyncio, pytest-aiohttp, hypothesis, pytest-mock,
+pytest-cov. The recorded runs in
+[benchmarks](../reference/benchmarks.md) use `-n 8` for all four
+(django-allauth's recommended count is `-n 4`, because its
+rate-limit-window tests can flake at high worker counts).
+
+pandas, django-allauth and rich measured 100% parity on the recorded runs;
+aiohttp measured 99.93-100%, from a socket-leak warning flake that moves
+under any parallel runner, xdist included. rich and django-allauth also
+contain tests that flake *under plain pytest itself*, so an individual run
+can land at about 99.x% when the baseline and rstest draw different flakes.
+Every such case is catalogued in
+[Parity divergences](../reference/parity-divergences.md).
 
 Summary-line accounting (passed/failed/skipped/xfailed/warnings counts)
 matches pytest's numbers on the same suites.
@@ -35,12 +57,12 @@ rstest currently vendors **pytest 9.1.1**, unmodified. Policy:
 - The vendored version is pinned per rstest release and stated in
   [License](../reference/license.md) and `rstest_worker._vendor`.
 - Upstream pytest minor releases are adopted by re-vendoring verbatim and
-  re-running the full compatibility battery.
+  rerunning the full compatibility battery.
 - **Security fixes**: when upstream pytest ships a security fix affecting
   the vendored code, an rstest release with the re-vendored core is
   expected **within two weeks** of the upstream release. Because the
-  vendored tree is verbatim, re-vendoring is mechanical; the two weeks
-  budget the compatibility battery, not the patch.
+  vendored tree is verbatim, re-vendoring is mechanical; the two-week
+  budget covers the compatibility battery, not the patch.
 - Local modifications to the vendored tree are forbidden; integration
   lives in `rstest_worker` around it.
 
@@ -49,11 +71,11 @@ rstest currently vendors **pytest 9.1.1**, unmodified. Policy:
     a suite (or plugin set) that isn't pytest-9-clean will see pytest 9
     behavior inside rstest workers, whatever pytest version is installed.
     There is currently no older-core build, and none is planned: one
-    vendored core, tracked forward. When a new pytest MAJOR ships, the
-    core is re-vendored after the early point releases stabilize — the
+    vendored core, tracked forward. When a new pytest **major** ships, the
+    core is re-vendored after the early point releases stabilize: the
     same timing a cautious team upgrades pytest itself. Minor releases
     are folded in routinely; security fixes within two weeks.
-    Run `rstest -n 0` first — it
+    Run `rstest -n 0` first: it
     surfaces version incompatibilities exactly as a pytest upgrade would.
 
 ### Why 9, not 8
@@ -63,33 +85,33 @@ vendors 9. pytest 9 is a **cleanup major**, not a redesign: it removes
 APIs that already emitted deprecation warnings throughout the 8.x line and
 keeps the same collection model, fixture engine, `_pytest.*` import paths,
 and plugin/`pluggy` hook contract. The runtime requirements are
-effectively the same as 8.x — same supported-CPython line, same core
-dependencies — so vendoring 9 doesn't raise the bar to adopt rstest beyond
+effectively the same as 8.x (same supported-CPython line, same core
+dependencies), so vendoring 9 doesn't raise the bar to adopt rstest beyond
 what running pytest 8 already required.
 
 What that means in practice:
 
 - A suite that runs clean on a recent pytest 8.x with **no deprecation
-  warnings** is almost always already pytest-9-clean — the removed APIs are
+  warnings** is almost always already pytest-9-clean: the removed APIs are
   exactly the ones 8.x was warning you about.
 - The realistic migration cost is auditing those warnings, not rewriting
-  tests. `rstest -n 0` (or `pytest -W error::DeprecationWarning` on your
-  current pytest first) surfaces them.
-- Vendoring 8 would buy almost nothing — the same suites pass on both — while
+  tests. `rstest -n 0` (or `pytest -W error::pytest.PytestDeprecationWarning`
+  on your current pytest first) surfaces them.
+- Vendoring 8 would buy almost nothing (the same suites pass on both) while
   immediately leaving rstest a major version behind upstream. Tracking 9
   forward keeps the vendored core current for the same near-zero cost.
 
 If your suite is *not* yet warning-clean on pytest 8.x, treat the rstest
-switch as "clear pytest deprecations first, then change one command" — the
+switch as "clear pytest deprecations first, then change one command": the
 same upgrade you'd owe pytest itself within a release or two anyway.
-[Onboarding to pytest 9.1.1](../guides/upgrade-to-pytest9.md) is the
+[Upgrading to pytest 9](../guides/upgrade-to-pytest9.md) is the
 step-by-step for clearing them, including the tiny 9.0.x → 9.1.1 delta.
 
 ### Plugin versions vs the vendored core
 
 The same rule applies to your **plugins**, and it is the most common source
 of confusion. A plugin loads *into* the vendored core, so `import pytest`
-inside it resolves to the vendored 9.1.1, not to whatever pytest is installed
+inside it resolves to vendored pytest 9.1.1, not to whatever pytest is installed
 in your environment. Two consequences:
 
 - **The plugin's own code must support pytest 9.** Its compatibility with
@@ -99,43 +121,52 @@ in your environment. Two consequences:
   reflects a version that already supports pytest 9.
 - **A `pytest<9` pin is inert at runtime.** Such a pin is a packaging
   constraint that pip enforces at install time only. It does not change which
-  pytest the plugin sees once a worker is running, and rstest never consults
-  it, so a plugin pinned to `pytest<9` still executes against the vendored 9.
+  pytest the plugin sees once a worker is running, so a plugin pinned to
+  `pytest<9` still executes against vendored pytest 9.1.1. rstest reads each loaded
+  plugin's `Requires-Dist` on pytest and, when it excludes the running pytest,
+  prints one `rstest: warning: <plugin> <version> requires pytest<9, ...` line
+  per plugin to stderr, once per run, telling you the pin is not enforced and
+  to upgrade the plugin if it misbehaves. Requirements gated behind an extra
+  (such as hypothesis's `[pytest]`) are ignored. The run itself is unaffected
+  (**Unreleased:** the warning is not in 0.7.0).
 
 rstest does not maintain a per-plugin minimum-version table. Instead,
 `rstest -n 0` runs your installed plugins against the vendored core in one
 session and surfaces any pytest-9 incompatibility exactly as a real upgrade
 would. Clear it there before scaling to workers. For the common stack see
 [Your plugin stack](../guides/plugin-stack.md); for the deprecation audit see
-[Onboarding to pytest 9.1.1](../guides/upgrade-to-pytest9.md).
+[Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
 
 ## Measured at scale
 
 Beyond the four-suite battery, the public-suite corpus runs rstest
-against 31 well-known projects. The one that matters for advanced
-xdist users: **SQLAlchemy** (25,300 tests) runs at `-n 4` with its
-master-side hooks exercised end-to-end — `pytest_configure_node`
+against 33 well-known projects. The one that matters for advanced
+xdist users: **SQLAlchemy** (about 25,300 tests) runs at `-n auto` with its
+controller-side hooks exercised end-to-end: `pytest_configure_node`
 filling `follower_ident`, follower databases provisioned per worker,
-`pytest_testnodedown` dropping them — with outcomes identical to its
-serial pytest run. Scope honestly stated: the default **SQLite**
-backend at `-n 4`, crash-free; Postgres/MySQL backends and
+`pytest_testnodedown` dropping them. Parity against its serial pytest run
+is about 99.97%: 7 IMV/RETURNING tests skip in the serial baseline (they
+depend on full-suite order) but pass under any parallel runner, real
+pytest-xdist included; see
+[Parity divergences §9](../reference/parity-divergences.md#9-order-dependent-serial-baseline).
+Scope: the default **SQLite** backend, crash-free; Postgres/MySQL backends and
 crash-during-provisioning behavior are not yet in the battery (tests
 requiring live services or absent optional dependencies fail
 identically under vanilla pytest).
 
 ## Known gaps
 
-Honest list, maintained as things close:
+Maintained as things close:
 
 | Gap | Status |
 |---|---|
-| Windows at corpus scale | supported — the full gate runs on `windows-latest` in CI every commit and wheels are smoke-tested there; the 31-suite public corpus, however, is run only on macOS/Linux, so large-real-world-suite validation on Windows is lighter than on the other platforms |
-| Terminal-rendering plugins (pytest-sugar, pytest-rich UIs) | by design at `-n ≥ 2` — rstest owns the terminal; data-level plugin behavior unaffected |
-| hypothesis's shared `.hypothesis` example database under many workers | untested at high worker counts; hypothesis itself handles concurrent DB access, but rstest has not verified it beyond `-n 8`. Mitigation if you hit contention: in a `settings` profile give each worker its own DB — `database=DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'main')}")` — or set `database=None` in CI to disable it entirely |
-| `--sw` (stepwise, `--stepwise-skip`, `--stepwise-reset`) | runs in a single pytest session automatically (like `--pdb`/`-s`/`--co`) — the vendored stepwise plugin owns resume/stop and its `cache/stepwise` round-trips exactly as upstream. Sequential by nature: stop-at-first-failure + resume-from-a-single-cursor has no meaning under split, duration-ordered parallel dispatch, so it does not run at `-n ≥ 2`. Same constraint as xdist. |
-| xdist master-side hooks (`pytest_configure_node` and friends) | emulated for hooks that are per-node-stateless (read `gateway.id`, fill `node.workerinput` — SQLAlchemy's pattern, measured). Structural divergences from a single xdist controller: the hooks run N times concurrently in N processes (controller-side shared state needs rework), and crashed-node `pytest_testnodedown` runs on a survivor without the dead node's configure-time state. Details: [xdist hook emulation](xdist-hooks.md). |
-| Plugins needing a controller-side service *shared* across all workers | rstest runs no central controller, so a plugin that needs one shared service for the whole pool isn't emulated. The known ecosystem cases are instead handled per worker: pytest-retry's branch self-provisions its own report server per worker (its `server_port` is set locally, no master needed) and pytest-rerunfailures is neutralized in favor of native `--reruns` — both work at `-n ≥ 2`. See [parity divergences §8](../reference/parity-divergences.md#8-plugin-master-hook-gating-rstest-side-fixed). |
-| Time-derived parametrize IDs (`now()` in `@pytest.mark.parametrize`) | collection runs once per worker, so time-dependent IDs differ between workers; rstest detects the mismatch and refuses to dispatch rather than misattribute results — use stable IDs or `-n 0` (same constraint as xdist) |
-| Plugins that need a single master process to aggregate worker output into one artifact (pytest-html) | pytest-html registers its report writer only on a node *without* `workerinput` (its xdist master check); every rstest worker has one, so at `-n ≥ 2` no writer is registered and `--html` silently produces nothing (no crash). Merging all workers into one file needs a master process rstest doesn't run. Generate the report at `-n 0`/`-n 1`. (Formerly this row also listed pytest-rerunfailures/`sock_port` and pytest-retry/`server_port`, both now handled, and claimed a pytest-html `TypeError` — that path is fixed by signature-aware node-hook dispatch; pytest-randomly's derivable `randomly_seed` is synthesized.) Full per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility) |
+| Windows at corpus scale | supported: the full gate runs on `windows-latest` in CI every commit and wheels are smoke-tested there; the 33-suite public corpus, however, is run only on macOS/Linux, so large-real-world-suite validation on Windows is lighter than on the other platforms |
+| Terminal-rendering plugins (pytest-sugar, pytest-rich UIs) | by design at `-n ≥ 2`: rstest owns the terminal; data-level plugin behavior unaffected |
+| hypothesis's shared `.hypothesis` example database under many workers | untested at high worker counts; hypothesis itself handles concurrent DB access, but rstest has not verified it beyond `-n 8`. Mitigation if you hit contention: in a `settings` profile give each worker its own DB (`database=DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'master')}")`) or set `database=None` in CI to disable it entirely |
+| `--sw` (stepwise, `--stepwise-skip`, `--stepwise-reset`) | runs in a single pytest session automatically (like `--pdb`/`-s`/`--co`): the vendored stepwise plugin owns resume/stop and its `cache/stepwise` round-trips exactly as upstream. Sequential by nature: stop-at-first-failure + resume-from-a-single-cursor has no meaning under split, duration-ordered parallel dispatch, so it does not run at `-n ≥ 2`. Same constraint as xdist. |
+| xdist controller-side hooks (`pytest_configure_node` and friends) | emulated for hooks that are per-node-stateless (read `gateway.id`, fill `node.workerinput`: SQLAlchemy's pattern, measured). Structural divergences from a single xdist controller: the hooks run N times concurrently in N processes (controller-side shared state needs rework), and crashed-node `pytest_testnodedown` runs on a survivor without the dead node's configure-time state. Details: [xdist hook emulation](xdist-hooks.md). |
+| Plugins needing a controller-side service *shared* across all workers | rstest runs no central controller, so a plugin that needs one shared service for the whole pool isn't emulated. The known ecosystem cases are instead handled per worker: pytest-retry's branch self-provisions its own report server per worker (its `server_port` is set locally, no controller needed; if that seeding fails, rstest unregisters the plugin and falls back to native `--reruns`) and pytest-rerunfailures is neutralized in favor of native `--reruns`; both work at `-n ≥ 2`. See [parity divergences §8](../reference/parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed). |
+| Time-derived parametrize IDs (`now()` in `@pytest.mark.parametrize`) | collection runs once per worker, and rstest compares every worker's collected nodeids (count + hash). IDs that come out identical on every worker run normally: second-resolution timestamps usually do, since workers collect within the same second (marshmallow runs 100% at `-n auto`; [parity divergences §3](../reference/parity-divergences.md#3-run-dependent-nodeids-now-resolved)). IDs that differ between workers (sub-second timestamps, uuids, random values, or a second-resolution collection that straddles a tick) make rstest refuse to dispatch rather than misattribute results; there is no automatic fallback. Use stable `ids=` or `-n 0` (same constraint as xdist) |
+| Plugins that need a single controller process to aggregate worker output into one artifact (pytest-html) | pytest-html registers its report writer only on a node *without* `workerinput` (its xdist controller check); every rstest worker has one, so at `-n ≥ 2` no writer is registered and an `--html` that reaches the plugin (via `addopts` or after `--`) silently produces nothing (no crash). Merging all workers into one file needs a controller process rstest doesn't run. A command-line `--html` is rstest's native merged report at every worker count; for pytest-html's own report, run `rstest -n 0 -- --html=...`. Full per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility) |
 
 Found a difference not listed here? That's a bug report we want.
