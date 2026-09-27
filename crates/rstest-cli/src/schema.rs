@@ -27,16 +27,33 @@ struct Output {
     schema: RootSchema,
 }
 
-/// The outputs whose schema is published. Typed serde structs only; the
-/// hand-built `serde_json::json!` outputs (report-json, discovery,
-/// migrate-check) are not typed yet and are excluded until they are.
+/// The outputs whose schema is published. Every stable JSON surface the CLI
+/// emits is a typed serde struct; adding one here is all it takes.
 fn outputs() -> Vec<Output> {
     vec![
+        Output {
+            name: "report-json",
+            title: "Run report",
+            source: "`--report-json`",
+            schema: schema_for!(crate::reporting::report::Snapshot<'static>),
+        },
         Output {
             name: "doctor-report",
             title: "Doctor report",
             source: "`--doctor-json`",
             schema: schema_for!(crate::doctor::DoctorReport),
+        },
+        Output {
+            name: "discovery",
+            title: "Discovery",
+            source: "`--collect-only --report-json`",
+            schema: schema_for!(crate::run::discovery::DiscoveryDoc),
+        },
+        Output {
+            name: "migrate-check",
+            title: "Migrate-check",
+            source: "`migrate-check --migrate-check-json`",
+            schema: schema_for!(crate::migrate::check::MigrateCheckDoc),
         },
         Output {
             name: "flake-log",

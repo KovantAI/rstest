@@ -17,12 +17,20 @@ schemas track the code. The guarantee applies only to what the typed struct
 describes: a field added outside the struct, or an output assembled from
 `serde_json::json!`, is not checked.
 
-The doctor report carries a `schema` version integer; incompatible changes bump
+Each versioned output carries a `schema` integer; incompatible changes bump
 it. The flake log is an unversioned cache file.
 For worked examples, the conditions under which each doctor section is
 present, and version history, see the prose walkthrough:
 [Report JSON: Doctor JSON](report-json.md#doctor-json). The run snapshot
 itself is documented only there, in [Shape](report-json.md#shape).
+
+--8<-- "docs/reference/schemas/report-json.md"
+
+??? note "Run report — full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/report-json.schema.json"
+    ```
 
 --8<-- "docs/reference/schemas/doctor-report.md"
 
@@ -30,6 +38,22 @@ itself is documented only there, in [Shape](report-json.md#shape).
 
     ```json
     --8<-- "docs/reference/schemas/doctor-report.schema.json"
+    ```
+
+--8<-- "docs/reference/schemas/discovery.md"
+
+??? note "Discovery — full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/discovery.schema.json"
+    ```
+
+--8<-- "docs/reference/schemas/migrate-check.md"
+
+??? note "Migrate-check — full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/migrate-check.schema.json"
     ```
 
 --8<-- "docs/reference/schemas/flake-log.md"

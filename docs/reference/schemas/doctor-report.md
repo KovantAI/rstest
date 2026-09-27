@@ -9,12 +9,14 @@ Source: `--doctor-json`
 | `coverage_waste` | CoverageWaste or null | yes | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
 | `cpu_time_seconds` | number | yes | Sum of call-phase CPU time, over tests where it was measured. |
 | `fixtures` | array of FixtureEntry | yes |  |
+| `fork_prewarm` | boolean | yes | Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates the "try --fork-pool" hint so it isn't suggested when already on. |
 | `leaks` | array of Leak | no | Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
 | `parallel_efficiency` | ParallelEfficiency or null | yes |  |
 | `parallel_floor` | ParallelFloor or null | yes |  |
 | `rstest_version` | string | yes |  |
 | `schema` | integer | yes |  |
 | `slowest_files` | array of FileEntry | yes |  |
+| `startup_seconds` | number | yes | Wall from pool spawn to every worker's first event (imported core + started collecting), part of `wall_seconds`. A fixed per-run tax that `--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs. Surfaced so a startup-bound suite is legible. |
 | `test_time_seconds` | number | yes |  |
 | `tests` | integer | yes |  |
 | `wait_bound` | WaitBound or null | yes |  |
