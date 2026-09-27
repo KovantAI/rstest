@@ -12,7 +12,7 @@ Environment variables rstest sets for tests and plugins, and the ones it reads t
 | `PYTEST_XDIST_WORKER_COUNT` | integer | xdist's pool-size var, same compatibility contract; **unset** in `-n 0`/`-n 1` mode (`1` under `--reruns`) |
 | `PYTEST_XDIST_TESTRUNUID` | opaque string | xdist's run-uid var, the same value as `RSTEST_RUN_UID`; set in pool workers (including the `--reruns` one-worker pool), cleared in `-n 0`/`-n 1` mode (like `PYTEST_XDIST_WORKER`). **Unreleased** (not in 0.7.0) |
 | `RSTEST_RUN_UID` | opaque string | one uid per run, shared by every worker (and every project of a monorepo run); also exposed as `workerinput["testrun_uid"]` and `workerinput["testrunuid"]` (xdist's spelling, Unreleased) |
-| `RSTEST_MONO_PROJECT` | relative path | set inside a [monorepo](../guides/monorepo.md) child run to that project's path (e.g. `libs/core`); unset otherwise |
+| `RSTEST_MONO_PROJECT` | relative path | set inside a [monorepo](../guides/monorepo.md) child run to that project's path (e.g. `libs/core`); unset otherwise. rstest also reads it: when it is set, monorepo discovery is skipped and the run is a single-project run, so don't export it yourself |
 
 Plugins that read pytest-xdist's `workerinput` get the same information via
 `request.config.workerinput["workerid"]` / `["workercount"]` /
@@ -34,11 +34,11 @@ real values.
 `RSTEST_LEAKCHECK`, `RSTEST_DEBUGPY_PORT`, `RSTEST_STREAM_OUTPUT` coordinate
 workers and may change between versions. Don't depend on them. rstest clears
 them before starting each worker and sets only the ones the run needs (for
-example `RSTEST_DOCTOR` only under `--doctor`), and it never reads them from
+example `RSTEST_DOCTOR` only under `--doctor`, `--doctor-json`, `--doctor-md` or
+`--doctor-fail-on`), and it never reads them from
 its own environment, so a value you export has no effect: `export
 RSTEST_DOCTOR=1` turns on nothing (pass `--doctor`). `RSTEST_RUN_UID` is the
-exception that passes through: a monorepo run hands it to each project's
-rstest so they share one run id.
+exception, see below.
 
 Two more are set by rstest for its own use: `RSTEST_RECORD` (the output path
 `rstest try` gives the recorder plugin in its plain-pytest run) and
@@ -49,8 +49,9 @@ listening, so a re-imported child process doesn't bind the port twice).
 
 | Variable | Effect |
 |---|---|
+| `RSTEST_RUN_UID` | the run id to use instead of generating one. Every worker sees it as `RSTEST_RUN_UID` and `workerinput["testrun_uid"]`. Set the same value on every CI shard to give them one shared run id (for example `RSTEST_RUN_UID=${{ github.run_id }}-${{ github.run_attempt }}`). A monorepo run passes its own to each project's rstest this way |
 | `VIRTUAL_ENV` | worker interpreter discovery (first after `--python`) |
-| `NO_COLOR` | disables colored output (a forwarded `--color=yes/no` wins) |
+| `NO_COLOR` | disables rstest's colored output when set, even to an empty value. Only `--color=yes` or `--color=no`, written with `=`, overrides it (the flag is also forwarded to pytest) |
 | `PYTEST_ADDOPTS` | read by the vendored core, exactly as under pytest. rstest-owned flags placed here (`--reruns`, `--junitxml`, `--timeout`, ...) are **not** seen by rstest; see [CLI](cli.md) |
 | `RSTEST_CACHE` | relocates the project cache directory (default `.rstest_cache` in the invocation directory): durations, flakes, coverage index, last-green baseline. At a [monorepo](../concepts/monorepo.md#caches-per-project) root each project gets `<RSTEST_CACHE>/<slug>` (a relative value resolves against the monorepo root); unset, each project keeps its own `<project>/.rstest_cache`. The per-project namespacing is **Unreleased** |
 | `RSTEST_CACHE_REMOTE` | default for [`--cache-remote`](cli.md#-cache-remote-urldir-cache-pull-cache-push) (the flag wins) |

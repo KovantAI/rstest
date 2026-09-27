@@ -12,17 +12,28 @@ Or add it to a uv-managed project (installs alongside your test deps):
 $ uv add --dev rstest
 ```
 
-Or install it as a standalone tool (advanced: the tool env is separate from
-your tests, so the worker runtime must also be in the project env; see
-[Binary vs worker runtime](#binary-vs-worker-runtime-for-tool-scoped-installs)):
+Install rstest into the **same environment as your test dependencies**:
+workers run your tests in that interpreter (see
+[Which Python does rstest use?](#which-python-does-rstest-use)). A
+standalone tool install is covered in
+[Binary vs worker runtime](#binary-vs-worker-runtime-for-tool-scoped-installs).
+
+## Verify your install
+
+From your project root, with one test file (`test_ok.py`) present:
 
 ```console
-$ uv tool install rstest      # or run ad hoc: uvx rstest --version
+$ rstest --version
+rstest 0.7.0
+$ rstest --co -q   # list tests without running them
+test_ok.py::test_ok
+
+1 test collected in 0.00s
 ```
 
-For the `pip` and `uv add --dev` paths, install rstest into the **same
-environment as your test dependencies**: workers run your tests in that
-interpreter (see [Which Python does rstest use?](#which-python-does-rstest-use)).
+In an empty folder the same `rstest --co -q` prints `no tests collected` and
+exits with code 5. That is expected: the install works, there is just nothing
+to run yet.
 
 ## Requirements
 
@@ -38,24 +49,43 @@ interpreter (see [Which Python does rstest use?](#which-python-does-rstest-use))
 
 rstest installs its own runtime dependencies (`msgpack`, `pluggy`,
 `iniconfig`, `packaging`, `pygments`). It does **not** require pytest to be
-installed, and it does not conflict with an installed pytest either: the
+installed (it is not a dependency, so installing rstest never installs or
+upgrades pytest), and it does not conflict with an installed pytest either: the
 vendored pytest core lives inside the `rstest_worker` package and never
 touches your `pytest` installation. (One exception: `rstest try` runs your
 suite under plain `pytest` to produce a baseline, so *that* command needs
-pytest installed; see [`try`](../reference/cli-commands.md#try).)
+pytest installed in the project's environment (`python -m pytest` must work); see [`try`](../reference/cli-commands.md#try).)
 
 Tests always run on the vendored pytest core (currently 9.1.1), whatever
 pytest version your project or its plugins pin. If a plugin still requires
 an older pytest, see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
 
+!!! note "Still on pytest 8?"
+    Your installed pytest does not need upgrading to install rstest. Your
+    suite does need to pass on pytest 9, which is what rstest runs. Check it
+    first on your current pytest 8.x:
+
+    ```console
+    $ python -m pytest -W error::pytest.PytestRemovedIn9Warning
+    ```
+
+    A clean run means the suite uses nothing pytest 9 removed.
+
 First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
-it covers the common install/first-run failures (missing `msgpack`, wrong
-interpreter, import errors).
+it covers the common install/first-run failures (no usable interpreter or a
+missing worker shim, rstest picking the wrong Python, `rstest: command not
+found`, and import errors from a Python older than 3.10).
 
 The wheel ships a single `rstest` binary (the Rust orchestrator), the
 `rstest_worker` Python package, and the vendored pytest core.
 
 ## Binary vs worker runtime (for tool-scoped installs)
+
+rstest can also be installed as a standalone tool:
+
+```console
+$ uv tool install rstest      # or run ad hoc: uvx rstest --version
+```
 
 A tool-scoped install (`uv tool install rstest`, `uvx rstest`) still runs
 your project's tests: rstest discovers the project interpreter at runtime
@@ -129,11 +159,3 @@ doesn't name an interpreter directly.
 
 Install rstest into the same environment as your project's test
 dependencies, exactly as you would pytest.
-
-## Verify your install
-
-```console
-$ rstest --version
-rstest 0.7.0
-$ rstest --co -q   # list tests without running them
-```

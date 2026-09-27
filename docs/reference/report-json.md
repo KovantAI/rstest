@@ -42,6 +42,13 @@ outputs that have one, see [Output schemas](output-schemas.md).
 }
 ```
 
+!!! warning "`meta.argv` is the full command line"
+    `meta.argv` records rstest's command line verbatim. A credential on it,
+    such as a password in a `--cache-remote https://user:pass@host/...` URL,
+    lands in the report and in every CI artifact that uploads it. Pass
+    secrets through the environment instead (`RSTEST_CACHE_REMOTE`,
+    `RSTEST_CACHE_REMOTE_TOKEN`), which the report does not record.
+
 Per-test fields (absent when not applicable):
 
 | Field | Type | Meaning |

@@ -88,7 +88,7 @@ live:
 | a directory path / `file://…` | local dir, NFS/EFS mount, or a dir a CI step materializes (`download-artifact`, `aws s3 sync`) |
 | `s3://bucket/prefix` | the `aws` CLI on the runner (creds from the environment) |
 | `gs://bucket/prefix` | `gcloud storage` (or `gsutil`) on the runner |
-| `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` |
+| `http(s)://host/path` | any endpoint honoring the listing contract below; bearer auth from `RSTEST_CACHE_REMOTE_TOKEN` (use `https://`: over plain `http://` the bearer token is sent in cleartext) |
 
 The `s3`/`gs` transports shell out to the cloud CLI already installed and
 authenticated in CI: no SDK, no secrets in the URL. Any other `scheme://` is

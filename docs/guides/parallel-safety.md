@@ -90,10 +90,11 @@ on an idle worker until the slowest worker finishes. Ordering within a worker
 is pytest's usual reverse-of-setup; there is no ordering across workers.
 If the run has `@pytest.mark.serial` tests, the other workers tear down
 first, and the designated worker keeps its session open to run the serial
-phase afterwards. (Cleanup that must run after
-*every* worker, such as dropping a shared DB, belongs in a
-[`pytest_testnodedown`-style hook](../concepts/xdist-hooks.md), not a
-session fixture.)
+phase afterwards. rstest has no hook that runs once after *all* workers
+finish: [`pytest_testnodedown`](../concepts/xdist-hooks.md) fires once per
+worker, inside that worker. So make every resource per-worker (keyed on
+`node.workerinput` or the worker id) and let each worker clean up its own,
+in a session fixture's teardown or in `pytest_testnodedown`.
 
 `--setup-show` and `--setup-plan` are **not** passthrough-IO flags, so they
 run in the parallel pool: each worker prints its own setup/teardown trace,
@@ -115,7 +116,18 @@ worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", ... ; unset at -n 0 or -n 
 ```
 
 Exception: `-n 0/1` with `--reruns` runs a one-worker pool, so there the
-variable is set to `gw0`. Handle both cases (`worker or "gw0"`).
+variable is set to `gw0`. The xdist-compatible `worker_id` fixture does not
+have this wrinkle: it returns `gw0`, `gw1`, ... at `-n ≥ 2` and `"master"`
+below `-n 2` (with or without `--reruns`), so prefer it inside fixtures:
+
+```python
+import pytest
+
+
+@pytest.fixture(scope="session")
+def worker_suffix(worker_id):
+    return worker_id  # "gw0", "gw1", ... or "master" below -n 2
+```
 
 Plugins that check xdist's `workerinput` get the same answer: the
 attribute is provided for compatibility.
@@ -128,16 +140,14 @@ session-scoped fixture, which runs once per worker. Raw SQLAlchemy / psycopg
 against a per-worker database:
 
 ```python
-import os
 import pytest
 from sqlalchemy import create_engine
 
 
 @pytest.fixture(scope="session")
-def db_engine():
-    # gw0, gw1, ...; "main" at -n 0/1 where there is a single session
-    worker = os.environ.get("RSTEST_WORKER_ID", "main")
-    url = f"postgresql+psycopg://ci:ci@localhost:5432/app_{worker}"
+def db_engine(worker_id):
+    # gw0, gw1, ...; "master" below -n 2, where there is a single session
+    url = f"postgresql+psycopg://ci:ci@localhost:5432/app_{worker_id}"
     # create the database `app_{worker}` if it does not exist, then:
     engine = create_engine(url)
     yield engine
@@ -145,7 +155,7 @@ def db_engine():
 ```
 
 Each worker gets its own `app_gw0`, `app_gw1`, ... database, so nothing
-collides. rstest exercises exactly this shape in its own battery with
+collides (`app_master` below `-n 2`). rstest exercises exactly this shape in its own battery with
 pytest-postgresql, where each worker spins up its own server on an
 OS-assigned free port.
 
@@ -212,12 +222,16 @@ worker a stable identity to derive a reproducible seed from
 on. Seed deterministically in a fixture:
 
 ```python
-import os, numpy as np
+import numpy as np
+import pytest
 
-# Same seed every run; distinct per worker so workers don't draw identical
-# streams. Drop the worker offset if you want every worker identical.
-worker = int((os.environ.get("RSTEST_WORKER_ID") or "gw0").removeprefix("gw"))
-np.random.seed(1234 + worker)
+
+@pytest.fixture(autouse=True)
+def seed_numpy(worker_id):
+    # Same seed every run; distinct per worker so workers don't draw identical
+    # streams. Drop the worker offset if you want every worker identical.
+    worker = 0 if worker_id == "master" else int(worker_id.removeprefix("gw"))
+    np.random.seed(1234 + worker)
 ```
 
 A test that depends on a seed set by an *earlier* test in the same process is
@@ -233,12 +247,15 @@ libraries to one thread per worker and let rstest own the parallelism:
 
 ```console
 $ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-    rstest -n auto
+    VECLIB_MAXIMUM_THREADS=1 rstest -n auto
 ```
 
-(Or cap `-n` to leave headroom for the internal threads.) This is also usually
-*faster* for a test suite: many small ops, where thread-pool overhead outweighs
-the win.
+(Or cap `-n` to leave headroom for the internal threads.) Pin for
+determinism, not for speed: on numpy with Accelerate the cap made no
+difference on a realistic suite, and on heavy linear algebra it was slower
+below the core count
+([measured](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#worker-x-blas-thread-grid)).
+`VECLIB_MAXIMUM_THREADS` is for macOS: Accelerate ignores the other three.
 
 **3. Reset global numeric state per test.** `np.seterr`, `torch.set_default_dtype`,
 the global RNG, `np.set_printoptions`: a test that mutates one and a test that

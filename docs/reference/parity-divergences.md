@@ -2,12 +2,21 @@
 
 A catalogue of every reason a public suite diverges from exact parity in
 the [corpus](https://github.com/KovantAI/rstest/blob/main/corpus/README.md), the upstream root cause, and the concrete
-change the **upstream project** could make to remove it. None of these are
-rstest correctness bugs: each is either a deliberate rstest design choice
-(vendoring), an upstream test that isn't deterministic, or an upstream test
-that isn't parallel-safe. The corpus uses the strictest possible metric (exact
-nodeid + per-phase outcome), so anything non-deterministic surfaces here rather
-than being silently normalized away.
+change the **upstream project** could make to remove it. These are not rstest
+bugs, but some are adoption blockers: each is either a deliberate rstest design
+choice (vendoring), an upstream test that isn't deterministic, or an upstream
+test that isn't parallel-safe. The corpus uses the strictest possible metric
+(exact nodeid + per-phase outcome), so anything non-deterministic surfaces here
+rather than being silently normalized away.
+
+**Which ones block a parallel run.** Most entries cost a test or two of parity
+and the suite still runs at `-n ≥ 2`. Two stop the parallel run until upstream
+changes, so the suite runs at `-n 0`:
+
+- **Non-deterministic nodeids** ([§2](#2-non-deterministic-nodeids-memory-addresses-reprs),
+  pydantic): workers collect different ids, so rstest refuses to dispatch.
+- **Real OS-resource contention** ([§7](#7-real-os-resource-contention),
+  httpx): a session fixture binds a fixed port on every worker.
 
 The classes, by what actually differs:
 
@@ -22,6 +31,7 @@ The classes, by what actually differs:
 | Real OS resource | the outcome | werkzeug, httpx | bind ephemeral / mark serial |
 | Plugin controller-hook gating | (was a crash) | pytest-retry, pytest-rerunfailures | (rstest-side, fixed) |
 | Order-dependent serial baseline | the outcome (baseline side) | sqlalchemy | isolate the order-dependent tests |
+| Leaked-resource warning attribution | the outcome | aiohttp | close sockets in the test that opens them |
 
 ---
 
@@ -314,6 +324,34 @@ serial run no longer skips them.
 
 ---
 
+## 10. Leaked-resource warning attribution
+
+### aiohttp: a different 2-3 tests per run
+
+aiohttp runs with warnings as errors, and some of its tests leak a socket.
+The leak is only noticed when the garbage collector finalizes the socket,
+which raises an unraisable `ResourceWarning` inside **whatever test is running
+at that moment**, and that test fails. In serial order the collection point is
+stable, so the baseline is clean; under any parallel runner the tests around it
+change and the failure lands somewhere else. Measured 2026-09-26 at `-n 8`
+(99.93-99.96% parity): rstest failed
+`test_connector.py::test_tcp_connector_do_not_raise_connector_ssl_error[domain name]`
+and `test_formdata.py::test_formdata_field_name_is_quoted` with
+`ResourceWarning: unclosed <socket.socket ...>`, plus one
+`test_web_functional.py::test_app_max_client_size_form` 500; pytest-xdist at
+the same `-n` failed two other tests, one of them a pure cookie-parsing unit
+test (`test_cookie_helpers.py::test_unquote_basic`) with no I/O of its own.
+The failing test is the victim, not the cause.
+
+**Upstream fix:** close every socket, session and transport in the test (or
+fixture) that opens it, so nothing is left for the garbage collector.
+
+**rstest side:** [`--fail-on-leak`](cli.md#-fail-on-leak) and the
+[`--doctor`](../guides/doctor.md) leak report name the test that leaves a file
+descriptor open after its teardown, which is the one to fix.
+
+---
+
 ## Summary: the upstream-fix shortlist
 
 For a suite maintainer who wants exact parallel parity:
@@ -328,3 +366,5 @@ For a suite maintainer who wants exact parallel parity:
    django-allauth)
 5. **Bind ephemeral ports / mark serial for fixed OS resources.** (httpx,
    werkzeug)
+6. **Close what you open.** A leaked socket fails an innocent test when it is
+   garbage-collected under warnings-as-errors. (aiohttp)

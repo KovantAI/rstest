@@ -5,6 +5,36 @@ between 0.x releases and are listed here.
 
 ## 0.8.0 (Unreleased)
 
+- **`-x` / `--maxfail` from ini `addopts` now stop the whole run.** Only a
+  command-line `-x` was coordinated across workers; one in `addopts` or
+  `PYTEST_ADDOPTS` stopped each worker's own session, so the other workers
+  kept going. Workers now report pytest's resolved limit and the
+  orchestrator applies it globally, in both the eager and lazy pools.
+- **Combined short flags are recognized.** `-sv` and `-vs` now force the
+  single-process passthrough like `-s`, `-xv` is a global fail-fast like
+  `-x`, `-sv` / `-v -v` count toward verbose output, and the two-token
+  `--capture no` is treated like `--capture=no`. Previously only the exact
+  tokens matched.
+- **`--changed` and `--watch` no longer drop option values that are paths.**
+  When replacing your positional paths with their selection they dropped
+  every argument naming an existing path, including option values: with an
+  `api/` directory, `-k api` lost `api` and broke the command line, and
+  `--ignore tests/slow` lost its value. Lazy collection similarly collected
+  an `--ignore`d directory as a test path. Option values are now kept; a
+  plugin option not in rstest's table still works as `--option=value`.
+- **Benchmarks re-measured under one methodology, plus CPU-bound results.**
+  Every published number is now the median of 5 runs after a warm-up, with
+  rstest and pytest-xdist at the same `-n`, on a documented machine. Numbers
+  that moved: pandas `-n 8` is now 42s for rstest against 89s for xdist (the
+  old single run had them at parity, 63s vs 61s; xdist's controller is the
+  bottleneck on 193k tests), django-allauth at matched `-n 8` is 5.7s against
+  8.8s (the old row compared xdist `-n 8` with rstest `-n 4`), and aiohttp's
+  cold run is 150s at `-n 8` (was 126s). New: sympy and scikit-learn sweeps
+  (parity with xdist, gains up to the performance-core count), a measured
+  per-worker memory model, and a worker x BLAS-thread grid, which replaces
+  the "one thread per worker is usually faster" advice. Tooling:
+  `examples/cpu-bench`, and `corpus/bench.py --sweep-workers`, `--xdist`,
+  `--memory`, `--grid`, `--cold`.
 - **GitHub action: the fail-ratio gate no longer masks non-test failures.**
   With `fail-under-ratio` set, the gate used to judge only the JUnit ratio, so
   an interrupt (exit 2), a lost worker (3), a pytest usage error (4), or an

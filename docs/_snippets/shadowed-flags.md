@@ -6,3 +6,4 @@
 | `--timeout` | pytest-timeout | rstest's native per-test timeout ([`--timeout`](../reference/cli.md#-timeout-secs)) |
 | `--reruns`, `--only-rerun` | pytest-rerunfailures | rstest's native, crash-aware, orchestrator-side reruns ([`--reruns`](../reference/cli.md#-reruns-n)) |
 | `--debug` | pytest core (`--debug` trace log) | starts debugpy and waits for an editor to attach ([`--debug`](../reference/cli.md#-debugport)) |
+| `-h`, `--help`, `-V`, `--version` | pytest core | prints rstest's own help or version. `rstest -- --help` does not show pytest's help either (0.7.0 prints only the banner and exits 0); for pytest's and your plugins' flags, run `python -m pytest --help` in the test environment (needs pytest installed there; its version may differ from the vendored core) |

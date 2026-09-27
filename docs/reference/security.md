@@ -198,7 +198,7 @@ The one exception is the shared cache, and only when you opt in with
 | `--cache-remote` value | Network behavior |
 |---|---|
 | unset, a directory path, or `file://…` | none: plain filesystem reads and writes |
-| `http(s)://…` | the orchestrator makes HTTP requests itself, via the `ureq` client compiled into the published wheels (Cargo feature `http-cache`, on by default); bearer token from `RSTEST_CACHE_REMOTE_TOKEN` |
+| `http(s)://…` | the orchestrator makes HTTP requests itself, via the `ureq` client compiled into the published wheels (Cargo feature `http-cache`, on by default); bearer token from `RSTEST_CACHE_REMOTE_TOKEN`. Use `https://`: over plain `http://` the token is sent in cleartext on every request |
 | `s3://…` / `gs://…` | rstest spawns the `aws` / `gcloud` (or `gsutil`) CLI already on the runner, which talks to the cloud with your environment's credentials |
 
 See [Caching: transports](../concepts/caching.md#transports) for the details.

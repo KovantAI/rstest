@@ -144,6 +144,8 @@ pub fn run_lazy_pool(
         // Lazy never reorders by flake history, so quarantine is post-run only.
         quarantine: _,
     } = cfg;
+    // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
+    let mut maxfail = maxfail;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     let mut states = Vec::new();
     for idx in 0..n {
@@ -250,7 +252,14 @@ pub fn run_lazy_pool(
             Ok(Event::LazyReady {
                 cache_dir: cd,
                 rootdir,
+                maxfail: reported_maxfail,
             }) => {
+                // pytest's own `-x`/`--maxfail` resolution (argv + ini
+                // `addopts` / PYTEST_ADDOPTS) is authoritative; every worker
+                // reports the same value before its first RunFiles.
+                if reported_maxfail.is_some() {
+                    maxfail = reported_maxfail;
+                }
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
                 }

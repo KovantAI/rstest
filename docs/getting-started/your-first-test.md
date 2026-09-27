@@ -12,12 +12,13 @@ pytest knowledge. New to the terms below (worker, byte-exact mode, `-n`)? The
 
 ```console
 $ mkdir rstest-demo && cd rstest-demo
-$ python -m venv .venv && source .venv/bin/activate
+$ python3 -m venv .venv && source .venv/bin/activate
+$ # Windows: python -m venv .venv, then .venv\Scripts\activate
 $ pip install rstest
 ```
 
 rstest discovers the interpreter from the active virtualenv, so activating
-`.venv` is all the configuration this needs. (Windows: `.venv\Scripts\activate`)
+`.venv` is all the configuration this needs.
 
 ## 2. Write a test
 
@@ -39,6 +40,11 @@ def test_add_negative():
 ```
 
 ## 3. Run it
+
+The output on this page is the `dots` view, which is what you get when
+output is piped or in CI. On an interactive terminal rstest shows the `bar`
+view instead (a `✓` line per test and a progress bar); pass `--output dots`
+to match this page exactly.
 
 ```console
 $ rstest
@@ -78,13 +84,14 @@ def test_add_wrong():
 E       assert 4 == 5
 E        +  where 4 = add(2, 2)
 
-test_first.py:15: AssertionError
+test_first.py:14: AssertionError
 
 1 failed, 2 passed in 0.14s
 ```
 
-Full pytest-style tracebacks, assertion rewriting included: identical to what
-pytest prints. (Across multiple workers each failure header also carries the
+Full pytest-style tracebacks, assertion rewriting included: the same
+tracebacks and assertion introspection pytest prints (the failure header
+format is rstest's own). (Across multiple workers each failure header also carries the
 `[gwN]` worker that hit it; with one worker there's nothing to attribute.)
 Rerun just the failure while you fix it:
 
@@ -108,8 +115,10 @@ def test_sleepy(i):
     time.sleep(1)  # pretend each test does real work
 ```
 
-This demo folder has only two test files, so `-n auto` would cap at two
-workers. Ask for four explicitly. Twelve one-second tests then finish in about
+This demo folder has only two test files, so `-n auto` would start at most
+two workers: it never starts more workers than test files, and once timings
+are cached it can go lower on a suite that takes only a few seconds. Ask for
+four explicitly. Twelve one-second tests then finish in about
 3 seconds, not 12:
 
 ```console

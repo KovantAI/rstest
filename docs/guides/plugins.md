@@ -83,7 +83,7 @@ verified/inferred marker), see the
 
 | Plugin | Tier | Note |
 |---|---|---|
-| pytest-timeout | 🟦 Native | the plugin's ini `timeout =` fires in both modes, but rstest has a built-in [`--timeout`](../reference/cli.md#-timeout-secs) and honors `@pytest.mark.timeout` itself at every worker count, even without `--timeout`. So with the plugin installed, a marked test gets two SIGALRM timers (rstest's is installed last, so its `Timeout` error is the one you see), and a command-line `--timeout` never reaches the plugin. Pick one: uninstall pytest-timeout, or disable it with `-p no:timeout`. See also `--worker-timeout` for C-extension deadlocks |
+| pytest-timeout | 🟦 Native | the plugin's ini `timeout =` fires in both modes, but rstest has a built-in [`--timeout`](../reference/cli.md#-timeout-secs) and honors `@pytest.mark.timeout` itself at every worker count, even without `--timeout`. So with the plugin installed, a marked test gets two SIGALRM timers (rstest's is installed last, so its `Timeout` error is the one you see), and a command-line `--timeout` never reaches the plugin. Pick one: uninstall pytest-timeout, or disable it with `-p no:timeout`. **Before you uninstall it, move the ini setting:** without the plugin, an ini `timeout = N` is dropped (pytest warns `Unknown config option: timeout`) and `addopts = --timeout N` is a usage error (`unrecognized arguments`), because rstest does not read its own flags from `addopts`, and `[tool.rstest]` has no timeout key. The working path is `rstest --timeout N` on the command line (CI script, Makefile). The plugin's `timeout_method`, `timeout_func_only` and `session_timeout` have no rstest equivalent and are dropped the same way: rstest's timeout always covers the call phase only and always uses a signal, and nothing bounds the whole session. On Windows rstest's `--timeout` cannot interrupt the test (no signal); only the auto-armed `--worker-timeout` watchdog applies, which kills the worker instead. See also `--worker-timeout` for C-extension deadlocks |
 | pytest-env | ✅ Works | *not gated*. Env vars are set by its `pytest_load_initial_conftests` hook, which runs in every worker session |
 | pytest-socket | ✅ Works | `--disable-socket` blocks identically in parallel |
 | pytest-repeat | ✅ Works | *not gated*. `@mark.repeat(N)` expands at collection, so the copies are ordinary items that distribute across workers |
@@ -334,7 +334,7 @@ Read the two lists:
 One caveat the diff can't see: a plugin that writes the *same path* at both
 worker counts but with **less** in it at `-n 2` (e.g. only one worker's
 share). For those, compare sizes or contents of the shared artifact, not
-just its presence. When in doubt, the honest fallback is unchanged:
+just its presence. When in doubt, the fallback is unchanged:
 generate that artifact at `-n 0`.
 
 ## Known limits

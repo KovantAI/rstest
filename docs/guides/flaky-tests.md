@@ -19,6 +19,17 @@ flagged in JUnit (`flaky` property) and `--report-json`. See
 [`--reruns`](../reference/cli.md#-reruns-n) for per-test budgets
 (`@pytest.mark.flaky`) and crash-aware retry semantics.
 
+Coming from pytest-rerunfailures? rstest's retry reads `--reruns`,
+`--only-rerun` and the mark's `reruns=` keyword. It does not carry over:
+
+- positional `@pytest.mark.flaky(3)`: retries **once**; write `flaky(reruns=3)`
+- the mark's `reruns_delay`, `condition` and `only_rerun` keywords: ignored,
+  so a `condition=False` test is still retried
+- `--reruns-delay` and `--rerun-except`: forwarded to pytest, where they do
+  nothing with the plugin installed and are a usage error (exit 4) without it
+
+See [`@pytest.mark.flaky`](../reference/markers.md#pytestmarkflaky).
+
 Reruns answer "don't redden this run." They don't answer "which tests
 keep doing this?": that's the history.
 
@@ -149,7 +160,7 @@ The exact semantics:
   `quarantined="true"` property and **no `<failure>` element**, so
   JUnit-gating CI (and dashboards that count failures) stays green
   while still being able to track the quarantine set.
-- **`--report-json`** (schema 5): per-test `"quarantined": true` plus
+- **`--report-json`**: per-test `"quarantined": true` plus
   a `quarantined` key in `meta.counts`. See
   [Run snapshot](../reference/report-json.md).
 - **Monorepos**: pass one file at the root; it's forwarded to every

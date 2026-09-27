@@ -223,7 +223,7 @@ $ rstest -n 4 --doctor     # diagnosing parallel scaling
 ## JSON output for CI
 
 `rstest --doctor-json doctor.json` writes the same analysis as a versioned
-JSON document (`"schema": 3`):
+JSON document ([field reference and schema version](../reference/report-json.md#doctor-json)):
 
 ```console
 $ rstest --doctor-json doctor.json

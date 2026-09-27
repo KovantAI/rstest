@@ -167,7 +167,7 @@ section 2 to find the actual best wall time.
   PARALLEL FLOOR, PARALLEL EFFICIENCY, fixture hotspots, resource leaks)
   and the JSON/markdown/CI-gate outputs.
 - [Scheduling](../concepts/scheduling.md): slow-tests-first dispatch and
-  why it beats file-affinity schedulers on wait-heavy suites.
+  why it beats collection-order schedulers on wait-heavy suites.
 - [Parallel safety](parallel-safety.md): per-worker isolation, the
   `@pytest.mark.serial` escape hatch, and time-sensitive tests at high
   concurrency.

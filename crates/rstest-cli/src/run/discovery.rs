@@ -199,6 +199,7 @@ mod tests {
             inifile: None,
             order_flags: None,
             confcutdir: None,
+            maxfail: None,
         }
     }
 

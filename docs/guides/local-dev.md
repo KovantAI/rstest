@@ -32,7 +32,7 @@ The rerun-selection policy is import-graph based, so you don't rerun the whole s
 
 --8<-- "docs/_snippets/watch-rerun-policy.md"
 
-Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. Type `q` and Enter between runs, or press `Ctrl+C`, to exit (`q` is Unreleased: not in 0.7.0, and not offered under `-s`/`--pdb`; see [Watch mode](watch-mode.md)).
+Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. Type `q` and Enter between runs, or press `Ctrl+C`, to exit (`q` is Unreleased: not in 0.7.0, and not offered under `-s`, `--pdb` and the other flags that hand pytest the terminal; quitting exits 0 whatever the last result; see [Watch mode](watch-mode.md)).
 
 **Every rerun is a clean run.** Each cycle spawns fresh Python worker processes and tears them down when it finishes, at every worker count, including `-n 0`/`-n 1`. Nothing is reused between cycles, so an edited module is always re-imported from scratch; watch mode cannot show a stale-import false green.
 

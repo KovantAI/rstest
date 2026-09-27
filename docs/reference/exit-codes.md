@@ -28,6 +28,28 @@ from "rstest refused to run", check for a report file
 ([`--junitxml`](cli.md#-junitxml-path) / [`--report-json`](cli.md#-report-json-path)):
 rejected runs write none.
 
+## Gating CI on exit code and report
+
+The process exit code alone can't separate every case. Combine it with
+whether the `--report-json` file exists and its `meta.exitstatus`, which
+records the test session's result **before** the post-run gates
+(`--fail-on-leak`, `--durations-regress`, `--doctor-fail-on`,
+`--cov-fail-under`, `--cov-diff-fail-under`) raise the exit to 1:
+
+| Exit | Report file | `meta.exitstatus` | What happened |
+|---|---|---|---|
+| 0 | written | 0 | tests ran and passed |
+| 0 | **none** | n/a | `--changed` selected nothing, so nothing ran (use [`--changed-strict`](cli.md#-changed-strict) to get 5 instead) |
+| 1 | written | 1 | tests failed |
+| 1 | written | 0 | tests passed, a post-run gate failed |
+| 1 | **none** | n/a | rstest refused to run: bad flag value, failed cache pull, no interpreter, `--require-baseline` with a cold cache |
+| 2 | written | 2 | collection errors interrupted the run |
+| 5 | written | 5 | no tests collected |
+| 5 | **none** | n/a | `--changed-strict` and nothing affected |
+
+A monorepo root is the exception to "no report": it still writes
+`--report-json` when `--changed` skips every project (see below).
+
 ## Gating flags and their exit codes
 
 Flags that gate CI have exit semantics beyond the table above:

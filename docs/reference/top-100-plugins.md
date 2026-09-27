@@ -30,7 +30,7 @@ plugin's category, not yet runtime-verified.
 |---|---|---|---|---|---|
 | 1 | pytest-asyncio | 275.9M | ✅ Works | V | Per-test event loop; vetted (rstest provides the worker context it sniffs). |
 | 2 | pytest-json-ctrf | 273.0M | 🔴 Silent / 🟦 | V | Report aggregator; no file at `-n ≥ 2`, written at `-n 0` (e2e gate). Use native `--report-json` under the pool. |
-| 3 | pytest-cov | 235.9M | 🟦 Native | V | rstest orchestrates coverage combine across workers; native `--cov`. Vetted. |
+| 3 | pytest-cov | 235.9M | 🟦 Native | V | rstest orchestrates coverage combine across workers; native `--cov`. Vetted. `--cov` must be on the command line: from `addopts` it isn't combined at `-n ≥ 2` ([Coverage](../guides/coverage.md)). |
 | 4 | pytest-xdist | 177.1M | ➖ N/A | V | Neutralized inside workers: rstest *is* the parallel runner; its options parse but stay inert. |
 | 5 | pytest-mock | 105.0M | ✅ Works | V | Per-test `mocker` fixture; vetted. |
 | 6 | pytest-timeout | 103.1M | 🟦 Native | V | Its ini `timeout =` setting fires in both modes. rstest has a native `--timeout` and honors `@pytest.mark.timeout` itself at every worker count; a command-line `--timeout` is rstest's and never reaches the plugin. To avoid two SIGALRM timers, uninstall the plugin or pass `-p no:timeout`. See [Plugins](../guides/plugins.md#tested-compatibility). |
@@ -40,7 +40,7 @@ plugin's category, not yet runtime-verified.
 | 10 | pytest-env | 24.0M | ✅ Works | i | Env vars set on every worker (its hook runs in each worker session). No gate yet. |
 | 11 | pytest-httpx | 22.9M | ✅ Works | V | Per-test httpx mock fixture; isolated per worker (e2e gate). |
 | 12 | pytest-html | 21.8M | 🔴 Silent | V | Writes no report at `-n ≥ 2` (gates on being the xdist controller, which has no `workerinput`); a command-line `--html` is rstest's native report; for the plugin's own, `rstest -n 0 -- --html=...`. |
-| 13 | pytest-django | 21.6M | ✅ Works | V | Per-worker test DB suffixed by `workerid`. Verified on django-allauth, which uses SQLite `:memory:`; server-backed databases (Postgres, MySQL) are not in the corpus yet. |
+| 13 | pytest-django | 21.6M | ✅ Works | V\* | Per-worker test DB suffixed by `workerid`. Verified only on django-allauth, which uses SQLite `:memory:`, so the per-worker database naming path of a server-backed database (Postgres, MySQL) is not exercised; check it on your own suite. |
 | 14 | pytest-split | 21.0M | 🟦 Native | V | Group selection is deselection (honored under the pool: e2e gate); rstest sharding is native `--shard K/N`. |
 | 15 | pytest-repeat | 15.5M | ✅ Works | i | `@mark.repeat(N)` expands at collection, so the copies distribute across workers. No gate yet. |
 | 16 | pytest-json-report | 15.0M | 🔴 Silent / 🟦 | V | Report aggregator; no file at `-n ≥ 2`, written at `-n 0` (e2e gate). Use native `--report-json`. |
@@ -132,7 +132,8 @@ plugin's category, not yet runtime-verified.
 `V` = runtime-verified (an e2e gate exercises the feature, or a corpus suite loads
 the plugin at `-n auto`); `V*` = verified only that the plugin does **not crash**
 under the pool and its artifact lands at `-n 0` (the shared report-aggregator
-gate), not that a usable artifact is produced at `-n ≥ 2`; `i` = inferred from
+gate), not that a usable artifact is produced at `-n ≥ 2`, or, for pytest-django,
+verified only on SQLite `:memory:`; `i` = inferred from
 the plugin's category, not yet runtime-verified. The `i` rows of 51–100 are the
 next verification tranche.
 

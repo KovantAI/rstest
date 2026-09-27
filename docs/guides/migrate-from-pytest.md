@@ -133,11 +133,19 @@ bite, with the grep and the fix for each.
 ## Rolling out in stages, and rolling back
 
 rstest doesn't touch your pytest setup, so switching back is a one-line
-change as long as you keep the pytest side intact during the rollout:
+change as long as you keep the pytest side intact during the rollout and
+haven't yet adopted rstest-only features (see
+[What ties you to rstest](#what-ties-you-to-rstest)):
 
 1. **Shadow.** Add an rstest job next to your existing pytest (or
    pytest-xdist) CI job. Keep the old job as the required check. Keep pytest
    installed: `rstest try` compares against it, and it's your fallback.
+   rstest does not install or upgrade pytest (it runs its own vendored
+   pytest 9 core and has no pytest dependency), so a `pytest<9` pin does not
+   conflict when you add it. Until that environment is on pytest 9, though,
+   a difference `rstest try` reports can be a pytest 8 versus 9 difference
+   rather than a parallelism one: check it at `rstest -n 0` (see
+   [Upgrading to pytest 9](upgrade-to-pytest9.md)).
 2. **Compare.** Run both for a while. `rstest try` and
    `rstest migrate-check` (below) tell you where results differ.
 3. **Switch.** Make the rstest job required and the old job optional.
@@ -148,12 +156,35 @@ change as long as you keep the pytest side intact during the rollout:
    `xdist_group` co-location is lost) and pass `-n` to rstest if you want a
    fixed count.
 4. **Clean up** once you're confident: remove the old job, then the xdist
-   flags from `addopts`, then pytest-xdist itself.
+   flags from `addopts`, then pytest-xdist itself. Keep pytest-xdist
+   installed if any conftest or plugin implements its hooks
+   (`pytest_configure_node` and friends): without it, pytest stops with
+   `unknown hook`. Or mark those impls `@pytest.hookimpl(optionalhook=True)`
+   first (see [Controller-side hooks](migrate-from-xdist.md#controller-side-hooks)).
 
 To roll back at any stage, point CI at `pytest` again. pytest ignores
 `[tool.rstest]` in `pyproject.toml` and the `.rstest_cache/` directory, so
 neither needs removing. If you already did step 4, restore the xdist flags
 and dependency.
+
+### What ties you to rstest
+
+Every rstest feature you adopt adds a step to the rollback. Before you
+switch back, grep for each construct below and apply the portable
+alternative, or keep the plugin that provides it under pytest.
+
+| If your suite uses | Under plain pytest | To stay portable |
+|---|---|---|
+| `@pytest.mark.serial` | Unknown marker: a `PytestUnknownMarkWarning`, and a collection error under `--strict-markers` or `-W error` | Register it in pytest's `markers` ini (`serial: run exclusively`). pytest-xdist has no equivalent; run those tests in a separate `-p no:xdist` job |
+| `@pytest.mark.flaky(reruns=N)`, `--reruns` | Needs pytest-rerunfailures | Keep pytest-rerunfailures installed; it reads the same `reruns=` kwarg |
+| `@pytest.mark.timeout(N)`, `--timeout` | Needs pytest-timeout | Keep pytest-timeout installed |
+| `--html` | Needs pytest-html | Keep pytest-html installed |
+| `worker_id` / `testrun_uid` fixtures | Fixture not found without pytest-xdist | Keep pytest-xdist installed, or define the fixtures in `conftest.py` |
+| `RSTEST_WORKER_ID`, `RSTEST_WORKER_COUNT`, `RSTEST_RUN_UID` in code | Never set | Read `PYTEST_XDIST_WORKER` / `PYTEST_XDIST_WORKER_COUNT` or the `worker_id` fixture, which work under both runners |
+| xdist hooks in `conftest.py` (`pytest_configure_node`, ...) | `unknown hook` error without pytest-xdist | Keep pytest-xdist installed, or mark the impls `@pytest.hookimpl(optionalhook=True)` |
+| `[tool.rstest]` settings (`numprocesses`, `dist`, `reruns`, ...) | Ignored | Move the xdist equivalents (`-n`, `--dist`) back to `addopts` |
+| rstest-only flags in CI (`--doctor*`, `--changed`, `--watch`, `--shard`, `--cache-*`, `--quarantine`, `--report-json`, `--fail-on-leak`) and subcommands (`try`, `migrate-check`, ...) | Usage error (`unrecognized arguments`) | Remove them from CI scripts; the features (doctor gates, changed-test selection, shared durations cache, quarantine) have no pytest equivalent |
+| The rstest GitHub Action | Not applicable | Replace with a plain `pytest` step |
 
 ## The escape hatch
 

@@ -18,6 +18,14 @@ releases, since they run against the vendored core too and a `pytest<9` pin
 is inert at runtime; see
 [Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
 
+rstest does not install or upgrade pytest: the package has no pytest
+dependency, so adding it next to a `pytest<9` pin does not conflict, and you
+can shadow-run rstest before this upgrade is done. Until the environment is
+on pytest 9, though, a difference `rstest try` reports (it compares your
+installed pytest against rstest) can be a pytest-version difference, not a
+parallelism one. `rstest -n 0` tells them apart: a failure there is the
+pytest 9 core, not the pool.
+
 ## The method
 
 You don't need to guess which *removed APIs* apply. Turn pytest's own

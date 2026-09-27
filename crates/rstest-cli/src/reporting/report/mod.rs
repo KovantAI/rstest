@@ -337,13 +337,20 @@ impl Run {
     /// pytest-style "N passed, N failed, ..." counts derived from phases:
     /// a test counts by its call outcome; setup/teardown failures count as
     /// errors; setup skips count as skipped (matches pytest accounting).
+    /// Nothing counted reads "no tests ran", like pytest.
     pub fn summary_line(&self) -> String {
-        self.counts()
+        let line = self
+            .counts()
             .iter()
             .filter(|(_, v)| **v > 0)
             .map(|(k, v)| format!("{v} {}", k.replace('_', " ")))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", ");
+        if line.is_empty() {
+            "no tests ran".to_string()
+        } else {
+            line
+        }
     }
 
     /// Outcome counts with pytest accounting: the single source of truth for
@@ -565,6 +572,11 @@ mod tests {
         run.collect_error("b.py".into(), "ImportError".into());
         assert!(!run.all_passed());
         assert!(run.summary_line().contains("1 collect errors"));
+    }
+
+    #[test]
+    fn empty_run_summary_reads_no_tests_ran() {
+        assert_eq!(Run::default().summary_line(), "no tests ran");
     }
 
     #[test]

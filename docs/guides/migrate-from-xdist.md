@@ -10,7 +10,14 @@ Most xdist flags carry over unchanged. The ones people actually touch:
 
 - **`-n 4` / `-n auto`**: same, and `auto` is the default. `auto` is capped by
   test-file count and cached suite time, so pass an explicit `-n` when you
-  need a fixed count (for example with `--shard`).
+  need a fixed count (for example with `--shard`). `auto` also counts
+  differently: rstest starts from **logical** cores, while xdist's `auto`
+  counts **physical** cores when psutil is installed (logical otherwise). On
+  a machine with SMT or hyperthreading, rstest's `auto` can start twice as
+  many workers. Pin `-n` to the count your xdist job actually used while you
+  shadow-run both, so timing and load differences are not a worker-count
+  difference.
+- **`-n logical`**: not supported (exit 1). Use `-n auto` or an explicit `-n N`.
 - **`--dist load` / `loadfile` / `loadscope` / `loadgroup`**: same names and
   semantics, including `@pytest.mark.xdist_group`. `load` (the default) adds
   duration-aware slowest-first scheduling. Pass the mode on the rstest command
@@ -20,6 +27,14 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   rstest's `-n 1`, like `-n 0`, is
   [byte-exact mode](../concepts/glossary.md#byte-exact-mode), with no worker identity.
 - **`--dist no`**: rejected (exit 1). Use `-n 0` for a single worker.
+- **`--dist worksteal`**: rejected (exit 1, `unknown --dist mode`). Use
+  `load`, the default: it already dispatches slowest-first from the duration
+  cache.
+- **`-p no:xdist`**: forwarded to pytest in every worker. rstest does not
+  need pytest-xdist, so the run still parallelizes. A leftover
+  `addopts = -n 4` then fails: pytest has no `-n` option once xdist is
+  disabled, so every run stops with a usage error (exit 4,
+  `unrecognized arguments: -n`), the same as uninstalling pytest-xdist.
 
 Everything else (`--tx`, `--rsync*`, `-d`, `--maxprocesses`,
 `--max-worker-restart`, `--dist each`, `--looponfail`) is covered row by row,
@@ -45,6 +60,21 @@ does the plugin keep its native behavior. In the pool, a `--reruns` in
 `--reruns` are rejected under `--dist each` (that mode exists to expose
 per-worker outcome differences, so retrying failures would defeat it; see
 [`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
+
+Not carried over from pytest-rerunfailures when rstest owns the retry (the
+pool, or any run with rstest's own `--reruns`):
+
+- **Positional `@pytest.mark.flaky(3)`**: rstest reads only the `reruns=`
+  keyword, so this retries **once**. Write `flaky(reruns=3)`.
+- **Mark keywords `reruns_delay`, `condition`, `only_rerun`**: ignored. A
+  test marked `condition=False` or with a non-matching `only_rerun` is
+  still retried. Use the global `--only-rerun` to filter by error.
+- **`--reruns-delay` and `--rerun-except`**: not rstest flags, so they are
+  forwarded to pytest. With pytest-rerunfailures installed they parse and do
+  nothing (no delay, no exception filter); without it they are a pytest usage
+  error (exit 4).
+
+Details: [`@pytest.mark.flaky`](../reference/markers.md#pytestmarkflaky).
 
 ## What your plugins see
 
@@ -95,12 +125,73 @@ derive from `gateway.id` or a uuid), and a crashed worker's
 function of `node.workerinput` alone. Full semantics, timing, and the crash
 race: [xdist hook emulation](../concepts/xdist-hooks.md).
 
+These hooks are declared by pytest-xdist. Uninstall it while a conftest or
+plugin still implements one (`pytest_configure_node`, `pytest_testnodeready`,
+`pytest_testnodedown`, `pytest_xdist_*`) and every run, at any `-n`, stops
+with an internal error: `PluginValidationError: unknown hook
+'pytest_configure_node'`. Either keep pytest-xdist installed (rstest leaves
+its session inert), or mark each implementation optional, which also keeps
+it working under rstest's emulation without xdist:
+
+```python
+import pytest
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node): ...
+```
+
+## Controller-only conftest code
+
+xdist runs a controller process next to its workers, and conftest code often
+targets it with `if not hasattr(config, "workerinput"):` or
+`xdist.is_xdist_controller(session)`. rstest has no controller process: at
+`-n ≥ 2` every pytest session is a worker with a `workerinput`, so that
+branch **never runs**. (At `-n 0/1` without `--reruns` the single session
+has no `workerinput`, so the branch runs there, once.)
+
+Move once-per-run setup into a session fixture that the workers coordinate
+through a file lock, the pattern
+[xdist documents](https://pytest-xdist.readthedocs.io/en/stable/how-to.html#making-session-scoped-fixtures-execute-only-once)
+for the same problem. `tmp_path_factory.getbasetemp().parent` is shared by
+every worker in a run, and `testrun_uid` is the same in every worker, so the
+first worker produces the data and the rest reuse it:
+
+```python
+import json
+
+import pytest
+from filelock import FileLock
+
+
+@pytest.fixture(scope="session")
+def session_data(tmp_path_factory, worker_id, testrun_uid):
+    if worker_id == "master":  # below -n 2: one session, no coordination
+        return produce_expensive_data()
+    root = tmp_path_factory.getbasetemp().parent
+    fn = root / f"data-{testrun_uid}.json"
+    with FileLock(str(fn) + ".lock"):
+        if fn.is_file():
+            return json.loads(fn.read_text())
+        data = produce_expensive_data()
+        fn.write_text(json.dumps(data))
+    return data
+```
+
+There is no equivalent for the other half of the controller's job: nothing
+runs once after **all** workers finish. `pytest_sessionfinish` and
+`pytest_testnodedown` fire in each worker, for that worker. Make cleanup
+per-worker (each worker drops what it created), or run it as a CI step after
+rstest exits.
+
 ## If xdist is still in your ini
 
 `addopts = -n 4` with pytest-xdist installed is neutralized inside rstest
 workers automatically: options parse, the xdist session never engages, no
 nested workers. Keep it while a pytest-xdist job is still your fallback, then
-remove it and pass `-n` to rstest.
+remove it and pass `-n` to rstest. Uninstall pytest-xdist only after that,
+and only once no conftest or plugin implements its hooks (see
+[Controller-side hooks](#controller-side-hooks)).
 
 rstest reads neither `-n` nor `--dist` from `addopts` (or `PYTEST_ADDOPTS`):
 its worker count comes from the command line or `[tool.rstest] numprocesses`
@@ -127,8 +218,12 @@ dist = "loadgroup"
 - **Crash attribution**: xdist infers the culprit of a crashed worker;
   rstest knows exactly which test was running, reports it failed, and
   finishes the run on a replacement worker.
-- **Long-pole splitting**: xdist's schedulers keep whole files together;
-  rstest's default mode splits slow files across workers. On wait-heavy
+- **Long-pole splitting**: xdist's default `load` scheduler has no duration
+  data. It hands each worker batches of consecutive tests in collection
+  order, so a slow file's tests tend to travel together, and a slow file
+  late in collection order starts late (`loadfile` / `loadscope` pin files
+  outright). rstest's default mode dispatches slowest-first from the
+  duration cache and splits slow files across workers. On wait-heavy
   suites this more than halves the wall time vs xdist (see
   [Benchmarks](../reference/benchmarks.md)).
 - **One merged output**: summary, `--lf` cache, junitxml, and coverage, with
@@ -146,24 +241,21 @@ BLAS/`OMP_NUM_THREADS` oversubscription concerns apply here as under xdist; see
 
 If your suite is **CPU-bound** (real compute per test, no sleeps or socket
 waits) and it already splits cleanly under xdist (`-n 8` ≈ 8× serial, workers
-stay busy, no single long test gating the run), the honest answer is: **rstest
-lands at parity on raw speed, not a win.** pandas (193,627 tests) runs 61s under
-xdist `-n 8` and 63s under rstest `-n 8`; the [benchmarks](../reference/benchmarks.md)
-file this under *"parity, not victory."* Don't switch for wall-clock alone.
+stay busy, no single long test gating the run), **rstest
+lands at parity on raw speed, not a win.** sympy (3,061 pure-Python compute
+tests) runs 15.6s under rstest `-n 8` and 15.5s under xdist `-n 8`, within
+noise at every worker count from 1 to 14 (see the
+[CPU-bound benchmarks](../reference/benchmarks.md#cpu-bound-suites)). Don't
+switch for wall-clock alone.
 
-Why: the gains are capped at core count. rstest's headline wins come from
-test-granular dispatch splitting a slow file that xdist's file-affinity
-scheduler pins to one worker: a *wait-bound* pattern. A CPU-bound suite that
+Why: the gains are capped by your cores. rstest's headline wins come from
+slowest-first, test-granular dispatch splitting a slow file that xdist's
+collection-order batches leave to one worker or start late: a *wait-bound*
+pattern. A CPU-bound suite that
 already spreads evenly has no such slack; both runners saturate your cores,
-neither exceeds them. From [Benchmarks](../reference/benchmarks.md): wait-bound
-suites gain most, CPU-bound suites gain up to core count, one-long-test suites
-gain nothing beyond that test.
-
-!!! note "Documentation gap"
-    The "up to core count" claim isn't yet demonstrated with a real
-    *compute-bound* benchmark: the corpus's CPU-bound data point (pandas) is
-    collection-bound. Measure your own suite with `rstest try` rather than
-    relying on a published ratio.
+neither exceeds them. Measured on an M4 Max (10 performance + 4 efficiency
+cores), sympy scales to 6.6x at `-n 10` and 7.2x at `-n 14`: expect gains up to
+your performance-core count, then a flat curve.
 
 **What's still worth it anyway** (beyond the improvements above):
 
@@ -178,31 +270,54 @@ gain nothing beyond that test.
   a bigger inner-loop win than any scheduler tweak when a full run costs
   cores × time.
 
-**Oversubscription (numpy/BLAS).** The one place a CPU-bound numerics suite can
-get slower *or* flakier under naive parallelism, under xdist too.
-numpy/torch/BLAS spin their own thread pools; at `-n auto` you get *workers × library-threads*
-competing for cores, which both shifts reduction order (a tight `assert x ==
-expected` can flip at `-n 8`) and fights for cores. Pin one thread per worker and
-let rstest own parallelism:
+**BLAS threads (numpy, scikit-learn, torch).** numpy and friends run their own
+thread pools, so at `-n N` you get N workers, each with its own pool. Measured
+on numpy with Accelerate (macOS;
+[cpu-bench grid](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#worker-x-blas-thread-grid)):
+
+- On a realistic suite (scikit-learn `linear_model`, small ops) the thread cap
+  made no difference at any `-n`.
+- On heavy matmul/solve tests, library threads **help** while `-n` is below
+  the core count (one worker: 13.2s capped at one thread, 7.5s uncapped), and
+  the cap stops mattering once `-n` reaches the core count.
+
+So one thread per worker is not a free default. Pin it when you see
+oversubscription on your stack (OpenBLAS and MKL spin their own threads and
+can behave differently from Accelerate), or when you need bit-stable
+reductions (a tight `assert x == expected` can flip when the reduction order
+changes):
 
 ```console
-$ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 rstest -n auto
+$ OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1 rstest -n auto
 ```
 
-(Or cap `-n`.) See [Numeric determinism](parallel-safety.md#numeric-determinism-ml-numerics-suites).
+`VECLIB_MAXIMUM_THREADS` is the one Accelerate reads (numpy's macOS arm64
+wheels use it). Measure your own stack with `examples/cpu-bench/measure.py
+--grid`. See [Numeric determinism](parallel-safety.md#numeric-determinism-ml-numerics-suites).
 
-**Memory.** Each worker is a full OS process, so peak memory scales roughly
-linearly: N workers ≈ N × your serial peak RSS. A suite that holds large
-arrays or models per worker can OOM at `-n auto` where xdist was tuned lower.
-As a first cut, cap `-n ≈ available RAM ÷ per-worker peak RSS`. Note `--doctor`
-does not measure memory (it instruments wall/CPU time and fixture cost), so
-watch actual RSS (e.g. `/usr/bin/time -v`, `psutil`, or your CI's memory graph)
-when sizing.
+**Memory.** Each worker is a full OS process. Measured
+([cpu-bench](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#memory),
+[scikit-learn](../reference/benchmarks.md#memory-and-blas-threads)):
 
-!!! note "Documentation gap"
-    The linear-RSS rule above is a first-order estimate; there is no measured
-    per-worker memory model, and no concrete worker×thread sweet-spot formula.
-    Measure on your own hardware to tune precisely.
+```text
+peak ≈ orchestrator + N × (worker baseline + your suite's working set)
+```
+
+- **Worker baseline:** 38 MiB (interpreter, pytest, rstest's worker), the same
+  as an xdist worker.
+- **Orchestrator:** about 10 MiB for rstest (Rust). xdist's controller is a
+  Python process: about 38 MiB.
+- **Working set:** your serial run's peak RSS minus the baseline. A suite that
+  holds about 400 MiB per worker (the cpu-bench `blas` tests) peaks at 3.3 GiB
+  at `-n 8`: 8 × its single-worker peak.
+
+That total is the upper bound, reached when every worker is at its peak at
+once (normal for a long suite; a short one comes in under it). Size `-n` as
+available RAM ÷ your serial peak RSS, and leave headroom for processes your
+tests start themselves (scikit-learn's joblib pools add about 500 MiB on its
+own suite). `--doctor` does not measure memory; use `/usr/bin/time -v`,
+`psutil`, or your CI's memory graph.
 
 **How to decide for real.** [`rstest try`](../reference/cli-commands.md#try) runs your own
 suite under plain pytest and under `rstest -n auto`, reporting parity and speed

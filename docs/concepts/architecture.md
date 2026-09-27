@@ -24,8 +24,9 @@ pytest core owns everything *about* the tests.
 
 pytest compatibility is not an API; it's ten years of semantics: fixture
 finalization order, conftest discovery rules, assertion rewriting, the
-exact behavior of `importorskip` at collection time. Every prior attempt
-at a pytest-compatible runner died reimplementing this surface.
+exact behavior of `importorskip` at collection time. Reimplementing that
+surface means matching all of it, and every gap shows up as a suite that
+behaves differently.
 
 There's a second, harder constraint: **plugins import pytest internals.**
 Many of the most widely used pytest plugins import from `_pytest.*`, and

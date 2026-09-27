@@ -220,6 +220,10 @@ pub enum Event {
         /// The conftest cutoff pytest used (absolute), when it reported one.
         #[serde(default)]
         confcutdir: Option<String>,
+        /// pytest's resolved `-x`/`--maxfail` (`config.option.maxfail`, so
+        /// ini `addopts` and `PYTEST_ADDOPTS` included), sent only when > 0.
+        #[serde(default)]
+        maxfail: Option<u64>,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.
@@ -230,6 +234,9 @@ pub enum Event {
         /// relative to. The duration cache resolves source files against it.
         #[serde(default)]
         rootdir: Option<String>,
+        /// pytest's resolved `-x`/`--maxfail`, as on `CollectionDone`.
+        #[serde(default)]
+        maxfail: Option<u64>,
     },
     /// Lazy mode: one file collected (by exactly one worker). `ids` in
     /// collection order; serial/flaky ride along, keyed by nodeid.
@@ -481,18 +488,19 @@ mod property {
             flaky in prop::option::of(prop::collection::hash_map(small_str(), any::<u32>(), 0..4)),
             groups in prop::option::of(prop::collection::hash_map(small_str(), small_str(), 0..4)),
             // Grouped: proptest's tuple strategies stop at 12 elements.
-            (rootdir, args_source, root_args, inifile, order_flags, confcutdir) in (
+            (rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail) in (
                 prop::option::of(small_str()),
                 prop::option::of(small_str()),
                 prop::option::of(small_strs()),
                 prop::option::of(small_str()),
                 prop::option::of(small_strs()),
                 prop::option::of(small_str()),
+                prop::option::of(any::<u64>()),
             ),
         ) -> Event {
             Event::CollectionDone {
                 count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
-                rootdir, args_source, root_args, inifile, order_flags, confcutdir,
+                rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail,
             }
         }
     }
@@ -522,8 +530,16 @@ mod property {
             prop::collection::vec(arb_warning(), 0..4)
                 .prop_map(|entries| Event::Warnings { entries }),
             arb_collection_done(),
-            (prop::option::of(small_str()), prop::option::of(small_str()))
-                .prop_map(|(cache_dir, rootdir)| Event::LazyReady { cache_dir, rootdir }),
+            (
+                prop::option::of(small_str()),
+                prop::option::of(small_str()),
+                prop::option::of(any::<u64>()),
+            )
+                .prop_map(|(cache_dir, rootdir, maxfail)| Event::LazyReady {
+                    cache_dir,
+                    rootdir,
+                    maxfail,
+                }),
             arb_file_collected(),
         ];
         let group_b = prop_oneof![
