@@ -43,11 +43,19 @@ derived from time/randomness. Workarounds: -p no:randomly, stable
 parametrize ids, or -n 0
 ```
 
-Your collection is nondeterministic: typically a randomizing plugin
-(pytest-randomly without a fixed seed) or test parametrization built from
-an unordered source (set iteration, directory listing). rstest refuses to
-dispatch rather than misassign tests. Fix the nondeterminism (seed it, sort
-it) or run `-n 0`.
+Your collection is nondeterministic. The most common cause is a
+`@pytest.mark.parametrize` whose ids differ between processes: ids built
+from `repr()` of an object without a stable repr (it contains a memory
+address), a `uuid4()`, or a timestamp. Give it an explicit stable `ids=`; see
+[the parametrize ids note](markers.md#a-note-on-pytestmarkparametrize-ids).
+Other causes: a randomizing plugin (pytest-randomly without a fixed seed) or
+parametrization built from an unordered source (set iteration, directory
+listing). rstest refuses to dispatch rather than misassign tests. Fix the
+nondeterminism (stable ids, seed it, sort it) or run `-n 0`.
+
+To find the exact sites before a parallel run, run
+[`rstest migrate-check`](cli-commands.md#migrate-check): it names each
+unstable parametrize id.
 
 ## My plugin's terminal output doesn't appear
 

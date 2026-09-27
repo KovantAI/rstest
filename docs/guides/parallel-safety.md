@@ -75,8 +75,10 @@ to xdist semantics. Two consequences:
   exactly like an xdist worker (`gw0`, `gw1`, ...), so the test database
   per worker is suffixed automatically.
 
-`rstest --doctor` prints a warning for every session fixture that ran more
-than once, with this exact caveat.
+`rstest --doctor` flags a session fixture that ran more than once with this
+exact caveat, but only on rows of its FIXTURE HOTSPOTS table (fixtures with at
+least 0.5s of total setup time, top 8). A cheap session fixture that runs per
+worker gets no warning, so audit those by hand.
 
 ### Teardown timing and `--setup-show` / `--setup-plan`
 
@@ -90,10 +92,11 @@ on an idle worker until the slowest worker finishes. Ordering within a worker
 is pytest's usual reverse-of-setup; there is no ordering across workers.
 If the run has `@pytest.mark.serial` tests, the other workers tear down
 first, and the designated worker keeps its session open to run the serial
-phase afterwards. (Cleanup that must run after
-*every* worker, such as dropping a shared DB, belongs in a
-[`pytest_testnodedown`-style hook](../concepts/xdist-hooks.md), not a
-session fixture.)
+phase afterwards. rstest has no hook that runs once after *all* workers
+finish: [`pytest_testnodedown`](../concepts/xdist-hooks.md) fires once per
+worker, inside that worker. So make every resource per-worker (keyed on
+`node.workerinput` or the worker id) and let each worker clean up its own,
+in a session fixture's teardown or in `pytest_testnodedown`.
 
 `--setup-show` and `--setup-plan` are **not** passthrough-IO flags, so they
 run in the parallel pool: each worker prints its own setup/teardown trace,
@@ -115,7 +118,18 @@ worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", ... ; unset at -n 0 or -n 
 ```
 
 Exception: `-n 0/1` with `--reruns` runs a one-worker pool, so there the
-variable is set to `gw0`. Handle both cases (`worker or "gw0"`).
+variable is set to `gw0`. The xdist-compatible `worker_id` fixture does not
+have this wrinkle: it returns `gw0`, `gw1`, ... at `-n ≥ 2` and `"master"`
+below `-n 2` (with or without `--reruns`), so prefer it inside fixtures:
+
+```python
+import pytest
+
+
+@pytest.fixture(scope="session")
+def worker_suffix(worker_id):
+    return worker_id  # "gw0", "gw1", ... or "master" below -n 2
+```
 
 Plugins that check xdist's `workerinput` get the same answer: the
 attribute is provided for compatibility.
@@ -128,16 +142,14 @@ session-scoped fixture, which runs once per worker. Raw SQLAlchemy / psycopg
 against a per-worker database:
 
 ```python
-import os
 import pytest
 from sqlalchemy import create_engine
 
 
 @pytest.fixture(scope="session")
-def db_engine():
-    # gw0, gw1, ...; "main" at -n 0/1 where there is a single session
-    worker = os.environ.get("RSTEST_WORKER_ID", "main")
-    url = f"postgresql+psycopg://ci:ci@localhost:5432/app_{worker}"
+def db_engine(worker_id):
+    # gw0, gw1, ...; "master" below -n 2, where there is a single session
+    url = f"postgresql+psycopg://ci:ci@localhost:5432/app_{worker_id}"
     # create the database `app_{worker}` if it does not exist, then:
     engine = create_engine(url)
     yield engine
@@ -145,7 +157,7 @@ def db_engine():
 ```
 
 Each worker gets its own `app_gw0`, `app_gw1`, ... database, so nothing
-collides. rstest exercises exactly this shape in its own battery with
+collides (`app_master` below `-n 2`). rstest exercises exactly this shape in its own battery with
 pytest-postgresql, where each worker spins up its own server on an
 OS-assigned free port.
 
@@ -212,12 +224,16 @@ worker a stable identity to derive a reproducible seed from
 on. Seed deterministically in a fixture:
 
 ```python
-import os, numpy as np
+import numpy as np
+import pytest
 
-# Same seed every run; distinct per worker so workers don't draw identical
-# streams. Drop the worker offset if you want every worker identical.
-worker = int((os.environ.get("RSTEST_WORKER_ID") or "gw0").removeprefix("gw"))
-np.random.seed(1234 + worker)
+
+@pytest.fixture(autouse=True)
+def seed_numpy(worker_id):
+    # Same seed every run; distinct per worker so workers don't draw identical
+    # streams. Drop the worker offset if you want every worker identical.
+    worker = 0 if worker_id == "master" else int(worker_id.removeprefix("gw"))
+    np.random.seed(1234 + worker)
 ```
 
 A test that depends on a seed set by an *earlier* test in the same process is
@@ -233,12 +249,15 @@ libraries to one thread per worker and let rstest own the parallelism:
 
 ```console
 $ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-    rstest -n auto
+    VECLIB_MAXIMUM_THREADS=1 rstest -n auto
 ```
 
-(Or cap `-n` to leave headroom for the internal threads.) This is also usually
-*faster* for a test suite: many small ops, where thread-pool overhead outweighs
-the win.
+(Or cap `-n` to leave headroom for the internal threads.) Pin for
+determinism, not for speed: on numpy with Accelerate the cap made no
+difference on a realistic suite, and on heavy linear algebra it was slower
+below the core count
+([measured](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#worker-x-blas-thread-grid)).
+`VECLIB_MAXIMUM_THREADS` is for macOS: Accelerate ignores the other three.
 
 **3. Reset global numeric state per test.** `np.seterr`, `torch.set_default_dtype`,
 the global RNG, `np.set_printoptions`: a test that mutates one and a test that
@@ -272,10 +291,25 @@ Three runs usually classify the failure. Order dependencies want
 `loadfile` or a refactor; load sensitivity wants `serial` or a clock mock;
 anything failing at `-n 0` too is a plain bug.
 
-`rstest migrate-check` runs exactly these discriminators **for you**, over the whole suite and scoped to the files that actually fail. It classifies each
-failure into the classes above, and bisects the polluting file for order /
+`rstest migrate-check` runs equivalent discriminators **for you**, over the
+whole suite and scoped to the files that actually fail: serial runs (twice)
+and a `--dist loadfile` run, with load sensitivity inferred from wall time
+far exceeding CPU time rather than from a separate `-n 2` run. It classifies
+each failure into the classes above, and bisects the polluting file for order /
 isolation defects. Reach for it instead of running the three commands by hand;
 see [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
+
+For an order-dependent suite, three more tools go from "it flakes sometimes"
+to a fix:
+
+- [`--shuffle`](../reference/cli.md#-shuffleseed) runs the suite in a seeded
+  random order to flush order dependence out on demand; the seed is printed,
+  and `--shuffle=SEED` replays a failing order.
+- [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) finds
+  the test that pollutes a victim and prints a minimal repro command.
+- [`rstest audit`](../reference/cli-commands.md#audit) runs the suite in
+  parallel against a serial baseline and prints the parallel-only failures as a
+  ready-to-paste `@pytest.mark.serial` list.
 
 If the failure only shows up on CI, don't try to recreate the schedule by
 hand: upload the run's replay journal and re-run that exact schedule locally

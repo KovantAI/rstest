@@ -192,6 +192,7 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
         send_ids: true,
         debug_port: None,
         stream_output: false,
+        junitxml: None,
     };
     let mut collect_args = args.to_vec();
     if !collect_args

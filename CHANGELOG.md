@@ -19,6 +19,67 @@ between 0.x releases and are listed here.
   The bundled GitHub Action now leaves `.rstest_cache/replay` out of the cache
   it persists; the changed path spec makes the first run after upgrading miss
   the cache once.
+- **Byte-exact mode now prints pytest's own terminal output.** At `-n 0` /
+  `-n 1` (and `-n auto` capped to one worker), with no `--output` set, the
+  pytest session writes to stdout directly instead of rstest re-rendering it:
+  the session header, `ERRORS` / `FAILURES` sections, warnings summary,
+  `short test summary info`, `-r`, `--durations`, `-x`, and any plugin's
+  `pytest_report_header` / `pytest_terminal_summary` lines now match plain
+  pytest byte for byte. rstest prints no banner or summary of its own there,
+  only its additions after pytest's (quarantined failures, doctor, coverage,
+  gate messages); `--junitxml`, `--report-json`, `--html` and `--stream-json`
+  are still written. Pass `--output dots|verbose|bar|...` to keep rstest's
+  renderer. `-n ≥ 2` is unchanged.
+- **`--junitxml` writes pytest's own document.** Each worker now runs
+  pytest's junitxml plugin and streams every finished `<testcase>` element,
+  and rstest merges them in collection order, so the file matches plain
+  pytest's (apart from `time` / `timestamp` / `hostname`) at every `-n`:
+  suite `pytest` in `<testsuites name="pytest tests">`, pytest's run order,
+  real `message` attributes, `type="pytest.skip"` / `pytest.xfail`, and
+  `junit_family`, `junit_logging`, `junit_suite_name`, `--junit-prefix`,
+  `record_property`, `record_xml_attribute` and `record_testsuite_property`
+  honored. Previously rstest wrote its own document (suite `rstest`, tests
+  sorted by nodeid, `message="failed"`), and the `record_*` fixtures were
+  lost. rstest's additions are standard `<property>` extensions: `flaky` on
+  a test that passed after reruns, and `quarantined` on a quarantined
+  failure, whose `<failure>` is removed so junit-gated CI agrees with the
+  exit status. In byte-exact mode, pytest's closing summary is now followed
+  by `rstest: N failures above are quarantined and do not fail the run`.
+- **An empty folder runs one worker and says `no tests ran`.** `rstest` with
+  nothing to collect started a full pool (one worker per core) and printed an
+  empty summary line (` in 0.15s`). `-n auto` now drops to one worker when
+  the collection walk finds no Python file at all and no argument names a
+  path, and an empty run's summary reads `no tests ran`, like pytest.
+- **`-x` / `--maxfail` from ini `addopts` now stop the whole run.** Only a
+  command-line `-x` was coordinated across workers; one in `addopts` or
+  `PYTEST_ADDOPTS` stopped each worker's own session, so the other workers
+  kept going. Workers now report pytest's resolved limit and the
+  orchestrator applies it globally, in both the eager and lazy pools.
+- **Combined short flags are recognized.** `-sv` and `-vs` now force the
+  single-process passthrough like `-s`, `-xv` is a global fail-fast like
+  `-x`, `-sv` / `-v -v` count toward verbose output, and the two-token
+  `--capture no` is treated like `--capture=no`. Previously only the exact
+  tokens matched.
+- **`--changed` and `--watch` no longer drop option values that are paths.**
+  When replacing your positional paths with their selection they dropped
+  every argument naming an existing path, including option values: with an
+  `api/` directory, `-k api` lost `api` and broke the command line, and
+  `--ignore tests/slow` lost its value. Lazy collection similarly collected
+  an `--ignore`d directory as a test path. Option values are now kept; a
+  plugin option not in rstest's table still works as `--option=value`.
+- **Benchmarks re-measured under one methodology, plus CPU-bound results.**
+  Every published number is now the median of 5 runs after a warm-up, with
+  rstest and pytest-xdist at the same `-n`, on a documented machine. Numbers
+  that moved: pandas `-n 8` is now 42s for rstest against 89s for xdist (the
+  old single run had them at parity, 63s vs 61s; xdist's controller is the
+  bottleneck on 193k tests), django-allauth at matched `-n 8` is 5.7s against
+  8.8s (the old row compared xdist `-n 8` with rstest `-n 4`), and aiohttp's
+  cold run is 150s at `-n 8` (was 126s). New: sympy and scikit-learn sweeps
+  (parity with xdist, gains up to the performance-core count), a measured
+  per-worker memory model, and a worker x BLAS-thread grid, which replaces
+  the "one thread per worker is usually faster" advice. Tooling:
+  `examples/cpu-bench`, and `corpus/bench.py --sweep-workers`, `--xdist`,
+  `--memory`, `--grid`, `--cold`.
 - **GitHub action: the fail-ratio gate no longer masks non-test failures.**
   With `fail-under-ratio` set, the gate used to judge only the JUnit ratio, so
   an interrupt (exit 2), a lost worker (3), a pytest usage error (4), or an
@@ -31,10 +92,16 @@ between 0.x releases and are listed here.
   reaches the action's scripts through `env:` rather than being pasted into
   them. `args` is split with shell quoting rules (`-k "a and b"` stays one
   argument) and is never glob-expanded or evaluated.
+- **GitHub action: "Re-run failed jobs" no longer fails at artifact upload.**
+  Artifact names are unique per run across attempts, so a re-run hit a name
+  conflict uploading its cache segment and JUnit. Segment names now carry the
+  attempt (`rstest-seg-<suffix>--<run_id>-<attempt>-<shard>`; the warm pattern
+  is unchanged and merges every attempt), and the JUnit upload overwrites the
+  failed attempt's report under its stable name.
 - **GitHub action: matrix legs no longer collide or mix caches.** Artifact
   names now carry a per-leg suffix (new `artifact-suffix` input; default
   `<os>-py<version>[-<working-directory>]`): segments are
-  `rstest-seg-<suffix>--<run_id>-<shard>` and JUnit artifacts
+  `rstest-seg-<suffix>--<run_id>-<attempt>-<shard>` and JUnit artifacts
   `rstest-junit-<suffix>[-shard-K]`, and the warm step pulls only its own
   leg's segments. **Upgrade note:** the first artifact-backend run after
   upgrading starts cold, and workflows that download JUnit by exact name need

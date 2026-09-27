@@ -23,6 +23,13 @@ _ORDER_FLAGS = (
 )
 
 
+def _maxfail(config) -> int:
+    """pytest's resolved -x / --maxfail (argv, ini `addopts` and
+    PYTEST_ADDOPTS alike; 0 = no limit). The orchestrator only parses argv,
+    so it adopts this to coordinate the stop across every worker."""
+    return int(getattr(getattr(config, "option", None), "maxfail", 0) or 0)
+
+
 def _session_roots(config) -> m.SessionRootsPayload:
     """pytest's own view of where this session is rooted, for `rstest bisect`:
     the rootdir nodeids are relative to, where the initial args came from, and
@@ -65,8 +72,10 @@ def _session_roots(config) -> m.SessionRootsPayload:
     option = getattr(config, "option", None)
     flags = [flag for dest, flag in _ORDER_FLAGS if getattr(option, dest, False)]
     # -x / --maxfail cut a session short at the first unrelated failure.
-    if getattr(option, "maxfail", 0):
+    maxfail = _maxfail(config)
+    if maxfail:
         flags.append("--maxfail")
+        roots["maxfail"] = maxfail
     if flags:
         roots["order_flags"] = flags
     return roots
@@ -208,6 +217,9 @@ class LazyDispatchPlugin(StreamPlugin):
         rootpath = getattr(session.config, "rootpath", None)
         if rootpath is not None:
             payload["rootdir"] = str(rootpath)
+        maxfail = _maxfail(session.config)
+        if maxfail:
+            payload["maxfail"] = maxfail
         self._conn.send("lazy_ready", payload)
         return True
 

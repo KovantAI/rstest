@@ -79,6 +79,7 @@ class SessionRootsPayload(TypedDict, total=False):
     inifile: str  # config.inipath, when a config file is in effect
     confcutdir: str  # the conftest cutoff in effect, absolute
     order_flags: list[str]  # active "--nf" "--ff" "--lf" "--sw" "--sw-skip" "--maxfail"
+    maxfail: int  # resolved -x/--maxfail (argv + addopts), only when > 0
 
 
 class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=False):
@@ -105,6 +106,7 @@ class FileCollectedPayload(_FileCollectedRequired, total=False):
 class LazyReadyPayload(TypedDict, total=False):
     cache_dir: str
     rootdir: str  # pytest's config.rootpath
+    maxfail: int  # resolved -x/--maxfail (argv + addopts), only when > 0
 
 
 class DonePayload(TypedDict):
@@ -157,6 +159,19 @@ class NodeInputPayload(TypedDict):
     workerinput: dict[str, object]  # _wire_safe'd, arbitrary map
 
 
+class JunitCasePayload(TypedDict):
+    nodeid: str
+    cases: list[str]  # serialized <testcase> elements of one test attempt
+
+
+class JunitSuitePayload(TypedDict):
+    name: str  # junit_suite_name
+    timestamp: str  # session start, local ISO 8601 (pytest's format)
+    hostname: str
+    properties: list[str]  # serialized record_testsuite_property <property>s
+    extra: list[str]  # never-finalized <testcase>s (collection/internal errors)
+
+
 EventKind = Literal[
     "report",
     "collect_error",
@@ -174,6 +189,8 @@ EventKind = Literal[
     "item_done",
     "stopped",
     "done",
+    "junit_case",
+    "junit_suite",
 ]
 
 

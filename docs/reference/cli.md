@@ -54,7 +54,10 @@ Worker count. Default `auto` (logical cores, capped as described below).
 - `-n 0` or `-n 1`: **byte-exact mode**, one pytest session with byte-exact
   pytest semantics; identical to each other, with no worker identity below
   `-n 2`. Exception: with `--reruns`, `-n 0/1` runs a one-worker pool instead
-  (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
+  (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). With no
+  `--output` set, the session prints pytest's own terminal output
+  (**Unreleased**); see [`--output`](#-output-dotsverbosebargithubjson).
+  See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
   (and, for migrators, how it differs from pytest-xdist's `-n 1`).
 
 **An explicit `-n <k>` is not capped by core count.** Only `auto` caps down.
@@ -154,7 +157,8 @@ or config) warns where it has no effect: an affinity dist
 (`loadfile`/`loadscope`/`loadgroup`), `--dist each` (no dispatch queue), and
 `--collect lazy`. On a single-worker run or a passthrough run (`-s`, `--pdb`,
 `--co`, `--debug`, ...) it warns only when passed on the command line.
-Combining it with `--shuffle` is an error. A cold `flakes.json`
+Combining it with `--shuffle` is an error. `failfast` and `fail_fast` are
+accepted as spellings of `fail-fast` (flag and config). A cold `flakes.json`
 just means no test has a failure/flake signal yet, so fail-fast matches
 `throughput`. Monorepo runs forward `--order` to every project. Config `[tool.rstest] order`.
 
@@ -166,7 +170,9 @@ parallel-readiness hazard; a shuffled run flushes it out on demand
 (in CI or before enabling more workers) instead of waiting for a
 scheduling change to bite. Without a value the seed is chosen per run
 and printed; reproduce a failing order with `--shuffle=SEED` (add
-`-n 2 --dist loadfile` to keep the repro stable).
+`-n 2 --dist loadfile` to keep the repro stable). The seed must be attached
+with `=`: `--shuffle 42` is a bare `--shuffle` plus a test path `42` (see
+[Optional-value flags](#argument-splitting)).
 
 Affinity modes (`loadfile`/`loadscope`/`loadgroup`) shuffle the group
 order and keep in-group order intact: in-group order is the affinity
@@ -236,7 +242,9 @@ other test. `--doctest-glob` and friends forward the same way.
 
 Run only tests affected by changed files. Changes come from git (working
 tree + untracked vs `HEAD`, or vs `REV`, e.g. `--changed=origin/main` in
-CI) and map to the affected tests; only those run.
+CI) and map to the affected tests; only those run. Attach `REV` with `=`:
+`--changed origin/main` is a bare `--changed` (diff against `HEAD`) plus a
+test path `origin/main` (see [Optional-value flags](#argument-splitting)).
 
 **Coverage-aware when a line→test index is warm.** If
 `.rstest_cache/coverage_index.json` exists (written by any
@@ -462,7 +470,7 @@ tests/test_ws.py::*
 A failure matching the list is demoted to a **quarantined** outcome:
 counted separately in the summary (`N quarantined`), printed with its
 traceback in its own section, flagged as a `quarantined` testcase
-property in junit (no `<failure>` element, so junit-gating CI stays green) and in `--report-json` (schema 5), and never fatal: a run whose
+property in junit (no `<failure>` element, so junit-gating CI stays green) and in `--report-json`, and never fatal: a run whose
 only failures are quarantined exits 0. **Failures outside the list
 still fail the run**, and a listed test that passes is a plain pass.
 
@@ -575,21 +583,30 @@ settable as `RSTEST_CACHE_REMOTE`. `--cache-remote` accepts:
 - an **`http(s)://`** endpoint: the endpoint must serve `GET <root>/segments/`
   as a JSON array of segment names (the [listing
   contract](../concepts/caching.md#shared-cache-backend)) and support `GET` /
-  `PUT` / `DELETE`. Bearer auth from `RSTEST_CACHE_REMOTE_TOKEN`.
+  `PUT` / `DELETE`. Bearer auth from `RSTEST_CACHE_REMOTE_TOKEN`, sent on
+  every request: use `https://`, since plain `http://` sends the token in
+  cleartext.
 
 Any other `scheme://` is rejected loudly: rstest never silently writes to a
 junk local directory named after the URL.
 
 - `--cache-pull` merges the remote into the local cache **before** the run:
-  warming scheduling and the regression baseline.
+  warming scheduling and the regression baseline. A failed pull (unreachable
+  remote, auth or listing error) **aborts the run with exit 1 before any test
+  runs** (`Error: pulling shared cache from <remote>`); an empty or missing
+  remote is not a failure. See
+  [Shared cache: reliability](../guides/ci-shared-cache.md#reliability).
 - `--cache-push` publishes **this run's** contribution afterward as one
   immutable, uniquely-named **segment**. Concurrent shards/PRs each drop their
   own segment and never conflict; readers union all segments on the next pull.
   (A push failure warns but never fails an otherwise-green run.)
 
 Because each run pushes an immutable segment rather than overwriting a shared
-blob, there is no single-writer job: every shard just runs
-`--cache-pull --cache-push`. See [Shared cache](../concepts/caching.md#shared-cache-backend).
+blob, there is no single-writer job: every shard can run
+`--cache-pull --cache-push`. In a shard matrix, though, a shard that pushes
+early changes what a later-starting shard pulls; see
+[Keep one cache snapshot across the matrix](../guides/sharding.md#keep-one-cache-snapshot-across-the-matrix).
+See [Shared cache](../concepts/caching.md#shared-cache-backend).
 
 `--cache-remote` on its own (without pull/push/compact) does nothing and warns.
 Pull/push are **not** supported at a [monorepo root](../concepts/monorepo.md#flags-at-a-monorepo-root):
@@ -605,6 +622,9 @@ remote holds more than N loose segments, rstest compacts inline (honoring
 or compaction failure warns and never fails an otherwise-green run. Concurrent
 auto-compactions are safe (the absorbed-id set prevents double-counting), only
 redundant. Leave it unset to keep compaction an explicit `cache-compact` step.
+On `s3://` / `gs://`, keep N low (20 to 50): a pull reads each loose segment
+with its own `aws` / `gcloud` process, one after another, so a high threshold
+means that many CLI calls before the first test runs.
 
 ## Diagnostics
 
@@ -620,8 +640,8 @@ measurements to the run; outcomes are unaffected.
 
 ### `--doctor-json <path>`
 
-Write the doctor analysis as JSON (stable, versioned schema: currently
-`3`) for CI trending. Implies doctor instrumentation; combine with
+Write the doctor analysis as JSON (stable, versioned schema; the
+current version is in the `schema` field) for CI trending. Implies doctor instrumentation; combine with
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
 
@@ -774,6 +794,24 @@ Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
 to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
 
+!!! note "Unreleased: pytest's own output in byte-exact mode"
+    In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
+    or `-n auto` capped to one worker, without `--reruns`) with no `--output`
+    flag and no `[tool.rstest] output` key, the default is neither `bar` nor
+    `dots`: the single pytest session prints pytest's own terminal output,
+    on a TTY or not. That includes the session header, the FAILURES and
+    ERRORS sections, the warnings summary, `-r` and `--durations` sections,
+    plugin header and summary lines, and the final `= N passed in Xs =`
+    line. rstest prints no banner and no summary of its own there; it only
+    appends its extras after pytest's output (quarantined failures, the
+    `--doctor` report, the coverage report, gate messages) and still writes
+    `--junitxml`, `--report-json`, `--html` and `--stream-json` (see
+    [`--junitxml`](#-junitxml-path) for how that document matches pytest's).
+    An explicit `--output` style, on the command line or in
+    `[tool.rstest]`, keeps rstest's own renderer, under a
+    `single worker (pytest-exact mode)` banner. rstest 0.7.0 always used its
+    own renderer. At `-n 2` and above nothing changes.
+
 `dots` is pytest's one-char-per-test (`.`/`F`/`s`/…) with a running
 percentage. `verbose` is the `-v` equivalent: one `nodeid OUTCOME` line
 per test. `bar` is a pytest-sugar-style view: a per-test result line
@@ -797,7 +835,8 @@ renders it orchestrator-side from the streamed results.
 When stdout is not a TTY (CI, pipes) the live footer, progress bar, and
 closing results bar self-disable; the per-test lines plus the stable
 `N passed … in Xs` summary remain, so logs stay greppable. `-v` selects
-`verbose` unless `--output` says otherwise. Pin any style explicitly with
+`verbose` unless `--output` says otherwise (in byte-exact mode with no
+`--output`, `-v` is pytest's own). Pin any style explicitly with
 `--output` or `[tool.rstest] output` to override the TTY auto-default.
 
 #### Machine-readable styles { #machine-readable-styles }
@@ -881,14 +920,31 @@ snapshot document to a file.
 ### `--junitxml <path>`
 
 Write merged results as JUnit XML. Intercepted by rstest (rather than
-forwarded) because per-worker sessions would clobber a shared file; the
-XML is rendered from merged results with pytest's classname conventions.
+forwarded) because per-worker sessions would clobber a shared file.
 
-Only final outcomes appear: a test that passed after `--reruns` retries is
-a passing `<testcase>` carrying a
-`<property name="flaky" value="true"/>` (JUnit's standard extension
-point), so junit-based dashboards can track flakes without parsing
-`--report-json`.
+**Unreleased:** the document is pytest's own at every worker count. Each
+worker runs pytest's junitxml plugin and streams every finished
+`<testcase>` element to rstest, which merges them in collection order
+(pytest's run order at `-n 0`). Suite name and attributes, `junit_family`,
+`junit_logging`, `junit_suite_name`, `--junit-prefix`, `record_property`,
+`record_xml_attribute` and `record_testsuite_property` all come out exactly
+as under pytest; only `time`, `timestamp` and `hostname` vary between runs.
+(rstest 0.7.0 wrote its own document: suite `rstest`, tests sorted by
+nodeid, generic `message` attributes.)
+
+rstest adds its own signals only as standard `<property>` extensions:
+
+- a test that passed after `--reruns` retries is a passing `<testcase>`
+  with `<property name="flaky" value="true" />`, and only its last attempt
+  appears;
+- a [quarantined](#-quarantine-file) failure has its `<failure>` / `<error>`
+  removed and carries `<property name="quarantined" value="true" />`, so a
+  junit-gated CI agrees with rstest's exit status;
+- a test no worker finished (a crash or `--worker-timeout` kill in a pool,
+  an `--incremental` cached pass) gets an element synthesized in pytest's
+  shape.
+
+A crash at `-n 0` still ends the run before any report is written.
 
 ### `--html <path>`
 
@@ -935,28 +991,43 @@ produced.
 Interpreter for the workers. Accepts either a path to an interpreter or a
 version request: `3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t` (free-threaded).
 Without it, rstest searches, in order: the active virtualenv (`$VIRTUAL_ENV`),
-a `.venv` found walking up from the working directory, versioned `python` /
-`pythonX.Y` names on `PATH`, and finally uv-managed interpreters as a fallback.
+a `.venv` found walking up from the working directory (the walk stops at the
+repository root, the first directory containing `.git`), versioned `python` /
+`pythonX.Y` names on `PATH`, on Windows the python.org installs reachable
+through the `py` launcher, and finally uv-managed interpreters as a fallback.
 A `.python-version` file (or a `--python` version request) does not pick an
 interpreter directly: it sets the version that filters those candidates.
 
 ### `--watch`
 
-Watch the project and rerun on change. A change set consisting only of
+Watch the directory you started rstest in (recursively; not the project
+root when you start it from a subdirectory) and rerun on change. Only `.py`
+files and pytest config files (`pytest.toml`, `pytest.ini`, `pyproject.toml`,
+`tox.ini`, `setup.cfg`, ...) trigger a rerun; data files, templates, `.json`,
+`.sql` and the like do not. A change set consisting only of
 test files reruns exactly those files (with your other flags); a source
 (`.py`) change reruns the tests the import graph says are affected
 (the `--changed` machinery; unresolvable changes fall back to the full
-selection); a pytest-config change reruns the full selection. Ignores
-VCS, caches, and virtualenvs. Type `q` then Enter to exit cleanly (`Ctrl+C`
+selection); a pytest-config change reruns the full selection. Paths under a
+directory named exactly `.git`, `__pycache__`, `.pytest_cache`,
+`.rstest_cache`, `.venv`, `.gate-venv`, `node_modules` or `target` are
+ignored; other virtualenv or tool directories (`venv/`, `.tox/`, `.nox/`) are
+watched. Type `q` then Enter to exit cleanly (`Ctrl+C`
 also works; **Unreleased:** `q` is not in rstest 0.7.0, where only `Ctrl+C`
 exits). Closing stdin (`nohup`, `< /dev/null`) does not end the session.
 Started as a background job on a terminal (`rstest --watch &`), rstest leaves
 stdin alone so the shell does not suspend it for tty input; stop it with `kill`
 or bring it back with `fg`. A session moved to the background later (Ctrl+Z,
 then `bg`) may be suspended for tty input; `fg` resumes it.
-With a flag that hands stdin to the test process (`--pdb`, `--trace`, `-s`,
-`--capture=...`, `--debug`), `q` belongs to that process instead, and only
-`Ctrl+C` exits.
+With a [passthrough flag](#passthrough-io-flags) (`--pdb`, `--trace`, `-s`,
+`--capture=...`, `--co`/`--collect-only`, the stepwise flags) or `--debug`,
+stdin belongs to the test process, `q` is not read, and only `Ctrl+C` exits.
+
+Exit code: quitting with `q` exits `0` whatever the last cycle's outcome
+(the last cycle's exit code is shown in the waiting prompt); `Ctrl+C` ends the
+process by signal. An rstest-level error
+during a cycle (a bad flag combination, a failed `--cache-pull`) ends the
+session with exit `1`.
 
 Selection is **incremental** across the session. The import graph that maps a
 source change to affected tests is built once and then kept warm: each save
@@ -1028,7 +1099,9 @@ the `--worker-timeout` flag. The `order` key is **Unreleased** (not in rstest
 Precedence: command line > `[tool.rstest]` > built-in defaults. rstest reads
 the `[tool.rstest]` of the **nearest** `pyproject.toml`, walking up from the
 working directory, and stops there even if that file has no `[tool.rstest]`
-table. pytest's own options stay where they always were
+table. A `pyproject.toml` that is not valid TOML is skipped with a warning
+(`rstest: ignoring malformed <path>: ...`) and the walk continues to the next
+one up. pytest's own options stay where they always were
 (`[tool.pytest.ini_options]`, `addopts`, ...), but rstest-owned flags placed
 in `addopts` or `PYTEST_ADDOPTS` are **not** read by rstest (see the warning at
 the top of this page).
@@ -1067,10 +1140,29 @@ Everything not listed above is passed to the vendored pytest core
 unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 `--ff`, `-W`, `-p`, `--tb`, `--color`, `--basetemp`, plugin flags, ...
 
+Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
+and subcommand list) and `-V` / `--version` (`rstest 0.7.0`). In 0.7.0 pytest's
+help is not reachable through rstest: `rstest -- --help` prints only the
+banner and exits `0`. **Unreleased:** in byte-exact mode with no `--output`
+set, it prints the vendored pytest's help instead. To list pytest's and
+your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows
+that installed version's flags).
+
+Short flags combine the way pytest reads them: `-sv` is `-s -v`, `-xv` is
+`-x -v`, and `--capture no` is `--capture=no`.
+
+When rstest replaces your positional paths with its own selection
+(`--changed`, `--watch` reruns), it keeps every option and its value, even
+a value that names a path on disk (`-k api`, `--ignore tests/slow`,
+`--cov src`). It knows pytest's own options and the common plugins'; for
+another plugin's option whose value is a separate token, write it as
+`--option=value` so the value is not mistaken for a test path.
+
 Three of them get extra orchestration on top of their per-session meaning:
 
-- **`-x` / `--maxfail=N`**: coordinated globally. When the threshold is
-  reached across all workers, dispatch halts and every worker winds down.
+- **`-x` / `--maxfail=N`**: coordinated globally, whether given on the
+  command line, in ini `addopts`, or in `PYTEST_ADDOPTS`. When the threshold
+  is reached across all workers, dispatch halts and every worker winds down.
   In-flight tests finish (bounded overshoot, as with pytest-xdist).
 - **`--lf` / `--ff`**: the last-failed cache is written by rstest from
   merged results (workers each see only their own failures), so a
@@ -1128,3 +1220,9 @@ flag rstest owns, e.g. pytest-html's own layout with
 use rstest's own [`--html`](#-html-path) there).
 
 (Usually unnecessary: unknown flags forward automatically.)
+
+**Optional-value flags need `=`.** `--changed[=REV]`, `--shuffle[=SEED]` and
+`--debug[=PORT]` take a value only when it is attached with `=`. The bare
+flag never consumes the next argument, so `--changed origin/main` means
+"`--changed` against `HEAD`, plus the test path `origin/main`". Write
+`--changed=origin/main`, `--shuffle=42`, `--debug=5679`.

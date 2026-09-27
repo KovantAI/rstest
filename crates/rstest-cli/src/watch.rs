@@ -327,12 +327,8 @@ fn ignored(path: &Path) -> bool {
 }
 
 /// The user's non-path args (flags and their values), for targeted reruns.
-/// Heuristic: keep everything that isn't an existing path argument.
 fn flags_only(args: &[String]) -> Vec<String> {
-    args.iter()
-        .filter(|a| a.starts_with('-') || !Path::new(a).exists())
-        .cloned()
-        .collect()
+    crate::cli::without_path_args(args)
 }
 
 fn rel(path: &Path, cwd: &Path) -> String {

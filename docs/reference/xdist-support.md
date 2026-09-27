@@ -6,7 +6,7 @@ How each pytest-xdist flag, hook and fixture maps onto rstest, for teams moving 
 
 You are moving a suite off pytest-xdist and need one lookup: for each xdist flag, hook, and worker-identity fixture, does rstest support it, emulate it, or drop it? This page answers that and links to the deeper treatment of each item.
 
-The baseline guarantee: at `-n 0` (or `-n 1`) rstest runs in byte-exact mode, a single vendored-pytest session whose per-test outcomes **match pytest exactly**; any difference there is a bug (see [Compatibility](../concepts/compatibility.md)); only the [few flags rstest shares with pytest or a plugin](cli.md#shadowed-flags) are still handled by rstest. rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the two areas below: flags that silently no-op, and hooks that run per-worker instead of once. The worker-identity fixtures (`worker_id`, `testrun_uid`) are provided natively, so they are one thing you do *not* have to worry about.
+The baseline guarantee: at `-n 0` rstest runs in byte-exact mode (`-n 1` takes the same code path, unless `--reruns` turns it into a one-worker rerun pool), a single vendored-pytest session whose per-test outcomes **match pytest exactly**; any difference there is a bug (see [Compatibility](../concepts/compatibility.md)); only the [few flags rstest shares with pytest or a plugin](cli.md#shadowed-flags) are still handled by rstest. rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the two areas below: flags that silently no-op, and hooks that run per-worker instead of once. The worker-identity fixtures (`worker_id`, `testrun_uid`) are provided natively, so they are one thing you do *not* have to worry about.
 
 For the narrative version see [Migrating from pytest-xdist](../guides/migrate-from-xdist.md).
 
@@ -14,13 +14,17 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 
 | pytest-xdist flag | rstest equivalent | Status / notes |
 |---|---|---|
-| `-n <N>` / `-n auto` | `-n <N>` / `-n auto` | Same. `auto` is logical cores, capped for small suites; it is the default. |
+| `-n <N>` | `-n <N>` | Same. |
+| `-n auto` | `-n auto` (**differs**) | rstest's `auto` is the logical core count (as reported by the OS, which honors CPU affinity and, on Linux, a cgroup CPU quota), then capped by test-file count and by the cached suite time; it is the default. xdist's `auto` is the **physical** core count when psutil is installed. On a machine with SMT the two can differ by 2x: while comparing the runners, pin `-n` to the count your xdist job used. |
+| `-n logical` | none | **rstest error, exit 1** (`invalid digit found in string`). Use `-n auto` or an explicit number. |
 | `-n 1` | `-n 1` (**differs**) | xdist's `-n 1` runs one `gw0` worker **with** `workerinput`; rstest's `-n 1` (like `-n 0`) is plain byte-exact mode with **no worker identity**. |
 | `--dist load` | `--dist load` (default) | Same, plus duration-aware long-pole-first scheduling. |
 | `--dist loadfile` | `--dist loadfile` | Same. File affinity, in-file order. |
 | `--dist loadscope` / `loadgroup` | same names | Supported, incl. `@pytest.mark.xdist_group`; rejected under `--collect lazy` (needs full collection). See [`--dist`](cli.md). |
 | `--dist each` | `--dist each` (**partial**) | Full suite per worker, but every worker uses the **same** interpreter. Heterogeneous `--tx` gateways have no equivalent. `--reruns` rejected in this mode. |
 | `--dist no` / `--dist=no` | none | **rstest error, exit 1** (`no` is not a valid `--dist` mode); byte-exact mode is `-n 0`. |
+| `--dist worksteal` | none | **rstest error, exit 1** (`unknown --dist mode: worksteal`). Use `--dist load` (the default). It doesn't steal work either; it balances by dispatching tests with a cached duration of 1s or more first, longest first, one at a time (see [Scheduling](../concepts/scheduling.md#dispatch-order)). |
+| `-p no:xdist` | `-p no:xdist` | Forwarded to the vendored pytest, which then doesn't load pytest-xdist. rstest's own parallelism and `worker_id` / `testrun_uid` fixtures are unaffected. But a leftover `-n` in `addopts` is then an unknown option: the run exits 4 (`unrecognized arguments: -n`). Remove `-n` from `addopts` before disabling or uninstalling xdist. |
 | `-d` | `--dist load` | `-d` is xdist's load-balancing shorthand, which is rstest's default. Forwarded verbatim (see below), no effect. |
 | `--maxprocesses` | none | Use `-n` (no separate cap). Forwarded verbatim, no effect. |
 | `--max-worker-restart` | none | No equivalent: rstest auto-respawns crashed workers on a fixed, non-tunable budget (see [Crash handling](../concepts/crash-handling.md)). Forwarded verbatim, no effect. |
@@ -28,12 +32,12 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 | `--rsyncdir` / `--rsync` | none | No equivalent: rstest runs local workers, no remote sync. |
 | `-p xdist.looponfail` / `--looponfail` | `--watch` | With import-graph selection. See [`--watch`](cli.md). |
 
-**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` is consumed by rstest's own `--dist` and rejected as an invalid mode (exit 1). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`, `--maxprocesses`) are **forwarded to the vendored pytest session verbatim**, so the outcome depends on whether pytest-xdist is installed:
+**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` and `--dist worksteal` are consumed by rstest's own `--dist` and rejected as invalid modes (exit 1), as is `-n logical`. The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`, `--maxprocesses`) are **forwarded to the vendored pytest session verbatim**, so the outcome depends on whether pytest-xdist is installed:
 
 - **pytest-xdist installed** (usual mid-migration): the flag *parses* but has **no effect**, because rstest keeps xdist's session inert (`dist = no`) and nothing acts on it. Silently ignored, no error, no warning.
 - **pytest-xdist not installed**: pytest doesn't recognize the option, so the vendored core exits with a usage error (exit 4).
 
-Either way these flags don't *do* anything under rstest; remove them from `addopts` once no pytest-xdist job still depends on them (see [the staged rollout](../guides/migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back)). If `addopts = -n 4` with pytest-xdist installed is still in your ini, it is neutralized inside rstest workers automatically (options parse, the xdist session never engages, no nested workers). Remove it at your convenience and pass `-n` to rstest.
+Either way these flags don't *do* anything under rstest; remove them from `addopts` once no pytest-xdist job still depends on them (see [the staged rollout](../guides/migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back)). If `addopts = -n 4` with pytest-xdist installed is still in your ini, it is neutralized inside rstest workers automatically (options parse, the xdist session never engages, no nested workers). Remove it at your convenience and pass `-n` to rstest. With pytest-xdist uninstalled or disabled (`-p no:xdist`), the same `addopts` line fails the run with exit 4.
 
 ## Hook matrix
 

@@ -13,7 +13,13 @@ What rstest promises about matching pytest's behavior, how that promise is measu
    `-n 0` as in parallel rather than as in pytest. `@pytest.mark.timeout` is
    rstest's native timeout too (its SIGALRM timer is armed for marked tests
    even without `--timeout`). To give one of these flags to pytest instead,
-   pass it after `--`.
+   pass it after `--`. With no `--output` set, the terminal output at `-n 0`
+   is pytest's own too (**Unreleased**; rstest 0.7.0 printed its own view),
+   with rstest's extras (doctor, coverage, gate messages) appended after
+   pytest's summary line; an explicit `--output` switches back to rstest's
+   renderer. `--junitxml` is pytest's own document at every worker count
+   (**Unreleased**), plus rstest's `flaky` / `quarantined` properties; see
+   [`--junitxml`](../reference/cli.md#-junitxml-path).
 2. **In parallel modes: outcomes preserved for parallel-safe tests.**
    Identical per-test outcomes (setup/call/teardown, skips, xfails) for
    tests without hidden timing/ordering/shared-state assumptions. Tests
@@ -24,19 +30,21 @@ What rstest promises about matching pytest's behavior, how that promise is measu
 ## What "verified" means
 
 Compatibility is measured, not asserted: rstest's battery runs four real
-suites, pandas (193,627 tests), aiohttp, django-allauth and rich, under
+suites, pandas (193,843 tests), aiohttp, django-allauth and rich, under
 pytest and under rstest, and diffs **per-test outcomes** (every phase,
 every skip reason class, xfail flags). Their real plugins are loaded:
 pytest-django, pytest-asyncio, pytest-aiohttp, hypothesis, pytest-mock,
-pytest-cov. The worker counts are the ones in
-[benchmarks](../reference/benchmarks.md): `-n 8` for pandas and aiohttp,
-`-n 4` for rich and django-allauth (django-allauth is pinned to `-n 4`
-because its rate-limit-window tests flake at high worker counts).
+pytest-cov. The recorded runs in
+[benchmarks](../reference/benchmarks.md) use `-n 8` for all four
+(django-allauth's recommended count is `-n 4`, because its
+rate-limit-window tests can flake at high worker counts).
 
-pandas and aiohttp measure 100% parity. rich and django-allauth measured
-100% on the recorded run, but each contains tests that flake *under plain
-pytest itself*, so an individual run can land at about 99.x% when the
-baseline and rstest draw different flakes. Every such case is catalogued in
+pandas, django-allauth and rich measured 100% parity on the recorded runs;
+aiohttp measured 99.93-100%, from a socket-leak warning flake that moves
+under any parallel runner, xdist included. rich and django-allauth also
+contain tests that flake *under plain pytest itself*, so an individual run
+can land at about 99.x% when the baseline and rstest draw different flakes.
+Every such case is catalogued in
 [Parity divergences](../reference/parity-divergences.md).
 
 Summary-line accounting (passed/failed/skipped/xfailed/warnings counts)
@@ -141,24 +149,24 @@ is about 99.97%: 7 IMV/RETURNING tests skip in the serial baseline (they
 depend on full-suite order) but pass under any parallel runner, real
 pytest-xdist included; see
 [Parity divergences §9](../reference/parity-divergences.md#9-order-dependent-serial-baseline).
-Scope honestly stated: the default **SQLite** backend, crash-free; Postgres/MySQL backends and
+Scope: the default **SQLite** backend, crash-free; Postgres/MySQL backends and
 crash-during-provisioning behavior are not yet in the battery (tests
 requiring live services or absent optional dependencies fail
 identically under vanilla pytest).
 
 ## Known gaps
 
-Honest list, maintained as things close:
+Maintained as things close:
 
 | Gap | Status |
 |---|---|
 | Windows at corpus scale | supported: the full gate runs on `windows-latest` in CI every commit and wheels are smoke-tested there; the 33-suite public corpus, however, is run only on macOS/Linux, so large-real-world-suite validation on Windows is lighter than on the other platforms |
 | Terminal-rendering plugins (pytest-sugar, pytest-rich UIs) | by design at `-n ≥ 2`: rstest owns the terminal; data-level plugin behavior unaffected |
-| hypothesis's shared `.hypothesis` example database under many workers | untested at high worker counts; hypothesis itself handles concurrent DB access, but rstest has not verified it beyond `-n 8`. Mitigation if you hit contention: in a `settings` profile give each worker its own DB (`database=DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'main')}")`) or set `database=None` in CI to disable it entirely |
+| hypothesis's shared `.hypothesis` example database under many workers | untested at high worker counts; hypothesis itself handles concurrent DB access, but rstest has not verified it beyond `-n 8`. Mitigation if you hit contention: in a `settings` profile give each worker its own DB (`database=DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'master')}")`) or set `database=None` in CI to disable it entirely |
 | `--sw` (stepwise, `--stepwise-skip`, `--stepwise-reset`) | runs in a single pytest session automatically (like `--pdb`/`-s`/`--co`): the vendored stepwise plugin owns resume/stop and its `cache/stepwise` round-trips exactly as upstream. Sequential by nature: stop-at-first-failure + resume-from-a-single-cursor has no meaning under split, duration-ordered parallel dispatch, so it does not run at `-n ≥ 2`. Same constraint as xdist. |
 | xdist controller-side hooks (`pytest_configure_node` and friends) | emulated for hooks that are per-node-stateless (read `gateway.id`, fill `node.workerinput`: SQLAlchemy's pattern, measured). Structural divergences from a single xdist controller: the hooks run N times concurrently in N processes (controller-side shared state needs rework), and crashed-node `pytest_testnodedown` runs on a survivor without the dead node's configure-time state. Details: [xdist hook emulation](xdist-hooks.md). |
-| Plugins needing a controller-side service *shared* across all workers | rstest runs no central controller, so a plugin that needs one shared service for the whole pool isn't emulated. The known ecosystem cases are instead handled per worker: pytest-retry's branch self-provisions its own report server per worker (its `server_port` is set locally, no controller needed) and pytest-rerunfailures is neutralized in favor of native `--reruns`; both work at `-n ≥ 2`. See [parity divergences §8](../reference/parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed). |
+| Plugins needing a controller-side service *shared* across all workers | rstest runs no central controller, so a plugin that needs one shared service for the whole pool isn't emulated. The known ecosystem cases are instead handled per worker: pytest-retry's branch self-provisions its own report server per worker (its `server_port` is set locally, no controller needed; if that seeding fails, rstest unregisters the plugin and falls back to native `--reruns`) and pytest-rerunfailures is neutralized in favor of native `--reruns`; both work at `-n ≥ 2`. See [parity divergences §8](../reference/parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed). |
 | Time-derived parametrize IDs (`now()` in `@pytest.mark.parametrize`) | collection runs once per worker, and rstest compares every worker's collected nodeids (count + hash). IDs that come out identical on every worker run normally: second-resolution timestamps usually do, since workers collect within the same second (marshmallow runs 100% at `-n auto`; [parity divergences §3](../reference/parity-divergences.md#3-run-dependent-nodeids-now-resolved)). IDs that differ between workers (sub-second timestamps, uuids, random values, or a second-resolution collection that straddles a tick) make rstest refuse to dispatch rather than misattribute results; there is no automatic fallback. Use stable `ids=` or `-n 0` (same constraint as xdist) |
-| Plugins that need a single controller process to aggregate worker output into one artifact (pytest-html) | pytest-html registers its report writer only on a node *without* `workerinput` (its xdist controller check); every rstest worker has one, so at `-n ≥ 2` no writer is registered and an `--html` that reaches the plugin (via `addopts` or after `--`) silently produces nothing (no crash). Merging all workers into one file needs a controller process rstest doesn't run. A command-line `--html` is rstest's native merged report at every worker count; for pytest-html's own report, run `rstest -n 0 -- --html=...`. (Formerly this row also listed pytest-rerunfailures/`sock_port` and pytest-retry/`server_port`, both now handled, and claimed a pytest-html `TypeError`: that path is fixed by signature-aware node-hook dispatch; pytest-randomly's derivable `randomly_seed` is synthesized.) Full per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility) |
+| Plugins that need a single controller process to aggregate worker output into one artifact (pytest-html) | pytest-html registers its report writer only on a node *without* `workerinput` (its xdist controller check); every rstest worker has one, so at `-n ≥ 2` no writer is registered and an `--html` that reaches the plugin (via `addopts` or after `--`) silently produces nothing (no crash). Merging all workers into one file needs a controller process rstest doesn't run. A command-line `--html` is rstest's native merged report at every worker count; for pytest-html's own report, run `rstest -n 0 -- --html=...`. Full per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility) |
 
 Found a difference not listed here? That's a bug report we want.

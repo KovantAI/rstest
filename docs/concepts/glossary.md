@@ -65,11 +65,18 @@ for very large suites in CI. See [Sharding](../guides/sharding.md).
 isn't optimal. From the **second** ("warm") run on, it starts the slowest
 tests first and gets faster. **Don't judge rstest's speed on the first run.**
 
-**Byte-exact mode**{#byte-exact-mode}: `-n 0` and `-n 1` are identical. Both run one
+**Byte-exact mode**{#byte-exact-mode}: `-n 0`: one process, runs exactly like plain
+pytest. You get the same per-test outcomes and, with no `--output` set,
+pytest's own terminal output (**Unreleased**; rstest 0.7.0 printed its own
+view), with rstest's extras (doctor report, coverage report, quarantined
+failures, gate messages) appended after it. An explicit `--output` switches
+back to rstest's renderer. `--junitxml` is pytest's own document too
+(**Unreleased**), with rstest's `flaky` / `quarantined` properties added.
+`-n 0` and `-n 1` are identical. Both run one
 pytest session in a single Python process, with no scheduling and no `[gwN]`
-attribution, for byte-exact pytest behavior (the compatibility anchor). Also called
+attribution (the compatibility anchor). Also called
 **single-worker mode** (the `-n` help and banner hint), **pytest-exact mode**
-(the run banner), or **passthrough** when a terminal flag forces it; all
+(the run banner shown with an explicit `--output`), or **passthrough** when a terminal flag forces it; all
 name this same mode. There is no worker identity below
 `-n 2` (unlike pytest-xdist, whose `-n 1` spawns a `gw0` worker; see
 [xdist migration](../guides/migrate-from-xdist.md)). The flags that need
@@ -81,6 +88,33 @@ for the guarantee and [Architecture](architecture.md) for how it falls
 back. One opt-in exception: passing [`--reruns`](../reference/cli.md#-reruns-n)
 runs `-n 0`/`-n 1` as a degenerate one-worker pool so retries fire, trading
 byte-exactness for the reruns you asked for.
+
+**Vendored core**: the unmodified copy of pytest shipped inside
+`rstest_worker._vendor`; provides all test semantics. Never conflicts with
+an installed pytest.
+
+**Long pole**: the slowest single test in the run (`long_pole_seconds` in
+the doctor report). No worker count can finish the run faster than it. When
+it (or any test) is longer than the ideal per-worker share
+(`test time / workers`), it sets the **parallel floor**: adding workers stops
+helping. Slow tests from the duration cache are dispatched first,
+individually, so the long pole starts early. Written "long-pole" only as an
+adjective ("long-pole tests").
+
+**Wait-bound**: a test (or suite) whose wall time far exceeds its CPU time:
+it is sleeping or waiting on IO or a timeout, not computing. `--doctor`
+reports the share of test time spent waiting. See
+[Wait-bound / IO suites](../guides/wait-bound.md).
+
+**Parallel floor**: the lower bound on wall time set by the longest single
+test: no worker count can finish faster. `--doctor` names the gate tests when
+the longest test exceeds the ideal per-worker share. See
+[Suite diagnostics](../guides/doctor.md#parallel-floor).
+
+**Duration-aware scheduling**: dispatching tests using the per-test durations
+recorded in `.rstest_cache/` by earlier runs, slowest first, so long tests
+start early instead of stacking at the end. It needs one prior (warm) run.
+See [Scheduling](scheduling.md).
 
 **Flaky**: a test that failed and then passed within the
 [`--reruns`](../reference/cli.md#-reruns-n) budget; reported green but
@@ -102,22 +136,10 @@ process, called "master" in older xdist code and in the `"master"`
 plays that role), so controller-side xdist hooks are *emulated* per worker. See
 [xdist hook emulation](xdist-hooks.md).
 
-**Vendored core**: the unmodified copy of pytest shipped inside
-`rstest_worker._vendor`; provides all test semantics. Never conflicts with
-an installed pytest.
-
 **Item dispatch**: distributing individual tests (not files) to workers.
 In the default eager mode a test travels as its index into the verified
 collection; under [lazy collection](lazy-collection.md) (`--collect lazy`)
 it travels by nodeid, since lazy workers share no index space.
-
-**Long pole**: the slowest single test in the run (`long_pole_seconds` in
-the doctor report). No worker count can finish the run faster than it. When
-it (or any test) is longer than the ideal per-worker share
-(`test time / workers`), it sets the **parallel floor**: adding workers stops
-helping. Slow tests from the duration cache are dispatched first,
-individually, so the long pole starts early. Written "long-pole" only as an
-adjective ("long-pole tests").
 
 **Chunk**: a contiguous run of collection order dispatched as one unit,
 preserving module-fixture locality.

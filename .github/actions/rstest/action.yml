@@ -636,15 +636,17 @@ runs:
         done
 
     # Artifact backend — publish only THIS job's new segment(s). The name carries
-    # the leg's artifact-suffix, the run id and the shard, so neither matrix legs
-    # nor concurrent shards collide, and the next warm's pattern
-    # (rstest-seg-<suffix>--*) unions exactly this leg's segments.
+    # the leg's artifact-suffix, the run id, the attempt and the shard, so neither
+    # matrix legs, concurrent shards, nor a "Re-run failed jobs" attempt collide
+    # (artifact names are unique per run, across attempts), and the next warm's
+    # pattern (rstest-seg-<suffix>--*) unions exactly this leg's segments from
+    # every attempt.
     # if-no-files-found: ignore keeps a run that pushed nothing green.
     - name: Push cache segment
       if: always() && steps.cfg.outputs.backend == 'artifact'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: rstest-seg-${{ steps.cfg.outputs.artifact-suffix }}--${{ github.run_id }}-${{ inputs.shard != '' && inputs.shard || '1' }}
+        name: rstest-seg-${{ steps.cfg.outputs.artifact-suffix }}--${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.shard != '' && inputs.shard || '1' }}
         path: ${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}/.push/seg-*.json
         if-no-files-found: ignore
         retention-days: 7
@@ -657,4 +659,8 @@ runs:
         path: ${{ inputs.working-directory }}/${{ inputs.junit }}
         # --changed with nothing affected writes no JUnit; that's not an error.
         if-no-files-found: ignore
+        # A "Re-run failed jobs" attempt reuses this name (artifact names are
+        # unique per run, across attempts): replace the failed attempt's report
+        # so the stable name always holds the latest result.
+        overwrite: true
         retention-days: 7

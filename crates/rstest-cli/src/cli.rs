@@ -426,19 +426,180 @@ pub struct Cli {
     pub(crate) stream_json: Option<PathBuf>,
 }
 
+/// pytest short options that take a value. In a cluster (`-rA`, `-ksmoke`,
+/// `-pno:cov`) everything after one of these is its value, not more switches.
+const SHORT_VALUE_FLAGS: &[char] = &['k', 'm', 'p', 'c', 'o', 'W', 'r', 'n'];
+
+/// The short switches in one pytest argv token, the way argparse expands a
+/// cluster: `-sv` -> `['s', 'v']`, `-xrA` -> `['x', 'r']` (`A` is `-r`'s value).
+/// Empty for long options, a bare `-`, and positionals.
+pub(crate) fn short_switches(arg: &str) -> Vec<char> {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return Vec::new();
+    };
+    if rest.starts_with('-') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for c in rest.chars() {
+        out.push(c);
+        if SHORT_VALUE_FLAGS.contains(&c) {
+            break;
+        }
+    }
+    out
+}
+
+/// Does this argv token set short switch `c`, alone or clustered (`-x`, `-xv`)?
+pub(crate) fn has_short(arg: &str, c: char) -> bool {
+    short_switches(arg).contains(&c)
+}
+
+/// Session (pytest and common plugin) long options whose value can be the
+/// next token (`--ignore tests/slow`). Mined from the vendored core's
+/// `addoption` calls, plus the logging options and the plugins rstest's
+/// docs name. A plugin option missing here still works in `--opt=value` form.
+const SESSION_VALUE_FLAGS: &[&str] = &[
+    // pytest core
+    "--assert",
+    "--basetemp",
+    "--capture",
+    "--code-highlight",
+    "--color",
+    "--confcutdir",
+    "--config-file",
+    "--deselect",
+    "--doctest-glob",
+    "--doctest-report",
+    "--durations",
+    "--durations-min",
+    "--ignore",
+    "--ignore-glob",
+    "--import-mode",
+    "--junit-prefix",
+    "--junit-xml",
+    "--junitprefix",
+    "--junitxml",
+    "--last-failed-no-failures",
+    "--lfnf",
+    "--log-auto-indent",
+    "--log-cli-date-format",
+    "--log-cli-format",
+    "--log-cli-level",
+    "--log-date-format",
+    "--log-disable",
+    "--log-file",
+    "--log-file-date-format",
+    "--log-file-format",
+    "--log-file-level",
+    "--log-file-mode",
+    "--log-format",
+    "--log-level",
+    "--max-warnings",
+    "--maxfail",
+    "--override-ini",
+    "--pastebin",
+    "--pdbcls",
+    "--pythonwarnings",
+    "--report-chars",
+    "--rootdir",
+    "--show-capture",
+    "--tb",
+    "--verbosity",
+    // plugins
+    "--cov-config",
+    "--cov-context",
+    "--cov-fail-under",
+    "--cov-report",
+    "--dc",
+    "--ds",
+    "--hypothesis-profile",
+    "--hypothesis-seed",
+    "--max-worker-restart",
+    "--maxprocesses",
+    "--randomly-seed",
+    "--report-log",
+    "--rerun-except",
+    "--reruns-delay",
+    "--rsyncdir",
+    "--rsyncignore",
+    "--timeout-method",
+    "--tx",
+];
+
+/// Session options with an *optional* value (argparse `nargs="?"`): the next
+/// token is the value unless it looks like another option (`--cov src`).
+const SESSION_OPT_VALUE_FLAGS: &[&str] = &["--cache-show", "--cov"];
+
+/// Which session args are positionals (paths, nodeids, `@argsfile`) rather
+/// than options or an option's separate value, the way pytest's argparse
+/// reads them: `-k api` / `--ignore tests/slow` / `-xk api` name no path,
+/// even when `api` or `tests/slow` exists on disk.
+pub(crate) fn positional_mask(args: &[String]) -> Vec<bool> {
+    let mut mask = vec![false; args.len()];
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let takes_next = if a == "--" {
+            mask[i + 1..].iter_mut().for_each(|m| *m = true);
+            break;
+        } else if a.starts_with("--") {
+            !a.contains('=')
+                && (SESSION_VALUE_FLAGS.contains(&a)
+                    || (SESSION_OPT_VALUE_FLAGS.contains(&a)
+                        && args.get(i + 1).is_some_and(|n| !n.starts_with('-'))))
+        } else if a.len() > 1 && a.starts_with('-') {
+            // `-k VALUE` / `-xk VALUE`: the cluster ends on a value flag
+            // with nothing attached, so the value is the next token.
+            let sw = short_switches(a);
+            sw.len() == a.len() - 1 && sw.last().is_some_and(|c| SHORT_VALUE_FLAGS.contains(c))
+        } else {
+            mask[i] = true;
+            false
+        };
+        i += if takes_next { 2 } else { 1 };
+    }
+    mask
+}
+
+/// Positional session args naming an existing path (a pytest `@argsfile`
+/// counts by its file): the explicit selection.
+pub(crate) fn path_args(args: &[String]) -> Vec<&String> {
+    args.iter()
+        .zip(positional_mask(args))
+        .filter(|(a, pos)| *pos && std::path::Path::new(a.strip_prefix('@').unwrap_or(a)).exists())
+        .map(|(a, _)| a)
+        .collect()
+}
+
+/// The session args minus the explicit path selection: the flags, with
+/// their values, to keep when rstest substitutes its own selection
+/// (`--changed`, `--watch` reruns).
+pub(crate) fn without_path_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .zip(positional_mask(args))
+        .filter(|(a, pos)| {
+            !*pos || !std::path::Path::new(a.strip_prefix('@').unwrap_or(a)).exists()
+        })
+        .map(|(a, _)| a.clone())
+        .collect()
+}
+
 /// -x / --maxfail=N from the session args (also forwarded: each worker
 /// session stops itself; the orchestrator does the global coordination).
+/// Argv only: a limit from ini `addopts` arrives later, from the workers.
 pub(crate) fn parse_maxfail(args: &[String]) -> Option<u64> {
     let mut limit = None;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "-x" | "--exitfirst" => limit = Some(1),
+            "--exitfirst" => limit = Some(1),
             "--maxfail" => {
                 if let Some(v) = it.peek().and_then(|v| v.parse().ok()) {
                     limit = Some(v);
                 }
             }
+            _ if has_short(a, 'x') => limit = Some(1),
             _ => {
                 if let Some(v) = a.strip_prefix("--maxfail=").and_then(|v| v.parse().ok()) {
                     limit = Some(v);
@@ -488,31 +649,32 @@ pub(crate) fn parse_durations(args: &[String]) -> Option<(usize, f64)> {
 /// worker with inherited stdio and let the vendored core render. Stepwise is
 /// here too because it is inherently sequential and wants `-n 0` like xdist.
 pub(crate) fn needs_passthrough_io(session_args: &[String]) -> bool {
-    session_args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--collect-only"
-                | "--co"
-                | "-s"
-                | "--capture=no"
-                | "--pdb"
-                | "--trace"
-                | "--sw"
-                | "--stepwise"
-                | "--sw-skip"
-                | "--stepwise-skip"
-                | "--sw-reset"
-                | "--stepwise-reset"
-        ) || a.starts_with("--capture=")
-    })
+    passthrough_trigger(session_args).is_some()
 }
 
 /// The first session flag that forces the passthrough path (for messages),
-/// matching [`needs_passthrough_io`].
+/// matching [`needs_passthrough_io`]. `-s` counts clustered too (`-sv`), and
+/// `--capture` in both its `=VALUE` and two-token (`--capture no`) forms.
 pub(crate) fn passthrough_trigger(session_args: &[String]) -> Option<&str> {
     session_args
         .iter()
-        .find(|a| needs_passthrough_io(std::slice::from_ref(*a)))
+        .find(|a| {
+            matches!(
+                a.as_str(),
+                "--collect-only"
+                    | "--co"
+                    | "--capture"
+                    | "--pdb"
+                    | "--trace"
+                    | "--sw"
+                    | "--stepwise"
+                    | "--sw-skip"
+                    | "--stepwise-skip"
+                    | "--sw-reset"
+                    | "--stepwise-reset"
+            ) || a.starts_with("--capture=")
+                || has_short(a, 's')
+        })
         .map(String::as_str)
 }
 
@@ -833,6 +995,84 @@ mod tests {
         // maxfail=0 means "no limit" in pytest.
         assert_eq!(parse_maxfail(&v(&["--maxfail=0"])), None);
         assert_eq!(parse_maxfail(&v(&["-k", "x"])), None);
+        // Clustered, either position; `-x` after a value flag is its value.
+        assert_eq!(parse_maxfail(&v(&["-xv"])), Some(1));
+        assert_eq!(parse_maxfail(&v(&["-vx"])), Some(1));
+        assert_eq!(parse_maxfail(&v(&["-kx"])), None);
+        assert_eq!(parse_maxfail(&v(&["-rx"])), None);
+    }
+
+    #[test]
+    fn short_switches_expand_clusters_up_to_a_value_flag() {
+        assert_eq!(short_switches("-sv"), vec!['s', 'v']);
+        assert_eq!(short_switches("-xrA"), vec!['x', 'r']);
+        assert_eq!(short_switches("-ksmoke"), vec!['k']);
+        assert!(short_switches("--verbose").is_empty());
+        assert!(short_switches("tests/").is_empty());
+        assert!(short_switches("-").is_empty());
+    }
+
+    #[test]
+    fn passthrough_sees_clustered_s_and_two_token_capture() {
+        for args in [
+            &["-sv"][..],
+            &["-vs"],
+            &["-xsv"],
+            &["--capture", "no"],
+            &["--capture=no"],
+        ] {
+            assert!(
+                needs_passthrough_io(&v(args)),
+                "{args:?} should force passthrough"
+            );
+        }
+        // `-rs` / `-ks`: `s` is the value of `-r` / `-k`.
+        for args in [&["-v"][..], &["-rs"], &["-ks"]] {
+            assert!(
+                !needs_passthrough_io(&v(args)),
+                "{args:?} must not force passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn path_args_skip_option_values_that_exist_on_disk() {
+        // `src` exists (cwd is the crate dir under cargo test): as a value it
+        // is not a selection, as a positional it is.
+        let args = v(&[
+            "-k",
+            "src",
+            "--ignore",
+            "src",
+            "--cov",
+            "src",
+            "-xk",
+            "src",
+            "--tb=short",
+            "src",
+        ]);
+        assert_eq!(path_args(&args), vec!["src"]);
+        assert_eq!(
+            without_path_args(&args),
+            v(&[
+                "-k",
+                "src",
+                "--ignore",
+                "src",
+                "--cov",
+                "src",
+                "-xk",
+                "src",
+                "--tb=short"
+            ])
+        );
+        // `--cov` without a value leaves the next positional alone.
+        assert_eq!(path_args(&v(&["--cov", "-q", "src"])), vec!["src"]);
+        // After `--` everything is positional.
+        assert_eq!(path_args(&v(&["--", "src"])), vec!["src"]);
+        // `@argsfile` counts by its file; a missing path isn't a selection.
+        assert_eq!(path_args(&v(&["@src", "no/such/dir"])), vec!["@src"]);
+        assert_eq!(without_path_args(&v(&["@src", "-q"])), v(&["-q"]));
     }
 
     #[test]

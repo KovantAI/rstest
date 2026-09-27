@@ -2,9 +2,12 @@
 
 Exact behavior of flags, files, and outputs.
 
+Evaluating rstest? Read [Compatibility](../concepts/compatibility.md),
+[Benchmarks](benchmarks.md), and [Security](security.md).
+
 - [CLI flags](cli.md): every rstest flag, grouped by topic, and the rule for forwarding pytest flags
 - [CLI subcommands](cli-commands.md): `try`, `migrate-check`, `audit`, `bisect`, `shard-verify`, `cache-compact`, `explain`, `verify-vendor`
-- [Markers](markers.md): `serial`, `flaky`, `xdist_group`
+- [Markers](markers.md): `serial`, `flaky`, `xdist_group`, `timeout`
 - [Environment variables](environment.md): the `RSTEST_*` contract
 - [Exit codes](exit-codes.md): what each code means and which flags gate on it
 - [Report JSON](report-json.md): walkthrough and examples for `--report-json`, discovery, streaming, doctor, and migrate-check output

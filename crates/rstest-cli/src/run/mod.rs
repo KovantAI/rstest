@@ -188,11 +188,7 @@ fn apply_selection(
                     tests.iter().map(|t| t.display().to_string()).collect();
                 // Keep the user's flags; drop any explicit path args in
                 // favor of the selection.
-                selected.extend(
-                    args.iter()
-                        .filter(|a| a.starts_with('-') || !std::path::Path::new(a).exists())
-                        .cloned(),
-                );
+                selected.extend(crate::cli::without_path_args(&args));
                 args = selected;
             }
         }
@@ -305,7 +301,7 @@ fn resolve_run_config(
     };
     let worker_timeout = cli.worker_timeout.or(settings.worker_timeout);
     warn_windows_timeout(sink.err(), cfg!(windows), cli.timeout, worker_timeout);
-    let n = parse_numprocesses(&numprocesses)?;
+    let n = parse_numprocesses(&numprocesses, args)?;
     // `--debug` runs one worker with inherited stdio (like --pdb) so debugpy
     // owns a single process and its console; route it through the passthrough
     // path regardless of the session flags.
@@ -328,17 +324,27 @@ fn resolve_run_config(
     for warning in silent_master_plugin_warnings(n, args) {
         sink.warn(&warning);
     }
-    let verbose = args
+    // pytest counts every -v, clustered (`-sv`) or repeated (`-v -v`).
+    let verbosity: usize = args
         .iter()
-        .any(|a| a == "--verbose" || (a.starts_with("-v") && a.chars().skip(1).all(|c| c == 'v')));
+        .map(|a| {
+            if a == "--verbose" {
+                1
+            } else {
+                crate::cli::short_switches(a)
+                    .iter()
+                    .filter(|&&c| c == 'v')
+                    .count()
+            }
+        })
+        .sum();
+    let verbose = verbosity >= 1;
     // -vv (or more): pytest shows ALL durations, no hidden-cutoff note.
-    let very_verbose = args.iter().filter(|a| *a == "--verbose").count() >= 2
-        || args
-            .iter()
-            .any(|a| a.starts_with("-vv") && a.chars().skip(1).all(|c| c == 'v'));
-    // Output style: --output > [tool.rstest] output > (-v ? verbose : tty ?
-    // bar : dots). Auto-promote to the sugar bar on a tty, stay on plain dots
-    // off-tty so logs stay byte-stable (the live footer self-disables there).
+    let very_verbose = verbosity >= 2;
+    // Output style: --output > [tool.rstest] output > (byte-exact mode ?
+    // pytest's own terminal : -v ? verbose : tty ? bar : dots). Auto-promote
+    // to the sugar bar on a tty, stay on plain dots off-tty so logs stay
+    // byte-stable (the live footer self-disables there).
     let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
         Some("bar") => progress::Mode::Bar,
         Some("verbose") => progress::Mode::Verbose,
@@ -357,6 +363,7 @@ fn resolve_run_config(
             ));
             progress::Mode::Dots
         }
+        None if n <= 1 && !single_worker_reruns && !passthrough => progress::Mode::Pytest,
         None if verbose => progress::Mode::Verbose,
         None if std::io::stdout().is_terminal() => progress::Mode::Bar,
         None => progress::Mode::Dots,
@@ -390,6 +397,7 @@ fn resolve_run_config(
         // Ship captured stdout/stderr on every report (not just failures) when a
         // live JSON consumer is attached, so editors get per-passing-test output.
         stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
+        junitxml: cli.junitxml.as_ref().map(|p| p.display().to_string()),
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -853,10 +861,7 @@ fn maybe_dispatch_monorepo(
 /// child runs): either keeps the run single-project instead of fanning out
 /// over every subproject and ignoring what was asked for.
 fn names_a_selection(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        let a = a.strip_prefix('@').unwrap_or(a);
-        !a.starts_with('-') && std::path::Path::new(a).exists()
-    })
+    !crate::cli::path_args(args).is_empty()
 }
 
 /// require-baseline: with the durations-regress gate active, an absent baseline
@@ -894,7 +899,7 @@ fn print_run_banner(
         sink.out_line("TAP version 13");
         return;
     }
-    if mode == progress::Mode::Json {
+    if matches!(mode, progress::Mode::Json | progress::Mode::Pytest) {
         return;
     }
     let worker_desc = if single_worker_reruns {
@@ -1214,7 +1219,8 @@ fn dispatch_run(
     }
     Ok(
         if matches!(path, RunPath::Passthrough | RunPath::SingleWorker) {
-            let io = if passthrough {
+            // Byte-exact output: pytest's own terminal writer prints.
+            let io = if passthrough || mode == progress::Mode::Pytest {
                 worker::Stdio::Inherit
             } else {
                 worker::Stdio::Null
@@ -1263,9 +1269,9 @@ fn dispatch_run(
         } else if path == RunPath::Lazy {
             let cwd = std::env::current_dir()?;
             let project = config::discover(&cwd, sink.err());
-            let paths: Vec<PathBuf> = args
-                .iter()
-                .filter(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
+            let paths: Vec<PathBuf> = crate::cli::path_args(args)
+                .into_iter()
+                .filter(|a| !a.starts_with('@'))
                 .map(PathBuf::from)
                 .collect();
             let mut files = collect::collect_test_files(&paths, &project)?;
@@ -1578,9 +1584,9 @@ fn watchdog_duration(
         })
 }
 
-fn parse_numprocesses(value: &str) -> Result<usize> {
+fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
     if value == "auto" {
-        return Ok(auto_workers());
+        return Ok(auto_workers(args));
     }
     Ok(value.parse()?)
 }
@@ -1588,7 +1594,9 @@ fn parse_numprocesses(value: &str) -> Result<usize> {
 /// `auto` = logical cores, capped by what the suite can use (worker startup
 /// costs real time). Two best-effort signals: test-file count from an
 /// ini-aware walk, and the duration cache (a few-second suite needs ~2 workers).
-fn auto_workers() -> usize {
+/// A walk with no Python file at all (an empty folder) means one worker,
+/// unless `args` name a path the walk didn't cover.
+fn auto_workers(args: &[String]) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
@@ -1600,6 +1608,12 @@ fn auto_workers() -> usize {
         let project = config::discover(&cwd, &mut std::io::stderr());
         if let Ok(files) = collect::collect_test_files(&[], &project) {
             n = cap_workers_by_files(n, files.len());
+            if files.is_empty()
+                && !names_existing_path(args)
+                && collect::has_python_files(&[], &project).is_ok_and(|found| !found)
+            {
+                n = 1;
+            }
         }
     }
 
@@ -1609,6 +1623,17 @@ fn auto_workers() -> usize {
     }
 
     n.max(1)
+}
+
+/// Whether the args select something on disk: a path, or a nodeid
+/// (`file.py::test`) whose file exists. Over-matching only keeps the
+/// empty-walk shortcut off, which is the safe direction.
+fn names_existing_path(args: &[String]) -> bool {
+    !crate::cli::path_args(args).is_empty()
+        || args.iter().any(|a| {
+            a.split_once("::")
+                .is_some_and(|(file, _)| std::path::Path::new(file).exists())
+        })
 }
 
 /// Cap the worker count by test-file count: never more workers than files. An
@@ -1859,6 +1884,21 @@ fn fold_run_event(
         | proto::Event::ItemStartId { .. }
         | proto::Event::ItemDoneId { .. }
         | proto::Event::StoppedIds { .. } => None,
+        proto::Event::JunitCase { nodeid, cases } => {
+            run.junit.record_case(nodeid, cases);
+            None
+        }
+        proto::Event::JunitSuite {
+            name,
+            timestamp,
+            hostname,
+            properties,
+            extra,
+        } => {
+            run.junit
+                .record_suite(name, timestamp, hostname, properties, extra);
+            None
+        }
         proto::Event::Done { exitstatus } => Some(exitstatus),
     }
 }
@@ -1868,9 +1908,9 @@ mod tests {
     use super::{
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
         collect_lazy, dispatch_command, fold_run_event, head_to_none, lazy_should_steal,
-        names_a_selection, order_ignored_warning, parse_duration_secs, parse_numprocesses,
-        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
+        parse_numprocesses, resolve_changed_base, resolve_order, resolve_retention_policy,
+        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
         warn_windows_timeout, watchdog_duration, RunPath,
     };
@@ -2029,10 +2069,10 @@ mod tests {
 
     #[test]
     fn parse_numprocesses_parses_and_rejects() {
-        assert_eq!(parse_numprocesses("4").unwrap(), 4);
-        assert_eq!(parse_numprocesses("0").unwrap(), 0);
-        assert!(parse_numprocesses("abc").is_err());
-        assert!(parse_numprocesses("-1").is_err());
+        assert_eq!(parse_numprocesses("4", &[]).unwrap(), 4);
+        assert_eq!(parse_numprocesses("0", &[]).unwrap(), 0);
+        assert!(parse_numprocesses("abc", &[]).is_err());
+        assert!(parse_numprocesses("-1", &[]).is_err());
     }
 
     #[test]
@@ -2605,6 +2645,19 @@ mod tests {
         // Default (no explicit load) keeps strict file affinity.
         assert!(!lazy_should_steal(None, None));
         assert!(!lazy_should_steal(Some("loadfile"), Some("loadscope")));
+    }
+
+    #[test]
+    fn names_existing_path_counts_paths_and_nodeids_not_flags() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // Cargo runs unit tests from the crate root, where Cargo.toml exists.
+        assert!(names_existing_path(&s(&["Cargo.toml"])));
+        assert!(names_existing_path(&s(&["Cargo.toml::test_x"])));
+        assert!(!names_existing_path(&s(&["-q", "--maxfail=1"])));
+        assert!(!names_existing_path(&s(&[
+            "nope.py::test_x",
+            "missing_dir"
+        ])));
     }
 
     #[test]
