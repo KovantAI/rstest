@@ -151,7 +151,7 @@ via `RSTEST_CACHE_REMOTE_TOKEN`. Still prefer syncing to a local dir? The
 
 ## Self-hosted shared mount: zero glue
 
-`--cache-remote /mnt/ci-cache/rstest` directly; the mount is the remote, no
+`--cache-remote /mnt/ci-cache/rstest` directly; the mount is the remote, with no
 pull/push bookends beyond the flags.
 
 ## Reliability
@@ -159,16 +159,17 @@ pull/push bookends beyond the flags.
 Add `--require-baseline` to `--durations-regress` so a cold or failed pull is a
 hard error, never a silent green:
 
-```bash
-rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
+```console
+$ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
 ```
 
-(`actions/cache` is **not** recommended for this: one blob per key, it can't
-list-and-merge every segment: the exact limitation this design removes.)
+(`actions/cache` is **not** recommended for this. It keeps one blob per key, so
+it can't list-and-merge every segment, which is the exact limitation this design
+removes.)
 
 ## One prefix per suite, interpreter, and project
 
-Test ids in the cache are **project-relative** (`tests/test_x.py::test_x`)
+Nodeids in the cache are **project-relative** (`tests/test_x.py::test_x`)
 and carry no interpreter tag. Give each distinct suite its own remote prefix
 (or artifact name), or their entries collide and mix:
 

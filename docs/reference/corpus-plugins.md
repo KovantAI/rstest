@@ -4,7 +4,7 @@ This maps every pytest plugin that **actually loads** during a
 compatibility-corpus (`corpus/` in the repo) run to the suite(s) that load it.
 It is the runtime-evidence half of the
 [top-100 plugin matrix](top-100-plugins.md): where that table classifies plugins
-(55 verified `V` or `V*`, 45 inferred `i`), this table records the ones a real suite
+(52 verified: 48 `V` and 4 `V*`; 48 inferred `i`), this table records the ones a real suite
 loads *and still meets the corpus parity floor under rstest*.
 
 ## What "exercised" means here, and doesn't
@@ -74,7 +74,7 @@ corpus parity floor under rstest.
 ## Weak / no evidence: needs a dedicated micro-suite
 
 - **`-n 0`-only evidence** (no parallel data at all): `Faker`, `pytest-examples`,
-  `pytest-pretty`, their sole corpus carrier (pydantic) runs at `-n 0`.
+  `pytest-pretty`; their sole corpus carrier (pydantic) runs at `-n 0`.
 - **Loaded but feature inert under the pool**: `pytest-codspeed`,
   `pytest-benchmark` (auto-disable at `-n ≥ 2`), `pytest-sugar` (terminal
   plugin, not painted). Coexistence is proven; the *feature* is `-n 0`-only by
@@ -98,7 +98,7 @@ These three were inferred until the corpus evidence below was confirmed; the
   no pytest-xdist, so rstest seeds the `server_port` the plugin's worker branch
   reads. With xdist installed the plugin instead self-provisions through its
   controller branch, covered by an e2e gate; see
-  [parity divergences §8](parity-divergences.md#8-plugin-master-hook-gating-rstest-side-fixed).
+  [parity divergences §8](parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed).
 
 The reverse also applies: `pytest-examples` and `pytest-pretty` are marked `i`
 in the matrix because their only corpus evidence is the `-n 0` pydantic run.

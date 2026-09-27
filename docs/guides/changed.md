@@ -7,10 +7,7 @@ in CI).
 
 Two selection engines back it, and rstest picks the tightest one available:
 
-| Engine | When | Granularity |
-|---|---|---|
-| **Import graph** | always available, zero setup | whole test *files* that transitively import a changed module |
-| **Coverage index** | when a line→test index is warm | individual *tests* whose recorded coverage hit the changed *lines* |
+--8<-- "docs/_snippets/changed-engines.md"
 
 The coverage engine is strictly tighter and turns on automatically once the
 index exists: there is no flag to set and nothing to remember beyond keeping
@@ -25,8 +22,8 @@ match, function-local imports still count as edges, a changed `conftest.py`
 selects its whole subtree, and any config or non-Python change falls back to a
 full run. The one documented gap is dynamic imports
 (`importlib.import_module`), which produce no edges; use
-[`--changed-strict`](../reference/cli.md#-changed-strict) for correctness-
-critical runs.
+[`--changed-strict`](../reference/cli.md#-changed-strict) for
+correctness-critical runs.
 
 !!! warning "Django and other string-wired frameworks"
     Django loads much of an app by string, not by `import`: `INSTALLED_APPS`,
@@ -98,7 +95,7 @@ the tightest selection.
 ## Keeping the index warm
 
 The index reflects coverage *as of the run that wrote it*. It is trusted for
-the lines it recorded, so a stale index can miss a test added since, keep it
+the lines it recorded, so a stale index can miss a test added since. Keep it
 fresh:
 
 - **Rebuild on your coverage runs.** Any `--cov-context=test` run refreshes it.

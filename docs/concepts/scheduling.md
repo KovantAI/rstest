@@ -7,14 +7,14 @@ mode.
 
 Every worker collects the identical session (same args, same ini, same
 conftest semantics). Workers verify agreement by item count + hash of the
-node-id list; worker `gw0` ships the full list. Divergent
+nodeid list; worker `gw0` ships the full list. Divergent
 collections (typically a randomizing plugin without a fixed seed) abort
 the run before any misassignment.
 
 Seeding is barrier-free: each worker starts receiving work the moment its
-own collection verifies against the reference, early collectors run
+own collection verifies against the reference; early collectors run
 tests while stragglers finish collecting. The refusal guarantee is
-per-worker: no worker is ever ASSIGNED work before its collection has
+per-worker: no worker is ever **assigned** work before its collection has
 been cross-checked, so a divergent straggler aborts the run without
 having received (or misrun) a single test, but tests on already-verified
 workers may have started by then.
@@ -75,7 +75,7 @@ there exclusively, in collection order.
 ## Affinity modes
 
 `--dist loadfile`, `loadscope`, and `loadgroup` replace the above with
-keyed groups in collection order, a dispatch never splits a group, and
+keyed groups in collection order. A dispatch never splits a group, and
 duration reordering is off (affinity is the point, at the cost of
 long-pole splitting):
 
@@ -99,6 +99,6 @@ Consequences:
 - Outcomes are keyed `nodeid [gwN]`, since the same test appears once per
   worker.
 - The duration cache is **not** written: N× runs would poison LPT
-  scheduling on the next normal run.
+  (longest-processing-time-first) scheduling on the next normal run.
 - `--reruns` is rejected: every worker already runs the suite, so a rerun
   has no distinct meaning.

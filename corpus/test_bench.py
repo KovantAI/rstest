@@ -23,8 +23,9 @@ sys.path.insert(0, str(Path(__file__).parent))  # bench imports its sibling `run
 
 import json
 
-from bench import _baseline_unusable, _parity_row, _row_status
-from run import diff
+from bench import _baseline_unusable, _parity_row, _render_sweep, _row_status, render
+from procmem import linear_fit, suspended
+from run import Suite, diff
 
 FLOOR = 99.5
 
@@ -184,6 +185,111 @@ def test_diff_extra_from_healthy_module_is_unexplained(tmp_path):
     row = _parity_row(base, cand)
     assert row["parity_unexplained"] == 1
     assert _row_status(row, FLOOR) == "regression"
+
+
+# ---- sweep rendering: matched-n xdist column, ties are ties -----------------
+
+
+def _point(n, rs, xd=None):
+    """A sweep point: rstest (median, min, max), optional xdist likewise."""
+    med, lo, hi = rs
+    p = {
+        "workers": n,
+        "rstest_wall": med,
+        "rstest_band": f"{med} ({lo}-{hi})",
+        "min": lo,
+        "max": hi,
+        "speedup": round(10 / med, 2),
+        "efficiency": round(10 / med / n, 2),
+        **_row(),
+    }
+    if xd:
+        xm, xl, xh = xd
+        p["xdist"] = {
+            "wall": xm,
+            "band": f"{xm} ({xl}-{xh})",
+            "min": xl,
+            "max": xh,
+            "speedup": round(10 / xm, 2),
+            "efficiency": round(10 / xm / n, 2),
+            "parity": 100.0,
+        }
+    return p
+
+
+def _sweep_table(points, gated=True):
+    sweep = {"suite": "s", "pytest_wall": 10.0, "pytest_band": "10.0 (9.9-10.1)", "points": points}
+    return "\n".join(_render_sweep(sweep, 2.0, FLOOR, gated))
+
+
+def test_sweep_overlapping_spreads_render_as_parity():
+    out = _sweep_table([_point(4, (3.0, 2.9, 3.2), xd=(3.1, 3.0, 3.3))])
+    assert "| parity |" in out
+    assert "| rstest |" not in out
+
+
+def test_sweep_disjoint_spreads_name_the_faster_runner():
+    out = _sweep_table([_point(4, (3.0, 2.9, 3.1), xd=(4.0, 3.9, 4.1))])
+    assert "| rstest |" in out
+
+
+def test_sweep_without_xdist_has_no_xdist_columns():
+    out = _sweep_table([_point(2, (5.0, 5.0, 5.0))])
+    assert "xdist" not in out
+    assert "| 100% |" in out  # efficiency = speedup / n = 2.0 / 2
+
+
+def test_only_first_sweep_is_gated():
+    assert "(floor 2.0x)" in _sweep_table([_point(2, (5.0, 5.0, 5.0))], gated=True)
+    assert "(not gated)" in _sweep_table([_point(2, (5.0, 5.0, 5.0))], gated=False)
+
+
+def test_render_accepts_single_sweep_dict_and_list():
+    sweep = {"suite": "s", "pytest_wall": 10.0, "points": [_point(2, (5.0, 5.0, 5.0))]}
+    assert render([], sweep, 2.0, FLOOR) == render([], [sweep], 2.0, FLOOR)
+
+
+# ---- memory model fit ----------------------------------------------------------
+
+
+def test_linear_fit_recovers_fixed_and_per_worker_cost():
+    xs = [1, 2, 4, 8]
+    a, b, r2 = linear_fit(xs, [12 + 106 * x for x in xs])
+    assert round(a, 6) == 12
+    assert round(b, 6) == 106
+    assert r2 == 1.0
+
+
+def test_linear_fit_single_x_does_not_divide_by_zero():
+    a, b, _ = linear_fit([4, 4], [100, 110])
+    assert b == 0.0
+    assert a == 105
+
+
+def test_suspended_flags_a_run_that_straddled_sleep():
+    # Wall clock ran 20 min longer than the monotonic clock: the machine slept.
+    assert suspended(1285.0, 85.0) is True
+
+
+def test_suspended_ignores_clock_noise():
+    assert suspended(85.3, 85.0) is False
+
+
+# ---- Suite command lines -------------------------------------------------------
+
+
+def test_rstest_argv_workers_override_suite_policy(tmp_path):
+    suite = Suite("x", {"rstest_args": ["-n", "4", "--collect", "lazy"]}, "w.whl", "rstest")
+    argv = suite.rstest_argv(tmp_path / "s.json", workers=2)
+    assert argv.count("-n") == 1
+    assert argv[argv.index("-n") + 1] == "2"
+    assert "--collect" in argv
+
+
+def test_rstest_argv_default_keeps_suite_policy(tmp_path):
+    suite = Suite("x", {"rstest_args": ["-n", "4"]}, "w.whl", "rstest")
+    argv = suite.rstest_argv(tmp_path / "s.json")
+    assert argv[argv.index("-n") + 1] == "4"
 
 
 if __name__ == "__main__":  # allow `python corpus/test_bench.py` without pytest

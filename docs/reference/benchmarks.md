@@ -32,7 +32,7 @@ runs, warm caches noted.
 
 langchain-ai/langgraph: discovery finds all 8 Python `libs/*` packages;
 the measured subset is the six that need no live database services.
-Each has its own pytest config: a repo pytest cannot run from the
+Each has its own pytest config: a repo a single pytest cannot run from the
 root at all. Baseline is the only native workflow: six serial pytest
 invocations. The numbers below are from the corpus runner (4,284 tests,
 commit `97320843`); reproduce with `python3 corpus/run.py --only
@@ -49,7 +49,7 @@ measured run: the cold run's per-project duration caches predict where the
 planner lands once warm, but that run hasn't been recorded here, so it
 carries no parity number.
 
-On the measured (cold) run, per-lib outcomes matched to the digit: every
+On the measured (cold) run, per-project outcomes matched to the digit: every
 one of the 4,284 tests' setup/call/teardown agreed, including the dominant
 package's service-dependent fail/error signature (those tests fail
 identically under vanilla pytest, hence the non-zero exit). The warm run
@@ -58,21 +58,22 @@ package gets the workers and the rest ride along on single workers.
 
 Two effects compound in the projected warm speedup: parallelism inside the
 dominant package and concurrency across packages. The first run is
-cold: shares are planned from per-project duration caches that don't
-exist yet, so it lands at 3.6×; a warm run, planned from those
+cold (shares are planned from per-project duration caches that don't
+exist yet), so it lands at 3.6×; a warm run, planned from those
 caches, is projected to reach 6.6–7.3× as the planner self-corrects toward
 the next bottleneck.
 
 **Policy.** `checkpoint-sqlite` is a small suite and runs single-worker
 (`-n 0`). It pulls in pytest-retry, whose worker reporter reads
 `workerinput["server_port"]`. That key once had no source under rstest (no
-central controller to set it) and forced this pin. It is now **resolved**: each worker self-provisions its own report server, so
-pytest-retry takes its master branch and its `@pytest.mark.flaky` TTL test
+central controller to set it) and forced this pin. It is now **resolved**: rstest starts pytest-retry's own
+report server inside each worker and seeds `workerinput["server_port"]`, so
+pytest-retry takes its worker branch and its `@pytest.mark.flaky` TTL test
 (which lives here) runs correctly at `-n ≥ 2` too (verified; see
-[parity divergences §8](parity-divergences.md#8-plugin-master-hook-gating-rstest-side-fixed)).
+[parity divergences §8](parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed)).
 Single-worker remains the natural choice for a suite this small; the numbers
 below are the `-n 0` run. The plugin also sits in the shared venv, so it loads
-in the other five libs too; they don't use the marker, so the corpus disables
+in the other five projects too; they don't use the marker, so the corpus disables
 it there (`-p no:pytest-retry`, on both the baseline and rstest runs) to keep
 per-test parity exact.
 
@@ -90,7 +91,7 @@ per-test parity exact.
 - **Small suites don't change much.** rich saves under a second. As a
   rule of thumb: under ~10 seconds of serial runtime, expect no
   meaningful wall-time win (worker startup amortizes poorly, and `-n
-  auto` deliberately caps itself low on small suites), the value there
+  auto` deliberately caps itself low on small suites); the value there
   is `--watch`, `--changed`, and `--doctor`, not raw speed. The win grows
   with suite size and is largest for wait-heavy suites.
 - **Parity is the real claim.** 100% means every test's

@@ -30,12 +30,12 @@ on the sessionstart retry).
 xdist's own distributed session is kept inert by forcing `dist = "no"` (its
 `DSession` only registers when `dist != "no"`), **not** by zeroing
 `numprocesses`. The pool width is left visible on `config.option.numprocesses`
-on purpose: third-party plugins gate their parallel-master setup on it. The
+on purpose: third-party plugins gate their parallel-controller setup on it. The
 load-bearing example is pytest-retry, whose
 `has_plugin("xdist") and getoption("numprocesses")` branch starts a
 `ReportServer` and stashes its (ephemeral) port; if `numprocesses` were nulled
 the plugin would instead take its *worker* branch and read a
-`workerinput["server_port"]` no master had set, raising `KeyError`. Surfacing
+`workerinput["server_port"]` no controller had set, raising `KeyError`. Surfacing
 the width lets each worker self-provision its own server, the same way the
 follower-DB pattern self-provisions.
 
@@ -43,18 +43,18 @@ That branch needs `has_plugin("xdist")`, so it only applies when pytest-xdist
 is installed next to rstest. Without xdist, pytest-retry takes its worker
 branch; rstest then starts pytest-retry's own `ReportServer` inside each
 worker and seeds `workerinput["server_port"]` with its port, so the read
-succeeds (the same "every worker plays master" model as the synthesized
+succeeds (the same "every worker plays controller" model as the synthesized
 `randomly_seed`). If that seeding fails, rstest unregisters the plugin and
-its native `--reruns` take over.
+rstest's native `--reruns` takes over.
 
 ## When self-provisioning can't apply: pytest-rerunfailures
 
-Not every controller-service plugin can be steered to a master branch.
-pytest-rerunfailures gates its master/client split on **`workerinput`
+Not every controller-service plugin can be steered to a controller branch.
+pytest-rerunfailures gates its controller/client split on **`workerinput`
 presence** (`is_master = not hasattr(config, "workerinput")`), not on
 `numprocesses`, and every rstest pool worker has a `workerinput`, so the
 plugin always takes its *client* branch and reads
-`workerinput["sock_port"]`, a key only an xdist master sets. There is no
+`workerinput["sock_port"]`, a key only an xdist controller sets. There is no
 knob (as there is for pytest-retry) to flip it to the self-provisioning
 branch. rstest wants the plugin inert under the pool anyway: it owns reruns
 natively (crash-aware, `@mark.flaky`), and leaving the plugin active would
@@ -74,17 +74,17 @@ emulation produces the same observable result as xdist. The call *timing*
 differs: xdist fires in the controller before the worker exists; rstest fires
 inside the worker, before other plugins' `pytest_configure` read
 `workerinput`. SQLAlchemy's uuid-based `follower_ident` is this pattern, and
-runs measured: see
-[compatibility](compatibility.md#measured-at-scale).
+runs measured (see
+[compatibility](compatibility.md#measured-at-scale)).
 
 ## Divergences from a single controller
 
-- **Your hook runs N times concurrently, in N processes.** xdist's one master
+- **Your hook runs N times concurrently, in N processes.** xdist's one controller
   serializes `pytest_configure_node` calls and can keep shared bookkeeping
   across them; per-process emulation cannot. Hooks that allocate from
   controller-side shared state (counters, registries, pools) need rework:
   derive everything from `gateway.id` or a uuid.
-- **`pytest_testnodedown` for a CRASHED worker runs on a surviving worker**
+- **`pytest_testnodedown` for a **crashed** worker runs on a surviving worker**
   that never saw the dead node's `configure_node`. The shim carries the dead
   worker's `workerinput` snapshot, so workerinput-keyed cleanup works;
   conftest-side registries keyed at configure time will miss. Make teardown a
@@ -97,7 +97,7 @@ that hook run after your session fixtures have finalized.
 
 ## conftest hooks run per-worker
 
-The master-side node hooks above are the special case. **Every other
+The controller-side node hooks above are the special case. **Every other
 conftest hook** (`pytest_configure`, `pytest_collection_modifyitems`,
 `pytest_sessionstart`/`pytest_sessionfinish`, `pytest_runtest_*`, and your
 own) runs inside each worker, because each worker is a full pytest session.
@@ -113,7 +113,7 @@ is the same model as xdist, where each worker also runs its own
   every worker, exactly as under xdist; the orchestrator then dispatches only
   that worker's share to run. Under [`--collect lazy`](../reference/cli.md#-collect-fulllazy)
   the orchestrator assigns files and each worker collects only its assigned
-  files on demand, so the hook sees a partial item set: run at `-n 0` (or
+  files on demand, so the hook sees a partial item set. Run at `-n 0` (or
   `--collect full`) if a hook must see the whole suite.
 - **`pytest_collection_modifyitems` reordering does not control parallel run
   order.** Deselection is honored (a deselected item won't run), but the
@@ -127,11 +127,11 @@ is the same model as xdist, where each worker also runs its own
 
 ## Crash cleanup
 
-Crash cleanup is best-effort and **weaker than xdist's**: xdist's master is a
+Crash cleanup is best-effort and **weaker than xdist's**: xdist's controller is a
 separate always-alive process; rstest needs a surviving worker (if the last
 worker crashes, cleanup is skipped with a loud warning). One ordering hazard
-to know: the crashed worker's REPLACEMENT starts while the survivor runs the
-dead node's `pytest_testnodedown`, with idents derived deterministically
+to know: the crashed worker's **replacement** starts while the survivor runs the
+dead node's `pytest_testnodedown`. With idents derived deterministically
 from `gateway.id`, the drop can race the replacement's re-provisioning of the
 same ident. Use uuid-based idents (as SQLAlchemy does) and the race
 disappears: the replacement provisions a fresh ident, the survivor drops the

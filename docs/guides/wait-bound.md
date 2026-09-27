@@ -1,4 +1,4 @@
-# Wait-bound / IO suite playbook
+# Wait-bound / IO suites
 
 A playbook for suites whose time goes to waiting (sleeps, network, timeouts) rather than computing, where rstest gains the most.
 
@@ -59,7 +59,7 @@ Here is the key move for a wait-bound suite, and it is counter-intuitive:
 This is the same effect doctor reports as **PARALLEL EFFICIENCY over
 100%**: "overlapping sleeps/IO run more tests at once than there are
 cores." Doctor flags efficiency above 100% as normal for wait-bound
-suites and points you back at WAIT-BOUND. (The section is `-n > 1` only.)
+suites and points you back at WAIT-BOUND. (The section is `-n ≥ 2` only.)
 The [scheduler](../concepts/scheduling.md) helps here too: it dispatches
 slow tests first (a cached duration of 1s or more), longest first, so a
 54-second waiter starts at t=0 instead of stacking behind other work.
@@ -85,7 +85,7 @@ tracks how well the run parallelized, e.g. `--doctor-fail-on
 gate on `wait_pct` for this; it measures how wait-bound the suite *is*,
 not whether the worker count is well-tuned.)
 
-> Caveat: this over-subscription trick is safe *because* the work is
+> Caveat: this oversubscription trick is safe *because* the work is
 > waiting, not computing. Tests that assert on rate-limit windows, token
 > expiries, or tight elapsed-time bounds can degrade under high `-n`;
 > that's load, not ordering. Contain them with `@pytest.mark.serial`, a
@@ -147,7 +147,7 @@ runs per worker gets no warning, so audit those by hand.
 ## 4. Measure the real win
 
 Before committing to anything, get *your* numbers with
-[`rstest try`](migrate-from-pytest.md):
+[`rstest try`](../reference/cli-commands.md#try):
 
 ```console
 $ rstest try

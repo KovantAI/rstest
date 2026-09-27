@@ -88,7 +88,7 @@ while genuine known-flakes are still rescued. An explicit
 `@pytest.mark.flaky` always bypasses the gate (the author already declared
 it), and it composes with `--only-rerun`.
 
-The catch: this flag *spends* flaky history, it does not *build* it. The
+The catch: this flag *spends* flaky history; it does not *build* it. The
 gate suppresses the very rerun that would record a new flake as `flaky > 0`,
 so a flagged run can never learn a brand-new flake on its own. Seed the
 history with a separate learning run (plain `--reruns` **without** this
@@ -100,7 +100,7 @@ runs so the history survives. Full semantics:
 
 ## Ring-fence: `--quarantine`
 
-Write the known offenders to a file (commit it, the quarantine set is
+Write the known offenders to a file (commit it: the quarantine set is
 a team decision and its diff history is the audit trail):
 
 ```text
@@ -154,7 +154,7 @@ The exact semantics:
   [Run snapshot](../reference/report-json.md).
 - **Monorepos**: pass one file at the root; it's forwarded to every
   project as an absolute path. Patterns match each project's
-  **project-relative** nodeids (the same ids the child prints).
+  **project-relative** nodeids (the same nodeids the child prints).
 
 ## Quarantine vs `--reruns`
 
@@ -181,7 +181,7 @@ run.
 
 The failure mode to avoid is a quarantine list that only ever grows.
 `flakes.json` self-ages (see [aging](#remember-the-flake-history)
-above), but `quarantine.txt` is committed and hand-curated on purpose:
-treat an addition like a TODO with an owner, and periodically audit it,
-an entry whose test no longer appears in the flake history is either
+above), but `quarantine.txt` is committed and hand-curated on purpose.
+Treat an addition like a TODO with an owner, and audit the list periodically.
+An entry whose test no longer appears in the flake history is either
 fixed (remove it) or abandoned (fix the test).

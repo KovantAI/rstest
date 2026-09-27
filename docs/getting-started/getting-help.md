@@ -1,5 +1,7 @@
 # Getting help
 
+Where to report problems and where to look first:
+
 - **Bugs and feature requests**: open an issue on the
   [GitHub repository](https://github.com/KovantAI/rstest/issues). For a
   behavioral difference from pytest, include the `-n 0` result: identical
@@ -17,7 +19,7 @@ rstest is **pre-1.0** software under active development. What that means
 honestly:
 
 - Versions are 0.x; CLI flags and the report-json schema aim for
-  stability but may change until 1.0: every change is listed in the
+  stability but may change until 1.0. Every change is listed in the
   repository's `CHANGELOG.md`.
 - The vendored pytest core carries a maintenance commitment: upstream
   pytest security fixes **aim to be re-vendored and released within two

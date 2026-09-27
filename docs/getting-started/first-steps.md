@@ -50,7 +50,8 @@ output](#reading-the-output)). This page's examples use `dots` for
 stability.
 
 No other arguments needed: rstest honors your project's pytest configuration
-(`pyproject.toml` / `pytest.ini` / `setup.cfg` / `tox.ini`, including
+(`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`,
+`tox.ini`, or `setup.cfg`, including
 `testpaths`, `addopts`, `python_files`, and markers) because collection
 runs through a vendored pytest core.
 
@@ -105,14 +106,13 @@ E       assert 401 == 200
 tests/test_login.py:3: AssertionError
 ```
 
-At `-n 0`/`-n 1` there is no worker, so the prefix is omitted, and `-v`
-lines carry no percentage:
+At `-n 0`/`-n 1` there is no worker, so the prefix is omitted:
 
 ```console
 $ rstest -n 0 -v
 rstest 0.7.0 — single worker (pytest-exact mode)
-tests/test_first.py::test_add PASSED
-tests/test_first.py::test_add_negative PASSED
+tests/test_first.py::test_add PASSED [ 16%]
+tests/test_first.py::test_add_negative PASSED [ 33%]
 ...
 ```
 
@@ -131,8 +131,8 @@ $ rstest --changed                      # only tests affected by your edits
 ```
 
 `--changed` runs just the tests a change can reach, using the per-test
-coverage index when it is warm and the import graph otherwise:
-see [Watch mode](../guides/watch-mode.md) for the on-save version.
+coverage index when it is warm and the import graph otherwise.
+See [Watch mode](../guides/watch-mode.md) for the on-save version.
 
 ## Controlling parallelism
 
@@ -155,8 +155,8 @@ the parallel banner. See
 [Byte-exact mode](../concepts/glossary.md#byte-exact-mode) for what that
 guarantees and how it differs from pytest-xdist's `-n 1`.
 
-Commit your defaults so you don't retype flags, `[tool.rstest]` in
-`pyproject.toml`:
+Commit your defaults to `[tool.rstest]` in `pyproject.toml` so you don't
+retype flags:
 
 ```toml
 [tool.rstest]

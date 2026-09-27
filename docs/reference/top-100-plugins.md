@@ -17,12 +17,12 @@ parallel also runtime-`V`.
 | 🟦 Native | Works, but rstest ships a built-in that supersedes it (prefer the native flag). |
 | ⚠️ Caveat | Works with a stated limitation, usually a subset that needs `-n 0`. |
 | 🔶 `-n 0` | Run single-worker for this plugin's feature (terminal painting, benchmarks, ordering). |
-| 🔴 Silent | Produces **nothing** at `-n ≥ 2` (report aggregators gated on the xdist master); use `-n 0` or a native equivalent. |
+| 🔴 Silent | Produces **nothing** at `-n ≥ 2` (report aggregators gated on the xdist controller); use `-n 0` or a native equivalent. |
 | ➖ N/A | Unaffected by parallelism (assertion / fixture / format helpers). |
 
 **Verified** column: **V** = exercised by an e2e gate or loaded by a
-corpus suite (the per-plugin notes are in the
-[tested-compat table](../guides/plugins.md#tested-compatibility)) (see the runtime inventory in
+corpus suite (per-plugin notes are in the
+[tested-compat table](../guides/plugins.md#tested-compatibility); the runtime inventory is in
 [Plugins exercised by the corpus](corpus-plugins.md)); **i** = inferred from the
 plugin's category, not yet runtime-verified.
 
@@ -39,7 +39,7 @@ plugin's category, not yet runtime-verified.
 | 9 | pytest-metadata | 35.2M | ➖ N/A | V | Session metadata for report plugins; plugin active on workers, no parallel hazard (e2e gate). |
 | 10 | pytest-env | 24.0M | ✅ Works | i | Env vars set on every worker (its hook runs in each worker session). No gate yet. |
 | 11 | pytest-httpx | 22.9M | ✅ Works | V | Per-test httpx mock fixture; isolated per worker (e2e gate). |
-| 12 | pytest-html | 21.8M | 🔴 Silent | V | Writes no report at `-n ≥ 2` (gates on the master `workerinput`); a command-line `--html` is rstest's native report; for the plugin's own, `rstest -n 0 -- --html=...`. |
+| 12 | pytest-html | 21.8M | 🔴 Silent | V | Writes no report at `-n ≥ 2` (gates on being the xdist controller, which has no `workerinput`); a command-line `--html` is rstest's native report; for the plugin's own, `rstest -n 0 -- --html=...`. |
 | 13 | pytest-django | 21.6M | ✅ Works | V | Per-worker test DB suffixed by `workerid`. Verified on django-allauth, which uses SQLite `:memory:`; server-backed databases (Postgres, MySQL) are not in the corpus yet. |
 | 14 | pytest-split | 21.0M | 🟦 Native | V | Group selection is deselection (honored under the pool: e2e gate); rstest sharding is native `--shard K/N`. |
 | 15 | pytest-repeat | 15.5M | ✅ Works | i | `@mark.repeat(N)` expands at collection, so the copies distribute across workers. No gate yet. |
@@ -49,7 +49,7 @@ plugin's category, not yet runtime-verified.
 | 19 | syrupy | 13.4M | ✅ Works | V | Snapshot asserts are per-test; run `--snapshot-update` at `-n 0` to avoid same-file write races. Corpus: langchain (`libs/core`) + langgraph snapshot asserts at `-n auto`. |
 | 20 | pytest-unordered | 11.0M | ➖ N/A | V | Assertion helper; works under the pool (e2e gate). |
 | 21 | pytest-base-url | 10.2M | ✅ Works | V | Config/fixture only; `--base-url` delivered to every worker (e2e gate). |
-| 22 | pytest-randomly | 10.0M | ✅ Works | V | rstest synthesizes the `randomly_seed` the master would inject (one run-level seed, all workers agree); vetted. Native `--shuffle` also available. |
+| 22 | pytest-randomly | 10.0M | ✅ Works | V | rstest synthesizes the `randomly_seed` the controller would inject (one run-level seed, all workers agree); vetted. Native `--shuffle` also available. |
 | 23 | pytest-icdiff | 9.7M | ➖ N/A | V | Assertion-diff repr; side-by-side diff reaches worker failure output (e2e gate). |
 | 24 | pytest-playwright | 9.6M | ✅ Works | V | Per-worker browser context; `page` fixture works under the pool (e2e `plugin-services` gate). |
 | 25 | pytest-homeassistant-custom-component | 9.4M | ✅ Works | V | Fixture bundle; per-worker `hass` fixture works under the pool (e2e `plugin-services` gate). |
@@ -73,18 +73,18 @@ plugin's category, not yet runtime-verified.
 | 43 | pytest-durations | 3.5M | 🔶 `-n 0` / 🟦 | V | Duration summary is terminal-owned; coexists under the pool (e2e gate). rstest has `--durations` and `--doctor`. |
 | 44 | pytest-memray | 2.9M | 🔶 `-n 0` | V | `@limit_memory` is enforced per worker process: same pass/fail under the pool as at `-n 0` (e2e gate). Only the memory *summary* is terminal-owned; read it at `-n 0`. |
 | 45 | pytest-codspeed | 2.9M | 🔶 `-n 0` | V | The `benchmark` fixture + `@mark.benchmark` coexist under the pool and `--codspeed` measurement completes at any `-n` (e2e gate); measure at `-n 0` for stable numbers. |
-| 46 | pytest-random-order | 2.8M | ✅ Works | V | rstest seeds the `workerinput["random_order_seed"]` its `pytest_configure` reads unconditionally: without it the plugin KeyError'd every `-n ≥ 2` run (dead-master-path, now closed; e2e gate). All workers share the seed; global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
+| 46 | pytest-random-order | 2.8M | ✅ Works | V | rstest seeds the `workerinput["random_order_seed"]` its `pytest_configure` reads unconditionally: without it the plugin KeyError'd every `-n ≥ 2` run (a dead controller path, now closed; e2e gate). All workers share the seed; global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
 | 47 | pytest-factoryboy | 2.8M | ✅ Works | V | Fixture generation; registered factory fixture resolves on workers (e2e gate). |
 | 48 | pytest-ordering | 2.8M | ⚠️ Caveat | V | Same as pytest-order: `@mark.run(order=N)` honored within a worker / at `-n 0` (e2e gate). |
 | 49 | pytest-snapshot | 2.6M | ✅ Works | V | Asserts parallel-safe; update at `-n 0`, assert under the pool (e2e gate). |
-| 50 | pytest-retry | 2.6M | ✅ Works | V | Each worker plays master for itself: with pytest-xdist installed, its controller branch self-provisions a report server (e2e gate); without xdist, rstest seeds the `server_port` its worker branch reads (langgraph corpus). Native reruns also available. |
+| 50 | pytest-retry | 2.6M | ✅ Works | V | Each worker plays controller for itself: with pytest-xdist installed, its controller branch self-provisions a report server (e2e gate); without xdist, rstest seeds the `server_port` its worker branch reads (langgraph corpus). Native reruns also available. |
 | 51 | pytest-docker | 2.4M | ⚠️ Caveat | i | Session docker-compose fixture → one stack **per worker**. Fine if the service is per-worker; for a single shared stack use `--dist loadgroup` or `-n 0`. |
 | 52 | pytest-vcr | 2.3M | ✅ Works | i | Per-test VCR cassette files; record/replay parallel-safe (same class as pytest-recording #32). |
 | 53 | pytest-lazy-fixtures | 2.2M | ➖ N/A | i | Resolves fixture *values* inside `parametrize`; no parallel interaction. |
 | 54 | pytest-flakefinder | 2.1M | ✅ Works | i | Multiplies each item N× at collection; the copies distribute across workers like any parametrization. |
 | 55 | pytest-profiling | 1.9M | 🔶 `-n 0` | i | Per-test `.prof` files written per worker; the combined svg/call graph + summary are terminal/aggregate: read at `-n 0`. |
 | 56 | pytest-celery | 1.9M | ⚠️ Caveat | i | Broker/worker fixtures (often Docker-backed); one broker per worker, or `-n 0` for a shared broker. |
-| 57 | pytest-watcher | 1.8M | 🟦 Native | i | External file-watch re-run wrapper around the pytest process; rstest has native watch (`rstest --watch`). |
+| 57 | pytest-watcher | 1.8M | 🟦 Native | i | External file-watch rerun wrapper around the pytest process; rstest has native watch (`rstest --watch`). |
 | 58 | pytest-datadir | 1.8M | ✅ Works | i | Per-test copied data-dir fixture; isolated per test/worker. |
 | 59 | pytest-docker-tools | 1.7M | ⚠️ Caveat | i | Container fixtures; same per-worker-stack caveat as pytest-docker (#51). |
 | 60 | pytest-test-groups | 1.6M | 🟦 Native | i | `--test-group`/`--test-group-count` selection is deselection (honored under the pool); rstest sharding is native `--shard K/N`. |
@@ -94,7 +94,7 @@ plugin's category, not yet runtime-verified.
 | 64 | pytest-freezer | 1.4M | ✅ Works | i | Same in-process time-freeze model as pytest-freezegun. |
 | 65 | pytest-alembic | 1.3M | ✅ Works | i | Migration tests; per-worker test DB (pytest-django class). |
 | 66 | pytest-pretty | 1.2M | 🔶 `-n 0` | i | Rich terminal painting; rstest owns the terminal at `-n ≥ 2`. Corpus-loaded only at `-n 0` (pydantic), so no parallel evidence yet. |
-| 67 | pytest-opentelemetry | 1.2M | ✅ Works | i | Emits a span per test on each worker; aggregate at the collector (per-worker exporters, no shared master state). |
+| 67 | pytest-opentelemetry | 1.2M | ✅ Works | i | Emits a span per test on each worker; aggregate at the collector (per-worker exporters, no shared controller state). |
 | 68 | pytest-qt | 1.2M | ✅ Works | i | Per-worker Qt app / `qtbot` fixture (needs a display or xvfb, as under any runner). |
 | 69 | pytest-describe | 1.2M | ✅ Works | i | Generates items from `describe`/`it` blocks at collection; distribute normally. |
 | 70 | pytest-sftpserver | 1.1M | ✅ Works | i | Per-test SFTP server fixture on its own port (pytest-httpserver class #39). |
@@ -104,27 +104,27 @@ plugin's category, not yet runtime-verified.
 | 74 | pytest-reportportal | 1.0M | ⚠️ Caveat | i | Streams to a ReportPortal launch per worker; use one launch id (config) or `-n 0` to avoid N launches. |
 | 75 | pytest-ansible | 983K | ✅ Works | i | Per-test ansible host/inventory fixtures. |
 | 76 | pytest-find-dependencies | 983K | 🔶 `-n 0` | i | `--find-dependencies` reorders the whole suite to detect inter-test coupling; single process. |
-| 77 | pytest-watch | 946K | 🟦 Native | i | External re-run wrapper (`ptw`); rstest has native watch. |
-| 78 | pytest-azurepipelines | 858K | 🔴 Silent / 🟦 | i | Azure CI result upload / `##vso` logging is master/terminal-owned; use native `--junitxml` under the pool. |
+| 77 | pytest-watch | 946K | 🟦 Native | i | External rerun wrapper (`ptw`); rstest has native watch. |
+| 78 | pytest-azurepipelines | 858K | 🔴 Silent / 🟦 | i | Azure CI result upload / `##vso` logging is controller/terminal-owned; use native `--junitxml` under the pool. |
 | 79 | pytest-picked | 819K | 🟦 Native | i | Runs tests from git-changed files (selection = deselection); rstest has native changed-based selection. |
 | 80 | pytest-anyio | 809K | ✅ Works | i | anyio async tests per worker. The `anyio` package's own built-in plugin is corpus-loaded in parallel (7 suites); this separate distribution is not. |
-| 81 | pytest-reportlog | 802K | 🔴 Silent | V\* | `--report-log` writes **no file** at `-n ≥ 2` (gated on the master); written at `-n 0`. e2e gate: no crash under the pool. Native `--report-json`. |
+| 81 | pytest-reportlog | 802K | 🔴 Silent | V\* | `--report-log` writes **no file** at `-n ≥ 2` (gated on the controller); written at `-n 0`. e2e gate: no crash under the pool. Native `--report-json`. |
 | 82 | pytest-race | 793K | ✅ Works | i | `--race` runs one test concurrently in threads to surface races; per-test, in-process. |
 | 83 | pytest-assume | 790K | ➖ N/A | i | Soft multi-assert; all assumptions ride the normal report (pytest-check class #38). |
-| 84 | pytest-md | 737K | 🔴 Silent | V\* | `--md` writes an empty *"0 tests"* report at `-n ≥ 2` (aggregates on the master); real report at `-n 0`. e2e gate: no crash. |
+| 84 | pytest-md | 737K | 🔴 Silent | V\* | `--md` writes an empty *"0 tests"* report at `-n ≥ 2` (aggregates on the controller); real report at `-n 0`. e2e gate: no crash. |
 | 85 | pytest-harvest | 731K | 🔶 `-n 0` | i | Collects fixture/test results into a whole-session store; cross-worker aggregation needs `-n 0`. |
 | 86 | pytest-cache | 688K | ➖ N/A | i | Legacy backport of the now-core `cacheprovider`; inert alongside rstest's cache. |
 | 87 | pytest-doctestplus | 678K | ✅ Works | i | Enhanced doctests collected at collection time; rstest also has native `--doctest-modules`. |
 | 88 | pytest-mpl | 677K | ✅ Works | i | Per-test matplotlib image compare; generate baselines with `--mpl-generate-path` at `-n 0`. |
 | 89 | pytest-variables | 661K | ✅ Works | i | `--variables <file>` delivered to every worker as a fixture (pytest-base-url class #21). |
 | 90 | pytest-clarity | 651K | ➖ N/A | i | Assertion-diff prettifier; the diff reaches worker failure output (pytest-icdiff class #23). |
-| 91 | pytest-nunit | 629K | 🔴 Silent | V\* | NUnit XML: **no file** at `-n ≥ 2` (single-master aggregator); written at `-n 0`. e2e gate: no crash. Native `--junitxml`. |
+| 91 | pytest-nunit | 629K | 🔴 Silent | V\* | NUnit XML: **no file** at `-n ≥ 2` (single-controller aggregator); written at `-n 0`. e2e gate: no crash. Native `--junitxml`. |
 | 92 | pytest-pylint | 616K | ✅ Works | i | Pylint-as-tests collected per file; runs per worker (shared pylint cache is a mild contention caveat). |
 | 93 | pytest-lazy-fixture | 608K | ➖ N/A | i | Legacy `lazy_fixture` (superseded by pytest-lazy-fixtures #53); value-level, no parallel hazard. |
 | 94 | pylint-pytest | 601K | ➖ N/A | i | A **pylint** plugin (lints pytest code), not a pytest runtime plugin, never loaded by the test session. |
 | 95 | pytest-examples | 595K | ✅ Works | i | Code-example / docstring testing. Corpus-loaded only at `-n 0` (pydantic), so no parallel evidence yet. |
 | 96 | pytest-pytestrail | 566K | ⚠️ Caveat | i | TestRail reporter; per-worker case results, or `-n 0` for one run submission. |
-| 97 | pytest-mypy | 557K | ✅ Works | V | **Dead-master-path closed.** Its worker branch reads `workerinput["mypy_config_stash_serialized"]`, a key only its xdist controller sets, so merely installing it `KeyError`'d every `-n ≥ 2` run. rstest now seeds a unique per-worker mypy results-cache path; mypy runs lazily per worker (`MypyResults.from_session`), so type errors surface identically at `-n auto` and `-n 0` (e2e gate). |
+| 97 | pytest-mypy | 557K | ✅ Works | V | **Dead controller path closed.** Its worker branch reads `workerinput["mypy_config_stash_serialized"]`, a key only its xdist controller sets, so merely installing it `KeyError`'d every `-n ≥ 2` run. rstest now seeds a unique per-worker mypy results-cache path; mypy runs lazily per worker (`MypyResults.from_session`), so type errors surface identically at `-n auto` and `-n 0` (e2e gate). |
 | 98 | pytest-csv | 552K | ⚠️ Caveat | V\* | `--csv` writes a **racy per-worker** CSV under the pool (each worker opens the same path, last close wins, may capture only one worker's subset); use `-n 0` or native `--report-json`. e2e gate: no crash. |
 | 99 | pytest-subprocess | 515K | ✅ Works | i | Per-test `fake_process` fixture; isolated per test. |
 | 100 | pytest-flake8 | 506K | ✅ Works | i | flake8-as-tests collected per file; runs per worker (shared flake8 cache is a mild contention caveat). |
@@ -142,7 +142,7 @@ next verification tranche.
 - **🟦 Native, 6:** rstest has a first-class replacement (cov, timeout, rerunfailures, split, timeouts, github-actions-annotate).
 - **🔶 `-n 0`, 7:** terminal / benchmark / memory features want single-worker (benchmark, sugar, instafail, testmon, durations, memray, codspeed).
 - **⚠️ Caveat, 4:** works with a limit (dependency, custom-exit-code, order, ordering).
-- **🔴 Silent, 3:** report aggregators gated on the master (json-ctrf, html, json-report); emit at `-n 0` or use a native artifact.
+- **🔴 Silent, 3:** report aggregators gated on the controller (json-ctrf, html, json-report); emit at `-n 0` or use a native artifact.
 - **➖ N/A, 5:** no parallel interaction (xdist neutralized, metadata, unordered, icdiff, check).
 
 **36 of 50 run unchanged or via a native flag; 4 more work with a caveat; the
@@ -151,8 +151,8 @@ None of them crash under the pool, but the 3 silent reporters produce no
 artifact there, so treat them as not working in parallel and use the native
 equivalent.
 
-The recurring fault line: a plugin that reads xdist-**master**-injected
-`workerinput` keys, aggregates from a single master, or paints the terminal.
+The recurring fault line: a plugin that reads xdist-**controller**-injected
+`workerinput` keys, aggregates from a single controller, or paints the terminal.
 rstest closes the first class per plugin (seeding/emulation), owns the terminal
 and dispatch for the second and third, and ships native equivalents for the
 common reporters.
@@ -163,12 +163,12 @@ common reporters.
 - **🟦 Native, 4:** watcher, test-groups, watch, picked (rstest ships watch / sharding / changed-selection).
 - **🔶 `-n 0`, 5:** profiling, deadfixtures, find-dependencies, harvest, pretty.
 - **⚠️ Caveat, 6:** docker, celery, docker-tools, reportportal, pytestrail, csv.
-- **🔴 Silent, 4:** reportlog, md, nunit, azurepipelines (single-master aggregators; emit at `-n 0` or use a native artifact).
+- **🔴 Silent, 4:** reportlog, md, nunit, azurepipelines (single-controller aggregators; emit at `-n 0` or use a native artifact).
 - **➖ N/A, 7:** lazy-fixtures, cases, assume, cache, clarity, lazy-fixture, pylint-pytest.
 
 The fault line is the same as in the top 50: a plugin that reads
-xdist-**master**-injected `workerinput` keys (pytest-mypy, closed by seeding),
-aggregates from a single master (the reporters, silent or racy under the pool),
+xdist-**controller**-injected `workerinput` keys (pytest-mypy, closed by seeding),
+aggregates from a single controller (the reporters, silent or racy under the pool),
 or paints the terminal (pretty, profiling). None crash; the silent and racy
 reporters have native rstest equivalents.
 
@@ -183,7 +183,7 @@ alternative; see
 argv-driven: it catches the known-dark flags deterministically, with no false
 positives.
 
-**Planned: static dead-master-path scan.** A general `--warn-on-dead-master-path`
+**Planned: static dead-controller-path scan.** A general `--warn-on-dead-master-path`
 detector that inspects *any* installed plugin's code for the "am I the xdist
 master?" branch pattern (predicting silent-no-op **and** crash classes for
 unlisted plugins) is designed but **not yet implemented**. Two false-positive shapes it will have to handle, from analyzing

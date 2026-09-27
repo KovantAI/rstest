@@ -77,7 +77,7 @@ licensing is in [License](license.md#vendored-software). Key points:
 When upstream pytest ships a security fix affecting the vendored code, an
 rstest release with the re-vendored core is expected **within two weeks** of
 the upstream release. Because the vendored tree is verbatim, re-vendoring is
-mechanical; the two-week budget covers re-running the compatibility battery,
+mechanical; the two-week budget covers rerunning the compatibility battery,
 not the patch itself.
 
 **How new pytest releases are detected.** A scheduled workflow
@@ -140,7 +140,7 @@ itself. Two levels of check:
   downloads the pinned pytest wheel, asserts its sha256 against the manifest's
   trust anchor, and diffs the extracted tree against `_vendor/`, proving the
   vendored copy is byte-identical to upstream pytest, not merely internally
-  consistent. This also re-runs weekly to catch drift. The same provenance
+  consistent. This also reruns weekly to catch drift. The same provenance
   check is part of the re-vendor procedure in
   [`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md).
 
@@ -282,7 +282,7 @@ and attached as release assets:
 
 Both are listed in the release's `SHA256SUMS`. One component is **not**
 captured by either SBOM: the vendored pytest lives *inside* the wheel rather
-than as a declared dependency, so tools don't see it, its version (9.1.1) and
+than as a declared dependency, so tools don't see it. Its version (9.1.1) and
 that core's own runtime deps are documented under
 [Vendored pytest](#vendored-pytest) and in
 [`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md).

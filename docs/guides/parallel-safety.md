@@ -231,9 +231,9 @@ the cores, and the changed reduction order can shift low bits: a tight
 `assert x == expected` passes at `-n 0` and flips at `-n 8`. Pin the math
 libraries to one thread per worker and let rstest own the parallelism:
 
-```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-  rstest -n auto
+```console
+$ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+    rstest -n auto
 ```
 
 (Or cap `-n` to leave headroom for the internal threads.) This is also usually
@@ -244,8 +244,8 @@ the win.
 the global RNG, `np.set_printoptions`: a test that mutates one and a test that
 assumes the default pass in serial order and disagree when reordered or split
 across workers. Contain state in fixtures (set-and-restore) so each test starts
-from a known configuration; this is the general
-[isolation](#the-serial-escape-hatch) rule, but for numerics the symptom is a
+from a known configuration; this is the general isolation
+rule behind [the serial escape hatch](#the-serial-escape-hatch), but for numerics the symptom is a
 *wrong number*, not a crash.
 
 **4. Order sensitivity.** Duration-aware scheduling runs tests in timing order,
@@ -283,4 +283,4 @@ see [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-prefl
 catalogues every real divergence found running rstest against well-known
 public suites (requests, pydantic, typer, rich, httpx, werkzeug, …), each with
 its root cause and the concrete upstream change that removes it: a practical
-checklist for making a suite byte-exact under any parallel runner.
+checklist for reaching exact parity under any parallel runner.

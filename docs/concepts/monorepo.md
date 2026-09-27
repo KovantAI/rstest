@@ -72,7 +72,7 @@ run on, the weights kick in. Output is printed per project, in completion
 order, each block whole.
 
 **Scale note:** every project gets at least one worker and all projects launch
-concurrently, a 40-package repo on a 2-core CI runner means 40 concurrent
+concurrently, so a 40-package repo on a 2-core CI runner means 40 concurrent
 single-worker children, which oversubscribes. On small runners, shard with
 `[tool.rstest] projects` (or path arguments) until a project-level concurrency
 cap exists.
@@ -123,7 +123,7 @@ dropped those flags at a monorepo root).
 - **Exit code** is the merge of per-project exits (pytest semantics: failures
   dominate; "no tests collected" only if every project says so). See
   [Exit codes](../reference/exit-codes.md).
-- **`--report-json`** writes ONE merged document at the requested path: test
+- **`--report-json`** writes **one** merged document at the requested path: test
   keys are root-relative nodeids (`libs/core/tests/test_x.py::test_y`, what
   pytest would call them from the root), `meta.exitstatus` is the merged exit,
   and `meta.projects` maps each project to `{"exitstatus": N, "counts": {...}}`
@@ -131,7 +131,7 @@ dropped those flags at a monorepo root).
   merging. See [Report JSON](../reference/report-json.md) for the exact shape.
 - **`--junitxml`, `--doctor-json`, `--doctor-md` and `--html`** are written
   per project with the project slug inserted before the extension (JUnit
-  consumers want one testsuite file per package). The slug is the project's path relative to the
+  consumers want one testsuite file per project). The slug is the project's path relative to the
   root with separators replaced by `-`: `libs/core` -> `junit.libs-core.xml`,
   `services/api` -> `junit.services-api.xml`. Files anchor at the invocation
   directory. A project skipped by `--changed` writes no files.
@@ -139,7 +139,7 @@ dropped those flags at a monorepo root).
   isolated child run): a hang in one package does not cost you the completed
   packages' JUnit/report files.
 - **`--output` style** is forwarded to every project, so `dots`, `verbose`,
-  `bar`, and `github` all apply per package (each project's block is captured
+  `bar`, and `github` all apply per project (each project's block is captured
   and reprinted under its header; `github` `::error` annotations are rewritten
   with the project's root-relative path so they land on the right file in the
   PR diff). `--output json` is **refused** at a monorepo root: the
