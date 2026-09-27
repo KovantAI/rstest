@@ -5,8 +5,18 @@
 - `durations.json` — per-test call durations, merged over runs (a filtered
   run updates only the tests it ran). Drives
   [long-pole-first scheduling](scheduling.md#dispatch-order) and the
-  suite-size heuristic behind `-n auto`. Safe to delete at any time; the
-  next run rebuilds it (and is scheduled in collection order).
+  suite-size heuristic behind `-n auto`. Each entry records its test file's
+  path and a sha256 of its contents, so the cache self-heals: an edited test
+  re-times on fresh numbers instead of stale ones, and a deleted or renamed
+  test is dropped rather than kept forever. Because the hash is content, not
+  mtime, and ignores line endings, a cache restored onto a fresh checkout (for
+  example with CI's cache action) still matches. Safe to delete
+  at any time; the next run rebuilds it (and is scheduled in collection order).
+- `wall.json` — the whole suite's last wall-clock time for this project
+  (fixture setup and teardown included), used by the monorepo planner to weight
+  a fixture-bound project by its real cost. It carries no per-test source to
+  fingerprint, so it ages out on time instead: entries older than
+  `RSTEST_WALL_TTL_DAYS` (default 30, `0` disables) are ignored on read.
 - `flakes.json` — sparse record of tests that have passed only on rerun
   ([`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`), used to
   surface repeat offenders. Auto-written, safe to delete, persisted the same

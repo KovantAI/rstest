@@ -28,12 +28,14 @@ from gates.dispatch import (
     gate_dist_each_crash_remnant,
     gate_dist_validation,
     gate_duration_regression_gate,
+    gate_fork_pool,
     gate_lazy_collection,
     gate_lazy_work_stealing,
     gate_lf,
     gate_loadscope_loadgroup,
     gate_maxfail_bound,
     gate_native_timeout,
+    gate_order_fail_fast,
     gate_serial_after_crash,
     gate_serial_mark,
     gate_shard_k_n,
@@ -50,6 +52,7 @@ from gates.flaky import (
     gate_verify_vendor,
 )
 from gates.incremental import (
+    gate_explain,
     gate_incremental_dispatch_skip,
     gate_incremental_guards,
     gate_since_green_incremental,
@@ -57,6 +60,7 @@ from gates.incremental import (
 from gates.misc import (
     gate_basics,
     gate_collection_error_semantics,
+    gate_worker_identity_fixtures,
 )
 from gates.monorepo import (
     gate_monorepo,
@@ -122,6 +126,7 @@ from gates.reporting import (
     gate_warnings,
 )
 from gates.serve_watch import (
+    gate_bisect,
     gate_migrate_check,
     gate_try,
     gate_watch_mode,
@@ -146,6 +151,7 @@ def main():
     sections = (
         gate_basics,
         gate_collection_error_semantics,
+        gate_worker_identity_fixtures,
         gate_output_styles,
         gate_multiprocessing_spawn_children,
         gate_crash_handling,
@@ -205,6 +211,7 @@ def main():
         gate_shard_verify,
         gate_dist_each,
         gate_dist_validation,
+        gate_fork_pool,
         gate_testnodedown_for_crashed_workers,
         gate_xdist_master_side_hooks,
         gate_one_arg_pytest_testnodedown,
@@ -222,9 +229,11 @@ def main():
         gate_since_green_incremental,
         gate_incremental_dispatch_skip,
         gate_incremental_guards,
+        gate_explain,
         gate_coverage_based_selection_changed_uses_th,
         gate_coverage_selection_under_autocrlf_crlf_w,
         gate_shuffle,
+        gate_order_fail_fast,
         gate_duration_regression_gate,
         gate_shared_cache_backend,
         gate_tool_rstest_config,
@@ -238,6 +247,7 @@ def main():
         gate_native_timeout,
         gate_try,
         gate_migrate_check,
+        gate_bisect,
         gate_watch_mode,
     )
     names = [s.__name__.removeprefix("gate_") for s in sections]

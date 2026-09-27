@@ -126,6 +126,7 @@ pub(super) fn execute_monorepo(
             cli_python: cli.python.as_deref(),
             project_python: mono::project_python(project),
             dist: cli.dist.as_deref(),
+            order: cli.order.as_deref(),
             output: cli.output.as_deref(),
             reruns: cli.reruns,
             quarantine: cli.quarantine.as_deref(),
@@ -254,6 +255,7 @@ struct ChildSpec<'a> {
     /// A project-local venv discovered by [`mono::project_python`].
     project_python: Option<PathBuf>,
     dist: Option<&'a str>,
+    order: Option<&'a str>,
     output: Option<&'a str>,
     reruns: Option<u32>,
     quarantine: Option<&'a std::path::Path>,
@@ -288,6 +290,9 @@ fn build_child_args(spec: &ChildSpec) -> Vec<String> {
     }
     if let Some(d) = spec.dist {
         pair(&mut a, "--dist", d.into());
+    }
+    if let Some(o) = spec.order {
+        pair(&mut a, "--order", o.into());
     }
     if let Some(o) = spec.output {
         pair(&mut a, "--output", o.into());
@@ -496,6 +501,7 @@ mod tests {
             cli_python: None,
             project_python: None,
             dist: None,
+            order: None,
             output: None,
             reruns: None,
             quarantine: None,
@@ -541,6 +547,7 @@ mod tests {
         spec.cli_python = Some("/venv/bin/python");
         spec.project_python = Some(PathBuf::from("/proj/.venv/bin/python"));
         spec.dist = Some("loadscope");
+        spec.order = Some("fail-fast");
         spec.output = Some("github");
         spec.reruns = Some(2);
         spec.quarantine = Some(&quar);
@@ -558,6 +565,7 @@ mod tests {
         // Explicit --python wins over the project venv.
         assert_eq!(val_after(&args, "--python"), Some("/venv/bin/python"));
         assert_eq!(val_after(&args, "--dist"), Some("loadscope"));
+        assert_eq!(val_after(&args, "--order"), Some("fail-fast"));
         assert_eq!(val_after(&args, "--output"), Some("github"));
         assert_eq!(val_after(&args, "--reruns"), Some("2"));
         assert_eq!(

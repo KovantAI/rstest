@@ -39,7 +39,7 @@ use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
-use io::{dispatch_to, spawn_into};
+use io::{dispatch_to, spawn_into, start_into};
 use state::WorkerState;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -83,6 +83,49 @@ impl std::str::FromStr for Dist {
     }
 }
 
+/// Dispatch ordering under `--dist load`. Ignored by the affinity/each modes
+/// (their order is the affinity contract, not a tunable).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Order {
+    /// Slow tests first, to pack workers (best wall-clock throughput).
+    #[default]
+    Throughput,
+    /// Recently failed, then flaky tests first, then the throughput order for
+    /// the rest: earliest red signal, for `--watch` and PR CI (compose with
+    /// `--maxfail`).
+    FailFast,
+}
+
+impl std::str::FromStr for Order {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "throughput" => Order::Throughput,
+            // Accept the hyphen spelling (the flag/doc form) and the
+            // underscore for convenience.
+            "fail-fast" | "failfast" | "fail_fast" => Order::FailFast,
+            other => {
+                return Err(format!(
+                    "unknown --order mode: {other} (use throughput|fail-fast)"
+                ))
+            }
+        })
+    }
+}
+
+/// Drop quarantined ids from the flake history fail-fast ranks on, so they
+/// fall into the normal (clean) tail instead of leading the queue.
+fn without_quarantined(
+    mut history: std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
+    quarantine: Option<&regex::RegexSet>,
+) -> std::collections::HashMap<String, crate::reporting::flakes::FlakeStats> {
+    if let Some(q) = quarantine {
+        history.retain(|id, _| !q.is_match(id));
+    }
+    history
+}
+
 /// Worker-pool parameters common to the eager (`run_pool`) and lazy
 /// (`run_lazy_pool`) orchestrators. Bundled so each entry point takes a handful
 /// of mode-specific args on top rather than one flat ~17-arg list.
@@ -99,6 +142,14 @@ pub struct PoolConfig<'a> {
     /// flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     pub known_flaky: Option<&'a std::collections::HashSet<String>>,
     pub worker_env: &'a crate::scheduling::worker::WorkerEnv,
+    /// `--fork-pool`: fork-prewarm the initial pool off one warm zygote (Unix
+    /// only; ignored elsewhere / on the crash-respawn path). Pays the vendored
+    /// pytest import once per run instead of once per worker.
+    pub fork_prewarm: bool,
+    /// `--quarantine` matcher. Fail-fast ordering drops matching ids from the
+    /// suspect set: a quarantined test fails every run by design, so leading
+    /// with it would trip `-x`/`--maxfail` and then be forgiven post-run.
+    pub quarantine: Option<&'a regex::RegexSet>,
 }
 
 /// Everything the orchestrator loop produces from one pool run, handed back to
@@ -125,6 +176,17 @@ pub struct PoolOutcome {
     /// Number of collected tests (the reference count all workers agreed on);
     /// 0 when unknown.
     pub collection_size: u64,
+    /// Wall time to spawn the initial worker pool (fork-prewarm zygote or plain
+    /// per-worker spawns), for `--doctor` startup reporting. 0.0 on paths that
+    /// don't spawn a pool (single-worker).
+    pub startup_seconds: f64,
+    /// Whether the initial pool was actually fork-prewarmed off a zygote (not
+    /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
+    /// don't spawn a pool). Feeds the `--doctor` report.
+    pub fork_prewarmed: bool,
+    /// pytest's rootdir and the collected test files' fingerprints, which the
+    /// duration cache tags this run's timings with.
+    pub sources: crate::scheduling::durations::Collected,
 }
 
 /// The `--dist` name for a mode, for the replay journal (inverse of the
@@ -190,13 +252,14 @@ fn known_flaky_ok(
     })
 }
 
-// The eager pool's knobs (dist/shuffle/shard/skip/pinned) are genuinely
+// The eager pool's knobs (dist/order/shuffle/shard/skip/pinned) are genuinely
 // independent run-shaping inputs; bundling them buys no clarity over the named
 // params, so this one call site keeps them flat.
 #[allow(clippy::too_many_arguments)]
 pub fn run_pool(
     cfg: &PoolConfig,
     dist: Dist,
+    order: Order,
     track_durations: bool,
     shuffle: Option<u64>,
     shard: Option<(usize, usize)>,
@@ -221,18 +284,48 @@ pub fn run_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        fork_prewarm,
+        quarantine,
     } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
+    // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
+    // otherwise this is n independent spawns. Each worker then gets its session
+    // command + reader thread via start_into. Time the spawn so --doctor can
+    // report pool startup cost (the lever --fork-pool moves).
+    let spawn_start = std::time::Instant::now();
+    let workers =
+        crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
+    // What actually happened, not what was asked: spawn_pool falls back to
+    // plain spawns when the zygote can't get its fds.
+    let fork_prewarmed = workers
+        .first()
+        .is_some_and(crate::scheduling::worker::Worker::is_forked);
     let mut states = Vec::new();
-    for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
+    for (idx, worker) in workers.into_iter().enumerate() {
+        let worker = start_into(worker, idx, args, &tx)?;
         states.push(WorkerState::fresh(worker));
     }
+    // "Pool ready" = every initial worker has emitted its first event (imported
+    // its core + started collecting). This is the startup window --fork-pool
+    // shrinks; stamped in the event loop when all n have responded. Timing the
+    // spawn call itself would be unfair — the plain path returns before its
+    // workers import (that cost is paid async, off-thread), while the zygote
+    // blocks on the shared import, so spawn duration understates one and
+    // overstates the other.
+    let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut startup_seconds = 0.0f64;
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
     // explicit done_workers break, not channel disconnect.
 
     let duration_cache = crate::scheduling::durations::load();
+    // Flake history feeds fail-fast ordering; empty (and untouched) under the
+    // throughput default so a cold cache costs nothing.
+    let flake_history = if order == Order::FailFast {
+        without_quarantined(crate::reporting::flakes::load(), quarantine)
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut run = Run::default();
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
@@ -263,6 +356,7 @@ pub fn run_pool(
     // rstest routes it to a sibling).
     let mut pending_downs: VecDeque<(serde_json::Value, String)> = VecDeque::new();
     let mut cache_dir: Option<String> = None;
+    let mut sources = crate::scheduling::durations::Collected::default();
     let mut rerun_used: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
     // @pytest.mark.flaky(reruns=N) budgets, from the designate's payload.
     let mut flaky_budget: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
@@ -311,6 +405,11 @@ pub fn run_pool(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        // First response from an initial worker (Ok event or a startup crash):
+        // when all n have responded, the pool is warm — record the window.
+        if ready_workers.len() < n && ready_workers.insert(idx) && ready_workers.len() == n {
+            startup_seconds = spawn_start.elapsed().as_secs_f64();
+        }
         match event {
             Ok(Event::Report(mut r)) => {
                 if dist == Dist::Each {
@@ -373,9 +472,21 @@ pub fn run_pool(
                 groups,
                 locations: _,
                 marks: _,
+                rootdir,
+                args_source: _,
+                root_args: _,
+                inifile: _,
+                order_flags: _,
+                confcutdir: _,
             }) => {
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
+                }
+                if let Some(rd) = &rootdir {
+                    sources.set_rootdir(rd);
+                }
+                if let Some(ids) = &ids {
+                    sources.record(ids);
                 }
                 if dist != Dist::Each {
                     if let Some(f) = flaky {
@@ -503,15 +614,17 @@ pub fn run_pool(
                             cached_ids.append(&mut cached);
                             Some(run_idx)
                         };
-                        dispatch = Some(build_dispatch(
+                        dispatch = build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
                             groups.unwrap_or_default(),
                             &duration_cache,
+                            &flake_history,
                             dist,
+                            order,
                             shuffle,
                             keep.as_ref(),
-                        )?);
+                        );
                     }
                     ids_store.get_or_insert(ids);
                 }
@@ -1046,6 +1159,9 @@ pub fn run_pool(
         exitstatus,
         collection_hash,
         collection_size,
+        startup_seconds,
+        fork_prewarmed,
+        sources,
     })
 }
 
@@ -1102,6 +1218,35 @@ fn partition_skip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_quarantined_drops_only_matching_ids() {
+        use crate::reporting::flakes::FlakeStats;
+        let red = FlakeStats {
+            failed: 3,
+            ..Default::default()
+        };
+        let h = std::collections::HashMap::from([
+            ("q.py::always_red".to_string(), red),
+            ("a.py::real_red".to_string(), red),
+        ]);
+        let q = regex::RegexSet::new(["^q\\.py::.*$"]).unwrap();
+        let kept = without_quarantined(h.clone(), Some(&q));
+        assert!(!kept.contains_key("q.py::always_red"));
+        assert!(kept.contains_key("a.py::real_red"));
+        // No --quarantine: history untouched.
+        assert_eq!(without_quarantined(h, None).len(), 2);
+    }
+
+    #[test]
+    fn order_from_str_parses_and_rejects() {
+        assert_eq!("throughput".parse::<Order>().unwrap(), Order::Throughput);
+        assert_eq!("fail-fast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!("failfast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!("fail_fast".parse::<Order>().unwrap(), Order::FailFast);
+        assert_eq!(Order::default(), Order::Throughput);
+        assert!("sideways".parse::<Order>().is_err());
+    }
 
     #[test]
     fn partition_skip_dedups_and_splits() {

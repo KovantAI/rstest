@@ -312,12 +312,10 @@ mod tests {
 
     /// Serializes every test that mutates the process-global `RSTEST_CACHE`, so
     /// two `with_cache_dir` closures never clobber each other's env/dir.
-    static CACHE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_cache_dir<T>(f: impl FnOnce(&Path) -> T) -> T {
         // Held for the whole closure: RSTEST_CACHE is process-global, so these
-        // tests must not overlap. Poisoning is irrelevant (we restore below).
-        let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // tests must not overlap with any other env-touching test.
+        let held = crate::test_env::lock();
         let base = std::env::temp_dir().join(format!(
             "rstest-replay-{}-{}",
             std::process::id(),
@@ -325,12 +323,10 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        // SAFETY: single-threaded within the lock; the matching remove restores
-        // the environment before the guard drops.
-        unsafe { std::env::set_var("RSTEST_CACHE", &base) };
-        let out = f(&base);
-        // SAFETY: same lock held; returns the env to its pre-test state.
-        unsafe { std::env::remove_var("RSTEST_CACHE") };
+        let out = {
+            let _cache = crate::test_env::set_var(&held, "RSTEST_CACHE", &base);
+            f(&base)
+        };
         let _ = std::fs::remove_dir_all(&base);
         out
     }

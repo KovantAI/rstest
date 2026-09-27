@@ -7,6 +7,17 @@ pub fn nodeid_file(nodeid: &str) -> &str {
     nodeid.split("::").next().unwrap_or(nodeid)
 }
 
+/// Drop Windows' `\\?\` extended-length prefix that `canonicalize` adds, so
+/// the path stays usable by tools (pytest, editors) that don't accept it.
+pub fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest.to_string())
+    } else {
+        p
+    }
+}
+
 /// Truncate `s` in place to at most `max` bytes, cutting on a UTF-8 char
 /// boundary. Plain `String::truncate(max)` panics when byte `max` splits a
 /// multibyte char — routine in tracebacks / parametrize-id samples, which

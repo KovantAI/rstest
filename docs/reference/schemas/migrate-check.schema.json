@@ -1,0 +1,225 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MigrateCheckDoc",
+  "description": "The `--migrate-check-json` document (schema 1). Field order is alphabetical to match the historical `serde_json` map output (no `preserve_order`), so the emitted bytes are unchanged by the move to typed structs.",
+  "type": "object",
+  "required": [
+    "meta",
+    "ready",
+    "tests_collected",
+    "unstable_ids",
+    "will_bail_count"
+  ],
+  "properties": {
+    "meta": {
+      "$ref": "#/definitions/MigrateMeta"
+    },
+    "parallel": {
+      "description": "Parallel-phase result: `null` when the phase was skipped (WILL-bail ids force `-n 0`) or could not capture outcomes.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ParallelReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ready": {
+      "description": "Whether the suite is parallel-ready (no blocking findings).",
+      "type": "boolean"
+    },
+    "tests_collected": {
+      "description": "Tests collected (union across the two collection runs).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "unstable_ids": {
+      "description": "Unstable-nodeid findings, grouped by test site.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UnstableSite"
+      }
+    },
+    "will_bail_count": {
+      "description": "Count of per-process-unstable ids that force `-n 0`.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "Finding": {
+      "description": "One parallel-only failure finding.",
+      "type": "object",
+      "required": [
+        "allowed",
+        "fix",
+        "nodeid",
+        "verdict",
+        "why"
+      ],
+      "properties": {
+        "allowed": {
+          "description": "Whether this nodeid is on the allow list.",
+          "type": "boolean"
+        },
+        "fix": {
+          "description": "The suggested fix.",
+          "type": "string"
+        },
+        "nodeid": {
+          "description": "The failing test's node id.",
+          "type": "string"
+        },
+        "polluter": {
+          "description": "The bisected polluter, or `null` when none was found.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PolluterJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verdict": {
+          "description": "The classification verdict title.",
+          "type": "string"
+        },
+        "why": {
+          "description": "Why it fails only under parallelism.",
+          "type": "string"
+        }
+      }
+    },
+    "MigrateMeta": {
+      "description": "Envelope metadata for the migrate-check document.",
+      "type": "object",
+      "required": [
+        "kind",
+        "runner",
+        "schema"
+      ],
+      "properties": {
+        "kind": {
+          "description": "Constant discriminator: always `\"migrate-check\"`.",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ParallelReport": {
+      "description": "Result of the `-n auto` parallel phase. Fields other than `ran` are absent when the phase did not actually run to completion.",
+      "type": "object",
+      "required": [
+        "ran"
+      ],
+      "properties": {
+        "findings": {
+          "description": "Per-test parallel-only findings (empty when ready).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Finding"
+          }
+        },
+        "preexisting": {
+          "description": "Tests that already fail at `-n 0` (pre-existing, not a parallelism bug).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "ran": {
+          "description": "Whether the parallel phase actually ran.",
+          "type": "boolean"
+        },
+        "ready": {
+          "description": "Whether it passed (present only once the phase ran).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "PolluterJson": {
+      "description": "A finding's polluter: the file that, run first, reproduces the failure.",
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "file": {
+          "description": "The polluting file (absent for `not_reproducible`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "Polluter kind: `other_file`, `same_file`, or `not_reproducible`.",
+          "type": "string"
+        }
+      }
+    },
+    "UnstableSite": {
+      "description": "One unstable-nodeid finding, grouped by test site (`file::test`).",
+      "type": "object",
+      "required": [
+        "allowed",
+        "fix",
+        "kinds",
+        "sample",
+        "site",
+        "will_bail"
+      ],
+      "properties": {
+        "allowed": {
+          "description": "Whether this site is on the `--allow-unstable` list.",
+          "type": "boolean"
+        },
+        "fix": {
+          "description": "The upstream fix for the worst instability kind here.",
+          "type": "string"
+        },
+        "kinds": {
+          "description": "Count of unstable ids at this site, keyed by instability kind.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          }
+        },
+        "sample": {
+          "description": "A sample parametrize id from this site.",
+          "type": "string"
+        },
+        "site": {
+          "description": "The test site (`file::test`).",
+          "type": "string"
+        },
+        "will_bail": {
+          "description": "Whether the site WILL bail at `-n auto` (per-process-unstable id).",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
