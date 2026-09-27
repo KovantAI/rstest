@@ -81,6 +81,24 @@ pub(crate) enum Command {
         reports: Vec<PathBuf>,
     },
 
+    /// Re-run a recorded parallel schedule. Every pool run (`-n >= 2`) journals
+    /// its exact per-worker assignment + order to `.rstest_cache/replay/`;
+    /// `replay` pins that schedule so a parallel-only failure reproduces. The
+    /// journal keys on nodeid, so a run journaled on CI replays locally: upload
+    /// `.rstest_cache/replay/latest.json` as an artifact and pass it with
+    /// `--journal`. Reruns and work-stealing are off; the recorded shuffle is
+    /// already baked into the pinned order.
+    Replay {
+        /// Which recorded run to replay: a run-uid (the journal file stem under
+        /// `.rstest_cache/replay/`). Omit to replay the most recent local run.
+        #[arg(value_name = "RUN_ID")]
+        run_id: Option<String>,
+        /// Replay a journal FILE directly (typically a downloaded CI artifact)
+        /// instead of one from the local cache. Takes precedence over RUN_ID.
+        #[arg(long, value_name = "FILE")]
+        journal: Option<PathBuf>,
+    },
+
     /// Print one test's dossier from the caches without running anything:
     /// last recorded duration, flake/fail history, last-green outcome, and the
     /// coverage footprint (files it covered). Merges `durations.json`,
@@ -711,6 +729,7 @@ const SUBCOMMANDS: &[&str] = &[
     "bisect",
     "cache-compact",
     "shard-verify",
+    "replay",
     "explain",
 ];
 
@@ -789,13 +808,16 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
         .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
     {
         let sub = argv.next().unwrap();
-        // `shard-verify` (report-json paths), `bisect` (a single nodeid) and
-        // `explain` (a nodeid) run no pytest session: every token after them is
-        // a clap positional or a subcommand-local flag, so route them all to
-        // `own` rather than forwarding non-flag tokens to the (nonexistent)
-        // session. The nodeids contain `::`, which the flag tables would
-        // otherwise route to the session and hide from clap.
-        let consumes_all = sub == "shard-verify" || sub == "bisect" || sub == "explain";
+        // `shard-verify` (report-json paths), `replay` (a run-id / `--journal`),
+        // `bisect` (a single nodeid) and `explain` (a nodeid) build no pytest
+        // session from argv: every token after them is a clap positional or a
+        // subcommand-local flag, so route them all to `own` rather than
+        // forwarding non-flag tokens to the (nonexistent argv-built) session.
+        // The nodeids contain `::`, which the flag tables would otherwise route
+        // to the session and hide from clap. `replay` gets its real session
+        // args from the journal, not argv.
+        let consumes_all =
+            sub == "shard-verify" || sub == "replay" || sub == "bisect" || sub == "explain";
         own.push(sub);
         if consumes_all {
             own.extend(argv.by_ref());
@@ -848,6 +870,34 @@ mod tests {
         let (own, session) = split_args(v(&["shard-verify", "a.json", "b.json"]));
         assert_eq!(own, v(&["rstest", "shard-verify", "a.json", "b.json"]));
         assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn replay_routes_run_id_and_journal_to_clap() {
+        use clap::Parser;
+        // `replay` builds no session from argv: the run-id positional and
+        // `--journal` are clap tokens, nothing forwards to pytest.
+        let (own, session) = split_args(v(&["replay", "myrun", "--journal", "ci.json"]));
+        assert_eq!(
+            own,
+            v(&["rstest", "replay", "myrun", "--journal", "ci.json"])
+        );
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Replay { run_id: Some(ref r), journal: Some(ref j) })
+                if r == "myrun" && j == std::path::Path::new("ci.json")
+        ));
+        // Bare `replay` => replay the latest local run.
+        let (own, _) = split_args(v(&["replay"]));
+        assert!(matches!(
+            Cli::parse_from(&own).command,
+            Some(Command::Replay {
+                run_id: None,
+                journal: None
+            })
+        ));
     }
 
     #[test]

@@ -379,6 +379,7 @@ pub(super) fn run_post_gates(
         config,
         prev_index,
         baseline,
+        replay,
     } = *post;
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
@@ -581,7 +582,7 @@ pub(super) fn run_post_gates(
     }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
-    if dist_name != "each" {
+    if dist_name != "each" && !replay {
         durations::save(&outcome.run, &outcome.sources);
         // Whole-suite wall (fixtures included) for the monorepo planner: a
         // fixture-bound project has near-zero call time in durations.json but

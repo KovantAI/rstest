@@ -291,6 +291,12 @@ SCOPE_C = fx("scope_c.py")
 SECTIONS = fx("sections.py")
 
 
+REPLAY_CRASH = fx("replay_crash.py")
+
+
+REPLAY_ORDER = fx("replay_order.py")
+
+
 SERIAL = fx("serial.py")
 
 

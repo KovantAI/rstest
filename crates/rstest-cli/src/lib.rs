@@ -17,6 +17,7 @@ mod incremental;
 mod migrate;
 mod mono;
 mod remote;
+mod replay;
 mod reporting;
 mod run;
 mod scheduling;

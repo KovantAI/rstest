@@ -218,6 +218,11 @@ struct PostRun<'a> {
     /// Coverage index snapshotted BEFORE the run (drives carry-forward after).
     prev_index: &'a select::CoverageIndex,
     baseline: &'a coverage_skip::Baseline,
+    /// `rstest replay`: a diagnostic re-run, not a data point. It skips the
+    /// duration / wall / flake-history writes (a debugging loop would pile
+    /// `failed` counts onto one test, and a forced CI worker count on a smaller
+    /// machine skews the duration baseline).
+    replay: bool,
 }
 
 /// The resolved run configuration for a single (non-watch) run: everything
@@ -446,6 +451,16 @@ fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
 /// (doctor, junit, lastfailed, duration-regression, cache push, report-json),
 /// and returns the process exit status.
 pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
+    execute_inner(cli, args, None)
+}
+
+/// The run pipeline. `pinned` is `Some` only under `rstest replay`, carrying the
+/// recorded per-worker schedule to re-pin; a normal run passes `None`.
+pub(crate) fn execute_inner(
+    cli: &Cli,
+    args: &[String],
+    pinned: Option<&crate::replay::PinnedSchedule>,
+) -> Result<i32> {
     let args = args.to_vec();
     // The single output sink for this run: owns stdout/stderr and the resolved
     // palette. Built up front so every diagnostic below (cache maintenance,
@@ -588,6 +603,7 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
             shard: inc.shard,
             quarantine: quarantine.as_ref(),
         },
+        pinned,
         &mut sink,
     )?;
 
@@ -622,16 +638,18 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
         config: &inc.config,
         prev_index: &inc.prev_index,
         baseline: &inc.baseline,
+        replay: pinned.is_some(),
     };
     gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
 }
 
-/// Dispatch a run-less subcommand (`rstest verify-vendor` / `try` /
-/// `migrate-check` / `cache-compact` / `shard-verify` / `explain`). Returns
+/// Dispatch a subcommand (`rstest verify-vendor` / `try` / `migrate-check` /
+/// `cache-compact` / `shard-verify` / `explain` / `replay`). Returns
 /// `Some(exit)` when a subcommand ran, `None` for a normal run (the caller falls
-/// through to watch/`execute`). These modes bypass the run pipeline; the
-/// interpreter-free ones (`cache-compact`, `shard-verify`, `explain`) return
-/// before Python is resolved, the rest resolve it here.
+/// through to watch/`execute`). The interpreter-free ones (`cache-compact`,
+/// `shard-verify`, `explain`) return before Python is resolved; `replay` runs
+/// the full pipeline (resolving its own interpreter through `execute`) with the
+/// recorded schedule pinned; the rest resolve Python here.
 pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     use crate::cli::Command;
     let Some(command) = &cli.command else {
@@ -689,6 +707,11 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 &mut sink,
             )
         }),
+        // `replay` runs the suite (it resolves its own interpreter through the
+        // run pipeline) and returns the run's exit code.
+        Command::Replay { run_id, journal } => {
+            crate::replay::run_replay(cli, run_id.as_deref(), journal.as_deref(), &mut sink)
+        }
     }?;
     Ok(Some(code))
 }
@@ -1161,6 +1184,7 @@ struct DispatchSelection<'a> {
     quarantine: Option<&'a regex::RegexSet>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_run(
     cfg: &RunConfig,
     cli: &Cli,
@@ -1168,6 +1192,7 @@ fn dispatch_run(
     args: &[String],
     skip_ids: &std::collections::HashSet<String>,
     selection: DispatchSelection<'_>,
+    pinned: Option<&crate::replay::PinnedSchedule>,
     sink: &mut Sink,
 ) -> Result<pool::PoolOutcome> {
     let DispatchSelection {
@@ -1194,6 +1219,15 @@ fn dispatch_run(
     let python = python.as_path();
     let worker_env: &worker::WorkerEnv = worker_env;
     let known_flaky = known_flaky.as_ref();
+    // Replay pins a recorded schedule, which only the eager pool can honor.
+    // The command layer forces `-n <recorded>` + `--collect full` and no
+    // passthrough flags, so this is a guard against a stray incompatible arg.
+    if pinned.is_some() && (passthrough || n <= 1) {
+        anyhow::bail!(
+            "replay needs the parallel pool (-n >= 2, no passthrough flags like -s/--pdb); \
+             the journal was recorded from a pool run"
+        );
+    }
     let watchdog = watchdog_duration(worker_timeout, cli.timeout);
     // Compiled once and shared by both pool paths (a config-struct field, so it
     // must outlive the borrow); the passthrough path below ignores it.
@@ -1327,6 +1361,7 @@ fn dispatch_run(
                 shuffle_seed,
                 shard,
                 skip_ids,
+                pinned,
                 sink,
             )?
         },

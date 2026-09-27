@@ -36,6 +36,20 @@ between 0.x releases and are listed here.
   The project's own editable or in-project install is keyed by name only, so a
   git-derived version bump (setuptools-scm, hatch-vcs) does not force a full
   run. Existing baselines reset once after upgrading rstest.
+- **`rstest replay`: re-run a recorded parallel schedule.** Every parallel run
+  (`-n >= 2`, except `--dist each`, `--shard` and `--collect lazy`) journals
+  which worker ran which tests, in what order, to
+  `.rstest_cache/replay/latest.json` (opt out with `RSTEST_NO_REPLAY_JOURNAL=1`).
+  `rstest replay --journal <file>` pins that schedule back, so an
+  order-dependent failure seen on CI reproduces locally. The journal is keyed by
+  nodeid and stores paths relative to the project, so it survives the machine
+  hop. Replay turns off reruns (`--reruns`, `[tool.rstest] reruns` and
+  `@pytest.mark.flaky`), keeps `@pytest.mark.serial` tests exclusive, respawns a
+  crashed worker with only its remaining tests, and ignores recorded
+  `--lf`/`--sw`. See *Replaying a CI-only failure locally* in the CI quickstart.
+  The bundled GitHub Action now leaves `.rstest_cache/replay` out of the cache
+  it persists; the changed path spec makes the first run after upgrading miss
+  the cache once.
 - **Byte-exact mode now prints pytest's own terminal output.** At `-n 0` /
   `-n 1` (and `-n auto` capped to one worker), with no `--output` set, the
   pytest session writes to stdout directly instead of rstest re-rendering it:

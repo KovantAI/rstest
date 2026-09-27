@@ -311,6 +311,11 @@ to a fix:
   parallel against a serial baseline and prints the parallel-only failures as a
   ready-to-paste `@pytest.mark.serial` list.
 
+If the failure only shows up on CI, don't try to recreate the schedule by
+hand: upload the run's replay journal and re-run that exact schedule locally
+with `rstest replay`. See
+[Replaying a CI-only failure locally](ci-quickstart.md#replaying-a-ci-only-failure-locally).
+
 ## Worked examples
 
 [Parity divergences & upstream fixes](../reference/parity-divergences.md)
