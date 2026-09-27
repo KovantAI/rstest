@@ -4,7 +4,7 @@ This maps every pytest plugin that **actually loads** during a
 compatibility-corpus (`corpus/` in the repo) run to the suite(s) that load it.
 It is the runtime-evidence half of the
 [top-100 plugin matrix](top-100-plugins.md): where that table classifies plugins
-(52 verified: 48 `V` and 4 `V*`; 48 inferred `i`), this table records the ones a real suite
+(52 verified: 47 `V` and 5 `V*`; 48 inferred `i`), this table records the ones a real suite
 loads *and still meets the corpus parity floor under rstest*.
 
 ## What "exercised" means here, and doesn't
@@ -109,8 +109,8 @@ django-allauth, the only corpus suite that loads pytest-django, configures
 SQLite `:memory:`. An in-memory database is private to each process anyway, so
 this run proves the plugin loads and passes under the pool, but it does **not**
 exercise the `test_<name>_gwN` database naming a server-backed database
-(Postgres, MySQL) relies on. Verify that on your own suite, or with
-`rstest migrate-check`.
+(Postgres, MySQL) relies on, which is why the matrix marks it `V*`. Verify
+that on your own suite, or with `rstest migrate-check`.
 
 ## How this table was produced
 

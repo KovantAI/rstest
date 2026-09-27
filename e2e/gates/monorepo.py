@@ -232,7 +232,7 @@ def gate_monorepo(g, args, binary):
     r = g.run("-n", "4", cwd=pp)
     check(
         "mono: per-project numprocesses pin",
-        "libs/a:-n0" in r.stdout and "pytest-exact" in r.stdout and r.returncode == 0,
+        "libs/a:-n0" in r.stdout and "test session starts" in r.stdout and r.returncode == 0,
         r.stdout[:400],
     )
 

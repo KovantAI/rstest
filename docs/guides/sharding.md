@@ -61,11 +61,22 @@ at its own start time:
 
 To pin one snapshot:
 
-- Resolve the warm source **once** in an upstream job (for example the
-  `gh run list` step) and pass the run id to every shard as a job output.
-- Or, during a sharded run, **pull only** (`--cache-pull` without
-  `--cache-push`) and push segments from a single follow-up job, so no
-  shard's write can change what another shard reads.
+- Resolve the warm source **once** in an upstream job (the `gh run list`
+  step, or an `actions/cache/restore` lookup) and pass the run id or cache key
+  to every shard as a job output. Recipes:
+  [GitHub Actions](#github-actions) below (`actions/cache`) and the
+  [artifact backend](ci-shared-cache.md#github-native-no-external-cloud-no-secrets).
+- Or snapshot the remote once, have shards read that copy, and push their new
+  segments from a single follow-up job, so no shard's write can change what
+  another shard reads:
+  [object-store recipe](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets).
+- Add `--report-json shard.K.json` to every shard and gate the merge job on
+  [`rstest shard-verify`](#verify-no-test-was-dropped), which catches any
+  divergence these steps miss.
+
+Resolving "the latest **successful** main run" (`gh run list --status
+success`) has one side effect: while main is red, every run keeps warming from
+the last green run, so the timings stop advancing until main is fixed.
 
 !!! note "Requirements & limits"
     - Needs the parallel pool: `-n ≥ 2`. Prefer an explicit `-n 2` or higher
@@ -167,12 +178,34 @@ shard run stamps no collection hash and is not verifiable this way.
 
 ## GitHub Actions
 
-Use a matrix. Every job restores the **same** duration-cache key, runs
-its shard, and uploads a uniquely-named JUnit. A final job merges them.
+Use a matrix. An upstream job resolves **one** cache key; every shard restores
+exactly that key, runs its slice, and uploads its JUnit and report. A final job
+proves the shards covered the suite and merges the JUnit.
 
 ```yaml
 jobs:
+  # Resolve the newest duration cache ONCE. Every shard restores this exact
+  # key, so a new cache saved mid-matrix (or a re-run of one shard hours
+  # later) can't change any shard's partition.
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.lookup.outputs.cache-matched-key }}
+    steps:
+      - uses: actions/checkout@v7   # hashFiles needs the lockfile
+      - id: lookup
+        uses: actions/cache/restore@v6
+        with:
+          path: .rstest_cache
+          lookup-only: true         # find the key, don't download
+          # The `durations` job saves `...-<run_id>`, so this exact key never
+          # hits; the restore-keys prefix matches the newest saved cache.
+          key: rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
+          restore-keys: |
+            rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
+
   test:
+    needs: resolve
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -187,27 +220,29 @@ jobs:
           pip install -r requirements.txt
           pip install rstest
 
-      # Restore a SHARED cache so every shard partitions identically.
-      # read-only: shards must not race to save divergent caches.
-      # The `durations` job below saves `...-<ref>-<run_id>`, so this exact
-      # `key` never hits; the match happens via the `restore-keys` prefix,
-      # pulling the newest cache for this ref. That's intended.
+      # Read-only restore of the ONE resolved key (no restore-keys: a
+      # prefix match here could pick a different entry per shard).
+      # Cold start: no key yet, every shard uses the same even split.
       - uses: actions/cache/restore@v6
+        if: needs.resolve.outputs.key != ''
         with:
           path: .rstest_cache
-          key: rstest-durations-${{ github.ref_name }}
-          restore-keys: |
-            rstest-durations-${{ github.ref_name }}-
-            rstest-durations-
+          key: ${{ needs.resolve.outputs.key }}
 
       - name: test shard ${{ matrix.shard }}
-        run: rstest -n 4 --shard ${{ matrix.shard }}/4 --junitxml junit.${{ matrix.shard }}.xml
+        run: |
+          rstest -n 4 --shard ${{ matrix.shard }}/4 \
+                 --report-json shard.${{ matrix.shard }}.json \
+                 --junitxml junit.${{ matrix.shard }}.xml
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: junit-${{ matrix.shard }}
-          path: junit.${{ matrix.shard }}.xml
+          name: shard-${{ matrix.shard }}
+          overwrite: true           # a re-run of this shard replaces its files
+          path: |
+            junit.${{ matrix.shard }}.xml
+            shard.${{ matrix.shard }}.json
 
   # One job runs the WHOLE suite and saves the fresh cache so the next
   # push's shards are wall-time balanced. (Shards run against a restored,
@@ -222,8 +257,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .rstest_cache
-          key: rstest-durations-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: rstest-durations-${{ github.ref_name }}-
+          key: rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
+          restore-keys: |
+            rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
       - run: rstest -n auto -q
 
   merge:
@@ -233,24 +269,37 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: junit-*
+          pattern: shard-*
           merge-multiple: true
+      # Gate: fail unless the shards covered the whole suite exactly once.
+      # Unreleased: shard-verify is not in rstest 0.7.0; there, use the jq
+      # check under "Verify no test was dropped" instead.
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.13" }
+      - run: pip install rstest && rstest shard-verify shard.*.json
       # Feed junit.*.xml to your test-report integration; most accept a
       # glob. Or merge with junitparser: pip install junitparser &&
       # junitparser merge junit.*.xml junit.xml
       - uses: actions/upload-artifact@v7
         with:
           name: junit-all
+          overwrite: true
           path: junit.*.xml
 ```
 
+Re-running one failed shard is safe here: it restores the same resolved key
+(the `resolve` job isn't re-run), so it recomputes the same partition, and
+`overwrite: true` replaces that shard's artifact, so `merge` and
+`shard-verify` see exactly one report per shard.
+
 !!! tip "Cache split, deliberately"
-    Shards **restore** a shared, stable key (`rstest-durations-<ref>`) so
-    they agree; a separate full run **saves** a fresh key each run so the
-    numbers stay current. Pointing shards at a per-run key would give each
-    matrix job a different cache and break the partition. If you'd rather
-    not run a separate full job, let shard 1 save the cache instead, but
-    accept that its timings only cover 1/N of the suite.
+    Shards **restore** the one key the `resolve` job found, so they agree; a
+    separate full run **saves** a fresh key each run so the numbers stay
+    current. Pointing shards at a per-run key, or letting each shard
+    prefix-match on its own, would give matrix jobs different caches and
+    break the partition. If you'd rather not run a separate full job, let
+    shard 1 save the cache instead, but accept that its timings only cover
+    1/N of the suite.
 
 !!! tip "Or skip the dance entirely with the shared cache"
     The restore-key/refresh-job choreography above exists to work around
@@ -275,6 +324,7 @@ it, live on the per-system pages:
 | GitLab CI | `CI_NODE_INDEX` (1-based) / `CI_NODE_TOTAL`, with `parallel:` | [GitLab CI](ci-recipes.md#gitlab-ci) |
 | CircleCI | `CIRCLE_NODE_INDEX` (**0-based**, add 1) / `CIRCLE_NODE_TOTAL`, with `parallelism:` | [CircleCI](ci-recipes.md#circleci) |
 | Buildkite | `BUILDKITE_PARALLEL_JOB` (**0-based**, add 1) / `BUILDKITE_PARALLEL_JOB_COUNT`, with `parallelism:` | [Buildkite](ci-recipes.md#buildkite) |
+| Azure Pipelines | `System.JobPositionInPhase` (1-based) / `System.TotalJobsInPhase`, with `strategy: parallel: N` | [Azure Pipelines](ci-recipes.md#azure-pipelines) |
 
 ## Any other CI (generic)
 

@@ -242,6 +242,9 @@ pub fn run_pool(
         fork_prewarm,
         quarantine,
     } = cfg;
+    // Widened by the designate's CollectionDone when `-x`/`--maxfail` comes
+    // from ini `addopts` / PYTEST_ADDOPTS, which the argv parse can't see.
+    let mut maxfail = maxfail;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
     // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
@@ -379,6 +382,16 @@ pub fn run_pool(
                 run.collect_error(path, longrepr);
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
+            Ok(Event::JunitSuite {
+                name,
+                timestamp,
+                hostname,
+                properties,
+                extra,
+            }) => run
+                .junit
+                .record_suite(name, timestamp, hostname, properties, extra),
             Ok(Event::Warnings { entries }) => {
                 // Per-test warnings are disjoint across workers; config and
                 // collection warnings repeat in every session, so count those
@@ -413,7 +426,13 @@ pub fn run_pool(
                 inifile: _,
                 order_flags: _,
                 confcutdir: _,
+                maxfail: reported_maxfail,
             }) => {
+                // pytest's own resolution (argv + addopts, last wins) is
+                // authoritative; it arrives before any item is dispatched.
+                if reported_maxfail.is_some() {
+                    maxfail = reported_maxfail;
+                }
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
                 }
@@ -422,6 +441,7 @@ pub fn run_pool(
                 }
                 if let Some(ids) = &ids {
                     sources.record(ids);
+                    run.junit.set_collection_order(ids);
                 }
                 if dist != Dist::Each {
                     if let Some(f) = flaky {

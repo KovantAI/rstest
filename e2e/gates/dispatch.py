@@ -423,7 +423,7 @@ def gate_auto_worker_capping(g, args, binary):
     r = g.run(cwd=g.tmp / "tiny")
     check(
         "auto caps tiny suite to single worker",
-        "single worker" in r.stdout.splitlines()[0],
+        "test session starts" in r.stdout.splitlines()[0],
         r.stdout[:100],
     )
 

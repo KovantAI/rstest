@@ -56,6 +56,7 @@ pub(super) fn execute_monorepo(
         &cli.numprocesses
             .clone()
             .unwrap_or_else(|| "auto".to_string()),
+        &[],
     )
     .unwrap_or(4)
     .max(1);

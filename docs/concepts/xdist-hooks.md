@@ -13,6 +13,11 @@ the migration overview, see
 
 Each worker plays controller for itself, calling your implementations against
 a node shim with the worker's own `workerinput`, `gateway.id`, and `config`.
+That is the whole shim. It has no `node.workeroutput` (a
+`pytest_testnodedown` that aggregates from it raises `AttributeError`), and
+`gateway` carries only `.id` (no `spec`, no `remote_exec`). Anything a worker
+writes to `config.workeroutput` is not sent anywhere: aggregate through a file
+or your own channel instead.
 Implementations registered mid-`pytest_configure` are caught (the call fires
 synchronously at plugin registration).
 
@@ -136,3 +141,10 @@ from `gateway.id`, the drop can race the replacement's re-provisioning of the
 same ident. Use uuid-based idents (as SQLAlchemy does) and the race
 disappears: the replacement provisions a fresh ident, the survivor drops the
 old one. See [Crash handling](crash-handling.md) for the surrounding model.
+
+An exception raised by your `pytest_testnodedown` while it cleans up a
+**crashed sibling** is swallowed, so a broken cleanup can never fail the
+surviving worker's session. It is logged at warning level through Python's
+`logging` (logger `rstest.worker`) with the traceback, and nothing else
+reports it: a failed database drop is otherwise silent. If that cleanup
+matters, catch and report failures inside the hook itself.

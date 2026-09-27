@@ -1,0 +1,25 @@
+real 87.24
+user 352.21
+sys 32.65
+xdist run 1 done
+real 41.91
+user 279.57
+sys 31.30
+rstest run 1 done
+real 85.73
+user 351.27
+sys 21.38
+xdist run 2 done
+real 41.19
+user 279.14
+sys 27.41
+rstest run 2 done
+real 85.94
+user 353.73
+sys 22.27
+xdist run 3 done
+real 41.07
+user 278.46
+sys 27.42
+rstest run 3 done
+CONTROL DONE

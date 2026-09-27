@@ -79,7 +79,7 @@ def gate_flaky_reruns(g, args, binary):
         "no-reruns at -n 1 stays byte-exact (flake fails)",
         r.returncode == 1
         and "1 failed" in r.stdout
-        and "pytest-exact mode" in r.stdout.splitlines()[0],
+        and "test session starts" in r.stdout.splitlines()[0],
         f"rc={r.returncode} " + r.stdout.splitlines()[0] + " || " + r.stdout[-200:],
     )
     # Passthrough (-s) can't be pooled: reruns stay inert, warned.

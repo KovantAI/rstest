@@ -145,6 +145,8 @@ pub fn run_lazy_pool(
         // Lazy never reorders by flake history, so quarantine is post-run only.
         quarantine: _,
     } = cfg;
+    // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
+    let mut maxfail = maxfail;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
     // otherwise n independent spawns. Each worker then gets its lazy-session
@@ -253,6 +255,16 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
+            Ok(Event::JunitSuite {
+                name,
+                timestamp,
+                hostname,
+                properties,
+                extra,
+            }) => run
+                .junit
+                .record_suite(name, timestamp, hostname, properties, extra),
             Ok(Event::Warnings { entries }) => {
                 // Files are disjoint across lazy workers, so collect and
                 // runtest warnings are each seen once; only config-phase
@@ -270,7 +282,14 @@ pub fn run_lazy_pool(
             Ok(Event::LazyReady {
                 cache_dir: cd,
                 rootdir,
+                maxfail: reported_maxfail,
             }) => {
+                // pytest's own `-x`/`--maxfail` resolution (argv + ini
+                // `addopts` / PYTEST_ADDOPTS) is authoritative; every worker
+                // reports the same value before its first RunFiles.
+                if reported_maxfail.is_some() {
+                    maxfail = reported_maxfail;
+                }
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
                 }

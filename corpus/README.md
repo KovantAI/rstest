@@ -77,6 +77,24 @@ runners is noisy. Each rstest run is still diffed against pytest — parity belo
 five defaults are documented at 100% parity). Report → stdout +
 `$GITHUB_STEP_SUMMARY`, data → `bench.json`.
 
+Options for the CPU-bound benchmarks (sympy, scikit-learn; see
+[docs/reference/benchmarks.md](../docs/reference/benchmarks.md#cpu-bound-suites)):
+
+```sh
+# Sweep any -n values, with pytest-xdist at the same -n (needs xdist in the venv).
+python3 corpus/bench.py --only sympy,scikit-learn --sweep sympy,scikit-learn \
+    --sweep-workers 1,2,4,8,10,14 --xdist --repeat 5
+# Peak memory per -n, and the -n x BLAS-thread grid (psutil for the tree total).
+python3 corpus/bench.py --only scikit-learn --sweep '' --memory scikit-learn \
+    --grid scikit-learn --grid-workers 1,2,4,10,14 --grid-threads 1,2,4,unset
+```
+
+Every point gets `--warmup` untimed runs first (default 1). rstest is warm
+unless `--cold` (drops `.rstest_cache` before every run). A run the machine
+slept through is detected (wall clock vs monotonic clock) and re-run; on macOS,
+wrap long runs in `caffeinate -ims` anyway. `bench.json` holds the latest run;
+runs published in the docs are archived in `bench-results/`.
+
 Runs weekly (+ manual) on a standard GitHub runner via
 `.github/workflows/corpus-bench.yml` — a fresh measured datapoint on public
 hardware, never a projection. Soft gate: the sweep suite's best speedup must

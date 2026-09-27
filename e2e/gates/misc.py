@@ -11,7 +11,8 @@ def gate_basics(g, args, binary):
     check("parallel exit 1", r.returncode == 1)
     check("header line", r.stdout.startswith("rstest "), r.stdout[:80])
     r = g.run("basic/test_basic.py", "-n", "0", "-k", "passes")
-    check("-n 0 exact mode + -k", "2 passed" in r.stdout and "pytest-exact" in r.stdout)
+    # Byte-exact mode prints pytest's own terminal output (its session header).
+    check("-n 0 exact mode + -k", "2 passed" in r.stdout and "test session starts" in r.stdout)
     r = g.run("basic/test_basic.py", "--co", "-q")
     check("--co passthrough", "test_basic.py::test_passes" in r.stdout)
     r = g.run("basic/test_basic.py", "-n", "2", "-v")

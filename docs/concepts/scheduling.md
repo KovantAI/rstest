@@ -23,8 +23,8 @@ workers may have started by then.
 
 1. **Slow tests first.** Tests with a cached duration ≥ 1s dispatch first,
    longest first, one at a time, so they spread across workers instead of
-   stacking. This is what beats file-affinity schedulers on wait-heavy
-   suites: a 54-second test starting at t=0 instead of t=90 changes the
+   stacking. This is what beats duration-blind schedulers (xdist's default
+   `--dist load` queues collection-order chunks) on wait-heavy suites: a 54-second test starting at t=0 instead of t=90 changes the
    whole run's wall time.
 2. **Everything else in contiguous chunks.** Chunks preserve module
    locality (module/class fixtures set up once per worker visit) and cut

@@ -91,6 +91,7 @@ nav:
   - Introduction: index.md
   - Getting started:
       - getting-started/index.md
+      - Evaluating rstest: getting-started/evaluating.md
       - Installation: getting-started/installation.md
       - Start from scratch: getting-started/your-first-test.md
       - Run your existing suite: getting-started/first-steps.md

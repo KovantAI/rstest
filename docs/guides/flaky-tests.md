@@ -19,6 +19,17 @@ flagged in JUnit (`flaky` property) and `--report-json`. See
 [`--reruns`](../reference/cli.md#-reruns-n) for per-test budgets
 (`@pytest.mark.flaky`) and crash-aware retry semantics.
 
+Coming from pytest-rerunfailures? rstest's retry reads `--reruns`,
+`--only-rerun` and the mark's `reruns=` keyword. It does not carry over:
+
+- positional `@pytest.mark.flaky(3)`: retries **once**; write `flaky(reruns=3)`
+- the mark's `reruns_delay`, `condition` and `only_rerun` keywords: ignored,
+  so a `condition=False` test is still retried
+- `--reruns-delay` and `--rerun-except`: forwarded to pytest, where they do
+  nothing with the plugin installed and are a usage error (exit 4) without it
+
+See [`@pytest.mark.flaky`](../reference/markers.md#pytestmarkflaky).
+
 Reruns answer "don't redden this run." They don't answer "which tests
 keep doing this?": that's the history.
 
@@ -49,6 +60,14 @@ cache. In CI, persist it the same way you persist `.rstest_cache` for
 scheduling (see [CI quickstart](ci-quickstart.md)) and the counts
 accumulate across runs; without persistence you still get history on
 developer machines and self-hosted runners.
+
+`failed` counts **every** red run that writes the cache, including local runs
+and each `--watch` cycle, so a test you broke on purpose while editing picks
+up `failed` counts too. Read `flaky` as the flake signal; a high `failed`
+count on a developer machine may just be your own edit loop. Those failures
+also move the test to the front of `--order fail-fast`. To keep a scratch
+history apart from the one you care about, point `RSTEST_CACHE` at another
+directory for that session.
 
 History **ages out**. A test with no flake or failure inside the
 retention window (default **90 days**, from `last_epoch`) reads as fixed:
@@ -149,7 +168,7 @@ The exact semantics:
   `quarantined="true"` property and **no `<failure>` element**, so
   JUnit-gating CI (and dashboards that count failures) stays green
   while still being able to track the quarantine set.
-- **`--report-json`** (schema 5): per-test `"quarantined": true` plus
+- **`--report-json`**: per-test `"quarantined": true` plus
   a `quarantined` key in `meta.counts`. See
   [Run snapshot](../reference/report-json.md).
 - **Monorepos**: pass one file at the root; it's forwarded to every
@@ -178,6 +197,15 @@ run.
 3. Fix the test; remove the entry. If it was really fixed, the history
    stops accruing and ages out of `flakes.json` after the retention
    window: if the entry comes back in review, it wasn't.
+
+Before quarantining a test that fails only in some orders or only in
+parallel, check whether it is flaky at all or order-dependent:
+[`--shuffle`](../reference/cli.md#-shuffleseed) reproduces an order,
+[`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) names
+the test that pollutes it, and [`rstest audit`](../reference/cli-commands.md#audit)
+lists the parallel-only failures. An order dependency has a fix; quarantine
+is for real nondeterminism. See
+[Diagnosing a parallel-only failure](parallel-safety.md#diagnosing-a-parallel-only-failure).
 
 The failure mode to avoid is a quarantine list that only ever grows.
 `flakes.json` self-ages (see [aging](#remember-the-flake-history)

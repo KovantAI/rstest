@@ -11,6 +11,37 @@ use crate::config::ProjectConfig;
 /// collection (which tests live inside each file) stays with the vendored
 /// core in the worker. Rule fidelity spec: research spike 1.
 pub fn collect_test_files(paths: &[PathBuf], cfg: &ProjectConfig) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    walk_py_files(paths, cfg, |path| {
+        if is_test_file(path, cfg) {
+            files.push(path.to_path_buf());
+        }
+        false
+    })?;
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// Whether the walk `collect_test_files` does sees any `.py` file at all,
+/// test-named or not (a `--doctest-modules` suite has no `test_*.py`).
+/// Stops at the first hit.
+pub fn has_python_files(paths: &[PathBuf], cfg: &ProjectConfig) -> Result<bool> {
+    let mut found = false;
+    walk_py_files(paths, cfg, |_| {
+        found = true;
+        true
+    })?;
+    Ok(found)
+}
+
+/// Visit every `.py` file under the collection roots (explicit paths, else
+/// `testpaths`, else rootdir). `visit` returns true to stop the walk early.
+fn walk_py_files(
+    paths: &[PathBuf],
+    cfg: &ProjectConfig,
+    mut visit: impl FnMut(&Path) -> bool,
+) -> Result<()> {
     let roots: Vec<PathBuf> = if !paths.is_empty() {
         paths.to_vec()
     } else if !cfg.testpaths.is_empty() {
@@ -19,11 +50,10 @@ pub fn collect_test_files(paths: &[PathBuf], cfg: &ProjectConfig) -> Result<Vec<
         vec![cfg.rootdir.clone()]
     };
 
-    let mut files = Vec::new();
     for root in &roots {
         if root.is_file() {
-            if is_test_file(root, cfg) {
-                files.push(root.clone());
+            if is_py(root) && visit(root) {
+                return Ok(());
             }
             continue;
         }
@@ -37,14 +67,19 @@ pub fn collect_test_files(paths: &[PathBuf], cfg: &ProjectConfig) -> Result<Vec<
             .build();
         for entry in walker {
             let entry = entry?;
-            if entry.file_type().is_some_and(|t| t.is_file()) && is_test_file(entry.path(), cfg) {
-                files.push(entry.into_path());
+            if entry.file_type().is_some_and(|t| t.is_file())
+                && is_py(entry.path())
+                && visit(entry.path())
+            {
+                return Ok(());
             }
         }
     }
-    files.sort();
-    files.dedup();
-    Ok(files)
+    Ok(())
+}
+
+fn is_py(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "py")
 }
 
 pub fn is_test_file(path: &Path, cfg: &ProjectConfig) -> bool {
@@ -76,7 +111,38 @@ fn is_virtualenv(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::glob_match;
+    use super::{glob_match, has_python_files};
+    use crate::config::ProjectConfig;
+
+    fn project(name: &str) -> ProjectConfig {
+        let root =
+            std::env::temp_dir().join(format!("rstest-collect-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        ProjectConfig {
+            rootdir: root,
+            ..ProjectConfig::default()
+        }
+    }
+
+    #[test]
+    fn has_python_files_sees_any_py_but_not_virtualenvs() {
+        let cfg = project("haspy");
+        assert!(!has_python_files(&[], &cfg).unwrap(), "empty folder");
+        std::fs::write(cfg.rootdir.join("README.md"), "").unwrap();
+        let venv = cfg.rootdir.join(".venv/lib");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(cfg.rootdir.join(".venv/pyvenv.cfg"), "").unwrap();
+        std::fs::write(venv.join("site.py"), "").unwrap();
+        assert!(
+            !has_python_files(&[], &cfg).unwrap(),
+            "only a venv and non-py files"
+        );
+        // Not test-named: a --doctest-modules suite still counts.
+        std::fs::write(cfg.rootdir.join("mod.py"), "").unwrap();
+        assert!(has_python_files(&[], &cfg).unwrap());
+        let _ = std::fs::remove_dir_all(&cfg.rootdir);
+    }
 
     #[test]
     fn globs() {
