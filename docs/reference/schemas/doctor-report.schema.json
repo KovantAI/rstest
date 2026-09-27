@@ -224,7 +224,7 @@
       ]
     },
     "Leak": {
-      "description": "A test that ended with more threads / open fds than it started — a resource\nit opened and never released (its own teardown included).",
+      "description": "A test that ended with more threads / open fds than it started: a resource\nit opened and never released (its own teardown included).",
       "type": "object",
       "properties": {
         "fds": {

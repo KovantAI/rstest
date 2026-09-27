@@ -61,7 +61,9 @@ to `1`, never lowers a failing code.
   uploads or parses those files must tolerate their absence
   (`if-no-files-found: ignore`). Under
   [`--changed-strict`](cli.md#-changed-strict) it exits **5** instead, so
-  gating pipelines see the difference.
+  gating pipelines see the difference. At a monorepo root the exit codes are
+  the same, but `--report-json` is still written, with every project marked
+  `"skipped": true`.
 - **Monorepo mode** merges per-project exits with the same rules as
   worker merging below: any severe code (2–4) dominates, then 1, and 5
   only when every project collected nothing. A project skipped by

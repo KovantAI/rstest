@@ -34,6 +34,17 @@ def test_run_uses_stream_plugin(monkeypatch):
     assert isinstance(captured["plugins"][0], StreamPlugin)
 
 
+def test_run_reports_collected_count_for_progress(monkeypatch):
+    # The single session sends its (post-deselection) item count so the
+    # orchestrator can print pytest's `[ NN%]` column.
+    captured = _capture_main(monkeypatch)
+    runner_pytest.run(["t.py"], FakeConn())
+    plugin = captured["plugins"][0]
+    assert isinstance(plugin, runner_pytest.SessionStreamPlugin)
+    plugin.pytest_collection_finish(type("S", (), {"items": [object(), object()]})())
+    assert plugin._conn.sent == [("collection_done", {"count": 2, "hash": ""})]
+
+
 class _FakeDebugpy:
     """Stand-in for the `debugpy` module: records listen/wait calls."""
 

@@ -7,14 +7,14 @@ mode.
 
 Every worker collects the identical session (same args, same ini, same
 conftest semantics). Workers verify agreement by item count + hash of the
-node-id list; one designated worker ships the full list. Divergent
+nodeid list; worker `gw0` ships the full list. Divergent
 collections (typically a randomizing plugin without a fixed seed) abort
 the run before any misassignment.
 
 Seeding is barrier-free: each worker starts receiving work the moment its
-own collection verifies against the reference, early collectors run
+own collection verifies against the reference; early collectors run
 tests while stragglers finish collecting. The refusal guarantee is
-per-worker: no worker is ever ASSIGNED work before its collection has
+per-worker: no worker is ever **assigned** work before its collection has
 been cross-checked, so a divergent straggler aborts the run without
 having received (or misrun) a single test, but tests on already-verified
 workers may have started by then.
@@ -32,8 +32,25 @@ workers may have started by then.
    when a worker half-drains.
 
 The duration cache (`.rstest_cache/durations.json`) is written after every
-run, so the first run is collection-ordered and every later run is
-duration-aware.
+normal run (not under [`--dist each`](#broadcast-mode-dist-each)), so the
+first run is collection-ordered and every later run is duration-aware.
+
+### Fail-fast ordering (`--order fail-fast`)
+
+!!! note "Unreleased"
+    Not in rstest 0.7.0 (the latest release); available when installing from
+    source, and in the next release.
+
+The order above is `--order throughput`, the default. [`--order
+fail-fast`](../reference/cli.md#-order-throughputfail-fast) re-sequences the
+`--dist load` queue for the earliest red signal instead: tests that recently
+hard-failed go first (most recent first), then flaky tests (most recent
+flake first), both read from `.rstest_cache/flakes.json` and each dispatched
+on its own; at most 128 lead, and quarantined tests are never pulled
+forward. The remaining tests follow in throughput order. With neither the
+flag nor `[tool.rstest] order` set, rstest picks `fail-fast` under
+`--watch` and `throughput` otherwise. Affinity modes and `--collect lazy`
+ignore it.
 
 ## The nextitem invariant
 
@@ -50,14 +67,15 @@ scheduler's edge cases (three deadlocks' worth).
 ## The serial phase
 
 `@pytest.mark.serial` items are excluded from the parallel queue. One
-designated worker is held open; when every other worker's session has
+designated worker (the lowest alive one, promoted if it crashes) is held
+open; when every other worker's session has
 fully finished (fixtures torn down, ports released), the serial items run
 there exclusively, in collection order.
 
 ## Affinity modes
 
 `--dist loadfile`, `loadscope`, and `loadgroup` replace the above with
-keyed groups in collection order, a dispatch never splits a group, and
+keyed groups in collection order. A dispatch never splits a group, and
 duration reordering is off (affinity is the point, at the cost of
 long-pole splitting):
 
@@ -81,6 +99,6 @@ Consequences:
 - Outcomes are keyed `nodeid [gwN]`, since the same test appears once per
   worker.
 - The duration cache is **not** written: N× runs would poison LPT
-  scheduling on the next normal run.
+  (longest-processing-time-first) scheduling on the next normal run.
 - `--reruns` is rejected: every worker already runs the suite, so a rerun
   has no distinct meaning.

@@ -52,7 +52,7 @@ real suites (201,127 tests total):
 --8<-- "docs/reference/benchmarks.md:suite-table"
 
 Parity means identical per-test setup/call/teardown outcomes, including
-skips, xfails, and expected failures: with the suites' real plugins loaded.
+skips, xfails, and expected failures, with the suites' real plugins loaded.
 See [Benchmarks](reference/benchmarks.md) for methodology and caveats.
 
 Read the speed numbers honestly: the wins come from suite *shape*, not magic.
@@ -68,20 +68,20 @@ across runs or expect cold-run timing.
 
 - At `-n 0`, rstest runs one pytest session: **per-test outcomes match
   pytest exactly**, and pytest renders the output itself for `--co`, `-s`,
-  and `--pdb`. The exceptions are the few flags rstest owns (`--junitxml`,
-  `--html`, `--timeout`, `--reruns`, `--debug`), which rstest handles itself
-  at every worker count; see
+  and `--pdb`. The exceptions are the
+  [few flags rstest shares with pytest or a plugin](reference/cli.md#shadowed-flags),
+  which rstest handles itself at every worker count; see
   [Compatibility](concepts/compatibility.md#the-contract).
 - In parallel modes, outcomes are preserved for parallel-safe tests. Tests
   with hidden timing, ordering, or shared-state assumptions can flake under
-  high concurrency: exactly as under pytest-xdist. The
+  high concurrency, exactly as under pytest-xdist. The
   [parallel safety](guides/parallel-safety.md) guide covers finding and
   containing them.
 
-## Where next
+## Go deeper
 
 - [Installation](getting-started/installation.md)
 - [Start from scratch](getting-started/your-first-test.md): no suite yet? from empty folder to green run
 - [Run your existing suite](getting-started/first-steps.md): already have a pytest suite? run it from your project root
 - [Migrating from pytest](guides/migrate-from-pytest.md)
-- [Glossary](concepts/glossary.md): worker, byte-exact, long pole, and the rest
+- [Glossary](concepts/glossary.md): worker, byte-exact mode, long pole, and the rest

@@ -14,7 +14,11 @@ this script aggregates them into markdown rows to paste over the table.
 
 Only plugins some suite actually installed get a row; anything else in the
 docs table (pytest-html, gated in e2e rather than the corpus) is kept by hand.
+If the chosen results file has no `plugins` data (a results.json from a run that
+predates plugin recording), the script says so and exits 1; use --from-venvs.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -119,6 +123,16 @@ def main(argv=None):
 
     rows = rows_from_venvs() if args.from_venvs else json.loads(args.results.read_text())
     agg = aggregate(rows)
+    if not agg:
+        where = "corpus/work/*/venv" if args.from_venvs else str(args.results)
+        hint = (
+            "prepare the suite venvs first (corpus/run.py)"
+            if args.from_venvs
+            else "re-run with --from-venvs to probe corpus/work/*/venv directly, "
+            "or pass --results with a results.json that records plugins"
+        )
+        print(f"no plugin data found in {where}; {hint}", file=sys.stderr)
+        return 1
     names = sorted(agg) if args.plugins == "all" else args.plugins.split(",")
     missing = [n for n in names if n not in agg]
     print("| Plugin | Verified with | Declared pytest range | Exercised by |")
@@ -127,7 +141,8 @@ def main(argv=None):
         print(line)
     if missing:
         print(f"not recorded by any suite: {', '.join(missing)}", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

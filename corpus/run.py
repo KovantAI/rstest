@@ -268,17 +268,24 @@ class Suite:
             return ["--pyargs", self.cfg["package"], *args]
         return args
 
-    def run_pytest(self):
+    def run_pytest(self, xdist_workers=None):
+        """Baseline run. `xdist_workers` (bench only) runs it under pytest-xdist
+        at that -n instead, into its own snapshot, so the serial baseline is
+        never overwritten."""
         if self.mode == "mono":
+            if xdist_workers is not None:
+                raise RuntimeError("xdist series is not supported in mono mode")
             return self.run_pytest_mono()
-        snap = self.dir / "pytest.json"
+        snap = self.dir / ("pytest.json" if xdist_workers is None else "xdist.json")
         env = self.env()
         env["PYTHONPATH"] = str(HERE)  # recorder plugin
         env["RSTEST_RECORD"] = str(snap)
         # Drop any prior snapshot: a failed run that writes nothing must NOT be
         # silently diffed against a stale file (it reads as bogus parity).
         snap.unlink(missing_ok=True)
-        log(f"  {self.name}: pytest baseline starting")
+        xdist = [] if xdist_workers is None else ["-n", str(xdist_workers)]
+        label = "pytest" if xdist_workers is None else f"xdist -n {xdist_workers}"
+        log(f"  {self.name}: {label} starting")
         t0 = time.monotonic()
         r = sh(
             [
@@ -288,13 +295,14 @@ class Suite:
                 "-p",
                 "recorder",
                 "-q",
+                *xdist,
                 *self.target_args(),
             ],
             cwd=self.cwd(),
             env=env,
         )
         wall = time.monotonic() - t0
-        log(f"  {self.name}: pytest done in {wall:.1f}s (rc={r.returncode})")
+        log(f"  {self.name}: {label} done in {wall:.1f}s (rc={r.returncode})")
         if not snap.exists():
             raise RuntimeError(
                 f"pytest produced no snapshot (rc={r.returncode})\n"
@@ -356,12 +364,7 @@ class Suite:
         merged.write_text(json.dumps(combined, sort_keys=True))
         return merged, total
 
-    def run_rstest(self, workers=None):
-        snap = self.dir / "rstest.json"
-        # Drop any prior snapshot: rstest exits non-zero and writes nothing on a
-        # fatal error (e.g. no usable interpreter). A leftover file would pass
-        # the exists() check below and get diffed as bogus parity.
-        snap.unlink(missing_ok=True)
+    def rstest_argv(self, snap, workers=None):
         extra = list(self.cfg.get("rstest_args", []))
         # `workers` (bench worker-sweep) is authoritative: strip any `-n N` from
         # the per-suite rstest_args and pin the requested count. Default (None)
@@ -369,23 +372,27 @@ class Suite:
         if workers is not None:
             extra = _strip_opt(extra, "-n")
             extra += ["-n", str(workers)]
+        return [
+            str(self.rstest_bin),
+            "--report-json",
+            str(snap),
+            # hang backstop: a stuck suite becomes failures, not a stall
+            "--worker-timeout",
+            "120",
+            *extra,
+            *self.target_args(),
+        ]
+
+    def run_rstest(self, workers=None):
+        snap = self.dir / "rstest.json"
+        # Drop any prior snapshot: rstest exits non-zero and writes nothing on a
+        # fatal error (e.g. no usable interpreter). A leftover file would pass
+        # the exists() check below and get diffed as bogus parity.
+        snap.unlink(missing_ok=True)
         nlabel = f"-n {workers}" if workers is not None else "-n auto"
         log(f"  {self.name}: rstest starting ({nlabel}, --worker-timeout 120)")
         t0 = time.monotonic()
-        r = sh(
-            [
-                str(self.rstest_bin),
-                "--report-json",
-                str(snap),
-                # hang backstop: a stuck suite becomes failures, not a stall
-                "--worker-timeout",
-                "120",
-                *extra,
-                *self.target_args(),
-            ],
-            cwd=self.cwd(),
-            env=self.env(),
-        )
+        r = sh(self.rstest_argv(snap, workers), cwd=self.cwd(), env=self.env())
         wall = time.monotonic() - t0
         log(f"  {self.name}: rstest done in {wall:.1f}s (rc={r.returncode})")
         if not snap.exists():

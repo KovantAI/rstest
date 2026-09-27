@@ -17,8 +17,8 @@ on a single designated worker, only after every other worker's session has
 fully finished (fixtures torn down, ports and databases released), in
 collection order.
 
-The marker is registered by rstest automatically, no `markers` ini entry
-needed, no `--strict-markers` complaints. Under plain pytest the marker is
+The marker is registered by rstest automatically: no `markers` ini entry
+is needed, and `--strict-markers` does not complain. Under plain pytest the marker is
 inert (unknown markers don't change behavior), so test code stays portable.
 
 Semantics details in [Scheduling](../concepts/scheduling.md#the-serial-phase);
@@ -63,7 +63,7 @@ def test_uses_shared_pool(): ...
 ```
 
 Under [`--dist loadgroup`](cli.md#-dist-loadloadfileloadscopeloadgroupeach),
-all tests sharing a group name run on the same worker: across files.
+all tests sharing a group name run on the same worker, across files.
 pytest-xdist-compatible.
 
 rstest registers the marker automatically, so `--strict-markers` never
@@ -97,7 +97,10 @@ both honor the marker, so uninstall it rather than run two timers.
 Not a marker rstest owns, but the one that most often blocks parallelism:
 parametrize **IDs must be stable across collections**. rstest collects on
 each worker and refuses to dispatch if the id sets disagree, so an id built
-from a memory address (`repr()` fallback), a uuid, or `now()` forces the
-suite to `-n 0`. Give such a parametrize an explicit stable `ids=` (e.g.
+from a memory address (`repr()` fallback), a uuid, or a sub-second timestamp
+stops a parallel run (`workers collected different test sets`) until you fix
+it or run `-n 0`. A second-resolution `now()` id usually matches across
+workers and runs, but can fail intermittently when collection straddles a
+second. Give such a parametrize an explicit stable `ids=` (e.g.
 `ids=[c.name for c in cases]`). [`rstest migrate-check`](cli-commands.md#migrate-check)
 finds these before your first run and names the exact site.

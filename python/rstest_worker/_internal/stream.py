@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 import pytest
+from _pytest.fixtures import is_visibility_more_specific
 
 from rstest_worker._internal import messages as m
 from rstest_worker._internal.plugincompat import (
@@ -30,6 +31,10 @@ from rstest_worker._internal.xdistnode import (
 )
 
 log = logging.getLogger("rstest.worker")
+
+# Identity fixtures StreamPlugin defines that pytest-xdist also defines; ours
+# must win the override chain (see pytest_sessionstart_identity_fixtures).
+_IDENTITY_FIXTURES = ("worker_id", "testrun_uid")
 
 # Sentinel for "no value fingerprinted yet" in the scope-promotion tracker.
 _UNSET = object()
@@ -243,8 +248,11 @@ class StreamPlugin:
     # rstest still populates `workerinput`. We provide them ourselves, with
     # semantics byte-identical to xdist's, so `def test(worker_id)` resolves
     # with or without pytest-xdist installed. When xdist IS installed it also
-    # defines these; whichever wins the override, the value is the same, so the
-    # duplicate is harmless.
+    # defines these. In a real pool (>= 2 workers) both definitions return the
+    # same values, but xdist's report a worker identity whenever `workerinput`
+    # exists, which is wrong for the `--reruns` one-worker pool. So ours are
+    # moved to the end of the override chain (see
+    # `pytest_sessionstart_identity_fixtures`) and win over xdist's.
     @staticmethod
     def _pool_workerinput(config):
         """`config.workerinput` when this worker is one of >= 2 in a pool, else
@@ -276,6 +284,33 @@ class StreamPlugin:
         import uuid
 
         return uuid.uuid4().hex
+
+    @pytest.hookimpl(specname="pytest_sessionstart", trylast=True)
+    def pytest_sessionstart_identity_fixtures(self, session):
+        """Make our `worker_id` / `testrun_uid` win over pytest-xdist's.
+
+        Both are global plugin fixtures, so the last one registered wins, and
+        rstest's plugin is registered (via `pytest.main(plugins=...)`) before
+        setuptools plugins such as xdist. trylast: the FixtureManager is built
+        by pytest's own sessionstart, which must run first. Re-inserting with
+        pytest's visibility ordering keeps a conftest or test module override
+        of these names winning over ours, as before."""
+        fm = getattr(session, "_fixturemanager", None)
+        if fm is None:
+            return
+        for name in _IDENTITY_FIXTURES:
+            defs = fm._arg2fixturedefs.get(name)
+            if not defs:
+                continue
+            ours = [fd for fd in defs if getattr(fd.func, "__self__", None) is self]
+            for fd in ours:
+                defs.remove(fd)
+                for i, existing in enumerate(defs):
+                    if is_visibility_more_specific(existing, fd):
+                        defs.insert(i, fd)
+                        break
+                else:
+                    defs.append(fd)
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_cmdline_main(self, config):
@@ -386,11 +421,15 @@ class StreamPlugin:
         os.environ["PYTEST_XDIST_WORKER"] = worker_id
         os.environ["PYTEST_XDIST_WORKER_COUNT"] = os.environ.get("RSTEST_WORKER_COUNT", "1")
         run_uid = os.environ.get("RSTEST_RUN_UID", "")
+        os.environ["PYTEST_XDIST_TESTRUNUID"] = run_uid
         config.workerinput = {
             "workerid": worker_id,
             "workercount": int(os.environ.get("RSTEST_WORKER_COUNT", "1")),
             # One uid per run, shared by every worker (xdist's
-            # testrun_uid contract); the orchestrator provides it.
+            # testrun_uid contract); the orchestrator provides it. xdist's own
+            # worker and `testrun_uid` fixture read the `testrunuid` key;
+            # `testrun_uid` is kept for anything already reading that spelling.
+            "testrunuid": run_uid,
             "testrun_uid": run_uid,
             # pytest-randomly's master broadcasts one resolved seed; absent,
             # the plugin KeyErrors at -n >= 2. rstest has no master, so we

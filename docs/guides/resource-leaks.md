@@ -73,8 +73,8 @@ per-test leak. Measurement starts from the second test each worker runs.
 
 - **Session / module-scoped fixtures.** A fixture that opens a connection pool
   is set up on the *first test that uses it* and torn down at the end of its
-  scope, not per test. That first test therefore shows the fixture's threads/
-  fds as a "leak", even though the fixture is behaving correctly. Treat a
+  scope, not per test. That first test therefore shows the fixture's
+  threads/fds as a "leak", even though the fixture is behaving correctly. Treat a
   fixture-shaped leak as informational; move the resource into a properly
   teardown-scoped fixture if you want it to net zero.
 - **Interpreter internals.** Some libraries start a shared background thread on
@@ -107,10 +107,13 @@ than a pre-existing fixture pattern.
   ```
 
 - If a leak is genuinely unavoidable for one test (a C extension you don't
-  control), isolate it with [`@pytest.mark.serial`](../reference/markers.md) so
-  it can't race the parallel phase, and exclude it from the gate.
+  control), know that `--fail-on-leak` has no allowlist: it fails the run on
+  every test with a positive delta, and markers don't exempt a test. Keep that
+  test out of the gated run instead: deselect it there (`-k "not test_name"`
+  or `--deselect <nodeid>`) and run it in a separate invocation without
+  `--fail-on-leak`.
 
-## See also
+## Go deeper
 
 - [Suite diagnostics](doctor.md): the `--doctor` report this rides on.
 - [`--fail-on-leak`](../reference/cli.md#-fail-on-leak): the CI gate.

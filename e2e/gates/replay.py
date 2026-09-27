@@ -17,8 +17,11 @@ from _harness import (
 
 def _project(files):
     """A fresh project dir OUTSIDE g.tmp: an ini another section left in g.tmp
-    would move the rootdir and change the nodeids the journals below name."""
-    d = Path(tempfile.mkdtemp(prefix="rstest-gate-replay-"))
+    would move the rootdir and change the nodeids the journals below name.
+    Resolved: Windows temp dirs come back as 8.3 short names (RUNNER~1), and
+    pytest's rootdir is the common ancestor of the cwd and the args, so a short
+    cwd plus a long absolute arg would root the nodeids at C:\\Users."""
+    d = Path(tempfile.mkdtemp(prefix="rstest-gate-replay-")).resolve()
     for rel, content in files.items():
         p = d / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +153,7 @@ def gate_replay(g, args, binary):
     # Portability: the same project at another path (another machine) replays
     # the recorded journal unchanged.
     if latest.exists():
-        moved = Path(tempfile.mkdtemp(prefix="rstest-gate-replay-moved-"))
+        moved = Path(tempfile.mkdtemp(prefix="rstest-gate-replay-moved-")).resolve()
         shutil.copy(d / "test_order.py", moved / "test_order.py")
         shutil.copy(latest, moved / "ci.json")
         mlog = moved / "e2e.jsonl"

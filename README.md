@@ -74,8 +74,8 @@ The wins come from suite *shape*, not magic. Quick self-check:
 | Your suite | What to expect |
 |---|---|
 | Wait-bound (IO, sleeps, network, timeouts) | **Biggest win**: test-granular dispatch splits the slow files xdist pins to one worker. |
-| CPU-bound, already splits well under xdist | **Parity, not a win**, gain up to core count, same as xdist (pandas: 63s vs 61s). |
-| Gated by one long test | **No win beyond that test**, no worker count beats the long pole. `--doctor` names it. |
+| CPU-bound, already splits well under xdist | **Parity, not a win**: gain up to core count, same as xdist (pandas: 63s vs 61s). |
+| Gated by one long test | **No win beyond that test**: no worker count beats the long pole. `--doctor` names it. |
 | Small (< ~10s serial) | **Little wall-time change**: value is `--watch`, `--changed`, `--doctor`, not raw speed. |
 | Many tiny per-service suites | Speedup is per-suite; the aggregate CI win depends on your largest suites. |
 
@@ -87,11 +87,15 @@ Two more truths worth knowing before you benchmark:
 - **Adopting rstest adopts pytest 9.** rstest runs a vendored pytest 9.1.1
   core. A suite that's warning-clean on recent pytest 8.x is almost always
   already pytest-9-clean; if not, clear deprecations first (the same upgrade
-  you'd owe pytest anyway). `rstest -n 0` surfaces them.
+  you'd owe pytest anyway). `rstest -n 0` surfaces them. Plugins run on
+  that core too, so a plugin's `pytest<9` pin is inert
+  ([details](https://python-rstest.readthedocs.io/en/stable/concepts/compatibility/#plugin-versions-vs-the-vendored-core)).
 
 Fastest way to find out for real: `rstest try` runs your suite under plain
 pytest and under `rstest -n auto`, then reports whether outcomes match and
-how much faster rstest was, no migration, no config.
+how much faster rstest was. No migration, no config. (It runs the baseline
+as `python -m pytest`, so pytest must be installed in the project's
+environment for this one command.)
 
 ## Benchmarks
 
@@ -100,17 +104,18 @@ the pytest baseline: 100% parity *on the measured run* (a few tests flake
 under plain pytest itself; those are catalogued in the docs).
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
-| Suite | Tests | pytest | xdist (`-n 8`) | rstest |
+| Suite | Tests | pytest | xdist | rstest |
 |---|---|---|---|---|
-| aiohttp | 4,469 | 197s | 160s | **68s** warm · 126s cold |
-| pandas | 193,627 | 182s | 61s | 63s (parity, not a win) |
-| django-allauth | 2,050 | 22s | 8s | **8s** (`-n 4`) |
+| aiohttp | 4,469 | 197s | 160s (`-n 8`) | **68s** warm · 126s cold |
+| pandas | 193,627 | 182s | 61s (`-n 8`) | 63s (parity, not a win) |
+| django-allauth | 2,050 | 22s | 8s (`-n 8`) | **8s** (`-n 4`) |
 | rich | 981 | 3.4s | 2.8s | **2.5s** (`-n 4`) |
 
-Apple Silicon, CPython 3.13, pytest-xdist 3.8.
+Apple Silicon, CPython 3.13, pytest-xdist 3.8. rstest ran at `-n 8` unless
+noted; the rich xdist run has no recorded worker count.
 
 **Monorepo** (langchain-ai/langgraph, 6 `libs/*` packages, 4,284 tests, each
-with its own pytest config, a single pytest can't run from the root at all):
+with its own pytest config; a single pytest can't run from the root at all):
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | | wall | parity |
@@ -120,7 +125,7 @@ with its own pytest config, a single pytest can't run from the root at all):
 | rstest at the root, warm | 121–133s (6.6–7.3×) | *projected* |
 
 The cold run is measured. The warm figure is a **projection**, not a
-recorded run: the cold run's per-package duration caches predict where the
+recorded run: the cold run's per-project duration caches predict where the
 planner lands once warm, so it carries no parity number. Discount it until
 you measure your own.
 
@@ -157,7 +162,7 @@ Full methodology:
 At `-n 0`, outcomes are byte-exact: one vendored-pytest session; any
 difference at `-n 0` is a bug. In parallel modes, outcomes are preserved for
 parallel-safe tests; tests with hidden time/ordering/shared-state
-assumptions can flake under high concurrency: exactly as under
+assumptions can flake under high concurrency, exactly as under
 pytest-xdist. `rstest --doctor` and lower `-n` values help find and contain
 them; `@pytest.mark.serial` is the escape hatch.
 
@@ -168,7 +173,7 @@ a suite warning-clean on recent pytest 8.x is almost always pytest-9-clean.
 If it isn't, clear the deprecations first: the same upgrade you'd owe pytest
 anyway. There is one vendored core, tracked forward; no older-core build.
 
-**Silent-at-`-n ≥ 2` plugins.** A few plugins that need a single master
+**Silent-at-`-n ≥ 2` plugins.** A few plugins that need a single controller
 process are no-ops in parallel: report plugins such as pytest-reportlog and
 pytest-json-report write nothing (no crash), and terminal-UI plugins
 (pytest-sugar and friends) don't paint; data-level behavior is unaffected.
@@ -189,16 +194,20 @@ the runner already owns (per-test wall/CPU time, per-fixture setup):
 
 WAIT-BOUND: 95% of test time (176.5s) is waiting, not computing (sleeps / IO / timeouts).
     54.20s waiting of   54.25s  tests/test_proxy_functional.py::test_proxy_https_multi_conn_limit
+    10.97s waiting of   10.97s  tests/test_proxy_functional.py::test_proxy_https_connect
   ... and 33 more
 
 PARALLEL FLOOR: the longest test (54.2s) exceeds the ideal per-worker share (23.2s at -n 8);
-no worker count can finish faster than its longest test.
+no worker count can finish faster than its longest test. Gate tests:
+    54.25s  tests/test_proxy_functional.py::test_proxy_https_multi_conn_limit
 
 FIXTURE HOTSPOTS (setup time across all workers):
      0.79s   4442x  scope=function blockbuster
+     0.54s    157x  scope=function transport
 
 SLOWEST FILES:
    150.46s (81.0%)  tests/test_proxy_functional.py
+     8.60s ( 4.6%)  tests/test_client_functional.py
 ===================================================
 ```
 

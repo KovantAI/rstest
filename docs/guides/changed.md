@@ -7,10 +7,7 @@ in CI).
 
 Two selection engines back it, and rstest picks the tightest one available:
 
-| Engine | When | Granularity |
-|---|---|---|
-| **Import graph** | always available, zero setup | whole test *files* that transitively import a changed module |
-| **Coverage index** | when a line→test index is warm | individual *tests* whose recorded coverage hit the changed *lines* |
+--8<-- "docs/_snippets/changed-engines.md"
 
 The coverage engine is strictly tighter and turns on automatically once the
 index exists: there is no flag to set and nothing to remember beyond keeping
@@ -25,8 +22,8 @@ match, function-local imports still count as edges, a changed `conftest.py`
 selects its whole subtree, and any config or non-Python change falls back to a
 full run. The one documented gap is dynamic imports
 (`importlib.import_module`), which produce no edges; use
-[`--changed-strict`](../reference/cli.md#-changed-strict) for correctness-
-critical runs.
+[`--changed-strict`](../reference/cli.md#-changed-strict) for
+correctness-critical runs.
 
 !!! warning "Django and other string-wired frameworks"
     Django loads much of an app by string, not by `import`: `INSTALLED_APPS`,
@@ -98,7 +95,7 @@ the tightest selection.
 ## Keeping the index warm
 
 The index reflects coverage *as of the run that wrote it*. It is trusted for
-the lines it recorded, so a stale index can miss a test added since, keep it
+the lines it recorded, so a stale index can miss a test added since. Keep it
 fresh:
 
 - **Rebuild on your coverage runs.** Any `--cov-context=test` run refreshes it.
@@ -136,7 +133,10 @@ under `--changed-strict`) before running anything, so `--junitxml` and
 `--report-json` are **not written**. CI steps that expect those files
 (GitLab `reports: junit`, test-report publishers, `upload-artifact`, a JUnit
 ratio gate) should tolerate their absence, e.g. `if-no-files-found: ignore` on
-`actions/upload-artifact`.
+`actions/upload-artifact`. That applies to single-project runs. At a
+[monorepo](monorepo.md) root, the merged `--report-json` is still written,
+with every project marked `"skipped": true` (same exit code); only the
+per-project JUnit files are absent.
 
 Keep the default-branch runs that feed the cache **full**, not `--changed`:
 a `--changed` run only records durations and coverage for the tests it ran.
@@ -149,8 +149,11 @@ a `--changed` run only records durations and coverage for the tests it ran.
   (`--cache-pull --cache-push`) and they **union on pull** into a full index;
   otherwise warm the index from an **unsharded** coverage run (or merge shard
   data before building it). See [Sharding](sharding.md).
-- **Monorepos.** `--changed` is forwarded to each affected project, which
-  narrows within its own tree against its own `.rstest_cache`. See
-  [Monorepos](monorepo.md).
+- **Monorepos.** At the root, rstest classifies projects once against the
+  repo-wide change set. A project with changed files of its own gets
+  `--changed` and narrows within its own tree against its own `.rstest_cache`;
+  a project that only depends on a changed one runs its full suite; the rest
+  are skipped. See [Monorepos](monorepo.md) and
+  [Monorepo mode](../concepts/monorepo.md).
 - **Watch mode.** [`--watch`](watch-mode.md) uses import-graph selection for
   its targeted reruns.
