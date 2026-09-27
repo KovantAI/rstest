@@ -267,6 +267,11 @@ failure into the classes above, and bisects the polluting file for order /
 isolation defects. Reach for it instead of running the three commands by hand;
 see [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
 
+If the failure only shows up on CI, don't try to recreate the schedule by
+hand: upload the run's replay journal and re-run that exact schedule locally
+with `rstest replay`. See
+[Replaying a CI-only failure locally](ci-quickstart.md#replaying-a-ci-only-failure-locally).
+
 ## Worked examples
 
 [Parity divergences & upstream fixes](../reference/parity-divergences.md)

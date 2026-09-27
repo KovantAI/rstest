@@ -219,6 +219,11 @@ struct PostRun<'a> {
     /// Coverage index snapshotted BEFORE the run (drives carry-forward after).
     prev_index: &'a select::CoverageIndex,
     baseline: &'a coverage_skip::Baseline,
+    /// `rstest replay`: a diagnostic re-run, not a data point. It skips the
+    /// duration / wall / flake-history writes (a debugging loop would pile
+    /// `failed` counts onto one test, and a forced CI worker count on a smaller
+    /// machine skews the duration baseline).
+    replay: bool,
 }
 
 /// The resolved run configuration for a single (non-watch) run: everything
@@ -606,6 +611,7 @@ pub(crate) fn execute_inner(
         config_fp: &inc.config_fp,
         prev_index: &inc.prev_index,
         baseline: &inc.baseline,
+        replay: pinned.is_some(),
     };
     gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
 }

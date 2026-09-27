@@ -217,7 +217,16 @@ fn warn_replay_drift(
         .collection_hash
         .as_deref()
         .is_some_and(|h| h != hash.as_str());
-    if size_drift || hash_drift {
+    if *count == 0 && pin.collection_size > 0 {
+        // Nothing collected is not "the suite changed": it is almost always
+        // the wrong directory or a recorded path that doesn't exist here.
+        sink.warn(&format!(
+            "rstest: replay: collected no tests here (the journal had {}). Run replay from \
+             the directory the recording ran in, and check that the recorded test paths \
+             exist on this machine.",
+            pin.collection_size
+        ));
+    } else if size_drift || hash_drift {
         sink.warn(&format!(
             "rstest: replay: the suite changed since the journal was recorded \
              (now {count} test(s), journal had {}). Replaying the tests that still \
@@ -225,6 +234,30 @@ fn warn_replay_drift(
             pin.collection_size
         ));
     }
+}
+
+/// Replay: hand `indices` to a worker and release its held last item. Chunked
+/// and best-effort like `dispatch_to`: a failed send means the worker is dying,
+/// and its crash event handles the remnant (already in `outstanding`). Called
+/// again for a slot's serial tail; the worker keeps draining, so items sent
+/// after a NoMoreItems still run.
+fn pin_send(s: &mut WorkerState, indices: Vec<u64>) {
+    if indices.is_empty() {
+        return;
+    }
+    s.outstanding.extend(indices.iter().copied());
+    for chunk in indices.chunks(4096) {
+        if s.worker
+            .send(&proto::Command::RunItems {
+                indices: chunk.to_vec(),
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+    s.finishing = true;
+    let _ = s.worker.send(&proto::Command::NoMoreItems);
 }
 
 /// The clean nodeid for a dispatched index, from the designate's id list.
@@ -377,7 +410,11 @@ pub fn run_pool(
     // for --dist each (every worker runs everything — nothing to replay), for a
     // shard (partial suite), or when opted out. Nodeid, not index, so the
     // journal survives a machine hop (CI -> local).
+    // Also off for a one-worker pool (`-n 1 --reruns N` runs through here): it
+    // has no parallel schedule to reproduce, replay rejects it, and writing it
+    // would clobber the last parallel run's latest.json.
     let journaling = pinned.is_none()
+        && n >= 2
         && dist != Dist::Each
         && shard.is_none()
         && crate::replay::journaling_enabled();
@@ -386,11 +423,31 @@ pub fn run_pool(
     } else {
         Vec::new()
     };
+    // Indices already journaled: a --reruns retry (same or another worker)
+    // re-announces item_start, but the journal keeps only the FIRST attempt,
+    // the one whose schedule produced the failure. Replay runs with reruns off,
+    // so a duplicate entry would just run the test twice.
+    let mut journaled: HashSet<u64> = HashSet::new();
     // Replay: state for translating the recorded assignment into this run's
     // indices and reporting drift/missing once.
     let mut pin_warned_drift = false;
     let mut pin_missing = 0usize;
     let mut pin_missing_warned = false;
+    // Replay: nodeid -> this run's collected indices (ascending), built once
+    // when the id list arrives. A queue per nodeid so a nodeid collected at
+    // several positions (duplicate parametrize ids) maps each recorded
+    // occurrence to its own position instead of running the first one twice.
+    let mut pin_index: Option<HashMap<String, VecDeque<u64>>> = None;
+    // Replay: a crashed worker's not-yet-run pinned remainder (this run's
+    // indices, recorded order), handed to its replacement instead of the
+    // whole recorded list. Mirrors `each_remnant`.
+    let mut pin_remnant: Vec<Option<Vec<u64>>> = vec![None; n];
+    // Replay: this run's @serial indices, and each slot's pinned serial tail
+    // held back until every other worker has finished. The recording ran them
+    // in the serial phase (alone); replaying them as soon as their worker got
+    // there would run them concurrently with other workers' tests.
+    let mut pin_serial: HashSet<u64> = HashSet::new();
+    let mut pin_serial_held: Vec<Option<Vec<u64>>> = vec![None; n];
 
     loop {
         let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
@@ -488,7 +545,10 @@ pub fn run_pool(
                 if let Some(ids) = &ids {
                     sources.record(ids);
                 }
-                if dist != Dist::Each {
+                // Replay runs with reruns off, @mark.flaky included: a retried
+                // attempt would be requeued onto a dispatch queue replay never
+                // builds, silently dropping the failure being reproduced.
+                if dist != Dist::Each && pinned.is_none() {
                     if let Some(f) = flaky {
                         for (k, v) in f {
                             if let Ok(i) = k.parse::<u64>() {
@@ -526,6 +586,9 @@ pub fn run_pool(
                     }
                 }
                 if let Some(ids) = ids {
+                    if pinned.is_some() {
+                        pin_serial.extend(serial.iter().flatten().copied());
+                    }
                     // Replay pins the exact per-worker lists, so the dynamic
                     // dispatch queue is never built; seeding happens below.
                     if dispatch.is_none() && dist != Dist::Each && pinned.is_none() {
@@ -639,7 +702,7 @@ pub fn run_pool(
                 let resolved = nodeid_at(&ids_store, index).map(str::to_string);
                 // Journal the emergent schedule: worker `idx` started this
                 // nodeid, in order. Recorded per worker so replay can re-pin it.
-                if journaling {
+                if journaling && journaled.insert(index) {
                     if let Some(id) = &resolved {
                         recorder[idx].push(id.clone());
                     }
@@ -809,6 +872,20 @@ pub fn run_pool(
                                 .filter(|&i| Some(i) != crashed_orig)
                                 .collect(),
                         );
+                    } else if pinned.is_some() && states[idx].seeded {
+                        // Replay: the replacement runs only what this worker
+                        // had left, in order. Without this it would be seeded
+                        // with the full recorded list and re-run tests that
+                        // already finished (including the crasher, in a loop
+                        // until the restart budget ran out). A worker that died
+                        // before it was seeded ran nothing, so its replacement
+                        // takes the full recorded list (no remnant).
+                        pin_remnant[idx] = Some(
+                            orphaned
+                                .into_iter()
+                                .filter(|&i| Some(i) != crashed_orig)
+                                .collect(),
+                        );
                     } else if let Some(d) = dispatch.as_mut() {
                         for i in orphaned.into_iter().filter(|&i| Some(i) != crashed_orig) {
                             d.requeued.push_back(i);
@@ -895,8 +972,16 @@ pub fn run_pool(
 
         // If the designated id-carrier died before delivering ids, fall
         // back to identity order rather than stalling. Serial marks are
-        // unknown in that case, so warn.
-        if dist != Dist::Each && dispatch.is_none() && reference.is_some() && states[0].dead {
+        // unknown in that case, so warn. Not under replay: its `dispatch` is
+        // always None by design (the pinned lists replace the queue), so a
+        // gw0 that simply finished would otherwise trip this and hand the
+        // whole suite to whichever workers are still open.
+        if dist != Dist::Each
+            && pinned.is_none()
+            && dispatch.is_none()
+            && reference.is_some()
+            && states[0].dead
+        {
             sink.warn(
                 "rstest: id-carrier worker died before reporting; \
                  falling back to collection order (serial marks unknown)",
@@ -940,19 +1025,20 @@ pub fn run_pool(
         if let Some(pin) = pinned {
             // Seed only once the id list has arrived (it rides on the designate's
             // CollectionDone, which may lag another worker's). Each worker is
-            // seeded as it becomes collected — staggered, like the each-branch —
+            // seeded as it becomes collected (staggered, like the each-branch),
             // so there is no latch that could skip a late collector.
             if let Some(ids) = ids_store.as_ref() {
                 if !pin_warned_drift {
                     pin_warned_drift = true;
                     warn_replay_drift(sink, pin, &reference);
                 }
-                // nodeid -> first collected index this run (parametrized tests
-                // can repeat a nodeid across positions; first wins, best-effort).
-                let mut index_of: HashMap<&str, u64> = HashMap::with_capacity(ids.len());
-                for (i, id) in ids.iter().enumerate() {
-                    index_of.entry(id.as_str()).or_insert(i as u64);
-                }
+                let index_of = pin_index.get_or_insert_with(|| {
+                    let mut m: HashMap<String, VecDeque<u64>> = HashMap::with_capacity(ids.len());
+                    for (i, id) in ids.iter().enumerate() {
+                        m.entry(id.clone()).or_default().push_back(i as u64);
+                    }
+                    m
+                });
                 for (i, s) in states
                     .iter_mut()
                     .enumerate()
@@ -964,40 +1050,66 @@ pub fn run_pool(
                         s.ended = true;
                         continue;
                     }
-                    let indices: Vec<u64> = pin
-                        .assignment
-                        .get(i)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|id| {
-                            let at = index_of.get(id.as_str()).copied();
-                            if at.is_none() {
-                                pin_missing += 1;
-                            }
-                            at
-                        })
-                        .collect();
-                    s.outstanding.extend(indices.iter().copied());
-                    // Chunked, best-effort (see dispatch_to): a dying worker's
-                    // crash event handles its own remnant.
-                    for chunk in indices.chunks(4096) {
-                        if s.worker
-                            .send(&proto::Command::RunItems {
-                                indices: chunk.to_vec(),
+                    let indices: Vec<u64> = match pin_remnant[i].take() {
+                        // A crash replacement: only the dead worker's remainder.
+                        Some(rest) => rest,
+                        None => pin
+                            .assignment
+                            .get(i)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|id| {
+                                let at =
+                                    index_of.get_mut(id.as_str()).and_then(VecDeque::pop_front);
+                                if at.is_none() {
+                                    pin_missing += 1;
+                                }
+                                at
                             })
-                            .is_err()
-                        {
-                            break;
+                            .collect(),
+                    };
+                    let (serial_tail, indices): (Vec<u64>, Vec<u64>) =
+                        indices.into_iter().partition(|i| pin_serial.contains(i));
+                    if !serial_tail.is_empty() {
+                        pin_serial_held[i]
+                            .get_or_insert_with(Vec::new)
+                            .extend(serial_tail);
+                    }
+                    pin_send(s, indices);
+                }
+                // Serial phase: release one slot's held serial tail once every
+                // other worker has finished its session (Done), the rule the
+                // normal serial phase uses. A worker that is itself idle and
+                // waiting on a serial tail doesn't block; the lowest such slot
+                // goes first and the next goes after it ends, so serial tests
+                // never overlap anything.
+                // A slot that died for good (restart budget spent) is skipped: its tail
+                // is lost with it (already reported as a worker failure), and
+                // waiting on it would stall every later slot.
+                if let Some(i) =
+                    (0..states.len()).find(|&i| pin_serial_held[i].is_some() && !states[i].dead)
+                {
+                    if stopping {
+                        pin_serial_held.iter_mut().for_each(|h| *h = None);
+                    } else {
+                        let idle = |s: &WorkerState| s.seeded && s.outstanding.is_empty();
+                        let others_done = states.iter().enumerate().all(|(j, o)| {
+                            j == i || o.dead || (pin_serial_held[j].is_some() && idle(o))
+                        });
+                        let s = &mut states[i];
+                        if others_done && !s.dead && idle(s) {
+                            let tail = pin_serial_held[i].take().unwrap_or_default();
+                            pin_send(s, tail);
                         }
                     }
-                    // No shared queue and no reruns: release the held last item.
-                    s.finishing = true;
-                    let _ = s.worker.send(&proto::Command::NoMoreItems);
                 }
                 // Once every worker is seeded, report any recorded tests that no
                 // longer collect (renamed/removed since the journal), just once.
+                // Skipped when nothing collected: the drift note already
+                // explained that, and "renamed or removed" would mislead.
                 if !pin_missing_warned
                     && pin_missing > 0
+                    && !ids.is_empty()
                     && states.iter().all(|s| s.seeded || s.dead)
                 {
                     pin_missing_warned = true;
@@ -1007,10 +1119,13 @@ pub fn run_pool(
                     ));
                 }
             }
-            for s in states
-                .iter_mut()
-                .filter(|s| s.seeded && !s.dead && !s.ended && s.outstanding.is_empty())
-            {
+            for (_, s) in states.iter_mut().enumerate().filter(|(i, s)| {
+                s.seeded
+                    && !s.dead
+                    && !s.ended
+                    && s.outstanding.is_empty()
+                    && pin_serial_held[*i].is_none()
+            }) {
                 let _ = s.worker.send(&proto::Command::EndSession);
                 s.ended = true;
             }

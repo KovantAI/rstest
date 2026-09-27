@@ -106,7 +106,9 @@ impl Journal {
             workers,
             dist,
             shuffle_seed,
-            args,
+            args: std::env::current_dir()
+                .map(|cwd| portable_args(args.clone(), &cwd))
+                .unwrap_or(args),
             collection_hash,
             collection_size,
             assignment,
@@ -124,11 +126,18 @@ impl Journal {
 
 /// True unless journaling is explicitly disabled. The journal is on by default
 /// so a CI failure is replayable without having enabled anything first; opt out
-/// with `RSTEST_NO_REPLAY_JOURNAL=1` (any non-empty value).
+/// with `RSTEST_NO_REPLAY_JOURNAL=1`. Empty, `0` and `false` leave it on, so
+/// `RSTEST_NO_REPLAY_JOURNAL=0` means what it reads as.
 pub fn journaling_enabled() -> bool {
-    std::env::var_os("RSTEST_NO_REPLAY_JOURNAL")
-        .map(|v| v.is_empty())
+    std::env::var("RSTEST_NO_REPLAY_JOURNAL")
+        .map(|v| opt_out_off(&v))
         .unwrap_or(true)
+}
+
+/// True when an opt-out value does NOT opt out (empty / `0` / `false`).
+fn opt_out_off(v: &str) -> bool {
+    let v = v.trim();
+    v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false")
 }
 
 /// Write `journal` to `<cache>/replay/<uid>.json`, refresh `latest.json`, and
@@ -195,13 +204,16 @@ pub fn load(run_id: Option<&str>, path: Option<&Path>) -> Result<Journal> {
             .join(format!("{}.json", sanitize(id))),
         (None, None) => cache::dir().join(DIR).join(LATEST),
     };
-    let bytes = std::fs::read(&file).with_context(|| {
-        format!(
-            "reading replay journal {}. Run the suite once (-n >= 2) to record one, \
-             or pass --journal <file> for a downloaded CI artifact",
+    if !file.exists() {
+        anyhow::bail!(
+            "no replay journal at {}. Only parallel runs record one (-n >= 2, not \
+             --dist each / --shard / --collect lazy); run the suite that way once, or \
+             pass --journal <file> for a downloaded CI artifact",
             file.display()
-        )
-    })?;
+        );
+    }
+    let bytes = std::fs::read(&file)
+        .with_context(|| format!("reading replay journal {}", file.display()))?;
     let journal: Journal = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {} as a replay journal", file.display()))?;
     if journal.schema != SCHEMA {
@@ -212,7 +224,46 @@ pub fn load(run_id: Option<&str>, path: Option<&Path>) -> Result<Journal> {
             journal.schema
         );
     }
+    validate(&journal).with_context(|| format!("invalid replay journal {}", file.display()))?;
     Ok(journal)
+}
+
+/// Shape checks `serde` can't express. Each worker slot must have exactly one
+/// list: extra lists would never run (and nothing would say so), missing ones
+/// would silently idle a worker.
+fn validate(journal: &Journal) -> Result<()> {
+    if journal.workers < 2 {
+        anyhow::bail!(
+            "records {} worker(s); replay needs a parallel recording (-n >= 2)",
+            journal.workers
+        );
+    }
+    if journal.assignment.len() != journal.workers {
+        anyhow::bail!(
+            "records {} worker(s) but {} per-worker test list(s)",
+            journal.workers,
+            journal.assignment.len()
+        );
+    }
+    Ok(())
+}
+
+/// Render recorded args for display, quoting a token that has whitespace (or
+/// is empty) so `-k 'not slow'` reads as the two tokens it is.
+fn display_args(args: &[String]) -> String {
+    if args.is_empty() {
+        return "(none)".into();
+    }
+    args.iter()
+        .map(|a| {
+            if a.is_empty() || a.chars().any(char::is_whitespace) {
+                format!("'{a}'")
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Convenience for the command layer: load and hand back the [`PinnedSchedule`]
@@ -243,6 +294,34 @@ pub fn run_replay(
         journal.collection_size,
         journal.assignment.len(),
     ));
+    // Always shown: these are handed to pytest verbatim, and a journal is often
+    // a downloaded artifact (possibly from a fork's CI) the user never opened.
+    sink.warn(&format!(
+        "rstest: replay: args: {}",
+        display_args(&journal.args)
+    ));
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    if journal.workers > cores.saturating_mul(4) {
+        sink.warn(&format!(
+            "rstest: replay: the journal records {} workers and this machine has {cores} \
+             core(s); replay starts all {} to keep the recorded assignment",
+            journal.workers, journal.workers
+        ));
+    }
+    for arg in missing_absolute_paths(&journal.args) {
+        sink.warn(&format!(
+            "rstest: replay: recorded arg {arg} is an absolute path that does not exist on \
+             this machine; re-record with a path relative to the project"
+        ));
+    }
+    let (args, dropped) = strip_cache_selection(&journal.args);
+    if !dropped.is_empty() {
+        sink.warn(&format!(
+            "rstest: replay: ignoring recorded {} (they select tests from this machine's \
+             pytest cache, not the recording's; the journal already pins what ran)",
+            dropped.join(" ")
+        ));
+    }
     // Rebuild the CLI from the recording run's shape, neutralizing every mode
     // that would perturb the pinned schedule. The session args (paths/-k/-m/
     // plugins) come from the journal, not this invocation's argv.
@@ -251,7 +330,10 @@ pub fn run_replay(
     c.numprocesses = Some(journal.workers.to_string());
     c.collect = Some("full".into());
     c.dist = Some(journal.dist.clone());
-    c.reruns = None;
+    // Some(0), not None: None falls back to `[tool.rstest] reruns`, and a
+    // retried attempt has no queue to go to under replay, so the failure being
+    // reproduced would be dropped.
+    c.reruns = Some(0);
     c.shuffle = None;
     c.shard = None;
     c.incremental = false;
@@ -261,7 +343,126 @@ pub fn run_replay(
     c.watch = false;
     c.cache_pull = false;
     c.cache_push = false;
-    crate::run::execute_inner(&c, &journal.args, Some(&pinned))
+    crate::run::execute_inner(&c, &args, Some(&pinned))
+}
+
+/// pytest cacheprovider flags that FILTER the collection by the local cache
+/// (`--lf` keeps last-failed, `--sw` skips up to the last stepwise failure).
+/// Replayed from a CI journal they'd select by the developer's cache and drop
+/// the very tests being reproduced. Reorder-only flags (`--ff`, `--nf`) are
+/// harmless (replay maps by nodeid) and stay.
+const CACHE_SELECTION_FLAGS: &[&str] = &[
+    "--lf",
+    "--last-failed",
+    "--sw",
+    "--stepwise",
+    "--sw-skip",
+    "--stepwise-skip",
+    "--sw-reset",
+    "--stepwise-reset",
+];
+/// Same family, taking a value (`--lfnf all` or `--lfnf=all`).
+const CACHE_SELECTION_VALUED: &[&str] = &["--lfnf", "--last-failed-no-failures"];
+
+/// `args` without the cache-driven selection flags, plus the dropped tokens
+/// (for one warning).
+fn strip_cache_selection(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut kept = Vec::with_capacity(args.len());
+    let mut dropped = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let name = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        if CACHE_SELECTION_FLAGS.contains(&a.as_str()) {
+            dropped.push(a.clone());
+        } else if CACHE_SELECTION_VALUED.contains(&name) {
+            dropped.push(a.clone());
+            if !a.contains('=') {
+                if let Some(v) = it.next() {
+                    dropped.push(v.clone());
+                }
+            }
+        } else {
+            kept.push(a.clone());
+        }
+    }
+    (kept, dropped)
+}
+
+/// Rewrite absolute paths under `cwd` in the session args to cwd-relative ones,
+/// so a journal recorded on CI (`rstest -n auto $GITHUB_WORKSPACE/tests`)
+/// replays from the same project directory on another machine. Covers bare
+/// paths, nodeids (`/abs/test_x.py::test`) and `--flag=/abs/path`. Paths
+/// outside `cwd`, and everything that isn't an absolute path, pass through.
+fn portable_args(args: Vec<String>, cwd: &Path) -> Vec<String> {
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    args.into_iter()
+        .map(|a| match a.split_once('=') {
+            Some((flag, val)) if flag.starts_with("--") => {
+                format!("{flag}={}", relativize(val, &cwd))
+            }
+            _ if a.starts_with('-') => a,
+            _ => relativize(&a, &cwd),
+        })
+        .collect()
+}
+
+/// `token` made relative to `cwd` if its path part (before any `::`) is
+/// absolute and under `cwd`; else unchanged. Joined with `/`, which pytest
+/// accepts on every platform, so a Windows-recorded journal replays on unix.
+fn relativize(token: &str, cwd: &Path) -> String {
+    let (path, rest) = token.find("::").map_or((token, ""), |i| token.split_at(i));
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return token.to_string();
+    }
+    let p = canonical_lenient(p);
+    let Ok(rel) = p.strip_prefix(cwd) else {
+        return token.to_string();
+    };
+    let rel: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let rel = if rel.is_empty() {
+        ".".to_string()
+    } else {
+        rel.join("/")
+    };
+    format!("{rel}{rest}")
+}
+
+/// Canonicalize so a symlinked spelling (macOS `/tmp` -> `/private/tmp`) still
+/// matches the canonical cwd. A path that doesn't exist (yet) canonicalizes its
+/// longest existing ancestor and keeps the rest verbatim.
+fn canonical_lenient(p: &Path) -> PathBuf {
+    for anc in p.ancestors() {
+        if let Ok(c) = std::fs::canonicalize(anc) {
+            return match p.strip_prefix(anc) {
+                Ok(rest) if !rest.as_os_str().is_empty() => c.join(rest),
+                _ => c,
+            };
+        }
+    }
+    p.to_path_buf()
+}
+
+/// Recorded args whose path part is absolute and missing here: the usual cause
+/// of a replay that collects nothing (a journal from an older rstest, or a path
+/// outside the project, still carries the CI machine's path).
+fn missing_absolute_paths(args: &[String]) -> Vec<&str> {
+    args.iter()
+        .map(String::as_str)
+        .filter(|a| {
+            let val = match a.split_once('=') {
+                Some((flag, val)) if flag.starts_with("--") => val,
+                _ if a.starts_with('-') => return false,
+                _ => a,
+            };
+            let path = val.split("::").next().unwrap_or(val);
+            let p = Path::new(path);
+            p.is_absolute() && !p.exists()
+        })
+        .collect()
 }
 
 /// Sanitize a run uid / user-supplied id into a safe single-path-component file
@@ -347,7 +548,8 @@ mod tests {
     fn load_missing_is_a_helpful_error() {
         with_cache_dir(|_| {
             let err = load(Some("nope"), None).unwrap_err().to_string();
-            assert!(err.contains("reading replay journal"), "{err}");
+            assert!(err.contains("no replay journal at"), "{err}");
+            assert!(err.contains("--journal"), "hint at the CI path: {err}");
         });
     }
 
@@ -375,7 +577,7 @@ mod tests {
     #[test]
     fn explicit_journal_path_wins_over_run_id() {
         with_cache_dir(|dir| {
-            let j = journal("artifact", vec![vec!["x::t"]]);
+            let j = journal("artifact", vec![vec!["x::t"], vec![]]);
             let p = dir.join("downloaded.json");
             std::fs::write(&p, serde_json::to_vec(&j).unwrap()).unwrap();
             assert_eq!(load(Some("ignored"), Some(&p)).unwrap(), j);
@@ -404,6 +606,137 @@ mod tests {
             let per_uid = jsons.iter().filter(|n| *n != LATEST).count();
             assert_eq!(per_uid, KEEP, "pruned to KEEP: {jsons:?}");
         });
+    }
+
+    // Unix path spellings (`/definitely/...` is not absolute on Windows).
+    #[cfg(unix)]
+    #[test]
+    fn portable_args_relativizes_paths_under_cwd() {
+        let base = std::env::temp_dir().join(format!(
+            "rstest-replay-args-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        let tests = base.join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        let t = tests.display().to_string();
+        let b = base.display().to_string();
+        let got = portable_args(
+            vec![
+                t.clone(),
+                format!("{t}/test_x.py::test_y"),
+                format!("--rootdir={b}"),
+                b.clone(),
+                "-k".into(),
+                "slow".into(),
+                "/definitely/not/under/cwd".into(),
+                "rel/path".into(),
+            ],
+            &base,
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(
+            got,
+            vec![
+                "tests",
+                "tests/test_x.py::test_y",
+                "--rootdir=.",
+                ".",
+                "-k",
+                "slow",
+                "/definitely/not/under/cwd",
+                "rel/path",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_absolute_paths_flags_only_absent_absolute_paths() {
+        let here = std::env::temp_dir().display().to_string();
+        let args: Vec<String> = vec![
+            "/no/such/dir/tests".into(),
+            "/no/such/t.py::test".into(),
+            "--basetemp=/no/such/tmp".into(),
+            here,
+            "tests".into(),
+            "-q".into(),
+        ];
+        assert_eq!(
+            missing_absolute_paths(&args),
+            vec![
+                "/no/such/dir/tests",
+                "/no/such/t.py::test",
+                "--basetemp=/no/such/tmp"
+            ]
+        );
+    }
+
+    #[test]
+    fn load_rejects_worker_list_mismatch() {
+        with_cache_dir(|dir| {
+            let mut j = journal("mismatch", vec![vec!["a::t1"], vec!["a::t2"]]);
+            j.workers = 3;
+            let p = dir.join("m.json");
+            std::fs::write(&p, serde_json::to_vec(&j).unwrap()).unwrap();
+            let err = format!("{:#}", load(None, Some(&p)).unwrap_err());
+            assert!(err.contains("3 worker(s) but 2"), "{err}");
+
+            j.workers = 1;
+            j.assignment.truncate(1);
+            std::fs::write(&p, serde_json::to_vec(&j).unwrap()).unwrap();
+            let err = format!("{:#}", load(None, Some(&p)).unwrap_err());
+            assert!(err.contains("-n >= 2"), "{err}");
+        });
+    }
+
+    #[test]
+    fn opt_out_value_parsing() {
+        for on in ["", "0", "false", "FALSE", " 0 "] {
+            assert!(opt_out_off(on), "{on:?} keeps journaling on");
+        }
+        for off in ["1", "true", "yes"] {
+            assert!(!opt_out_off(off), "{off:?} turns journaling off");
+        }
+    }
+
+    #[test]
+    fn display_args_quotes_whitespace_tokens() {
+        let a: Vec<String> = ["tests", "-k", "not slow", ""].map(String::from).to_vec();
+        assert_eq!(display_args(&a), "tests -k 'not slow' ''");
+        assert_eq!(display_args(&[]), "(none)");
+    }
+
+    #[test]
+    fn strip_cache_selection_drops_filtering_flags_only() {
+        let args: Vec<String> = [
+            "tests",
+            "--lf",
+            "--ff",
+            "--lfnf",
+            "all",
+            "--sw",
+            "-k",
+            "slow",
+            "--last-failed-no-failures=none",
+            "--stepwise-skip",
+            "--nf",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (kept, dropped) = strip_cache_selection(&args);
+        assert_eq!(kept, ["tests", "--ff", "-k", "slow", "--nf"]);
+        assert_eq!(
+            dropped,
+            [
+                "--lf",
+                "--lfnf",
+                "all",
+                "--sw",
+                "--last-failed-no-failures=none",
+                "--stepwise-skip"
+            ]
+        );
     }
 
     #[test]

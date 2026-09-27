@@ -466,12 +466,16 @@ See [Verify no test was dropped](../guides/sharding.md#verify-no-test-was-droppe
 
 Re-run a recorded parallel schedule, so a parallel-only failure reproduces on
 demand. rstest owns dispatch (which worker runs which test, in what order), so
-unlike pytest/xdist it can record that schedule and pin it back. Every pool run
-(`-n >= 2`) journals its exact per-worker assignment and order to
+unlike pytest/xdist it can record that schedule and pin it back. Every parallel
+run (`-n >= 2`, except `--dist each`, `--shard` and `--collect lazy`) journals
+its exact per-worker assignment and order to
 `.rstest_cache/replay/`: one file per run (`<run-uid>.json`, last 10 kept) plus a
 stable `latest.json`. Journaling is on by default and costs almost nothing (it is
 the assignment rstest already tracks); disable it with
-`RSTEST_NO_REPLAY_JOURNAL=1`.
+`RSTEST_NO_REPLAY_JOURNAL=1` (`0`, `false` or empty leave it on). Replay itself
+writes no journal and leaves the duration and flake-history caches untouched:
+it is a diagnostic re-run, so repeating it while debugging doesn't pile
+failures onto one test or skew the scheduling baseline.
 
 ```console
 $ rstest replay                     # replay the most recent local run
@@ -489,20 +493,32 @@ replays it locally:
 - uses: actions/upload-artifact@v4
   if: failure()
   with:
-    name: rstest-replay
+    name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
     path: .rstest_cache/replay/latest.json
 ```
 
 ```console
-$ rstest replay --journal ./rstest-replay/latest.json
+$ rstest replay --journal ./rstest-replay-tests-0/latest.json
 ```
+
+For the full CI-to-local walkthrough (download, portability rules, what to
+read in the output), see
+[Replaying a CI-only failure locally](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally).
 
 The journal keys on nodeid, not on the machine-local collection index, so it
 survives the machine hop. Replay collects the suite fresh, re-resolves each
 recorded nodeid to this run's index, forces `-n` to the recorded worker count,
 and pins each worker to exactly its recorded nodeids in the recorded order, with
-work-stealing and reruns off (the recorded shuffle is already baked into the
-pinned order). It runs no new journaling.
+work-stealing and reruns off, `@pytest.mark.flaky` budgets and
+`[tool.rstest] reruns` included (the recorded shuffle is already baked into the
+pinned order). `@pytest.mark.serial` tests are held until every other worker
+has finished, as in the recording's serial phase. Recorded cache-selection
+flags (`--lf`, `--sw` and their variants) are dropped with a warning, since
+they would filter by the local pytest cache; reorder-only `--ff`/`--nf` stay. A worker that crashes
+mid-replay is respawned and runs only the rest of its list. A `--reruns` retry
+in the recording is journaled once, as its first attempt. Absolute test paths
+under the recording's working directory are stored relative to it. Replay
+writes no new journal.
 
 Determinism is per-worker: worker-local order and assignment are reproduced
 exactly, which is what state-ordering flakes depend on. The exact cross-worker

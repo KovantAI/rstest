@@ -250,7 +250,13 @@ runs:
       id: cache-restore
       uses: actions/cache/restore@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # v4.1.2
       with:
-        path: ${{ inputs.working-directory }}/.rstest_cache
+        # Replay journals are per-run artifacts, not scheduling state: caching
+        # them re-uploads up to 11 of them (MBs each at scale) on every save and
+        # can hand a later job a stale latest.json. Upload them per failed run
+        # instead (see the CI quickstart's replay recipe).
+        path: |
+          ${{ inputs.working-directory }}/.rstest_cache
+          !${{ inputs.working-directory }}/.rstest_cache/replay
         key: ${{ steps.cfg.outputs.cache-key }}
         restore-keys: |
           ${{ steps.cfg.outputs.cache-restore }}
@@ -492,7 +498,10 @@ runs:
       if: always() && steps.cfg.outputs.backend == 'actions-cache'
       uses: actions/cache/save@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # v4.1.2
       with:
-        path: ${{ inputs.working-directory }}/.rstest_cache
+        # Same path spec as the restore (actions/cache keys on it too).
+        path: |
+          ${{ inputs.working-directory }}/.rstest_cache
+          !${{ inputs.working-directory }}/.rstest_cache/replay
         key: ${{ steps.cfg.outputs.cache-key }}
 
     # Stage only the segment(s) this run wrote (present now, absent from the warm
