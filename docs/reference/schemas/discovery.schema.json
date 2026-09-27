@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DiscoveryDoc",
+  "description": "The `--collect-only --report-json` discovery document (schema 1). Field order is alphabetical to match the historical `serde_json::Map` output (serde_json has no `preserve_order` here), so the emitted bytes are unchanged by the move to a typed struct.",
+  "type": "object",
+  "required": [
+    "collect_errors",
+    "meta",
+    "tests"
+  ],
+  "properties": {
+    "collect_errors": {
+      "description": "Per-collector import/collection errors (empty on a clean collection).",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CollectError"
+      }
+    },
+    "meta": {
+      "$ref": "#/definitions/DiscoveryMeta"
+    },
+    "tests": {
+      "description": "One entry per collected test item, in collection order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DiscoveredTest"
+      }
+    }
+  },
+  "definitions": {
+    "CollectError": {
+      "description": "A collection-time error (one collector that failed to import/collect).",
+      "type": "object",
+      "required": [
+        "longrepr",
+        "path"
+      ],
+      "properties": {
+        "longrepr": {
+          "description": "The failure text (traceback / repr).",
+          "type": "string"
+        },
+        "path": {
+          "description": "The path pytest was collecting when it failed.",
+          "type": "string"
+        }
+      }
+    },
+    "DiscoveredTest": {
+      "description": "One discovered test item.",
+      "type": "object",
+      "required": [
+        "file",
+        "markers",
+        "nodeid"
+      ],
+      "properties": {
+        "file": {
+          "description": "Absolute source file, or empty when pytest reported no location.",
+          "type": "string"
+        },
+        "lineno": {
+          "description": "0-based definition line, or null when pytest reported none.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "markers": {
+          "description": "All pytest marker names on the item (own + inherited).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nodeid": {
+          "description": "The pytest node id.",
+          "type": "string"
+        }
+      }
+    },
+    "DiscoveryMeta": {
+      "description": "Envelope metadata for the discovery document.",
+      "type": "object",
+      "required": [
+        "count",
+        "kind",
+        "rootdir",
+        "runner",
+        "schema"
+      ],
+      "properties": {
+        "count": {
+          "description": "Number of collected test items (`tests.len()`).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "kind": {
+          "description": "Constant discriminator: always `\"discovery\"`.",
+          "type": "string"
+        },
+        "rootdir": {
+          "description": "Absolute project root; `file` paths are resolved against it.",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}
