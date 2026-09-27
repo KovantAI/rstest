@@ -257,6 +257,7 @@ mod tests {
                 flaky: 4,
                 failed: 2,
                 last_epoch: 0,
+                last_failed_epoch: 0,
             },
         );
         let (mut sink, cap) = Sink::captured();
@@ -305,6 +306,7 @@ mod tests {
                 flaky: 1,
                 failed: 5,
                 last_epoch: 0,
+                last_failed_epoch: 0,
             },
         );
         let (mut sink, cap) = Sink::captured();

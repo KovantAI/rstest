@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use crate::reporting::sink::Sink;
 
 /// How a CI exposes the PR/MR base for the current job.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum CiBase {
     /// A base branch NAME (GitHub/GitLab/Buildkite). Resolved against
     /// `origin/<name>` via merge-base - the PR fork point, not the base
@@ -340,26 +341,8 @@ mod tests {
         changed_files_from_git, changed_line_ranges, changed_new_lines, detect_ci_base, nonempty,
         parse_diff_hunks, parse_hunk_new_range, parse_hunk_old_range, CiBase, FileChange,
     };
-    use crate::select::GLOBAL_TEST_LOCK as GLOBAL;
+    use crate::test_env::{self, Held};
     use std::path::{Path, PathBuf};
-
-    /// RAII: restore the original CWD (and hold the global lock) on drop, so a
-    /// panicking test can't leave the process in a temp dir for its siblings.
-    struct Cwd {
-        orig: PathBuf,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    impl Drop for Cwd {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.orig);
-        }
-    }
-    fn enter(dir: &Path) -> Cwd {
-        let lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
-        let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        Cwd { orig, _lock: lock }
-    }
 
     fn git(dir: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
@@ -370,7 +353,9 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
-    fn init_repo(name: &str) -> PathBuf {
+    /// Takes the held lock: it spawns `git`, which resolves through PATH that
+    /// a sibling test may be shimming.
+    fn init_repo(_held: &Held, name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("rstest-git-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -389,116 +374,114 @@ mod tests {
 
     #[test]
     fn ci_base_priority_and_gitlab_target_branch() {
-        let _lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let held = test_env::lock();
         let keys = [
             "GITHUB_BASE_REF",
             "CI_MERGE_REQUEST_DIFF_BASE_SHA",
             "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
             "BUILDKITE_PULL_REQUEST_BASE_BRANCH",
         ];
-        let saved: Vec<Option<String>> = keys.iter().map(|k| std::env::var(k).ok()).collect();
-        for k in keys {
-            std::env::remove_var(k);
-        }
+        // Declared first, so dropped last: restores the real CI env after the
+        // per-step guards below have unwound.
+        let _cleared: Vec<_> = keys
+            .iter()
+            .map(|k| test_env::remove_var(&held, k))
+            .collect();
 
         // Nothing set off-CI.
         assert!(detect_ci_base().is_none());
 
         // GitLab MR without the exact SHA falls to the target-branch name.
-        std::env::set_var("CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "main");
-        match detect_ci_base() {
-            Some(CiBase::Branch { name, env }) => {
-                assert_eq!(name, "main");
-                assert_eq!(env, "CI_MERGE_REQUEST_TARGET_BRANCH_NAME");
-            }
-            _ => panic!("expected target-branch base"),
-        }
+        let _branch = test_env::set_var(&held, "CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "main");
+        assert_eq!(
+            detect_ci_base(),
+            Some(CiBase::Branch {
+                name: "main".into(),
+                env: "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+            })
+        );
 
         // The exact diff-base SHA wins over the branch name.
-        std::env::set_var("CI_MERGE_REQUEST_DIFF_BASE_SHA", "abc123");
+        let _sha = test_env::set_var(&held, "CI_MERGE_REQUEST_DIFF_BASE_SHA", "abc123");
         assert!(matches!(detect_ci_base(), Some(CiBase::Sha { .. })));
 
         // GITHUB_BASE_REF has top priority.
-        std::env::set_var("GITHUB_BASE_REF", "trunk");
-        match detect_ci_base() {
-            Some(CiBase::Branch { name, env }) => {
-                assert_eq!(name, "trunk");
-                assert_eq!(env, "GITHUB_BASE_REF");
-            }
-            _ => panic!("expected GITHUB_BASE_REF branch"),
-        }
-
-        for (k, v) in keys.iter().zip(saved) {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
-        }
+        let _gh = test_env::set_var(&held, "GITHUB_BASE_REF", "trunk");
+        assert_eq!(
+            detect_ci_base(),
+            Some(CiBase::Branch {
+                name: "trunk".into(),
+                env: "GITHUB_BASE_REF",
+            })
+        );
     }
 
     #[test]
     fn nonempty_rejects_empty_and_literal_false() {
-        let _lock = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let held = test_env::lock();
         let key = "RSTEST_TEST_NONEMPTY";
-        let saved = std::env::var(key).ok();
-        std::env::set_var(key, "");
+        let _g = test_env::set_var(&held, key, "");
         assert_eq!(nonempty(key), None);
-        std::env::set_var(key, "false");
+        let _g = test_env::set_var(&held, key, "false");
         assert_eq!(nonempty(key), None);
-        std::env::set_var(key, "main");
+        let _g = test_env::set_var(&held, key, "main");
         assert_eq!(nonempty(key).as_deref(), Some("main"));
-        match saved {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
     }
 
     #[test]
     fn changed_files_bails_on_unknown_rev() {
-        let repo = init_repo("files-bail");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "files-bail");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
         let err = changed_files_from_git(Some("no-such-ref-xyz")).unwrap_err();
         assert!(err.to_string().contains("git diff"), "{err}");
     }
 
     #[test]
     fn changed_line_ranges_bails_on_unknown_rev() {
-        let repo = init_repo("lines-bail");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "lines-bail");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
         let err = changed_line_ranges(Some("no-such-ref-xyz")).unwrap_err();
         assert!(err.to_string().contains("git diff -U0"), "{err}");
     }
 
-    /// Absolute path to the real `git`, found before we shadow it on PATH.
+    /// Absolute path to the real `git`, resolved once. Takes the held lock so
+    /// the first lookup can't see a sibling test's shim on PATH and mistake it
+    /// for git.
     #[cfg(unix)]
-    fn real_git() -> PathBuf {
-        for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-            let cand = dir.join("git");
-            if cand.is_file() {
-                return cand;
+    fn real_git(_held: &Held) -> PathBuf {
+        static REAL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        REAL.get_or_init(|| {
+            for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+                let cand = dir.join("git");
+                if cand.is_file() {
+                    return cand;
+                }
             }
-        }
-        panic!("no git on PATH");
+            panic!("no git on PATH");
+        })
+        .clone()
     }
 
     /// A `bin/` dir holding a `git` shim that exits non-zero for any invocation
     /// whose argv contains `fail_arg`, and otherwise execs the real git. Used to
     /// force a SPECIFIC git subcommand to fail while its siblings still succeed.
     #[cfg(unix)]
-    fn shim_git(dir: &Path, fail_arg: &str) -> PathBuf {
+    fn shim_git(held: &Held, dir: &Path, fail_arg: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let git = bin.join("git");
         let script = format!(
             "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"{fail_arg}\" ]; then\n    echo \"shim: forced failure on {fail_arg}\" >&2\n    exit 1\n  fi\ndone\nexec \"{real}\" \"$@\"\n",
-            real = real_git().display(),
+            real = real_git(held).display(),
         );
         std::fs::write(&git, script).unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -508,27 +491,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bails_when_ls_files_fails_after_diff_succeeds() {
-        let repo = init_repo("lsfiles-fail");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "lsfiles-fail");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let bin = shim_git(&repo, "ls-files");
-        let _cwd = enter(&repo);
-        let saved = std::env::var_os("PATH");
-        let mut path = bin.clone().into_os_string();
+        let _cwd = test_env::set_cwd(&held, &repo);
+        let bin = shim_git(&held, &repo, "ls-files");
+        let mut path = bin.into_os_string();
         path.push(":");
-        path.push(saved.clone().unwrap_or_default());
-        std::env::set_var("PATH", &path);
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let _path = test_env::set_var(&held, "PATH", &path);
 
         // diff succeeds (real git), ls-files is forced to fail.
         let e1 = changed_files_from_git(None).unwrap_err();
         // both diffs succeed, ls-files (the 3rd command) is forced to fail.
         let e2 = changed_line_ranges(None).unwrap_err();
 
-        match saved {
-            Some(v) => std::env::set_var("PATH", v),
-            None => std::env::remove_var("PATH"),
-        }
         assert!(e1.to_string().contains("git ls-files --others"), "{e1}");
         assert!(e2.to_string().contains("git ls-files --others"), "{e2}");
     }
@@ -536,31 +515,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn changed_line_ranges_bails_when_name_only_diff_fails() {
-        let repo = init_repo("nameonly-fail");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "nameonly-fail");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let bin = shim_git(&repo, "--name-only");
-        let _cwd = enter(&repo);
-        let saved = std::env::var_os("PATH");
-        let mut path = bin.clone().into_os_string();
+        let _cwd = test_env::set_cwd(&held, &repo);
+        let bin = shim_git(&held, &repo, "--name-only");
+        let mut path = bin.into_os_string();
         path.push(":");
-        path.push(saved.clone().unwrap_or_default());
-        std::env::set_var("PATH", &path);
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let _path = test_env::set_var(&held, "PATH", &path);
 
         // diff -U0 succeeds; the follow-up `diff --name-only` is forced to fail.
         let err = changed_line_ranges(None).unwrap_err();
 
-        match saved {
-            Some(v) => std::env::set_var("PATH", v),
-            None => std::env::remove_var("PATH"),
-        }
         assert!(err.to_string().contains("git diff --name-only"), "{err}");
     }
 
     #[test]
     fn changed_files_and_ranges_over_a_real_repo() {
-        let repo = init_repo("real");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "real");
         write(&repo, "a.py", "def a():\n    return 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
@@ -571,7 +547,7 @@ mod tests {
         write(&repo, ".coverage", "junk\n");
         write(&repo, "htmlcov/index.html", "<html>\n");
 
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
 
         let files = changed_files_from_git(None).unwrap();
         assert!(files.contains(&PathBuf::from("a.py")), "{files:?}");
@@ -591,18 +567,20 @@ mod tests {
 
     #[test]
     fn changed_new_lines_bails_on_unknown_rev() {
-        let repo = init_repo("newlines-bail");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "newlines-bail");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
         let err = changed_new_lines(Some("no-such-ref-xyz")).unwrap_err();
         assert!(err.to_string().contains("git diff -U0"), "{err}");
     }
 
     #[test]
     fn changed_new_lines_over_a_real_repo() {
-        let repo = init_repo("newlines-real");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "newlines-real");
         write(&repo, "a.py", "a = 1\nb = 2\nc = 3\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
@@ -613,7 +591,7 @@ mod tests {
         write(&repo, "b.py", "e = 5\nf = 6\n");
         git(&repo, &["add", "b.py"]);
 
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
 
         let map = changed_new_lines(None).unwrap();
         // Modified file: new-side line 2 (changed) and line 4 (added).
@@ -624,11 +602,12 @@ mod tests {
 
     #[test]
     fn changed_new_lines_empty_when_nothing_changed() {
-        let repo = init_repo("newlines-empty");
+        let held = test_env::lock();
+        let repo = init_repo(&held, "newlines-empty");
         write(&repo, "a.py", "x = 1\n");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let _cwd = enter(&repo);
+        let _cwd = test_env::set_cwd(&held, &repo);
         assert!(changed_new_lines(None).unwrap().is_empty());
     }
 

@@ -249,10 +249,12 @@ It is a **separate document** from the run snapshot above; combine with
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "rstest_version": "0.7.0",
   "workers": 8,
   "wall_seconds": 68.4,
+  "startup_seconds": 0.6,
+  "fork_prewarm": false,
   "tests": 2048,
   "test_time_seconds": 412.9,
   "cpu_time_seconds": 120.3,
@@ -282,22 +284,36 @@ It is a **separate document** from the run snapshot above; combine with
     "long_pole_seconds": 84.1
   },
   "fixtures": [
-    { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 }
+    { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 },
+    { "name": "feature_flags", "scope": "function", "count": 206, "total_seconds": 4.3,
+      "constant": true, "projected_saving_seconds": 0.52 }
   ],
   "slowest_files": [
     { "file": "tests/test_e2e.py", "total_seconds": 84.1, "pct": 20.4 }
-  ]
+  ],
+  "coverage_waste": {
+    "wasted_seconds": 18.4,
+    "redundant_tests": 3,
+    "tests": [
+      { "nodeid": "tests/test_api.py::test_end_to_end_slow", "duration": 12.1, "covered_lines": 240, "also_covered_by": 4 }
+    ]
+  }
 }
 ```
+
+For the machine-readable JSON Schema of this document (generated from the Rust
+type, always current), see [Output schemas](output-schemas.md#doctor-report).
 
 Top-level fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema` | int | document version, currently `2` |
+| `schema` | int | document version, currently `3` |
 | `rstest_version` | string | the rstest version that wrote it |
 | `workers` | int | worker count for this run (`-n`) |
 | `wall_seconds` | float | total wall-clock time; **depends on worker count** — compare across runs only at equal `-n` |
+| `startup_seconds` | float | wall from pool spawn to every worker's first event (import + collect start); part of `wall_seconds`. `0.0` on single-worker runs. Cut by [`--fork-pool`](cli.md#-fork-pool) |
+| `fork_prewarm` | bool | whether this run used [`--fork-pool`](cli.md#-fork-pool) |
 | `tests` | int | number of tests with a recorded duration |
 | `test_time_seconds` | float | summed per-test call durations (worker-count-independent — the stable trending metric) |
 | `cpu_time_seconds` | float | summed call-phase CPU time, over tests where it was measured |
@@ -306,6 +322,7 @@ Top-level fields:
 | `parallel_efficiency` | object / `null` | realized parallel speedup and per-worker load; **`null`** unless the run used more than one worker (`workers > 1`) |
 | `fixtures` | array | fixture timings, slowest first (≤ 50) |
 | `slowest_files` | array | per-file totals, slowest first (≤ 20) |
+| `coverage_waste` | object / `null` | slow tests that add no unique coverage; **`null`** unless this run collected per-test coverage (`--cov --cov-context=test`) and at least one slow test qualified |
 
 `wait_bound` (wall ≫ CPU — tests that wait rather than compute):
 
@@ -335,14 +352,37 @@ this run — `null` for single-worker runs):
 | `imbalance_pct` | float | `100 × (busiest − idlest) / busiest` — load spread across workers |
 | `long_pole_seconds` | float | slowest single test — the hard floor no worker count beats |
 
-`fixtures[]`: `{name, scope, count, total_seconds}` — fixture name, pytest
-scope, setup count, summed setup time. `slowest_files[]`:
+`fixtures[]`: `{name, scope, count, total_seconds, constant?,
+projected_saving_seconds?}` — fixture name, pytest scope, setup count,
+summed setup time. `constant` (present only when `true`) marks a
+function-scoped fixture that returned the same immutable builtin value on
+every call in every worker — a scope-promotion candidate; `projected_saving_seconds`
+(present only when non-zero) is the wall time promoting it to session scope
+would save: the largest per-worker-session `(calls − 1) × mean setup`.
+`constant` also requires some worker session to have run it at least
+twice, and is never set for fixtures with per-test teardown or
+narrower-scoped dependencies, for parametrize arguments, or for failed or
+skipped setups (see the
+[doctor guide](../guides/doctor.md#scope-promotion-candidates)).
+`slowest_files[]`:
 `{file, total_seconds, pct}` — `pct` is the file's share of
 `test_time_seconds`.
 
+`coverage_waste` (slow tests that cover no line another test doesn't also
+cover, so they are safe to delete or merge; needs per-test coverage from the
+same run):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `wasted_seconds` | float | summed duration of every redundant slow test (the reclaimable time), not just the shown ones |
+| `redundant_tests` | int | count of redundant slow tests found |
+| `tests` | array | the slowest of them, worst first (≤ 20): `{nodeid, duration, covered_lines, also_covered_by}` — `covered_lines` is how many lines the test hit (all shared), `also_covered_by` how many distinct other tests also cover them |
+
 `schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
 `cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
-`slowest_files`); `2` added the `parallel_efficiency` object.
+`slowest_files`); `2` added the `parallel_efficiency` object; `3` added the
+per-fixture `constant` / `projected_saving_seconds` scope-promotion fields
+and the `coverage_waste` object.
 
 `schema` aside, all times are raw seconds (no rounding) — round in your
 consumer. Increment-only: incompatible changes bump `schema`.
@@ -430,7 +470,7 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `nodeid` | string | the failing test |
-| `verdict` | string | `NOT PARALLEL-SPECIFIC` / `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` |
+| `verdict` | string | `NOT PARALLEL-SPECIFIC` / `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` / `INCONCLUSIVE` |
 | `why` | string | the evidence behind the verdict |
 | `fix` | string | the recommended fix plus rstest stopgap |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |

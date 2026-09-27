@@ -626,7 +626,7 @@ def gate_diff_coverage_gate(g, args, binary):
     check(
         "diff-cov: partial coverage passes a lower threshold",
         r.returncode == 0 and "meets 80%" in r.stderr,
-        f"rc={r.returncode} " + r.stderr[-200:],
+        f"rc={r.returncode} " + r.stderr[-200:] + r.stdout[-1500:],
     )
     # Cover the other branch -> 100%, gate passes.
     g.write(
@@ -641,7 +641,17 @@ def gate_diff_coverage_gate(g, args, binary):
     check(
         "diff-cov: fully-covered diff passes at 100%",
         r.returncode == 0 and "diff coverage 100.0% meets 100%" in r.stderr,
-        f"rc={r.returncode} " + r.stderr[-200:],
+        f"rc={r.returncode} " + r.stderr[-200:] + r.stdout[-1500:],
+    )
+    # --cov-diff-json alone (no threshold) writes covtool's scored result and
+    # never gates the run.
+    out = g.tmp / "diffcov.json"
+    r = g.run("-n", "2", *cov, "--cov-diff-json", str(out), cwd=dp, env_extra=env)
+    scored = json.loads(out.read_text()) if out.exists() else {}
+    check(
+        "diff-cov: --cov-diff-json writes the scored result",
+        r.returncode == 0 and scored.get("pct") == 100.0,
+        f"rc={r.returncode} {scored} " + r.stderr[-200:],
     )
     # Without --cov there's no coverage data to score: the gate is ignored with
     # a warning and does not fail the run.
