@@ -81,6 +81,9 @@ pub struct WorkerEnv {
     /// the worker ships captured stdout/stderr/log `sections` on **every**
     /// report, not just failures. Off by default to keep the wire lean.
     pub stream_output: bool,
+    /// `--junitxml` was given (the user's path, verbatim): the worker runs
+    /// pytest's LogXML and streams its testcase elements back. None = off.
+    pub junitxml: Option<String>,
 }
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
@@ -253,6 +256,7 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_LEAKCHECK",
     "RSTEST_DEBUGPY_PORT",
     "RSTEST_STREAM_OUTPUT",
+    "RSTEST_JUNITXML",
 ];
 
 /// Build the worker's [`Command`] (argv + per-run child environment + stdio)
@@ -332,6 +336,9 @@ fn build_worker_command(
     }
     if env.stream_output {
         command.env("RSTEST_STREAM_OUTPUT", "1");
+    }
+    if let Some(path) = &env.junitxml {
+        command.env("RSTEST_JUNITXML", path);
     }
     // Exactly one worker ships the full id list (D5); the rest verify their
     // collection by count+hash. Worker 0 in a pool; the lone worker only
@@ -627,6 +634,7 @@ mod tests {
             send_ids: false,
             debug_port: None,
             stream_output: false,
+            junitxml: None,
         }
     }
 
@@ -900,6 +908,7 @@ mod tests {
             send_ids: false,
             debug_port: None,
             stream_output: false,
+            junitxml: None,
         };
         // A freshly spawned worker blocks on its first command: alive, and never
         // sent anything — the decode-error/respawn precondition (child still

@@ -54,7 +54,10 @@ Worker count. Default `auto` (logical cores, capped as described below).
 - `-n 0` or `-n 1`: **byte-exact mode**, one pytest session with byte-exact
   pytest semantics; identical to each other, with no worker identity below
   `-n 2`. Exception: with `--reruns`, `-n 0/1` runs a one-worker pool instead
-  (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
+  (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). With no
+  `--output` set, the session prints pytest's own terminal output
+  (**Unreleased**); see [`--output`](#-output-dotsverbosebargithubjson).
+  See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
   (and, for migrators, how it differs from pytest-xdist's `-n 1`).
 
 **An explicit `-n <k>` is not capped by core count.** Only `auto` caps down.
@@ -768,6 +771,24 @@ Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
 to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
 
+!!! note "Unreleased: pytest's own output in byte-exact mode"
+    In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
+    or `-n auto` capped to one worker, without `--reruns`) with no `--output`
+    flag and no `[tool.rstest] output` key, the default is neither `bar` nor
+    `dots`: the single pytest session prints pytest's own terminal output,
+    on a TTY or not. That includes the session header, the FAILURES and
+    ERRORS sections, the warnings summary, `-r` and `--durations` sections,
+    plugin header and summary lines, and the final `= N passed in Xs =`
+    line. rstest prints no banner and no summary of its own there; it only
+    appends its extras after pytest's output (quarantined failures, the
+    `--doctor` report, the coverage report, gate messages) and still writes
+    `--junitxml`, `--report-json`, `--html` and `--stream-json` (see
+    [`--junitxml`](#-junitxml-path) for how that document matches pytest's).
+    An explicit `--output` style, on the command line or in
+    `[tool.rstest]`, keeps rstest's own renderer, under a
+    `single worker (pytest-exact mode)` banner. rstest 0.7.0 always used its
+    own renderer. At `-n 2` and above nothing changes.
+
 `dots` is pytest's one-char-per-test (`.`/`F`/`s`/…) with a running
 percentage. `verbose` is the `-v` equivalent: one `nodeid OUTCOME` line
 per test. `bar` is a pytest-sugar-style view: a per-test result line
@@ -791,7 +812,8 @@ renders it orchestrator-side from the streamed results.
 When stdout is not a TTY (CI, pipes) the live footer, progress bar, and
 closing results bar self-disable; the per-test lines plus the stable
 `N passed … in Xs` summary remain, so logs stay greppable. `-v` selects
-`verbose` unless `--output` says otherwise. Pin any style explicitly with
+`verbose` unless `--output` says otherwise (in byte-exact mode with no
+`--output`, `-v` is pytest's own). Pin any style explicitly with
 `--output` or `[tool.rstest] output` to override the TTY auto-default.
 
 #### Machine-readable styles { #machine-readable-styles }
@@ -875,14 +897,31 @@ snapshot document to a file.
 ### `--junitxml <path>`
 
 Write merged results as JUnit XML. Intercepted by rstest (rather than
-forwarded) because per-worker sessions would clobber a shared file; the
-XML is rendered from merged results with pytest's classname conventions.
+forwarded) because per-worker sessions would clobber a shared file.
 
-Only final outcomes appear: a test that passed after `--reruns` retries is
-a passing `<testcase>` carrying a
-`<property name="flaky" value="true"/>` (JUnit's standard extension
-point), so junit-based dashboards can track flakes without parsing
-`--report-json`.
+**Unreleased:** the document is pytest's own at every worker count. Each
+worker runs pytest's junitxml plugin and streams every finished
+`<testcase>` element to rstest, which merges them in collection order
+(pytest's run order at `-n 0`). Suite name and attributes, `junit_family`,
+`junit_logging`, `junit_suite_name`, `--junit-prefix`, `record_property`,
+`record_xml_attribute` and `record_testsuite_property` all come out exactly
+as under pytest; only `time`, `timestamp` and `hostname` vary between runs.
+(rstest 0.7.0 wrote its own document: suite `rstest`, tests sorted by
+nodeid, generic `message` attributes.)
+
+rstest adds its own signals only as standard `<property>` extensions:
+
+- a test that passed after `--reruns` retries is a passing `<testcase>`
+  with `<property name="flaky" value="true" />`, and only its last attempt
+  appears;
+- a [quarantined](#-quarantine-file) failure has its `<failure>` / `<error>`
+  removed and carries `<property name="quarantined" value="true" />`, so a
+  junit-gated CI agrees with rstest's exit status;
+- a test no worker finished (a crash or `--worker-timeout` kill in a pool,
+  an `--incremental` cached pass) gets an element synthesized in pytest's
+  shape.
+
+A crash at `-n 0` still ends the run before any report is written.
 
 ### `--html <path>`
 
@@ -1079,10 +1118,11 @@ unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 `--ff`, `-W`, `-p`, `--tb`, `--color`, `--basetemp`, plugin flags, ...
 
 Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
-and subcommand list) and `-V` / `--version` (`rstest 0.7.0`). pytest's help
-is not reachable through rstest: `rstest -- --help` prints only the banner and
-exits `0`. To list pytest's and your plugins' flags, run `python -m pytest
---help` in the test environment (this needs pytest installed there, and shows
+and subcommand list) and `-V` / `--version` (`rstest 0.7.0`). In 0.7.0 pytest's
+help is not reachable through rstest: `rstest -- --help` prints only the
+banner and exits `0`. **Unreleased:** in byte-exact mode with no `--output`
+set, it prints the vendored pytest's help instead. To list pytest's and
+your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows
 that installed version's flags).
 
 Short flags combine the way pytest reads them: `-sv` is `-s -v`, `-xv` is

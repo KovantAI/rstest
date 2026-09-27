@@ -30,6 +30,14 @@ Most xdist flags carry over unchanged. The ones people actually touch:
 - **`--dist worksteal`**: rejected (exit 1, `unknown --dist mode`). Use
   `load`, the default: it already dispatches slowest-first from the duration
   cache.
+- **`--dist each`**: supported, partially. Every worker runs the full suite,
+  all on the same interpreter (xdist's heterogeneous `--tx` gateways have no
+  equivalent), and rstest's `--reruns` is rejected in this mode. See the
+  [xdist support matrix](../reference/xdist-support.md#flag-matrix).
+- **`--looponfail` / `-f`**: use [`--watch`](watch-mode.md) instead. rstest
+  does not handle `--looponfail`; with pytest-xdist installed it reaches every
+  worker session, xdist's loop-on-fail mode takes it over, and the run hangs.
+  Remove it from `addopts` before switching.
 - **`-p no:xdist`**: forwarded to pytest in every worker. rstest does not
   need pytest-xdist, so the run still parallelizes. A leftover
   `addopts = -n 4` then fails: pytest has no `-n` option once xdist is
@@ -37,7 +45,7 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   `unrecognized arguments: -n`), the same as uninstalling pytest-xdist.
 
 Everything else (`--tx`, `--rsync*`, `-d`, `--maxprocesses`,
-`--max-worker-restart`, `--dist each`, `--looponfail`) is covered row by row,
+`--max-worker-restart`) is covered row by row,
 including what happens to a flag rstest doesn't act on, in the
 [xdist support matrix](../reference/xdist-support.md#flag-matrix). In short:
 those flags parse but do nothing while pytest-xdist is installed, and are a
@@ -102,6 +110,9 @@ pytest-xdist is installed. Removing pytest-xdist from your config keeps them
 working (`worker_id` is `"master"` below `-n 2`, `gwN` in the pool). With
 pytest-xdist installed, rstest's definitions take precedence over xdist's (a
 conftest override still wins), and in the pool both return the same values.
+**Unreleased:** in 0.7.0 xdist's definitions won when pytest-xdist was
+installed (see the
+[xdist support matrix](../reference/xdist-support.md#fixtures-worker-identity)).
 One caveat: `--reruns` at `-n 0/1` runs a one-worker pool where
 `config.workerinput` and `PYTEST_XDIST_WORKER=gw0` exist, so xdist's
 `get_xdist_worker_id()` / `is_xdist_worker()` report `gw0` while the fixtures
@@ -188,7 +199,10 @@ rstest exits.
 
 `addopts = -n 4` with pytest-xdist installed is neutralized inside rstest
 workers automatically: options parse, the xdist session never engages, no
-nested workers. Keep it while a pytest-xdist job is still your fallback, then
+nested workers. One exception: `rstest --pdb` fails with xdist's
+`--pdb is incompatible with distributing tests`, because xdist checks before
+rstest neutralizes it, so remove `-n` from `addopts` before debugging with
+`--pdb`. Keep it while a pytest-xdist job is still your fallback, then
 remove it and pass `-n` to rstest. Uninstall pytest-xdist only after that,
 and only once no conftest or plugin implements its hooks (see
 [Controller-side hooks](#controller-side-hooks)).
@@ -205,12 +219,34 @@ warning. Copy the mode when you switch:
 dist = "loadgroup"
 ```
 
+### Audit the rest of `addopts`
+
+rstest reads its own flags from the command line or `[tool.rstest]`, never
+from `addopts` or `PYTEST_ADDOPTS`. Besides `-n` and `--dist` above, check
+these before you switch:
+
+- **`--reruns N`**: does nothing in the pool, silently. Pass it on the rstest
+  command line or set `[tool.rstest] reruns = N`
+  ([why](migrate-from-pytest.md#addopts-and-pytest_addopts)).
+- **`--cov=...` / `--cov-report=...`**: a parallel run measures coverage in
+  every worker but never combines or reports it, and still exits 0. Move the
+  flags to the command line
+  ([Coverage](coverage.md)).
+- **`--timeout N`**: works only while pytest-timeout is installed, and then
+  the plugin and rstest both arm a timer. Once you remove the plugin it is a
+  usage error (exit 4). Pass `rstest --timeout N` on the command line; there
+  is no `[tool.rstest]` key for it
+  ([pytest-timeout](plugins.md)).
+- **`--looponfail`, `--tx`, `--rsync*`, `-d`, `--maxprocesses`,
+  `--max-worker-restart`**: see the [flag map](#flag-map) above; drop them
+  once no pytest-xdist job still needs them.
+
 ## What improves
 
 - **Single collection authority**: xdist aborts runs when workers collect
   differently ("Different tests were collected..."); rstest verifies by
   hash and refuses **before** misassigning, and its error names the cause
-  (usually a randomizing plugin without a fixed seed). `rstest
+  (usually an unstable `parametrize` id). `rstest
   migrate-check` finds this *before* the first run: it collects twice,
   diffs the nodeid sets, and names the exact `parametrize` site with the
   unstable id (memory address / uuid); see

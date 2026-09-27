@@ -13,7 +13,13 @@ What rstest promises about matching pytest's behavior, how that promise is measu
    `-n 0` as in parallel rather than as in pytest. `@pytest.mark.timeout` is
    rstest's native timeout too (its SIGALRM timer is armed for marked tests
    even without `--timeout`). To give one of these flags to pytest instead,
-   pass it after `--`.
+   pass it after `--`. With no `--output` set, the terminal output at `-n 0`
+   is pytest's own too (**Unreleased**; rstest 0.7.0 printed its own view),
+   with rstest's extras (doctor, coverage, gate messages) appended after
+   pytest's summary line; an explicit `--output` switches back to rstest's
+   renderer. `--junitxml` is pytest's own document at every worker count
+   (**Unreleased**), plus rstest's `flaky` / `quarantined` properties; see
+   [`--junitxml`](../reference/cli.md#-junitxml-path).
 2. **In parallel modes: outcomes preserved for parallel-safe tests.**
    Identical per-test outcomes (setup/call/teardown, skips, xfails) for
    tests without hidden timing/ordering/shared-state assumptions. Tests

@@ -79,3 +79,9 @@ $ rstest --watch -n 2          # bounded parallelism while editing
 
 The duration cache and last-failed state update on every cycle, so `--lf`
 and slow-test-first scheduling stay warm throughout the session.
+
+### Dispatch order and worker count
+
+Watch reruns default to [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast): tests that recently failed or flaked (from `flakes.json`) run first, then the rest in slow-first throughput order, so a red surfaces as early as possible on each save. Pair it with `-x` to stop at that first red; pass `--order throughput` (or set `[tool.rstest] order`) to opt out. Ordering only applies with two or more workers.
+
+Without `-n`, rstest uses `-n auto`, which caps the pool by test-file count and by cached suite time (about one worker per 2s of tests). A small, fast suite with a warm cache therefore often runs a single worker locally: [byte-exact mode](../concepts/glossary.md#byte-exact-mode), no worker identity, and fail-fast ordering has no effect. Parallel-only failures you see in CI won't reproduce that way; pass `-n 2` or more (`rstest --watch -n 2`) when you want local runs to parallelize like CI.

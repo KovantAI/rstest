@@ -159,6 +159,19 @@ class NodeInputPayload(TypedDict):
     workerinput: dict[str, object]  # _wire_safe'd, arbitrary map
 
 
+class JunitCasePayload(TypedDict):
+    nodeid: str
+    cases: list[str]  # serialized <testcase> elements of one test attempt
+
+
+class JunitSuitePayload(TypedDict):
+    name: str  # junit_suite_name
+    timestamp: str  # session start, local ISO 8601 (pytest's format)
+    hostname: str
+    properties: list[str]  # serialized record_testsuite_property <property>s
+    extra: list[str]  # never-finalized <testcase>s (collection/internal errors)
+
+
 EventKind = Literal[
     "report",
     "collect_error",
@@ -176,6 +189,8 @@ EventKind = Literal[
     "item_done",
     "stopped",
     "done",
+    "junit_case",
+    "junit_suite",
 ]
 
 

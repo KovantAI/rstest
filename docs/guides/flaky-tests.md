@@ -61,6 +61,14 @@ scheduling (see [CI quickstart](ci-quickstart.md)) and the counts
 accumulate across runs; without persistence you still get history on
 developer machines and self-hosted runners.
 
+`failed` counts **every** red run that writes the cache, including local runs
+and each `--watch` cycle, so a test you broke on purpose while editing picks
+up `failed` counts too. Read `flaky` as the flake signal; a high `failed`
+count on a developer machine may just be your own edit loop. Those failures
+also move the test to the front of `--order fail-fast`. To keep a scratch
+history apart from the one you care about, point `RSTEST_CACHE` at another
+directory for that session.
+
 History **ages out**. A test with no flake or failure inside the
 retention window (default **90 days**, from `last_epoch`) reads as fixed:
 its entry is dropped on the next run and it stops carrying the
@@ -189,6 +197,15 @@ run.
 3. Fix the test; remove the entry. If it was really fixed, the history
    stops accruing and ages out of `flakes.json` after the retention
    window: if the entry comes back in review, it wasn't.
+
+Before quarantining a test that fails only in some orders or only in
+parallel, check whether it is flaky at all or order-dependent:
+[`--shuffle`](../reference/cli.md#-shuffleseed) reproduces an order,
+[`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) names
+the test that pollutes it, and [`rstest audit`](../reference/cli-commands.md#audit)
+lists the parallel-only failures. An order dependency has a fix; quarantine
+is for real nondeterminism. See
+[Diagnosing a parallel-only failure](parallel-safety.md#diagnosing-a-parallel-only-failure).
 
 The failure mode to avoid is a quarantine list that only ever grows.
 `flakes.json` self-ages (see [aging](#remember-the-flake-history)

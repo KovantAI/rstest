@@ -235,6 +235,16 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
+            Ok(Event::JunitSuite {
+                name,
+                timestamp,
+                hostname,
+                properties,
+                extra,
+            }) => run
+                .junit
+                .record_suite(name, timestamp, hostname, properties, extra),
             Ok(Event::Warnings { entries }) => {
                 // Files are disjoint across lazy workers, so collect and
                 // runtest warnings are each seen once; only config-phase

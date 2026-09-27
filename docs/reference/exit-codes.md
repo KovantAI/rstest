@@ -47,8 +47,16 @@ records the test session's result **before** the post-run gates
 | 5 | written | 5 | no tests collected |
 | 5 | **none** | n/a | `--changed-strict` and nothing affected |
 
-A monorepo root is the exception to "no report": it still writes
-`--report-json` when `--changed` skips every project (see below).
+A monorepo root reads this table differently:
+
+- It is the exception to "no report": it still writes `--report-json` when
+  `--changed` skips every project (see below), and it writes the merged
+  report even when a project refused to run.
+- Its `meta.exitstatus` (and each `meta.projects[*].exitstatus`) is the
+  merged **process** exit of the projects, so post-run gate failures are
+  already in it. At a root, `exit 1` with `meta.exitstatus` 1 can mean a
+  failed test or a failed gate; read the project's own entry, or its
+  per-project report, to tell them apart.
 
 ## Gating flags and their exit codes
 
@@ -66,10 +74,10 @@ Flags that gate CI have exit semantics beyond the table above:
 | [`--fail-on-leak`](cli.md#-fail-on-leak) | `1` when any thread/fd leak is found |
 | [`--require-baseline`](cli.md#-require-baseline) | `1` before the run when `--durations-regress` has no duration baseline |
 | [`--quarantine`](cli.md#-quarantine-file) | `0` when every failure is on the quarantine list; `1` if any failure is outside it |
-| [`audit`](cli-commands.md#audit) | `0` parallel-safe, `1` at least one parallel-only failure, `2` rstest refused to dispatch |
-| [`bisect`](cli-commands.md#bisect-nodeid) | `0` order-dependent culprit found, `1` not order-dependent, `2` nodeid not in the suite or a selection passed after `--` |
-| [`shard-verify`](cli-commands.md#shard-verify) | `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
-| [`explain`](cli-commands.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
+| [`audit`](cli-commands.md#audit) | **Unreleased.** `0` parallel-safe, `1` at least one parallel-only failure, `2` rstest refused to dispatch |
+| [`bisect`](cli-commands.md#bisect-nodeid) | **Unreleased.** `0` order-dependent culprit found, `1` not order-dependent, `2` nodeid not in the suite or a selection passed after `--` |
+| [`shard-verify`](cli-commands.md#shard-verify) | **Unreleased.** `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
+| [`explain`](cli-commands.md#explain) | **Unreleased.** human mode: `1` for an unknown nodeid; with `--json`: always `0` |
 | [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift |
 
 When several gates fire, the exit is still `1`; each gate only raises a `0`

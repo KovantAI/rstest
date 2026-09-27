@@ -46,6 +46,10 @@ $ rstest --watch -n 2          # bounded parallelism while editing
 
 The duration cache and last-failed state update on every cycle, so `--lf` (below) and slow-test-first scheduling stay warm throughout the session.
 
+**Reruns go fail-fast first.** Watch reruns default to [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast): tests that recently failed or flaked (from `flakes.json`) run first, then the rest in slow-first throughput order, so a red surfaces as early as possible on each save. Pair it with `-x` to stop at that first red; pass `--order throughput` (or set `[tool.rstest] order`) to opt out. Ordering only applies with two or more workers.
+
+**Small suites may run one worker.** Without `-n`, rstest uses `-n auto`, which caps the pool by test-file count and by cached suite time (about one worker per 2s of tests). A small, fast suite with a warm cache therefore often runs a single worker locally: [byte-exact mode](../concepts/glossary.md#byte-exact-mode), no worker identity, and fail-fast ordering has no effect. Parallel-only failures you see in CI won't reproduce that way; pass `-n 2` or more (`rstest --watch -n 2`) when you want local runs to parallelize like CI.
+
 **New test files are picked up.** Saving a brand-new file that matches `python_files` counts as a test-file change and reruns exactly that file, even if it sits outside the path you started the session with: reruns keep your flags (`-k`, `-x`, `-n`, ...) but not your positional paths.
 
 **Per-cycle overhead is roughly 0.4s.** From save to result on a one-test project, a cycle takes about 400ms at both `-n 0` and `-n 2`: the 300ms debounce plus about 100ms to spawn fresh workers and collect. Higher `-n` adds a little worker startup, and large trees add the per-save selection latency (tens of milliseconds; see [`--watch`](../reference/cli.md#-watch)). Everything else is your tests' own time. See [Watch mode](watch-mode.md#per-cycle-cost).

@@ -247,9 +247,10 @@ at once:
 
 **Both dissolve if you make the project the unit of CI parallelism**: one
 job per package via a matrix, instead of one root job running everything
-concurrently. Each job runs a single project (`rstest libs/core` opts out of
-monorepo mode and runs that package alone, with the runner's *full* core count
-and no oversubscription), and because it's a single-project run it can use the
+concurrently. Each job runs the bundled action **inside** its package
+(`working-directory`), so it is a plain single-project run: the package's
+own `[tool.rstest]`, lockfile or `.venv`, and `.rstest_cache` apply, it gets
+the runner's *full* core count with no oversubscription, and it can use the
 [shared cache](ci-shared-cache.md) normally:
 
 ```yaml
@@ -260,7 +261,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       projects: ${{ steps.list.outputs.projects }}
-      run-id: ${{ steps.warm.outputs.run-id }}
     steps:
       - uses: actions/checkout@v7
       # Emit the matrix from your project layout. Keep this list in sync with
@@ -268,19 +268,6 @@ jobs:
       - id: list
         run: |
           echo 'projects=["libs/core","libs/cli","services/api"]' >> "$GITHUB_OUTPUT"
-      # Resolve the warm-cache run ONCE, here, so every matrix leg warms from
-      # the same main run even if a new one finishes while the matrix starts.
-      - name: resolve warm-cache run
-        id: warm
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "${{ github.workflow }}" --branch main --event push \
-                  --status success --limit 1 \
-                  --json databaseId --jq '.[0].databaseId // ""')
-          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
 
   test:
     needs: discover
@@ -291,72 +278,43 @@ jobs:
         project: ${{ fromJSON(needs.discover.outputs.projects) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with: { python-version: "3.13" }
-      - run: pip install -r requirements.txt && pip install rstest==0.7.0
-      # Artifact names can't contain "/", so derive a slug (libs/core -> libs-core).
-      # Artifact names put "--" after the slug so libs-core's pattern can't
-      # also match libs-core-extra's segments.
-      - id: slug
-        run: echo "slug=$(echo '${{ matrix.project }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
-
-      # Warm this project's shared cache from the main run resolved upstream.
-      # Warm segments land in ./rcache/segments/ (where rstest reads them);
-      # upload-artifact strips that prefix on push, so aim the download at it.
-      - uses: actions/download-artifact@v8
-        if: needs.discover.outputs.run-id != ''
+      # Pin a main commit SHA: per-leg artifact names are Unreleased (0.8.0).
+      - uses: KovantAI/rstest/.github/actions/rstest@<sha>
         with:
-          pattern: "rstest-seg-${{ steps.slug.outputs.slug }}--*"
-          merge-multiple: true
-          path: ./rcache/segments
-          github-token: ${{ github.token }}
-          run-id: ${{ needs.discover.outputs.run-id }}
-        continue-on-error: true
-      - run: ls ./rcache/segments/seg-*.json 2>/dev/null | xargs -rn1 basename | sort > .warm-segs || true
-
-      # Run ONE project → full runner cores, no oversubscription, shared cache OK.
-      # The junit slug keeps per-package files distinct across matrix legs.
-      - name: test
-        run: |
-          rstest ${{ matrix.project }} -n auto --output github \
-                 --cache-remote ./rcache --cache-pull --cache-push \
-                 --junitxml "junit.${{ steps.slug.outputs.slug }}.xml"
-
-      # Upload only this run's new segment(s), not the warmed union.
-      - run: |
-          mkdir -p ./push
-          for f in ./rcache/segments/seg-*.json; do
-            [ -e "$f" ] || continue
-            grep -qxF "$(basename "$f")" .warm-segs 2>/dev/null || cp "$f" ./push/
-          done
-        if: always()
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          # run_attempt keeps a re-run from colliding with the first
-          # attempt's artifact name (artifact names are unique per run).
-          name: rstest-seg-${{ steps.slug.outputs.slug }}--${{ github.run_id }}-${{ github.run_attempt }}
-          path: ./push/seg-*.json
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: junit-${{ steps.slug.outputs.slug }}-${{ github.run_attempt }}
-          path: "junit.*.xml"
+          python-version: "3.13"
+          # Run inside the package, not `rstest libs/core` from the root:
+          # a root-relative path would skip the package's own [tool.rstest],
+          # its .venv, and its .rstest_cache.
+          working-directory: ${{ matrix.project }}
+          # Per-package segment-merge shared cache over GitHub artifacts.
+          # Artifact names carry the package (artifact-suffix defaults to
+          # <os>-py<version>-<working-directory>, e.g. Linux-py3.13-libs-core),
+          # so packages never warm from each other's segments.
+          cache-backend: artifact
+          # uv projects are detected and installed with `uv sync --dev`;
+          # otherwise install the package's own dependencies here.
+          install: pip install -r requirements.txt rstest
+          args: "-n auto"
+          upload-junit: true
 ```
 
-`gh run list --status success` only ever picks a **green** main run. While
-main is red, every job keeps warming from the last green run, so durations and
-the coverage index stop advancing until main is fixed, and a long red streak
-means scheduling from increasingly stale timings. Use `--status completed`
-instead if you would rather warm from the newest finished run, red or not.
-
 Each package is its own job. It gets the whole runner, warms its own cache
-segment from the last green main run, and pushes a fresh segment (cold on run
-one, warm from run two, exactly like the single-suite case). Isolation is free
-(matrix jobs don't share a runner), and a slow package no longer steals
-workers from a fast one. The segment-merge mechanics are in
-[Shared cache across CI jobs](ci-shared-cache.md).
+segments from the latest green run on `main` (cold on run one, warm from run
+two, exactly like the single-suite case), and uploads a fresh segment plus
+its JUnit under per-package artifact names. Isolation is free (matrix jobs
+don't share a runner), and a slow package no longer steals workers from a
+fast one. Each leg resolves its warm run on its own; that is fine here,
+because legs are different packages and never merge each other's segments
+(a [shard matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix) of
+one suite is different). The action only warms from green runs, so while
+`main` is red every leg keeps warming from the last green one. The
+segment-merge mechanics are in [Shared cache across CI jobs](ci-shared-cache.md).
+
+If a package is a member of a root uv workspace (one `uv.lock` at the repo
+root, none in the package), set `runner: uv` so the action doesn't fall
+back to pip. Point `working-directory` at a package, never at the monorepo
+root itself: the action caches `<working-directory>/.rstest_cache` and
+uploads a single JUnit file, which is not what a root run writes.
 
 !!! note "When to keep the root run instead"
     If your packages are **few** (roughly ≤ the runner's core count) the root

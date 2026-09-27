@@ -343,6 +343,16 @@ pub fn run_pool(
                 run.collect_error(path, longrepr);
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
+            Ok(Event::JunitSuite {
+                name,
+                timestamp,
+                hostname,
+                properties,
+                extra,
+            }) => run
+                .junit
+                .record_suite(name, timestamp, hostname, properties, extra),
             Ok(Event::Warnings { entries }) => {
                 // Per-test warnings are disjoint across workers; config and
                 // collection warnings repeat in every session, so count those
@@ -392,6 +402,7 @@ pub fn run_pool(
                 }
                 if let Some(ids) = &ids {
                     sources.record(ids);
+                    run.junit.set_collection_order(ids);
                 }
                 if dist != Dist::Each {
                     if let Some(f) = flaky {

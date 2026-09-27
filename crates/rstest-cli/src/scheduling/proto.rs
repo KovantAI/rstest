@@ -285,6 +285,27 @@ pub enum Event {
     Done {
         exitstatus: i32,
     },
+    /// `--junitxml`: pytest's own serialized `<testcase>` element(s) for one
+    /// test attempt (a call failure plus a teardown error is two), streamed as
+    /// each test finishes. The last attempt per nodeid wins (reruns).
+    JunitCase {
+        nodeid: String,
+        cases: Vec<String>,
+    },
+    /// `--junitxml`, at session finish: suite attributes, serialized
+    /// `record_testsuite_property` elements, and never-finalized testcases
+    /// (collection and internal errors).
+    JunitSuite {
+        name: String,
+        #[serde(default)]
+        timestamp: String,
+        #[serde(default)]
+        hostname: String,
+        #[serde(default)]
+        properties: Vec<String>,
+        #[serde(default)]
+        extra: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -550,6 +571,24 @@ mod property {
             any::<u64>().prop_map(|index| Event::ItemDone { index }),
             prop::collection::vec(any::<u64>(), 0..4).prop_map(|unrun| Event::Stopped { unrun }),
             any::<i32>().prop_map(|exitstatus| Event::Done { exitstatus }),
+            (small_str(), small_strs())
+                .prop_map(|(nodeid, cases)| Event::JunitCase { nodeid, cases }),
+            (
+                small_str(),
+                small_str(),
+                small_str(),
+                small_strs(),
+                small_strs()
+            )
+                .prop_map(|(name, timestamp, hostname, properties, extra)| {
+                    Event::JunitSuite {
+                        name,
+                        timestamp,
+                        hostname,
+                        properties,
+                        extra,
+                    }
+                }),
         ];
         prop_oneof![group_a, group_b]
     }

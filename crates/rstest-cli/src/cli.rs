@@ -553,7 +553,9 @@ pub(crate) fn path_args(args: &[String]) -> Vec<&String> {
 pub(crate) fn without_path_args(args: &[String]) -> Vec<String> {
     args.iter()
         .zip(positional_mask(args))
-        .filter(|(a, pos)| !*pos || !std::path::Path::new(a).exists())
+        .filter(|(a, pos)| {
+            !*pos || !std::path::Path::new(a.strip_prefix('@').unwrap_or(a)).exists()
+        })
         .map(|(a, _)| a.clone())
         .collect()
 }
@@ -1012,6 +1014,7 @@ mod tests {
         assert_eq!(path_args(&v(&["--", "src"])), vec!["src"]);
         // `@argsfile` counts by its file; a missing path isn't a selection.
         assert_eq!(path_args(&v(&["@src", "no/such/dir"])), vec!["@src"]);
+        assert_eq!(without_path_args(&v(&["@src", "-q"])), v(&["-q"]));
     }
 
     #[test]

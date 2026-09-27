@@ -5,6 +5,37 @@ between 0.x releases and are listed here.
 
 ## 0.8.0 (Unreleased)
 
+- **Byte-exact mode now prints pytest's own terminal output.** At `-n 0` /
+  `-n 1` (and `-n auto` capped to one worker), with no `--output` set, the
+  pytest session writes to stdout directly instead of rstest re-rendering it:
+  the session header, `ERRORS` / `FAILURES` sections, warnings summary,
+  `short test summary info`, `-r`, `--durations`, `-x`, and any plugin's
+  `pytest_report_header` / `pytest_terminal_summary` lines now match plain
+  pytest byte for byte. rstest prints no banner or summary of its own there,
+  only its additions after pytest's (quarantined failures, doctor, coverage,
+  gate messages); `--junitxml`, `--report-json`, `--html` and `--stream-json`
+  are still written. Pass `--output dots|verbose|bar|...` to keep rstest's
+  renderer. `-n ≥ 2` is unchanged.
+- **`--junitxml` writes pytest's own document.** Each worker now runs
+  pytest's junitxml plugin and streams every finished `<testcase>` element,
+  and rstest merges them in collection order, so the file matches plain
+  pytest's (apart from `time` / `timestamp` / `hostname`) at every `-n`:
+  suite `pytest` in `<testsuites name="pytest tests">`, pytest's run order,
+  real `message` attributes, `type="pytest.skip"` / `pytest.xfail`, and
+  `junit_family`, `junit_logging`, `junit_suite_name`, `--junit-prefix`,
+  `record_property`, `record_xml_attribute` and `record_testsuite_property`
+  honored. Previously rstest wrote its own document (suite `rstest`, tests
+  sorted by nodeid, `message="failed"`), and the `record_*` fixtures were
+  lost. rstest's additions are standard `<property>` extensions: `flaky` on
+  a test that passed after reruns, and `quarantined` on a quarantined
+  failure, whose `<failure>` is removed so junit-gated CI agrees with the
+  exit status. In byte-exact mode, pytest's closing summary is now followed
+  by `rstest: N failures above are quarantined and do not fail the run`.
+- **An empty folder runs one worker and says `no tests ran`.** `rstest` with
+  nothing to collect started a full pool (one worker per core) and printed an
+  empty summary line (` in 0.15s`). `-n auto` now drops to one worker when
+  the collection walk finds no Python file at all and no argument names a
+  path, and an empty run's summary reads `no tests ran`, like pytest.
 - **`-x` / `--maxfail` from ini `addopts` now stop the whole run.** Only a
   command-line `-x` was coordinated across workers; one in `addopts` or
   `PYTEST_ADDOPTS` stopped each worker's own session, so the other workers
@@ -47,10 +78,16 @@ between 0.x releases and are listed here.
   reaches the action's scripts through `env:` rather than being pasted into
   them. `args` is split with shell quoting rules (`-k "a and b"` stays one
   argument) and is never glob-expanded or evaluated.
+- **GitHub action: "Re-run failed jobs" no longer fails at artifact upload.**
+  Artifact names are unique per run across attempts, so a re-run hit a name
+  conflict uploading its cache segment and JUnit. Segment names now carry the
+  attempt (`rstest-seg-<suffix>--<run_id>-<attempt>-<shard>`; the warm pattern
+  is unchanged and merges every attempt), and the JUnit upload overwrites the
+  failed attempt's report under its stable name.
 - **GitHub action: matrix legs no longer collide or mix caches.** Artifact
   names now carry a per-leg suffix (new `artifact-suffix` input; default
   `<os>-py<version>[-<working-directory>]`): segments are
-  `rstest-seg-<suffix>--<run_id>-<shard>` and JUnit artifacts
+  `rstest-seg-<suffix>--<run_id>-<attempt>-<shard>` and JUnit artifacts
   `rstest-junit-<suffix>[-shard-K]`, and the warm step pulls only its own
   leg's segments. **Upgrade note:** the first artifact-backend run after
   upgrading starts cold, and workflows that download JUnit by exact name need

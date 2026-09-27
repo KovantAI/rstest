@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from _pytest.fixtures import is_visibility_more_specific
 
+from rstest_worker._internal import junit
 from rstest_worker._internal import messages as m
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
@@ -351,6 +352,7 @@ class StreamPlugin:
         self._neutralize_xdist(config)
         self._register_markers(config)
         _warn_pytest_pins(config)
+        junit.maybe_register(config, self._conn)
         worker_id = os.environ.get("RSTEST_WORKER_ID")
         if worker_id is None:
             return  # standalone run: nothing pool-specific to set up

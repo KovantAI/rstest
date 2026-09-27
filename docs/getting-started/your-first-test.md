@@ -41,24 +41,27 @@ def test_add_negative():
 
 ## 3. Run it
 
-The output on this page is the `dots` view, which is what you get when
-output is piped or in CI. On an interactive terminal rstest shows the `bar`
-view instead (a `✓` line per test and a progress bar); pass `--output dots`
-to match this page exactly.
-
 ```console
 $ rstest
-rstest 0.7.0 — single worker (pytest-exact mode)
-.. [100%]
+============================= test session starts ==============================
+platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /path/to/rstest-demo
+collected 2 items
 
-2 passed in 0.11s
+test_first.py ..                                                         [100%]
+
+============================== 2 passed in 0.00s ===============================
 ```
 
 That's the whole loop: no config file, no flags. rstest collected both tests,
-ran them, and printed pytest's familiar summary. The header says **single
-worker** here because `-n auto` (the default) deliberately caps itself low on
-tiny suites: it never starts more workers than you have test files, and once
-rstest has timings cached it also caps by how long the suite takes, since
+ran them, and printed pytest's familiar output. It *is* pytest's output: this
+tiny suite runs on a **single worker**, and on one worker rstest runs one
+plain pytest session and lets it print its own terminal output (**Unreleased**:
+rstest 0.7.0 printed its own `dots` view here, under a `single worker
+(pytest-exact mode)` banner; pass `--output dots` to get that view back).
+It runs on one worker because `-n auto` (the default) deliberately caps
+itself low on tiny suites: it never starts more workers than you have test
+files, and once rstest has timings cached it also caps by how long the suite takes, since
 worker startup isn't worth it for a sub-second run. On a real suite with many
 files, the same command fans out across your cores; rstest is [parallel by
 default](features.md). Force a worker count any time with `-n`, e.g.
@@ -75,24 +78,31 @@ def test_add_wrong():
 
 ```console
 $ rstest
-rstest 0.7.0 — single worker (pytest-exact mode)
-..F [100%]
+============================= test session starts ==============================
+platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /path/to/rstest-demo
+collected 3 items
 
---- FAILED test_first.py::test_add_wrong ---
-def test_add_wrong():
+test_first.py ..F                                                        [100%]
+
+=================================== FAILURES ===================================
+________________________________ test_add_wrong ________________________________
+
+    def test_add_wrong():
 >       assert add(2, 2) == 5
 E       assert 4 == 5
 E        +  where 4 = add(2, 2)
 
 test_first.py:14: AssertionError
-
-1 failed, 2 passed in 0.14s
+=========================== short test summary info ============================
+FAILED test_first.py::test_add_wrong - assert 4 == 5
+========================= 1 failed, 2 passed in 0.01s ==========================
 ```
 
-Full pytest-style tracebacks, assertion rewriting included: the same
-tracebacks and assertion introspection pytest prints (the failure header
-format is rstest's own). (Across multiple workers each failure header also carries the
-`[gwN]` worker that hit it; with one worker there's nothing to attribute.)
+Full pytest tracebacks, assertion rewriting included: on one worker this is
+exactly what pytest prints. (Across multiple workers rstest renders the
+output itself, and each failure header also carries the `[gwN]` worker that
+hit it.)
 Rerun just the failure while you fix it:
 
 ```console

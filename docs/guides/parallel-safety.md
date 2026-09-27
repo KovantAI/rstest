@@ -75,8 +75,10 @@ to xdist semantics. Two consequences:
   exactly like an xdist worker (`gw0`, `gw1`, ...), so the test database
   per worker is suffixed automatically.
 
-`rstest --doctor` prints a warning for every session fixture that ran more
-than once, with this exact caveat.
+`rstest --doctor` flags a session fixture that ran more than once with this
+exact caveat, but only on rows of its FIXTURE HOTSPOTS table (fixtures with at
+least 0.5s of total setup time, top 8). A cheap session fixture that runs per
+worker gets no warning, so audit those by hand.
 
 ### Teardown timing and `--setup-show` / `--setup-plan`
 
@@ -289,10 +291,25 @@ Three runs usually classify the failure. Order dependencies want
 `loadfile` or a refactor; load sensitivity wants `serial` or a clock mock;
 anything failing at `-n 0` too is a plain bug.
 
-`rstest migrate-check` runs exactly these discriminators **for you**, over the whole suite and scoped to the files that actually fail. It classifies each
-failure into the classes above, and bisects the polluting file for order /
+`rstest migrate-check` runs equivalent discriminators **for you**, over the
+whole suite and scoped to the files that actually fail: serial runs (twice)
+and a `--dist loadfile` run, with load sensitivity inferred from wall time
+far exceeding CPU time rather than from a separate `-n 2` run. It classifies
+each failure into the classes above, and bisects the polluting file for order /
 isolation defects. Reach for it instead of running the three commands by hand;
 see [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
+
+For an order-dependent suite, three more tools go from "it flakes sometimes"
+to a fix:
+
+- [`--shuffle`](../reference/cli.md#-shuffleseed) runs the suite in a seeded
+  random order to flush order dependence out on demand; the seed is printed,
+  and `--shuffle=SEED` replays a failing order.
+- [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) finds
+  the test that pollutes a victim and prints a minimal repro command.
+- [`rstest audit`](../reference/cli-commands.md#audit) runs the suite in
+  parallel against a serial baseline and prints the parallel-only failures as a
+  ready-to-paste `@pytest.mark.serial` list.
 
 ## Worked examples
 

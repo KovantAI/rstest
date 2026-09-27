@@ -68,7 +68,9 @@ pytest-sugar-style view (a `✓`/`✗` line per test, inline failures, a live
 progress bar). When output is piped or running in CI it falls back to the
 compact **`dots`** style shown above, so logs stay stable. Pick any style
 explicitly with [`--output dots|verbose|bar|github|json`](../reference/cli.md#-output-dotsverbosebargithubjson):
-the rest of this page describes `dots`.
+the rest of this page describes `dots`. On a single worker with no
+`--output` set, rstest prints pytest's own terminal output instead
+(**Unreleased**; see [below](#controlling-parallelism)).
 
 - The **header line** states the worker count. rstest is parallel by
   default; this line is the visible reminder.
@@ -112,13 +114,21 @@ E       assert 401 == 200
 tests/test_login.py:3: AssertionError
 ```
 
-At `-n 0`/`-n 1` there is no worker, so the prefix is omitted:
+At `-n 0`/`-n 1` there is no worker, so there is no prefix: the single
+pytest session prints its own `-v` output, exactly as pytest does
+(**Unreleased**: rstest 0.7.0 printed its own `verbose` view here, which
+`--output verbose` still gives you):
 
 ```console
 $ rstest -n 0 -v
-rstest 0.7.0 — single worker (pytest-exact mode)
-tests/test_first.py::test_add PASSED [ 16%]
-tests/test_first.py::test_add_negative PASSED [ 33%]
+============================= test session starts ==============================
+platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0 -- /path/to/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /path/to/project
+collecting ... collected 6 items
+
+tests/test_first.py::test_add PASSED                                     [ 16%]
+tests/test_first.py::test_add_zero PASSED                                [ 33%]
 ...
 ```
 
@@ -160,10 +170,13 @@ timings are cached it also caps by total suite time, so a tiny suite runs
 on one or two workers. Pass an explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
-in a single worker process, pytest's own behavior in every detail. You will
-see this one mode under three names: *byte-exact* in these docs,
-*pytest-exact* in its run banner, and *single-worker* in the `-n 0` hint of
-the parallel banner. See
+in a single worker process, pytest's own behavior in every detail. With no
+`--output` set, the terminal output is pytest's own too, byte for byte
+(**Unreleased**), and rstest only appends its extras (doctor, coverage, gate
+messages) after pytest's summary line. You will see this one mode under
+three names: *byte-exact* in these docs, *pytest-exact* in its run banner
+(printed only when you pin rstest's renderer with `--output`), and
+*single-worker* in the `-n 0` hint of the parallel banner. See
 [Byte-exact mode](../concepts/glossary.md#byte-exact-mode) for what that
 guarantees and how it differs from pytest-xdist's `-n 1`.
 

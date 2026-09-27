@@ -762,6 +762,14 @@ pub(super) fn finalize_output(
             "counts": outcome.run.counts(),
         });
         sink.out_line(&envelope.to_string());
+    } else if !passthrough && mode == progress::Mode::Pytest {
+        // pytest already printed failures, warnings, durations and the summary
+        // line itself. Only rstest's own additions follow.
+        outcome.run.print_quarantined(sink, &flake_history);
+        // pytest's summary counted them as failed; say what rstest did instead.
+        if let Some(note) = quarantine_note(outcome.run.counts()["quarantined"]) {
+            sink.out_line(&palette.yellow(&note));
+        }
     } else if !passthrough && mode == progress::Mode::Tap {
         // Pure TAP: close the stream with the trailing plan. Failure text
         // already rode along as `#` diagnostics; no human summary.
@@ -827,6 +835,18 @@ pub(super) fn finalize_output(
             progress::Mode::Teamcity => write_teamcity_flaky(sink.out(), &outcome.run.flaky),
             _ => {}
         }
+    }
+}
+
+/// Under pytest's own terminal output, the one line that reconciles pytest's
+/// "N failed" with rstest not failing the run for quarantined tests.
+fn quarantine_note(quarantined: u64) -> Option<String> {
+    match quarantined {
+        0 => None,
+        1 => Some("rstest: 1 failure above is quarantined and does not fail the run".into()),
+        n => Some(format!(
+            "rstest: {n} failures above are quarantined and do not fail the run"
+        )),
     }
 }
 
@@ -936,8 +956,8 @@ mod tests {
     use super::{
         apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, diff_cov_gate,
         finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
-        print_warnings_summary, quarantine_matcher, reconcile_cov_status, report_push_result,
-        resolve_compact_threshold, results_bar_line, validate_regress_ratio,
+        print_warnings_summary, quarantine_matcher, quarantine_note, reconcile_cov_status,
+        report_push_result, resolve_compact_threshold, results_bar_line, validate_regress_ratio,
         warn_doctor_gate_passthrough, write_report_json, write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
@@ -1140,6 +1160,13 @@ mod tests {
     fn quarantine_matcher_errors_on_missing_file() {
         let path = std::env::temp_dir().join("rstest-quarantine-does-not-exist-xyz.txt");
         assert!(quarantine_matcher(&path, &mut Sink::captured().0).is_err());
+    }
+
+    #[test]
+    fn quarantine_note_counts_and_stays_silent_at_zero() {
+        assert_eq!(quarantine_note(0), None);
+        assert!(quarantine_note(1).unwrap().contains("1 failure above is"));
+        assert!(quarantine_note(3).unwrap().contains("3 failures above are"));
     }
 
     #[test]

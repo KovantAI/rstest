@@ -123,8 +123,9 @@ merged results, since per-worker sessions would clobber a shared file. The
 vendored core is pytest 9; if your suite and plugin set are pinned to
 pytest 8 (or older), adopting rstest *includes* a pytest-9 migration:
 deprecation warnings, plugin version bumps, the usual. `rstest -n 0` is
-the cheap probe: it surfaces exactly what a pytest upgrade would, with
-your installed pytest untouched. Budget the runner switch as
+the cheap probe: it runs your suite under the pytest 9 core with your
+installed pytest untouched (a few pytest 9 behavior changes raise no
+error, so also check the list in the upgrade guide). Budget the runner switch as
 "pytest upgrade first, then a one-line command change," not one step.
 [Upgrading to pytest 9](upgrade-to-pytest9.md) is the concrete
 checklist for that first step: the small set of 8→9 removals that actually
@@ -147,7 +148,10 @@ haven't yet adopted rstest-only features (see
    rather than a parallelism one: check it at `rstest -n 0` (see
    [Upgrading to pytest 9](upgrade-to-pytest9.md)).
 2. **Compare.** Run both for a while. `rstest try` and
-   `rstest migrate-check` (below) tell you where results differ.
+   `rstest migrate-check` (below) tell you where results differ. Persist
+   `.rstest_cache` between CI runs ([CI quickstart](ci-quickstart.md)):
+   without it every shadow run is a cold run, and its timings understate
+   rstest.
 3. **Switch.** Make the rstest job required and the old job optional.
    Leave pytest-xdist and its `addopts` (`-n 4`, `--dist ...`) in place for
    now: rstest neutralizes them inside its workers, and the old job still
@@ -228,20 +232,26 @@ differences, it points you at `migrate-check` (below).
 
 ## A migration checklist
 
-1. `rstest migrate-check`: **the preflight that does the triage for you.**
-   It is the front door of the migration. Run it first, fix what it names,
-   and steps 3–4 below usually become a formality. See
+1. `rstest try`: the one-command answer to "should we switch?". It runs the
+   suite under your installed pytest and under rstest, and reports whether
+   outcomes match and how much faster rstest is
+   ([Just want to know if it's worth it?](#just-want-to-know-if-its-worth-it)).
+2. **Still on pytest 8?** Do [Upgrading to pytest 9](upgrade-to-pytest9.md)
+   first. Until then, a difference `try` reports can be pytest 8 versus 9,
+   not rstest.
+3. `rstest -n 0`: on pytest 9.1.x, confirm identical results to pytest (this
+   is the contract; report a bug if not). Move any rstest-owned flags out of
+   `addopts` first ([why](#addopts-and-pytest_addopts)).
+4. `rstest migrate-check`: **the preflight that does the triage for you.**
+   Fix what it names, and steps 5 and 6 usually become a formality. See
    [The migrate-check preflight](#the-migrate-check-preflight) just below for
    what it reports.
-2. `rstest -n 0`: confirm identical results to pytest (this is the
-   contract; report a bug if not). Move any rstest-owned flags out of
-   `addopts` first ([why](#addopts-and-pytest_addopts)).
-3. `rstest`: run parallel. Green? You're done.
-4. A few tests fail only in parallel? `migrate-check` already classified
+5. `rstest`: run parallel. Green? You're done.
+6. A few tests fail only in parallel? `migrate-check` already classified
    each one and named its fix; [Parallel safety](parallel-safety.md) is the
    reference for the remedies (`@pytest.mark.serial`, `--dist loadfile`, or
    fixing the shared state).
-5. Run `rstest --doctor` once. It usually pays for the migration by
+7. Run `rstest --doctor` once. It usually pays for the migration by
    itself.
 
 ## Driving it with Claude (the migrate-to-rstest skill)
@@ -259,7 +269,7 @@ your tests or CI.
 ## The migrate-check preflight
 
 `rstest migrate-check` is not a test run: it is a parallel-readiness
-report. It turns the manual triage of step 4 ("a few tests fail in parallel,
+report. It turns the manual triage of step 6 ("a few tests fail in parallel,
 read the guide, classify each by hand") into one command.
 
 It first collects the suite twice and flags test ids that differ between

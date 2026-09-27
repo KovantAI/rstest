@@ -66,10 +66,13 @@ an older pytest, see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
     first on your current pytest 8.x:
 
     ```console
-    $ python -m pytest -W error::pytest.PytestRemovedIn9Warning
+    $ python -m pytest -W error::pytest.PytestDeprecationWarning
     ```
 
-    A clean run means the suite uses nothing pytest 9 removed.
+    Each failure is a deprecated API to fix. A clean run is not the whole
+    check: a few pytest 9 behavior changes raise no warning, so finish with
+    the short list and the `rstest -n 0` backstop in
+    [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md#the-method).
 
 First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
 it covers the common install/first-run failures (no usable interpreter or a

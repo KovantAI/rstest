@@ -134,6 +134,8 @@ pub struct Run {
     /// is real, so default off).
     pub track_phase_durations: bool,
     phase_durations: Vec<(f64, String, String)>,
+    /// `--junitxml`: pytest's testcase elements as the workers streamed them.
+    pub junit: crate::reporting::junit::JunitParts,
 }
 
 impl Run {

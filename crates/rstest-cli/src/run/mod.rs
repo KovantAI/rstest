@@ -336,9 +336,10 @@ fn resolve_run_config(
     let verbose = verbosity >= 1;
     // -vv (or more): pytest shows ALL durations, no hidden-cutoff note.
     let very_verbose = verbosity >= 2;
-    // Output style: --output > [tool.rstest] output > (-v ? verbose : tty ?
-    // bar : dots). Auto-promote to the sugar bar on a tty, stay on plain dots
-    // off-tty so logs stay byte-stable (the live footer self-disables there).
+    // Output style: --output > [tool.rstest] output > (byte-exact mode ?
+    // pytest's own terminal : -v ? verbose : tty ? bar : dots). Auto-promote
+    // to the sugar bar on a tty, stay on plain dots off-tty so logs stay
+    // byte-stable (the live footer self-disables there).
     let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
         Some("bar") => progress::Mode::Bar,
         Some("verbose") => progress::Mode::Verbose,
@@ -357,6 +358,7 @@ fn resolve_run_config(
             ));
             progress::Mode::Dots
         }
+        None if n <= 1 && !single_worker_reruns && !passthrough => progress::Mode::Pytest,
         None if verbose => progress::Mode::Verbose,
         None if std::io::stdout().is_terminal() => progress::Mode::Bar,
         None => progress::Mode::Dots,
@@ -390,6 +392,7 @@ fn resolve_run_config(
         // Ship captured stdout/stderr on every report (not just failures) when a
         // live JSON consumer is attached, so editors get per-passing-test output.
         stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
+        junitxml: cli.junitxml.as_ref().map(|p| p.display().to_string()),
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -873,7 +876,7 @@ fn print_run_banner(
         sink.out_line("TAP version 13");
         return;
     }
-    if mode == progress::Mode::Json {
+    if matches!(mode, progress::Mode::Json | progress::Mode::Pytest) {
         return;
     }
     let worker_desc = if single_worker_reruns {
@@ -1181,7 +1184,8 @@ fn dispatch_run(
     }
     Ok(
         if matches!(path, RunPath::Passthrough | RunPath::SingleWorker) {
-            let io = if passthrough {
+            // Byte-exact output: pytest's own terminal writer prints.
+            let io = if passthrough || mode == progress::Mode::Pytest {
                 worker::Stdio::Inherit
             } else {
                 worker::Stdio::Null
@@ -1841,6 +1845,21 @@ fn fold_run_event(
         | proto::Event::ItemStartId { .. }
         | proto::Event::ItemDoneId { .. }
         | proto::Event::StoppedIds { .. } => None,
+        proto::Event::JunitCase { nodeid, cases } => {
+            run.junit.record_case(nodeid, cases);
+            None
+        }
+        proto::Event::JunitSuite {
+            name,
+            timestamp,
+            hostname,
+            properties,
+            extra,
+        } => {
+            run.junit
+                .record_suite(name, timestamp, hostname, properties, extra);
+            None
+        }
         proto::Event::Done { exitstatus } => Some(exitstatus),
     }
 }
