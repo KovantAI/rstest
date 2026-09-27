@@ -10,7 +10,7 @@ smarter when persisted between runs.
 
 This page gets you running on **GitHub Actions** and walks two worked examples
 (Django, monorepo). For other CI systems (AWS CodeBuild, Google Cloud Build,
-GitLab, Azure, CircleCI, Jenkins, pre-commit), see [More CI
+GitLab, Azure, CircleCI, Jenkins, Buildkite, pre-commit), see [More CI
 systems](ci-recipes.md). For a shard matrix that needs a cache no native CI
 cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
 
@@ -406,7 +406,7 @@ Two practical notes:
 
 ## Gating new parallel-unsafe tests with migrate-check
 
-[`migrate-check`](../reference/cli.md#migrate-check) exits non-zero when a
+[`migrate-check`](../reference/cli-commands.md#migrate-check) exits non-zero when a
 test has a run-to-run unstable id or fails only under parallelism, so a
 dedicated job keeps a migrating suite from regressing: no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use
@@ -488,7 +488,7 @@ and just run `rstest`.
 ## Go deeper
 
 - [More CI systems](ci-recipes.md): AWS CodeBuild, Google Cloud Build,
-  GitLab, Azure, CircleCI, Jenkins, and pre-commit.
+  GitLab, Azure, CircleCI, Jenkins, Buildkite, and pre-commit.
 - [Shared cache across CI jobs](ci-shared-cache.md): the segment-merge cache
   for a shard matrix.
 - [Sharding across CI jobs](sharding.md): how partitions are computed and the

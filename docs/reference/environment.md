@@ -17,24 +17,25 @@ Plugins that read pytest-xdist's `workerinput` get the same information via
 `request.config.workerinput["workerid"]` / `["workercount"]` /
 `["testrun_uid"]`: that path works under both runners.
 
-An "unset" above means rstest does not set it. rstest does not clear
-variables either: a `RSTEST_WORKER_ID` or `PYTEST_XDIST_WORKER` already in
-your shell or CI environment is inherited by an `-n 0` run, and a test then
-sees that value. In a parallel run, a pre-set `PYTEST_XDIST_WORKER` /
-`PYTEST_XDIST_WORKER_COUNT` even **wins over** the real value (every worker
-sees the same id), which breaks per-worker resource naming. Don't export
-these variables yourself. `request.config.workerinput` always carries the
+An "unset" above means the variable is absent in the worker: rstest clears
+these before starting each worker, so a `RSTEST_WORKER_ID` or
+`PYTEST_XDIST_WORKER` exported in your shell or CI (or by an outer rstest,
+when a test runs rstest itself) never reaches a test. In a parallel run each
+worker sets its own real values. (rstest 0.7.0 let inherited values through:
+an `-n 0` test saw them, and in a pool a pre-set `PYTEST_XDIST_WORKER` won, so
+every worker saw the same id.) `request.config.workerinput` always carries the
 real values.
 
 ## Set by the orchestrator (internal)
 
 `RSTEST_BASETEMP`, `RSTEST_SEND_IDS`, `RSTEST_DOCTOR`, `RSTEST_TIMEOUT`,
 `RSTEST_LEAKCHECK`, `RSTEST_DEBUGPY_PORT`, `RSTEST_STREAM_OUTPUT` coordinate
-workers and may change between versions. Don't depend on them, and **don't set
-them**: most are only set on the runs that need them (for example
-`RSTEST_DOCTOR` only under `--doctor`), and rstest never removes them, so a
-value you export leaks into every other run. For a hermetic run, make sure
-none of them are in the environment.
+workers and may change between versions. Don't depend on them. rstest clears
+them before starting each worker and sets only the ones the run needs (for
+example `RSTEST_DOCTOR` only under `--doctor`), so a value in your environment
+has no effect on the workers. `RSTEST_RUN_UID` is the exception that passes
+through: a monorepo run hands it to each project's rstest so they share one
+run id.
 
 ## Honored from the environment
 

@@ -89,11 +89,11 @@ nav:
   - Getting started:
       - getting-started/index.md
       - Installation: getting-started/installation.md
-      - Your first test: getting-started/your-first-test.md
-      - First steps: getting-started/first-steps.md
+      - Start from scratch: getting-started/your-first-test.md
+      - Run your existing suite: getting-started/first-steps.md
       - Features: getting-started/features.md
       - Getting help: getting-started/getting-help.md
-  - By use case:
+  - Playbooks:
       - Wait-bound / IO suites: guides/wait-bound.md
       - Local dev / inner loop: guides/local-dev.md
       - Your plugin stack: guides/plugin-stack.md
@@ -128,7 +128,8 @@ nav:
       - Glossary: concepts/glossary.md
   - Reference:
       - reference/index.md
-      - CLI: reference/cli.md
+      - CLI flags: reference/cli.md
+      - CLI subcommands: reference/cli-commands.md
       - Markers: reference/markers.md
       - Environment variables: reference/environment.md
       - Exit codes: reference/exit-codes.md

@@ -105,7 +105,7 @@ test is simply never run. The merged report is short, yet the build can still
 go green with fewer tests than the suite has. Nothing detects that at runtime.
 
 For a merge-queue or release gate, add a step that proves the shards covered
-the whole suite. The built-in [`rstest shard-verify`](../reference/cli.md#shard-verify)
+the whole suite. The built-in [`rstest shard-verify`](../reference/cli-commands.md#shard-verify)
 does exactly this.
 
 !!! warning "Unreleased"
@@ -258,80 +258,18 @@ jobs:
     as described in [Keep one cache snapshot across the matrix](#keep-one-cache-snapshot-across-the-matrix).
     See [Shared cache across CI jobs](ci-shared-cache.md).
 
-## GitLab CI
+## Other CI systems
 
-GitLab exposes `CI_NODE_INDEX` (1-based) and `CI_NODE_TOTAL` when you set
-`parallel:`. They map straight onto `K/N`:
+Every CI system with a job matrix exposes the job's index and the total;
+wire them into `--shard K/N` (K is 1-based) and keep an explicit `-n 2` or
+more. Full recipes, including the read-only cache and the job that refreshes
+it, live on the per-system pages:
 
-```yaml
-test:
-  parallel: 4
-  cache:
-    key: rstest-durations-$CI_COMMIT_REF_SLUG
-    paths: [.rstest_cache]
-    policy: pull        # shards restore only; don't race to save
-  script:
-    - pip install -r requirements.txt && pip install rstest
-    - rstest -n 4 --shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL} --junitxml junit.xml
-  artifacts:
-    when: always
-    reports:
-      junit: junit.xml   # GitLab merges per-job JUnit natively
-```
-
-Add a separate non-parallel job with `policy: pull-push` that runs the
-full suite to keep the cache fresh, mirroring the GitHub `durations` job.
-
-## CircleCI
-
-CircleCI provides `CIRCLE_NODE_INDEX` (**0-based**) and
-`CIRCLE_NODE_TOTAL`. Add 1 to the index:
-
-```yaml
-jobs:
-  test:
-    parallelism: 4
-    steps:
-      - checkout
-      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
-      - run: pip install -r requirements.txt && pip install rstest
-      - run: rstest -n 4 --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml test-results/junit.xml
-      - store_test_results: { path: test-results }   # a directory, not a file
-```
-
-As with GitHub and GitLab, the shards restore that cache read-only:
-**something must write it**, or every run partitions cold (even split, no
-wall-time balancing). Add a separate non-parallel job that runs the full
-suite and saves the fresh cache:
-
-```yaml
-  durations:
-    steps:
-      - checkout
-      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
-      - run: pip install -r requirements.txt && pip install rstest
-      - run: rstest -n auto -q
-      - save_cache:
-          key: rstest-durations-{{ .Branch }}-{{ .Revision }}
-          paths: [".rstest_cache"]
-```
-
-Wire both jobs into a workflow, CircleCI runs nothing without a
-`workflows:` block:
-
-```yaml
-workflows:
-  test-and-cache:
-    jobs:
-      - test
-      - durations
-```
-
-CircleCI keys are immutable once written, so the `{{ .Revision }}` suffix
-makes each run save a fresh key that the shards' branch-prefix
-`restore_cache` then picks up on the next push. CircleCI aggregates
-per-container results in its Tests tab; for a single merged `junit.xml`
-artifact, add a downstream collect/merge step as in the GitHub recipe.
+| System | Index / total | Recipe |
+|---|---|---|
+| GitLab CI | `CI_NODE_INDEX` (1-based) / `CI_NODE_TOTAL`, with `parallel:` | [GitLab CI](ci-recipes.md#gitlab-ci) |
+| CircleCI | `CIRCLE_NODE_INDEX` (**0-based**, add 1) / `CIRCLE_NODE_TOTAL`, with `parallelism:` | [CircleCI](ci-recipes.md#circleci) |
+| Buildkite | `BUILDKITE_PARALLEL_JOB` (**0-based**, add 1) / `BUILDKITE_PARALLEL_JOB_COUNT`, with `parallelism:` | [Buildkite](ci-recipes.md#buildkite) |
 
 ## Any other CI (generic)
 

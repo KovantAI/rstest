@@ -1,8 +1,8 @@
-# Your first test
+# Start from scratch
 
 This is the five-minute path from nothing to a green run, no existing suite
 required. If you already have a pytest project, skip to
-[First steps](first-steps.md): rstest runs it as-is.
+[Run your existing suite](first-steps.md): rstest runs it as-is.
 
 **You need:** Python 3.10+ and a terminal. That's it, no config, no prior
 pytest knowledge. New to the terms below (worker, byte-exact, `-n`)? The
@@ -127,7 +127,7 @@ On a real suite you rarely need `-n`: with many test files, the default
 
 ## Where to next
 
-- [First steps](first-steps.md): reading the output in depth, selecting
+- [Run your existing suite](first-steps.md): reading the output in depth, selecting
   tests, controlling parallelism
 - [Migrating from pytest](../guides/migrate-from-pytest.md): point rstest at
   a real suite; what stays identical and what changes

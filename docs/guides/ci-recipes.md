@@ -176,6 +176,33 @@ test:
 the parallelism you want. For a monorepo root, glob `junit.*.xml` in
 `artifacts:paths` and widen the cache to `**/.rstest_cache/`.
 
+**Sharding (`parallel:`).** GitLab exposes `CI_NODE_INDEX` (1-based) and
+`CI_NODE_TOTAL` when you set `parallel:`, which map straight onto
+[`--shard K/N`](sharding.md). With GitLab's own cache, the shards restore it
+read-only so they partition identically:
+
+```yaml
+test:
+  image: python:3.13
+  parallel: 4
+  cache:
+    key: rstest-durations-$CI_COMMIT_REF_SLUG
+    paths: [.rstest_cache]
+    policy: pull        # shards restore only; don't race to save
+  script:
+    - pip install -r requirements.txt && pip install rstest
+    - rstest -n 4 --shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL} --output gitlab --junitxml junit.xml
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml   # GitLab merges per-job JUnit natively
+```
+
+Something has to write that cache: add a separate non-parallel job with
+`policy: pull-push` that runs the full suite, as in the
+[GitHub Actions sharding example](sharding.md#github-actions). The shared
+cache below removes the need for that job.
+
 **Shared cache (parallel matrix).** GitLab's `cache:` is one blob per key. It
 can't merge segments across `parallel:` jobs. For a duration-balanced matrix,
 use the [shared-cache backend](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
@@ -215,11 +242,15 @@ steps:
     inputs:
       versionSpec: "3.13"
 
-  # Persist the duration cache between runs.
+  # Persist the duration cache between runs. The key is unique per build:
+  # Azure never overwrites an existing cache entry, so a branch-only key would
+  # freeze the durations at the branch's first run. restoreKeys prefix-match
+  # the newest entry for this branch, then for any branch.
   - task: Cache@2
     inputs:
-      key: 'rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)"'
+      key: 'rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)" | "$(Build.BuildId)"'
       restoreKeys: |
+        rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)"
         rstest | "$(Agent.OS)"
       path: .rstest_cache
 
@@ -309,6 +340,48 @@ workflows:
 `-n auto` uses the resource-class vCPUs; pick a larger class for more
 parallelism. Point `store_test_results` at a directory (not a single
 file) so a monorepo's `junit.*.xml` are all collected.
+
+**Sharding (`parallelism:`).** CircleCI provides `CIRCLE_NODE_INDEX`
+(**0-based**) and `CIRCLE_NODE_TOTAL`, so add 1 to the index for
+[`--shard K/N`](sharding.md). The shards restore the cache read-only, and a
+separate non-parallel job runs the full suite to write it (without that job,
+every run partitions cold: an even split with no wall-time balancing):
+
+```yaml
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.13
+    parallelism: 4
+    steps:
+      - checkout
+      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
+      - run: pip install -r requirements.txt && pip install rstest
+      - run: rstest -n 4 --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml test-results/junit.xml
+      - store_test_results: { path: test-results }   # a directory, not a file
+  durations:
+    docker:
+      - image: cimg/python:3.13
+    steps:
+      - checkout
+      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
+      - run: pip install -r requirements.txt && pip install rstest
+      - run: rstest -n auto -q
+      - save_cache:
+          key: rstest-durations-{{ .Branch }}-{{ .Revision }}
+          paths: [".rstest_cache"]
+workflows:
+  test-and-cache:
+    jobs:
+      - test
+      - durations
+```
+
+CircleCI keys are immutable once written, so the `{{ .Revision }}` suffix
+makes each run save a fresh key that the shards' branch-prefix
+`restore_cache` picks up on the next push. The Tests tab aggregates
+per-container results; for one merged `junit.xml` artifact, add a
+downstream collect-and-merge step.
 
 **Shared cache (parallelism).** `save_cache`/`restore_cache` is one blob per key.
 It can't merge across `parallelism: N` containers. Point

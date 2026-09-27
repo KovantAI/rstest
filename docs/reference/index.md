@@ -2,7 +2,8 @@
 
 Exact behavior of flags, files, and outputs.
 
-- [CLI](cli.md): every flag and subcommand, and the forwarding rule
+- [CLI flags](cli.md): every rstest flag, grouped by topic, and the rule for forwarding pytest flags
+- [CLI subcommands](cli-commands.md): `try`, `migrate-check`, `audit`, `bisect`, `shard-verify`, `cache-compact`, `explain`, `verify-vendor`
 - [Markers](markers.md): `serial`, `flaky`, `xdist_group`
 - [Environment variables](environment.md): the `RSTEST_*` contract
 - [Exit codes](exit-codes.md): what each code means and which flags gate on it

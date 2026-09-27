@@ -81,7 +81,7 @@ across runs or expect cold-run timing.
 ## Where next
 
 - [Installation](getting-started/installation.md)
-- [Your first test](getting-started/your-first-test.md): no suite yet? from empty folder to green run
-- [First steps](getting-started/first-steps.md): already have a pytest suite? run it from your project root
+- [Start from scratch](getting-started/your-first-test.md): no suite yet? from empty folder to green run
+- [Run your existing suite](getting-started/first-steps.md): already have a pytest suite? run it from your project root
 - [Migrating from pytest](guides/migrate-from-pytest.md)
 - [Glossary](concepts/glossary.md): worker, byte-exact, long pole, and the rest

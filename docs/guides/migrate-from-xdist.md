@@ -6,38 +6,26 @@ keep working.
 
 ## Flag map
 
-| pytest-xdist | rstest | Notes |
-|---|---|---|
-| `-n 4` / `-n auto` | same | `auto` is logical cores, capped for small suites; it is the default |
-| `-n 1` | differs | xdist's `-n 1` runs one `gw0` worker WITH `workerinput`; rstest's `-n 1` (like `-n 0`) is plain byte-exact mode with no worker identity |
-| `--dist load` | same (default) | plus duration-aware long-pole-first scheduling |
-| `--dist loadfile` | same | file affinity, in-file order |
-| `--dist loadscope` / `loadgroup` | same | incl. `@pytest.mark.xdist_group`; rejected under `--collect lazy` (needs full collection) |
-| `--dist each` | partial | full suite per worker, but every worker uses the SAME interpreter; xdist's heterogeneous `--tx` gateways have no equivalent |
-| `-d` | `--dist load` | `-d` is xdist's shorthand for load-balancing, which is rstest's default |
-| `--maxprocesses` | none | use `-n` (no separate cap) |
-| `-p xdist.looponfail` / `--looponfail` | `--watch` | with import-graph selection |
-| `--dist no` / `--dist=no` | none | **rstest error** (`no` is not a valid `--dist` mode); single-worker is `-n 0` |
-| `--tx` (gateways) | none | no equivalent: one local interpreter; `--dist each` covers same-env broadcast, not heterogeneous environments |
-| `--rsyncdir` / `--rsync` | none | no equivalent: rstest runs local workers, no remote sync |
-| `--max-worker-restart` | none | no equivalent: rstest auto-respawns crashed workers on a fixed budget (see [crash handling](../concepts/crash-handling.md)); the restart count is not user-tunable |
+Most xdist flags carry over unchanged. The ones people actually touch:
 
-**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` is
-consumed by rstest's own `--dist` and rejected as an invalid mode (exit
-1). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`,
-`--maxprocesses`) are **forwarded to the vendored pytest session
-verbatim**, so the outcome depends on whether pytest-xdist is installed:
+- **`-n 4` / `-n auto`**: same, and `auto` is the default. `auto` is capped by
+  test-file count and cached suite time, so pass an explicit `-n` when you
+  need a fixed count (for example with `--shard`).
+- **`--dist load` / `loadfile` / `loadscope` / `loadgroup`**: same names and
+  semantics, including `@pytest.mark.xdist_group`. `load` (the default) adds
+  duration-aware slowest-first scheduling.
+- **`-n 1`**: differs. xdist's `-n 1` is one `gw0` worker with `workerinput`;
+  rstest's `-n 1`, like `-n 0`, is single-worker mode with no worker identity.
+- **`--dist no`**: rejected (exit 1). Use `-n 0` for a single worker.
 
-- **pytest-xdist installed** (the usual case mid-migration): the flag
-  *parses* (xdist registered its options) but has **no effect**: rstest
-  keeps xdist's session inert (`dist = no`), so nothing acts on it. No
-  error, no warning; it is silently ignored.
-- **pytest-xdist not installed**: pytest doesn't recognize the option, so
-  it's a usage error from the vendored core (exit 4).
-
-Either way these flags don't *do* anything under rstest. Remove them from
-your `addopts` only once nothing runs pytest-xdist any more: while an old
-xdist CI job is still your fallback, it needs them (see
+Everything else (`--tx`, `--rsync*`, `-d`, `--maxprocesses`,
+`--max-worker-restart`, `--dist each`, `--looponfail`) is covered row by row,
+including what happens to a flag rstest doesn't act on, in the
+[xdist support matrix](../reference/xdist-support.md#flag-matrix). In short:
+those flags parse but do nothing while pytest-xdist is installed, and are a
+pytest usage error (exit 4) once it isn't. Remove them from `addopts` only
+once nothing runs pytest-xdist any more: while an old xdist CI job is still
+your fallback, it needs them (see
 [the staged rollout](migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back)).
 
 pytest-rerunfailures maps: `--reruns N`,

@@ -34,8 +34,8 @@ Flags that gate CI have exit semantics beyond the table above:
 
 | Flag | Exit codes |
 |---|---|
-| [`try`](cli.md#try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest or rstest refused to dispatch |
-| [`migrate-check`](cli.md#migrate-check) / `--migrate-check-json` | non-zero (`0` clean) when any WILL-bail unstable id **or** parallel-only failure is found |
+| [`try`](cli-commands.md#try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest or rstest refused to dispatch |
+| [`migrate-check`](cli-commands.md#migrate-check) / `--migrate-check-json` | non-zero (`0` clean) when any WILL-bail unstable id **or** parallel-only failure is found |
 | [`--durations-regress`](cli.md#-durations-regress-ratio) | `1` on a duration regression over the threshold |
 | [`--cov-fail-under`](../guides/coverage.md) | `1` when coverage falls below the target |
 | [`--changed-strict`](cli.md#-changed-strict) | `5` when nothing is affected (instead of `0`) |
@@ -44,11 +44,11 @@ Flags that gate CI have exit semantics beyond the table above:
 | [`--fail-on-leak`](cli.md#-fail-on-leak) | `1` when any thread/fd leak is found |
 | [`--require-baseline`](cli.md#-require-baseline) | `1` before the run when `--durations-regress` has no duration baseline |
 | [`--quarantine`](cli.md#-quarantine-file) | `0` when every failure is on the quarantine list; `1` if any failure is outside it |
-| [`audit`](cli.md#audit) | `0` parallel-safe, `1` at least one parallel-only failure, `2` rstest refused to dispatch |
-| [`bisect`](cli.md#bisect-nodeid) | `0` order-dependent culprit found, `1` not order-dependent, `2` nodeid not in the suite or a selection passed after `--` |
-| [`shard-verify`](cli.md#shard-verify) | `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
-| [`explain`](cli.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
-| [`verify-vendor`](cli.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift |
+| [`audit`](cli-commands.md#audit) | `0` parallel-safe, `1` at least one parallel-only failure, `2` rstest refused to dispatch |
+| [`bisect`](cli-commands.md#bisect-nodeid) | `0` order-dependent culprit found, `1` not order-dependent, `2` nodeid not in the suite or a selection passed after `--` |
+| [`shard-verify`](cli-commands.md#shard-verify) | `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
+| [`explain`](cli-commands.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
+| [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift |
 
 When several gates fire, the exit is still `1`; each gate only raises a `0`
 to `1`, never lowers a failing code.
