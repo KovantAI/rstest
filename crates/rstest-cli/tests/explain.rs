@@ -95,7 +95,7 @@ fn populate_all(dir: &Path) {
         dir,
         "incremental_outcomes.json",
         &json!({
-            "schema": 2,
+            "schema": 3,
             "config_fp": "fp",
             "green": [ID, "tests/test_x.py::test_other"],
             "test_lines": { ID: 17, "tests/test_x.py::test_other": 3 },
@@ -260,7 +260,7 @@ fn each_cache_alone_marks_the_test_found() {
         ),
         (
             "incremental_outcomes.json",
-            json!({ "schema": 2, "green": [ID] }),
+            json!({ "schema": 3, "green": [ID] }),
         ),
         (
             "coverage_index.json",
@@ -284,7 +284,7 @@ fn source_line_alone_marks_found_but_not_passed() {
     write_cache(
         &dir,
         "incremental_outcomes.json",
-        &json!({ "schema": 2, "green": [], "test_lines": { ID: 8 } }),
+        &json!({ "schema": 3, "green": [], "test_lines": { ID: 8 } }),
     );
     let v = run_json(&dir, ID);
     assert_eq!(v["found"], true);
@@ -303,7 +303,7 @@ fn outcomes_are_reported_even_when_config_fingerprint_differs() {
     write_cache(
         &dir,
         "incremental_outcomes.json",
-        &json!({ "schema": 2, "config_fp": "stale-fingerprint", "green": [ID] }),
+        &json!({ "schema": 3, "config_fp": "stale-fingerprint", "green": [ID] }),
     );
     let v = run_json(&dir, ID);
     assert_eq!(v["last_outcome"], "passed");
@@ -395,7 +395,7 @@ fn rstest_cache_env_redirects_the_run_scoped_caches() {
     write_cache(
         &dir,
         "incremental_outcomes.json",
-        &json!({ "schema": 2, "green": [ID] }),
+        &json!({ "schema": 3, "green": [ID] }),
     );
     let o = run_env(
         &dir,
