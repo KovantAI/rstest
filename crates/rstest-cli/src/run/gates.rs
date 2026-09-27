@@ -376,7 +376,7 @@ pub(super) fn run_post_gates(
         head,
         env_fp,
         incremental_active,
-        config_fp,
+        config,
         prev_index,
         baseline,
     } = *post;
@@ -678,7 +678,7 @@ pub(super) fn run_post_gates(
         outcome.run.backfill_cached_linenos(&baseline.test_lines);
         coverage_skip::record(
             scope,
-            config_fp,
+            config,
             outcome.run.green_nodeids(),
             outcome.run.green_linenos(),
         );

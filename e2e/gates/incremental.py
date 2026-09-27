@@ -383,6 +383,161 @@ def gate_incremental_out_of_scope_source(g, args, binary):
         r.stderr[-200:] + r.stdout[-200:],
     )
 
+    # A test-NAMED helper that defines no tests (test_helpers.py) is guarded by no
+    # per-test hash, so it must fold like any other out-of-scope source: editing
+    # it busts the skip instead of leaving test_a cached on a stale pass.
+    g.write(
+        "incroos/test_helpers.py",
+        "class TestMixin:\n    EXPECTED = 1\ndef expected():\n    return TestMixin.EXPECTED\n",
+    )
+    g.write(
+        "incroos/test_a.py",
+        "from pkg import mod_a\nfrom test_helpers import expected\n"
+        "def test_a():\n    assert mod_a.a() == expected()\n",
+    )
+    run()
+    r = run()
+    check(
+        "incremental(oos): re-caches with the test-named helper in place",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+    g.write(
+        "incroos/test_helpers.py",
+        "class TestMixin:\n    EXPECTED = 2  # edited\n"
+        "def expected():\n    return TestMixin.EXPECTED\n",
+    )
+    r = run()
+    check(
+        "incremental(oos): test-named helper (TestMixin, no tests) edit busts the skip",
+        r.returncode != 0 and "cached)" not in r.stdout and "test_a" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # A bare --cov narrowed by `[run] source = pkg` in .coveragerc is just as
+    # scoped as --cov=pkg: helper.py stays coverage-invisible, so editing it
+    # must bust the skip rather than leave test_b cached.
+    # Different length from the edit above: CPython's .pyc check is mtime+size,
+    # and a same-size rewrite within one second would reuse the stale bytecode.
+    g.write(
+        "incroos/test_helpers.py",
+        "class TestMixin:\n    EXPECTED = 1  # restored\n"
+        "def expected():\n    return TestMixin.EXPECTED\n",
+    )
+    g.write("incroos/.coveragerc", "[run]\nsource = pkg\n")
+
+    def run_bare():
+        for stale in sp.glob(".coverage.*"):
+            stale.unlink()
+        stale = sp / ".coverage"
+        if stale.exists():
+            stale.unlink()
+        return g.run(
+            "test_a.py",
+            "test_b.py",
+            "-n",
+            "2",
+            "--cov",
+            "--cov-context=test",
+            "--cov-report=",
+            "--incremental",
+            cwd=sp,
+            env_extra=env,
+        )
+
+    run_bare()
+    r = run_bare()
+    check(
+        "incremental(oos): bare --cov + .coveragerc source caches unchanged suite",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr and "scoped --cov" in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited again\n")
+    r = run_bare()
+    check(
+        "incremental(oos): bare --cov + .coveragerc source: out-of-scope edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
+    def run_plain(*cov_args):
+        for stale in [*sp.glob(".coverage.*"), sp / ".coverage"]:
+            if stale.exists():
+                stale.unlink()
+        return g.run(
+            "test_a.py",
+            "test_b.py",
+            "-n",
+            "2",
+            *cov_args,
+            "--cov-context=test",
+            "--cov-report=",
+            "--incremental",
+            cwd=sp,
+            env_extra=env,
+        )
+
+    # --cov=pkg living ONLY in the ini addopts narrows coverage just the same:
+    # the CLI carries no --cov at all, yet helper.py must still fold.
+    (sp / ".coveragerc").unlink()
+    g.write("incroos/pytest.ini", "[pytest]\naddopts = --cov=pkg\n")
+    run_plain()
+    r = run_plain()
+    check(
+        "incremental(oos): addopts-only --cov=pkg caches unchanged suite",
+        r.returncode == 0
+        and "2 of 2 test(s) unchanged" in r.stderr
+        and "scoped --cov" in r.stderr
+        and "without --cov" not in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited via addopts\n")
+    r = run_plain()
+    check(
+        "incremental(oos): addopts-only --cov=pkg: out-of-scope edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
+    # Whole-tree --cov=. but `omit = helper.py`: coverage never measures the
+    # helper, so editing it must bust just as under a narrowed scope.
+    (sp / "pytest.ini").unlink()
+    g.write("incroos/.coveragerc", "[run]\nomit = helper.py\n")
+    run_plain("--cov=.")
+    r = run_plain("--cov=.")
+    check(
+        "incremental(oos): --cov=. + omit caches unchanged suite",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited under omit\n")
+    r = run_plain("--cov=.")
+    check(
+        "incremental(oos): --cov=. + omit: omitted-file edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
+    # A run WITHOUT --cov after a --cov=pkg run reuses that run's coverage index,
+    # so it must reuse its scope too: helper.py (never measured) still folds.
+    (sp / ".coveragerc").unlink()
+    run_plain("--cov=pkg")
+    run_plain("--cov=pkg")
+    run_plain()
+    r = run_plain()
+    check(
+        "incremental(oos): no-cov run after --cov=pkg caches unchanged suite",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited with no --cov\n")
+    r = run_plain()
+    check(
+        "incremental(oos): no-cov run after --cov=pkg: out-of-scope edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
 
 def gate_explain(g, args, binary):
     print("== explain <nodeid> (reads real run caches) ==")

@@ -10,7 +10,7 @@
 //! Soundness: like `--changed`, this reasons over FIRST-PARTY source tracked by
 //! git. An environment change invisible to git is caught by [`env_fingerprint`],
 //! which folds the dependency manifests AND every installed distribution's
-//! identity (dist-info dir name + RECORD size) — so an in-place `pip install -U`
+//! identity (dist-info / egg-info name + RECORD / PKG-INFO size) — so an in-place `pip install -U`
 //! that never touches a lockfile still busts the baseline instead of a sticky
 //! false green. A change under an interpreter outside a recognizable venv layout
 //! (no discoverable site-packages), or a same-version in-place reinstall, remains
@@ -93,7 +93,7 @@ pub fn env_fingerprint(scope: &Path, python: &Path) -> String {
             h.update(&bytes);
         }
     }
-    hash_installed_dists(&mut h, python);
+    hash_installed_dists(&mut h, scope, python);
     hex_encode(&h.finalize())
 }
 
@@ -126,9 +126,56 @@ fn site_packages_dirs(python: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// The file whose size stands in for a site-packages entry's content, if the
+/// entry is an installed distribution: a wheel's `*.dist-info/RECORD`, a legacy
+/// setuptools `*.egg-info/PKG-INFO` (or the `*.egg-info` itself when it is a
+/// single file), or a `setup.py develop` `*.egg-link`. `None` = not a dist.
+fn dist_size_path(name: &str, path: &Path) -> Option<PathBuf> {
+    if name.ends_with(".dist-info") {
+        Some(path.join("RECORD"))
+    } else if name.ends_with(".egg-info") {
+        Some(if path.is_dir() {
+            path.join("PKG-INFO")
+        } else {
+            path.to_path_buf()
+        })
+    } else if name.ends_with(".egg-link") {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Whether the `*.dist-info` at `dist_info` was installed from the project
+/// itself, per its PEP 610 `direct_url.json`: an editable install, or a local
+/// `file://` directory inside `scope`. Absent / unreadable -> third-party.
+fn is_first_party_dist(scope: &Path, dist_info: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(dist_info.join("direct_url.json")) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let editable = doc
+        .pointer("/dir_info/editable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let local_in_scope = doc
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|u| u.strip_prefix("file://"))
+        .is_some_and(|p| {
+            let p = Path::new(p);
+            let canon = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
+            canon(p).starts_with(canon(scope))
+        });
+    editable || local_in_scope
+}
+
 /// Fold every installed distribution's identity into `h`, order-stable: the
 /// `*.dist-info` dir NAME (which encodes package + version) plus its RECORD file
-/// SIZE. An in-place `pip install -U` bumps the version, renaming the dist-info
+/// SIZE (legacy `*.egg-info` / `*.egg-link` entries likewise, see
+/// [`dist_size_path`]). An in-place `pip install -U` bumps the version, renaming the dist-info
 /// dir; a reinstall that adds/removes files changes RECORD's length — either
 /// shifts the fingerprint and busts the baseline, WITHOUT reading a single RECORD
 /// body (only a cheap `stat` per distribution, so a venv of hundreds of packages
@@ -136,8 +183,12 @@ fn site_packages_dirs(python: &Path) -> Vec<PathBuf> {
 /// interpreter path is not hashed: the site-packages location varies across
 /// machines/checkouts for the SAME environment. Residual gap: a same-version
 /// reinstall that rewrites file CONTENTS without changing the file list — rare,
-/// and shares the manual-bust escape with the no-venv case.
-fn hash_installed_dists(h: &mut Sha256, python: &Path) {
+/// and shares the manual-bust escape with the no-venv case. A FIRST-PARTY dist
+/// ([`is_first_party_dist`]) folds by package name only: an editable install
+/// whose version is derived from git (setuptools-scm, hatch-vcs) is renamed on
+/// every commit's re-sync, which would otherwise bust the baseline every time;
+/// its code is first-party source that git already tracks.
+fn hash_installed_dists(h: &mut Sha256, scope: &Path, python: &Path) {
     let mut dists: Vec<(String, u64)> = Vec::new();
     for sp in site_packages_dirs(python) {
         let Ok(rd) = std::fs::read_dir(&sp) else {
@@ -146,12 +197,15 @@ fn hash_installed_dists(h: &mut Sha256, python: &Path) {
         for e in rd.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            if !name.ends_with(".dist-info") {
+            let Some(sized) = dist_size_path(&name, &e.path()) else {
+                continue;
+            };
+            if name.ends_with(".dist-info") && is_first_party_dist(scope, &e.path()) {
+                let pkg = name.split('-').next().unwrap_or(&name);
+                dists.push((format!("first-party:{pkg}"), 0));
                 continue;
             }
-            let size = std::fs::metadata(e.path().join("RECORD"))
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(sized).map(|m| m.len()).unwrap_or(0);
             dists.push((name.into_owned(), size));
         }
     }
@@ -405,6 +459,72 @@ mod tests {
             None,
             "changed env must bust the stored baseline"
         );
+    }
+
+    #[test]
+    fn env_fingerprint_reflects_legacy_egg_installs() {
+        // setuptools-era installs leave no dist-info: an `*.egg-info` (dir or
+        // file) or a develop-mode `*.egg-link` must move the fingerprint too.
+        let scope = tmp("egginfo");
+        let (py, sp) = fake_venv("egginfo-venv");
+        let base = env_fingerprint(&scope, &py);
+        std::fs::create_dir_all(sp.join("old-1.0-py3.12.egg-info")).unwrap();
+        std::fs::write(
+            sp.join("old-1.0-py3.12.egg-info/PKG-INFO"),
+            b"Version: 1.0\n",
+        )
+        .unwrap();
+        let dir_egg = env_fingerprint(&scope, &py);
+        assert_ne!(base, dir_egg, "egg-info dir must move the fp");
+        std::fs::write(sp.join("flat-2.0.egg-info"), b"Version: 2.0\n").unwrap();
+        let file_egg = env_fingerprint(&scope, &py);
+        assert_ne!(dir_egg, file_egg, "egg-info file must move the fp");
+        std::fs::write(sp.join("dev.egg-link"), b"/src/dev\n.\n").unwrap();
+        assert_ne!(
+            file_egg,
+            env_fingerprint(&scope, &py),
+            "egg-link must move the fp"
+        );
+    }
+
+    #[test]
+    fn first_party_dist_version_bump_keeps_the_fingerprint() {
+        // An editable (or in-project local) install renamed by a git-derived
+        // version bump must NOT move the fp; a third-party bump still must.
+        let scope = tmp("firstparty");
+        let (py, sp) = fake_venv("firstparty-venv");
+        let editable = |sp: &Path, dist: &str| {
+            install(sp, dist, b"proj/__init__.py,,\n");
+            std::fs::write(
+                sp.join(dist).join("direct_url.json"),
+                br#"{"url": "file:///elsewhere/proj", "dir_info": {"editable": true}}"#,
+            )
+            .unwrap();
+        };
+        editable(&sp, "proj-0.1.dev3+g1111111.dist-info");
+        let before = env_fingerprint(&scope, &py);
+        std::fs::remove_dir_all(sp.join("proj-0.1.dev3+g1111111.dist-info")).unwrap();
+        editable(&sp, "proj-0.1.dev12+g2222222222.dist-info");
+        assert_eq!(
+            before,
+            env_fingerprint(&scope, &py),
+            "editable version bump"
+        );
+        // A non-editable local install from inside the project counts too.
+        let local = sp.join("local-1.0.dist-info");
+        install(&sp, "local-1.0.dist-info", b"x\n");
+        let url = format!(
+            r#"{{"url": "file://{}", "dir_info": {{}}}}"#,
+            scope.display()
+        );
+        std::fs::write(local.join("direct_url.json"), url).unwrap();
+        assert!(is_first_party_dist(&scope, &local));
+        // A third-party dist keeps its version in the fp.
+        install(&sp, "acme-1.0.dist-info", b"acme,,\n");
+        let with_acme = env_fingerprint(&scope, &py);
+        std::fs::remove_dir_all(sp.join("acme-1.0.dist-info")).unwrap();
+        install(&sp, "acme-1.1.dist-info", b"acme,,\n");
+        assert_ne!(with_acme, env_fingerprint(&scope, &py), "third-party bump");
     }
 
     #[test]
