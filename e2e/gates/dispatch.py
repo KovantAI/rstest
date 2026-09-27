@@ -6,6 +6,7 @@ import shutil
 import xml.etree.ElementTree as ET
 
 from _harness import (
+    BASIC,
     CRASHMANY,
     EACH_CRASH,
     FLAKY,
@@ -319,6 +320,45 @@ def gate_dist_each(g, args, binary):
         "each: --reruns rejected",
         r.returncode != 0 and "not supported" in r.stderr,
         r.stderr[-200:],
+    )
+
+
+def gate_fork_pool(g, args, binary):
+    print("== --fork-pool ==")
+    if WINDOWS:
+        check("fork-pool: skipped on Windows", True)
+        return
+    g.write("fp/test_fp.py", BASIC)
+    # Parity: fork-prewarmed pool must produce the SAME outcomes as the plain
+    # spawn path (only worker startup differs, never results).
+    plain = g.run("fp/test_fp.py", "-n", "4")
+    forked = g.run("fp/test_fp.py", "-n", "4", "--fork-pool")
+    check(
+        "fork-pool: same counts as plain spawn",
+        "2 failed, 2 passed" in plain.stdout and "2 failed, 2 passed" in forked.stdout,
+        f"plain={plain.stdout[-120:]!r} forked={forked.stdout[-120:]!r}",
+    )
+    check("fork-pool: same exit code", plain.returncode == forked.returncode == 1)
+    # Crash + respawn under fork-pool: a worker that dies mid-test is reported
+    # failed (respawn uses the plain spawn path), never hangs.
+    g.write(
+        "fp/test_crash.py",
+        "import os\ndef test_boom(): os._exit(1)\ndef test_ok(): assert True\n",
+    )
+    cr = g.run("fp", "-n", "4", "--fork-pool", "-k", "boom or ok")
+    check(
+        "fork-pool: crash reported, run completes",
+        cr.returncode != 0 and "test_boom" in cr.stdout,
+        cr.stdout[-200:],
+    )
+    # Doctor JSON records whether fork-prewarm was used.
+    dj = g.tmp / "fp-doctor.json"
+    g.run("fp/test_fp.py", "-n", "4", "--fork-pool", "--doctor-json", str(dj))
+    d = json.loads(dj.read_text(encoding="utf-8"))
+    check(
+        "fork-pool: doctor json fork_prewarm=true + startup_seconds present",
+        d.get("fork_prewarm") is True and "startup_seconds" in d,
+        str({k: d.get(k) for k in ("fork_prewarm", "startup_seconds")}),
     )
 
 

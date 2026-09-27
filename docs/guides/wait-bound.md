@@ -2,6 +2,8 @@
 
 A playbook for suites whose time goes to waiting (sleeps, network, timeouts) rather than computing, where rstest gains the most.
 
+A playbook for suites whose time goes to waiting (sleeps, network, timeouts) rather than computing, where rstest gains the most.
+
 ## Who this is for
 
 You maintain a backend suite that spends most of its time *waiting* (on

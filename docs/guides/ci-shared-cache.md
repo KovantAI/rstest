@@ -185,6 +185,18 @@ and carry no interpreter tag. Give each distinct suite its own remote prefix
   `<os>-py<version>[-<working-directory>]`). **Unreleased:** that input is not
   in the `@v0.7.0` action; it ships in 0.8.0.
 
+## One prefix per suite, interpreter, and project
+
+Test ids in the cache are **project-relative** (`tests/test_x.py::test_x`)
+and carry no interpreter tag. Give each distinct suite its own remote prefix
+(or artifact name), or their entries collide and mix:
+
+- a monorepo matrix with one job per package: `s3://ci-cache/rstest/libs-core`,
+  `s3://ci-cache/rstest/libs-cli`, …
+- a Python-version or OS matrix: add the version, e.g.
+  `s3://ci-cache/rstest/py3.13`, since durations and flakiness differ per
+  interpreter.
+
 ## Permissions
 
 The remote needs **list + read + write + delete** on the cache prefix. Delete
