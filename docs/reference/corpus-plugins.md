@@ -57,7 +57,7 @@ corpus parity floor under rstest.
 | pytest-httpbin | 1 | requests | ✅ parallel |
 | pytest-memray | 1 | urllib3 | ✅ parallel (`-n 4`) |
 | pytest-pretty | 1 | pydantic | 🔶 `-n 0` only |
-| pytest-randomly | 1 | structlog | ✅ parallel (seed synced across workers). Known issue: with pytest-xdist also installed every `-n ≥ 2` run fails (exit 3, `TypeError` in `pytest_randomly._reseed`); uninstall pytest-xdist or pass `-p no:xdist` |
+| pytest-randomly | 1 | structlog | ✅ parallel (seed synced across workers). Works with pytest-xdist installed too (**Unreleased**; 0.7.0 fails there, see [pytest-randomly](../guides/plugins.md)) |
 | pytest-recording | 1 | langchain | ✅ parallel |
 | pytest-retry | 1 | langgraph | ✅ parallel (no xdist in the venv, so rstest seeds `server_port`) |
 | pytest-sugar | 1 | fastapi | ⚠️ loaded only; terminal plugin not painted at `-n ≥ 2` |

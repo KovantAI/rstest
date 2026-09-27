@@ -207,8 +207,9 @@ pub struct Cli {
     pub(crate) order: Option<String>,
 
     /// Write merged results as junit XML (intercepted: per-worker sessions
-    /// would clobber a shared file).
-    #[arg(long)]
+    /// would clobber a shared file). `--junit-xml` is pytest's alias for it
+    /// and is intercepted the same way.
+    #[arg(long, alias = "junit-xml")]
     pub(crate) junitxml: Option<PathBuf>,
 
     /// Write a self-contained HTML report of the merged run (rendered
@@ -453,9 +454,7 @@ const SESSION_VALUE_FLAGS: &[&str] = &[
     "--ignore-glob",
     "--import-mode",
     "--junit-prefix",
-    "--junit-xml",
     "--junitprefix",
-    "--junitxml",
     "--last-failed-no-failures",
     "--lfnf",
     "--log-auto-indent",
@@ -739,6 +738,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--doctor-md",
     "--doctor-fail-on",
     "--junitxml",
+    "--junit-xml",
     "--html",
     "--dist",
     "--shard",
@@ -1060,6 +1060,15 @@ mod tests {
                     "clap short flag {tok} missing from split_args tables"
                 );
             }
+            // Aliases route through the same tables, or `--alias VALUE` would
+            // leak its value to the pytest session as a test path.
+            for alias in arg.get_all_aliases().unwrap_or_default() {
+                let tok = format!("--{alias}");
+                assert!(
+                    covered(&tok),
+                    "clap alias {tok} missing from split_args tables"
+                );
+            }
         }
         // Every clap subcommand must be in SUBCOMMANDS, or split_args would
         // forward its leading token to the pytest session instead of clap.
@@ -1079,6 +1088,20 @@ mod tests {
         ]));
         assert_eq!(own, v(&["rstest", "-n", "4", "--dist", "loadfile"]));
         assert_eq!(session, v(&["tests/", "-k", "smoke", "-x"]));
+    }
+
+    #[test]
+    fn junit_xml_alias_is_intercepted_like_junitxml() {
+        // pytest's `--junit-xml` spelling must not reach the worker sessions,
+        // where each would overwrite the same file.
+        for form in [&["--junit-xml", "out.xml"][..], &["--junit-xml=out.xml"]] {
+            let mut argv = form.to_vec();
+            argv.push("tests/");
+            let (own, session) = split_args(v(&argv));
+            assert_eq!(session, v(&["tests/"]), "{form:?}");
+            let cli = Cli::try_parse_from(own).unwrap();
+            assert_eq!(cli.junitxml, Some(PathBuf::from("out.xml")), "{form:?}");
+        }
     }
 
     #[test]

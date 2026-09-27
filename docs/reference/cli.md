@@ -904,6 +904,9 @@ snapshot document to a file.
 
 Write merged results as JUnit XML. Intercepted by rstest (rather than
 forwarded) because per-worker sessions would clobber a shared file.
+pytest's `--junit-xml` spelling is an alias and is intercepted the same way
+(**Unreleased:** rstest 0.7.0 forwarded `--junit-xml` to every worker, which
+then overwrote one another's file).
 
 **Unreleased:** the document is pytest's own at every worker count. Each
 worker runs pytest's junitxml plugin and streams every finished

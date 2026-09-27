@@ -90,6 +90,37 @@ def gate_pytest_randomly_real_plugin(g, args, binary):
     check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
 
+def gate_pytest_randomly_with_xdist_installed(g, args, binary):
+    print("== pytest-randomly with pytest-xdist also installed ==")
+    # With xdist installed, randomly registers XdistHooks, and rstest's
+    # configure_node emulation called it mid-configure, while its option was
+    # still the "default" placeholder: the string replaced rstest's seed and
+    # every -n >= 2 worker died in _reseed (TypeError, exit 3).
+    gr = _plugin_gate(binary, args, "-randomly-xdist", ["pytest-randomly", "pytest-xdist"])
+    gr.write(
+        "rx/test_rx.py",
+        "def test_a(): pass\n"
+        "def test_b(): pass\n"
+        "def test_seed_is_rstests(request):\n"
+        "    resolved = request.config.getoption('randomly_seed')\n"
+        "    wi = request.config.workerinput\n"
+        "    assert resolved == (int(wi['testrun_uid'], 16) & 0xFFFFFFFF)\n",
+    )
+    r = gr.run("rx", "-n", "2", env_extra={"RSTEST_RUN_UID": "abc123def456789"})
+    out = r.stdout + r.stderr
+    check(
+        "randomly+xdist: no TypeError at -n 2, rstest's seed is used",
+        r.returncode == 0 and "3 passed" in r.stdout and "TypeError" not in out,
+        f"rc={r.returncode} " + out[-500:],
+    )
+    r = gr.run("rx/test_rx.py::test_a", "-n", "2", "-p", "randomly", "--randomly-seed=1234")
+    check(
+        "randomly+xdist: an explicit --randomly-seed still works",
+        r.returncode == 0 and "1 passed" in r.stdout,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+    )
+
+
 def gate_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
     print("== pytest-rerunfailures + xdist (no sock_port KeyError) ==")
     # rerunfailures+xdist reads workerinput["sock_port"], a key only an xdist
@@ -158,6 +189,41 @@ def gate_pdb_with_addopts_n_and_xdist(g, args, binary):
         "addopts -n + xdist: pool run unaffected",
         r.returncode == 0 and "1 passed" in r.stdout,
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+    )
+
+
+def gate_looponfail_and_junit_xml_alias_with_xdist(g, args, binary):
+    print("== --looponfail refused / neutralized, --junit-xml alias (xdist installed) ==")
+    gx = _plugin_gate(binary, args, "-xdist", ["pytest-xdist"])
+    gx.write("lf/test_lf.py", "def test_a():\n    assert True\ndef test_b():\n    assert True\n")
+    lf = str(gx.tmp / "lf")
+    # On rstest's command line: refused up front, pointing at --watch.
+    for flag in ("--looponfail", "-fv"):
+        r = gx.run("-n", "2", flag, cwd=lf)
+        check(
+            f"{flag}: refused with a pointer to --watch",
+            r.returncode == 1 and "--watch" in r.stderr,
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+        )
+    # From ini addopts (rstest can't see it): switched off in the worker, so the
+    # run completes instead of xdist's loop-on-fail taking the session over.
+    gx.write("lf/pytest.ini", "[pytest]\naddopts = --looponfail\n")
+    for n in ("2", "0"):
+        r = gx.run("-n", n, cwd=lf, timeout=60)
+        check(
+            f"addopts --looponfail at -n {n}: run completes",
+            r.returncode == 0 and "2 passed" in (r.stdout + r.stderr),
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+        )
+    (gx.tmp / "lf" / "pytest.ini").unlink()
+    # pytest's --junit-xml spelling is rstest's own --junitxml: one merged file.
+    r = gx.run("-n", "2", "--junit-xml", "junit-alias.xml", cwd=lf)
+    xml = gx.tmp / "lf" / "junit-alias.xml"
+    body = xml.read_text() if xml.exists() else ""
+    check(
+        "--junit-xml alias: one merged report with both tests",
+        r.returncode == 0 and 'tests="2"' in body,
+        f"rc={r.returncode} exists={xml.exists()} " + (r.stdout + r.stderr)[-300:],
     )
 
 

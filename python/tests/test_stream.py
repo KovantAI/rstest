@@ -93,11 +93,12 @@ def test_cmdline_main_disables_xdist_distribution_before_xdist_sees_it(monkeypat
     # tryfirst cmdline_main would raise on --pdb, so the wrapper zeroes these
     # before any impl runs, in the pool and in single sessions alike.
     monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
-    config = _xdist_config(numprocesses=4, dist="loadgroup", distload=True)
+    config = _xdist_config(numprocesses=4, dist="loadgroup", distload=True, looponfail=True)
     _run_cmdline_main(config)
     assert config.option.numprocesses == 0
     assert config.option.dist == "no"
     assert config.option.distload is False
+    assert config.option.looponfail is False
 
 
 def test_cmdline_main_without_xdist_options_is_harmless(monkeypatch):
@@ -326,6 +327,32 @@ def test_call_configure_node_invokes_once_and_marks(monkeypatch):
 
     p._call_configure_node(plugin)  # already configured -> skipped
     assert len(seen) == 1
+
+
+def _randomly_like_hook(value: Any):
+    # pytest-randomly's XdistHooks.pytest_configure_node: copies its option
+    # (still the "default" placeholder mid-configure) into workerinput.
+    def hook(node):
+        node.workerinput["randomly_seed"] = value
+
+    return SimpleNamespace(pytest_configure_node=hook)
+
+
+def test_call_configure_node_keeps_resolved_seed_over_placeholder(monkeypatch):
+    monkeypatch.setattr(stream, "_is_dist_internal", lambda pl: False)
+    p = _plugin()
+    p._xdist_node = SimpleNamespace(workerinput={"randomly_seed": 1234})
+    p._call_configure_node(_randomly_like_hook("default"))
+    assert p._xdist_node.workerinput["randomly_seed"] == 1234
+
+
+def test_call_configure_node_accepts_a_resolved_seed(monkeypatch):
+    # An explicit --randomly-seed=N resolves to an int: what a master sends.
+    monkeypatch.setattr(stream, "_is_dist_internal", lambda pl: False)
+    p = _plugin()
+    p._xdist_node = SimpleNamespace(workerinput={"randomly_seed": 1234})
+    p._call_configure_node(_randomly_like_hook(42))
+    assert p._xdist_node.workerinput["randomly_seed"] == 42
 
 
 def test_call_configure_node_skips_without_shim():

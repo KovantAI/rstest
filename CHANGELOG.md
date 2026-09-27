@@ -5,6 +5,23 @@ between 0.x releases and are listed here.
 
 ## 0.8.0 (Unreleased)
 
+- **pytest-randomly works with pytest-xdist also installed.** randomly
+  registers its xdist hooks when xdist is present, and rstest's
+  `pytest_configure_node` emulation called them mid-configure, while the seed
+  option still held the `"default"` placeholder. That string replaced
+  rstest's run-level seed, and every `-n >= 2` worker failed with `TypeError`
+  in `pytest_randomly._reseed` (exit 3). rstest now keeps its resolved seed
+  when a configure_node hook writes back an unresolved value; an explicit
+  `--randomly-seed=N` still wins.
+- **`--looponfail` no longer hangs the run.** pytest-xdist's loop-on-fail
+  flag was forwarded to every worker session, where xdist's loop took the
+  session over and the run never finished. On rstest's command line
+  `--looponfail` / `-f` (also clustered, such as `-fv`) is now refused with
+  exit 1 and a pointer to `--watch`; from ini `addopts` it is switched off
+  inside the workers.
+- **`--junit-xml` is intercepted like `--junitxml`.** pytest's alias was
+  forwarded to every worker, which then overwrote one another's JUnit file.
+  It now writes the one merged report.
 - **`--pdb` works with a leftover `addopts = -n N` and pytest-xdist
   installed.** xdist's own `pytest_cmdline_main` rejected the run with
   `--pdb is incompatible with distributing tests` before rstest turned xdist

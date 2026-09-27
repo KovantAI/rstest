@@ -33,6 +33,24 @@ from rstest_worker._internal.xdistnode import (
 
 log = logging.getLogger("rstest.worker")
 
+# workerinput keys rstest provisions with an already-resolved seed, and the
+# type a resolved value has. A real xdist master runs pytest_configure_node
+# after its own pytest_configure resolved the seed; rstest's emulation runs it
+# at registration, mid-configure, when pytest-randomly's option still holds
+# the "default" placeholder. Its hook would copy that string over rstest's
+# seed and then read it back as the seed (TypeError in _reseed).
+_RESOLVED_SEED_KEYS = {"randomly_seed": int}
+
+
+def _keep_resolved_seeds(workerinput: dict, seeded: dict) -> None:
+    """Undo a configure_node write that replaced a resolved seed with a value
+    of the wrong type (an unresolved placeholder). A resolved value, such as an
+    explicit --randomly-seed=N, is kept: that is what a master would send."""
+    for key, value in seeded.items():
+        if not isinstance(workerinput.get(key), _RESOLVED_SEED_KEYS[key]):
+            workerinput[key] = value
+
+
 # Identity fixtures StreamPlugin defines that pytest-xdist also defines; ours
 # must win the override chain (see pytest_sessionstart_identity_fixtures).
 _IDENTITY_FIXTURES = ("worker_id", "testrun_uid")
@@ -340,6 +358,10 @@ class StreamPlugin:
             opt.distload = False
         if hasattr(opt, "dist"):
             opt.dist = "no"
+        # `--looponfail` from ini `addopts` (rstest refuses it on its own
+        # command line): xdist's cmdline_main would loop forever in the worker.
+        if hasattr(opt, "looponfail"):
+            opt.looponfail = False
 
     @pytest.hookimpl(wrapper=True)
     def pytest_load_initial_conftests(self, early_config, parser, args):
@@ -508,12 +530,16 @@ class StreamPlugin:
         impl = getattr(plugin, "pytest_configure_node", None)
         if impl is None or id(plugin) in self._node_configured:
             return
+        workerinput = getattr(self._xdist_node, "workerinput", None) or {}
+        seeded = {k: workerinput[k] for k in _RESOLVED_SEED_KEYS if k in workerinput}
         try:
             impl(self._xdist_node)
         except Exception:
             if lenient:
                 return  # state not ready yet; retried strictly at sessionstart
             raise
+        finally:
+            _keep_resolved_seeds(workerinput, seeded)
         self._node_configured.add(id(plugin))
 
     def _sweep_configure_node(self):
