@@ -21,7 +21,8 @@ use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
 use crate::{
-    collect, config, coverage_skip, discover, doctor, incremental, migrate, mono, remote, select,
+    collect, config, cov_scope, coverage_skip, discover, doctor, incremental, migrate, mono,
+    remote, select,
 };
 
 /// Resolve the effective `--changed` base rev: the flag's value, or `HEAD` when
@@ -213,7 +214,7 @@ struct PostRun<'a> {
     head: &'a Option<String>,
     env_fp: &'a str,
     incremental_active: bool,
-    config_fp: &'a str,
+    config: &'a coverage_skip::ConfigState,
     /// Coverage index snapshotted BEFORE the run (drives carry-forward after).
     prev_index: &'a select::CoverageIndex,
     baseline: &'a coverage_skip::Baseline,
@@ -634,7 +635,7 @@ pub(crate) fn execute_inner(
         head: &head,
         env_fp: &env_fp,
         incremental_active: inc.active,
-        config_fp: &inc.config_fp,
+        config: &inc.config,
         prev_index: &inc.prev_index,
         baseline: &inc.baseline,
         replay: pinned.is_some(),
@@ -967,11 +968,44 @@ struct Incremental {
     shard: Option<(usize, usize)>,
     /// `--incremental` is actually in effect this run (all preconditions met).
     active: bool,
-    config_fp: String,
+    config: coverage_skip::ConfigState,
     /// Coverage index snapshotted BEFORE the run (drives skip now, carry-forward after).
     prev_index: select::CoverageIndex,
     baseline: coverage_skip::Baseline,
     skip_ids: std::collections::HashSet<String>,
+}
+
+/// Coverage scope + config state for an active incremental run. The measured
+/// set comes from the args pytest really runs with (ini `addopts` and
+/// `PYTEST_ADDOPTS` included: [`cov_scope::effective_pytest_args`]), and the
+/// state folds config/conftest content AND — when coverage measures only part
+/// of the tree — every unmeasured first-party file, so editing
+/// coverage-invisible code busts the skip set instead of leaving a stale
+/// false-green. A run without `--cov` reuses the coverage args of the run that
+/// wrote the index. Factored out of [`resolve_incremental`] so the wiring is
+/// unit-testable without standing up a full `RunConfig`: dropping the scope
+/// here (a default [`cov_scope::CovScope`]) is a silent-false-green regression
+/// the seam test catches.
+fn incremental_config(
+    scope: &std::path::Path,
+    args: &[String],
+) -> (cov_scope::CovScope, coverage_skip::ConfigState) {
+    let effective = cov_scope::effective_pytest_args(scope, args);
+    // The index skipping trusts was written by the last COVERAGE run: without
+    // --cov now, rebuild that run's scope from its recorded args, so files it
+    // never measured still fold (see ConfigState::index_cov_args).
+    let index_cov_args = if coverage_skip::coverage_requested(&effective) {
+        Some(cov_scope::coverage_args(&effective))
+    } else {
+        coverage_skip::stored_index_cov_args(scope)
+    };
+    let cov = index_cov_args
+        .as_ref()
+        .map(|a| cov_scope::CovScope::resolve(scope, a))
+        .unwrap_or_default();
+    let mut state = coverage_skip::config_state(scope, &cov);
+    state.index_cov_args = index_cov_args;
+    (cov, state)
 }
 
 /// Resolve `--shuffle`/`--shard` and compute the `--incremental` skip set in one
@@ -1034,12 +1068,12 @@ fn resolve_incremental(
         && shard.is_none()
         && shuffle_seed.is_none()
         && !is_lazy;
-    // The config fingerprint is only consumed under `active`; computing it
+    // The config state is only consumed under `active`; computing it
     // unconditionally would walk the whole project tree for conftests.
-    let config_fp = if active {
-        coverage_skip::config_fingerprint(scope)
+    let (cov, config) = if active {
+        incremental_config(scope, args)
     } else {
-        String::new()
+        Default::default()
     };
     warn_incremental_conflicts(
         sink.err(),
@@ -1051,21 +1085,34 @@ fn resolve_incremental(
     // --incremental relies on the coverage index advancing every run; without
     // --cov this run covtool never rewrites it, so a changed test re-runs on
     // every invocation until a coverage run refreshes the index.
-    if active && !coverage_skip::coverage_requested(args) {
+    if active && !coverage_skip::coverage_requested(&cov_scope::effective_pytest_args(scope, args))
+    {
         sink.warn(
             "rstest: --incremental without --cov: the coverage index won't be \
              refreshed this run, so changed tests keep re-running until a --cov run",
         );
     }
-    // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
-    // coverage-invisible: editing it won't bust the skip, so a test depending on
-    // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
-    if active && coverage_skip::cov_scope_narrowed(args) {
+    // A narrowed --cov=<pkg> (or a coverage include/omit) makes first-party
+    // source coverage doesn't measure invisible. That gap is closed soundly:
+    // config_state folds a hash of every unmeasured first-party .py, so editing
+    // one busts the skip set wholesale. Warn only about the coarseness (any such
+    // edit re-runs everything); --cov=. restores per-file granularity.
+    if cov.is_partial() {
         sink.warn(
-            "rstest: --incremental with a scoped --cov: edits to first-party source \
-             outside the coverage scope are undetectable and may leave a test cached \
-             on a stale pass; use --cov=. to cover the whole tree",
+            "rstest: --incremental with a scoped --cov (or coverage include/omit): \
+             first-party source coverage doesn't measure is folded into the skip \
+             fingerprint, so editing any of it re-runs the whole suite; use --cov=. \
+             for per-file incrementality",
         );
+        // A scope naming no directory/module under the project can't exempt any
+        // file from that fold, so every edit re-runs everything: say which.
+        for s in cov.unmatched_sources(scope) {
+            sink.warn(&format!(
+                "rstest: --incremental: --cov scope `{s}` matches no directory or module \
+                 under the project, so every first-party .py counts as out of scope and any \
+                 edit re-runs the whole suite"
+            ));
+        }
     }
     // Snapshot the index BEFORE the run: it drives the skip decision now, and
     // post-run it supplies the cached tests' coverage to fold back in (covtool
@@ -1079,12 +1126,12 @@ fn resolve_incremental(
     // recorded def lines restore the cached (not-run) entries' source line after
     // the run (a cached test has no pytest report to supply one).
     let baseline = if active {
-        coverage_skip::load(scope, &config_fp)
+        coverage_skip::load(scope, &config.fp)
     } else {
         coverage_skip::Baseline::default()
     };
     let skip_ids = if active {
-        coverage_skip::skippable_now(&prev_index, &baseline)
+        coverage_skip::skippable_now(&prev_index, &baseline, &config)
     } else {
         std::collections::HashSet::new()
     };
@@ -1092,7 +1139,7 @@ fn resolve_incremental(
         shuffle_seed,
         shard,
         active,
-        config_fp,
+        config,
         prev_index,
         baseline,
         skip_ids,
@@ -1907,12 +1954,12 @@ fn fold_run_event(
 mod tests {
     use super::{
         attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
-        collect_lazy, dispatch_command, fold_run_event, head_to_none, lazy_should_steal,
-        names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
-        parse_numprocesses, resolve_changed_base, resolve_order, resolve_retention_policy,
-        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, watchdog_duration, RunPath,
+        collect_lazy, dispatch_command, fold_run_event, head_to_none, incremental_config,
+        lazy_should_steal, names_a_selection, names_existing_path, order_ignored_warning,
+        parse_duration_secs, parse_numprocesses, resolve_changed_base, resolve_order,
+        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
+        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration, RunPath,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1981,6 +2028,60 @@ mod tests {
         // Single-worker: the plugin's own master branch runs => no warning.
         assert!(silent_master_plugin_warnings(1, &sv(&["--report-log=out.jsonl"])).is_empty());
         assert!(silent_master_plugin_warnings(0, &sv(&["--csv=r.csv"])).is_empty());
+    }
+
+    #[test]
+    fn incremental_config_threads_cov_scope() {
+        // Wiring guard for resolve_incremental's config seam: under a narrowed
+        // --cov — on the CLI or only in the ini addopts — the fingerprint MUST
+        // fold unmeasured first-party source. If the scope is ever dropped,
+        // editing coverage-invisible code would not move the fp -> a silent
+        // false-green.
+        let scope = std::env::temp_dir().join(format!("rstest-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("pkg")).unwrap();
+        std::fs::create_dir_all(scope.join("other")).unwrap();
+        std::fs::write(scope.join("pkg/mod.py"), b"x = 1\n").unwrap();
+        std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
+        let fp = |args: &[&str]| incremental_config(&scope, &sv(args)).1.fp;
+
+        // Under --cov=pkg, editing out-of-scope other/mod.py MUST move the fp.
+        let before = fp(&["--cov=pkg"]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 2\n").unwrap();
+        assert_ne!(
+            before,
+            fp(&["--cov=pkg"]),
+            "out-of-scope edit must bust under --cov=pkg"
+        );
+
+        // Sanity: no --cov does NOT fold out-of-scope source, so the same edit
+        // leaves the fp stable — proving the difference above is scoping.
+        let wt = fp(&[]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 3\n").unwrap();
+        assert_eq!(wt, fp(&[]), "no --cov: out-of-scope source is not folded");
+
+        // --cov=pkg only in the ini addopts narrows just the same.
+        std::fs::write(scope.join("pytest.ini"), b"[pytest]\naddopts = --cov=pkg\n").unwrap();
+        let (cov, _) = incremental_config(&scope, &sv(&[]));
+        assert_eq!(cov.sources, vec!["pkg"], "addopts --cov must be seen");
+        let before = fp(&[]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 4\n").unwrap();
+        assert_ne!(before, fp(&[]), "addopts-only --cov=pkg must fold other/");
+
+        // A later run WITHOUT --cov reuses the recorded scope of the run that
+        // wrote the index: other/ still folds. With nothing recorded, the
+        // index's scope is unknown and the state says so.
+        std::fs::remove_file(scope.join("pytest.ini")).unwrap();
+        let (_, state) = incremental_config(&scope, &sv(&[]));
+        assert_eq!(state.index_cov_args, None, "nothing recorded yet");
+        let (_, cov_run) = incremental_config(&scope, &sv(&["--cov=pkg"]));
+        crate::coverage_skip::record(&scope, &cov_run, Default::default(), Default::default());
+        let (cov, plain) = incremental_config(&scope, &sv(&[]));
+        assert_eq!(plain.index_cov_args, Some(sv(&["--cov=pkg"])));
+        assert_eq!(cov.sources, vec!["pkg"]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 5\n").unwrap();
+        assert_ne!(plain.fp, fp(&[]), "no-cov run still folds other/");
+        let _ = std::fs::remove_dir_all(&scope);
     }
 
     #[test]
