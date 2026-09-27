@@ -482,6 +482,8 @@ pub(super) fn run_post_gates(
             &outcome.run,
             &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
             suite_wall,
+            outcome.startup_seconds,
+            outcome.fork_prewarmed,
             n,
             coverage_index.as_ref().zip(project.as_ref()),
         );
@@ -1627,6 +1629,8 @@ mod tests {
             exitstatus: 0,
             collection_hash: None,
             collection_size: 0,
+            startup_seconds: 0.0,
+            fork_prewarmed: false,
             sources: Default::default(),
         };
         let (mut sink, _cap) = Sink::captured();

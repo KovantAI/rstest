@@ -6,11 +6,13 @@
     "coverage_waste",
     "cpu_time_seconds",
     "fixtures",
+    "fork_prewarm",
     "parallel_efficiency",
     "parallel_floor",
     "rstest_version",
     "schema",
     "slowest_files",
+    "startup_seconds",
     "test_time_seconds",
     "tests",
     "wait_bound",
@@ -39,6 +41,10 @@
       "items": {
         "$ref": "#/definitions/FixtureEntry"
       }
+    },
+    "fork_prewarm": {
+      "description": "Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates the \"try --fork-pool\" hint so it isn't suggested when already on.",
+      "type": "boolean"
     },
     "leaks": {
       "description": "Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).",
@@ -80,6 +86,11 @@
       "items": {
         "$ref": "#/definitions/FileEntry"
       }
+    },
+    "startup_seconds": {
+      "description": "Wall from pool spawn to every worker's first event (imported core + started collecting), part of `wall_seconds`. A fixed per-run tax that `--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs. Surfaced so a startup-bound suite is legible.",
+      "type": "number",
+      "format": "double"
     },
     "test_time_seconds": {
       "type": "number",
