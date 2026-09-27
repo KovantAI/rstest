@@ -87,10 +87,206 @@ pub struct WorkerEnv {
 /// CreatePipe handles on Windows), never stdio (D4: fd 0/1/2 stay free). The
 /// child gets its endpoints as numeric argv: fds on unix, HANDLEs on Windows.
 pub struct Worker {
-    child: Child,
+    proc: Proc,
     cmd_w: File,
     reader: Option<EventReader>,
+    /// When `Shutdown` was first sent. A reparented worker's exit timeout runs
+    /// from here, so a wind-down that sends every Shutdown and then waits the
+    /// workers one by one shares one deadline instead of stacking N of them.
+    shutdown_sent: Option<std::time::Instant>,
 }
+
+/// How a worker's OS process is owned. The plain spawn path makes the worker a
+/// direct child of the orchestrator (reap via `Child::wait`). The fork-prewarm
+/// path (Unix) forks workers off a zygote that then exits, reparenting them to
+/// init/launchd; the orchestrator never became their parent, so it signals them
+/// by pid (`kill(pid, ...)`), polls for their exit, and relies on init to reap.
+enum Proc {
+    /// Direct child: the orchestrator spawned it and owns its exit status.
+    Owned(Child),
+    /// Fork-prewarmed worker, reparented to init after the zygote exited. Kill
+    /// by pid; init reaps it. `None` once the worker is known to have exited, so
+    /// a pid init already recycled is never signalled again.
+    #[cfg(unix)]
+    Reparented(Option<Tracked>),
+}
+
+/// A reparented worker's pid plus its process start time, captured right after
+/// the fork. The worker is not our child, so init can reap it (and the kernel
+/// recycle the pid) at any moment without us noticing; comparing start times
+/// before signalling tells a recycled pid apart from our worker. `start` is
+/// `None` where the platform exposes no start time (then only liveness is
+/// checked).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Tracked {
+    pid: u32,
+    start: Option<u64>,
+}
+
+#[cfg(unix)]
+impl Tracked {
+    /// Start tracking `pid`; `None` if it is gone (nothing to track). Called
+    /// while the zygote is still alive and the worker's parent, so the pid can't
+    /// have been recycled yet: a worker that already died is still a zombie.
+    /// A zombie is tracked too when its start time is known, so whoever ends
+    /// up reaping it (possibly us, as PID 1 / a subreaper) can still verify it.
+    fn capture(pid: u32) -> Option<Self> {
+        match probe(pid) {
+            Probe::Alive { start } => Some(Tracked { pid, start }),
+            Probe::Zombie { start: Some(start) } => Some(Tracked {
+                pid,
+                start: Some(start),
+            }),
+            Probe::Zombie { start: None } | Probe::Gone => None,
+        }
+    }
+
+    /// Whether `start` (a fresh probe's) identifies this worker. Without a
+    /// recorded start time only liveness can be checked, so anything matches.
+    fn same_start(&self, start: Option<u64>) -> bool {
+        self.start.is_none() || start == self.start
+    }
+
+    /// This worker's current state. A pid now naming a different process (the
+    /// worker was reaped and the pid recycled) or a zombie that can't be proven
+    /// to be this worker is reported [`Status::Gone`]: never signalled or reaped.
+    fn status(&self) -> Status {
+        match probe(self.pid) {
+            Probe::Alive { start } if self.same_start(start) => Status::Running,
+            Probe::Zombie { start } if self.same_start(start) => Status::Zombie,
+            _ => Status::Gone,
+        }
+    }
+}
+
+/// A tracked worker's state, identity already verified (see [`Tracked::status`]).
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum Status {
+    Running,
+    /// Exited, not yet reaped, and verifiably this worker.
+    Zombie,
+    /// Exited and reaped, or its pid now belongs to someone else.
+    Gone,
+}
+
+/// What the OS reports for a pid we are not necessarily the parent of.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum Probe {
+    /// No such process.
+    Gone,
+    /// Exited but not yet reaped. Counts as exited: a PID 1 that never reaps
+    /// adopted orphans (common in containers) would otherwise leave every
+    /// worker looking alive until the full exit timeout. `start` where the
+    /// platform still exposes it for a zombie (Linux; not macOS).
+    Zombie { start: Option<u64> },
+    /// Running; `start` is its start time where the platform exposes one.
+    Alive { start: Option<u64> },
+}
+
+/// Probe `pid` via `/proc/<pid>/stat` (state field + starttime).
+#[cfg(target_os = "linux")]
+fn probe(pid: u32) -> Probe {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => parse_proc_stat(&stat).unwrap_or_else(|| probe_by_signal(pid)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Probe::Gone,
+        Err(_) => probe_by_signal(pid),
+    }
+}
+
+/// Parse a `/proc/<pid>/stat` line. Fields after the parenthesised comm (which
+/// may itself contain spaces/parens, hence `rfind`) start at field 3 (state);
+/// starttime is field 22.
+#[cfg(target_os = "linux")]
+fn parse_proc_stat(stat: &str) -> Option<Probe> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?;
+    let start = fields.nth(22 - 4).and_then(|f| f.parse::<u64>().ok());
+    if matches!(state, "Z" | "X" | "x") {
+        return Some(Probe::Zombie { start });
+    }
+    Some(Probe::Alive {
+        start: Some(start?),
+    })
+}
+
+/// Probe `pid` via `proc_pidinfo(PROC_PIDTBSDINFO)` (status + start time).
+#[cfg(target_os = "macos")]
+fn probe(pid: u32) -> Probe {
+    /// `SZOMB` from `<sys/proc.h>`; not exported by the libc crate.
+    const SZOMB: u32 = 5;
+    // SAFETY: an all-zero proc_bsdinfo is a valid value of this plain-data
+    // struct; proc_pidinfo writes at most `size` bytes into it.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a live, correctly sized buffer for PROC_PIDTBSDINFO.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if got != size {
+        let esrch = std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        return match probe_by_signal(pid) {
+            // proc_pidinfo has no task info for a zombie (ESRCH) even though the
+            // pid still exists, which is how a zombie is told apart here.
+            Probe::Alive { .. } if esrch => Probe::Zombie { start: None },
+            other => other,
+        };
+    }
+    if info.pbi_status == SZOMB {
+        return Probe::Zombie {
+            start: Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec),
+        };
+    }
+    Probe::Alive {
+        start: Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec),
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn probe(pid: u32) -> Probe {
+    probe_by_signal(pid)
+}
+
+/// Fallback probe: signal 0 checks existence only (a zombie still counts as
+/// present, and there is no start time to detect pid reuse).
+#[cfg(unix)]
+fn probe_by_signal(pid: u32) -> Probe {
+    // SAFETY: signal 0 only probes for existence; no memory access.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        Probe::Alive { start: None }
+    } else {
+        Probe::Gone
+    }
+}
+
+/// Upper bound on waiting for the zygote's pid report. The zygote only imports
+/// the vendored pytest core and forks (no collection), so this is generous; it
+/// exists so a wedged interpreter start (a hanging `sitecustomize`, say) fails
+/// the run with a diagnostic instead of hanging it before any watchdog exists.
+#[cfg(unix)]
+const ZYGOTE_REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Poll interval while waiting for a reparented worker to disappear.
+#[cfg(unix)]
+const REPARENTED_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// Upper bound on waiting for a reparented worker to exit after `Shutdown`. A
+/// worker stuck in teardown past it is SIGKILLed rather than hanging the run.
+#[cfg(unix)]
+const REPARENTED_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long to wait for a SIGKILLed reparented worker to disappear. Normally
+/// milliseconds; bounded so a process stuck in uninterruptible sleep can't hang
+/// the run.
+#[cfg(unix)]
+const REPARENTED_REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The read half of a worker's event pipe, split off from [`Worker`] so a
 /// reader thread can own it while the orchestrator keeps the write half.
@@ -177,14 +373,67 @@ impl Worker {
         let cmd_w = transport::into_file(cmd.write.into_raw());
         let evt_r = transport::into_file(evt.read.into_raw());
         Ok(Self {
-            child,
+            proc: Proc::Owned(child),
             cmd_w,
             reader: Some(EventReader::new(evt_r)),
+            shutdown_sent: None,
         })
+    }
+
+    /// Spawn a pool of `n` workers with stdio suppressed. When `fork_prewarm` is
+    /// set (Unix only) the workers are forked off one warm zygote that imports
+    /// the vendored pytest core a single time; otherwise each is an independent
+    /// `python -m rstest_worker` process (the portable path). Either way the
+    /// caller drives the returned workers identically (send a session command,
+    /// attach a reader). Respawn-after-crash always uses the plain per-worker
+    /// [`Worker::spawn`], so this covers only the initial pool.
+    pub fn spawn_pool(
+        python: &Path,
+        n: usize,
+        env: &WorkerEnv,
+        fork_prewarm: bool,
+    ) -> Result<Vec<Self>> {
+        #[cfg(unix)]
+        if Self::prewarms(fork_prewarm, n) {
+            ensure_fd_headroom(n);
+            match Self::spawn_forked_pool(python, n, env) {
+                // The zygote holds both ends of all 2n pipes at once (~4n fds,
+                // vs ~2n for plain spawns, which close each worker's child ends
+                // as they go), so it can hit the fd limit where the plain path
+                // still fits: fall back to plain spawns rather than failing.
+                Err(e) if is_fd_exhaustion(&e) => {}
+                result => return result,
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = fork_prewarm;
+        (0..n)
+            .map(|idx| Self::spawn(python, Some((idx, n)), env))
+            .collect()
+    }
+
+    /// Whether [`Worker::spawn_pool`] with these arguments tries to fork off a
+    /// zygote (Unix only, and only for a non-empty pool). It may still fall
+    /// back to plain spawns; see [`Worker::is_forked`] for what happened.
+    #[cfg(unix)]
+    fn prewarms(fork_prewarm: bool, n: usize) -> bool {
+        fork_prewarm && n > 0
+    }
+
+    /// Whether this worker was actually forked off a zygote (vs spawned).
+    pub fn is_forked(&self) -> bool {
+        match self.proc {
+            Proc::Owned(_) => false,
+            #[cfg(unix)]
+            Proc::Reparented(_) => true,
+        }
     }
 
     /// Send one msgpack [`proto::Command`] down the worker's command pipe.
     pub fn send(&mut self, cmd: &proto::Command) -> Result<()> {
+        if matches!(cmd, proto::Command::Shutdown) && self.shutdown_sent.is_none() {
+            self.shutdown_sent = Some(std::time::Instant::now());
+        }
         let buf = rmp_serde::encode::to_vec_named(cmd)?;
         self.cmd_w.write_all(&buf)?;
         self.cmd_w.flush()?;
@@ -209,19 +458,19 @@ impl Worker {
     /// Ask the worker to exit cleanly (send `Shutdown`, then reap it).
     pub fn shutdown(mut self) -> Result<()> {
         self.send(&proto::Command::Shutdown)?;
-        self.child.wait()?;
+        self.proc.wait(self.shutdown_sent);
         Ok(())
     }
 
     /// Hard-kill the worker process (hang watchdog). The reader thread
     /// sees EOF and the normal crash machinery takes over.
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        self.proc.kill();
     }
 
     /// Wait for the worker process to exit (after a Shutdown was sent).
     pub fn wait(mut self) -> Result<()> {
-        self.child.wait()?;
+        self.proc.wait(self.shutdown_sent);
         Ok(())
     }
 
@@ -233,8 +482,145 @@ impl Worker {
     /// (`std::process::Child::wait` stores it on first success and never calls
     /// `waitpid` again), so the end-of-run cleanup double-wait is safe.
     pub fn reap(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.proc.reap();
+    }
+}
+
+impl Proc {
+    /// Kill the process. `Child::kill` for an owned child; a SIGKILL by pid for
+    /// a reparented fork-prewarmed worker (not our child, so no `Child` handle).
+    fn kill(&mut self) {
+        match self {
+            Proc::Owned(child) => {
+                let _ = child.kill();
+            }
+            #[cfg(unix)]
+            Proc::Reparented(slot) => {
+                let Some(tracked) = *slot else { return };
+                // Re-verify identity right before signalling: init may have
+                // reaped the worker and the kernel recycled its pid since we last
+                // looked. A gone/recycled pid is forgotten, never signalled.
+                match tracked.status() {
+                    Status::Running => {
+                        // SAFETY: sending SIGKILL to a pid performs no memory
+                        // access. The residual window between the probe and the
+                        // signal is a few instructions, versus the unbounded one
+                        // of trusting a stale pid.
+                        unsafe { libc::kill(tracked.pid as libc::pid_t, libc::SIGKILL) };
+                    }
+                    // Already exited: nothing to signal, but keep tracking so the
+                    // following wait/reap can `waitpid` it when we are its reaper
+                    // (PID 1 / subreaper); forgetting it here would leave it
+                    // <defunct>. If init reaps it instead and the pid is recycled,
+                    // the start-time check rules the new process out.
+                    Status::Zombie => {}
+                    Status::Gone => *slot = None,
+                }
+            }
+        }
+    }
+
+    /// Reap the process. Owned children must be `wait`ed to avoid a `<defunct>`
+    /// zombie. A reparented worker is polled until it is gone so wind-down
+    /// really waits for teardown, bounded by [`REPARENTED_EXIT_TIMEOUT`]
+    /// counted from `since` (when Shutdown was sent; now if never).
+    fn wait(&mut self, since: Option<std::time::Instant>) {
+        #[cfg(unix)]
+        let timeout = REPARENTED_EXIT_TIMEOUT
+            .saturating_sub(since.map_or(std::time::Duration::ZERO, |t| t.elapsed()));
+        #[cfg(not(unix))]
+        let _ = since;
+        #[cfg(unix)]
+        self.wait_or_kill(timeout);
+        #[cfg(not(unix))]
+        {
+            let Proc::Owned(child) = self;
+            let _ = child.wait();
+        }
+    }
+
+    /// [`Proc::wait`] with an explicit timeout for reparented workers (split out
+    /// so tests can exercise the stuck-in-teardown fallback without waiting).
+    /// A worker still running at the deadline (e.g. `sys.exit` joining a
+    /// non-daemon thread a test left behind) is SIGKILLed: nothing else ever
+    /// would, so it would outlive the run holding ports, connections and tmp.
+    #[cfg(unix)]
+    fn wait_or_kill(&mut self, timeout: std::time::Duration) {
+        match self {
+            Proc::Owned(child) => {
+                let _ = child.wait();
+            }
+            Proc::Reparented(slot) => {
+                if !wait_reparented(slot, timeout) {
+                    self.kill();
+                    if let Proc::Reparented(slot) = self {
+                        wait_reparented(slot, REPARENTED_REAP_GRACE);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Kill (if still running) and reap, immediately like an owned child: this
+    /// runs on the event-loop thread, so it must not stall other workers. Safe
+    /// for a reparented worker even if it already exited and init recycled its
+    /// pid, because [`Proc::kill`] verifies identity before signalling; the
+    /// short bounded wait after it only covers the SIGKILL taking effect.
+    fn reap(&mut self) {
+        self.kill();
+        match self {
+            Proc::Owned(child) => {
+                let _ = child.wait();
+            }
+            #[cfg(unix)]
+            Proc::Reparented(slot) => {
+                wait_reparented(slot, REPARENTED_REAP_GRACE);
+            }
+        }
+    }
+}
+
+/// Reap `pid` if it is an exited child of ours (`waitpid(WNOHANG)`); a no-op
+/// (ECHILD) when init is its reaper.
+#[cfg(unix)]
+fn try_reap(pid: u32) -> bool {
+    let pid = pid as libc::pid_t;
+    // SAFETY: WNOHANG waitpid on a specific pid with a null status pointer
+    // performs no memory access; ECHILD (not our child) is the normal case.
+    let reaped = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+    reaped == pid
+}
+
+/// Poll a reparented worker until it has exited or `timeout` elapses. Returns
+/// true (and clears `slot`, so the pid is never signalled again) once it is
+/// gone. `waitpid(WNOHANG)` reaps it ourselves when the orchestrator is the
+/// reaper it was reparented to (rstest as PID 1 / a subreaper in a container);
+/// otherwise it yields ECHILD and init does the reaping.
+#[cfg(unix)]
+fn wait_reparented(slot: &mut Option<Tracked>, timeout: std::time::Duration) -> bool {
+    let Some(tracked) = *slot else {
+        return true;
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        // Only `waitpid` a zombie proven to be this worker: blindly reaping the
+        // pid could collect an unrelated child of ours that inherited it after
+        // init reaped the worker, stealing that child's exit status. A zombie
+        // counts as exited either way: if the reaper it was reparented to never
+        // reaps (a non-init PID 1 in a container), it would otherwise look alive
+        // until the timeout.
+        let status = tracked.status();
+        if status == Status::Zombie {
+            try_reap(tracked.pid);
+        }
+        if status != Status::Running {
+            *slot = None;
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(REPARENTED_POLL);
     }
 }
 
@@ -325,6 +711,248 @@ fn build_worker_command(
     command
 }
 
+#[cfg(unix)]
+impl Worker {
+    /// Fork-prewarm `n` workers off one warm zygote (see [`Worker::spawn_pool`]).
+    /// The orchestrator creates every pipe, spawns the zygote passing all child
+    /// endpoints via argv, and reads back the forked child pids. Each child is
+    /// reparented to init when the zygote exits, so its [`Proc`] is
+    /// `Reparented(pid)` — killable by signal, reaped by init.
+    fn spawn_forked_pool(python: &Path, n: usize, env: &WorkerEnv) -> Result<Vec<Self>> {
+        // One cmd + one evt pipe per worker, plus a report pipe the zygote uses
+        // to hand the forked child pids back.
+        let mut cmds = Vec::with_capacity(n);
+        let mut evts = Vec::with_capacity(n);
+        for _ in 0..n {
+            cmds.push(transport::pipe()?);
+            evts.push(transport::pipe()?);
+        }
+        let mut report = transport::pipe()?;
+        // Held open until every worker's identity is recorded: the zygote blocks
+        // on it, staying the workers' parent so none of their pids can be
+        // recycled before `Tracked::capture` has seen them.
+        let mut release = transport::pipe()?;
+
+        // Parent keeps: each cmd write, each evt read, the report read — all
+        // CLOEXEC so they never leak into the zygote (leaked evt-write ends would
+        // defeat per-worker EOF/crash detection). Child ends inherit as-is.
+        for c in &cmds {
+            transport::prepare_parent_end(c.write.raw())?;
+            transport::prepare_child_end(c.read.raw())?;
+        }
+        for e in &evts {
+            transport::prepare_parent_end(e.read.raw())?;
+            transport::prepare_child_end(e.write.raw())?;
+        }
+        transport::prepare_parent_end(report.read.raw())?;
+        transport::prepare_child_end(report.write.raw())?;
+        transport::prepare_parent_end(release.write.raw())?;
+        transport::prepare_child_end(release.read.raw())?;
+
+        // argv: --fork-pool <n> <report_write_fd> <release_read_fd> <cmd0> <evt0> ...
+        // where cmd_i is the worker's command-READ end and evt_i its event-WRITE
+        // end (matching _fork_pool in python/rstest_worker/__main__.py).
+        let mut command = Command::new(python);
+        command.args([
+            "-m",
+            "rstest_worker",
+            "--fork-pool",
+            &n.to_string(),
+            &report.write.raw().to_string(),
+            &release.read.raw().to_string(),
+        ]);
+        for i in 0..n {
+            command.arg(cmds[i].read.raw().to_string());
+            command.arg(evts[i].write.raw().to_string());
+        }
+        apply_shared_worker_env(&mut command, n, env);
+        // Same stdio as a plain non-passthrough worker (see build_worker_command):
+        // stdout is rendered Rust-side, and stdin must not be inherited because
+        // `--watch` keeps a thread blocked reading it for `q`. Every forked
+        // worker inherits the zygote's stdio.
+        command
+            .stdout(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null());
+
+        let mut zygote = command
+            .spawn()
+            .with_context(|| format!("spawning worker zygote: {}", python.display()))?;
+
+        // Close the child ends in the parent so EOF detection works and no
+        // endpoint leaks; the parent ends become owned Files below.
+        for c in &mut cmds {
+            c.read.close_now();
+        }
+        for e in &mut evts {
+            e.write.close_now();
+        }
+        report.write.close_now();
+        release.read.close_now();
+
+        // Read the forked child pids (newline-separated) off the report pipe.
+        // Bounded: this runs before the pool's event loop and hang watchdog, so
+        // an unbounded read would hang the run silently on a wedged zygote.
+        let report_r = transport::into_file(report.read.take_raw());
+        let pid_text = match read_with_timeout(report_r, ZYGOTE_REPORT_TIMEOUT) {
+            Ok(text) => text,
+            Err(e) => {
+                // Killing the zygote also ends any child it already forked:
+                // those see EOF on their command pipe once our write ends drop.
+                let _ = zygote.kill();
+                let _ = zygote.wait();
+                return Err(e).context("reading forked worker pids from zygote");
+            }
+        };
+        let pids = match parse_pid_report(&pid_text, n) {
+            Ok(pids) => pids,
+            Err(e) => {
+                // Reap the zygote (it IS our child) so a bad report can't leave
+                // it a zombie; it is blocked on the release pipe, so kill it.
+                let _ = zygote.kill();
+                let _ = zygote.wait();
+                return Err(e);
+            }
+        };
+        // Record identities while the zygote is still every worker's parent,
+        // then release it: it exits and the workers reparent to init.
+        let tracked: Vec<_> = pids.iter().map(|&pid| Tracked::capture(pid)).collect();
+        release.write.close_now();
+        let _ = zygote.wait();
+
+        let mut workers = Vec::with_capacity(n);
+        for (i, tracked) in tracked.into_iter().enumerate() {
+            let cmd_w = transport::into_file(cmds[i].write.take_raw());
+            let evt_r = transport::into_file(evts[i].read.take_raw());
+            workers.push(Self {
+                proc: Proc::Reparented(tracked),
+                cmd_w,
+                reader: Some(EventReader::new(evt_r)),
+                shutdown_sent: None,
+            });
+        }
+        Ok(workers)
+    }
+}
+
+/// Raise the soft `RLIMIT_NOFILE` (never above the hard limit) so the zygote's
+/// ~4n pipe fds fit alongside what the process already holds. Best effort: on
+/// failure the fork path may still hit EMFILE and fall back to plain spawns.
+#[cfg(unix)]
+// `rlim_t` is u64 on Linux/macOS but signed on some BSDs.
+#[allow(clippy::unnecessary_cast)]
+fn ensure_fd_headroom(n: usize) {
+    /// Allowance for fds the orchestrator already holds (stdio, caches, the
+    /// watcher, ...) on top of the zygote's pipes.
+    const BASELINE: u64 = 256;
+    let want = (4 * n as u64 + 4).saturating_add(BASELINE);
+    // SAFETY: an all-zero rlimit is a valid value of this plain-data struct.
+    let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+    // SAFETY: `lim` is a live rlimit for getrlimit to fill.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        return;
+    }
+    if (lim.rlim_cur as u64) >= want {
+        return;
+    }
+    lim.rlim_cur = (want as libc::rlim_t).min(lim.rlim_max);
+    // SAFETY: `lim` is a valid rlimit; the soft limit stays <= the hard one.
+    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) };
+}
+
+/// Whether `err` is fd exhaustion (EMFILE/ENFILE) anywhere in its chain.
+#[cfg(unix)]
+fn is_fd_exhaustion(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            .is_some_and(|code| code == libc::EMFILE || code == libc::ENFILE)
+    })
+}
+
+/// Read `file` to EOF as UTF-8, failing if EOF doesn't arrive within `timeout`.
+#[cfg(unix)]
+fn read_with_timeout(mut file: std::fs::File, timeout: std::time::Duration) -> Result<String> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("timed out after {}s", timeout.as_secs());
+        }
+        let mut pfd = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = remaining.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        // SAFETY: `pfd` is one valid pollfd for the duration of the call.
+        let ready = unsafe { libc::poll(&mut pfd, 1, ms.max(1)) };
+        if ready < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err.into());
+        }
+        if ready == 0 {
+            continue;
+        }
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(k) => buf.extend_from_slice(&chunk[..k]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(String::from_utf8(buf)?)
+}
+
+/// Parse the zygote's newline-separated pid report, requiring exactly `n` pids.
+#[cfg(unix)]
+fn parse_pid_report(text: &str, n: usize) -> Result<Vec<u32>> {
+    let pids: Vec<u32> = text
+        .split_whitespace()
+        .map(|s| s.parse::<u32>())
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("parsing zygote pid report {text:?}"))?;
+    if pids.len() != n {
+        anyhow::bail!("zygote reported {} worker pids, expected {n}", pids.len());
+    }
+    Ok(pids)
+}
+
+/// Set the run-wide worker environment shared by every forked child on the
+/// zygote's [`Command`]. Per-worker identity (`RSTEST_WORKER_ID`,
+/// `RSTEST_SEND_IDS`) is intentionally omitted: all children share this one
+/// environment, so each applies its own identity by index post-fork.
+#[cfg(unix)]
+fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
+    command
+        .env("PYTHONPATH", worker_pythonpath())
+        .env("RSTEST_RUN_UID", &env.run_uid)
+        .env("RSTEST_WORKER_COUNT", n.to_string())
+        .env(
+            "RSTEST_BASETEMP",
+            std::env::temp_dir().join(format!("rstest-{}", std::process::id())),
+        );
+    if env.doctor {
+        command.env("RSTEST_DOCTOR", "1");
+    }
+    if let Some(secs) = env.timeout {
+        command.env("RSTEST_TIMEOUT", secs.to_string());
+    }
+    if env.leakcheck {
+        command.env("RSTEST_LEAKCHECK", "1");
+    }
+    if env.stream_output {
+        command.env("RSTEST_STREAM_OUTPUT", "1");
+    }
+}
+
 /// RAII owner for one raw pipe endpoint (a file descriptor on unix, a HANDLE
 /// on Windows). Closes on drop so an early return between `transport::pipe()`
 /// and a successful `spawn()` can't leak the endpoint. Call [`Endpoint::into_raw`]
@@ -345,6 +973,24 @@ impl Endpoint {
     /// Take ownership of the raw value; drop no longer closes it.
     fn into_raw(mut self) -> u64 {
         self.0.take().expect("endpoint already taken")
+    }
+
+    /// Take the raw value out (defusing Drop) without closing it, via `&mut`
+    /// so it works on an endpoint still living inside a `Vec<Pipe>`. Used when
+    /// the endpoint is being handed to a `File` that will own the close.
+    #[cfg(unix)]
+    fn take_raw(&mut self) -> u64 {
+        self.0.take().expect("endpoint already taken")
+    }
+
+    /// Close the endpoint now and defuse Drop, via `&mut` (for endpoints living
+    /// in a `Vec<Pipe>`, where the by-value [`Endpoint::into_raw`] can't move
+    /// out). A no-op if already taken.
+    #[cfg(unix)]
+    fn close_now(&mut self) {
+        if let Some(raw) = self.0.take() {
+            transport::close(raw);
+        }
     }
 }
 
@@ -778,6 +1424,43 @@ mod tests {
         None
     }
 
+    /// [`worker_python`], with production `worker_pythonpath()` pointed at the
+    /// repo package while the returned guard lives. None => skip.
+    #[cfg(unix)]
+    fn live_python(
+        held: &crate::test_env::Held,
+    ) -> Option<(PathBuf, crate::test_env::VarGuard<'_>)> {
+        let found = worker_python();
+        found
+            .is_none()
+            .then(|| eprintln!("skipping: no python with pytest found"));
+        let (python, worker_path) = found?;
+        let guard = crate::test_env::set_var(held, "RSTEST_WORKER_PATH", &worker_path);
+        Some((python, guard))
+    }
+
+    /// Run `f` with a worker-capable python, holding the env lock throughout:
+    /// [`worker_python`] and the spawn resolve python via PATH, and the spawn
+    /// reads RSTEST_WORKER_PATH. Skips (returns) when no such python exists.
+    #[cfg(unix)]
+    fn with_live_python(f: impl FnOnce(&crate::test_env::Held, &Path)) {
+        let held = crate::test_env::lock();
+        let found = live_python(&held);
+        if let Some((python, _worker_path)) = found {
+            f(&held, &python);
+        }
+    }
+
+    /// A worker's pid: the child's for an owned worker, the tracked one for a
+    /// forked worker (None once it has been forgotten).
+    #[cfg(unix)]
+    fn pid_of(w: &Worker) -> Option<u32> {
+        match &w.proc {
+            super::Proc::Owned(child) => Some(child.id()),
+            super::Proc::Reparented(t) => t.map(|t| t.pid),
+        }
+    }
+
     /// Whether `pid` still exists. A zombie (killed but un-reaped) still counts
     /// as alive here — signal 0 succeeds until the parent `wait()`s it away.
     #[cfg(unix)]
@@ -795,44 +1478,639 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_then_wait_reaps_the_worker_child() {
-        // Held throughout: worker_python() and the spawn resolve python via
-        // PATH, and the spawn reads RSTEST_WORKER_PATH.
-        let held = crate::test_env::lock();
-        let Some((python, worker_path)) = worker_python() else {
-            eprintln!("skipping reap test: no python with pytest found");
-            return;
+        with_live_python(|_, python| {
+            let env = WorkerEnv {
+                run_uid: format!("reap-{}", std::process::id()),
+                doctor: false,
+                timeout: None,
+                leakcheck: false,
+                send_ids: false,
+                debug_port: None,
+                stream_output: false,
+            };
+            // A freshly spawned worker blocks on its first command: alive, and never
+            // sent anything — the decode-error/respawn precondition (child still
+            // running against the pipe, not a clean exit).
+            let mut worker = Worker::spawn(python, None, &env).expect("spawn worker");
+            assert!(!worker.is_forked(), "plain spawn should be Owned");
+            let pid = pid_of(&worker).expect("fresh worker has a pid");
+            assert!(alive(pid), "worker should be alive right after spawn");
+
+            // Exactly what the respawn arm now does with the old worker.
+            worker.kill();
+            let _ = worker.wait();
+
+            // wait() returning is itself proof the child was reaped; the alive()
+            // probe is the observable proxy. It can in theory false-fail if the
+            // kernel recycles `pid` to another live process between wait() and the
+            // probe, but this thread spawns nothing after wait(), so that window is
+            // negligible (and reuse can only spuriously fail, never falsely pass).
+            assert!(
+                !alive(pid),
+                "worker pid {pid} still present after kill+wait -> orphan or <defunct> zombie"
+            );
+        });
+    }
+
+    /// Fork-prewarm spawns N live workers off one zygote, each a distinct
+    /// reparented pid on its own pipe pair, and each shuts down cleanly with no
+    /// zombie left behind (init reaps the orphans). Exercises the whole zygote
+    /// round-trip: pid report parse, per-worker Files, and `Proc::Reparented`
+    /// kill/wait.
+    #[cfg(unix)]
+    #[test]
+    fn fork_prewarm_pool_spawns_distinct_live_workers_and_reaps_clean() {
+        with_live_python(|_, python| {
+            let env = WorkerEnv {
+                run_uid: format!("fork-{}", std::process::id()),
+                doctor: false,
+                timeout: None,
+                leakcheck: false,
+                send_ids: false,
+                debug_port: None,
+                stream_output: false,
+            };
+            let n = 3;
+            let workers = Worker::spawn_pool(python, n, &env, true).expect("fork-prewarm pool");
+            assert_eq!(workers.len(), n, "expected {n} forked workers");
+
+            let mut pids = Vec::new();
+            for w in &workers {
+                assert!(w.is_forked(), "fork-prewarm worker should be Reparented");
+                let pid = pid_of(w).expect("fresh forked worker lost its pid");
+                assert!(alive(pid), "forked worker pid {pid} should be alive");
+                pids.push(pid);
+            }
+            pids.sort_unstable();
+            pids.dedup();
+            assert_eq!(pids.len(), n, "forked worker pids must be distinct");
+
+            // Clean shutdown: each worker blocks on its first command, so Shutdown
+            // ends it. shutdown() waits until the pid is gone, so it must already be
+            // absent on return — a lingering pid would mean wait() returned early or
+            // a leaked/zombied worker.
+            for w in workers {
+                w.shutdown().expect("shutdown forked worker");
+            }
+            for pid in pids {
+                assert!(
+                    !alive(pid),
+                    "forked worker pid {pid} still alive after shutdown"
+                );
+            }
+        });
+    }
+
+    /// `reap()` on a forked worker that is exiting on its own (the crash/EOF
+    /// path) leaves it gone and forgets the pid, so it is never signalled
+    /// again.
+    #[cfg(unix)]
+    #[test]
+    fn reap_forgets_pid_of_exited_forked_worker() {
+        with_live_python(|_, python| {
+            let env = WorkerEnv {
+                run_uid: format!("fork-reap-{}", std::process::id()),
+                doctor: false,
+                timeout: None,
+                leakcheck: false,
+                send_ids: false,
+                debug_port: None,
+                stream_output: false,
+            };
+            let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
+            let mut worker = workers.pop().expect("one forked worker");
+            assert!(
+                worker.is_forked(),
+                "fork-prewarm worker should be Reparented"
+            );
+            let pid = pid_of(&worker).expect("fresh forked worker has a pid");
+
+            // The worker exits on its own, as after a crash, before reap runs.
+            worker
+                .send(&crate::scheduling::proto::Command::Shutdown)
+                .expect("send shutdown");
+            worker.reap();
+
+            assert!(
+                !alive(pid),
+                "forked worker pid {pid} still alive after reap"
+            );
+            assert!(
+                matches!(worker.proc, super::Proc::Reparented(None)),
+                "reap must forget the pid of an exited worker"
+            );
+        });
+    }
+
+    /// `reap` SIGKILLs a still-alive forked worker at once (the watchdog /
+    /// decode-error case, on the event-loop thread) and then forgets it.
+    #[cfg(unix)]
+    #[test]
+    fn reap_kills_live_forked_worker_without_grace() {
+        with_live_python(|_, python| {
+            let mut env = base_env();
+            env.run_uid = format!("fork-kill-{}", std::process::id());
+            let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
+            let mut worker = workers.pop().expect("one forked worker");
+            assert!(
+                worker.is_forked(),
+                "fork-prewarm worker should be Reparented"
+            );
+            let pid = pid_of(&worker).expect("fresh forked worker has a pid");
+            assert!(
+                alive(pid),
+                "forked worker should block on its first command"
+            );
+
+            let started = std::time::Instant::now();
+            worker.reap();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "reap waited for a live worker instead of killing it at once"
+            );
+
+            assert!(
+                !alive(pid),
+                "forked worker pid {pid} survived the SIGKILL fallback"
+            );
+            assert!(matches!(worker.proc, super::Proc::Reparented(None)));
+            // Once forgotten, kill and wait are no-ops (no signal to a recycled pid).
+            worker.kill();
+            worker.wait().expect("wait on a forgotten worker");
+        });
+    }
+
+    /// A forked worker still running when the exit timeout lapses (stuck in
+    /// teardown) is SIGKILLed rather than abandoned to outlive the run.
+    #[cfg(unix)]
+    #[test]
+    fn wait_kills_forked_worker_stuck_past_exit_timeout() {
+        with_live_python(|_, python| {
+            let mut env = base_env();
+            env.run_uid = format!("fork-stuck-{}", std::process::id());
+            let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
+            let mut worker = workers.pop().expect("one forked worker");
+            assert!(
+                worker.is_forked(),
+                "fork-prewarm worker should be Reparented"
+            );
+            let pid = pid_of(&worker).expect("fresh forked worker has a pid");
+            // Never sent Shutdown: it blocks on its first command, i.e. it will not
+            // exit on its own within the (zero) timeout.
+            worker.proc.wait_or_kill(std::time::Duration::ZERO);
+
+            assert!(!alive(pid), "stuck forked worker {pid} left running");
+            assert!(matches!(worker.proc, super::Proc::Reparented(None)));
+        });
+    }
+
+    /// Only `Shutdown` stamps the wind-down deadline, and only the first one.
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_deadline_is_stamped_once_by_first_shutdown() {
+        with_live_python(|_, python| {
+            let mut worker = Worker::spawn(python, None, &base_env()).expect("spawn worker");
+            assert!(worker.shutdown_sent.is_none());
+            worker
+                .send(&crate::scheduling::proto::Command::Shutdown)
+                .expect("send shutdown");
+            let first = worker.shutdown_sent.expect("stamped by Shutdown");
+            let _ = worker.send(&crate::scheduling::proto::Command::Shutdown);
+            assert_eq!(
+                worker.shutdown_sent,
+                Some(first),
+                "restamped by a later Shutdown"
+            );
+            worker.wait().expect("wait");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_exhaustion_is_detected_through_context() {
+        let emfile = anyhow::Error::from(std::io::Error::from_raw_os_error(libc::EMFILE))
+            .context("pipe()")
+            .context("spawning pool");
+        assert!(super::is_fd_exhaustion(&emfile));
+        let other = anyhow::Error::from(std::io::Error::from_raw_os_error(libc::EACCES));
+        assert!(!super::is_fd_exhaustion(&other));
+    }
+
+    /// Raising headroom never lowers the soft limit and never exceeds the hard.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_fd_headroom_raises_soft_limit_within_hard() {
+        let get = || {
+            // SAFETY: an all-zero rlimit is a valid value of this plain-data struct.
+            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+            // SAFETY: `lim` is a live rlimit for getrlimit to fill.
+            assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) }, 0);
+            lim
         };
-        // Point production `worker_pythonpath()` at the repo package.
-        let _worker_path = crate::test_env::set_var(&held, "RSTEST_WORKER_PATH", &worker_path);
+        let before = get();
+        super::ensure_fd_headroom(64);
+        let after = get();
+        assert!(after.rlim_cur >= before.rlim_cur);
+        assert!(after.rlim_cur <= after.rlim_max);
+        assert!(after.rlim_cur >= (4 * 64 + 4 + 256).min(after.rlim_max));
+    }
 
-        let env = WorkerEnv {
-            run_uid: format!("reap-{}", std::process::id()),
-            doctor: false,
-            timeout: None,
-            leakcheck: false,
-            send_ids: false,
-            debug_port: None,
-            stream_output: false,
+    /// `wait_reparented` gives up (false) when the worker outlives the timeout,
+    /// keeping the pid, and returns true at once for an already-forgotten slot.
+    #[cfg(unix)]
+    #[test]
+    fn wait_reparented_times_out_on_live_pid_and_skips_forgotten_slot() {
+        // Our own pid is always alive and never our child (waitpid -> ECHILD).
+        let me = super::Tracked::capture(std::process::id()).expect("self is alive");
+        let mut slot = Some(me);
+        assert!(!super::wait_reparented(
+            &mut slot,
+            std::time::Duration::ZERO
+        ));
+        assert_eq!(slot, Some(me), "a live pid must be kept");
+
+        let mut gone = None;
+        assert!(super::wait_reparented(&mut gone, std::time::Duration::ZERO));
+    }
+
+    /// A tracked pid whose start time no longer matches (the pid was recycled
+    /// to another process) counts as exited: `wait_reparented` forgets it and
+    /// `kill` never signals it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn recycled_pid_is_treated_as_exited_and_never_signalled() {
+        let me = super::Tracked::capture(std::process::id()).expect("self is alive");
+        let start = me.start.expect("linux/macos expose a start time");
+        let recycled = super::Tracked {
+            start: Some(start.wrapping_add(1)),
+            ..me
         };
-        // A freshly spawned worker blocks on its first command: alive, and never
-        // sent anything — the decode-error/respawn precondition (child still
-        // running against the pipe, not a clean exit).
-        let mut worker = Worker::spawn(&python, None, &env).expect("spawn worker");
-        let pid = worker.child.id();
-        assert!(alive(pid), "worker should be alive right after spawn");
+        assert_eq!(recycled.status(), super::Status::Gone);
 
-        // Exactly what the respawn arm now does with the old worker.
-        worker.kill();
-        let _ = worker.wait();
+        let mut slot = Some(recycled);
+        assert!(super::wait_reparented(&mut slot, std::time::Duration::ZERO));
+        assert_eq!(slot, None);
 
-        // wait() returning is itself proof the child was reaped; the alive()
-        // probe is the observable proxy. It can in theory false-fail if the
-        // kernel recycles `pid` to another live process between wait() and the
-        // probe, but this thread spawns nothing after wait(), so that window is
-        // negligible (and reuse can only spuriously fail, never falsely pass).
+        // Would SIGKILL this test process if identity weren't re-checked.
+        let mut proc = super::Proc::Reparented(Some(recycled));
+        proc.kill();
+        assert!(matches!(proc, super::Proc::Reparented(None)));
+    }
+
+    /// An exited-but-unreaped child (zombie) counts as exited, so a PID 1 that
+    /// never reaps orphans can't stall wind-down for the full exit timeout.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn zombie_counts_as_exited() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let tracked = super::Tracked {
+            pid: child.id(),
+            start: None,
+        };
+        // Our own child: it stays a zombie until we wait() it. Poll for the
+        // zombie state rather than sleeping a fixed time.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(super::probe(tracked.pid), super::Probe::Zombie { .. }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never became a zombie"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_ne!(tracked.status(), super::Status::Running);
+        child.wait().expect("reap zombie");
+    }
+
+    /// Spawn `true` and wait until it is a zombie (our own child, so it stays
+    /// one until we reap it: the PID 1 / subreaper case for a forked worker).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn zombie_child() -> u32 {
+        let child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        // Dropping a Child neither kills nor waits it.
+        drop(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(super::probe(pid), super::Probe::Zombie { .. }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never became a zombie"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        pid
+    }
+
+    /// `kill` on a zombie worker keeps it tracked, so the following `wait`
+    /// reaps it instead of leaving it <defunct> when we are its reaper.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn kill_keeps_zombie_so_wait_reaps_it() {
+        let pid = zombie_child();
+        let tracked = super::Tracked { pid, start: None };
+        let mut proc = super::Proc::Reparented(Some(tracked));
+        proc.kill();
         assert!(
-            !alive(pid),
-            "worker pid {pid} still present after kill+wait -> orphan or <defunct> zombie"
+            matches!(proc, super::Proc::Reparented(Some(_))),
+            "kill must not forget an unreaped zombie"
         );
+        proc.wait(None);
+        assert!(matches!(proc, super::Proc::Reparented(None)));
+        assert_eq!(
+            super::probe(pid),
+            super::Probe::Gone,
+            "zombie left unreaped"
+        );
+    }
+
+    /// A worker already dead when first tracked stays tracked on Linux (a
+    /// zombie's start time is visible), so the following wait reaps it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_zombie_with_known_identity_is_reaped() {
+        let pid = zombie_child();
+        let mut slot = super::Tracked::capture(pid);
+        assert!(slot.is_some(), "linux exposes a zombie's start time");
+        assert!(super::wait_reparented(&mut slot, std::time::Duration::ZERO));
+        assert_eq!(slot, None);
+        assert_eq!(
+            super::probe(pid),
+            super::Probe::Gone,
+            "zombie left unreaped"
+        );
+    }
+
+    /// On macOS a zombie has no start time (and launchd is always the reaper),
+    /// so a worker already dead when first tracked is dropped.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn captured_zombie_without_identity_is_dropped() {
+        let pid = zombie_child();
+        assert_eq!(super::Tracked::capture(pid), None);
+        assert!(super::try_reap(pid), "clean up the test zombie");
+    }
+
+    /// A worker already reaped when first tracked leaves nothing to track.
+    #[cfg(unix)]
+    #[test]
+    fn capture_of_a_reaped_pid_tracks_nothing() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        assert_eq!(super::Tracked::capture(pid), None);
+    }
+
+    /// The signal-0 fallback reports existence only: no start time.
+    #[cfg(unix)]
+    #[test]
+    fn probe_by_signal_reports_liveness_without_start_time() {
+        assert_eq!(
+            super::probe_by_signal(std::process::id()),
+            super::Probe::Alive { start: None }
+        );
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        assert_eq!(super::probe_by_signal(pid), super::Probe::Gone);
+    }
+
+    /// A zombie whose start time doesn't match the tracked worker (the worker
+    /// was reaped and its pid recycled to another, now-exited child of ours) is
+    /// forgotten without `waitpid`, leaving that child's exit status intact.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn zombie_with_other_identity_is_forgotten_not_reaped() {
+        let pid = zombie_child();
+        let mut slot = Some(super::Tracked {
+            pid,
+            start: Some(1),
+        });
+        assert!(super::wait_reparented(&mut slot, std::time::Duration::ZERO));
+        assert_eq!(slot, None);
+        assert!(
+            matches!(super::probe(pid), super::Probe::Zombie { .. }),
+            "someone else's zombie must not be reaped"
+        );
+        assert!(super::try_reap(pid), "clean up the test zombie");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_reads_state_and_start_time() {
+        // comm with spaces and a ')' exercises the rfind split.
+        let line = "42 (a b) c) S 1 42 42 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 777 0 0";
+        assert_eq!(
+            super::parse_proc_stat(line),
+            Some(super::Probe::Alive { start: Some(777) })
+        );
+        let zombie = "42 (w) Z 1 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777 0 0";
+        assert_eq!(
+            super::parse_proc_stat(zombie),
+            Some(super::Probe::Zombie { start: Some(777) })
+        );
+        assert_eq!(super::parse_proc_stat("garbage"), None);
+    }
+
+    /// The zygote-report read gives up when the writer never closes, and
+    /// returns everything written once it does.
+    #[cfg(unix)]
+    #[test]
+    fn read_with_timeout_times_out_on_open_writer_and_reads_to_eof() {
+        let mut p = super::transport::pipe().expect("pipe");
+        let r = super::transport::into_file(p.read.take_raw());
+        let w = super::transport::into_file(p.write.take_raw());
+        let err = super::read_with_timeout(r, std::time::Duration::from_millis(20)).unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"));
+
+        let mut p = super::transport::pipe().expect("pipe");
+        let r = super::transport::into_file(p.read.take_raw());
+        let mut w2 = super::transport::into_file(p.write.take_raw());
+        std::io::Write::write_all(&mut w2, b"11\n22\n").expect("write");
+        drop(w2);
+        let text = super::read_with_timeout(r, std::time::Duration::from_secs(5)).expect("read");
+        assert_eq!(text, "11\n22\n");
+        drop(w);
+    }
+
+    /// `reap` on a directly spawned (owned) worker kills and waits it.
+    #[cfg(unix)]
+    #[test]
+    fn reap_kills_and_waits_owned_worker() {
+        with_live_python(|_, python| {
+            let mut worker = Worker::spawn(python, None, &base_env()).expect("spawn worker");
+            assert!(!worker.is_forked(), "plain spawn should be Owned");
+            let pid = pid_of(&worker).expect("owned worker has a pid");
+            worker.reap();
+            assert!(
+                !alive(pid),
+                "owned worker pid {pid} still present after reap"
+            );
+        });
+    }
+
+    /// Without fork-prewarm, `spawn_pool` spawns `n` independent owned workers.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_pool_without_prewarm_spawns_owned_workers() {
+        with_live_python(|_, python| {
+            let workers = Worker::spawn_pool(python, 2, &base_env(), false).expect("plain pool");
+            assert_eq!(workers.len(), 2);
+            for w in workers {
+                assert!(!w.is_forked());
+                w.shutdown().expect("shutdown plain worker");
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_pid_report_accepts_exact_count_and_rejects_mismatch_or_garbage() {
+        assert_eq!(
+            super::parse_pid_report("11\n22\n", 2).unwrap(),
+            vec![11, 22]
+        );
+        let short = super::parse_pid_report("11\n", 2).unwrap_err();
+        assert!(format!("{short:#}").contains("reported 1 worker pids, expected 2"));
+        let bad = super::parse_pid_report("11\nxx\n", 2).unwrap_err();
+        assert!(format!("{bad:#}").contains("parsing zygote pid report"));
+    }
+
+    /// The zygote carries every run-wide opt-in flag its children inherit.
+    #[cfg(unix)]
+    #[test]
+    fn shared_worker_env_sets_run_wide_flags() {
+        let mut env = base_env();
+        env.doctor = true;
+        env.timeout = Some(1.5);
+        env.leakcheck = true;
+        env.stream_output = true;
+        let mut cmd = Command::new("python");
+        super::apply_shared_worker_env(&mut cmd, 3, &env);
+        let envs = envs_of(&cmd);
+        assert_eq!(envs["RSTEST_WORKER_COUNT"], "3");
+        assert_eq!(envs["RSTEST_DOCTOR"], "1");
+        assert_eq!(envs["RSTEST_TIMEOUT"], "1.5");
+        assert_eq!(envs["RSTEST_LEAKCHECK"], "1");
+        assert_eq!(envs["RSTEST_STREAM_OUTPUT"], "1");
+        // Per-worker identity is applied post-fork, never on the shared env.
+        assert!(!envs.contains_key("RSTEST_WORKER_ID"));
+        assert!(!envs.contains_key("RSTEST_SEND_IDS"));
+    }
+
+    /// A read error on the zygote-report pipe (here EISDIR) surfaces as an
+    /// error instead of being retried or treated as EOF.
+    #[cfg(unix)]
+    #[test]
+    fn read_with_timeout_surfaces_read_errors() {
+        let dir = std::fs::File::open(std::env::temp_dir()).expect("open temp dir");
+        let err = super::read_with_timeout(dir, std::time::Duration::from_secs(5)).unwrap_err();
+        assert!(
+            err.downcast_ref::<std::io::Error>().is_some(),
+            "expected an io error, got {err:#}"
+        );
+    }
+
+    /// Run `spawn_pool` with fork-prewarm against a stand-in `rstest_worker`
+    /// package whose `__main__` is `body`, so the zygote misbehaves on cue, and
+    /// assert the pool fails with an error mentioning `needle`.
+    #[cfg(unix)]
+    fn assert_fake_zygote_fails(tag: &str, body: &str, needle: &str) {
+        with_live_python(|held, python| {
+            let root = std::env::temp_dir()
+                .join(format!("rstest-fake-zygote-{}-{tag}", std::process::id()));
+            let pkg = root.join("rstest_worker");
+            std::fs::create_dir_all(&pkg).expect("create fake package");
+            std::fs::write(pkg.join("__init__.py"), "").expect("write __init__");
+            std::fs::write(pkg.join("__main__.py"), body).expect("write __main__");
+            // Shadows the repo package: the explicit worker path leads PYTHONPATH.
+            let fake = crate::test_env::set_var(held, "RSTEST_WORKER_PATH", &root);
+            let result = Worker::spawn_pool(python, 2, &base_env(), true);
+            drop(fake);
+            let _ = std::fs::remove_dir_all(&root);
+            let err = result
+                .err()
+                .expect("a bad zygote report must fail the pool");
+            assert!(format!("{err:#}").contains(needle), "{err:#}");
+        });
+    }
+
+    /// A zygote that exits without reporting any pid fails the pool with the
+    /// count mismatch (and is reaped, not left a zombie).
+    #[cfg(unix)]
+    #[test]
+    fn fork_pool_rejects_a_zygote_that_reports_no_pids() {
+        assert_fake_zygote_fails(
+            "empty",
+            "import sys\nsys.exit(0)\n",
+            "reported 0 worker pids, expected 2",
+        );
+    }
+
+    /// A zygote report that can't be read (not UTF-8) fails the pool with the
+    /// read context.
+    #[cfg(unix)]
+    #[test]
+    fn fork_pool_rejects_an_unreadable_zygote_report() {
+        assert_fake_zygote_fails(
+            "utf8",
+            "import os, sys\nos.write(int(sys.argv[3]), b'\\xff')\n",
+            "reading forked worker pids from zygote",
+        );
+    }
+
+    /// Env var marking the re-executed child of
+    /// [`fork_prewarm_falls_back_to_plain_spawns_on_fd_exhaustion`].
+    #[cfg(unix)]
+    const FD_CHILD: &str = "RSTEST_TEST_FD_EXHAUSTION_CHILD";
+
+    /// When the zygote's ~4n pipe fds don't fit under the fd limit (but the
+    /// plain path's ~2n do), `spawn_pool` falls back to plain spawns instead of
+    /// failing. Lowering the hard limit can't be undone, so the body runs in a
+    /// re-executed copy of this test binary.
+    #[cfg(unix)]
+    #[test]
+    fn fork_prewarm_falls_back_to_plain_spawns_on_fd_exhaustion() {
+        if std::env::var_os(FD_CHILD).is_none() {
+            let (_, module) = module_path!()
+                .split_once("::")
+                .expect("crate-qualified path");
+            let name =
+                format!("{module}::fork_prewarm_falls_back_to_plain_spawns_on_fd_exhaustion");
+            let out = Command::new(std::env::current_exe().expect("test binary"))
+                .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+                .env(FD_CHILD, "1")
+                .output()
+                .expect("re-exec test binary");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "child failed or ran no test:\n{stdout}{stderr}"
+            );
+            return;
+        }
+
+        with_live_python(|_, python| {
+            let n = 8;
+            // Room for the plain path (2 fds per live worker, plus the 4 child ends
+            // and spawn's internal pipe while each spawns), not the zygote's 4n + 4.
+            let open = std::fs::read_dir("/dev/fd").expect("list fds").count() as u64;
+            let limit = open + 2 * n as u64 + 10;
+            let lim = libc::rlimit {
+                rlim_cur: limit as libc::rlim_t,
+                rlim_max: limit as libc::rlim_t,
+            };
+            // SAFETY: `lim` is a valid rlimit; this process is a throwaway child.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) }, 0);
+
+            let workers = Worker::spawn_pool(python, n, &base_env(), true).expect("fallback pool");
+            assert_eq!(workers.len(), n);
+            for w in workers {
+                assert!(
+                    !w.is_forked(),
+                    "fd exhaustion must fall back to plain spawns"
+                );
+                w.shutdown().expect("shutdown fallback worker");
+            }
+        });
     }
 }

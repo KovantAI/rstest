@@ -9,11 +9,11 @@ Open an issue on the
 [GitHub repository](https://github.com/KovantAI/rstest/issues).
 
 For a **behavioral difference from pytest**, include the `rstest -n 0`
-result. At `-n 0` rstest is pytest-exact — identical behavior there is the
+result. At `-n 0` rstest is pytest-exact: identical behavior there is the
 compatibility contract, so a divergence is a bug we want to hear about.
 
 For **parallel-only failures**, work through the
-[three-run diagnosis](https://python-rstest.readthedocs.io/en/latest/guides/parallel-safety/#diagnosing-a-parallel-only-failure)
+[three-run diagnosis](https://python-rstest.readthedocs.io/en/stable/guides/parallel-safety/#diagnosing-a-parallel-only-failure)
 first; it classifies most cases.
 
 ## Development setup
@@ -37,7 +37,7 @@ pre-commit install
 
 ## Checks before opening a PR
 
-The CI gate runs these on Linux, macOS, and Windows — run them locally
+The CI gate runs these on Linux, macOS, and Windows, run them locally
 first:
 
 ```sh
@@ -70,7 +70,7 @@ lockstep with the code automatically.
 ## Vendored pytest
 
 `python/rstest_worker/_vendor/{pytest,_pytest,py.py}` is an **unmodified**
-copy of pytest. Do not edit files there — local modifications are
+copy of pytest. Do not edit files there: local modifications are
 forbidden. Behavioral changes belong in `rstest_worker/` (the orchestration
 layer) instead. To bump the vendored version, re-extract from the new wheel
 verbatim and update `python/VENDOR.md`. See that file for the full

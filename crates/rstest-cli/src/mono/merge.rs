@@ -60,7 +60,7 @@ pub fn merge_reports(
     let doc = serde_json::json!({
         "meta": {
             "runner": "rstest",
-            "schema": 4,
+            "schema": crate::reporting::report::REPORT_SCHEMA,
             "exitstatus": run_meta.exitstatus,
             "counts": totals,
             "duration_seconds": (run_meta.duration_seconds * 100.0).round() / 100.0,
@@ -121,7 +121,10 @@ mod merge_tests {
         .unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
         assert_eq!(doc["meta"]["exitstatus"], 1);
-        assert_eq!(doc["meta"]["schema"], 4);
+        assert_eq!(
+            doc["meta"]["schema"],
+            crate::reporting::report::REPORT_SCHEMA
+        );
         assert_eq!(doc["meta"]["counts"]["passed"], 1);
         assert_eq!(doc["meta"]["counts"]["failed"], 1);
         assert_eq!(doc["meta"]["projects"]["libs/b"]["counts"]["failed"], 1);

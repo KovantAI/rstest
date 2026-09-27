@@ -2,7 +2,7 @@
 
 A test that starts a thread it never joins, or opens a file/socket it never
 closes, leaves that resource live for the rest of the session. It rarely fails
-the test that caused it — instead it becomes **shared state that flakes a later
+the test that caused it: instead it becomes **shared state that flakes a later
 test** (a stray thread races, an fd limit is hit, a background loop mutates
 global state). rstest measures this per test and names the culprit, so you fix
 the leak instead of chasing the symptom.
@@ -10,8 +10,8 @@ the leak instead of chasing the symptom.
 Two entry points, both riding the worker instrumentation you already pay for
 under [`--doctor`](../reference/cli.md#-doctor):
 
-- **See** leaks — `--doctor` prints a `RESOURCE LEAKS` section.
-- **Gate** on them — [`--fail-on-leak`](../reference/cli.md#-fail-on-leak)
+- **See** leaks: `--doctor` prints a `RESOURCE LEAKS` section.
+- **Gate** on them: [`--fail-on-leak`](../reference/cli.md#-fail-on-leak)
   fails the build if any test leaks (no `--doctor` needed).
 
 ## Detect: `--doctor`
@@ -46,10 +46,10 @@ doctor report. Ideal as a CI step that keeps new leaks out.
 
 Per test, in the worker that ran it:
 
-- **Threads** — `threading.active_count()`. Portable, but counts only Python
+- **Threads**: `threading.active_count()`. Portable, but counts only Python
   threads; a native C-extension thread that bypasses the `threading` module is
   invisible.
-- **File descriptors** — the open-fd count, from `/proc/self/fd` on Linux and
+- **File descriptors**: the open-fd count, from `/proc/self/fd` on Linux and
   `/dev/fd` on macOS/BSD. On platforms with neither, fd tracking is silently
   off (threads still work).
 
@@ -59,8 +59,8 @@ The count is snapshotted **before setup** and again **after teardown**, and the
 report carries the *net* difference:
 
 - A test that opens something and closes it (in the test or a fixture teardown)
-  nets **zero** — not a leak.
-- A test that opens something and never releases it nets **positive** — flagged.
+  nets **zero**, not a leak.
+- A test that opens something and never releases it nets **positive**: flagged.
 
 Because the whole protocol (setup → call → teardown) is bracketed, correct
 cleanup in a teardown fixture is credited; only what survives it counts.
@@ -73,7 +73,7 @@ per-test leak. Measurement starts from the second test each worker runs.
 
 - **Session / module-scoped fixtures.** A fixture that opens a connection pool
   is set up on the *first test that uses it* and torn down at the end of its
-  scope — not per test. That first test therefore shows the fixture's threads/
+  scope, not per test. That first test therefore shows the fixture's threads/
   fds as a "leak", even though the fixture is behaving correctly. Treat a
   fixture-shaped leak as informational; move the resource into a properly
   teardown-scoped fixture if you want it to net zero.
@@ -112,7 +112,7 @@ than a pre-existing fixture pattern.
 
 ## See also
 
-- [Suite diagnostics](doctor.md) — the `--doctor` report this rides on.
-- [`--fail-on-leak`](../reference/cli.md#-fail-on-leak) — the CI gate.
-- [Flaky tests](flaky-tests.md) — leaked state is a leading cause of
+- [Suite diagnostics](doctor.md): the `--doctor` report this rides on.
+- [`--fail-on-leak`](../reference/cli.md#-fail-on-leak): the CI gate.
+- [Flaky tests](flaky-tests.md): leaked state is a leading cause of
   order-dependent flakiness.

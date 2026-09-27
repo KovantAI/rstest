@@ -3,6 +3,8 @@ inside a pool worker (which has no xdist master to coordinate them)."""
 
 from __future__ import annotations
 
+import os
+import sys
 import zlib
 from typing import Any
 
@@ -189,3 +191,66 @@ def _is_dist_internal(plugin: Any) -> bool:
     worker hits controller state that only exists on a real master."""
     mod = getattr(plugin, "__name__", None) or type(plugin).__module__
     return str(mod).split(".", 1)[0] in ("xdist", "pytest_cov")
+
+
+# Once per worker process: a pool worker can run several pytest sessions, and
+# each one calls pytest_configure.
+_pins_checked = False
+
+
+def _pytest_pin_conflicts(distinfo: Any, pytest_version: str) -> list[str]:
+    """One line per loaded plugin distribution whose `Requires-Dist` on pytest
+    excludes the pytest actually running (rstest's vendored core).
+
+    Such a pin only ever constrained pip: `import pytest` inside the plugin gets
+    the vendored core regardless, so the user never learns the pin is inert.
+    Requirements gated behind an extra (hypothesis's `[pytest]`) are ignored,
+    as are unparseable ones. `distinfo` is pluggy's `list_plugin_distinfo()`:
+    `(plugin, dist)` pairs, one per registered module, so dists repeat."""
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for _plugin, dist in distinfo:
+        name = dist.metadata["Name"] or dist.project_name
+        if canonicalize_name(name) in seen:
+            continue
+        seen.add(canonicalize_name(name))
+        for raw in dist.requires or ():
+            try:
+                req = Requirement(raw)
+            except InvalidRequirement:
+                continue
+            if canonicalize_name(req.name) != "pytest":
+                continue
+            if req.marker is not None and not req.marker.evaluate({"extra": ""}):
+                continue
+            if req.specifier.contains(pytest_version, prereleases=True):
+                continue
+            out.append(
+                f"rstest: warning: {name} {dist.version} requires pytest{req.specifier}, "
+                f"but rstest runs its vendored pytest {pytest_version}; the pin is not "
+                "enforced. If the plugin misbehaves, upgrade it (check with `rstest -n 0`). "
+                "See docs/guides/plugin-stack.md#plugin-versions-vs-the-vendored-pytest-9"
+            )
+    return out
+
+
+def _warn_pytest_pins(config: Any) -> None:
+    """Print `_pytest_pin_conflicts` to stderr once per run: from the standalone
+    session, or from gw0 only in the pool. Best-effort: a metadata oddity must
+    never break a run."""
+    global _pins_checked
+    if _pins_checked or os.environ.get("RSTEST_WORKER_ID") not in (None, "gw0"):
+        return
+    _pins_checked = True
+    try:
+        import pytest
+
+        distinfo = config.pluginmanager.list_plugin_distinfo()
+        lines = _pytest_pin_conflicts(distinfo, pytest.__version__)
+    except Exception:
+        return
+    for line in lines:
+        print(line, file=sys.stderr, flush=True)

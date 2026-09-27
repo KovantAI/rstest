@@ -10,7 +10,7 @@ or into a uv-managed project (installs alongside your test deps):
 $ uv add --dev rstest
 ```
 
-or as a standalone tool (advanced — the tool env is separate from your
+or as a standalone tool (advanced, the tool env is separate from your
 tests, so the worker runtime must also be in the project env; see
 [Binary vs worker runtime](#binary-vs-worker-runtime-for-tool-scoped-installs)):
 
@@ -19,13 +19,13 @@ $ uv tool install rstest      # or run ad hoc: uvx rstest --version
 ```
 
 For the `pip` and `uv add --dev` paths, install rstest into the **same
-environment as your test dependencies** — workers run your tests in that
+environment as your test dependencies**: workers run your tests in that
 interpreter (see [Which Python does rstest use?](#which-python-does-rstest-use)).
 
 ## Requirements
 
 - Python **3.10 or newer** in the environment whose tests you run. This
-  matches the supported CPython line — 3.9 reached end-of-life in October
+  matches the supported CPython line: 3.9 reached end-of-life in October
   2025 and no longer receives security fixes, so rstest tracks 3.10+.
 - macOS, Linux, or Windows. Windows uses an anonymous-pipe transport
   (Unix uses POSIX pipes); the full test gate runs on `windows-latest`
@@ -36,13 +36,13 @@ interpreter (see [Which Python does rstest use?](#which-python-does-rstest-use))
 
 rstest installs its own runtime dependencies (`msgpack`, `pluggy`,
 `iniconfig`, `packaging`, `pygments`). It does **not** require pytest to be
-installed — and it does not conflict with an installed pytest either: the
+installed, and it does not conflict with an installed pytest either: the
 vendored pytest core lives inside the `rstest_worker` package and never
 touches your `pytest` installation. (One exception: `rstest try` runs your
 suite under plain `pytest` to produce a baseline, so *that* command needs
-pytest installed — see [`try`](../reference/cli.md#try).)
+pytest installed, see [`try`](../reference/cli.md#try).)
 
-First run erroring? See [Troubleshooting](../reference/troubleshooting.md) —
+First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
 it covers the common install/first-run failures (missing `msgpack`, wrong
 interpreter, import errors).
 
@@ -52,11 +52,11 @@ The wheel ships a single `rstest` binary (the Rust orchestrator), the
 ## Binary vs worker runtime (for tool-scoped installs)
 
 A tool-scoped install (`uv tool install rstest`, `uvx rstest`) still runs
-your project's tests — rstest discovers the project interpreter at runtime
+your project's tests: rstest discovers the project interpreter at runtime
 (see [Which Python does rstest use?](#which-python-does-rstest-use)), so the
 tool env and the test env stay separate. Two things therefore live in two
 places: the `rstest` BINARY can live anywhere (tool env, `~/bin`), but the
-WORKER runtime — the `rstest_worker` package and its `msgpack` dependency —
+WORKER runtime (the `rstest_worker` package and its `msgpack` dependency)
 must be importable by the *project* interpreter, because workers run your
 tests in your environment. `pip install rstest` / `uv add --dev rstest` into
 the project venv provides both at once; a tool-only install needs rstest in
@@ -111,7 +111,7 @@ Workers run in the interpreter of your project's environment, discovered in
 this order:
 
 1. [`--python`](../reference/cli.md#-python-path-or-version) on the command
-   line — a path or a version request (`3.12`, `>=3.12,<3.13`, `pypy@3.10`)
+   line: a path or a version request (`3.12`, `>=3.12,<3.13`, `pypy@3.10`)
 2. `$VIRTUAL_ENV` (an activated virtualenv)
 3. a `.venv` found walking up from the working directory
 4. versioned `python` / `pythonX.Y` names on `PATH`

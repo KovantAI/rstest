@@ -2,7 +2,7 @@
 
 rstest ships a compiled Rust orchestrator plus a vendored pytest core inside
 a Python wheel. That is a wider trust surface than a pure-Python package, so
-this page states — in one place — how releases are built and signed, what the
+this page states (in one place) how releases are built and signed, what the
 runner does and does not do on your machine, and how the vendored pytest is
 sourced and kept current. For the reporting process and the exact policy text,
 [`SECURITY.md`](https://github.com/KovantAI/rstest/blob/main/SECURITY.md) in
@@ -39,13 +39,13 @@ not from a maintainer's laptop. Two properties follow:
   [GitHub artifact attestations][gh-attest] (Sigstore-backed, keyless via
   OIDC) at build time and the attestation is stored in GitHub's attestation
   store. You can verify any downloaded wheel was built by this repository's
-  workflow — see [Verifying your install](#verifying-your-install) below.
+  workflow: see [Verifying your install](#verifying-your-install) below.
 - **Trusted Publishing to PyPI.** Wheels are published via PyPI Trusted
-  Publishing (OIDC) — **no long-lived API tokens are stored** in the
+  Publishing (OIDC): **no long-lived API tokens are stored** in the
   repository or CI. The publisher is scoped to this repo and workflow.
 
 Wheels are built as per-platform binaries (manylinux, musllinux, macOS arm64,
-Windows x86_64/arm64) — they contain a compiled Rust extension, so they are
+Windows x86_64/arm64): they contain a compiled Rust extension, so they are
 **not** pure-Python and are not bit-for-bit reproducible; provenance is
 established by attestation, not by reproducible builds. Each release also
 ships a `SHA256SUMS` file.
@@ -62,7 +62,7 @@ library. Provenance and the update procedure are documented in
 licensing is in [License](license.md#vendored-software). Key points:
 
 - The vendored tree is copied **verbatim** from the pytest 9.1.1 PyPI wheel.
-  Local modifications inside the vendored directories are forbidden by policy —
+  Local modifications inside the vendored directories are forbidden by policy:
   rstest replaces orchestration, not pytest semantics.
 - There is **one** vendored core, tracked forward. Adopting rstest adopts
   pytest 9's behavior regardless of the pytest version installed elsewhere in
@@ -79,23 +79,23 @@ the upstream release. Because the vendored tree is verbatim, re-vendoring is
 mechanical; the two-week budget covers re-running the compatibility battery,
 not the patch itself.
 
-**How new pytest releases are detected.** A scheduled workflow —
-[`pytest-upgrade-watch.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/pytest-upgrade-watch.yml)
-— runs **daily (07:00 UTC)** and compares the version vendored under
+**How new pytest releases are detected.** A scheduled workflow
+([`pytest-upgrade-watch.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/pytest-upgrade-watch.yml))
+runs **daily (07:00 UTC)** and compares the version vendored under
 `python/rstest_worker/_vendor` against the latest pytest on PyPI. When PyPI is
 ahead, it opens a deduplicated tracking issue (label `pytest-upgrade`) that
 links the verbatim re-extract procedure in
 [`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md)
 and requires the full e2e gate before merge. Because a pytest security fix
 ships as a new PyPI release, it is surfaced by this watch within a day of
-publication — the watch tracks *releases*, not an advisory feed directly, but
+publication: the watch tracks *releases*, not an advisory feed directly, but
 a security release is a release.
 
 ### Re-vendor history
 
 **Why this table is short.** It records changes to the *vendored pytest*, not
 rstest releases. pytest has been on 9.1.1 since rstest 0.1.0 (2026-06-23), so
-there has been nothing to re-vendor since — a short table here means the core
+there has been nothing to re-vendor since: a short table here means the core
 has been stable, not that the docs are stale. For rstest's own release cadence
 and per-version changes, see the
 [CHANGELOG](https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md).
@@ -123,7 +123,7 @@ wheel's PyPI sha256 (the trust anchor), and a sha256 of every file under
 `_vendor/`. The manifest ships in the wheel, so any installed copy can verify
 itself. Two levels of check:
 
-- **Offline integrity — anyone, anytime.** `rstest verify-vendor` rehashes
+- **Offline integrity: anyone, anytime.** `rstest verify-vendor` rehashes
   the installed `_vendor/` tree and compares it to `vendor.lock`, catching a
   modified, corrupted, or partial vendored copy. It runs without contacting the
   network and exits non-zero on any drift:
@@ -133,11 +133,11 @@ itself. Two levels of check:
     vendored pytest 9.1.1: 84 files verified against vendor.lock
     ```
 
-- **Upstream provenance — CI.** The
+- **Upstream provenance (CI).** The
   [`vendor.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/vendor.yml)
   workflow runs the offline check on every change and, in a separate job,
   downloads the pinned pytest wheel, asserts its sha256 against the manifest's
-  trust anchor, and diffs the extracted tree against `_vendor/` — proving the
+  trust anchor, and diffs the extracted tree against `_vendor/`, proving the
   vendored copy is byte-identical to upstream pytest, not merely internally
   consistent. This also re-runs weekly to catch drift. The same provenance
   check is part of the re-vendor procedure in
@@ -152,11 +152,11 @@ the provenance check answers "is what shipped really upstream pytest?".
 [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), configured in
 [`deny.toml`](https://github.com/KovantAI/rstest/blob/main/deny.toml):
 
-- **Advisories** — RustSec vulnerabilities and yanked crates fail the check;
+- **Advisories**: RustSec vulnerabilities and yanked crates fail the check;
   the advisory database is fetched fresh each run.
-- **Licenses** — an allow-list of permissive licenses (MIT, Apache-2.0,
+- **Licenses**: an allow-list of permissive licenses (MIT, Apache-2.0,
   ISC, …); a dependency introducing a license outside the set fails.
-- **Sources** — every crate must come from crates.io; an unknown registry or
+- **Sources**: every crate must come from crates.io; an unknown registry or
   git source fails.
 
 The Rust toolchain is pinned to `stable` via
@@ -168,7 +168,7 @@ so local dev, pre-commit, and CI build with the same compiler.
 [`ci.yml`](https://github.com/KovantAI/rstest/blob/main/.github/workflows/ci.yml)):
 the locked runtime dependency tree exported from `uv.lock` is checked against
 the PyPI/OSV advisory feed on every push and pull request. Dev-only
-dependencies are excluded — they are not part of the shipped artifact.
+dependencies are excluded: they are not part of the shipped artifact.
 
 ## What rstest runs on your machine
 
@@ -179,19 +179,32 @@ boundary is worth stating plainly:
   processes, exactly as under pytest. rstest schedules and isolates workers;
   it does not restrict what your tests can do.
 - **The vendored pytest is on the import path** at `_pytest.*`. Within a
-  worker, imports of pytest internals resolve to the vendored copy — see
+  worker, imports of pytest internals resolve to the vendored copy: see
   [Architecture](../concepts/architecture.md) for how the worker environment
   is assembled.
 
-### No telemetry, no network calls
+### No telemetry; network only when you ask for a remote cache
 
-**rstest itself makes no network calls and collects no telemetry.** The
-orchestrator has no HTTP client or analytics SDK compiled in; its only socket
-use is **local inter-process communication** between the orchestrator and its
-worker processes (a Unix domain socket / Windows named pipe carrying msgpack —
-never a TCP/UDP connection to any remote host). The shared-duration cache
-(`--cache-remote`) reads and writes a **filesystem path or `file://` URL
-only** — it does not fetch over the network.
+**rstest collects no telemetry and has no analytics SDK.** By default its
+only socket use is **local inter-process communication** between the
+orchestrator and its worker processes (a Unix domain socket / Windows named
+pipe carrying msgpack, never a TCP/UDP connection to a remote host).
+
+The one exception is the shared cache, and only when you opt in with
+`--cache-remote` (or `RSTEST_CACHE_REMOTE`):
+
+| `--cache-remote` value | Network behavior |
+|---|---|
+| unset, a directory path, or `file://…` | none: plain filesystem reads and writes |
+| `http(s)://…` | the orchestrator makes HTTP requests itself, via the `ureq` client compiled into the published wheels (Cargo feature `http-cache`, on by default); bearer token from `RSTEST_CACHE_REMOTE_TOKEN` |
+| `s3://…` / `gs://…` | rstest spawns the `aws` / `gcloud` (or `gsutil`) CLI already on the runner, which talks to the cloud with your environment's credentials |
+
+See [Caching: transports](../concepts/caching.md#transports) for the details.
+If you need a binary with no HTTP client compiled in, build from source with
+`cargo build --no-default-features`: `http(s)://` cache URLs are then
+rejected with an error. (`s3://` / `gs://` still work in that build, because
+they go through the external cloud CLIs; don't pass those URLs if the run
+must stay offline.)
 
 The network access rstest *does not* make is not the same as your run making
 none. Unchanged from pytest, the following still reach the network, because
@@ -200,11 +213,33 @@ they are your code or your commands, not rstest's:
 - **Your tests, fixtures, conftest, and plugins** run with your privileges and
   may do whatever I/O they always did.
 - **The CI recipes** in the [CI quickstart](../guides/ci-quickstart.md) call
-  `gh`, `aws s3`, or `actions/*` to move cache segments — those are steps in
+  `gh`, `aws s3`, or `actions/*` to move cache segments: those are steps in
   *your* pipeline, not rstest reaching out.
 - **Installing** rstest (`pip`/`uv`) or tracking a git revision fetches over
   the network like any package install; that is your package manager, not the
   runner at test time.
+
+### Shared cache is a trust boundary
+
+A shared cache (`--cache-remote`, or the GitHub action's `cache-backend`)
+feeds data from earlier runs into test selection, rerun policy, and shard
+balancing. Whoever can push segments can make a later `--changed` run skip
+tests or make `--reruns-only-known-flaky` hide failures. Only trusted
+default-branch runs should push; PR jobs (especially from forks) should pull
+only. See [Caching: trust boundary](../concepts/caching.md#trust-boundary).
+
+### GitHub action inputs
+
+The composite action passes every input to its scripts through `env:`
+variables, never by pasting `${{ }}` expressions into shell code, so an input
+value can't inject commands. `args` is split with shell quoting rules but never
+evaluated or glob-expanded. The exception is `install`, which is a shell
+command by design: set it only to a command you wrote, never to
+attacker-influenced context such as `github.head_ref` or a PR title.
+
+With the artifact cache backend, the action warms only from a successful run
+triggered by `warm-from-event` (default `push`) on `warm-from-branch`, so a
+pull_request run, fork or not, can't seed the cache main reads.
 
 ## Verifying your install
 
@@ -215,7 +250,7 @@ $ gh attestation verify rstest-*.whl --repo KovantAI/rstest
 ```
 
 For fully pinned, reproducible installs, install with hashes from your
-lockfile — e.g. pip:
+lockfile, e.g. pip:
 
 ```console
 $ pip install --require-hashes -r requirements.txt
@@ -231,14 +266,14 @@ Each release ships two CycloneDX Software Bills of Materials, generated by the
 [release workflow](https://github.com/KovantAI/rstest/blob/main/.github/workflows/release.yml)
 and attached as release assets:
 
-- **`sbom.python.cdx.json`** — the Python runtime dependencies a user installs
+- **`sbom.python.cdx.json`**: the Python runtime dependencies a user installs
   alongside the wheel (inventoried from a clean install of the built wheel).
-- **`sbom.rust.cdx.json`** — the Rust crate graph compiled into the
+- **`sbom.rust.cdx.json`**: the Rust crate graph compiled into the
   orchestrator (via `cargo cyclonedx`).
 
 Both are listed in the release's `SHA256SUMS`. One component is **not**
 captured by either SBOM: the vendored pytest lives *inside* the wheel rather
-than as a declared dependency, so tools don't see it — its version (9.1.1) and
+than as a declared dependency, so tools don't see it, its version (9.1.1) and
 that core's own runtime deps are documented under
 [Vendored pytest](#vendored-pytest) and in
 [`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md).

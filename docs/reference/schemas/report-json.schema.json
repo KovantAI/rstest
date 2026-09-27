@@ -222,14 +222,7 @@
             "null"
           ]
         }
-      },
-      "required": [
-        "wasxfail",
-        "flaky",
-        "crashed",
-        "quarantined",
-        "cached"
-      ]
+      }
     }
   }
 }

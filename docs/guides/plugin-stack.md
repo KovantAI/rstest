@@ -1,5 +1,7 @@
 # Your plugin stack
 
+A playbook for checking that the pytest plugins you rely on work under rstest before you switch.
+
 ## Who this is for
 
 You maintain a suite that leans on the common pytest plugin stack
@@ -12,8 +14,10 @@ The one-line reassurance: **every plugin in this stack loads and runs; the
 only adjustments are two report/terminal plugins you move to `-n 0`, and
 nothing needs re-installing, porting, or configuring**: plugins load
 through the standard `pytest11` entry points against a real
-[pluggy](https://github.com/pytest-dev/pluggy), exactly as under pytest
-([Plugins](plugins.md)).
+[pluggy](https://github.com/pytest-dev/pluggy), as under pytest
+([Plugins](plugins.md)). The one thing to watch is flag names rstest owns,
+such as `--timeout` and `--html`
+([Flags rstest owns](migrate-from-pytest.md#flags-rstest-owns)).
 
 The one command to check your own suite against the vendored core:
 
@@ -36,12 +40,12 @@ upgraded to `V`.
 
 | Plugin | Status (verdict) | V/i | Per-plugin caveat |
 |---|---|---|---|
-| pytest-django | ✅ Works | V | Per-worker test DB suffixed by `workerid`, parallel-safe as-is ([top-100](../reference/top-100-plugins.md)). |
+| pytest-django | ✅ Works | V | Per-worker test DB suffixed by `workerid` ([top-100](../reference/top-100-plugins.md)). Verified on SQLite `:memory:` only (django-allauth); confirm a Postgres/MySQL setup with one parallel run. |
 | pytest-asyncio | ✅ Works | V | Per-test event loop; rstest provides the worker context it sniffs ([top-100](../reference/top-100-plugins.md)). |
 | hypothesis | ✅ Works | V | Property-based per worker. Known gap: shared `.hypothesis` example DB untested past `-n 8`. See [known gaps](../concepts/compatibility.md) for the per-worker-DB mitigation. |
 | pytest-cov | 🟦 Native | V | rstest orchestrates the coverage combine across workers via native `--cov`; percentages match a serial run exactly. See [Coverage](coverage.md). |
 | pytest-mock | ✅ Works | V | Per-test `mocker` fixture; vetted ([top-100](../reference/top-100-plugins.md)). |
-| pytest-html | 🔴 Silent | V | **Writes no report at `-n ≥ 2`**: a silent no-op, not a crash (gates on the master `workerinput`). Run the report pass at `-n 0`/`-n 1`, or use native `--html`. See below. |
+| pytest-html | 🔴 Silent | V | **Writes no report at `-n ≥ 2`**: a silent no-op, not a crash (gates on the master `workerinput`). A command-line `--html` is rstest's native report; for the plugin's own report run `-n 0 -- --html=...`. See below. |
 | pytest-sugar | 🔶 `-n 0` | V | Terminal-rendering; **not painted at `-n ≥ 2`**: rstest owns the terminal. Non-visual behavior unaffected; run at `-n 0` when you want its rendering. |
 | freezegun | Works | n/a | From the [tested-compatibility table](plugins.md) (in-process time freezing is per-worker); **but don't put `now()` in parametrize IDs** ([time-derived IDs gap](../concepts/compatibility.md)). |
 
@@ -68,6 +72,11 @@ core. The consequence to internalize:
 - **A `pytest<9` install pin is inert at runtime.** It only constrains pip
   at install time; it does not change which pytest a plugin sees once the
   worker is running. Under rstest the worker always runs vendored 9.
+- **rstest warns about inert pins.** When a loaded plugin's own metadata
+  excludes the running pytest (say it declares `pytest<9`), rstest prints one
+  `rstest: warning: <plugin> <version> requires pytest<9, ...` line to stderr
+  per run. The run is unaffected; the warning just tells you the pin is not
+  doing anything.
 - **`rstest -n 0` exercises every installed plugin against vendored-9** and
   surfaces any pytest-9 incompatibility *exactly as a real pytest upgrade
   would*, because that is effectively what it is. Clear it there first.
@@ -78,11 +87,33 @@ paths, and pluggy contract; see [Compatibility](../concepts/compatibility.md)),
 a stack that is warning-clean on a recent pytest 8.x is almost always
 already pytest-9-clean. If it isn't, clear the deprecations *before* you
 switch the runner: the step-by-step is
-[Onboarding to pytest 9.1.1](upgrade-to-pytest9.md): run
-`pytest -W error::DeprecationWarning` on your current pytest, then
+[Upgrading to pytest 9](upgrade-to-pytest9.md): run
+`pytest -W error::pytest.PytestDeprecationWarning` on your current pytest, then
 `rstest -n 0` as the backstop.
 
-<!-- TODO(gap): minimum pytest-9-compatible versions for each plugin in this stack are not yet documented in the sources. -->
+### Known-good versions
+
+The versions below are the ones the [compatibility corpus](../concepts/compatibility.md)
+resolved and ran against vendored pytest 9.1.1. They are **known-good
+floors to aim for, not proven minimums**: older releases were not tested,
+and the corpus installs plugins unpinned, so a newer corpus run may resolve
+newer versions. Every corpus run records the versions it installed, and the
+rows are regenerated from that data with `python3 corpus/plugin_versions.py`.
+The declared range is the plugin's own `Requires-Dist` on pytest.
+
+| Plugin | Verified with | Declared pytest range | Exercised by |
+|---|---|---|---|
+| pytest-django | 4.14.0 | `>=7.0.0` | django-allauth |
+| pytest-asyncio | 1.4.0 | `>=8.4,<10` | aiohttp, django-allauth, langchain, langgraph, structlog |
+| hypothesis | 6.165.10 / 6.167.1 | `>=4.6` (`[pytest]` extra) | attrs, anyio, packaging, pandas, pydantic, python-dateutil |
+| pytest-cov | 7.1.0 (coverage 7.16.0) | `>=7` | aiohttp, arrow, fastapi, langchain, python-dateutil, requests |
+| pytest-mock | 3.15.1 | `>=6.2.5` | aiohttp, anyio, arrow, langchain, langgraph, pydantic |
+| pytest-sugar | 1.1.1 | `>=6.2.0` | fastapi |
+| freezegun | 1.5.5 | none (no pytest dependency) | aiohttp, freezegun, itsdangerous, langchain, python-dateutil |
+| pytest-html | 4.2.0 | `>=7` | e2e gate (`gate_pytest_html_real_plugin`), not a corpus suite |
+
+If you are on an older release than the one listed, `rstest -n 0` is the
+check: it either passes, or fails the same way a real pytest 9 upgrade would.
 
 ## What to move to `-n 0`, and why
 
@@ -96,16 +127,21 @@ and having no Python master to aggregate worker output.
   a `workerinput`, so nothing ever owns report generation. Merging all
   workers into one file needs a single master process rstest doesn't run.
   Two good paths:
-  - Keep the fast parallel run and emit from merged artifacts:
-    `--junitxml` (for CI dashboards) or `--report-json` (render your own
-    HTML), both **intercepted by rstest and rendered from merged results**
-    at any worker count. Nothing re-runs. See
+  - Keep the fast parallel run and emit from merged artifacts: native
+    `--html` (a self-contained report), `--junitxml` (for CI dashboards),
+    or `--report-json` (render your own), all **intercepted by rstest and
+    rendered from merged results** at any worker count. Nothing re-runs. See
     [Plugins](plugins.md).
   - Or, if pytest-html's *exact* layout is a hard requirement, run a
-    dedicated `-n 0`/`-n 1` reporting pass: `rstest -n 0 --html report.html`
-    (single session, no `workerinput`).
-  - rstest also **warns you automatically** when a parallel run is invoked
-    with a flag whose plugin goes dark, see [Plugins](plugins.md).
+    dedicated `-n 0`/`-n 1` reporting pass and hand `--html` to pytest, not
+    to rstest: `rstest -n 0 -- --html=report.html` (arguments after `--` go
+    straight to the pytest session), or set it in `addopts`. A plain
+    `rstest -n 0 --html report.html` still writes rstest's native report,
+    because rstest owns a command-line `--html` at every worker count.
+  - rstest **warns you automatically** when a parallel run is invoked with a
+    flag whose plugin goes dark, see [Plugins](plugins.md). A `--html` that
+    reaches pytest-html through `addopts` or after `--` is not caught by that
+    check: at `-n ≥ 2` it silently writes nothing.
 
 - **pytest-sugar: the progress UI.** Its terminal rendering is not painted
   at `-n ≥ 2` because rstest owns the terminal. Its non-visual behavior is

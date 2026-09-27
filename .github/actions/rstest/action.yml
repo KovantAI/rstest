@@ -8,7 +8,7 @@ description: >-
 
 inputs:
   args:
-    description: "Extra rstest flags / test paths appended verbatim (e.g. '-n auto -m integration')."
+    description: "Extra rstest flags / test paths, appended last. Split with shell quoting rules (so -k \"a and b\" stays one argument) and never glob-expanded; not evaluated by a shell."
     required: false
     default: "-n auto"
   python-version:
@@ -74,6 +74,23 @@ inputs:
     description: "Artifact backend: branch whose latest successful run seeds the warm cache (its shard segments union into a full index). Cross-branch so PRs read newest-main."
     required: false
     default: "main"
+  warm-from-event:
+    description: >-
+      Artifact backend: only warm from a run triggered by this event (default
+      'push'). This keeps a pull_request run (including one from a fork whose
+      branch happens to be named like warm-from-branch) from ever becoming the
+      warm source. Set to 'schedule' or 'workflow_dispatch' if that is how your
+      default branch runs, or empty to accept any event.
+    required: false
+    default: "push"
+  artifact-suffix:
+    description: >-
+      Scopes this job's artifact names (cache segments and JUnit) so matrix legs
+      don't collide or mix caches. Empty (default) = derived from the runner OS,
+      Python version and working-directory, e.g. 'Linux-py3.13-libs-core'. Set it
+      explicitly when legs differ in some other way (e.g. a dependency matrix).
+    required: false
+    default: ""
   artifact-cache-dir:
     description: "Artifact backend: workspace dir the segments materialize into (used as --cache-remote). Relative to working-directory."
     required: false
@@ -83,7 +100,7 @@ inputs:
     required: false
     default: ${{ github.token }}
   output:
-    description: "rstest --output style. Default 'github' emits ::error per failure and ::warning for flaky reruns. Use dots/verbose/bar/gitlab/azure/teamcity as needed."
+    description: "rstest --output style: dots, verbose, bar, github, gitlab, buildkite, teamcity, azure, tap, or json. Default 'github' emits ::error per failure and ::warning for flaky reruns. An unknown value warns and falls back to dots."
     required: false
     default: "github"
   junit:
@@ -132,9 +149,10 @@ inputs:
       realized_speedup, imbalance_pct, long_pole_seconds. Ops: < <= > >= == !=.
       A breach fails the run via its exit code; the full doctor report is
       auto-published to the job summary. A metric whose section did not apply
-      (e.g. parallel_efficiency at -n 1) is skipped, not failed. Note: when
-      fail-under-ratio is also set, the run's exit code is deferred to the
-      ratio gate, so pair doctor-fail-on with a dedicated job if you need both.
+      (e.g. parallel_efficiency at -n 1) is skipped, not failed. With
+      fail-under-ratio also set, a breach still fails the job when no test
+      failed; if tests failed too, the ratio gate cannot tell the two apart
+      and judges by the ratio, so use a dedicated job if you need both.
     required: false
     default: ""
   quarantine:
@@ -150,7 +168,7 @@ inputs:
     required: false
     default: ""
   fail-under-ratio:
-    description: "Max tolerated fraction of assertion failures (0.0-1.0) for nondeterministic suites; empty = any failure fails. Requires junit."
+    description: "Max tolerated fraction of assertion failures (0.0-1.0) for nondeterministic suites; empty = any failure fails. Requires junit. Only test failures are tolerated: an rstest exit other than 0/1 (interrupt, internal error or lost worker, pytest usage error, no tests collected), or exit 1 with no failing test (a gating flag fired or rstest refused the run), still fails the job."
     required: false
     default: ""
   hard-fail-on:
@@ -185,14 +203,27 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
+    # Every input reaches the shell through env, never by pasting ${{ }} into a
+    # script, so a value such as a branch name can't inject shell code.
     - name: Resolve runner + cache key
       id: cfg
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        IN_RUNNER: ${{ inputs.runner }}
+        IN_PYTHON_VERSION: ${{ inputs.python-version }}
+        IN_CACHE: ${{ inputs.cache }}
+        IN_CACHE_KEY_PREFIX: ${{ inputs.cache-key-prefix }}
+        IN_CACHE_BACKEND: ${{ inputs.cache-backend }}
+        IN_CACHE_REMOTE: ${{ inputs.cache-remote }}
+        IN_ARTIFACT_CACHE_DIR: ${{ inputs.artifact-cache-dir }}
+        IN_ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+        IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        IN_BASE_REF: ${{ inputs.base-ref }}
       run: |
         set -euo pipefail
         # Resolve runner mode.
-        mode="${{ inputs.runner }}"
+        mode="$IN_RUNNER"
         if [ "$mode" = "auto" ]; then
           if [ -f uv.lock ] || grep -q '^\[tool\.uv\]' pyproject.toml 2>/dev/null; then
             mode="uv"
@@ -204,7 +235,7 @@ runs:
 
         # Cache key segmented by OS + python + lockfile hash so a 3.12 run
         # never seeds a 3.13 shard (durations/flakes are interpreter-specific).
-        py="${{ inputs.python-version }}"
+        py="$IN_PYTHON_VERSION"
         [ -n "$py" ] || py="$(python -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo unknown)"
         lockhash=none
         for f in uv.lock poetry.lock requirements.txt pyproject.toml; do
@@ -213,17 +244,30 @@ runs:
             break
           fi
         done
-        base="${{ inputs.cache-key-prefix }}-${RUNNER_OS}-py${py}-${lockhash}"
+        base="${IN_CACHE_KEY_PREFIX}-${RUNNER_OS}-py${py}-${lockhash}"
         echo "cache-key=${base}-${GITHUB_RUN_ID}" >>"$GITHUB_OUTPUT"
         echo "cache-restore=${base}-" >>"$GITHUB_OUTPUT"
+
+        # Artifact-name scope for this matrix leg (segments + JUnit). Sanitized
+        # to [A-Za-z0-9._-] with no "--", because "--" separates the scope from
+        # the run id in segment names: "rstest-seg-<scope>--*" then can't also
+        # match a longer scope such as "<scope>-libs-core".
+        suffix="$IN_ARTIFACT_SUFFIX"
+        if [ -z "$suffix" ]; then
+          wd="${IN_WORKING_DIRECTORY#./}"
+          [ "$wd" = "." ] && wd=""
+          suffix="${RUNNER_OS}-py${py}${wd:+-$wd}"
+        fi
+        suffix="$(printf '%s' "$suffix" | tr -c 'A-Za-z0-9._-' '-' | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
+        echo "artifact-suffix=$suffix" >>"$GITHUB_OUTPUT"
 
         # Resolve the cache backend. cache:false is a global kill switch checked
         # first, so it disables the artifact/remote backends too ('none'), not
         # just actions-cache. Otherwise a non-empty cache-remote forces 'remote';
         # cache-backend:artifact materializes a local segment dir.
-        backend="${{ inputs.cache-backend }}"
-        remote="${{ inputs.cache-remote }}"
-        if [ "${{ inputs.cache }}" != "true" ]; then
+        backend="$IN_CACHE_BACKEND"
+        remote="$IN_CACHE_REMOTE"
+        if [ "$IN_CACHE" != "true" ]; then
           backend="none"
           remote=""
         elif [ -n "$remote" ]; then
@@ -231,7 +275,7 @@ runs:
         elif [ "$backend" = "artifact" ]; then
           # The materialized segment dir IS the remote (a local dir), relative
           # to working-directory so the run step (which cds there) can use it.
-          remote="${{ inputs.artifact-cache-dir }}"
+          remote="$IN_ARTIFACT_CACHE_DIR"
         fi
         echo "backend=$backend" >>"$GITHUB_OUTPUT"
         echo "remote=$remote" >>"$GITHUB_OUTPUT"
@@ -239,7 +283,7 @@ runs:
         # Resolve the --changed base ref: explicit base-ref wins; else infer the
         # PR base from $GITHUB_BASE_REF (set on pull_request events). Empty on a
         # push with no base-ref -> --changed falls back to HEAD.
-        bref="${{ inputs.base-ref }}"
+        bref="$IN_BASE_REF"
         if [ -z "$bref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
           bref="origin/${GITHUB_BASE_REF}"
         fi
@@ -259,12 +303,16 @@ runs:
     # Artifacts are run-scoped, so we resolve that run's id and pull its segments
     # (a full sharded run's segments union into a whole index). Cross-branch so a
     # PR job reads newest-main and never depends on its own branch history.
+    # Filtered to warm-from-event (default push) so a pull_request run, fork
+    # included, can never become the warm source.
     - name: Resolve warm-cache run
       if: steps.cfg.outputs.backend == 'artifact'
       id: warm
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        IN_WARM_BRANCH: ${{ inputs.warm-from-branch }}
+        IN_WARM_EVENT: ${{ inputs.warm-from-event }}
       run: |
         set -uo pipefail
         # Resolve THIS workflow's file (owner/repo/.github/workflows/<file>@ref)
@@ -275,24 +323,27 @@ runs:
         wf="${wf##*/.github/workflows/}"
         wf="${wf%%@*}"
         [ -n "$wf" ] || wf="${GITHUB_WORKFLOW}"
+        event_args=()
+        [ -n "$IN_WARM_EVENT" ] && event_args=(--event "$IN_WARM_EVENT")
         rid="$(gh run list --repo "$GITHUB_REPOSITORY" \
-                 --workflow "$wf" --branch "${{ inputs.warm-from-branch }}" \
+                 --workflow "$wf" --branch "$IN_WARM_BRANCH" ${event_args[@]+"${event_args[@]}"} \
                  --status success --limit 1 \
                  --json databaseId --jq '.[0].databaseId // ""' 2>/dev/null || echo "")"
         echo "run-id=$rid" >>"$GITHUB_OUTPUT"
-        [ -n "$rid" ] && echo "warming from run $rid" || echo "::notice::no prior successful '${{ inputs.warm-from-branch }}' run yet — cold start, cache will be seeded this run"
+        [ -n "$rid" ] && echo "warming from run $rid" || echo "::notice::no prior successful '$IN_WARM_BRANCH' run yet, cold start; the cache will be seeded this run"
 
     # Land segments under <artifact-cache-dir>/segments/ — that is where rstest
     # reads them (--cache-remote <dir> looks in <dir>/segments/). upload-artifact
     # roots each artifact at the LCA of its glob, so the pushed 'segments/' prefix
     # is stripped to flat seg-*.json; targeting the download path at .../segments
-    # reconstructs the layout rstest expects.
+    # reconstructs the layout rstest expects. The pattern is scoped to this leg's
+    # artifact-suffix so a matrix never mixes interpreters or projects.
     - name: Pull warm-cache segments
       if: steps.cfg.outputs.backend == 'artifact' && steps.warm.outputs.run-id != ''
       continue-on-error: true    # cold start / expired artifacts: run stays green
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
-        pattern: rstest-seg-*
+        pattern: rstest-seg-${{ steps.cfg.outputs.artifact-suffix }}--*
         merge-multiple: true
         path: ${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}/segments
         github-token: ${{ inputs.github-token }}
@@ -305,9 +356,12 @@ runs:
     - name: Snapshot warm segments
       if: steps.cfg.outputs.backend == 'artifact'
       shell: bash
+      env:
+        IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        IN_ARTIFACT_CACHE_DIR: ${{ inputs.artifact-cache-dir }}
       run: |
         set -uo pipefail
-        base="${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}"
+        base="$IN_WORKING_DIRECTORY/$IN_ARTIFACT_CACHE_DIR"
         mkdir -p "$base/segments"
         ( cd "$base/segments" && ls seg-*.json 2>/dev/null || true ) | sort > "$base/.warm-segments"
 
@@ -315,9 +369,11 @@ runs:
       if: inputs.changed != 'false' && steps.cfg.outputs.base-ref != ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        BASE_REF: ${{ steps.cfg.outputs.base-ref }}
       run: |
         set -euo pipefail
-        ref="${{ steps.cfg.outputs.base-ref }}"
+        ref="$BASE_REF"
         remote_ref="${ref#origin/}"
         # Deepen a shallow clone so --changed can diff against the base.
         git fetch --no-tags --depth=1 origin "$remote_ref" || \
@@ -330,23 +386,30 @@ runs:
     - name: Install rstest
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        MODE: ${{ steps.cfg.outputs.mode }}
+        IN_INSTALL: ${{ inputs.install }}
+        IN_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        cmd="${{ inputs.install }}"
-        if [ -z "$cmd" ]; then
-          if [ "${{ steps.cfg.outputs.mode }}" = "uv" ]; then
-            cmd="uv sync --dev"
-          elif [ -n "${{ inputs.version }}" ]; then
-            cmd="pip install rstest==${{ inputs.version }}"
-          else
-            cmd="pip install rstest"
-          fi
+        if [ -n "$IN_INSTALL" ]; then
+          # A custom install command is shell code by design (the workflow
+          # author's own input), so it is evaluated.
+          echo "install: $IN_INSTALL"
+          eval "$IN_INSTALL"
+        elif [ "$MODE" = "uv" ]; then
+          echo "install: uv sync --dev"
+          uv sync --dev
+        elif [ -n "$IN_VERSION" ]; then
+          echo "install: pip install rstest==$IN_VERSION"
+          pip install "rstest==$IN_VERSION"
+        else
+          echo "::warning::rstest version not pinned; installing the latest release. Set the 'version' input for reproducible CI."
+          pip install rstest
         fi
-        echo "install: $cmd"
-        eval "$cmd"
         # Echo the resolved rstest version for reproducibility/debugging.
         prefix=""
-        [ "${{ steps.cfg.outputs.mode }}" = "uv" ] && prefix="uv run"
+        [ "$MODE" = "uv" ] && prefix="uv run"
         $prefix rstest --version || echo "rstest: --version unavailable"
 
     - name: Run rstest
@@ -356,27 +419,46 @@ runs:
       env:
         # Bearer for an http(s):// remote (ignored by dir/s3/gs transports).
         RSTEST_CACHE_REMOTE_TOKEN: ${{ inputs.cache-remote-token }}
+        MODE: ${{ steps.cfg.outputs.mode }}
+        BACKEND: ${{ steps.cfg.outputs.backend }}
+        REMOTE: ${{ steps.cfg.outputs.remote }}
+        BASE_REF: ${{ steps.cfg.outputs.base-ref }}
+        IN_ARGS: ${{ inputs.args }}
+        IN_OUTPUT: ${{ inputs.output }}
+        IN_JUNIT: ${{ inputs.junit }}
+        IN_CHANGED: ${{ inputs.changed }}
+        IN_RERUNS: ${{ inputs.reruns }}
+        IN_RERUN_ON: ${{ inputs.rerun-on }}
+        IN_WORKER_TIMEOUT: ${{ inputs.worker-timeout }}
+        IN_DURATIONS_REGRESS: ${{ inputs.durations-regress }}
+        IN_REQUIRE_BASELINE: ${{ inputs.require-baseline }}
+        IN_DOCTOR: ${{ inputs.doctor }}
+        IN_DOCTOR_FAIL_ON: ${{ inputs.doctor-fail-on }}
+        IN_QUARANTINE: ${{ inputs.quarantine }}
+        IN_SHARD: ${{ inputs.shard }}
+        IN_SHARD_TOTAL: ${{ inputs.shard-total }}
+        IN_CACHE_COMPACT_THRESHOLD: ${{ inputs.cache-compact-threshold }}
+        IN_FAIL_UNDER_RATIO: ${{ inputs.fail-under-ratio }}
       run: |
         set -uo pipefail
         prefix=""
-        [ "${{ steps.cfg.outputs.mode }}" = "uv" ] && prefix="uv run"
+        [ "$MODE" = "uv" ] && prefix="uv run"
 
         cmd=($prefix rstest)
 
         # --output
-        [ -n "${{ inputs.output }}" ] && cmd+=(--output "${{ inputs.output }}")
+        [ -n "$IN_OUTPUT" ] && cmd+=(--output "$IN_OUTPUT")
 
         # junit
-        junit="${{ inputs.junit }}"
-        if [ -n "$junit" ]; then cmd+=(--junitxml "$junit"); fi
-        echo "junit-path=$junit" >>"$GITHUB_OUTPUT"
+        if [ -n "$IN_JUNIT" ]; then cmd+=(--junitxml "$IN_JUNIT"); fi
+        echo "junit-path=$IN_JUNIT" >>"$GITHUB_OUTPUT"
 
         # --changed / --changed-strict. Always use the =REV form (never bare
         # --changed, which can greedily swallow a following test path as its
         # optional value). REV is the resolved base ref (explicit or inferred
         # PR base), falling back to HEAD.
-        rev="${{ steps.cfg.outputs.base-ref }}"
-        case "${{ inputs.changed }}" in
+        rev="$BASE_REF"
+        case "$IN_CHANGED" in
           strict)
             cmd+=(--changed-strict)
             [ -n "$rev" ] && cmd+=(--changed="$rev")
@@ -387,10 +469,10 @@ runs:
         esac
 
         # reruns + rerun-on presets
-        [ -n "${{ inputs.reruns }}" ] && cmd+=(--reruns "${{ inputs.reruns }}")
+        [ -n "$IN_RERUNS" ] && cmd+=(--reruns "$IN_RERUNS")
         preset_regex=""
-        IFS=',' read -ra presets <<< "${{ inputs.rerun-on }}"
-        for p in "${presets[@]}"; do
+        IFS=',' read -ra presets <<< "$IN_RERUN_ON"
+        for p in ${presets[@]+"${presets[@]}"}; do
           p="$(echo "$p" | xargs)"
           case "$p" in
             http-5xx) r='429|500|502|503|504|Too Many Requests|ServerBusy' ;;
@@ -402,23 +484,23 @@ runs:
         done
         [ -n "$preset_regex" ] && cmd+=(--only-rerun "$preset_regex")
 
-        [ -n "${{ inputs.worker-timeout }}" ] && cmd+=(--worker-timeout "${{ inputs.worker-timeout }}")
-        [ -n "${{ inputs.durations-regress }}" ] && cmd+=(--durations-regress "${{ inputs.durations-regress }}")
-        [ "${{ inputs.doctor }}" = "true" ] && cmd+=(--doctor)
+        [ -n "$IN_WORKER_TIMEOUT" ] && cmd+=(--worker-timeout "$IN_WORKER_TIMEOUT")
+        [ -n "$IN_DURATIONS_REGRESS" ] && cmd+=(--durations-regress "$IN_DURATIONS_REGRESS")
+        [ "$IN_DOCTOR" = "true" ] && cmd+=(--doctor)
         # Doctor-metric gate is native (rstest --doctor-fail-on, PR #35):
         # repeatable flag, one condition each, breach -> exit 1 folded into the
         # run's exit code. It also auto-publishes the doctor report to the job
         # summary, so no separate --doctor / --doctor-json is required.
-        if [ -n "${{ inputs.doctor-fail-on }}" ]; then
-          IFS=',' read -ra dconds <<< "${{ inputs.doctor-fail-on }}"
-          for c in "${dconds[@]}"; do
+        if [ -n "$IN_DOCTOR_FAIL_ON" ]; then
+          IFS=',' read -ra dconds <<< "$IN_DOCTOR_FAIL_ON"
+          for c in ${dconds[@]+"${dconds[@]}"}; do
             c="$(echo "$c" | xargs)"
             [ -n "$c" ] && cmd+=(--doctor-fail-on "$c")
           done
         fi
-        [ -n "${{ inputs.quarantine }}" ] && cmd+=(--quarantine "${{ inputs.quarantine }}")
-        if [ -n "${{ inputs.shard }}" ] && [ -n "${{ inputs.shard-total }}" ]; then
-          cmd+=(--shard "${{ inputs.shard }}/${{ inputs.shard-total }}")
+        [ -n "$IN_QUARANTINE" ] && cmd+=(--quarantine "$IN_QUARANTINE")
+        if [ -n "$IN_SHARD" ] && [ -n "$IN_SHARD_TOTAL" ]; then
+          cmd+=(--shard "$IN_SHARD/$IN_SHARD_TOTAL")
         fi
 
         # Shared-cache backend (artifact / remote): pull the authoritative
@@ -426,18 +508,16 @@ runs:
         # merge-on-read, so concurrent shards/PRs never clobber. In this mode the
         # baseline arrives DURING the run (--cache-pull), so the local-file guard
         # below is skipped; --require-baseline (native) is the cold-pull guard.
-        backend="${{ steps.cfg.outputs.backend }}"
-        remote="${{ steps.cfg.outputs.remote }}"
-        if [ "$backend" = "artifact" ] || [ "$backend" = "remote" ]; then
-          cmd+=(--cache-remote "$remote" --cache-pull --cache-push)
+        if [ "$BACKEND" = "artifact" ] || [ "$BACKEND" = "remote" ]; then
+          cmd+=(--cache-remote "$REMOTE" --cache-pull --cache-push)
           # Compaction is REMOTE-only. It folds loose segments into <root>/base.json
           # and deletes them; the artifact backend never uploads base.json (it
           # publishes per-run segment artifacts and relies on artifact retention to
           # evict), so compacting there would silently drop the folded durations.
-          if [ "$backend" = "remote" ] && [ -n "${{ inputs.cache-compact-threshold }}" ]; then
-            cmd+=(--cache-compact-threshold "${{ inputs.cache-compact-threshold }}")
+          if [ "$BACKEND" = "remote" ] && [ -n "$IN_CACHE_COMPACT_THRESHOLD" ]; then
+            cmd+=(--cache-compact-threshold "$IN_CACHE_COMPACT_THRESHOLD")
           fi
-          [ "${{ inputs.require-baseline }}" = "true" ] && [ -n "${{ inputs.durations-regress }}" ] && cmd+=(--require-baseline)
+          [ "$IN_REQUIRE_BASELINE" = "true" ] && [ -n "$IN_DURATIONS_REGRESS" ] && cmd+=(--require-baseline)
         fi
 
         # Baseline guard (local-file backends: actions-cache or none). A durations-regress gate
@@ -447,8 +527,8 @@ runs:
         # into a hard fail for steady state, where a missing baseline means a
         # broken cache path. Shared-cache backends use native --require-baseline
         # (wired above) since their baseline is pulled during the run.
-        if { [ "$backend" = "actions-cache" ] || [ "$backend" = "none" ]; } && [ -n "${{ inputs.durations-regress }}" ] && [ ! -f .rstest_cache/durations.json ]; then
-          if [ "${{ inputs.require-baseline }}" = "true" ]; then
+        if { [ "$BACKEND" = "actions-cache" ] || [ "$BACKEND" = "none" ]; } && [ -n "$IN_DURATIONS_REGRESS" ] && [ ! -f .rstest_cache/durations.json ]; then
+          if [ "$IN_REQUIRE_BASELINE" = "true" ]; then
             echo "::error::--durations-regress set but no duration baseline in .rstest_cache, and require-baseline is true. Seed the baseline from an authoritative run, or set require-baseline: false." >&2
             exit 1
           else
@@ -456,10 +536,31 @@ runs:
           fi
         fi
 
-        # append verbatim args / paths last
-        # shellcheck disable=SC2206
-        extra=(${{ inputs.args }})
-        cmd+=("${extra[@]}")
+        # Append the args input last. Split with shell quoting rules via shlex
+        # (so -k "a and b" stays one argument), never glob-expanded and never
+        # evaluated. Without Python on PATH, fall back to plain whitespace
+        # splitting with globbing disabled.
+        extra=()
+        if [ -n "$IN_ARGS" ]; then
+          py=""
+          for cand in python3 python; do
+            if command -v "$cand" >/dev/null 2>&1; then py="$cand"; break; fi
+          done
+          if [ -n "$py" ]; then
+            argsf="$(mktemp)"
+            if ! "$py" -c 'import shlex, sys; sys.stdout.write("".join(a + "\0" for a in shlex.split(sys.argv[1])))' "$IN_ARGS" >"$argsf"; then
+              echo "::error::could not parse the args input (unbalanced quotes?): $IN_ARGS" >&2
+              exit 2
+            fi
+            while IFS= read -r -d '' a; do extra+=("$a"); done <"$argsf"
+            rm -f "$argsf"
+          else
+            set -f
+            read -ra extra <<< "$IN_ARGS"
+            set +f
+          fi
+        fi
+        [ ${#extra[@]} -gt 0 ] && cmd+=("${extra[@]}")
 
         echo "+ ${cmd[*]}"
         # GitHub runs composite `shell: bash` as `bash -eo pipefail`, so a
@@ -470,7 +571,9 @@ runs:
         echo "exit-code=$code" >>"$GITHUB_OUTPUT"
 
         # When a fail-ratio gate is active, defer the pass/fail decision to it.
-        if [ -n "${{ inputs.fail-under-ratio }}" ]; then
+        # The gate still fails the job on any exit code that isn't a plain test
+        # failure (see ratio_gate.py), so this never masks a crash.
+        if [ -n "$IN_FAIL_UNDER_RATIO" ]; then
           exit 0
         fi
         exit $code
@@ -480,13 +583,19 @@ runs:
       if: always() && inputs.fail-under-ratio != ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        IN_JUNIT: ${{ inputs.junit }}
+        IN_FAIL_UNDER_RATIO: ${{ inputs.fail-under-ratio }}
+        IN_HARD_FAIL_ON: ${{ inputs.hard-fail-on }}
+        RSTEST_EXIT: ${{ steps.run.outputs.exit-code }}
+        GATE: ${{ github.action_path }}/ratio_gate.py
       run: |
         set -euo pipefail
-        python "${{ github.action_path }}/ratio_gate.py" \
-          --junit "${{ inputs.junit }}" \
-          --fail-under-ratio "${{ inputs.fail-under-ratio }}" \
-          --hard-fail-on "${{ inputs.hard-fail-on }}" \
-          --rstest-exit "${{ steps.run.outputs.exit-code }}"
+        python "$GATE" \
+          --junit "$IN_JUNIT" \
+          --fail-under-ratio "$IN_FAIL_UNDER_RATIO" \
+          --hard-fail-on "$IN_HARD_FAIL_ON" \
+          --rstest-exit "${RSTEST_EXIT:-}"
 
     - name: Save rstest cache
       if: always() && steps.cfg.outputs.backend == 'actions-cache'
@@ -503,9 +612,12 @@ runs:
     - name: Stage new segments
       if: always() && steps.cfg.outputs.backend == 'artifact'
       shell: bash
+      env:
+        IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        IN_ARTIFACT_CACHE_DIR: ${{ inputs.artifact-cache-dir }}
       run: |
         set -uo pipefail
-        base="${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}"
+        base="$IN_WORKING_DIRECTORY/$IN_ARTIFACT_CACHE_DIR"
         stage="$base/.push"
         rm -rf "$stage"; mkdir -p "$stage"
         for f in "$base"/segments/seg-*.json; do
@@ -514,15 +626,16 @@ runs:
           grep -qxF "$name" "$base/.warm-segments" 2>/dev/null || cp "$f" "$stage/"
         done
 
-    # Artifact backend — publish only THIS job's new segment(s). The unique name
-    # (run id + shard) means concurrent shards never collide, and download's
-    # pattern/merge-multiple unions them all on the next warm. if-no-files-found:
-    # ignore keeps a run that pushed nothing (e.g. --cache-push no-op) green.
+    # Artifact backend — publish only THIS job's new segment(s). The name carries
+    # the leg's artifact-suffix, the run id and the shard, so neither matrix legs
+    # nor concurrent shards collide, and the next warm's pattern
+    # (rstest-seg-<suffix>--*) unions exactly this leg's segments.
+    # if-no-files-found: ignore keeps a run that pushed nothing green.
     - name: Push cache segment
       if: always() && steps.cfg.outputs.backend == 'artifact'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: rstest-seg-${{ github.run_id }}-${{ inputs.shard != '' && inputs.shard || '1' }}
+        name: rstest-seg-${{ steps.cfg.outputs.artifact-suffix }}--${{ github.run_id }}-${{ inputs.shard != '' && inputs.shard || '1' }}
         path: ${{ inputs.working-directory }}/${{ inputs.artifact-cache-dir }}/.push/seg-*.json
         if-no-files-found: ignore
         retention-days: 7
@@ -531,6 +644,8 @@ runs:
       if: always() && inputs.upload-junit == 'true' && inputs.junit != ''
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: rstest-junit${{ inputs.shard != '' && format('-shard-{0}', inputs.shard) || '' }}
+        name: rstest-junit-${{ steps.cfg.outputs.artifact-suffix }}${{ inputs.shard != '' && format('-shard-{0}', inputs.shard) || '' }}
         path: ${{ inputs.working-directory }}/${{ inputs.junit }}
+        # --changed with nothing affected writes no JUnit; that's not an error.
+        if-no-files-found: ignore
         retention-days: 7

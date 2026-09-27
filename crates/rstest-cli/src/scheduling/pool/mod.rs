@@ -39,7 +39,7 @@ use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
-use io::{dispatch_to, spawn_into};
+use io::{dispatch_to, spawn_into, start_into};
 use state::WorkerState;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -142,6 +142,10 @@ pub struct PoolConfig<'a> {
     /// flaky history) or explicitly @mark.flaky-marked are rerun-eligible.
     pub known_flaky: Option<&'a std::collections::HashSet<String>>,
     pub worker_env: &'a crate::scheduling::worker::WorkerEnv,
+    /// `--fork-pool`: fork-prewarm the initial pool off one warm zygote (Unix
+    /// only; ignored elsewhere / on the crash-respawn path). Pays the vendored
+    /// pytest import once per run instead of once per worker.
+    pub fork_prewarm: bool,
     /// `--quarantine` matcher. Fail-fast ordering drops matching ids from the
     /// suspect set: a quarantined test fails every run by design, so leading
     /// with it would trip `-x`/`--maxfail` and then be forgiven post-run.
@@ -172,6 +176,14 @@ pub struct PoolOutcome {
     /// Number of collected tests (the reference count all workers agreed on);
     /// 0 when unknown.
     pub collection_size: u64,
+    /// Wall time to spawn the initial worker pool (fork-prewarm zygote or plain
+    /// per-worker spawns), for `--doctor` startup reporting. 0.0 on paths that
+    /// don't spawn a pool (single-worker).
+    pub startup_seconds: f64,
+    /// Whether the initial pool was actually fork-prewarmed off a zygote (not
+    /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
+    /// don't spawn a pool). Feeds the `--doctor` report.
+    pub fork_prewarmed: bool,
     /// pytest's rootdir and the collected test files' fingerprints, which the
     /// duration cache tags this run's timings with.
     pub sources: crate::scheduling::durations::Collected,
@@ -227,15 +239,37 @@ pub fn run_pool(
         worker_timeout,
         known_flaky,
         worker_env,
+        fork_prewarm,
         quarantine,
     } = cfg;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
+    // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
+    // otherwise this is n independent spawns. Each worker then gets its session
+    // command + reader thread via start_into. Time the spawn so --doctor can
+    // report pool startup cost (the lever --fork-pool moves).
+    let spawn_start = std::time::Instant::now();
+    let workers =
+        crate::scheduling::worker::Worker::spawn_pool(python, n, worker_env, fork_prewarm)?;
+    // What actually happened, not what was asked: spawn_pool falls back to
+    // plain spawns when the zygote can't get its fds.
+    let fork_prewarmed = workers
+        .first()
+        .is_some_and(crate::scheduling::worker::Worker::is_forked);
     let mut states = Vec::new();
-    for idx in 0..n {
-        let worker = spawn_into(python, idx, n, args, &tx, worker_env)?;
+    for (idx, worker) in workers.into_iter().enumerate() {
+        let worker = start_into(worker, idx, args, &tx)?;
         states.push(WorkerState::fresh(worker));
     }
+    // "Pool ready" = every initial worker has emitted its first event (imported
+    // its core + started collecting). This is the startup window --fork-pool
+    // shrinks; stamped in the event loop when all n have responded. Timing the
+    // spawn call itself would be unfair — the plain path returns before its
+    // workers import (that cost is paid async, off-thread), while the zygote
+    // blocks on the shared import, so spawn duration understates one and
+    // overstates the other.
+    let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut startup_seconds = 0.0f64;
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
     // explicit done_workers break, not channel disconnect.
 
@@ -306,6 +340,11 @@ pub fn run_pool(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        // First response from an initial worker (Ok event or a startup crash):
+        // when all n have responded, the pool is warm — record the window.
+        if ready_workers.len() < n && ready_workers.insert(idx) && ready_workers.len() == n {
+            startup_seconds = spawn_start.elapsed().as_secs_f64();
+        }
         match event {
             Ok(Event::Report(mut r)) => {
                 if dist == Dist::Each {
@@ -950,6 +989,8 @@ pub fn run_pool(
         exitstatus,
         collection_hash,
         collection_size,
+        startup_seconds,
+        fork_prewarmed,
         sources,
     })
 }
