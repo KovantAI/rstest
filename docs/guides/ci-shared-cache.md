@@ -18,8 +18,10 @@ run one job (no shard matrix), you do not need this: the
     `cache-remote: s3://…` drives the object-store path. The hand-wired YAML here
     is the reference for other CI systems (or if you want full control). The
     action resolves the warm run, or pulls and pushes the remote, inside each
-    job, so in a shard matrix each shard picks its own snapshot; for a gating
-    pipeline, use the upstream-resolve layouts below.
+    job, so in a shard matrix each shard picks its own snapshot. For a gating
+    pipeline on the artifact backend, resolve the run once upstream and pass it
+    to every shard as the action's `warm-run-id` input (**Unreleased**, not in
+    the `@v0.7.0` action); otherwise use the upstream-resolve layouts below.
 
 ## GitHub-native, no external cloud, no secrets
 

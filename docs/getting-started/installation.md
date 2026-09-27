@@ -95,8 +95,9 @@ your project's tests: rstest discovers the project interpreter at runtime
 (see [Which Python does rstest use?](#which-python-does-rstest-use)), so the
 tool env and the test env stay separate. Two things therefore live in two
 places: the `rstest` **binary** can live anywhere (tool env, `~/bin`), but the
-**worker** runtime (the `rstest_worker` package and its `msgpack` dependency)
-must be importable by the *project* interpreter, because workers run your
+**worker** runtime (the `rstest_worker` package and its dependencies:
+`msgpack` for the worker protocol, plus `pluggy`, `iniconfig`, `packaging`
+and `pygments` for the vendored pytest core) must be importable by the *project* interpreter, because workers run your
 tests in your environment. `pip install rstest` / `uv add --dev rstest` into
 the project venv provides both at once; a tool-only install needs rstest in
 the project venv too.

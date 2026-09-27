@@ -120,7 +120,7 @@ Doctor adds only a few cheap measurements and doesn't change outcomes, so it's f
 
 Even a fast suite gets the occasional intermittent failure, and on a tight loop a spurious red is maximally annoying. Three tools, one lifecycle:
 
-- **Detect within a run**: [`--reruns N`](../reference/cli.md#-reruns-n) retries a failure; a test that then passes is reported `flaky` (the run stays green) and recorded. Works at any worker count, including `-n 0`/`-n 1`.
+- **Detect within a run**: [`--reruns N`](../reference/cli.md#-reruns-n) retries a failure; a test that then passes is reported `flaky` (the run stays green) and recorded. Works at any worker count, including `-n 0`/`-n 1`, but there it leaves [byte-exact mode](../concepts/glossary.md#byte-exact-mode) and runs a one-worker pool (`RSTEST_WORKER_ID=gw0`), and it is inert under a passthrough flag (`--pdb`, `-s`, `--co`, ...), which rstest warns about; see [`--reruns`](../reference/cli.md#-reruns-n).
 - **Remember across runs**: every run merges events into `.rstest_cache/flakes.json` automatically (no flag). A test with `flaky: 7` is your ranked candidate to fix, and history ages out (default 90 days) so a test you actually fixed goes quiet on its own.
 - **Ring-fence**: [`--quarantine`](../reference/cli.md#-quarantine-file) tolerates a committed list of known offenders (failures on the list don't redden the run; failures off it still fail) while they get fixed.
 

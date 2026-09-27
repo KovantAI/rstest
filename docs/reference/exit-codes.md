@@ -11,9 +11,11 @@ rstest uses pytest's exit-code vocabulary:
 | 4 | **Usage error from the vendored pytest core**: an unrecognized argument forwarded to it, or a bad pytest option |
 | 5 | No tests collected |
 
-**Exit 1 is not only "tests failed".** Only syntax errors caught by rstest's
-argument parser exit 2. Every other error rstest raises itself exits **1**,
-the same code as a test failure. That includes:
+**Exit 1 is not only "tests failed".** On a normal run, only syntax errors
+caught by rstest's argument parser exit 2 (the subcommands `try`, `audit` and
+`bisect` also exit 2 for their own reasons; see
+[Gating flags](#gating-flags-and-their-exit-codes)). Every other error rstest
+raises itself exits **1**, the same code as a test failure. That includes:
 
 - a bad value or combination for an rstest flag: a non-integer `-n`,
   `--dist no`, `--order bogus`, `--shard 1/2` with `-n 0` (or an `-n auto`

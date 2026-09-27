@@ -28,7 +28,10 @@ inputs:
     required: false
     default: ""
   working-directory:
-    description: "Directory to run in (monorepo project root)."
+    description: >-
+      Directory to run in: a single project (in a monorepo, one package's
+      directory). A monorepo root is refused with an error: run one matrix job
+      per package with working-directory set to it (see README).
     required: false
     default: "."
   cache:
@@ -74,6 +77,14 @@ inputs:
     description: "Artifact backend: branch whose latest successful run seeds the warm cache (its shard segments union into a full index). Cross-branch so PRs read newest-main."
     required: false
     default: "main"
+  warm-run-id:
+    description: >-
+      Artifact backend: warm from this workflow run id instead of resolving the
+      latest successful run in each job. Resolve it once in an upstream job and
+      pass the same id to every shard, so a gating shard matrix shares one cache
+      snapshot. Empty (default) = each job resolves its own.
+    required: false
+    default: ""
   warm-from-event:
     description: >-
       Artifact backend: only warm from a run triggered by this event (default
@@ -108,11 +119,11 @@ inputs:
     required: false
     default: "junit.xml"
   changed:
-    description: "'false', 'true' (--changed vs base-ref), or 'strict' (--changed-strict: full run on unconnectable files, exit 5 on nothing-affected)."
+    description: "'false', 'true' (--changed vs base-ref), or 'strict' (--changed-strict: full run on unconnectable files, exit 5 on nothing-affected). The base is base-ref, else the PR base, else on a push the commit before the push; with no usable base (new branch, schedule, dispatch, or a base equal to HEAD) the full suite runs with a warning."
     required: false
     default: "false"
   base-ref:
-    description: "Base git ref for --changed (e.g. origin/main). Fetched if the clone is shallow. Empty + changed => infers the PR base."
+    description: "Base git ref for --changed (e.g. origin/main). Fetched if the clone is shallow. Empty + changed => the PR base, or on a push the commit before the push. A base equal to HEAD (origin/main on a push to main) falls back to the push's previous commit."
     required: false
     default: ""
   reruns:
@@ -120,7 +131,7 @@ inputs:
     required: false
     default: ""
   rerun-on:
-    description: "Preset name(s) -> --only-rerun regex. 'http-5xx' => 429|500|502|503|504|Too Many Requests|ServerBusy; comma-joinable. Raw regex via args still works."
+    description: "Preset name(s) -> --only-rerun regex. 'http-5xx' => 429|500|502|503|504|Too Many Requests|ServerBusy; 'timeouts' => Timeout|TimeoutError|APITimeoutError|APIConnectionError; comma-joinable (e.g. 'http-5xx,timeouts'); any other entry is used as a raw regex. Raw regex via args still works."
     required: false
     default: ""
   worker-timeout:
@@ -220,6 +231,7 @@ runs:
         IN_ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
         IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         IN_BASE_REF: ${{ inputs.base-ref }}
+        IN_PUSH_BEFORE: ${{ github.event.before }}
       run: |
         set -euo pipefail
         # Resolve runner mode.
@@ -281,13 +293,41 @@ runs:
         echo "remote=$remote" >>"$GITHUB_OUTPUT"
 
         # Resolve the --changed base ref: explicit base-ref wins; else infer the
-        # PR base from $GITHUB_BASE_REF (set on pull_request events). Empty on a
-        # push with no base-ref -> --changed falls back to HEAD.
+        # PR base from $GITHUB_BASE_REF (set on pull_request events); else, on a
+        # push, the commit before the push (github.event.before; all zeros on a
+        # new branch, which has no usable base). Empty here means "no base":
+        # the changed-base step then runs the full suite instead of diffing
+        # against HEAD (a clean CI checkout diffs to nothing, so that would pass
+        # green without running a test).
         bref="$IN_BASE_REF"
         if [ -z "$bref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
           bref="origin/${GITHUB_BASE_REF}"
         fi
+        if [ -z "$bref" ] && [ "${GITHUB_EVENT_NAME:-}" = "push" ] \
+           && [ -n "$IN_PUSH_BEFORE" ] && [ -n "${IN_PUSH_BEFORE//0/}" ]; then
+          bref="$IN_PUSH_BEFORE"
+        fi
         echo "base-ref=$bref" >>"$GITHUB_OUTPUT"
+
+    # A monorepo root keeps a cache and a junit.<slug>.xml per project and
+    # refuses --cache-pull/--cache-push, none of which fit this action's
+    # single-project cache path, JUnit upload and fail-ratio gate. Fail here,
+    # before install, with a pointer to the per-project matrix recipe.
+    - name: Refuse a monorepo root
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        IN_ARGS: ${{ inputs.args }}
+        IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        GUARD: ${{ github.action_path }}/monorepo_guard.py
+      run: |
+        set -uo pipefail
+        py="$(command -v python3 || command -v python || true)"
+        if [ -z "$py" ]; then
+          echo "::notice::no Python on PATH; skipping the monorepo-root check"
+          exit 0
+        fi
+        "$py" "$GUARD" --dir . --label "$IN_WORKING_DIRECTORY" --args "$IN_ARGS"
 
     - name: Restore rstest cache
       if: steps.cfg.outputs.backend == 'actions-cache'
@@ -313,8 +353,18 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         IN_WARM_BRANCH: ${{ inputs.warm-from-branch }}
         IN_WARM_EVENT: ${{ inputs.warm-from-event }}
+        IN_WARM_RUN_ID: ${{ inputs.warm-run-id }}
       run: |
         set -uo pipefail
+        # An id resolved upstream wins: every shard then warms from the same run.
+        if [ -n "$IN_WARM_RUN_ID" ]; then
+          case "$IN_WARM_RUN_ID" in
+            *[!0-9]*) echo "::error::warm-run-id must be a numeric workflow run id, got '$IN_WARM_RUN_ID'" >&2; exit 1 ;;
+          esac
+          echo "run-id=$IN_WARM_RUN_ID" >>"$GITHUB_OUTPUT"
+          echo "warming from run $IN_WARM_RUN_ID (warm-run-id)"
+          exit 0
+        fi
         # Resolve THIS workflow's file (owner/repo/.github/workflows/<file>@ref)
         # so gh matches by filename, not the display name (ambiguous when two
         # workflows share a 'name:' or the name was changed). Fall back to the
@@ -365,23 +415,57 @@ runs:
         mkdir -p "$base/segments"
         ( cd "$base/segments" && ls seg-*.json 2>/dev/null || true ) | sort > "$base/.warm-segments"
 
-    - name: Fetch base ref for --changed
-      if: inputs.changed != 'false' && steps.cfg.outputs.base-ref != ''
+    # Decide what --changed diffs against. Emits mode (off|true|strict) and rev.
+    # A base that is missing, unreachable-by-design (new branch, schedule,
+    # dispatch) or identical to HEAD (base-ref: origin/main on a push to main)
+    # would select nothing, so fall back to the push's previous commit when
+    # there is one, else run the full suite with a warning.
+    - name: Resolve base for --changed
+      id: changed
+      if: inputs.changed != 'false'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         BASE_REF: ${{ steps.cfg.outputs.base-ref }}
+        IN_CHANGED: ${{ inputs.changed }}
+        IN_PUSH_BEFORE: ${{ github.event.before }}
       run: |
         set -euo pipefail
-        ref="$BASE_REF"
-        remote_ref="${ref#origin/}"
+        full_run() {
+          echo "::warning::changed: $1; running the full suite instead of selecting nothing. Set base-ref to diff against a specific ref."
+          echo "mode=off" >>"$GITHUB_OUTPUT"
+          exit 0
+        }
         # Deepen a shallow clone so --changed can diff against the base.
-        git fetch --no-tags --depth=1 origin "$remote_ref" || \
-          git fetch --no-tags origin "$remote_ref" || true
+        fetch() {
+          local remote_ref="${1#origin/}"
+          git fetch --no-tags --depth=1 origin "$remote_ref" >/dev/null 2>&1 || \
+            git fetch --no-tags origin "$remote_ref" >/dev/null 2>&1 || true
+        }
+        before=""
+        if [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ -n "$IN_PUSH_BEFORE" ] && [ -n "${IN_PUSH_BEFORE//0/}" ]; then
+          before="$IN_PUSH_BEFORE"
+        fi
+        ref="$BASE_REF"
+        [ -n "$ref" ] || full_run "no base to diff against on a '${GITHUB_EVENT_NAME:-unknown}' event"
+        fetch "$ref"
         if ! git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
           echo "::error::base-ref '$ref' is not reachable after fetch. Set fetch-depth: 0 on checkout, or pass a valid base-ref." >&2
           exit 1
         fi
+        if [ "$(git rev-parse "$ref^{commit}")" = "$(git rev-parse HEAD)" ]; then
+          if [ -n "$before" ] && [ "$before" != "$ref" ]; then
+            echo "::notice::changed: base-ref '$ref' is this commit; diffing against the push's previous commit $before instead"
+            ref="$before"
+            fetch "$ref"
+            git rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
+              || full_run "the push's previous commit $ref is not reachable (set fetch-depth: 0 on checkout)"
+          else
+            full_run "base-ref '$ref' is this commit, so nothing would differ"
+          fi
+        fi
+        echo "mode=$IN_CHANGED" >>"$GITHUB_OUTPUT"
+        echo "rev=$ref" >>"$GITHUB_OUTPUT"
 
     - name: Install rstest
       shell: bash
@@ -422,11 +506,11 @@ runs:
         MODE: ${{ steps.cfg.outputs.mode }}
         BACKEND: ${{ steps.cfg.outputs.backend }}
         REMOTE: ${{ steps.cfg.outputs.remote }}
-        BASE_REF: ${{ steps.cfg.outputs.base-ref }}
+        CHANGED_REV: ${{ steps.changed.outputs.rev }}
         IN_ARGS: ${{ inputs.args }}
         IN_OUTPUT: ${{ inputs.output }}
         IN_JUNIT: ${{ inputs.junit }}
-        IN_CHANGED: ${{ inputs.changed }}
+        CHANGED_MODE: ${{ steps.changed.outputs.mode }}
         IN_RERUNS: ${{ inputs.reruns }}
         IN_RERUN_ON: ${{ inputs.rerun-on }}
         IN_WORKER_TIMEOUT: ${{ inputs.worker-timeout }}
@@ -453,18 +537,16 @@ runs:
         if [ -n "$IN_JUNIT" ]; then cmd+=(--junitxml "$IN_JUNIT"); fi
         echo "junit-path=$IN_JUNIT" >>"$GITHUB_OUTPUT"
 
-        # --changed / --changed-strict. Always use the =REV form (never bare
-        # --changed, which can greedily swallow a following test path as its
-        # optional value). REV is the resolved base ref (explicit or inferred
-        # PR base), falling back to HEAD.
-        rev="$BASE_REF"
-        case "$IN_CHANGED" in
+        # --changed / --changed-strict, as resolved by the changed step (mode
+        # off = no usable base, full run). Always the =REV form: a bare
+        # --changed must never sit next to a following test path.
+        rev="$CHANGED_REV"
+        case "${CHANGED_MODE:-}" in
           strict)
-            cmd+=(--changed-strict)
-            [ -n "$rev" ] && cmd+=(--changed="$rev")
+            cmd+=(--changed-strict --changed="$rev")
             ;;
           true)
-            cmd+=(--changed="${rev:-HEAD}")
+            cmd+=(--changed="$rev")
             ;;
         esac
 

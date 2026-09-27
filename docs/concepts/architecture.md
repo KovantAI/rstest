@@ -81,4 +81,7 @@ to this mode automatically. With no `--output` set, the session's own
 terminal output is what you see, and rstest only appends its extras after
 it (**Unreleased**; see
 [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson)). It is
-the compatibility anchor: byte-exact pytest behavior.
+the compatibility anchor: byte-exact pytest behavior. One opt-in
+exception: with [`--reruns`](../reference/cli.md#-reruns-n), `-n 0`/`-n 1`
+runs a one-worker pool instead (worker `gw0`, rstest's renderer) so retries
+fire; see [Byte-exact mode](glossary.md#byte-exact-mode).

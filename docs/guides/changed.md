@@ -138,7 +138,7 @@ space, `--changed origin/main` is bare `--changed` plus a test path
     selection exits 5 instead of 0:
 
     ```yaml
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0          # the merge-base needs the base branch history
     - name: Changed tests (PR)
@@ -151,6 +151,12 @@ space, `--changed origin/main` is bare `--changed` plus a test path
 
     On the first push of a new branch, `github.event.before` is all zeros,
     which is not a commit: run the full suite there instead.
+
+    The bundled [GitHub action](https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest#pr-change-based-selection-strict-gate)
+    on `main` does all of this for `changed: true` / `strict` (**Unreleased**):
+    on a push it diffs against `github.event.before`, and with no usable base
+    (new branch, schedule, dispatch, or a base equal to `HEAD`) it warns and
+    runs the full suite.
 
 A typical layout: a scheduled main-branch job runs full coverage
 (`--cov-context=test`) and saves `.rstest_cache`; PR jobs restore it and run

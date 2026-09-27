@@ -33,6 +33,21 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   graph without it; rebuild by rerunning coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
   union into a full index (see [Shared cache backend](#shared-cache-backend)).
+- `incremental_outcomes.json`: the tests that passed last run (plus each
+  test's source line) and a fingerprint of the pytest and coverage config
+  files, written by [`--incremental`](../reference/cli.md#-incremental) runs.
+  Drives which tests `--incremental` skips as cached passes; `rstest explain`
+  (**Unreleased**) also reads it for a test's last outcome and source line.
+  Safe to delete: the next `--incremental` run runs everything and rebuilds it.
+- `last_green.json`: the git commit of the last fully-passing run and an
+  environment fingerprint (interpreter plus lockfiles), written by
+  [`--since-green`](../reference/cli.md#-since-green) runs and used as their
+  `--changed` base. Advances only on a green run. Delete it to force one full
+  run (for example after an in-place dependency upgrade).
+- `.lock`: an empty sentinel file. rstest takes an OS advisory lock on it
+  around each read-modify-write of the cache files, so concurrent runs or
+  shards sharing one cache directory don't lose each other's updates. Never
+  read or written; safe to delete when no run is active.
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
 duration-aware scheduling from the second run onward. In the repository,
@@ -128,7 +143,8 @@ or corrupted segment can:
 - make [`--changed`](../guides/changed.md) select **too few tests**, because
   the coverage index is trusted for the lines it records;
 - inflate flake counts in `flakes.json`, so `--reruns-only-known-flaky`
-  retries (and hides) failures it should not;
+  retries (and hides) failures it should not, `--order fail-fast` reorders
+  dispatch around them, and `rstest explain` reports them as genuine history;
 - skew durations, which unbalances shards and can make `--durations-regress`
   pass or fail wrongly.
 

@@ -131,6 +131,36 @@ def gate_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
     )
 
 
+def gate_pdb_with_addopts_n_and_xdist(g, args, binary):
+    print("== --pdb with addopts -n and pytest-xdist installed ==")
+    # xdist's tryfirst pytest_cmdline_main raised "--pdb is incompatible with
+    # distributing tests" from a leftover `addopts = -n 4` before rstest's
+    # pytest_configure neutralized xdist. rstest's cmdline_main wrapper now
+    # zeroes the distribution options before any impl runs.
+    gx = _plugin_gate(binary, args, "-xdist", ["pytest-xdist"])
+    gx.write("px/pytest.ini", "[pytest]\naddopts = -n 4\n")
+    gx.write("px/test_px.py", "def test_ok():\n    assert True\n")
+    r = gx.run("--pdb", cwd=str(gx.tmp / "px"))
+    out = r.stdout + r.stderr
+    check(
+        "--pdb + addopts -n + xdist: no 'incompatible with distributing' error",
+        "incompatible with distributing" not in out,
+        out[-500:],
+    )
+    check(
+        "--pdb + addopts -n + xdist: session runs and passes",
+        r.returncode == 0 and "1 passed" in out,
+        f"rc={r.returncode} " + out[-400:],
+    )
+    # The pool still runs with the leftover addopts (neutralized, no nesting).
+    r = gx.run("-n", "2", cwd=str(gx.tmp / "px"))
+    check(
+        "addopts -n + xdist: pool run unaffected",
+        r.returncode == 0 and "1 passed" in r.stdout,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+    )
+
+
 def gate_pytest_retry_xdist_server_port_self_prov(g, args, binary):
     print("== pytest-retry + xdist (server_port self-provision) ==")
     # pytest-retry gates master vs worker on xdist + numprocesses; rstest keeps

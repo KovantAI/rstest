@@ -6,11 +6,19 @@
   watched: save a `.py` file, or restart, to pick them up.
 - A change set consisting **only of test files** (per your project's
   `python_files` patterns) reruns exactly those files, with all your other
-  flags intact.
+  flags intact. Files in it that no longer exist are left out, so a change
+  set of only deleted test files runs nothing.
 - Any other `.py` change (source code) reruns the tests **affected by the
   change** per the project import graph (the same machinery as
-  [`--changed`](changed.md)); a change affecting no tests skips the rerun,
-  and changes the graph can't reason about fall back to the full selection.
+  [`--changed`](changed.md)), narrowed to the affected test files; changes
+  the graph can't reason about fall back to the full selection.
+- Both narrowed reruns (test files, affected tests) drop the positional
+  paths you started the session with and keep every flag with its value
+  (`-k api`, `-n 2`, ...). Only a full-selection rerun keeps the original
+  paths.
+- A change that selects nothing (only deleted test files, or source that no
+  test imports) skips the cycle and prints
+  `[watch] change affects no tests; waiting`.
 - Changes to pytest configuration files (`pytest.toml`, `.pytest.toml`,
   `pytest.ini`, `.pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg`)
   trigger a full rerun.

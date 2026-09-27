@@ -1,6 +1,8 @@
 # CLI flags
 
-rstest owns the flags listed on this page, grouped by topic below;
+rstest owns the flags listed on this page, grouped by topic below, plus a
+few forwarded pytest flags that rstest adds orchestration to (each marked
+*forwarded* in its section, e.g. `--doctest-modules`, `--durations`);
 **everything else forwards to the test session verbatim**, so the rest of the
 pytest flag surface, including flags added by your plugins, works without
 translation.
@@ -53,7 +55,8 @@ Worker count. Default `auto` (logical cores, capped as described below).
 - `-n 4`: four workers
 - `-n 0` or `-n 1`: **byte-exact mode**, one pytest session with byte-exact
   pytest semantics; identical to each other, with no worker identity below
-  `-n 2`. Exception: with `--reruns`, `-n 0/1` runs a one-worker pool instead
+  `-n 2`. `-n auto` runs this same mode when it resolves to one worker (a
+  small project). Exception: with `--reruns`, `-n 0/1` runs a one-worker pool instead
   (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). With no
   `--output` set, the session prints pytest's own terminal output
   (**Unreleased**); see [`--output`](#-output-dotsverbosebargithubjson).
@@ -211,7 +214,7 @@ Nodeid/`--pyargs` arguments fall back to full collection.
 
 ### `--doctest-modules`
 
-Works as in pytest: forwarded to the vendored core, which collects
+*Forwarded pytest flag.* Works as in pytest: forwarded to the vendored core, which collects
 doctest items from all modules; they dispatch across workers like any
 other test. `--doctest-glob` and friends forward the same way.
 
@@ -506,12 +509,13 @@ covered by this watchdog.
 
 ### `--durations <N>` / `--durations-min <SECS>`
 
-pytest's slowest-durations report, rendered by the orchestrator after
+*Forwarded pytest flags.* pytest's slowest-durations report, rendered by the orchestrator after
 the run (worker terminals are captured, so the merged block covers all
 workers). `--durations=0` shows everything; entries under
 `--durations-min` (default 0.005s) are hidden with pytest's note unless
 `-vv`. Phase granularity matches pytest: setup, call, and teardown each
-get a line.
+get a line. In byte-exact mode with no `--output` set (**Unreleased**), the
+single pytest session prints this report itself, exactly as pytest does.
 
 ### `--durations-regress <RATIO>`
 
@@ -767,9 +771,11 @@ report without gating the exit code.
 
 ### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>` { #-output-dotsverbosebargithubjson }
 
-Terminal output style. The default is **automatic**: on an interactive
-terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
-to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
+Terminal output style. The default is **automatic**: in the parallel pool,
+on an interactive terminal it's `bar` (the pretty view); off a TTY (CI,
+pipes) it falls back to `dots`, so logs stay byte-stable. In byte-exact mode
+(**Unreleased**) the default is pytest's own output instead; see the note
+below. Pass `--output` to pin a style.
 
 !!! note "Unreleased: pytest's own output in byte-exact mode"
     In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
@@ -1063,7 +1069,7 @@ reruns-only-known-flaky = true
 worker-timeout = 300
 collect = "full"        # or "lazy"
 order = "throughput"    # or "fail-fast"
-output = "bar"          # dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json (default: bar on a TTY, dots off-TTY)
+output = "bar"          # dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json (default: bar on a TTY, dots off-TTY; unset at -n 0/1 = pytest's own output, Unreleased)
 projects = ["libs/*", "services/api"]   # monorepo subprojects; replaces auto-discovery
 ```
 
@@ -1120,8 +1126,11 @@ unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
 and subcommand list) and `-V` / `--version` (`rstest 0.7.0`). In 0.7.0 pytest's
 help is not reachable through rstest: `rstest -- --help` prints only the
-banner and exits `0`. **Unreleased:** in byte-exact mode with no `--output`
-set, it prints the vendored pytest's help instead. To list pytest's and
+banner and an empty summary, and exits `0`. **Unreleased:** at `-n 0`/`-n 1`
+(or when `-n auto` resolves to one worker, as it does on a small project)
+with no `--output` set, it prints the vendored pytest's full help instead;
+in the parallel pool, or with an explicit `--output`, it still prints only
+the banner. To list pytest's and
 your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows
 that installed version's flags).
 
@@ -1144,10 +1153,12 @@ Three of them get extra orchestration on top of their per-session meaning:
 - **`--lf` / `--ff`**: the last-failed cache is written by rstest from
   merged results (workers each see only their own failures), so a
   follow-up `--lf` behaves exactly as after a serial run.
-- **`-v`**: rendered by rstest as one line per test, in completion order
-  across workers, each prefixed with the worker that ran it (`[gw2] ...`,
-  xdist's convention). Failure headers carry the same attribution; the
-  worker also appears per-test in `--report-json`.
+- **`-v`**: in the parallel pool, rendered by rstest as one line per test,
+  in completion order across workers, each prefixed with the worker that
+  ran it (`[gw2] ...`, xdist's convention). Failure headers carry the same
+  attribution; the worker also appears per-test in `--report-json`. In
+  byte-exact mode with no `--output` set (**Unreleased**), there is no
+  worker prefix: the single pytest session prints its own `-v` lines.
 
 ## Passthrough-IO flags
 

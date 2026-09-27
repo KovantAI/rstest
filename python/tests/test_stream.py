@@ -52,15 +52,31 @@ def mk_report(
     )
 
 
-# ── pytest_cmdline_main: rerunfailures neutralization ───────────────────────
+# ── pytest_cmdline_main: rerunfailures + xdist neutralization ──────────────
+
+
+def _run_cmdline_main(config: Any, result: Any = 0) -> Any:
+    """Drive the wrapper: run its pre-yield part, then hand back `result` as
+    the inner impls' outcome and return what the wrapper passes through."""
+    gen = _plugin().pytest_cmdline_main(config)
+    next(gen)
+    try:
+        gen.send(result)
+    except StopIteration as stop:
+        return stop.value
+    raise AssertionError("wrapper yielded twice")
+
+
+def _xdist_config(**option: Any) -> SimpleNamespace:
+    return SimpleNamespace(option=SimpleNamespace(**option))
 
 
 def test_cmdline_main_neutralizes_rerunfailures_in_worker(monkeypatch):
     seen: list[Any] = []
     monkeypatch.setattr(stream, "_neutralize_rerunfailures", lambda c: seen.append(c))
     monkeypatch.setenv("RSTEST_WORKER_ID", "gw0")
-    config = object()
-    assert _plugin().pytest_cmdline_main(config) is None
+    config = _xdist_config()
+    assert _run_cmdline_main(config, result=3) == 3
     assert seen == [config]
 
 
@@ -68,8 +84,27 @@ def test_cmdline_main_noop_outside_worker(monkeypatch):
     seen: list[Any] = []
     monkeypatch.setattr(stream, "_neutralize_rerunfailures", lambda c: seen.append(c))
     monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
-    _plugin().pytest_cmdline_main(object())
+    _run_cmdline_main(_xdist_config())
     assert seen == []
+
+
+def test_cmdline_main_disables_xdist_distribution_before_xdist_sees_it(monkeypatch):
+    # `addopts = -n 4 --dist loadgroup` with pytest-xdist installed: xdist's own
+    # tryfirst cmdline_main would raise on --pdb, so the wrapper zeroes these
+    # before any impl runs, in the pool and in single sessions alike.
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    config = _xdist_config(numprocesses=4, dist="loadgroup", distload=True)
+    _run_cmdline_main(config)
+    assert config.option.numprocesses == 0
+    assert config.option.dist == "no"
+    assert config.option.distload is False
+
+
+def test_cmdline_main_without_xdist_options_is_harmless(monkeypatch):
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    config = _xdist_config()
+    _run_cmdline_main(config)
+    assert vars(config.option) == {}
 
 
 # ── pytest_load_initial_conftests: pytest-cov erase race ────────────────────

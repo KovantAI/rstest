@@ -23,6 +23,10 @@ runnable, missing the shim, or not matching a `--python` version request).
 Your project's interpreter is older than Python 3.10. The vendored pytest
 core requires 3.10+, which matches the supported CPython line (3.9 is
 end-of-life as of October 2025). Upgrade the environment's Python.
+**Unreleased:** rstest now rejects a 3.9 interpreter during discovery
+(`Python 3.9.x is older than the required 3.10`, listed with the other
+rejected candidates), so you see this error only from 0.7.0, which let 3.9
+through.
 
 ## Tests pass under pytest, fail under `rstest`, only in parallel
 

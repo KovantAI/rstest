@@ -334,9 +334,10 @@ pub struct Cli {
     /// Output style: "dots", "verbose" (like -v), or "bar" (pytest-sugar-style
     /// live progress) for terminals; "github", "gitlab", "buildkite",
     /// "teamcity", or "azure" for CI annotations; "tap" or "json" for
-    /// machine-readable streams. Config `[tool.rstest] output`. Default "bar"
-    /// on a tty ("verbose" with -v), "dots" off-tty. An unknown style warns and
-    /// falls back to "dots".
+    /// machine-readable streams. Config `[tool.rstest] output`. Default at
+    /// -n 0/1 (no --reruns): pytest's own terminal output. Default in the
+    /// parallel pool: "bar" on a tty ("verbose" with -v), "dots" off-tty. An
+    /// unknown style warns and falls back to "dots".
     #[arg(long, value_name = "STYLE")]
     pub(crate) output: Option<String>,
 

@@ -46,6 +46,16 @@ it the action installs the latest rstest from PyPI.
     durations-regress: "2.0" # cold cache warns + seeds; require-baseline:true to enforce
 ```
 
+On a push event the action (on `main`, **Unreleased**) picks a base that can
+actually differ: `base-ref` if it is not the pushed commit itself, else the
+commit before the push (`github.event.before`). With no usable base (a new
+branch, a `schedule` or `workflow_dispatch` run, or a PR whose base equals
+`HEAD`) it warns and runs the full suite, rather than diffing against `HEAD`,
+which in a clean checkout selects nothing and passes green (or exits 5 under
+`strict`). So the example above is safe on both `pull_request` and pushes to
+`main`. The `@v0.7.0` action diffs against `HEAD` in those cases: guard the
+step with `if: github.event_name == 'pull_request'` there.
+
 ### Real-LLM / nondeterministic suite (fail-ratio gate)
 
 ```yaml
@@ -94,9 +104,76 @@ steps:
 > [cache backend](#warm-cache-as-a-service), not the default `actions-cache`:
 > with `actions-cache` every shard tries to save the same key (only the first
 > wins) and shards can restore different entries. Even with a shared backend,
-> shards pull at different times; see
-> [Keep one cache snapshot across the matrix](https://python-rstest.readthedocs.io/en/stable/guides/sharding/#keep-one-cache-snapshot-across-the-matrix)
-> for gating pipelines.
+> shards pull at different times, and each job resolves its own warm run, so
+> shards can warm from different runs. For a gating pipeline, resolve the run
+> once upstream and pass it as `warm-run-id` (**Unreleased**):
+>
+> ```yaml
+> jobs:
+>   warm:
+>     runs-on: ubuntu-latest
+>     outputs: { run-id: "${{ steps.r.outputs.run-id }}" }
+>     steps:
+>       - id: r
+>         env: { GH_TOKEN: "${{ github.token }}", WF_REF: "${{ github.workflow_ref }}" }
+>         run: |
+>           wf="${WF_REF##*/.github/workflows/}"; wf="${wf%%@*}"
+>           rid=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
+>                   --branch main --event push --status success --limit 1 \
+>                   --json databaseId --jq '.[0].databaseId // ""')
+>           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
+>   test:
+>     needs: warm
+>     strategy: { matrix: { shard: [1, 2, 3, 4] } }
+>     runs-on: ubuntu-latest
+>     steps:
+>       - uses: actions/checkout@v7
+>       - uses: KovantAI/rstest/.github/actions/rstest@<sha>
+>         with:
+>           args: "-n 4"
+>           cache-backend: artifact
+>           warm-run-id: ${{ needs.warm.outputs.run-id }}
+>           shard: ${{ matrix.shard }}
+>           shard-total: 4
+> ```
+>
+> See [Keep one cache snapshot across the matrix](https://python-rstest.readthedocs.io/en/stable/guides/sharding/#keep-one-cache-snapshot-across-the-matrix).
+
+### Monorepos
+
+Run one matrix job per package, with `working-directory` set to the package:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [libs/core, libs/cli, services/api]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: KovantAI/rstest/.github/actions/rstest@<sha>
+        with:
+          python-version: "3.13"
+          working-directory: ${{ matrix.project }}
+          cache-backend: artifact
+          upload-junit: true
+```
+
+Each job is a plain single-project run: the package's own `[tool.rstest]`,
+`.venv` or lockfile, and `.rstest_cache` apply, and artifact names carry the
+package (`artifact-suffix` defaults to `<os>-py<version>-<working-directory>`).
+For a package in a root uv workspace, set `runner: uv`.
+
+The action refuses a monorepo root (a `working-directory` with no pytest
+config of its own and several subprojects, or `[tool.rstest] projects`),
+using the same rule rstest uses to enter monorepo mode. A root run keeps a
+cache and a `junit.<slug>.xml` per project and refuses
+`--cache-pull`/`--cache-push`, none of which fit this action's cache path,
+JUnit upload or fail-ratio gate. **Unreleased** (not in `@v0.7.0`). Full
+recipe, including the single-job root alternative:
+[monorepo on ephemeral CI](https://python-rstest.readthedocs.io/en/latest/guides/ci-quickstart/#worked-example-monorepo-on-ephemeral-ci).
 
 ## Warm cache as a service
 
@@ -181,7 +258,7 @@ covers GCS / Azure / HTTP.
 | `runner` | `auto` | `uv` / `plain` / `auto` (uv when `uv.lock` or `[tool.uv]` present) |
 | `install` | `""` | install override; empty = infer from `runner` |
 | `version` | `""` | pin `rstest==X` (plain runner; uv uses the lockfile) |
-| `working-directory` | `.` | project root (monorepo) |
+| `working-directory` | `.` | one project's directory (in a monorepo, a package); a monorepo root is refused, see [Monorepos](#monorepos) |
 | `cache` | `true` | restore/save `.rstest_cache`. Global kill switch: `false` disables caching for **every** backend (`actions-cache`, `artifact`, `remote`) |
 | `cache-key-prefix` | `rstest-cache` | bump to invalidate all cached baselines |
 | `cache-backend` | `actions-cache` | `actions-cache` / `artifact` / `remote`: see [Warm cache as a service](#warm-cache-as-a-service) |
@@ -189,14 +266,15 @@ covers GCS / Azure / HTTP.
 | `cache-remote-token` | `""` | bearer for an `http(s)://` remote → `RSTEST_CACHE_REMOTE_TOKEN` |
 | `cache-compact-threshold` | `""` | `--cache-compact-threshold N`: fold loose segments inline on push past N (best-effort) |
 | `warm-from-branch` | `main` | artifact backend: branch whose latest successful run seeds the warm cache |
+| `warm-run-id` | `""` | **Unreleased (0.8.0), not in `@v0.7.0`.** Artifact backend: warm from this run id instead of resolving one per job; pass one id resolved upstream to every shard so they share a snapshot |
 | `warm-from-event` | `push` | **Unreleased (0.8.0), not in `@v0.7.0`.** Artifact backend: only warm from a run triggered by this event (empty = any); keeps PR runs from becoming the warm source |
 | `artifact-suffix` | derived | **Unreleased (0.8.0), not in `@v0.7.0`.** Scopes artifact names per matrix leg; default is `<os>-py<version>[-<working-directory>]` |
 | `artifact-cache-dir` | `.rstest-rcache` | artifact backend: workspace dir segments materialize into |
 | `github-token` | job token | artifact backend: token for the cross-run resolve + download (needs `actions: read`) |
 | `output` | `github` | `--output` style: `github` (annotations), `gitlab`, `buildkite`, `teamcity`, `azure`, `tap`, `json`, `dots`, `verbose`, `bar`. An unknown value only warns and falls back to `dots` |
 | `junit` | `junit.xml` | `--junitxml` path; empty = skip (required for the gate) |
-| `changed` | `false` | `false` / `true` / `strict` |
-| `base-ref` | `""` | base ref for `--changed`; fetched if shallow. Empty on a PR = inferred from `$GITHUB_BASE_REF` (`origin/<base>`) |
+| `changed` | `false` | `false` / `true` / `strict`. With no usable base the full suite runs with a warning (**Unreleased**; see [PR change-based selection](#pr-change-based-selection-strict-gate)) |
+| `base-ref` | `""` | base ref for `--changed`; fetched if shallow. Empty on a PR = inferred from `$GITHUB_BASE_REF` (`origin/<base>`); empty on a push = the commit before the push (**Unreleased**) |
 | `reruns` | `""` | `--reruns N` |
 | `rerun-on` | `""` | preset(s) → `--only-rerun` (`http-5xx`, `timeouts`, or raw regex) |
 | `worker-timeout` | `""` | `--worker-timeout SECS` (hang / container-boot backstop) |

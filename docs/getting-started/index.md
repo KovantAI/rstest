@@ -11,6 +11,9 @@ $ rstest --doctor             # and find out why the suite is slow
 (`--doctor` shines on a real suite, not a toy two-test folder; see
 [Suite diagnostics](../guides/doctor.md).)
 
+These docs track the main branch: items marked **Unreleased** ship in 0.8.0
+(the current release is 0.7.0).
+
 - [Evaluating rstest](evaluating.md): what it speeds up, when not to adopt, maturity, cost of adopting and backing out
 - [Installation](installation.md): requirements, pip/uv, from source
 - [Start from scratch](your-first-test.md): no suite yet? from an empty folder to a green run

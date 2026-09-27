@@ -15,14 +15,14 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 | pytest-xdist flag | rstest equivalent | Status / notes |
 |---|---|---|
 | `-n <N>` | `-n <N>` | Same. |
-| `-n auto` | `-n auto` (**differs**) | rstest's `auto` is the logical core count (as reported by the OS, which honors CPU affinity and, on Linux, a cgroup CPU quota), then capped by test-file count and by the cached suite time; it is the default. xdist's `auto` is the **physical** core count when psutil is installed. On a machine with SMT the two can differ by 2x: while comparing the runners, pin `-n` to the count your xdist job used. |
+| `-n auto` | `-n auto` (**differs**) | rstest's `auto` is the logical core count (as reported by the OS, which honors CPU affinity and, on Linux, a cgroup CPU quota), then capped by test-file count and by the cached suite time; it is the default. xdist's `auto` is the **physical** core count when psutil is installed. On a machine with SMT the two can differ by 2x: while comparing the runners, pin `-n` to the count your xdist job used. `PYTEST_XDIST_AUTO_NUM_WORKERS` is ignored: pass `-n` or set `[tool.rstest] numprocesses`. |
 | `-n logical` | none | **rstest error, exit 1** (`invalid digit found in string`). Use `-n auto` or an explicit number. |
 | `-n 1` | `-n 1` (**differs**) | xdist's `-n 1` runs one `gw0` worker **with** `workerinput`; rstest's `-n 1` (like `-n 0`) is plain byte-exact mode with **no worker identity**. |
 | `--dist load` | `--dist load` (default) | Same, plus duration-aware long-pole-first scheduling. |
 | `--dist loadfile` | `--dist loadfile` | Same. File affinity, in-file order. |
 | `--dist loadscope` / `loadgroup` | same names | Supported, incl. `@pytest.mark.xdist_group`; rejected under `--collect lazy` (needs full collection). See [`--dist`](cli.md). |
 | `--dist each` | `--dist each` (**partial**) | Full suite per worker, but every worker uses the **same** interpreter. Heterogeneous `--tx` gateways have no equivalent. `--reruns` rejected in this mode. |
-| `--dist no` / `--dist=no` | none | **rstest error, exit 1** (`no` is not a valid `--dist` mode); byte-exact mode is `-n 0`. |
+| `--dist no` / `--dist=no` | none | **rstest error, exit 1** (`unknown --dist mode: no`, followed by the valid modes; full text below the table); byte-exact mode is `-n 0`. |
 | `--dist worksteal` | none | **rstest error, exit 1** (`unknown --dist mode: worksteal`). Use `--dist load` (the default). It doesn't steal work either; it balances by dispatching tests with a cached duration of 1s or more first, longest first, one at a time (see [Scheduling](../concepts/scheduling.md#dispatch-order)). |
 | `-p no:xdist` | `-p no:xdist` | Forwarded to the vendored pytest, which then doesn't load pytest-xdist. rstest's own parallelism and `worker_id` / `testrun_uid` fixtures are unaffected. But a leftover `-n` in `addopts` is then an unknown option: the run exits 4 (`unrecognized arguments: -n`). Remove `-n` from `addopts` before disabling or uninstalling xdist. |
 | `-d` | `--dist load` | `-d` is xdist's load-balancing shorthand, which is rstest's default. Forwarded verbatim (see below), no effect. |
@@ -30,9 +30,9 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 | `--max-worker-restart` | none | No equivalent: rstest auto-respawns crashed workers on a fixed, non-tunable budget (see [Crash handling](../concepts/crash-handling.md)). Forwarded verbatim, no effect. |
 | `--tx` (gateways) | none | No equivalent: one local interpreter. `--dist each` covers same-env broadcast, not heterogeneous environments. |
 | `--rsyncdir` / `--rsync` | none | No equivalent: rstest runs local workers, no remote sync. |
-| `-p xdist.looponfail` / `--looponfail` | `--watch` | With import-graph selection. See [`--watch`](cli.md). |
+| `-p xdist.looponfail` / `--looponfail` | `--watch` | With import-graph selection. See [`--watch`](cli.md). rstest does not handle `--looponfail` itself: it is forwarded to every worker session, and with pytest-xdist installed xdist's loop-on-fail mode takes each one over and the run **hangs**. Remove it from `addopts` before switching. |
 
-**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` and `--dist worksteal` are consumed by rstest's own `--dist` and rejected as invalid modes (exit 1), as is `-n logical`. The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`, `--maxprocesses`) are **forwarded to the vendored pytest session verbatim**, so the outcome depends on whether pytest-xdist is installed:
+**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` and `--dist worksteal` are consumed by rstest's own `--dist` and rejected as invalid modes (exit 1, for example `unknown --dist mode: no (use load|loadfile|loadscope|loadgroup|each)`), as is `-n logical`. `--looponfail` / `-f` is the exception to the no-op rule below: with pytest-xdist installed it hangs the run (see its row). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`, `--maxprocesses`) are **forwarded to the vendored pytest session verbatim**, so the outcome depends on whether pytest-xdist is installed:
 
 - **pytest-xdist installed** (usual mid-migration): the flag *parses* but has **no effect**, because rstest keeps xdist's session inert (`dist = no`) and nothing acts on it. Silently ignored, no error, no warning.
 - **pytest-xdist not installed**: pytest doesn't recognize the option, so the vendored core exits with a usage error (exit 4).
@@ -54,10 +54,12 @@ xdist's controller-side ("master") hooks fire in the controller process around e
 | `pytest_xdist_setupnodes` | **Not emulated** (never called). |
 | `pytest_xdist_node_collection_finished` | **Not emulated** (never called). There is no controller collection phase. |
 | `pytest_handlecrashitem` | **Not emulated** (never called). Crash handling lives in the Rust orchestrator. |
+| `pytest_xdist_rsyncstart` / `pytest_xdist_rsyncfinish` | **Not emulated** (never called). There is no rsync to remote gateways. |
+| `pytest_xdist_getremotemodule` | **Not emulated** (never called). There are no remote execnet workers. |
 
 The same list, with the reasons, is in [Plugins: hook coverage](../guides/plugins.md#hook-coverage).
 
-Two structural caveats on the three emulated hooks: they run **N times concurrently in N processes** (controller-side shared state such as counters, registries, and pools needs rework; derive everything from `gateway.id` or a uuid), and crashed-node teardown runs on a survivor that never saw the dead node's `configure_node`. Every **other** conftest hook (`pytest_configure`, `pytest_collection_modifyitems`, `pytest_sessionstart`/`finish`, `pytest_runtest_*`) also runs inside each worker (the same model as xdist), so make shared-state hooks idempotent or key them on `RSTEST_WORKER_ID` / `workerinput["workerid"]`. Note also that `pytest_collection_modifyitems` **reordering does not control parallel run order** at `-n ≥ 2` (deselection is honored; ordering is governed by `--dist` mode, `@pytest.mark.serial`, and `xdist_group`).
+Two structural caveats on the three emulated hooks: they run **N times concurrently in N processes** (controller-side shared state such as counters, registries, and pools needs rework; derive everything from `gateway.id` or a uuid), and crashed-node teardown runs on a survivor that never saw the dead node's `configure_node`. Every **other** conftest hook (`pytest_configure`, `pytest_collection_modifyitems`, `pytest_sessionstart`/`finish`, `pytest_runtest_*`) also runs inside each worker (the same model as xdist), so make shared-state hooks idempotent or key them on `workerinput["workerid"]` / `PYTEST_XDIST_WORKER` (set under both xdist and rstest; `RSTEST_WORKER_ID` is the rstest-only equivalent). Note also that `pytest_collection_modifyitems` **reordering does not control parallel run order** at `-n ≥ 2` (deselection is honored; ordering is governed by `--dist` mode, `@pytest.mark.serial`, and `xdist_group`).
 
 ## Fixtures & worker identity
 
@@ -72,7 +74,7 @@ Under the fixtures, rstest sets the full xdist-compatible surface on every pool 
 
 - `RSTEST_WORKER_ID` env var, the `gwN` value, rstest-specific.
 - `PYTEST_XDIST_WORKER`, `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` env vars, set so environment-grepping plugins/conftests keep working (`PYTEST_XDIST_TESTRUNUID` is Unreleased).
-- `config.workerinput`, which carries `workerid` (`gwN`), `workercount`, the run uid under both `testrunuid` (xdist's key, Unreleased) and `testrun_uid` (one uid per run, shared by all workers), `mainargv`, and the `cov_master_*` keys pytest-cov expects.
+- `config.workerinput`, which carries `workerid` (`gwN`), `workercount`, the run uid under both `testrunuid` (xdist's key, Unreleased) and `testrun_uid` (one uid per run, shared by all workers), `randomly_seed` (pytest-randomly) and `random_order_seed` (pytest-random-order), one run-level value shared by all workers, `mainargv`, and the `cov_master_*` keys pytest-cov expects. Two more are seeded only when the plugin is installed and pytest-xdist is not: `server_port` (pytest-retry) and `mypy_config_stash_serialized` (pytest-mypy).
 
 Reading the surface directly, instead of via the fixtures, also works:
 
@@ -80,11 +82,11 @@ Reading the surface directly, instead of via the fixtures, also works:
 worker = getattr(request.config, "workerinput", {}).get("workerid", "master")
 ```
 
-**Values at `-n 0` / `-n 1`.** There is **no `workerinput`** below `-n 2`: `config.workerinput` does not exist, `RSTEST_WORKER_ID`, `PYTEST_XDIST_WORKER` and `PYTEST_XDIST_WORKER_COUNT` are unset, the `worker_id` fixture returns `"master"`, and `testrun_uid` returns a fresh per-session uid, with or without pytest-xdist installed. This differs from xdist's `-n 1`, which *does* create a `gw0` worker with `workerinput`.
+**Values at `-n 0` / `-n 1`.** There is **no `workerinput`** below `-n 2`: `config.workerinput` does not exist, `RSTEST_WORKER_ID`, `PYTEST_XDIST_WORKER`, `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` are unset, the `worker_id` fixture returns `"master"`, and `testrun_uid` returns a fresh per-session uid, with or without pytest-xdist installed. This differs from xdist's `-n 1`, which *does* create a `gw0` worker with `workerinput`.
 
-The exception is `--reruns` at `-n 0/1`, which runs a one-worker rerun pool. There `config.workerinput` exists (`workerid` `gw0`, `workercount` `1`), `PYTEST_XDIST_WORKER=gw0`, `PYTEST_XDIST_WORKER_COUNT=1` and `PYTEST_XDIST_TESTRUNUID` are set, and xdist's helpers `get_xdist_worker_id()` / `is_xdist_worker()` report `gw0`, yet the fixtures still return `"master"` and a fresh uid. Code that reads `config.workerinput` or the environment directly (rather than via the fixtures) must guard for this case too.
+The exception is `--reruns` at `-n 0/1`, which runs a one-worker rerun pool. There `config.workerinput` exists (`workerid` `gw0`, `workercount` `1`), `PYTEST_XDIST_WORKER=gw0`, `PYTEST_XDIST_WORKER_COUNT=1` and `PYTEST_XDIST_TESTRUNUID` are set, and xdist's helpers `get_xdist_worker_id()` / `is_xdist_worker()` report `gw0`, yet the fixtures still return `"master"` and a fresh uid. Code that reads `config.workerinput` or the environment directly (rather than via the fixtures) must guard for this case too. pytest-django, for one, then names its test database `test_<name>_gw0` instead of `test_<name>`, which matters with `--reuse-db`: a database kept by a plain `-n 0` run is not the one a `--reruns` run reuses, and vice versa.
 
-Plugins keyed on worker identity work unchanged: pytest-django's per-worker test databases are the canonical case (in rstest's corpus, exercised only on SQLite `:memory:`; check a Postgres or MySQL setup on your own suite). And `hypothesis`'s shared example DB under many workers can be split per worker with `DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'master')}")` (see [Compatibility](../concepts/compatibility.md)).
+Plugins keyed on worker identity work unchanged: pytest-django's per-worker test databases are the canonical case (in rstest's corpus, exercised only on SQLite `:memory:`; check a Postgres or MySQL setup on your own suite). And `hypothesis`'s shared example DB under many workers can be split per worker with `DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('PYTEST_XDIST_WORKER', 'master')}")` (see [Compatibility](../concepts/compatibility.md)).
 
 ## Known divergences
 

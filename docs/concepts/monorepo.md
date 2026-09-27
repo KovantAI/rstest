@@ -104,6 +104,7 @@ dropped those flags at a monorepo root).
 | `--changed[=REV]`, `--changed-strict` | classified once at the root, then forwarded to the directly changed projects (see [Changed-aware runs](#changed-aware-runs)) |
 | `--timeout`, `--collect`, `--incremental`, `--reruns-only-known-flaky` | forwarded to every project (**Unreleased**) |
 | `--fail-on-leak`, `--durations-regress`, `--require-baseline` | forwarded; each gate applies per project, and a project that fails its gate fails the root through the merged exit code (**Unreleased**) |
+| `--instrument-workers` | forwarded to every project (**Unreleased**). Internal and hidden from `--help`: a parent rstest passes it (for `migrate-check`'s classifier runs) to turn on worker instrumentation without the doctor report |
 | `--shuffle[=SEED]` | resolved once at the root, so every project uses the same seed. A bare `--shuffle` picks one and prints `rstest: shuffle seed <N> for every project (reproduce with --shuffle=<N>)`. Each project still needs `-n 2` or more, so a project whose share is one worker errors (**Unreleased**) |
 | `--junitxml`, `--doctor-json`, `--doctor-md` | one file per project, slug before the extension (see below) |
 | `--html` | one file per project, like `--junitxml`: `out.html` -> `out.libs-core.html` (**Unreleased**) |

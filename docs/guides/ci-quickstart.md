@@ -240,8 +240,9 @@ at once:
    least one worker each ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
    Many packages on a small (2–4 core) runner oversubscribes: 20 packages on
    a 2-core runner is 20 concurrent single-worker children fighting for 2 cores.
-2. **Shared cache.** `--cache-remote`/`--cache-pull`/`--cache-push` are **not
-   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir-cache-pull-cache-push)):
+2. **Shared cache.** `--cache-pull` and `--cache-push` are **refused at a
+   monorepo root** (exit 1), and `--cache-remote` alone is inert there
+   ([CLI](../reference/cli.md#-cache-remote-urldir-cache-pull-cache-push)):
    each project keeps its own `.rstest_cache`, so the segment-merge shared
    cache is a per-project feature.
 
@@ -314,7 +315,10 @@ If a package is a member of a root uv workspace (one `uv.lock` at the repo
 root, none in the package), set `runner: uv` so the action doesn't fall
 back to pip. Point `working-directory` at a package, never at the monorepo
 root itself: the action caches `<working-directory>/.rstest_cache` and
-uploads a single JUnit file, which is not what a root run writes.
+uploads a single JUnit file, which is not what a root run writes. The action
+on `main` refuses a monorepo root with an error that names the subprojects
+(**Unreleased**: the `@v0.7.0` action runs it and silently misses the
+caches and JUnit).
 
 !!! note "When to keep the root run instead"
     If your packages are **few** (roughly ≤ the runner's core count) the root

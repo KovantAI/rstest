@@ -71,11 +71,24 @@ directory for that session.
 
 History **ages out**. A test with no flake or failure inside the
 retention window (default **90 days**, from `last_epoch`) reads as fixed:
-its entry is dropped on the next run and it stops carrying the
-annotation below, so a test you actually fixed goes quiet on its own,
-and the ranked candidate list stays current instead of haunted by
-last quarter's offenders. Tune with `RSTEST_FLAKE_RETENTION_DAYS`; set
-it to `0` to keep history forever.
+every reader ignores its entry, so it stops carrying the annotation below,
+and a test you actually fixed goes quiet on its own while the ranked
+candidate list stays current instead of haunted by last quarter's
+offenders. The stale entry stays in the file until the next run that
+records a flake or failure (or a `--cache-pull` merge) rewrites it; a
+green run writes nothing, so it prunes nothing. Tune with
+`RSTEST_FLAKE_RETENTION_DAYS`; set it to `0` to keep history forever. A
+value that is not a whole number of days silently falls back to 90.
+
+Everything that reads the history applies the same window:
+
+- the **run annotations** in the flaky and quarantined sections (below);
+- [`--reruns-only-known-flaky`](#target-reruns-only-known-flaky), which
+  retries only tests with a `flaky > 0` record;
+- [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast)
+  (**Unreleased**), which dispatches recently failed and flaky tests first;
+- [`rstest explain`](../reference/cli-commands.md#explain) (**Unreleased**),
+  which reports a test's flake and failure counts.
 
 The flaky and quarantined sections annotate each test from this file:
 

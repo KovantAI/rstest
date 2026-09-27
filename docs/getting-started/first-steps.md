@@ -7,8 +7,9 @@
     runs; see [`try`](../reference/cli-commands.md#try).
 
 Run rstest from your project root, exactly where you would run pytest. This
-sample is django-allauth's 2,050-test suite at `-n 4`, the run recorded in
-[Benchmarks](../reference/benchmarks.md) (the middle lines are elided):
+sample is django-allauth's 2,050-test suite at `-n 4` (the middle lines are
+elided; [Benchmarks](../reference/benchmarks.md) records its measured time,
+8.4s):
 
 ```console
 $ rstest -n 4
@@ -170,9 +171,9 @@ timings are cached it also caps by total suite time, so a tiny suite runs
 on one or two workers. Pass an explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
-in a single worker process, pytest's own behavior in every detail. With no
-`--output` set, the terminal output is pytest's own too, byte for byte
-(**Unreleased**), and rstest only appends its extras (doctor, coverage, gate
+in a single worker process, with the same per-test outcomes as plain pytest.
+With no `--output` or `--reruns` set, the terminal output is pytest's own
+too, byte for byte (**Unreleased**), and rstest only appends its extras (doctor, coverage, gate
 messages) after pytest's summary line. You will see this one mode under
 three names: *byte-exact* in these docs, *pytest-exact* in its run banner
 (printed only when you pin rstest's renderer with `--output`), and
@@ -208,8 +209,8 @@ Command-line flags override these; full key list in
 rstest records per-test durations in `.rstest_cache/`. From the second run
 on, the scheduler starts your slowest tests first, which is what keeps
 workers busy at the end of the run instead of waiting on one long test.
-On wait-heavy suites this is dramatic: aiohttp's suite nearly halves
-between its cold and warm runs (see [Benchmarks](../reference/benchmarks.md)).
+On wait-heavy suites this is dramatic: aiohttp's suite drops from 150s
+cold to 67s warm (see [Benchmarks](../reference/benchmarks.md)).
 
 ## When something fails
 
@@ -221,8 +222,8 @@ $ rstest --doctor    # and if the suite feels slow, ask why
 !!! tip "Coming from pytest or pytest-xdist?"
     If tests fail *only* under parallelism on a freshly migrated suite, run
     [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) first: it
-    classifies each parallel-only failure (order dependency, isolation leak,
-    wall-clock timing, unstable id) and names the fix, so you don't triage by
+    classifies each parallel-only failure (for example order dependency,
+    isolation leak, or wall-clock timing) and names the fix, so you don't triage by
     hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
 
 ## Which command when?
@@ -232,7 +233,7 @@ Four commands answer four different questions:
 | You want to… | Run | It tells you |
 |---|---|---|
 | Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli-commands.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup: zero risk |
-| Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) | Onboarding preflight: finds unstable test ids first, then classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
+| Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) | Onboarding preflight: finds unstable test ids first, then classifies each parallel-only failure (for example order dependency / isolation leak / timing) and names the fix |
 | Quarantine the parallel-unsafe tests in one step (**Unreleased**) | [`rstest audit`](../reference/cli-commands.md#audit) | Focused fix loop: same classification, repeatable to catch intermittent races, plus a ready-to-paste `conftest.py` block marking exactly the serial-fixable tests `@pytest.mark.serial` |
 | Understand why a passing suite is **slow** | [`rstest --doctor`](../guides/doctor.md) | Plain-English breakdown of where test time goes (wait-bound, a long-pole test, poor parallel balance) |
 

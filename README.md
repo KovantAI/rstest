@@ -26,10 +26,10 @@ aiohttp, 4,469 tests:   pytest 193s  →  rstest 67s warm (150s cold), -n 8
 ```
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/KovantAI/rstest/main/docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (197s), then rstest (68s, 8 parallel workers), then rstest --doctor pinpointing the wait-bound file that gates the suite" width="820">
+  <img src="https://raw.githubusercontent.com/KovantAI/rstest/main/docs/assets/rstest-demo.gif" alt="Terminal recording (older recording): the aiohttp suite under pytest (197s), then rstest (68s, 8 parallel workers), then rstest --doctor pinpointing the wait-bound file that gates the suite" width="820">
 </p>
 
-<p align="center"><sub>Same suite: <b>pytest 197s → rstest 68s</b> (warm, <code>-n 8</code>, as recorded), then <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
+<p align="center"><sub>Same suite: <b>pytest 197s → rstest 68s</b> (warm, <code>-n 8</code>, older recording), then <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
 
@@ -60,7 +60,7 @@ project environment; see
 [Installation](https://python-rstest.readthedocs.io/en/stable/getting-started/installation/).)
 
 Requires Python 3.10+ on macOS, Linux, or Windows. Windows runs the full
-test gate in CI, but the 33-suite public corpus runs only on macOS/Linux, so
+test gate in CI, but the public-suite corpus runs only on macOS/Linux, so
 Windows is validated at a smaller scale. rstest is alpha (0.x):
 expect breaking changes between minor versions until 1.0.
 
@@ -174,8 +174,8 @@ Full methodology:
 
 At `-n 0` (byte-exact mode), per-test outcomes match pytest exactly: one
 vendored-pytest session; any difference at `-n 0` is a bug. The guarantee is
-per-test outcomes (every phase, skips, xfails). With no `--output` set
-(**Unreleased**), the terminal output at `-n 0` is pytest's own as well, with
+per-test outcomes (every phase, skips, xfails). With no `--output` or
+`--reruns` set (**Unreleased**), the terminal output at `-n 0` is pytest's own as well, with
 rstest's extras (doctor, coverage, gate messages) appended after it, and
 `--junitxml` is pytest's own document at every worker count. In parallel modes, outcomes are preserved for
 parallel-safe tests; tests with hidden time/ordering/shared-state

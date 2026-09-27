@@ -40,7 +40,8 @@ def test_talks_to_flaky_service(): ...
 Per-test rerun budget: the mark overrides a global
 [`--reruns`](cli.md#-reruns-n) for that test. A pass-after-retry reports as
 flaky exactly like global reruns. The plugin itself is neutralized inside
-rstest workers to prevent double reruns. Registered automatically.
+rstest pool workers to prevent double reruns (at `-n 0/1` without a global
+`--reruns` there is no pool, so it stays active; see below). Registered automatically.
 
 The marker name matches pytest-rerunfailures, but rstest reads **only the
 `reruns=` keyword**, defaulting to 1. The positional form (`flaky(3)`) and
