@@ -10,14 +10,16 @@ smarter when persisted between runs.
 
 This page gets you running on **GitHub Actions** and walks two worked examples
 (Django, monorepo). For other CI systems (AWS CodeBuild, Google Cloud Build,
-GitLab, Azure, CircleCI, Jenkins, pre-commit), see [More CI
+GitLab, Azure, CircleCI, Jenkins, Buildkite, pre-commit), see [More CI
 systems](ci-recipes.md). For a shard matrix that needs a cache no native CI
 cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
 
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin a version (`pip install rstest==0.7.0` or `rstest~=0.3`) or install
-    from your lockfile.
+    pin an exact version (`pip install rstest==0.7.0`) or install from your
+    lockfile, ideally with hashes (`pip install --require-hashes -r
+    requirements.txt`). rstest is pre-1.0, so a range like `~=0.7` can still
+    pull in breaking changes.
 
 ## Which layout do I want?
 
@@ -45,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: KovantAI/rstest/.github/actions/rstest@v1
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
         with:
           python-version: "3.13"
           args: "-n auto"
@@ -56,6 +58,10 @@ That defaults `--output github` (so failures show as `::error` annotations and
 flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
 `junit.xml`. See the [action README][action] for all inputs (`changed`,
 `durations-regress`, `reruns`/`rerun-on`, `fail-under-ratio`, `shard`, …).
+
+Pin the action to a release tag (as above) or a full commit SHA, and set
+`version:` to pin the rstest wheel; without it the action installs the
+latest rstest from PyPI.
 
 [action]: https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest
 
@@ -98,7 +104,7 @@ jobs:
 
       - name: test
         # --output github emits ::error per failure and ::warning for flaky
-        # reruns; --doctor auto-publishes diagnostics to the job summary.
+        # reruns. Add --doctor to also publish diagnostics to the job summary.
         run: rstest -n auto --output github --junitxml junit.xml
 
       # Long pole? Fan the suite across a runner matrix with --shard K/N;
@@ -186,7 +192,7 @@ slowest tests first and packs workers tightly.
 
 Concretely, on the runnable
 [`examples/ci-bench`](https://github.com/KovantAI/rstest/tree/main/examples/ci-bench)
-suite (136 wait-bound tests with duration skew), **measured**, `-n 4`, best of
+suite (161 wait-bound tests with duration skew), **measured**, `-n 4`, best of
 3, Apple Silicon / CPython 3.13:
 
 <!-- SOURCE OF TRUTH: examples/ci-bench/README.md, keep numbers in sync -->
@@ -223,7 +229,7 @@ at once:
    Many packages on a small (2–4 core) runner oversubscribes: 20 packages on
    a 2-core runner is 20 concurrent single-worker children fighting for 2 cores.
 2. **Shared cache.** `--cache-remote`/`--cache-pull`/`--cache-push` are **not
-   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir--cache-pull--cache-push)):
+   supported at a monorepo root** ([CLI](../reference/cli.md#-cache-remote-urldir-cache-pull-cache-push)):
    each project keeps its own `.rstest_cache`, so the segment-merge shared
    cache is a per-project feature.
 
@@ -240,7 +246,8 @@ permissions: { contents: read, actions: read }
 jobs:
   discover:
     runs-on: ubuntu-latest
-    outputs: { projects: ${{ steps.list.outputs.projects }} }
+    outputs:
+      projects: ${{ steps.list.outputs.projects }}
     steps:
       - uses: actions/checkout@v4
       # Emit the matrix from your project layout. Keep this list in sync with
@@ -254,20 +261,27 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: { project: ${{ fromJSON(needs.discover.outputs.projects) }} }
+      matrix:
+        project: ${{ fromJSON(needs.discover.outputs.projects) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - run: pip install -r requirements.txt && pip install rstest==0.7.0
+      # Artifact names can't contain "/", so derive a slug (libs/core -> libs-core).
+      # Artifact names put "--" after the slug so libs-core's pattern can't
+      # also match libs-core-extra's segments.
+      - id: slug
+        run: echo "slug=$(echo '${{ matrix.project }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
       # Warm this project's shared cache from the latest successful main run.
       - name: resolve warm-cache run
         id: warm
-        env: { GH_TOKEN: ${{ github.token }} }
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "${{ github.workflow }}" --branch main \
+                  --workflow "${{ github.workflow }}" --branch main --event push \
                   --status success --limit 1 \
                   --json databaseId --jq '.[0].databaseId // ""')
           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
@@ -277,7 +291,7 @@ jobs:
       - uses: actions/download-artifact@v4
         if: steps.warm.outputs.run-id != ''
         with:
-          pattern: "rstest-seg-${{ matrix.project }}-*"
+          pattern: "rstest-seg-${{ steps.slug.outputs.slug }}--*"
           merge-multiple: true
           path: ./rcache/segments
           github-token: ${{ github.token }}
@@ -289,10 +303,9 @@ jobs:
       # The junit slug keeps per-package files distinct across matrix legs.
       - name: test
         run: |
-          slug=$(echo "${{ matrix.project }}" | tr '/' '-')
           rstest ${{ matrix.project }} -n auto --output github \
                  --cache-remote ./rcache --cache-pull --cache-push \
-                 --junitxml "junit.${slug}.xml"
+                 --junitxml "junit.${{ steps.slug.outputs.slug }}.xml"
 
       # Upload only this run's new segment(s), not the warmed union.
       - run: |
@@ -305,12 +318,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rstest-seg-${{ matrix.project }}-${{ github.run_id }}
+          name: rstest-seg-${{ steps.slug.outputs.slug }}--${{ github.run_id }}
           path: ./push/seg-*.json
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: junit-${{ matrix.project }}, path: "junit.*.xml" }
+        with:
+          name: junit-${{ steps.slug.outputs.slug }}
+          path: "junit.*.xml"
 ```
 
 Each package is its own job: it gets the whole runner, warms its own cache
@@ -397,7 +412,7 @@ Two practical notes:
 
 ## Gating new parallel-unsafe tests with migrate-check
 
-[`migrate-check`](../reference/cli.md#migrate-check) exits non-zero when a
+[`migrate-check`](../reference/cli-commands.md#migrate-check) exits non-zero when a
 test has a run-to-run unstable id or fails only under parallelism, so a
 dedicated job keeps a migrating suite from regressing: no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use
@@ -408,7 +423,7 @@ leak, order dependency, or unstable-id site sneaks in green. Use
 ```yaml
       - name: migrate-check gate
         run: |
-          rstest --migrate-check-json migrate.json \
+          rstest migrate-check --migrate-check-json migrate.json \
                  --migrate-allow tests/legacy/   # known-unsafe backlog, tolerated
       - uses: actions/upload-artifact@v4
         if: always()
@@ -428,7 +443,7 @@ A test that fails on CI but passes on your machine is usually an ordering
 problem: on CI it shared a worker with a test that leaked state, and locally
 the scheduler put them apart. Every parallel run (`-n >= 2`) records which
 worker ran which tests, in what order, to `.rstest_cache/replay/latest.json`.
-Keep that file when a job fails and [`rstest replay`](../reference/cli.md#replay)
+Keep that file when a job fails and [`rstest replay`](../reference/cli-commands.md#replay)
 re-runs the same schedule on your machine.
 
 **1. In CI, upload the journal when the tests fail.** With the bundled action,
@@ -516,9 +531,17 @@ not show up at all.
 
 ## Notes
 
-- **Exit codes** are pytest's (0 pass, 1 failures, 2 interrupted, 3
-  internal, 4 usage error, 5 nothing collected) with sensible merging across workers.
-  See [Exit codes](../reference/exit-codes.md).
+- **Exit codes** follow pytest's (0 pass, 1 failures, 2 interrupted, 3
+  internal or worker lost, 4 pytest usage error, 5 nothing collected), merged
+  across workers. Two CI gotchas: rstest's **own** validation errors (bad flag
+  combinations such as `--shard` with one worker, no usable interpreter)
+  exit **1**, the same as test failures, and a malformed rstest flag caught
+  by its argument parser exits **2**. Check the log, not just the code. See
+  [Exit codes](../reference/exit-codes.md).
+- **Nothing affected, no reports.** A `--changed` run that selects no tests
+  exits before running and writes no `--junitxml` or `--report-json`. Set
+  `if-no-files-found: ignore` on artifact uploads and make report steps
+  tolerate a missing file. See [Selecting changed tests](changed.md#ci-usage).
 - **`--junitxml`** is rendered by rstest from merged results; point your
   CI's test-report integration at it as you would pytest's.
 - **`--report-json`** emits a per-test outcome snapshot (stable schema) if
@@ -528,21 +551,34 @@ not show up at all.
   PR diff. See [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
 - **Crash safety matters most in CI**: a segfaulting test costs one FAILED
   entry instead of an aborted job with partial results.
-- **Worker count**: `-n auto` uses the runner's available logical cores.
-  On Linux it honors the CPU affinity mask and cgroup CPU quota, so a
-  CPU-limited container gets its allocation, not the host's core count. CI
-  runners are small (2–4 cores) and not oversubscribed, so `auto` is the
-  right default there; pin `-n <k>` only if you need a fixed count.
+- **Worker count**: `-n auto` starts from the runner's available cores
+  (on Linux, the count Rust's `available_parallelism` reports, which honors
+  the CPU affinity mask and cgroup quota), then **caps** it: never more
+  workers than test files, and, once durations are cached, roughly one worker
+  per 2 seconds of total test time. That is the right default for a plain run.
+  With `--shard`, pin `-n 2` or more: if `auto` resolves to one worker (a
+  1-vCPU runner, a one-file suite, a warm cache under ~2s), `--shard` fails
+  with exit 1. See [Sharding](sharding.md).
+- **Timeouts**: a hung test otherwise runs until the CI job limit (6 hours
+  on GitHub). Set a per-test [`--timeout SECS`](../reference/cli.md#-timeout-secs)
+  (fails the stuck test with a traceback, and also arms the
+  [`--worker-timeout`](../reference/cli.md#-worker-timeout-secs) watchdog for
+  C code that never returns), and a job-level cap such as `timeout-minutes:`
+  on GitHub Actions.
+- **Reproducing order-dependent failures**: `--shuffle` prints its seed;
+  rerun with `--shuffle=SEED` to replay the same order. `rstest bisect
+  <nodeid>` (on `main`, not in 0.7.0) narrows a test that fails only after
+  others down to the polluting test(s).
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` if your CI renders ANSI.
 - **Platform**: these recipes are written for Linux runners but work
   unchanged on `windows-latest` and `macos-latest` (swap the runner image);
-  rstest's full test gate runs on all three every commit. `-n auto` returns
-  the runner's logical cores on macOS/Windows (the cgroup/affinity narrowing
-  above is Linux-specific). Two Windows-only behavior differences, both with
+  rstest's full test gate runs on all three every commit. On macOS/Windows
+  `-n auto` starts from the runner's logical cores (the cgroup/affinity
+  narrowing above is Linux-specific), with the same file and time caps. Two Windows-only behavior differences, both with
   automatic fallbacks: the per-test timeout has no signal-based interrupt, so
   `--worker-timeout` (the watchdog) is the only backstop there. See
-  [`--worker-timeout`](../reference/cli.md#-worker-timeout-seconds); and
+  [`--worker-timeout`](../reference/cli.md#-worker-timeout-secs); and
   file-descriptor leak tracking is unavailable (it reads `/proc/self/fd` or
   `/dev/fd`), so `--doctor` reports thread leaks but not fd leaks on Windows.
   See [Resource leaks](resource-leaks.md).
@@ -550,7 +586,7 @@ not show up at all.
 ## Go deeper
 
 - [More CI systems](ci-recipes.md): AWS CodeBuild, Google Cloud Build,
-  GitLab, Azure, CircleCI, Jenkins, and pre-commit.
+  GitLab, Azure, CircleCI, Jenkins, Buildkite, and pre-commit.
 - [Shared cache across CI jobs](ci-shared-cache.md): the segment-merge cache
   for a shard matrix.
 - [Sharding across CI jobs](sharding.md): how partitions are computed and the

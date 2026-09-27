@@ -134,6 +134,26 @@ jobs:
           test "${{ steps.hard.outcome }}" = "failure" \
             || { echo "expected hard-fail-on to fail the gate, got ${{ steps.hard.outcome }}"; exit 1; }
 
+      # The gate tolerates test failures only: a run that collects nothing
+      # (exit 5) must still fail the job, even with a permissive ratio.
+      - name: scaffold empty suite
+        run: mkdir -p empty && echo "x = 1" > empty/helper.py
+      - uses: ./.github/actions/rstest
+        id: nothing
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: empty
+          args: "-n 2"
+          fail-under-ratio: "1.0"
+          cache: false
+      - name: assert non-test exit code is not masked
+        run: |
+          set -euo pipefail
+          test "${{ steps.nothing.outcome }}" = "failure" \
+            || { echo "expected exit ${{ steps.nothing.outputs.exit-code }} to fail the ratio gate, got ${{ steps.nothing.outcome }}"; exit 1; }
+
   doctor-gate:
     name: doctor-metric gate
     runs-on: ubuntu-latest

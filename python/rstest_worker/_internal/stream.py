@@ -20,6 +20,7 @@ from rstest_worker._internal.plugincompat import (
     _randomly_seed,
     _seed_pytest_mypy,
     _seed_pytest_retry,
+    _warn_pytest_pins,
 )
 from rstest_worker._internal.wire import _wire_safe
 from rstest_worker._internal.xdistnode import (
@@ -314,6 +315,7 @@ class StreamPlugin:
     def pytest_configure(self, config):
         self._neutralize_xdist(config)
         self._register_markers(config)
+        _warn_pytest_pins(config)
         worker_id = os.environ.get("RSTEST_WORKER_ID")
         if worker_id is None:
             return  # standalone run: nothing pool-specific to set up
@@ -378,11 +380,11 @@ class StreamPlugin:
         import socket
 
         # The most-grepped xdist env vars: plugins (and conftests we
-        # cannot edit) read these directly.
-        os.environ.setdefault("PYTEST_XDIST_WORKER", worker_id)
-        os.environ.setdefault(
-            "PYTEST_XDIST_WORKER_COUNT", os.environ.get("RSTEST_WORKER_COUNT", "1")
-        )
+        # cannot edit) read these directly. Assigned, not setdefault: a value
+        # inherited from the caller's environment would give every worker the
+        # same id and collide on per-worker resources.
+        os.environ["PYTEST_XDIST_WORKER"] = worker_id
+        os.environ["PYTEST_XDIST_WORKER_COUNT"] = os.environ.get("RSTEST_WORKER_COUNT", "1")
         run_uid = os.environ.get("RSTEST_RUN_UID", "")
         config.workerinput = {
             "workerid": worker_id,

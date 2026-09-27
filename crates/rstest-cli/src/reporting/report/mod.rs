@@ -23,7 +23,7 @@ pub struct TestEntry {
     pub teardown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wasxfail: bool,
     /// Worker that produced the final outcome (pool runs only).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,14 +43,14 @@ pub struct TestEntry {
     #[serde(skip)]
     pub fd_delta: Option<i64>,
     /// Passed only after one or more reruns (--reruns).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
     /// Failure text (assertion repr / traceback), failures only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub longrepr: Option<String>,
     /// The outcome was fabricated because the worker died on this test
     /// (crash or --worker-timeout kill), not produced by pytest.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,
     /// Source line of the test (0-based, from pytest's report.location),
     /// for editor mapping. None when pytest reports no location.
@@ -58,11 +58,11 @@ pub struct TestEntry {
     pub lineno: Option<u64>,
     /// Failed, but matched the --quarantine list: reported distinctly,
     /// never fatal to the run.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quarantined: bool,
     /// Not executed this run: unchanged since the last green run, so its prior
     /// pass was carried forward (`--incremental`). Still counts as passed.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cached: bool,
 }
 
@@ -78,6 +78,13 @@ pub struct ShardMeta {
     pub collection_hash: String,
     pub collection_size: u64,
 }
+
+/// Current report-json document version (`meta.schema`). Shared by the
+/// single-run writer and the monorepo merge so the two can't disagree.
+/// History: 2 added longrepr/crashed+version; 3 added the envelope (counts,
+/// duration_seconds, started_at_epoch, workers, argv); 4 added per-test
+/// lineno; 5 added quarantined.
+pub const REPORT_SCHEMA: u32 = 5;
 
 /// Run-level metadata for the report-json envelope (schema 5).
 pub struct RunMeta {
@@ -431,10 +438,7 @@ impl Run {
                 duration_seconds: (run_meta.duration_seconds * 100.0).round() / 100.0,
                 exitstatus: run_meta.exitstatus,
                 runner: "rstest",
-                // Schema history: 2 added longrepr/crashed+version; 3 added the
-                // envelope (counts, duration_seconds, started_at_epoch, workers,
-                // argv); 4 added per-test lineno; 5 added quarantined.
-                schema: 5,
+                schema: REPORT_SCHEMA,
                 // Sharding identity (only under --shard): lets `shard-verify`
                 // reconcile the per-shard reports. Optional, no schema bump.
                 shard: run_meta.shard.as_ref().map(|s| ShardJson {

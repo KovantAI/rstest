@@ -3,7 +3,7 @@
 The [CI quickstart](ci-quickstart.md) covers GitHub Actions and the two
 worked examples (Django, monorepo). This page is the per-provider reference
 for everyone else (AWS CodeBuild, Google Cloud Build, GitLab CI, Azure
-Pipelines, CircleCI, Jenkins), plus the pre-commit hooks.
+Pipelines, CircleCI, Jenkins, Buildkite), plus the pre-commit hooks.
 
 Every recipe follows the same shape as the quickstart: install rstest, run it
 with `-n auto`, publish the JUnit file to the provider's test-report UI, and
@@ -13,8 +13,10 @@ at the [shared-cache backend](ci-shared-cache.md) instead.
 
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin a version (`pip install rstest==0.7.0` or `rstest~=0.3`) or install
-    from your lockfile.
+    pin an exact version (`pip install rstest==0.7.0`) or install from your
+    lockfile, ideally with hashes (`pip install --require-hashes -r
+    requirements.txt`). rstest is pre-1.0, so a range like `~=0.7` can still
+    pull in breaking changes.
 
 ## AWS CodeBuild
 
@@ -65,14 +67,14 @@ race to write divergent duration caches and their partitions will drift.
 
 **Shared cache (sharding, no write race).** Drop the `cache:` block and the
 single-writer discipline entirely: the build's IAM role already reaches S3, so
-point [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc--no-secrets)
+point [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
 at a bucket and every batch shard pushes its own immutable segment (no
 clobber), pulls the union:
 
 ```yaml
 build:
   commands:
-    - rstest -n auto --shard "$SHARD/$SHARDS"
+    - rstest -n 4 --shard "$SHARD/$SHARDS"
         --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
         --cache-compact-threshold 500 --junitxml "junit.$SHARD.xml"
 ```
@@ -119,7 +121,7 @@ stays clean; the JUnit file is the machine-readable surface for any
 downstream test-reporting tool.
 
 **Shared cache (sharding, no rsync bookends).** The build's service account
-already reaches GCS, so point [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc--no-secrets)
+already reaches GCS, so point [`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
 straight at a `gs://` bucket: rstest drives the `gcloud storage` (or `gsutil`)
 CLI on the step, immutable segments make concurrent shard pushes safe, no
 start/end sync:
@@ -132,7 +134,7 @@ steps:
       - -c
       - |
         pip install -r requirements.txt && pip install rstest
-        rstest -n auto --shard "$_SHARD/$_SHARDS" \
+        rstest -n 4 --shard "$_SHARD/$_SHARDS" \
           --cache-remote gs://$PROJECT_ID-ci-cache/rstest --cache-pull --cache-push \
           --cache-compact-threshold 500 --junitxml junit.xml
 ```
@@ -174,9 +176,36 @@ test:
 the parallelism you want. For a monorepo root, glob `junit.*.xml` in
 `artifacts:paths` and widen the cache to `**/.rstest_cache/`.
 
+**Sharding (`parallel:`).** GitLab exposes `CI_NODE_INDEX` (1-based) and
+`CI_NODE_TOTAL` when you set `parallel:`, which map straight onto
+[`--shard K/N`](sharding.md). With GitLab's own cache, the shards restore it
+read-only so they partition identically:
+
+```yaml
+test:
+  image: python:3.13
+  parallel: 4
+  cache:
+    key: rstest-durations-$CI_COMMIT_REF_SLUG
+    paths: [.rstest_cache]
+    policy: pull        # shards restore only; don't race to save
+  script:
+    - pip install -r requirements.txt && pip install rstest
+    - rstest -n 4 --shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL} --output gitlab --junitxml junit.xml
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml   # GitLab merges per-job JUnit natively
+```
+
+Something has to write that cache: add a separate non-parallel job with
+`policy: pull-push` that runs the full suite, as in the
+[GitHub Actions sharding example](sharding.md#github-actions). The shared
+cache below removes the need for that job.
+
 **Shared cache (parallel matrix).** GitLab's `cache:` is one blob per key. It
 can't merge segments across `parallel:` jobs. For a duration-balanced matrix,
-use the [shared-cache backend](ci-shared-cache.md#object-store-s3gcsr2-oidc--no-secrets)
+use the [shared-cache backend](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
 against an object store the runner is authed to (S3/GCS/R2) or an authenticated
 `https://` endpoint (`RSTEST_CACHE_REMOTE_TOKEN`):
 
@@ -187,7 +216,7 @@ test:
   before_script:
     - pip install -r requirements.txt && pip install rstest
   script:
-    - rstest -n auto --shard "$CI_NODE_INDEX/$CI_NODE_TOTAL"
+    - rstest -n 4 --shard "$CI_NODE_INDEX/$CI_NODE_TOTAL"
         --cache-remote s3://ci-cache/rstest --cache-pull --cache-push
         --cache-compact-threshold 500 --output gitlab --junitxml junit.xml
   artifacts: { when: always, reports: { junit: junit.xml } }
@@ -213,11 +242,15 @@ steps:
     inputs:
       versionSpec: "3.13"
 
-  # Persist the duration cache between runs.
+  # Persist the duration cache between runs. The key is unique per build:
+  # Azure never overwrites an existing cache entry, so a branch-only key would
+  # freeze the durations at the branch's first run. restoreKeys prefix-match
+  # the newest entry for this branch, then for any branch.
   - task: Cache@2
     inputs:
-      key: 'rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)"'
+      key: 'rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)" | "$(Build.BuildId)"'
       restoreKeys: |
+        rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)"
         rstest | "$(Agent.OS)"
       path: .rstest_cache
 
@@ -244,10 +277,20 @@ dir. Two supported paths:
 
   ```yaml
   - script: |
+      # download-batch keeps blob names, so rstest/segments/seg-*.json lands in
+      # ./rcache/rstest/segments/; point --cache-remote at ./rcache/rstest.
       az storage blob download-batch -d ./rcache -s ci-cache --pattern 'rstest/*' || true
-      rstest -n auto --shard "$(shard)/4" \
-        --cache-remote ./rcache --cache-pull --cache-push --junitxml junit.xml
-      az storage blob upload-batch -d ci-cache/rstest -s ./rcache/segments --overwrite
+      mkdir -p ./rcache/rstest/segments
+      ls ./rcache/rstest/segments > .warm-segs
+      rstest -n 4 --shard "$(shard)/4" \
+        --cache-remote ./rcache/rstest --cache-pull --cache-push --junitxml junit.xml
+      # Upload only this run's new segment(s), back under rstest/segments/.
+      mkdir -p ./push
+      for f in ./rcache/rstest/segments/seg-*.json; do
+        [ -e "$f" ] || continue
+        grep -qxF "$(basename "$f")" .warm-segs || cp "$f" ./push/
+      done
+      az storage blob upload-batch -d ci-cache --destination-path rstest/segments -s ./push
     displayName: test (shared cache)
   ```
 
@@ -298,15 +341,57 @@ workflows:
 parallelism. Point `store_test_results` at a directory (not a single
 file) so a monorepo's `junit.*.xml` are all collected.
 
+**Sharding (`parallelism:`).** CircleCI provides `CIRCLE_NODE_INDEX`
+(**0-based**) and `CIRCLE_NODE_TOTAL`, so add 1 to the index for
+[`--shard K/N`](sharding.md). The shards restore the cache read-only, and a
+separate non-parallel job runs the full suite to write it (without that job,
+every run partitions cold: an even split with no wall-time balancing):
+
+```yaml
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.13
+    parallelism: 4
+    steps:
+      - checkout
+      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
+      - run: pip install -r requirements.txt && pip install rstest
+      - run: rstest -n 4 --shard $((CIRCLE_NODE_INDEX + 1))/$CIRCLE_NODE_TOTAL --junitxml test-results/junit.xml
+      - store_test_results: { path: test-results }   # a directory, not a file
+  durations:
+    docker:
+      - image: cimg/python:3.13
+    steps:
+      - checkout
+      - restore_cache: { keys: ["rstest-durations-{{ .Branch }}"] }
+      - run: pip install -r requirements.txt && pip install rstest
+      - run: rstest -n auto -q
+      - save_cache:
+          key: rstest-durations-{{ .Branch }}-{{ .Revision }}
+          paths: [".rstest_cache"]
+workflows:
+  test-and-cache:
+    jobs:
+      - test
+      - durations
+```
+
+CircleCI keys are immutable once written, so the `{{ .Revision }}` suffix
+makes each run save a fresh key that the shards' branch-prefix
+`restore_cache` picks up on the next push. The Tests tab aggregates
+per-container results; for one merged `junit.xml` artifact, add a
+downstream collect-and-merge step.
+
 **Shared cache (parallelism).** `save_cache`/`restore_cache` is one blob per key.
 It can't merge across `parallelism: N` containers. Point
-[`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc--no-secrets) at an
+[`--cache-remote`](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets) at an
 object store the job is authed to (S3/GCS via a context or OIDC) so each
 container pushes its segment and pulls the union:
 
 ```yaml
 - run: |
-    rstest -n auto --shard "$((CIRCLE_NODE_INDEX+1))/$CIRCLE_NODE_TOTAL" \
+    rstest -n 4 --shard "$((CIRCLE_NODE_INDEX+1))/$CIRCLE_NODE_TOTAL" \
       --cache-remote s3://ci-cache/rstest --cache-pull --cache-push \
       --cache-compact-threshold 500 --junitxml test-results/junit.xml
 ```
@@ -347,13 +432,13 @@ plugin](https://plugins.jenkins.io/tap/).
 
 **Shared cache (agents, sharding): zero glue.** Jenkins agents usually share
 an NFS/volume mount, which *is* the [shared-cache
-remote](ci-shared-cache.md#self-hosted-shared-mount--zero-glue): no
+remote](ci-shared-cache.md#self-hosted-shared-mount-zero-glue): no
 stash/unstash, no pull/push bookends beyond the flags. Parallel stages / matrix
 shards each push their immutable segment to the same mount and pull the union:
 
 ```groovy
 sh '''
-  rstest -n auto --shard "${SHARD}/${SHARDS}" \
+  rstest -n 4 --shard "${SHARD}/${SHARDS}" \
     --cache-remote /mnt/ci-cache/rstest --cache-pull --cache-push \
     --junitxml junit.xml
 '''
@@ -361,6 +446,33 @@ sh '''
 
 No mount? Point `--cache-remote` at `s3://…` / `gs://…` (the agent's cloud CLI
 drives it) instead.
+
+## Buildkite
+
+rstest has a native Buildkite style: `--output buildkite` prints each
+failure under an auto-expanded `+++` log group, and `--doctor` pipes its report to
+`buildkite-agent annotate` when the agent is available. `--changed` detects
+the PR base from `BUILDKITE_PULL_REQUEST_BASE_BRANCH`.
+
+```yaml
+# .buildkite/pipeline.yml
+steps:
+  - label: ":pytest: rstest"
+    command: |
+      pip install -r requirements.txt
+      pip install rstest==0.7.0
+      rstest -n auto --output buildkite --junitxml junit.xml
+    artifact_paths:
+      - junit.xml
+    parallelism: 1        # for a shard matrix: set N and use
+                          # rstest -n 4 --shard "$$((BUILDKITE_PARALLEL_JOB + 1))/$$BUILDKITE_PARALLEL_JOB_COUNT"
+```
+
+Feed `junit.xml` to the [Test Engine
+collector](https://buildkite.com/docs/test-engine) or the JUnit annotate plugin
+for a test report. Buildkite agents usually don't persist `.rstest_cache`
+between builds; use the [shared-cache backend](ci-shared-cache.md) (an
+`s3://` prefix works well on AWS-hosted agents) to keep scheduling warm.
 
 ## Pre-commit
 

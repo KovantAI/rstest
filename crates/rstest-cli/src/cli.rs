@@ -20,7 +20,8 @@ pub(crate) enum Command {
 
     /// Zero-config proof: run the suite under plain pytest and under rstest
     /// (-n auto), then report whether outcomes are identical and how much
-    /// faster rstest is. The 30-second "should I switch?" answer.
+    /// faster rstest is. The one-command "should I switch?" answer (costs one
+    /// serial pytest run plus one rstest run).
     Try,
 
     /// Parallel-readiness preflight: collect twice and report tests with
@@ -348,21 +349,27 @@ pub struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "random", value_name = "SEED")]
     pub(crate) shuffle: Option<String>,
 
-    /// Terminal output style: "dots", "verbose" (like -v), or "bar"
-    /// (pytest-sugar-style live progress). Config `[tool.rstest] output`.
-    /// Default "bar" on a tty ("verbose" with -v), "dots" off-tty.
+    /// Output style: "dots", "verbose" (like -v), or "bar" (pytest-sugar-style
+    /// live progress) for terminals; "github", "gitlab", "buildkite",
+    /// "teamcity", or "azure" for CI annotations; "tap" or "json" for
+    /// machine-readable streams. Config `[tool.rstest] output`. Default "bar"
+    /// on a tty ("verbose" with -v), "dots" off-tty. An unknown style warns and
+    /// falls back to "dots".
     #[arg(long, value_name = "STYLE")]
     pub(crate) output: Option<String>,
 
     /// Split the suite across N independent CI jobs and run only shard K
     /// (`--shard K/N`, K 1-based), balanced by the duration cache. Buckets are
-    /// disjoint, so merging per-job JUnit reconstructs the full run.
+    /// disjoint when every job sees the same collection and duration cache;
+    /// `rstest shard-verify` proves it after the fact. Needs `-n 2` or more.
     #[arg(long, value_name = "K/N")]
     pub(crate) shard: Option<String>,
 
     /// Shared-cache remote: a directory / `file://` path (local, an NFS/EFS
-    /// mount, or a dir a CI step materializes), or an `s3://` / `gs://` bucket
-    /// URL driven through the `aws` / `gcloud` CLI already on the runner. Also
+    /// mount, or a dir a CI step materializes), an `s3://` / `gs://` bucket
+    /// URL driven through the `aws` / `gcloud` CLI already on the runner, or an
+    /// `http(s)://` endpoint (bearer token from `RSTEST_CACHE_REMOTE_TOKEN`;
+    /// needs the default `http-cache` build feature). Also
     /// settable via `RSTEST_CACHE_REMOTE`. Enables `--cache-pull` /
     /// `--cache-push` / the `cache-compact` subcommand.
     #[arg(long, value_name = "URL|DIR", global = true)]
@@ -491,6 +498,15 @@ pub(crate) fn needs_passthrough_io(session_args: &[String]) -> bool {
                 | "--stepwise-reset"
         ) || a.starts_with("--capture=")
     })
+}
+
+/// The first session flag that forces the passthrough path (for messages),
+/// matching [`needs_passthrough_io`].
+pub(crate) fn passthrough_trigger(session_args: &[String]) -> Option<&str> {
+    session_args
+        .iter()
+        .find(|a| needs_passthrough_io(std::slice::from_ref(*a)))
+        .map(String::as_str)
 }
 
 pub(crate) fn is_collect_only(session_args: &[String]) -> bool {

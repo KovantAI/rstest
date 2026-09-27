@@ -52,7 +52,7 @@ reuses pytest, doesn't replace it.
    matches pytest exactly.) A parity diff is either an unstable id or a real
    compatibility issue — surface it, don't paper over it; `migrate-check`
    classifies it.
-2. **Preflight + fix.** `rstest --migrate-check-json findings.json`. Work each
+2. **Preflight + fix.** `rstest migrate-check --migrate-check-json findings.json`. Work each
    finding via `fix-playbook.md`; re-run until it reports **ready**. (It blocks
    on unstable-id "WILL bail" findings before the parallel phase can even run —
    fix those first.)

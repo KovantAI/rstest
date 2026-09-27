@@ -6,46 +6,40 @@ keep working.
 
 ## Flag map
 
-| pytest-xdist | rstest | Notes |
-|---|---|---|
-| `-n 4` / `-n auto` | same | `auto` is logical cores, capped for small suites; it is the default |
-| `-n 1` | differs | xdist's `-n 1` runs one `gw0` worker WITH `workerinput`; rstest's `-n 1` (like `-n 0`) is plain byte-exact mode with no worker identity |
-| `--dist load` | same (default) | plus duration-aware long-pole-first scheduling |
-| `--dist loadfile` | same | file affinity, in-file order |
-| `--dist loadscope` / `loadgroup` | same | incl. `@pytest.mark.xdist_group`; rejected under `--collect lazy` (needs full collection) |
-| `--dist each` | partial | full suite per worker, but every worker uses the SAME interpreter; xdist's heterogeneous `--tx` gateways have no equivalent |
-| `-d` | `--dist load` | `-d` is xdist's shorthand for load-balancing, which is rstest's default |
-| `--maxprocesses` | none | use `-n` (no separate cap) |
-| `-p xdist.looponfail` / `--looponfail` | `--watch` | with import-graph selection |
-| `--dist no` / `--dist=no` | none | **rstest error** (`no` is not a valid `--dist` mode); single-worker is `-n 0` |
-| `--tx` (gateways) | none | no equivalent: one local interpreter; `--dist each` covers same-env broadcast, not heterogeneous environments |
-| `--rsyncdir` / `--rsync` | none | no equivalent: rstest runs local workers, no remote sync |
-| `--max-worker-restart` | none | no equivalent: rstest auto-respawns crashed workers on a fixed budget (see [crash handling](../concepts/crash-handling.md)); the restart count is not user-tunable |
+Most xdist flags carry over unchanged. The ones people actually touch:
 
-**What happens to an unsupported xdist flag?** `--dist no`/`--dist=no` is
-consumed by rstest's own `--dist` and rejected as an invalid mode (exit
-2). The rest (`--tx`, `--rsync*`, `-d`, `--max-worker-restart`,
-`--maxprocesses`) are **forwarded to the vendored pytest session
-verbatim**, so the outcome depends on whether pytest-xdist is installed:
+- **`-n 4` / `-n auto`**: same, and `auto` is the default. `auto` is capped by
+  test-file count and cached suite time, so pass an explicit `-n` when you
+  need a fixed count (for example with `--shard`).
+- **`--dist load` / `loadfile` / `loadscope` / `loadgroup`**: same names and
+  semantics, including `@pytest.mark.xdist_group`. `load` (the default) adds
+  duration-aware slowest-first scheduling.
+- **`-n 1`**: differs. xdist's `-n 1` is one `gw0` worker with `workerinput`;
+  rstest's `-n 1`, like `-n 0`, is single-worker mode with no worker identity.
+- **`--dist no`**: rejected (exit 1). Use `-n 0` for a single worker.
 
-- **pytest-xdist installed** (the usual case mid-migration): the flag
-  *parses* (xdist registered its options) but has **no effect**: rstest
-  keeps xdist's session inert (`dist = no`), so nothing acts on it. No
-  error, no warning; it is silently ignored.
-- **pytest-xdist not installed**: pytest doesn't recognize the option, so
-  it's a usage error from the vendored core (exit 4).
-
-Either way these flags don't *do* anything under rstest. Remove them from
-your `addopts` once the switch is done.
+Everything else (`--tx`, `--rsync*`, `-d`, `--maxprocesses`,
+`--max-worker-restart`, `--dist each`, `--looponfail`) is covered row by row,
+including what happens to a flag rstest doesn't act on, in the
+[xdist support matrix](../reference/xdist-support.md#flag-matrix). In short:
+those flags parse but do nothing while pytest-xdist is installed, and are a
+pytest usage error (exit 4) once it isn't. Remove them from `addopts` only
+once nothing runs pytest-xdist any more: while an old xdist CI job is still
+your fallback, it needs them (see
+[the staged rollout](migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back)).
 
 pytest-rerunfailures maps: `--reruns N`,
 `@pytest.mark.flaky(reruns=N)`, and `--only-rerun REGEX` work natively
 in parallel modes (and crash-aware: a test that kills its worker
-retries on the replacement). The plugin itself is neutralized inside
-pool workers so nothing double-reruns; at `-n 0` the plugin keeps its
-native behavior and handles reruns itself. Scope note: rstest's `--reruns`
-fire at every worker count, including `-n 0/1` (a degenerate one-worker rerun
-pool), but are rejected under `--dist each` (that mode exists to expose
+retries on the replacement). The plugin itself is unregistered inside
+pool workers so nothing double-reruns. A command-line `--reruns` is always
+rstest's own, at every worker count: at `-n 0/1` it switches to a one-worker
+rerun pool, so the plugin is unregistered there too. Only at `-n 0` *without*
+rstest's `--reruns` (for example with `--reruns` in `addopts`, or after `--`)
+does the plugin keep its native behavior. In the pool, a `--reruns` in
+`addopts` does nothing, silently; pass it on the rstest command line instead
+([why](migrate-from-pytest.md#addopts-and-pytest_addopts)). rstest's
+`--reruns` are rejected under `--dist each` (that mode exists to expose
 per-worker outcome differences, so retrying failures would defeat it; see
 [`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
 
@@ -58,8 +52,11 @@ rstest workers announce themselves exactly like xdist workers.
 `PYTEST_XDIST_WORKER` and `PYTEST_XDIST_WORKER_COUNT` environment
 variables are set too, so plugins and conftests that grep the
 environment keep working as-is. Plugins
-keying per-worker resources on worker identity (pytest-django's
-per-worker test databases being the canonical case) work unchanged.
+keying per-worker resources on worker identity work unchanged. The canonical
+case is pytest-django's per-worker test database (`test_<name>_gw0`, ...),
+which follows from the `workerid` above; note that rstest's corpus only
+exercises pytest-django on SQLite `:memory:`, so check a server-backed
+database (Postgres, MySQL) on your own suite.
 
 `RSTEST_WORKER_ID` (same `gwN` values) is also set if you want to
 detect rstest specifically.
@@ -91,7 +88,8 @@ race: [xdist hook emulation](../concepts/xdist-hooks.md).
 
 `addopts = -n 4` with pytest-xdist installed is neutralized inside rstest
 workers automatically: options parse, the xdist session never engages, no
-nested workers. Remove it at your convenience and pass `-n` to rstest.
+nested workers. Keep it while a pytest-xdist job is still your fallback, then
+remove it and pass `-n` to rstest.
 
 ## What improves
 
