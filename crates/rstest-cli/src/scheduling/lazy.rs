@@ -125,6 +125,10 @@ fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) ->
 pub fn run_lazy_pool(
     cfg: &crate::scheduling::pool::PoolConfig,
     files: Vec<PathBuf>,
+    // The run's duration cache (orders files, longest first).
+    duration_cache: &HashMap<String, f64>,
+    // `--durations N` asked for: record per-phase timings for the report.
+    track_durations: bool,
     // --dist loadfile => steal=false: strict file affinity, the remedy
     // for order-dependent suites (same contract as the full pool).
     steal: bool,
@@ -173,13 +177,13 @@ pub fn run_lazy_pool(
     let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut startup_seconds = 0.0f64;
 
-    let duration_cache = crate::scheduling::durations::load();
     let cwd = std::env::current_dir()?;
-    let mut file_queue: VecDeque<String> = order_files(files, &duration_cache, &cwd).into();
+    let mut file_queue: VecDeque<String> = order_files(files, duration_cache, &cwd).into();
 
     let continue_on_collect_errors = args.iter().any(|a| a == "--continue-on-collection-errors");
 
     let mut run = Run::default();
+    run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
     // Json mode keeps stdout pure NDJSON; the footer would corrupt it.
     if mode != crate::reporting::progress::Mode::Json {

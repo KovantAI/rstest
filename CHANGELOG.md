@@ -7,17 +7,22 @@ between 0.x releases and are listed here.
 
 - **`--collect` now defaults to auto.** With neither the `--collect` flag nor
   `[tool.rstest] collect` set, rstest picks `lazy` collection for a big-enough
-  parallel run — at least 2000 known tests (from `.rstest_cache/durations.json`)
+  parallel run: at least 2000 known tests (from `.rstest_cache/durations.json`)
   and a `tests × workers` product of at least 16 000, on a file-affine dist
-  (`--dist load`/`loadfile`) — and `full` otherwise. This drops the
+  (`--dist load`/`loadfile`). Otherwise it picks `full`. This drops the
   `(workers − 1)` redundant full collections large parallel runs paid before,
   without touching small suites (which keep full collection's locality). A cold
-  cache counts as zero tests, so the first run of a suite stays `full`; a banner
+  cache counts as zero tests, so the first run of a suite stays `full`. Auto
+  also stays `full` for path or `--changed` selections, when doctests are
+  enabled, when the cache has tests from files the lazy walk can't see, or
+  when one file would hold up the run. Lazy workers (auto or explicit) now
+  honor `norecursedirs`, `collect_ignore` and `--ignore` for the files they are
+  handed, as eager recursion does. A banner
   reports the choice when auto picks `lazy`. Force either with `--collect full`
   / `--collect lazy`. See
   [Lazy collection](docs/concepts/lazy-collection.md#auto-default).
 - **`rstest replay`: re-run a recorded parallel schedule.** Every parallel run
-  (`-n >= 2`, except `--dist each`, `--shard` and `--collect lazy`) journals
+  (`-n >= 2`, except `--dist each` and `--shard`) journals
   which worker ran which tests, in what order, to
   `.rstest_cache/replay/latest.json` (opt out with `RSTEST_NO_REPLAY_JOURNAL=1`).
   `rstest replay --journal <file>` pins that schedule back, so an

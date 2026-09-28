@@ -29,6 +29,9 @@ pub struct ProjectConfig {
     pub python_files: Vec<String>,
     /// Default collection roots when no paths are given on the CLI.
     pub testpaths: Vec<String>,
+    /// The ini `addopts`, whitespace-split: enough to spot flags (auto-lazy
+    /// checks for doctest collection), not to re-parse quoted values.
+    pub addopts: Vec<String>,
 }
 
 impl Default for ProjectConfig {
@@ -40,6 +43,7 @@ impl Default for ProjectConfig {
             // this default must match pytest exactly.
             python_files: vec!["test_*.py".into(), "*_test.py".into()],
             testpaths: Vec::new(),
+            addopts: Vec::new(),
         }
     }
 }
@@ -98,7 +102,7 @@ fn parse_toml(text: &str, path: &Path, err: &mut dyn Write) -> Option<toml::Valu
     }
 }
 
-/// Read `python_files` / `testpaths` from a pytest TOML table (native or
+/// Read `python_files` / `testpaths` / `addopts` from a pytest TOML table (native or
 /// ini_options mode; [`toml_str_list`] accepts both shapes).
 fn from_toml_table(table: &toml::Value) -> ProjectConfig {
     let mut cfg = ProjectConfig::default();
@@ -107,6 +111,9 @@ fn from_toml_table(table: &toml::Value) -> ProjectConfig {
     }
     if let Some(v) = table.get("testpaths") {
         cfg.testpaths = toml_str_list(v);
+    }
+    if let Some(v) = table.get("addopts") {
+        cfg.addopts = toml_str_list(v);
     }
     cfg
 }
@@ -160,6 +167,7 @@ fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
         match key {
             "python_files" => cfg.python_files = values,
             "testpaths" => cfg.testpaths = values,
+            "addopts" => cfg.addopts = values,
             _ => {}
         }
     }
@@ -447,6 +455,30 @@ worker-timeout = 120
         std::fs::create_dir_all(&child).unwrap();
         std::fs::write(child.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
         assert_eq!(rstest_settings(&child, &mut std::io::sink()).reruns, None);
+    }
+
+    #[test]
+    fn discover_reads_addopts_from_ini_and_pyproject() {
+        let d = tmpdir("addopts-ini");
+        std::fs::write(
+            d.join("pytest.ini"),
+            "[pytest]\naddopts =\n    -q\n    --doctest-modules\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&d, &mut std::io::sink()).addopts,
+            vec!["-q", "--doctest-modules"]
+        );
+        let d = tmpdir("addopts-toml");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.pytest.ini_options]\naddopts = \"-q --doctest-modules\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&d, &mut std::io::sink()).addopts,
+            vec!["-q", "--doctest-modules"]
+        );
     }
 
     #[test]

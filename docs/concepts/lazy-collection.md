@@ -1,7 +1,7 @@
 # Lazy collection
 
 Collection has two strategies. `--collect full` has every worker collect
-the whole suite — identical sessions, outcomes verified by count and
+the whole suite: identical sessions, outcomes verified by count and
 hash. Lazy mode collects each test file **exactly once, on one worker, on
 demand**: the orchestrator walks test files (the same `python_files`
 rules pytest uses), assigns them to workers, and the collecting worker
@@ -11,9 +11,9 @@ streams back the nodeids.
 
 Setting neither `--collect` nor `[tool.rstest] collect` selects the
 strategy automatically. rstest picks `lazy` for a big-enough parallel
-run — at least **2000** known tests (counted from the duration cache) and
+run: at least **2000** known tests (counted from the duration cache) and
 a **`tests × workers` ≥ 16 000** product, on a file-affine dist
-(`--dist load`/`loadfile`) — and `full` otherwise. Rationale: lazy's win
+(`--dist load`/`loadfile`). Otherwise it picks `full`. Rationale: lazy's win
 is dropping the `(workers − 1)` redundant full collections, which only
 pays off once the suite and the worker count are both large; smaller
 suites keep full collection's locality.
@@ -25,8 +25,24 @@ banner naming the test and worker counts. Force either strategy with an
 explicit `--collect full` / `--collect lazy`. An explicit `--dist load`
 enables work-stealing under lazy however lazy was chosen. Auto never
 *rejects* a config: on `--dist loadscope|loadgroup`, a nodeid, `--pyargs`,
-`--shard`, `--shuffle`, `--incremental`, or a fail-fast `--order` it just
-stays `full`.
+a path selection (explicit paths, or `--changed`/`--since-green`
+narrowing), `--shard`, `--shuffle`, `--incremental`, or a fail-fast
+`--order` it just stays `full`. The test count covers the whole cached
+suite, so a run narrowed to a few files keeps full collection's per-test
+spread across workers.
+
+Lazy hands workers only `python_files` matches, so it would miss doctests
+in non-test modules, `--doctest-glob` files and plugin-collected non-`.py`
+items. Auto therefore stays `full` when doctests are enabled (argv, ini
+`addopts` or `PYTEST_ADDOPTS`) or when the duration cache holds tests from a
+file the lazy walk doesn't find. Files the walk finds but pytest would
+never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) are safe
+in any lazy run: the worker applies pytest's own ignore checks and reports
+them empty.
+Auto-lazy never splits a file across workers, so it also stays `full` when
+one file's cached time exceeds an even per-worker share
+(`total time / workers`) by more than a second, since that file would hold
+up the run.
 
 ```console
 $ rstest --collect lazy
