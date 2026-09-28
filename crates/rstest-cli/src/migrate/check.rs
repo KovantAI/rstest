@@ -57,14 +57,17 @@ pub struct MigrateMeta {
 pub struct ParallelReport {
     /// Per-test parallel-only findings (empty when ready).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<Finding>"))]
     pub findings: Option<Vec<Finding>>,
     /// Tests that already fail at `-n 0` (pre-existing, not a parallelism bug).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "usize"))]
     pub preexisting: Option<usize>,
     /// Whether the parallel phase actually ran.
     pub ran: bool,
     /// Whether it passed (present only once the phase ran).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "bool"))]
     pub ready: Option<bool>,
 }
 
@@ -104,7 +107,7 @@ impl ParallelReport {
 #[derive(Serialize, Clone)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct UnstableSite {
-    /// Whether this site is on the `--allow-unstable` list.
+    /// Whether this site matches a `--migrate-allow` entry.
     pub allowed: bool,
     /// The upstream fix for the worst instability kind here.
     pub fix: String,
@@ -142,6 +145,7 @@ pub struct Finding {
 pub struct PolluterJson {
     /// The polluting file (absent for `not_reproducible`).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub file: Option<String>,
     /// Polluter kind: `other_file`, `same_file`, or `not_reproducible`.
     pub kind: String,

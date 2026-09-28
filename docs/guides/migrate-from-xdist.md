@@ -65,8 +65,9 @@ rstest's `--reruns` (for example with `--reruns` in `addopts`, or after `--`)
 does the plugin keep its native behavior. In the pool, a `--reruns` in
 `addopts` does nothing, silently; pass it on the rstest command line instead
 ([why](migrate-from-pytest.md#addopts-and-pytest_addopts)). rstest's
-`--reruns` are rejected under `--dist each` (that mode exists to expose
-per-worker outcome differences, so retrying failures would defeat it; see
+`--reruns` are rejected under `--dist each` (rstest reruns a failure on
+another worker, which has no meaning when every worker runs the full suite;
+see
 [`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
 
 Not carried over from pytest-rerunfailures when rstest owns the retry (the
@@ -237,9 +238,11 @@ these before you switch:
   usage error (exit 4). Pass `rstest --timeout N` on the command line; there
   is no `[tool.rstest]` key for it
   ([pytest-timeout](plugins.md)).
-- **`--looponfail`, `--tx`, `--rsync*`, `-d`, `--maxprocesses`,
-  `--max-worker-restart`**: see the [flag map](#flag-map) above; drop them
-  once no pytest-xdist job still needs them.
+- **`--looponfail` / `-f`**: remove it before switching; with pytest-xdist
+  installed it hangs the run (see the [flag map](#flag-map) above).
+- **`--tx`, `--rsync*`, `-d`, `--maxprocesses`, `--max-worker-restart`**: see
+  the [flag map](#flag-map) above; drop them once no pytest-xdist job still
+  needs them.
 
 ## What improves
 

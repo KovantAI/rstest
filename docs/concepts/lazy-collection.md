@@ -42,14 +42,18 @@ affinity; packaging's 61k-in-30-files similar). Two options:
 
 - stay with `--collect full` (the right call for full runs of such
   suites), or
-- add an explicit `--dist load`, which enables **stealing**: when the
+- add an explicit `--dist load` (on the command line or as
+  `[tool.rstest] dist = "load"`), which enables **stealing**: when the
   file queue is empty, an idle worker takes half of the busiest
   worker's undispatched items, paying one extra collection of that
   file. This restores balance (packaging matches full mode) but
   reorders execution more aggressively (see below).
 
 `--dist loadfile` (or just the lazy default) keeps strict file
-affinity: a file's tests run on one worker, in file order.
+affinity: a file's tests run on one worker, in file order. A `load` from
+either source turns stealing on, so a command-line `--dist loadfile` does not
+switch off a `dist = "load"` in `[tool.rstest]`; remove it from the config
+for strict affinity.
 
 ## The compatibility trade
 
@@ -98,6 +102,8 @@ default) or fix the tests.
 
 - `--dist loadscope` / `--dist loadgroup` are rejected: they
   consolidate groups across a global nodeid list that lazy never builds.
+- `--dist each` is rejected too: it runs the full suite on every worker,
+  so there is nothing to collect lazily.
 - Nodeid arguments (`tests/test_x.py::test_y`) and `--pyargs` fall
   back to full collection automatically.
 - Collection-time side effects of *unselected* files never happen:

@@ -13,17 +13,11 @@
     },
     "cwd": {
       "description": "Directory `reproduce_command` runs from.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": "string"
     },
     "error": {
       "description": "Why the run ended without a verdict (absent on a completed bisect).",
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": "string"
     },
     "meta": {
       "$ref": "#/definitions/BisectMeta"
@@ -45,10 +39,7 @@
     },
     "rootdir": {
       "description": "The pytest rootdir the node ids are relative to.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": "string"
     }
   },
   "required": [

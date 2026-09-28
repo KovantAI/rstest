@@ -134,7 +134,13 @@
           "default": 0,
           "minimum": 0
         }
-      }
+      },
+      "required": [
+        "flaky",
+        "failed",
+        "last_epoch",
+        "last_failed_epoch"
+      ]
     },
     "Meta": {
       "description": "Envelope metadata for the explain document.",

@@ -27,14 +27,14 @@ The coverage footprint of one test: the source files it covered and the total nu
 | `files` | array of string | yes | Covered source files, sorted, cwd-relative (the coverage-index keys). |
 | `line_count` | integer | yes | Covered lines, summed across those files. |
 
-### FlakeStats
+### FlakeStats (Explain)
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `failed` | integer | no | Runs where the test hard-failed (quarantined failures included). |
-| `flaky` | integer | no | Runs where the test passed only after rerun(s). |
-| `last_epoch` | integer | no | Unix epoch of the last recorded event (flake or failure). |
-| `last_failed_epoch` | integer | no | Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed (readers then fall back to `last_epoch` when `failed` is non-zero). |
+| `failed` | integer | yes | Runs where the test hard-failed (quarantined failures included). |
+| `flaky` | integer | yes | Runs where the test passed only after rerun(s). |
+| `last_epoch` | integer | yes | Unix epoch of the last recorded event (flake or failure). |
+| `last_failed_epoch` | integer | yes | Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed (readers then fall back to `last_epoch` when `failed` is non-zero). |
 
 ### Meta
 

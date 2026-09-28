@@ -69,7 +69,9 @@ licensing is in [License](license.md#vendored-software). Key points:
   pytest 9's behavior regardless of the pytest version installed elsewhere in
   your environment; there is no older-core build.
 - The vendored core's own runtime dependencies must exist in the target
-  virtualenv: `pluggy>=1.5`, `iniconfig`, `packaging`, `pygments`. rstest
+  virtualenv: `pluggy>=1.5`, `iniconfig`, `packaging`, `pygments`, plus
+  `exceptiongroup` and `tomli` on Python 3.10 and `colorama` on Windows
+  (pytest's own conditional dependencies). rstest
   depends on the **real** pluggy by design.
 
 ### Handling pytest security fixes

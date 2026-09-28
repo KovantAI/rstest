@@ -4,8 +4,9 @@ Generated field references and full [JSON Schemas](https://json-schema.org/)
 (draft-07) for the rstest JSON outputs that are built from typed Rust structs.
 
 **This list is partial.** Outputs still assembled by hand, and so not covered
-here yet, include streaming JSON (`--output json` / `--stream-json`) and
-`--cov-diff-json`. Those are documented in prose in
+here yet, include streaming JSON (`--output json` / `--stream-json`),
+`--cov-diff-json`, and the `meta.projects` map a monorepo root adds to the
+run report. Those are documented in prose in
 [Report JSON](report-json.md) and the [CLI reference](cli.md).
 
 Everything on this page is **generated from the Rust types that produce the
@@ -20,8 +21,8 @@ Each versioned output carries a `schema` integer; incompatible changes bump
 it. The flake log is an unversioned cache file.
 For worked examples, the conditions under which each doctor section is
 present, and version history, see the prose walkthrough:
-[Report JSON: Doctor JSON](report-json.md#doctor-json). The run snapshot
-itself is documented only there, in [Shape](report-json.md#shape).
+[Report JSON: Doctor JSON](report-json.md#doctor-json). For the run
+snapshot's prose walkthrough and examples, see [Shape](report-json.md#shape).
 
 --8<-- "docs/reference/schemas/report-json.md"
 

@@ -10,9 +10,9 @@
 //! Adding an output is one entry in [`outputs`]; the `JsonSchema` derive on the
 //! type does the rest.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use schemars::generate::SchemaSettings;
+use schemars::generate::{Contract, SchemaSettings};
 use schemars::{JsonSchema, Schema};
 use serde_json::{Map, Value};
 
@@ -30,8 +30,12 @@ struct Output {
 
 /// Root schema for `T`. Pinned to draft-07 (schemars 1 defaults to 2020-12) so
 /// the published dialect and `#/definitions/...` refs stay stable for consumers.
+/// Uses the serialize contract: these describe what rstest writes, so a
+/// `skip_serializing_if` field is optional and a `#[serde(default)]` one that
+/// is always written is required.
 fn schema_of<T: JsonSchema>() -> Schema {
     SchemaSettings::draft07()
+        .with(|s| s.contract = Contract::Serialize)
         .into_generator()
         .into_root_schema_for::<T>()
 }
@@ -100,8 +104,10 @@ pub struct GeneratedFile {
 /// Every artifact that should exist on disk: one `.schema.json` and one `.md`
 /// field-table per output.
 pub fn generated_files() -> Vec<GeneratedFile> {
+    let outputs = outputs();
+    let shared = shared_definitions(&outputs);
     let mut files = Vec::new();
-    for o in outputs() {
+    for o in outputs {
         let mut json = serde_json::to_string_pretty(&o.schema).expect("schema serializes");
         json.push('\n');
         files.push(GeneratedFile {
@@ -110,7 +116,7 @@ pub fn generated_files() -> Vec<GeneratedFile> {
         });
         files.push(GeneratedFile {
             rel_path: format!("{OUT_DIR}/{}.md", o.name),
-            contents: render_md(&o),
+            contents: render_md(&o, &shared),
         });
     }
     files
@@ -124,9 +130,28 @@ fn sorted(obj: &Map<String, Value>) -> Vec<(&String, &Value)> {
     entries
 }
 
+/// Definition names used by more than one output. Every output's partial is
+/// embedded into one page, so a shared name would repeat a heading and give it
+/// an ambiguous, order-dependent anchor; [`render_md`] qualifies those.
+fn shared_definitions(outputs: &[Output]) -> HashSet<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for o in outputs {
+        if let Some(Value::Object(defs)) = o.schema.as_object().and_then(|r| r.get("definitions")) {
+            for name in defs.keys() {
+                *seen.entry(name.clone()).or_default() += 1;
+            }
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// The generated markdown for one output: the root object, then a table per
-/// referenced sub-type (definitions), in a stable (alphabetical) order.
-fn render_md(o: &Output) -> String {
+/// referenced sub-type (definitions), in a stable (alphabetical) order. A
+/// sub-type in `shared` is headed `Name (Title)` so headings stay unique.
+fn render_md(o: &Output, shared: &HashSet<String>) -> String {
     let mut s = String::new();
     s.push_str(
         "<!-- Generated from the Rust type by `cargo test -p rstest-cli schema`. \
@@ -139,7 +164,12 @@ fn render_md(o: &Output) -> String {
     if let Some(Value::Object(defs)) = root.get("definitions") {
         for (name, sch) in sorted(defs) {
             if let Value::Object(obj) = sch {
-                render_object(&mut s, "###", name, "", obj);
+                let heading = if shared.contains(name) {
+                    format!("{name} ({})", o.title)
+                } else {
+                    name.clone()
+                };
+                render_object(&mut s, "###", &heading, "", obj);
             }
         }
     }
@@ -278,14 +308,6 @@ fn label_for_instance(t: &str, o: &Map<String, Value>) -> String {
         },
         other => other.to_string(),
     }
-}
-
-/// `schema_with` target for an `Option<T>` field serde always writes (no
-/// `skip_serializing_if`): the key is present, possibly `null`. Routing through
-/// `schema_with` makes schemars list it as required while keeping `null` in the
-/// type, which `#[schemars(required)]` would strip.
-pub fn nullable<T: JsonSchema>(g: &mut schemars::SchemaGenerator) -> Schema {
-    g.subschema_for::<Option<T>>()
 }
 
 /// `#/definitions/DoctorReport` -> `DoctorReport`.
@@ -503,6 +525,21 @@ mod tests {
         let mut s = String::new();
         render_object(&mut s, "###", "Loose", "", &loose);
         assert!(s.contains("| `anything` | any | yes |  |"), "{s}");
+    }
+
+    #[test]
+    fn headings_are_unique_across_the_embedded_page() {
+        // Every partial lands on one page (output-schemas.md), so a repeated
+        // heading would give two sections the same, order-dependent anchor.
+        let mut seen = HashSet::new();
+        for f in generated_files()
+            .iter()
+            .filter(|f| f.rel_path.ends_with(".md"))
+        {
+            for h in f.contents.lines().filter(|l| l.starts_with('#')) {
+                assert!(seen.insert(h.to_string()), "duplicate heading {h:?}");
+            }
+        }
     }
 
     #[test]

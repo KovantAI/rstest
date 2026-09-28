@@ -6,20 +6,14 @@
   "properties": {
     "inconclusive": {
       "description": "Tests that failed under `-n auto` but did not run in the follow-up\nruns, so could not be classified. They still fail the gate.",
-      "type": [
-        "array",
-        "null"
-      ],
+      "type": "array",
       "items": {
         "type": "string"
       }
     },
     "intrinsic_flakes": {
       "description": "Tests that fail intermittently whatever the scheduling (intrinsic flakes).",
-      "type": [
-        "array",
-        "null"
-      ],
+      "type": "array",
       "items": {
         "type": "string"
       }
@@ -29,10 +23,7 @@
     },
     "order_dependent": {
       "description": "Tests that pass under `--dist loadfile`: they depend on a sibling in\ntheir file running first, so keep the file together rather than serial.",
-      "type": [
-        "array",
-        "null"
-      ],
+      "type": "array",
       "items": {
         "type": "string"
       }
@@ -43,10 +34,7 @@
     },
     "preexisting_failures": {
       "description": "Tests that already fail at `-n 0`: pre-existing, not a parallelism\nissue, and not counted against the gate.",
-      "type": [
-        "integer",
-        "null"
-      ],
+      "type": "integer",
       "format": "uint",
       "minimum": 0
     },
@@ -56,27 +44,18 @@
     },
     "serial_candidates": {
       "description": "Tests fixable by pinning them to `@pytest.mark.serial`.",
-      "type": [
-        "array",
-        "null"
-      ],
+      "type": "array",
       "items": {
         "$ref": "#/definitions/SerialCandidate"
       }
     },
     "serial_conftest": {
       "description": "A paste-able `conftest.py` block that marks every serial candidate.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": "string"
     },
     "tests": {
       "description": "Tests audited (0 when the selection matched nothing).",
-      "type": [
-        "integer",
-        "null"
-      ],
+      "type": "integer",
       "format": "uint",
       "minimum": 0
     }

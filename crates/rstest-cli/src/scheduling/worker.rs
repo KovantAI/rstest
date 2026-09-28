@@ -1,9 +1,11 @@
+use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, ChildStderr, Command, ExitStatus};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -93,6 +95,10 @@ pub struct Worker {
     proc: Proc,
     cmd_w: File,
     reader: Option<EventReader>,
+    /// Tail of the worker's stderr, kept so a worker that dies can say why
+    /// (see [`Worker::death_detail`]). `None` when stderr isn't ours to read:
+    /// passthrough mode (inherited) and fork-prewarmed workers.
+    stderr: Option<StderrTail>,
     /// When `Shutdown` was first sent. A reparented worker's exit timeout runs
     /// from here, so a wind-down that sends every Shutdown and then waits the
     /// workers one by one shares one deadline instead of stacking N of them.
@@ -299,6 +305,9 @@ pub struct EventReader {
     /// [`LimitedReader`]).
     budget: Arc<AtomicUsize>,
     cap: usize,
+    /// Whether any event arrived yet: an EOF before the first one means the
+    /// worker died during startup (a broken interpreter, a missing import).
+    received: bool,
 }
 
 impl EventReader {
@@ -313,6 +322,7 @@ impl EventReader {
             events: rmp_serde::Deserializer::new(BufReader::new(reader)),
             budget,
             cap,
+            received: false,
         }
     }
 
@@ -321,8 +331,136 @@ impl EventReader {
     pub fn recv(&mut self) -> Result<proto::Event> {
         use serde::Deserialize;
         self.budget.store(self.cap, Ordering::Relaxed);
-        proto::Event::deserialize(&mut self.events).context("reading worker event")
+        match proto::Event::deserialize(&mut self.events) {
+            Ok(ev) => {
+                self.received = true;
+                Ok(ev)
+            }
+            // A clean EOF at a message boundary is the worker going away, not a
+            // protocol fault: say that instead of msgpack's "failed to fill
+            // whole buffer".
+            Err(rmp_serde::decode::Error::InvalidMarkerRead(e))
+                if e.kind() == io::ErrorKind::UnexpectedEof =>
+            {
+                Err(anyhow::anyhow!(if self.received {
+                    "its event pipe closed (the process exited)"
+                } else {
+                    "exited during startup, before sending any event"
+                }))
+            }
+            Err(e) => Err(anyhow::Error::new(e).context("reading worker event")),
+        }
     }
+}
+
+/// How long [`Worker::death_detail`] waits for a dying worker to exit, and
+/// then for its stderr to drain. Short: it runs on the event loop.
+const DEATH_GRACE: Duration = Duration::from_millis(250);
+
+/// Stderr lines kept per worker for [`Worker::death_detail`].
+const STDERR_TAIL_LINES: usize = 8;
+
+/// Longest stderr line kept, in bytes (cut on a character boundary).
+const STDERR_TAIL_LINE_BYTES: usize = 500;
+
+/// A worker's stderr, forwarded live to rstest's own stderr by a thread that
+/// also keeps the last [`STDERR_TAIL_LINES`] lines. The worker used to inherit
+/// stderr directly; forwarding keeps that visibility, and the tail lets a dead
+/// worker's failure name its error (a `ModuleNotFoundError` at startup, a
+/// fatal Python error) instead of only "terminated unexpectedly".
+struct StderrTail {
+    lines: Arc<Mutex<VecDeque<String>>>,
+    /// Set once the pipe hits EOF (the worker and anything that inherited its
+    /// stderr are gone).
+    done: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl StderrTail {
+    fn capture(stderr: ChildStderr) -> Self {
+        let lines = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let (t_lines, t_done) = (Arc::clone(&lines), Arc::clone(&done));
+        let spawned = std::thread::Builder::new()
+            .name("rstest-worker-stderr".into())
+            .spawn(move || {
+                forward_stderr(BufReader::new(stderr), &mut io::stderr(), &t_lines);
+                let (flag, cv) = &*t_done;
+                *flag.lock().unwrap_or_else(|p| p.into_inner()) = true;
+                cv.notify_all();
+            });
+        if spawned.is_err() {
+            // No thread, no reader: mark done so snapshot never waits. The
+            // worker then writes into a pipe nobody drains, which only blocks
+            // it once the pipe buffer fills.
+            *done.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        }
+        StderrTail { lines, done }
+    }
+
+    /// The kept lines, after waiting up to `wait` for the pipe to reach EOF.
+    fn snapshot(&self, wait: Duration) -> Vec<String> {
+        let (flag, cv) = &*self.done;
+        let guard = flag.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = cv
+            .wait_timeout_while(guard, wait, |done| !*done)
+            .unwrap_or_else(|p| p.into_inner());
+        let lines = self.lines.lock().unwrap_or_else(|p| p.into_inner());
+        lines.iter().cloned().collect()
+    }
+}
+
+/// Copy `from` to `to` line by line (bytes untouched), keeping the last
+/// non-blank lines in `tail`. Returns at EOF or a read error.
+fn forward_stderr(mut from: impl BufRead, to: &mut impl Write, tail: &Mutex<VecDeque<String>>) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match from.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let _ = to.write_all(&buf);
+        let _ = to.flush();
+        let mut line = String::from_utf8_lossy(&buf).trim_end().to_string();
+        if line.trim().is_empty() {
+            continue;
+        }
+        crate::text::truncate_on_boundary(&mut line, STDERR_TAIL_LINE_BYTES);
+        let mut tail = tail.lock().unwrap_or_else(|p| p.into_inner());
+        if tail.len() == STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+/// Render [`Worker::death_detail`]: an indented exit line and stderr tail.
+fn format_death_detail(status: Option<ExitStatus>, tail: &[String]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    if let Some(status) = status {
+        match status.code() {
+            Some(code) => {
+                let _ = write!(s, "\n  exited with code {code}");
+            }
+            None => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(sig) = status.signal() {
+                        let _ = write!(s, "\n  killed by signal {sig}");
+                    }
+                }
+            }
+        }
+    }
+    if !tail.is_empty() {
+        s.push_str("\n  last lines of its stderr:");
+        for line in tail {
+            let _ = write!(s, "\n    {line}");
+        }
+    }
+    s
 }
 
 /// What the worker's stdout/stdin look like. The protocol always rides
@@ -364,9 +502,10 @@ impl Worker {
 
         let mut command =
             build_worker_command(python, worker, io, env, cmd.read.raw(), evt.write.raw());
-        let child = command
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawning worker: {}", python.display()))?;
+        let stderr = child.stderr.take().map(StderrTail::capture);
 
         // Close the child's ends in the parent or EOF detection breaks
         // (Endpoint::drop calls transport::close). The parent ends become
@@ -379,6 +518,7 @@ impl Worker {
             proc: Proc::Owned(child),
             cmd_w,
             reader: Some(EventReader::new(evt_r)),
+            stderr,
             shutdown_sent: None,
         })
     }
@@ -410,6 +550,10 @@ impl Worker {
         }
         #[cfg(not(unix))]
         let _ = fork_prewarm;
+        // Plain spawns hold ~3 fds per worker (command, event, stderr pipes),
+        // under the zygote's ~4n, so the same headroom covers them.
+        #[cfg(unix)]
+        ensure_fd_headroom(n);
         (0..n)
             .map(|idx| Self::spawn(python, Some((idx, n)), env))
             .collect()
@@ -452,10 +596,41 @@ impl Worker {
     /// Block for the next event on the still-attached reader. Errors if the
     /// reader was detached via [`Worker::take_reader`].
     pub fn recv(&mut self) -> Result<proto::Event> {
-        self.reader
+        let res = self
+            .reader
             .as_mut()
             .context("event reader was detached; recv is unavailable after take_reader")?
-            .recv()
+            .recv();
+        res.map_err(|e| self.explain_failure(e))
+    }
+
+    /// `e` (this worker's failed event stream) with [`Worker::death_detail`]
+    /// appended, so the error names why the worker went away.
+    pub fn explain_failure(&mut self, e: anyhow::Error) -> anyhow::Error {
+        let detail = self.death_detail();
+        if detail.is_empty() {
+            e
+        } else {
+            anyhow::anyhow!("{e:#}{detail}")
+        }
+    }
+
+    /// Why a worker whose event stream just failed went away: its exit status
+    /// (when it exits within a short grace) and the last lines it wrote to
+    /// stderr. Empty when neither is known. Call it before [`Worker::reap`],
+    /// which kills first and would report that kill as the cause.
+    pub fn death_detail(&mut self) -> String {
+        let status = self.proc.exit_status_within(DEATH_GRACE);
+        // The stderr pipe drains after the exit; give the forwarder the same
+        // grace to reach EOF so the last lines (the actual error) are in.
+        let tail = self.stderr.as_ref().map_or_else(Vec::new, |t| {
+            t.snapshot(if status.is_some() {
+                DEATH_GRACE
+            } else {
+                Duration::ZERO
+            })
+        });
+        format_death_detail(status, &tail)
     }
 
     /// Ask the worker to exit cleanly (send `Shutdown`, then reap it).
@@ -490,6 +665,27 @@ impl Worker {
 }
 
 impl Proc {
+    /// The exit status, if the process exits within `grace`. Only an owned
+    /// child has one to read; a reparented worker's belongs to init.
+    fn exit_status_within(&mut self, grace: Duration) -> Option<ExitStatus> {
+        match self {
+            Proc::Owned(child) => {
+                let deadline = Instant::now() + grace;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => return Some(status),
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            #[cfg(unix)]
+            Proc::Reparented(_) => None,
+        }
+    }
+
     /// Kill the process. `Child::kill` for an owned child; a SIGKILL by pid for
     /// a reparented fork-prewarmed worker (not our child, so no `Child` handle).
     fn kill(&mut self) {
@@ -691,8 +887,7 @@ fn build_worker_command(
         // in edition 2024).
         .env("RSTEST_RUN_UID", &env.run_uid)
         // Worker stdout is not ours to show: output is rendered Rust-side,
-        // except passthrough mode which inherits so pytest renders. stderr
-        // stays inherited for worker crash visibility.
+        // except passthrough mode which inherits so pytest renders.
         .stdout(match io {
             Stdio::Null => std::process::Stdio::null(),
             Stdio::Inherit => std::process::Stdio::inherit(),
@@ -704,6 +899,13 @@ fn build_worker_command(
         // hanging every worker.
         .stdin(match io {
             Stdio::Null => std::process::Stdio::null(),
+            Stdio::Inherit => std::process::Stdio::inherit(),
+        })
+        // stderr is forwarded live either way. Outside passthrough it goes
+        // through a pipe so its tail can explain a worker that dies
+        // ([`StderrTail`]); in passthrough pytest owns the terminal.
+        .stderr(match io {
+            Stdio::Null => std::process::Stdio::piped(),
             Stdio::Inherit => std::process::Stdio::inherit(),
         });
     // Clear every internal variable first so only what this run sets reaches
@@ -878,6 +1080,8 @@ impl Worker {
                 proc: Proc::Reparented(tracked),
                 cmd_w,
                 reader: Some(EventReader::new(evt_r)),
+                // Forked workers share the zygote's inherited stderr.
+                stderr: None,
                 shutdown_sent: None,
             });
         }
@@ -893,7 +1097,7 @@ impl Worker {
 #[allow(clippy::unnecessary_cast)]
 fn ensure_fd_headroom(n: usize) {
     /// Allowance for fds the orchestrator already holds (stdio, caches, the
-    /// watcher, ...) on top of the zygote's pipes.
+    /// watcher, ...) on top of the worker pipes.
     const BASELINE: u64 = 256;
     let want = (4 * n as u64 + 4).saturating_add(BASELINE);
     // SAFETY: an all-zero rlimit is a valid value of this plain-data struct.
@@ -1231,14 +1435,22 @@ fn build_pythonpath(explicit: Option<&str>, existing_pythonpath: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use super::{build_worker_command, Endpoint, LimitedReader, Stdio, WorkerEnv};
+    use super::{
+        format_death_detail, forward_stderr, transport, EventReader, STDERR_TAIL_LINES,
+        STDERR_TAIL_LINE_BYTES,
+    };
     use crate::scheduling::proto;
     use serde::Deserialize;
     use std::collections::HashMap;
+    use std::collections::VecDeque;
+    use std::io;
     use std::io::{BufReader, Cursor, Read};
     use std::path::Path;
     use std::process::Command;
+    use std::process::ExitStatus;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     /// The budget is a hard ceiling: once exhausted, reads fail instead of
     /// draining the underlying source (which is what bounds decode work).
@@ -1288,6 +1500,97 @@ mod tests {
     }
 
     /// A quiet baseline WorkerEnv (no doctor / timeout / debug / stream).
+    #[test]
+    fn forward_stderr_copies_bytes_and_keeps_a_bounded_tail() {
+        let long = "x".repeat(STDERR_TAIL_LINE_BYTES + 50);
+        let mut input = String::new();
+        for i in 0..STDERR_TAIL_LINES + 3 {
+            input.push_str(&format!("line {i}\n\n"));
+        }
+        input.push_str(&long);
+        input.push_str("\nno trailing newline");
+        let tail = Mutex::new(VecDeque::new());
+        let mut out = Vec::new();
+        forward_stderr(io::Cursor::new(input.clone()), &mut out, &tail);
+        // Everything is forwarded verbatim, blank lines included.
+        assert_eq!(out, input.as_bytes());
+        let tail: Vec<String> = tail.into_inner().unwrap().into();
+        assert_eq!(tail.len(), STDERR_TAIL_LINES, "{tail:?}");
+        // Blank lines are skipped, the oldest dropped, long lines cut.
+        assert!(tail.iter().all(|l| !l.trim().is_empty()));
+        assert_eq!(tail.last().unwrap(), "no trailing newline");
+        assert_eq!(tail[tail.len() - 2].len(), STDERR_TAIL_LINE_BYTES);
+        assert!(!tail.iter().any(|l| l == "line 0"));
+    }
+
+    #[test]
+    fn format_death_detail_renders_status_and_tail() {
+        assert_eq!(format_death_detail(None, &[]), "");
+        let tail = vec![
+            "Traceback".to_string(),
+            "ModuleNotFoundError: x".to_string(),
+        ];
+        assert_eq!(
+            format_death_detail(None, &tail),
+            "\n  last lines of its stderr:\n    Traceback\n    ModuleNotFoundError: x"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // Raw wait statuses: exit code 2 is 2 << 8; signal 9 is 9.
+            let exited = ExitStatus::from_raw(2 << 8);
+            assert_eq!(
+                format_death_detail(Some(exited), &[]),
+                "\n  exited with code 2"
+            );
+            let killed = ExitStatus::from_raw(9);
+            assert_eq!(
+                format_death_detail(Some(killed), &[]),
+                "\n  killed by signal 9"
+            );
+        }
+    }
+
+    #[test]
+    fn eof_before_and_after_the_first_event_reads_as_an_exit() {
+        let pipe = transport::pipe().expect("pipe");
+        let mut reader = EventReader::new(transport::into_file(pipe.read.into_raw()));
+        drop(pipe.write);
+        let err = format!("{:#}", reader.recv().unwrap_err());
+        assert_eq!(err, "exited during startup, before sending any event");
+        reader.received = true;
+        let err = format!("{:#}", reader.recv().unwrap_err());
+        assert_eq!(err, "its event pipe closed (the process exited)");
+    }
+
+    /// A worker that dies at startup (here: a fake interpreter that prints an
+    /// error and exits 3) is reported with its exit code and its stderr.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_that_dies_at_startup_names_its_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rstest-dead-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("python");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'Traceback (most recent call last):' >&2\n\
+             echo \"ModuleNotFoundError: No module named 'exceptiongroup'\" >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut worker = Worker::spawn(&fake, None, &base_env()).expect("spawn");
+        let err = format!("{:#}", worker.recv().unwrap_err());
+        worker.reap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.starts_with("exited during startup, before sending any event"),
+            "{err}"
+        );
+        assert!(err.contains("exited with code 3"), "{err}");
+        assert!(err.contains("No module named 'exceptiongroup'"), "{err}");
+    }
+
     fn base_env() -> WorkerEnv {
         WorkerEnv {
             run_uid: "uid-1".into(),
@@ -2193,7 +2496,7 @@ mod tests {
     const FD_CHILD: &str = "RSTEST_TEST_FD_EXHAUSTION_CHILD";
 
     /// When the zygote's ~4n pipe fds don't fit under the fd limit (but the
-    /// plain path's ~2n do), `spawn_pool` falls back to plain spawns instead of
+    /// plain path's ~3n do), `spawn_pool` falls back to plain spawns instead of
     /// failing. Lowering the hard limit can't be undone, so the body runs in a
     /// re-executed copy of this test binary.
     #[cfg(unix)]
@@ -2220,11 +2523,12 @@ mod tests {
         }
 
         with_live_python(|_, python| {
-            let n = 8;
-            // Room for the plain path (2 fds per live worker, plus the 4 child ends
-            // and spawn's internal pipe while each spawns), not the zygote's 4n + 4.
+            let n = 12;
+            // Room for the plain path (3 fds per live worker: command, event and
+            // stderr pipes; plus the child ends and spawn's internal pipe while
+            // each spawns), not the zygote's 4n + 4.
             let open = std::fs::read_dir("/dev/fd").expect("list fds").count() as u64;
-            let limit = open + 2 * n as u64 + 10;
+            let limit = open + 3 * n as u64 + 10;
             let lim = libc::rlimit {
                 rlim_cur: limit as libc::rlim_t,
                 rlim_max: limit as libc::rlim_t,

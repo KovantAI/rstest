@@ -11,7 +11,9 @@ It is deliberately short. pytest 9 is a **cleanup major**, not a redesign:
 it removes APIs that already emitted `DeprecationWarning` throughout 8.x and
 keeps the collection model, fixture engine, `_pytest.*` import paths, and
 the `pluggy` hook contract. If your suite is warning-clean today, you are
-almost certainly already done: jump to [Verify](#3-verify).
+almost certainly nearly done: check the
+[behavioral changes the probe won't catch](#behavioral-changes-the-w-probe-wont-catch),
+then jump to [Verify](#3-verify).
 
 This covers your test code. Your **plugins** must also be pytest-9-compatible
 releases, since they run against the vendored core too and a `pytest<9` pin
@@ -48,7 +50,9 @@ including `PytestRemovedIn9Warning` on pytest 8.x, and the filter works on
 both 8.x and 9.x. It only matches warnings pytest itself raises, so a
 Django `RemovedInDjango…Warning` or a third-party library's
 `DeprecationWarning` won't fail the run. Every failure is one thing to fix.
-A clean run here means **nothing below applies to you**: go to step 3.
+A clean run here means none of the removed APIs below apply to you. Still
+check the [behavioral changes the probe won't catch](#behavioral-changes-the-w-probe-wont-catch),
+then go to step 3.
 
 !!! tip "No config change needed"
     `-W` is a command-line flag; it overrides your `filterwarnings` ini for
@@ -103,7 +107,7 @@ $ grep -rn "def pytest_\(ignore_collect\|collect_file\|pycollect_makemodule\|rep
 !!! note "Most suites hit zero of these"
     The common case is **no matches**. These removals target plugin authors
     and old conftest hooks, not everyday test code. If your grep is empty
-    and step 1 was clean, you have nothing to do.
+    and step 1 was clean, only the behavioral changes below are left to check.
 
 #### Behavioral changes the `-W` probe won't catch
 
@@ -135,12 +139,14 @@ parallel. That's a *different* migration
 
 ## Already on pytest 9.0.x?
 
-Then you're nearly done: the 9.0 → 9.1 delta is only **two** items, both in
-the table above:
+Then you're nearly done: the 9.0 → 9.1 delta is three items:
 
 1. `importorskip` catches only `ModuleNotFoundError` by default (pass
    `exc_type=ImportError` to restore the old catch-all).
 2. `from_parent(..., fspath=...)` → `path=`.
+3. `PytestRemovedIn9Warning` no longer exists: delete any
+   `ignore::pytest.PytestRemovedIn9Warning` entry from `filterwarnings`, or
+   9.1 aborts the run with a usage error (see the warning in step 1).
 
 Run step 1's `-W error` probe once to confirm, and you're on 9.1.1.
 

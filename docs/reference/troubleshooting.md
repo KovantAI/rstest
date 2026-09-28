@@ -154,4 +154,28 @@ both the rerun and restart budgets so a repeatable crash can't loop. Its
 remaining tests are redistributed to other workers automatically. If you see
 `worker terminated unexpectedly` instead, the restart budget was
 exhausted: something is killing workers repeatedly, and the longrepr of
-the first crash is the lead.
+the first crash is the lead. Each such failure carries the worker's exit
+code (or the signal that killed it) and the last lines it wrote to stderr.
+
+## `worker terminated unexpectedly: exited during startup`
+
+The worker process died before it sent anything back, so it never collected
+a test and isn't restarted. The failure shows its exit code and the last
+lines of its stderr, which is usually the actual error, for example:
+
+```text
+--- FAILED <worker gw0> ---
+worker terminated unexpectedly: exited during startup, before sending any event
+  exited with code 1
+  last lines of its stderr:
+    ...
+    ModuleNotFoundError: No module named 'exceptiongroup'
+```
+
+A missing module here means the interpreter rstest picked can't import
+rstest's worker or the vendored pytest core: reinstall rstest into the
+environment you run tests in (`pip install --force-reinstall rstest`), or
+check that rstest is using the interpreter you expect (see
+[`rstest` runs the wrong Python](#rstest-runs-the-wrong-python-cant-find-my-venv)).
+Anything else in the tail, such as an error from a `sitecustomize` or a
+`.pth` file, comes from the environment itself.

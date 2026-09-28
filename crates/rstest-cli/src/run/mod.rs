@@ -1895,7 +1895,9 @@ fn warn_quarantine_passthrough(w: &mut dyn Write) {
 
 /// Steal (split files across workers) only on an EXPLICIT `--dist load`: lazy
 /// collection defaults to strict file affinity, since stealing exposes the
-/// cross-file / in-file order dependence that affinity hides.
+/// cross-file / in-file order dependence that affinity hides. A `load` from
+/// either the CLI or `[tool.rstest] dist` enables it (by design, a CLI
+/// `loadfile` does not override a config `load`).
 fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> bool {
     cli_dist == Some("load") || settings_dist == Some("load")
 }
@@ -2731,6 +2733,8 @@ mod tests {
         // Default (no explicit load) keeps strict file affinity.
         assert!(!lazy_should_steal(None, None));
         assert!(!lazy_should_steal(Some("loadfile"), Some("loadscope")));
+        // Either source's `load` enables it; a CLI `loadfile` doesn't veto.
+        assert!(lazy_should_steal(Some("loadfile"), Some("load")));
     }
 
     #[test]

@@ -828,6 +828,9 @@ pub fn run_pool(
             | Ok(Event::ItemDoneId { .. })
             | Ok(Event::StoppedIds { .. }) => {}
             Err(e) => {
+                // Name the cause (exit status, stderr tail) before anything below
+                // reaps the worker, which kills first and would hide it.
+                let e = states[idx].worker.explain_failure(e);
                 if let Some(winput) = states[idx].node_input.take() {
                     pending_downs.push_back((winput, format!("{e:#}")));
                 }

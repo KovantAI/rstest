@@ -402,6 +402,9 @@ pub fn run_lazy_pool(
             | Ok(Event::ItemDone { .. })
             | Ok(Event::Stopped { .. }) => {}
             Err(e) => {
+                // Name the cause (exit status, stderr tail) before anything below
+                // reaps the worker, which kills first and would hide it.
+                let e = states[idx].worker.explain_failure(e);
                 // The limit that killed it, when the watchdog did (names it in the
                 // fabricated failure).
                 let killed_by = if states[idx].timeout_killed {

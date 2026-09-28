@@ -66,24 +66,16 @@ pub(crate) struct ExplainReport {
     found: bool,
     /// Last recorded call-phase duration in seconds (latest value only; local
     /// caches keep no history).
-    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<f64>"))]
     duration_seconds: Option<f64>,
     /// `"passed"` if the test was green on the last incremental run; `null`
     /// otherwise (absence is not proof of failure; see `flakes` for fail
     /// history).
-    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<String>"))]
     last_outcome: Option<&'static str>,
     /// Source def line (1-based) recorded on the last incremental run, if known.
-    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<u64>"))]
     source_line: Option<u64>,
     /// Cross-run flake/fail counts + last-event epoch, if the test has any.
-    #[cfg_attr(
-        test,
-        schemars(schema_with = "crate::schema::nullable::<crate::reporting::flakes::FlakeStats>")
-    )]
     flakes: Option<FlakeStats>,
     /// Files this test covered, if a warm coverage index has it.
-    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<Coverage>"))]
     coverage: Option<Coverage>,
 }
 

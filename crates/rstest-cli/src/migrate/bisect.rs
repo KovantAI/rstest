@@ -735,9 +735,11 @@ pub struct BisectDoc {
     pub culprits: Vec<String>,
     /// Directory `reproduce_command` runs from.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub cwd: Option<String>,
     /// Why the run ended without a verdict (absent on a completed bisect).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub error: Option<String>,
     pub meta: BisectMeta,
     /// The victim test's node id, relative to `rootdir`.
@@ -746,10 +748,10 @@ pub struct BisectDoc {
     pub order_dependent: bool,
     /// A command that reproduces the failure, or `null` when the victim is
     /// not order-dependent.
-    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<String>"))]
     pub reproduce_command: Option<String>,
     /// The pytest rootdir the node ids are relative to.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub rootdir: Option<String>,
 }
 

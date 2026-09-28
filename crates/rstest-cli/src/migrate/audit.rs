@@ -336,14 +336,17 @@ pub struct AuditDoc {
     /// Tests that failed under `-n auto` but did not run in the follow-up
     /// runs, so could not be classified. They still fail the gate.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
     pub inconclusive: Option<Vec<String>>,
     /// Tests that fail intermittently whatever the scheduling (intrinsic flakes).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
     pub intrinsic_flakes: Option<Vec<String>>,
     pub meta: AuditMeta,
     /// Tests that pass under `--dist loadfile`: they depend on a sibling in
     /// their file running first, so keep the file together rather than serial.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
     pub order_dependent: Option<Vec<String>>,
     /// Whether the suite is parallel-safe (no parallel-only failures). Always
     /// `false` when the audit did not run.
@@ -351,17 +354,21 @@ pub struct AuditDoc {
     /// Tests that already fail at `-n 0`: pre-existing, not a parallelism
     /// issue, and not counted against the gate.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "usize"))]
     pub preexisting_failures: Option<usize>,
     /// Whether the `-n auto` pass produced a run to audit.
     pub ran: bool,
     /// Tests fixable by pinning them to `@pytest.mark.serial`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<SerialCandidate>"))]
     pub serial_candidates: Option<Vec<SerialCandidate>>,
     /// A paste-able `conftest.py` block that marks every serial candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub serial_conftest: Option<String>,
     /// Tests audited (0 when the selection matched nothing).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "usize"))]
     pub tests: Option<usize>,
 }
 

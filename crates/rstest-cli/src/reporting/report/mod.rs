@@ -16,25 +16,32 @@ mod render;
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TestEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub setup: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub call: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub teardown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "f64"))]
     pub duration: Option<f64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wasxfail: bool,
     /// Worker that produced the final outcome (pool runs only).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub worker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub skip_reason: Option<String>,
     /// Call-phase CPU time (process_time), present only when measured
     /// (`--doctor` or a live-stream run). Serialized when present so a
     /// report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on
     /// a plain run so the snapshot stays byte-comparable to the pytest baseline.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "f64"))]
     pub cpu: Option<f64>,
     /// Leak check: net threads / open fds after teardown (from the teardown
     /// report). Doctor-internal; not serialized to report-json.
@@ -47,14 +54,16 @@ pub struct TestEntry {
     pub flaky: bool,
     /// Failure text (assertion repr / traceback), failures only.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
     pub longrepr: Option<String>,
     /// The outcome was fabricated because the worker died on this test
     /// (crash or --worker-timeout kill), not produced by pytest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,
     /// Source line of the test (0-based, from pytest's report.location),
-    /// for editor mapping. None when pytest reports no location.
+    /// for editor mapping. Absent when pytest reports no location.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "u64"))]
     pub lineno: Option<u64>,
     /// Failed, but matched the --quarantine list: reported distinctly,
     /// never fatal to the run.
@@ -128,6 +137,7 @@ pub struct SnapshotMeta<'a> {
     pub schema: u32,
     /// Sharding identity; present only under `--shard K/N`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "ShardJson<'a>"))]
     pub shard: Option<ShardJson<'a>>,
     /// Unix epoch (seconds) the run started.
     pub started_at_epoch: u64,

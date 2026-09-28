@@ -3,7 +3,7 @@
 These commands don't run your suite as a normal test run. Each is given as
 the first argument (`rstest try`); a path literally named after one is
 disambiguated with `rstest ./try` or `rstest -- try`. `try`,
-`migrate-check`, `audit` and `bisect` do run pytest sessions, but as their
+`migrate-check`, `audit`, `bisect` and `replay` do run pytest sessions, but as their
 own analysis, not as a normal test run. The flags that only apply to a
 subcommand are documented with it; everything else is on
 [CLI flags](cli.md).
@@ -22,8 +22,8 @@ rstest <COMMAND> [OPTIONS]
 
 The zero-config "should I switch?" proof. Runs your suite once under plain
 `pytest` and once under `rstest -n auto`, then prints the only two things that
-matter: whether the outcomes are **identical** (the `-n 0 ≡ pytest` contract,
-checked against your real pytest) and how much **faster** rstest is, with a
+matter: whether the outcomes are **identical** (your real pytest against
+`rstest -n auto`, so a difference is a parallel-safety issue or a parity gap) and how much **faster** rstest is, with a
 rough CI-time saving. No flags, no config.
 
 ```console
@@ -321,8 +321,8 @@ Write the `bisect` result as a versioned JSON document (schema `1`):
 `{meta, nodeid, rootdir, cwd, order_dependent, culprits[], reproduce_command}`.
 Nodeids are relative to `rootdir`; `reproduce_command` runs from `cwd` and is
 null when the test isn't order-dependent. A run that ends without a verdict
-(exit `2`, or an error) still writes the document, with an `error` message
-and no culprits, so a stale result from an earlier run is never left behind.
+(exit `2`, or an error) still writes the document, with an `error` message,
+no culprits, and no `rootdir` or `cwd`, so a stale result from an earlier run is never left behind.
 Used with the `bisect` subcommand. Field reference:
 [Bisect JSON](output-schemas.md#bisect).
 

@@ -5,11 +5,31 @@ between 0.x releases and are listed here.
 
 ## 0.8.0 (Unreleased)
 
+- **`pip install rstest` works on Python 3.10 without pytest.** The vendored
+  pytest core imports `exceptiongroup` and `tomli` below Python 3.11 (and
+  `colorama` on Windows), but rstest didn't declare them, so a fresh 3.10
+  environment without pytest failed to start any worker. They are now
+  declared with pytest's own markers, and CI checks a clean install.
+- **A worker that dies says why.** Its failure now carries the exit code (or
+  the signal) and the last lines it wrote to stderr, so the report, junit and
+  report-json name the actual error (for example a `ModuleNotFoundError` at
+  startup). A worker that dies before sending anything reads "exited during
+  startup" instead of msgpack's "failed to fill whole buffer". Worker stderr is
+  still shown live; outside `-s`/`--pdb` it now reaches the terminal through
+  rstest, so it is no longer a TTY for the worker.
+- **`--junit-xml` is intercepted like `--junitxml`.** pytest's alias used to
+  reach every worker session, which then all wrote the same file.
+- **Worker messages are size-capped.** One worker-to-orchestrator message is
+  capped at 256 MiB, so a crashed or wedged worker can't drive an unbounded
+  read. Raise it with `RSTEST_MAX_MESSAGE_BYTES` for the rare suite that
+  genuinely exceeds it.
 - **JSON Schemas for `audit`, `bisect` and `explain`.** `--audit-json`,
   `--bisect-json` and `explain --json` are now built from typed structs and
   get generated field references and full draft-07 schemas on the
   [Output schemas](docs/reference/output-schemas.md) page, checked by the same
-  golden test as the others. The emitted JSON is unchanged.
+  golden test as the others. The emitted JSON is unchanged. All schemas now
+  describe what rstest writes: a field that is omitted when empty is optional
+  and never `null`, and a field always written is required.
 - **`--incremental` no longer caches a test on a stale pass when coverage
   measures only part of the project.** First-party files that coverage never
   measures used to be invisible to `--incremental`, so editing one left

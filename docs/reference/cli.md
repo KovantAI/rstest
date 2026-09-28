@@ -27,7 +27,7 @@ rstest <COMMAND> [OPTIONS]
     flags to the command line or `[tool.rstest]`.
 
 Subcommands (`rstest try`, `rstest migrate-check`, `rstest audit`, `rstest
-bisect`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
+bisect`, `rstest replay`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
 `rstest verify-vendor`) and their own flags are on [CLI
 subcommands](cli-commands.md).
 
@@ -938,7 +938,8 @@ snapshot document to a file.
 ### `--junitxml <path>`
 
 Write merged results as JUnit XML. Intercepted by rstest (rather than
-forwarded) because per-worker sessions would clobber a shared file.
+forwarded) because per-worker sessions would clobber a shared file. pytest's
+alias `--junit-xml` is intercepted the same way.
 
 **Unreleased:** the document is pytest's own at every worker count. Each
 worker runs pytest's junitxml plugin and streams every finished

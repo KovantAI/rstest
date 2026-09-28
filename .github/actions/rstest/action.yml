@@ -508,10 +508,10 @@ runs:
         if [ -n "$IN_JUNIT" ]; then cmd+=(--junitxml "$IN_JUNIT"); fi
         echo "junit-path=$IN_JUNIT" >>"$GITHUB_OUTPUT"
 
-        # --changed / --changed-strict. Always use the =REV form (never bare
-        # --changed, which can greedily swallow a following test path as its
-        # optional value). REV is the resolved base ref (explicit or inferred
-        # PR base), falling back to HEAD.
+        # --changed / --changed-strict. Always use the =REV form: rstest never
+        # lets a bare --changed take the next argument, so REV has to be
+        # attached to be read as the base. REV is the resolved base ref
+        # (explicit or inferred PR base), falling back to HEAD.
         rev="$BASE_REF"
         case "$IN_CHANGED" in
           strict)

@@ -33,6 +33,15 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   graph without it; rebuild by rerunning coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
   union into a full index (see [Shared cache backend](#shared-cache-backend)).
+- `last_green.json`: the commit of the last fully green run, stamped with an
+  environment fingerprint (interpreter and dependency manifests). Read by
+  [`--since-green`](../reference/cli.md#-since-green); an environment change
+  busts it, so the next run selects everything. Safe to delete.
+- `incremental_outcomes.json`: per-test outcomes, source lines and coverage
+  hashes from the last [`--incremental`](../reference/cli.md#-incremental)
+  run, so an unchanged green test can be skipped. Also read by
+  [`rstest explain`](../reference/cli-commands.md#explain). Safe to delete:
+  the next run re-runs everything and rebuilds it.
 - `replay/`: the schedule of each parallel run (`<run-uid>.json`, the last 10
   kept, plus `latest.json`), read by
   [`rstest replay`](../reference/cli-commands.md#replay). Local to the

@@ -12,7 +12,9 @@
     `_pytest` packages shadow the installed ones, a missing module does not
     fall back to site-packages, it just fails to import.
   - Runtime deps of the vendored core (must exist in the target venv):
-    pluggy>=1.5, iniconfig, packaging, pygments. We depend on the REAL pluggy
+    pluggy>=1.5, iniconfig, packaging, pygments, plus pytest's conditional
+    deps: exceptiongroup and tomli below Python 3.11, colorama on Windows.
+    Mirror pytest's own `Requires-Dist` on every re-vendor. We depend on the REAL pluggy
     (not a vendored copy) by design: plugins check class identity against
     pluggy's hook machinery, so there must be exactly one pluggy in the
     process.
