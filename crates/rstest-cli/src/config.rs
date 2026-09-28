@@ -29,8 +29,8 @@ pub struct ProjectConfig {
     pub python_files: Vec<String>,
     /// Default collection roots when no paths are given on the CLI.
     pub testpaths: Vec<String>,
-    /// The ini `addopts`, whitespace-split: enough to spot flags (auto-lazy
-    /// checks for doctest collection), not to re-parse quoted values.
+    /// The ini `addopts`, already split into args (pytest prepends them to the
+    /// command line).
     pub addopts: Vec<String>,
 }
 
@@ -112,8 +112,16 @@ fn from_toml_table(table: &toml::Value) -> ProjectConfig {
     if let Some(v) = table.get("testpaths") {
         cfg.testpaths = toml_str_list(v);
     }
-    if let Some(v) = table.get("addopts") {
-        cfg.addopts = toml_str_list(v);
+    // pytest takes a list verbatim and shlex-splits a string.
+    match table.get("addopts") {
+        Some(toml::Value::Array(items)) => {
+            cfg.addopts = items
+                .iter()
+                .filter_map(|i| i.as_str().map(String::from))
+                .collect();
+        }
+        Some(toml::Value::String(s)) => cfg.addopts = shell_split(s),
+        _ => {}
     }
     cfg
 }
@@ -138,6 +146,67 @@ fn parse_pyproject(text: &str, path: &Path, err: &mut dyn Write) -> Option<Proje
     tool_pytest.get("ini_options").map(from_toml_table)
 }
 
+/// POSIX-shell word splitting, as pytest's `shlex.split` applies to `addopts`
+/// and `PYTEST_ADDOPTS`: whitespace separates words, single quotes are literal,
+/// double quotes honor `\"` / `\\` escapes, and a bare backslash escapes the
+/// next character. An unterminated quote runs to the end.
+pub(crate) fn shell_split(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    cur.push(q);
+                }
+            }
+            '"' => {
+                in_word = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => match chars.next() {
+                            Some(e @ ('"' | '\\' | '$' | '`')) => cur.push(e),
+                            Some(e) => {
+                                cur.push('\\');
+                                cur.push(e);
+                            }
+                            None => cur.push('\\'),
+                        },
+                        _ => cur.push(q),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                if let Some(e) = chars.next() {
+                    cur.push(e);
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_word {
+                    out.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            c => {
+                in_word = true;
+                cur.push(c);
+            }
+        }
+    }
+    if in_word {
+        out.push(cur);
+    }
+    out
+}
+
 fn toml_str_list(v: &toml::Value) -> Vec<String> {
     match v {
         // pytest accepts both a list and a space-separated string
@@ -150,33 +219,68 @@ fn toml_str_list(v: &toml::Value) -> Vec<String> {
     }
 }
 
-/// Just enough INI parsing for pytest configs. Handles the single-line
-/// `key = v1 v2` form, configparser's `:` delimiter, and the indented
-/// multi-line form:
+/// Just enough INI parsing for pytest configs, over [`ini_parse`]: a key's
+/// value fragments are whitespace-split, and an empty value leaves the default
+/// in place. `None` when the file has no `[section]` header.
+fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
+    let doc = ini_parse(text);
+    if !doc.sections.iter().any(|s| s == section) {
+        return None;
+    }
+    let mut cfg = ProjectConfig::default();
+    for (sec, key, fragments) in &doc.entries {
+        if sec != section {
+            continue;
+        }
+        let values: Vec<String> = fragments
+            .iter()
+            .flat_map(|f| f.split_whitespace().map(String::from))
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        match key.as_str() {
+            "python_files" => cfg.python_files = values,
+            "testpaths" => cfg.testpaths = values,
+            // shlex over the joined value, not the whitespace split: quotes matter.
+            "addopts" => cfg.addopts = shell_split(&fragments.join(" ")),
+            _ => {}
+        }
+    }
+    Some(cfg)
+}
+
+/// A parsed INI file: every section header seen, and each `key = value` in file
+/// order as `(section, key, fragments)`. `fragments` holds the trimmed text after
+/// the delimiter plus each non-blank indented continuation line; how to split
+/// them (whitespace for pytest, commas/newlines for coverage) is the caller's.
+pub(crate) struct IniDoc {
+    pub sections: Vec<String>,
+    pub entries: Vec<(String, String, Vec<String>)>,
+}
+
+/// configparser-compatible enough for pytest and coverage configs. Handles the
+/// single-line `key = v1 v2` form, configparser's `:` delimiter, full-line `#` /
+/// `;` comments, and the indented multi-line form:
 ///
 /// ```ini
 /// testpaths =
 ///     tests
 ///     integration
 /// ```
-fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
-    fn apply(cfg: &mut ProjectConfig, key: &str, values: Vec<String>) {
-        if values.is_empty() {
-            return;
-        }
-        match key {
-            "python_files" => cfg.python_files = values,
-            "testpaths" => cfg.testpaths = values,
-            "addopts" => cfg.addopts = values,
-            _ => {}
-        }
-    }
-
-    let mut in_section = false;
-    let mut cfg = ProjectConfig::default();
-    let mut found = false;
+pub(crate) fn ini_parse(text: &str) -> IniDoc {
+    let mut doc = IniDoc {
+        sections: Vec::new(),
+        entries: Vec::new(),
+    };
+    let mut section: Option<String> = None;
     // The key still accepting indented continuation lines, plus values so far.
     let mut open: Option<(String, Vec<String>)> = None;
+    fn close(doc: &mut IniDoc, section: &Option<String>, open: &mut Option<(String, Vec<String>)>) {
+        if let (Some(sec), Some((k, v))) = (section, open.take()) {
+            doc.entries.push((sec.clone(), k, v));
+        }
+    }
 
     for raw in text.lines() {
         let line = raw.trim_end();
@@ -186,53 +290,45 @@ fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
         // Blank line: configparser keeps it as part of an open value
         // (empty_lines_in_values=True is the default), so it does NOT
         // terminate the key. The value ends at the next un-indented key,
-        // section header, or EOF. For whitespace-split lists a blank line
-        // contributes nothing.
+        // section header, or EOF. A blank line contributes nothing.
         if content.is_empty() {
             continue;
         }
         // Section header (never indented).
         if !is_indented {
             if let Some(name) = content.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-                if let Some((k, v)) = open.take() {
-                    apply(&mut cfg, &k, v);
-                }
-                in_section = name == section;
-                found |= in_section;
+                close(&mut doc, &section, &mut open);
+                doc.sections.push(name.to_string());
+                section = Some(name.to_string());
                 continue;
             }
         }
-        if !in_section {
-            continue;
-        }
-        if content.starts_with(['#', ';']) {
+        if section.is_none() || content.starts_with(['#', ';']) {
             continue;
         }
         // Indented continuation of an open key.
         if is_indented {
             if let Some((_, v)) = open.as_mut() {
-                v.extend(content.split_whitespace().map(String::from));
+                v.push(content.to_string());
                 continue;
             }
         }
         // New key line: close the previous key, open this one. Split on the
         // first `=` or `:` (configparser accepts either delimiter).
-        if let Some((k, v)) = open.take() {
-            apply(&mut cfg, &k, v);
-        }
+        close(&mut doc, &section, &mut open);
         if let Some(idx) = content.find(['=', ':']) {
             let key = content[..idx].trim().to_string();
-            let values = content[idx + 1..]
-                .split_whitespace()
-                .map(String::from)
-                .collect();
+            let first = content[idx + 1..].trim();
+            let values = if first.is_empty() {
+                Vec::new()
+            } else {
+                vec![first.to_string()]
+            };
             open = Some((key, values));
         }
     }
-    if let Some((k, v)) = open.take() {
-        apply(&mut cfg, &k, v);
-    }
-    found.then_some(cfg)
+    close(&mut doc, &section, &mut open);
+    doc
 }
 
 /// rstest's own defaults from `[tool.rstest]` in pyproject.toml. Precedence: CLI
@@ -459,7 +555,7 @@ worker-timeout = 120
 
     #[test]
     fn discover_reads_addopts_from_ini_and_pyproject() {
-        let d = tmpdir("addopts-ini");
+        let d = tmpdir("doctest-addopts-ini");
         std::fs::write(
             d.join("pytest.ini"),
             "[pytest]\naddopts =\n    -q\n    --doctest-modules\n",
@@ -469,7 +565,7 @@ worker-timeout = 120
             discover(&d, &mut std::io::sink()).addopts,
             vec!["-q", "--doctest-modules"]
         );
-        let d = tmpdir("addopts-toml");
+        let d = tmpdir("doctest-addopts-toml");
         std::fs::write(
             d.join("pyproject.toml"),
             "[tool.pytest.ini_options]\naddopts = \"-q --doctest-modules\"\n",
@@ -646,6 +742,48 @@ worker-timeout = 120
         assert_eq!(cfg.testpaths, Vec::<String>::new());
         // python_files lives in [other], not [pytest] => default retained.
         assert_eq!(cfg.python_files, vec!["test_*.py", "*_test.py"]);
+    }
+
+    #[test]
+    fn addopts_read_from_ini_and_pyproject() {
+        let d = tmpdir("addopts-ini");
+        std::fs::write(
+            d.join("pytest.ini"),
+            "[pytest]\naddopts =\n    --cov=pkg\n    -k 'a or b'\n",
+        )
+        .unwrap();
+        let cfg = discover(&d, &mut std::io::sink());
+        assert_eq!(cfg.addopts, vec!["--cov=pkg", "-k", "a or b"]);
+        let d = tmpdir("addopts-toml-str");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.pytest.ini_options]\naddopts = \"--cov=pkg -q\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&d, &mut std::io::sink()).addopts,
+            vec!["--cov=pkg", "-q"]
+        );
+        let d = tmpdir("addopts-toml-list");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.pytest.ini_options]\naddopts = [\"--cov=my pkg\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&d, &mut std::io::sink()).addopts,
+            vec!["--cov=my pkg"]
+        );
+    }
+
+    #[test]
+    fn shell_split_follows_shlex() {
+        assert_eq!(shell_split("  a  b\tc "), vec!["a", "b", "c"]);
+        assert_eq!(shell_split("-k 'x or y'"), vec!["-k", "x or y"]);
+        assert_eq!(shell_split(r#"--m="a \"b\"" c"#), vec![r#"--m=a "b""#, "c"]);
+        assert_eq!(shell_split(r"a\ b"), vec!["a b"]);
+        assert_eq!(shell_split("''"), vec![""]);
+        assert!(shell_split("   ").is_empty());
     }
 
     #[test]

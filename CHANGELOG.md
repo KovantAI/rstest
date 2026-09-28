@@ -21,6 +21,37 @@ between 0.x releases and are listed here.
   reports the choice when auto picks `lazy`. Force either with `--collect full`
   / `--collect lazy`. See
   [Lazy collection](docs/concepts/lazy-collection.md#auto-default).
+- **`--incremental` no longer caches a test on a stale pass when coverage
+  measures only part of the project.** First-party files that coverage never
+  measures used to be invisible to `--incremental`, so editing one left
+  dependent tests cached. Those files are now folded into the skip fingerprint:
+  editing any of them re-runs the suite (`--cov=.` with no `include`/`omit`
+  keeps per-file granularity). The measured set is read the way pytest-cov and
+  coverage.py build it: `--cov` values from the command line, the ini `addopts`,
+  and `PYTEST_ADDOPTS` (space form, dotted module names, `src/` layouts, and
+  absolute paths included); a bare `--cov` narrowed by `[run] source` /
+  `source_pkgs` / `source_dirs`; and `[run] include` / `omit`, from
+  `.coveragerc`, `setup.cfg`, `tox.ini`, `pyproject.toml`, or `--cov-config`,
+  in coverage.py's lookup order. The files checked come
+  from one directory walk that skips dot-folders, virtualenvs, and caches, so
+  gitignored first-party code (e.g. generated `*_pb2.py`), submodules, and
+  nested repos count too; inside git, unchanged tracked files reuse git's own
+  hashes instead of being re-read, and symlinked files and package folders are
+  followed and hashed by their target's content. A run without `--cov` reuses
+  the scope of the coverage run that wrote the index it relies on. `omit` /
+  `include` patterns support `[...]` character classes, either path separator,
+  and Windows drive paths, and match case-insensitively on Windows. Test-named files are tracked
+  separately: a changed test module re-runs only its own tests, while a changed test-named
+  helper with no tests of its own (`test_utils.py`, a `TestMixin` base)
+  re-runs the suite. A `--cov` scope matching nothing in the project gets a
+  warning. Existing `--incremental` baselines reset once after upgrading.
+- **`--since-green` detects in-place dependency upgrades.** The environment
+  fingerprint now includes every installed distribution in the venv's
+  site-packages (`*.dist-info`, legacy `*.egg-info` / `*.egg-link`), so a
+  `pip install -U` that leaves the lockfile alone still resets the baseline.
+  The project's own editable or in-project install is keyed by name only, so a
+  git-derived version bump (setuptools-scm, hatch-vcs) does not force a full
+  run. Existing baselines reset once after upgrading rstest.
 - **`rstest replay`: re-run a recorded parallel schedule.** Every parallel run
   (`-n >= 2`, except `--dist each` and `--shard`) journals
   which worker ran which tests, in what order, to
