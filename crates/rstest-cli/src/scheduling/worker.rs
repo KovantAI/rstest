@@ -1447,7 +1447,6 @@ mod tests {
     use std::io::{BufReader, Cursor, Read};
     use std::path::Path;
     use std::process::Command;
-    use std::process::ExitStatus;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -1537,6 +1536,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
+            use std::process::ExitStatus;
             // Raw wait statuses: exit code 2 is 2 << 8; signal 9 is 9.
             let exited = ExitStatus::from_raw(2 << 8);
             assert_eq!(
@@ -1757,11 +1757,14 @@ mod tests {
         assert!(removed_of(&cmd)
             .iter()
             .any(|r| r == "RSTEST_CACHE_REMOTE_TOKEN"));
-        let mut zygote = Command::new("python3");
-        super::apply_shared_worker_env(&mut zygote, 2, &base_env());
-        assert!(removed_of(&zygote)
-            .iter()
-            .any(|r| r == "RSTEST_CACHE_REMOTE_TOKEN"));
+        #[cfg(unix)]
+        {
+            let mut zygote = Command::new("python3");
+            super::apply_shared_worker_env(&mut zygote, 2, &base_env());
+            assert!(removed_of(&zygote)
+                .iter()
+                .any(|r| r == "RSTEST_CACHE_REMOTE_TOKEN"));
+        }
     }
 
     #[test]
