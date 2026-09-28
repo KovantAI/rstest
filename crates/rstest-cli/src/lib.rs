@@ -8,6 +8,7 @@ mod cache;
 mod cli;
 mod collect; // D5: single-point collection
 mod config;
+mod cov_scope;
 mod coverage_skip;
 mod discover;
 mod doctor;
