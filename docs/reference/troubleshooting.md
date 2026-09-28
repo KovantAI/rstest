@@ -129,13 +129,17 @@ test): rstest interrupts a test whose call phase runs past the limit, reports
 it failed with a traceback at the line it was stuck on, and the run
 completes. `@pytest.mark.timeout(N)` sets a per-test limit. This is built in;
 you don't need pytest-timeout (and rstest consumes `--timeout`, so the plugin
-never sees it).
+never sees it). On Windows there is no in-process interrupt: the test is
+only stopped by the hang watchdog below, at 3 × its timeout + 10 s, which
+kills its worker instead of printing a traceback.
 
 For a hang the in-process interrupt can't break (a test blocked inside a C
 extension), [`--worker-timeout 300`](cli.md#-worker-timeout-secs) is the
 backstop: a worker stuck on one test past the limit is killed, the test
-reported failed, and the run completes. `--timeout` arms it automatically at
-a generous multiple. Caveat: the watchdog covers
+reported failed, and the run completes. Without it, rstest arms a watchdog
+per test at 3 × that test's timeout + 10 s (its `@pytest.mark.timeout`, else
+`--timeout`), so a long marker is not cut short by a short global
+`--timeout`. Caveat: the watchdog covers
 hangs on a **test** (any phase); a hang during collection or session config
 is outside it, so wrap the invocation in an external timeout if your
 environment can hang before tests start.

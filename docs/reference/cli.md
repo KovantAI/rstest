@@ -507,15 +507,33 @@ def test_slow_path(): ...
 ```
 
 A test hard-blocked inside a C extension never returns to the interpreter, so
-the signal can't fire: the [`--worker-timeout`](#-worker-timeout-secs)
-watchdog is the backstop for that, and rstest auto-arms it (at a generous
-multiple of `--timeout`) whenever you set `--timeout` without an explicit
-`--worker-timeout`. The interrupt uses a Unix signal on the test's main
-thread; on platforms without it (Windows), the watchdog alone applies.
+the signal can't fire. For that, rstest arms a hang watchdog per test, sized
+from that test's own timeout: **3 × its timeout + 10 s**, where its timeout
+is the `@pytest.mark.timeout` value if it has one, else `--timeout`. A test
+marked `timeout(300)` under `--timeout 30` gets a 910 s watchdog, not 100 s.
+When the watchdog fires, the whole worker is killed and the test is reported
+failed (the [`--worker-timeout`](#-worker-timeout-secs) crash path). An
+explicit `--worker-timeout` replaces the per-test watchdog with one fixed
+limit for every test.
+
+!!! warning "Windows: no in-process interrupt"
+    The interrupt is a Unix signal (SIGALRM) on the test's main thread, and
+    Windows has none. There, a slow test is **not** failed at its timeout:
+    only the watchdog applies, at 3 × the timeout + 10 s, and it kills the
+    worker rather than raising a traceback at the stuck line. With
+    `--timeout 30`, a 60 s test passes and a hung one is killed at 100 s.
+    `@pytest.mark.timeout(N)` arms the same coarse watchdog for its test,
+    with or without `--timeout`. For a tighter cap, set `--worker-timeout`.
 
 ### `--worker-timeout <SECS>`
 
-Hang backstop, off by default: a worker stuck on **one test** for longer than SECS, in any phase (setup, call, or teardown), is killed. The test is reported failed with a timeout message, the
+Hang backstop with one fixed limit for every test: a worker stuck on **one
+test** for longer than SECS, in any phase (setup, call, or teardown), is
+killed. Without it, tests that have a timeout (`--timeout` or
+`@pytest.mark.timeout`) get a per-test watchdog at 3 × their timeout + 10 s
+(see [`--timeout`](#-timeout-secs)), and tests without one have none. Set it
+above your longest `@pytest.mark.timeout`, since it replaces the per-test
+limits. The test is reported failed with a timeout message, the
 worker's other tests redistribute, and a replacement worker joins (the
 crash-recovery machinery, same budgets). This is the coarse hang backstop;
 for ordinary per-test limits use [`--timeout`](#-timeout-secs) (above).

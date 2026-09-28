@@ -321,6 +321,40 @@ def test_call_configure_node_lenient_swallows_error(monkeypatch):
         p._call_configure_node(plugin)
 
 
+def test_call_configure_node_lenient_may_add_but_not_clobber_workerinput(monkeypatch):
+    # pytest-randomly's XdistHooks copies its unresolved "default" seed over the
+    # one rstest broadcast when called at registration time; that write must
+    # be undone and the hook retried at sessionstart. New keys (sqlalchemy's
+    # follower_ident) are kept.
+    monkeypatch.setattr(stream, "_is_dist_internal", lambda pl: False)
+    p = _plugin()
+    p._xdist_node = SimpleNamespace(workerinput={"randomly_seed": 1234})
+
+    def hook(node):
+        node.workerinput["randomly_seed"] = "default"
+        node.workerinput["follower_ident"] = "test_gw0"
+
+    plugin = SimpleNamespace(pytest_configure_node=hook)
+    p._call_configure_node(plugin, lenient=True)
+    assert p._xdist_node.workerinput == {"randomly_seed": 1234, "follower_ident": "test_gw0"}
+    assert id(plugin) not in p._node_configured  # retried at sessionstart
+
+    p._call_configure_node(plugin)  # strict: the hook's write stands
+    assert p._xdist_node.workerinput["randomly_seed"] == "default"
+    assert id(plugin) in p._node_configured
+
+
+def test_call_configure_node_lenient_marks_hook_that_only_adds(monkeypatch):
+    monkeypatch.setattr(stream, "_is_dist_internal", lambda pl: False)
+    p = _plugin()
+    p._xdist_node = SimpleNamespace(workerinput={"workerid": "gw0"})
+    plugin = SimpleNamespace(
+        pytest_configure_node=lambda node: node.workerinput.update(follower_ident="x")
+    )
+    p._call_configure_node(plugin, lenient=True)
+    assert id(plugin) in p._node_configured
+
+
 def test_plugin_registered_defers_to_configure_node(monkeypatch):
     p = _plugin()
     seen: list[Any] = []

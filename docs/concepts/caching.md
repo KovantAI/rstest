@@ -33,9 +33,15 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   graph without it; rebuild by rerunning coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
   union into a full index (see [Shared cache backend](#shared-cache-backend)).
+- `replay/`: the schedule of each parallel run (`<run-uid>.json`, the last 10
+  kept, plus `latest.json`), read by
+  [`rstest replay`](../reference/cli-commands.md#replay). Local to the
+  machine that ran it: keep it **out** of any CI cache and upload
+  `latest.json` as a failure artifact instead (see
+  [Replaying a CI-only failure](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)).
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
-duration-aware scheduling from the second run onward. In the repository,
+duration-aware scheduling from the second run onward, minus `replay/`. In the repository,
 add it to `.gitignore` alongside `.pytest_cache/`:
 
 ```gitignore
@@ -137,7 +143,13 @@ Recommended setup:
 - **Only trusted events write.** Give `--cache-push` (and the credential that
   allows it) to runs on your default branch (`push` events, merge queue,
   schedule). PR jobs, especially from forks, run **pull-only**, or push to a
-  separate PR prefix that main never pulls.
+  separate PR prefix that main never pulls. The GitHub action's
+  `cache-push: auto` default pushes to a `remote` only from `push`,
+  `schedule` and `workflow_dispatch` runs of `warm-from-branch` (and
+  `merge_group`). The credential is the real boundary: tests can read
+  whatever the job holds (rstest keeps `RSTEST_CACHE_REMOTE_TOKEN` out of
+  their environment, but not out of reach), so give PR jobs read-only
+  credentials.
 - **Filter the warm-source lookup to trusted runs.** With the artifact
   backend, resolve the prior run with
   `gh run list --branch main --event push --status success`. Without

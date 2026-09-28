@@ -724,7 +724,7 @@ fn print_report(sink: &mut Sink, victim: &str, culprits: &[String], repro: &str,
 /// Write the `--bisect-json` document for a run that ended without a verdict
 /// (refused, or an error), when a path was given: no culprits, no command, and
 /// the reason in `error`.
-fn write_error_json(json_path: Option<&Path>, nodeid: &str, error: &str) -> Result<()> {
+pub fn write_error_json(json_path: Option<&Path>, nodeid: &str, error: &str) -> Result<()> {
     let Some(path) = json_path else {
         return Ok(());
     };
@@ -736,7 +736,7 @@ fn write_error_json(json_path: Option<&Path>, nodeid: &str, error: &str) -> Resu
         "reproduce_command": null,
         "error": error,
     });
-    std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
     Ok(())
 }
 
@@ -763,7 +763,7 @@ fn write_json(
         "culprits": culprits,
         "reproduce_command": reproduce,
     });
-    std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
     Ok(())
 }
 
@@ -1404,10 +1404,11 @@ mod tests {
 
     #[test]
     fn write_json_unwritable_path_errors() {
-        let p = std::env::temp_dir()
-            .join(format!("rstest-bisect-missing-{}", std::process::id()))
-            .join("nested")
-            .join("out.json");
+        // Parent is a regular file: no directory can be created under it.
+        let blocker =
+            std::env::temp_dir().join(format!("rstest-bisect-file-{}", std::process::id()));
+        std::fs::write(&blocker, b"").unwrap();
+        let p = blocker.join("out.json");
         assert!(write_json(
             Some(&p),
             "t::v",

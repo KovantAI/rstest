@@ -940,8 +940,8 @@ mod tests {
 
     #[test]
     fn write_merged_report_warns_when_the_write_fails() {
-        // An out path in a nonexistent directory makes merge_reports fail to
-        // write; the helper warns (to the buffer) rather than panicking.
+        // An out path under a regular file makes merge_reports fail to write;
+        // the helper warns (to the buffer) rather than panicking.
         let meta = crate::reporting::report::RunMeta {
             exitstatus: 0,
             duration_seconds: 0.0,
@@ -950,7 +950,10 @@ mod tests {
             argv: vec![],
             shard: None,
         };
-        let out = Path::new("/nonexistent-dir-xyz-12345/merged.json");
+        let blocker =
+            std::env::temp_dir().join(format!("rstest-merged-file-{}", std::process::id()));
+        std::fs::write(&blocker, b"").unwrap();
+        let out = &blocker.join("merged.json");
         let parts = vec![("libs-a".to_string(), None, Some(0), false)];
         let mut buf = Vec::new();
         super::write_merged_report(&mut buf, &parts, &meta, out);

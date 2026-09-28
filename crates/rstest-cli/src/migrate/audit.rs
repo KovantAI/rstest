@@ -152,7 +152,7 @@ pub fn run_audit(
     // refused run, an error from a child session) leaves `ran: false` behind
     // instead of a stale result from an earlier run for a CI gate to read.
     if let Some(path) = json_path {
-        std::fs::write(path, serde_json::to_string_pretty(&not_run_doc())?)?;
+        crate::reporting::write_output(path, serde_json::to_string_pretty(&not_run_doc())?)?;
     }
     sink.warn(&format!(
         "rstest audit: running -n auto {runs}× to surface parallel-only failures…"
@@ -183,7 +183,7 @@ pub fn run_audit(
         // and not a failure, but say so, since it is usually a selection typo.
         if let Some(path) = json_path {
             let doc = audit_doc(0, &partition(&[]));
-            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+            crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
         }
         sink.out_line(
             "rstest audit: no tests were selected (check your -k/-m/path args); \
@@ -202,7 +202,7 @@ pub fn run_audit(
 
     if let Some(path) = json_path {
         let doc = audit_doc(par.len(), &b);
-        std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+        crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
     }
     Ok(report(par.len(), &b, sink))
 }
@@ -354,7 +354,7 @@ fn audit_doc(tests: usize, b: &Buckets) -> serde_json::Value {
 }
 
 /// The `--audit-json` envelope when the `-n auto` pass produced no run.
-fn not_run_doc() -> serde_json::Value {
+pub fn not_run_doc() -> serde_json::Value {
     serde_json::json!({
         "meta": { "runner": "rstest", "kind": "audit", "schema": 1 },
         "ran": false,

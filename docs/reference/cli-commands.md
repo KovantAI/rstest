@@ -42,8 +42,9 @@ commit in that window as one CI run.
 
 Exit 0 when outcomes are identical, 1 when they differ (it then points you at
 `migrate-check` to classify the differences, usually an unstable parametrize
-id or a parallel-only failure), 2 when it couldn't run pytest or rstest refused
-to dispatch. A pre-existing red pytest run is reported as such, not blamed on
+id or a parallel-only failure), 2 when it couldn't run pytest, rstest refused
+to dispatch, or rstest hit an error (no usable interpreter, a failed spawn;
+an `Error:` line on stderr says which). A pre-existing red pytest run is reported as such, not blamed on
 rstest.
 
 `try` is the one command that needs **pytest installed on its own**. It runs
@@ -107,9 +108,11 @@ serially before the victim, reproduce the failure, and reports `POLLUTED BY:
 serial ordering reproduces) that the failure is likely a concurrent-resource
 race rather than state pollution.
 
-Each finding prints the upstream fix and the rstest stopgap. Exits non-zero
-if any WILL-bail id or parallelism-specific failure is found: usable as a CI
-gate (see `--migrate-check-json` and `--migrate-allow` below for the
+Each finding prints the upstream fix and the rstest stopgap. Exits `1` if
+any WILL-bail id or parallelism-specific failure is found, and `2` when it
+couldn't judge: the `-n auto` pass produced no outcomes (`parallel` is
+`{"ran": false}` in the JSON), or rstest hit an error (an `Error:` line on
+stderr). `0` means ready. Usable as a CI gate (see `--migrate-check-json` and `--migrate-allow` below for the
 machine-readable form and the known-issue allow-list).
 
 ### `--migrate-check-json <path>`
@@ -188,7 +191,8 @@ follow-up run (for example an unstable parametrize id) is reported as
 failure (serial-fixable, order-dependent, intrinsic or inconclusive), so it
 gates CI; pre-existing failures don't fail the audit. A selection that matches
 no tests (for example a `-m` with no matching tests) exits `0` with a "no tests
-were selected" note; exit `2` is kept for a run rstest refused to dispatch. [`--audit-json`](#-audit-json-path) writes the findings, the serial set,
+were selected" note; exit `2` is kept for a run rstest refused to dispatch or
+an error inside the audit (an `Error:` line on stderr). [`--audit-json`](#-audit-json-path) writes the findings, the serial set,
 and the conftest block for tooling.
 
 ### `--audit-json <path>`
@@ -304,7 +308,8 @@ variable).
 
 Exit code: `0` = order-dependent culprit found, `1` = not order-dependent
 (fails alone, or doesn't reproduce from order), `2` = the nodeid isn't in the
-suite, or a test selection was passed after `--`. If the victim doesn't run in
+suite, a test selection was passed after `--`, or rstest hit an error (an
+`Error:` line on stderr; `--bisect-json` records it in `error`). If the victim doesn't run in
 a child session (deselected by an option, a collection error), bisect stops
 with an error instead of reading that as a pass. `--bisect-json` writes the
 result.
@@ -347,11 +352,12 @@ replays it locally:
 ```yaml
 # CI: keep the schedule of a failed run
 - run: rstest -n auto
-- uses: actions/upload-artifact@v4
+- uses: actions/upload-artifact@v7
   if: failure()
   with:
     name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
     path: .rstest_cache/replay/latest.json
+    if-no-files-found: ignore
 ```
 
 ```console
@@ -383,8 +389,17 @@ interleaving stays timing-dependent, so a genuinely time-dependent race is
 best-effort. If the suite changed since the journal was written, replay prints a
 drift note, runs the tests that still match, and reports how many recorded tests
 no longer collect. Session args (paths, `-k`, `-m`, plugins) come from the
-journal, not from the `replay` invocation; pass `--python` to pick the
-interpreter.
+journal, not from the `replay` invocation, and are printed (`rstest: replay:
+args: ...`) before the run starts. They go to pytest as they are, so replay
+only journals from runs you trust (see
+[Security: replay journals](security.md#replay-journals)). To pick the
+interpreter, put `--python` after the subcommand
+(`rstest replay --journal ci.json --python .venv/bin/python`); before it,
+`replay` is read as a test path.
+
+Exit code: the replayed run's own code (`0` all passed, `1` a test failed,
+and so on). A missing or unreadable journal exits `1` with an `Error:` line
+before any test runs.
 
 ## CI and the shared cache
 

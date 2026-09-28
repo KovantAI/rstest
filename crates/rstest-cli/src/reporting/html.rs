@@ -184,8 +184,7 @@ pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
     );
     html.push_str("</body>\n</html>\n");
 
-    std::fs::write(path, html)?;
-    Ok(())
+    super::write_output(path, html)
 }
 
 /// One `<tr>` for the grid, carrying data-* attributes the JS filters/sorts on.

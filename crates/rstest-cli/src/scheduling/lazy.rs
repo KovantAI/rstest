@@ -44,6 +44,7 @@ struct WorkerState {
     outstanding: Vec<String>,
     running: Option<String>,
     running_since: Option<std::time::Instant>,
+    running_watchdog: Option<orchestrator::Watchdog>,
     timeout_killed: bool,
     attempt: Vec<proto::Report>,
     attempt_failed: bool,
@@ -68,6 +69,9 @@ impl orchestrator::Slot for WorkerState {
     fn running_since(&self) -> Option<std::time::Instant> {
         self.running_since
     }
+    fn running_watchdog(&self) -> Option<orchestrator::Watchdog> {
+        self.running_watchdog
+    }
     fn kill_worker(&mut self) {
         self.worker.kill();
     }
@@ -89,6 +93,7 @@ impl WorkerState {
             outstanding: Vec::new(),
             running: None,
             running_since: None,
+            running_watchdog: None,
             timeout_killed: false,
             attempt: Vec::new(),
             attempt_failed: false,
@@ -209,9 +214,7 @@ pub fn run_lazy_pool(
             Ok(pair) => pair,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 prog.tick(sink);
-                if let Some(limit) = worker_timeout {
-                    orchestrator::watchdog_tick(sink, &mut states, limit);
-                }
+                orchestrator::watchdog_tick(sink, &mut states);
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -319,9 +322,10 @@ pub fn run_lazy_pool(
                 serial.extend(ser);
                 flaky_budget.extend(flaky);
             }
-            Ok(Event::ItemStartId { id }) => {
+            Ok(Event::ItemStartId { id, timeout }) => {
                 states[idx].running = Some(id.clone());
                 states[idx].running_since = Some(std::time::Instant::now());
+                states[idx].running_watchdog = orchestrator::watchdog_for(worker_timeout, timeout);
                 prog.item_started(sink, idx, id);
             }
             Ok(Event::ItemDoneId { id }) => {
@@ -329,6 +333,7 @@ pub fn run_lazy_pool(
                 let s = &mut states[idx];
                 s.running = None;
                 s.running_since = None;
+                s.running_watchdog = None;
                 if let Some(pos) = s.outstanding.iter().position(|x| *x == id) {
                     s.outstanding.remove(pos);
                 }
@@ -397,7 +402,13 @@ pub fn run_lazy_pool(
             | Ok(Event::ItemDone { .. })
             | Ok(Event::Stopped { .. }) => {}
             Err(e) => {
-                let was_timeout = states[idx].timeout_killed;
+                // The limit that killed it, when the watchdog did (names it in the
+                // fabricated failure).
+                let killed_by = if states[idx].timeout_killed {
+                    states[idx].running_watchdog
+                } else {
+                    None
+                };
                 let crashed = states[idx].running.take();
                 states[idx].attempt.clear();
                 states[idx].attempt_failed = false;
@@ -425,13 +436,7 @@ pub fn run_lazy_pool(
                         }
                     }
                     if let Some(id) = crashed {
-                        let fab = orchestrator::fabricate_crash_report(
-                            id,
-                            was_timeout,
-                            worker_timeout,
-                            idx,
-                            &e,
-                        );
+                        let fab = orchestrator::fabricate_crash_report(id, killed_by, idx, &e);
                         prog.on_report(sink, Some(idx), &fab);
                         sink.emit_report(Some(idx), &fab);
                         run.record(Some(idx), fab);

@@ -30,9 +30,13 @@ this from its queue, which can misattribute; the explicit signal cannot.)
 ## Hung tests (`--worker-timeout`)
 
 A test that hangs instead of crashing goes through the same machinery when
-[`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs) is set
-(off by default). A worker stuck on one test for longer than SECS, in any
-phase, is killed; the test is reported failed with a timeout message
+its hang watchdog fires. The limit is
+[`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs) when set,
+the same for every test. Otherwise a test that has a timeout
+([`--timeout`](../reference/cli.md#-timeout-secs) or
+`@pytest.mark.timeout`) gets 3 × that timeout + 10 s, and a test without one
+has no watchdog. A worker stuck on one test past its limit, in any phase, is
+killed; the test is reported failed with a timeout message
 instead of the crash message, and steps 2 and 3 above follow unchanged.
 Under `--reruns` the timed-out test is retried within the budget, and the
 kill counts against the same restart cap below. Hangs outside a test

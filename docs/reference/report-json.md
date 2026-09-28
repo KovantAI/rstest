@@ -489,6 +489,8 @@ Top-level fields:
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |
 | `polluter` | object / `null` | for `ORDER DEPENDENCY` / `ISOLATION / CO-LOCATION`: `{kind: "other_file", file}`, `{kind: "same_file", file}`, or `{kind: "not_reproducible"}`; `null` otherwise |
 
-The exit code is **not** in the document; read it from the process: non-zero
-when any non-allow-listed WILL-bail id or parallel finding exists.
+The exit code is **not** in the document; read it from the process: `1`
+when any non-allow-listed WILL-bail id or parallel finding exists, `2` when
+the parallel pass produced no outcomes (`parallel` is `{"ran": false}`) or
+rstest hit an error.
 Increment-only: incompatible changes bump `meta.schema`.

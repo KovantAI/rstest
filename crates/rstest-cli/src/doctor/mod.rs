@@ -549,7 +549,7 @@ pub fn detect_leaks(run: &Run) -> Vec<Leak> {
 }
 
 pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Result<()> {
-    std::fs::write(path, serde_json::to_vec_pretty(report)?)?;
+    crate::reporting::write_output(path, serde_json::to_vec_pretty(report)?)?;
     Ok(())
 }
 

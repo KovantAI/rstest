@@ -19,6 +19,53 @@ between 0.x releases and are listed here.
   The bundled GitHub Action now leaves `.rstest_cache/replay` out of the cache
   it persists; the changed path spec makes the first run after upgrading miss
   the cache once.
+- **Report files create their parent directory.** `--junitxml`,
+  `--report-json`, `--html`, `--stream-json`, `--doctor-json`/`--doctor-md`,
+  `--cov-diff-json`, the merged monorepo report and the
+  `migrate-check`/`audit`/`bisect` JSON outputs now create a missing
+  parent directory, as pytest does for `--junitxml`. Before, a path such as
+  `test-results/junit.xml` on a fresh checkout ran the whole suite and then
+  exited 1 with `No such file or directory`. A write that still fails names
+  the path.
+- **Verdict subcommands exit 2 on an error.** `try`, `migrate-check`, `audit`
+  and `bisect` use exit `1` for "found something". An error inside them (no
+  usable interpreter, a failed spawn) now exits `2` with an `Error:` line
+  instead of `1`, and `migrate-check` exits `2` when its parallel pass
+  produced no outcomes to judge. When such an error happens before the run
+  (for example no usable interpreter), `--bisect-json` still records it in
+  `error`, `--audit-json` says `ran: false`, and a stale `--migrate-check-json`
+  is removed, so a CI gate never reads an earlier run's result.
+- **`rstest try --python` reaches both runs.** The `rstest -n auto` half of
+  `try` now uses the same interpreter as the pytest baseline; before, it
+  re-ran discovery and, outside an activated venv, could find none.
+- **The remote cache token is kept out of test processes' environment.**
+  `RSTEST_CACHE_REMOTE_TOKEN` is removed from the environment of workers and
+  of the pytest baseline `rstest try` runs. This is defense in depth: a test
+  running as the same user can still read the rstest process's environment,
+  so jobs that run untrusted code need a read-only token.
+- **pytest-randomly works with pytest-xdist installed.** With both plugins
+  installed, every `-n >= 2` run failed with an internal error, `TypeError:
+  can only concatenate str (not "int") to str`: randomly's xdist hook copied its
+  unresolved `"default"` seed over the one rstest broadcasts. A
+  `pytest_configure_node` hook called while its plugin registers may now add
+  `workerinput` keys but not overwrite them; it is called again at session
+  start, as under a real xdist controller.
+- **The hang watchdog is sized per test.** The watchdog rstest arms from a
+  timeout used one limit for the whole run, 3 × `--timeout` + 10 s, so a
+  test with a longer `@pytest.mark.timeout` was killed at the global limit
+  (`timeout(300)` under `--timeout 30` died at 100 s). Each test's watchdog
+  is now 3 × its own timeout + 10 s: its marker, else `--timeout`. A marker
+  also arms the watchdog without `--timeout`, which gives Windows (no
+  in-process interrupt) a backstop for marked tests. An explicit
+  `--worker-timeout` still sets one limit for every test. Watchdog kills now
+  say which limit fired.
+- **GitHub action: `cache-push` input.** Decides which runs write the cache
+  other jobs trust. With the default `auto`, the `remote` backend pushes only
+  on `push` / `schedule` / `workflow_dispatch` runs of `warm-from-branch` and
+  on `merge_group`, and the `actions-cache` backend no longer saves on
+  `pull_request_target`, `issue_comment` or `workflow_run`. `true` always
+  writes, `false` never does. The action also hands `cache-remote-token`
+  only to the rstest command instead of its whole run step.
 - **Byte-exact mode now prints pytest's own terminal output.** At `-n 0` /
   `-n 1` (and `-n auto` capped to one worker), with no `--output` set, the
   pytest session writes to stdout directly instead of rstest re-rendering it:

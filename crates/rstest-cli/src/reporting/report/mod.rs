@@ -474,8 +474,7 @@ impl Run {
     pub fn write_snapshot(&self, path: &Path, run_meta: &RunMeta) -> Result<()> {
         // Serialize through the `Value` (like the HTML embed) so every key stays
         // alphabetical, byte-for-byte identical to the pre-typed-struct output.
-        std::fs::write(path, serde_json::to_vec(&self.snapshot_value(run_meta))?)?;
-        Ok(())
+        crate::reporting::write_output(path, serde_json::to_vec(&self.snapshot_value(run_meta))?)
     }
 }
 

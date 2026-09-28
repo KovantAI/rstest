@@ -164,7 +164,10 @@ class ItemDispatchPlugin(StreamPlugin):
                 # Crash attribution: if this process dies mid-protocol, the
                 # orchestrator knows exactly which item took it down
                 # (research: xdist infers head-of-pending and misattributes).
-                self._conn.send("item_start", {"index": index})
+                # `timeout` sizes the orchestrator's hang watchdog per test.
+                self._conn.send(
+                    "item_start", {"index": index, "timeout": self._effective_timeout(item)}
+                )
                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
                 self._conn.send("item_done", {"index": index})
                 if session.shouldfail or session.shouldstop:
@@ -269,7 +272,9 @@ class LazyDispatchPlugin(StreamPlugin):
             if len(pending) >= 2 or (draining and pending):
                 item = pending.popleft()
                 nextitem = pending[0] if pending else None
-                self._conn.send("item_start_id", {"id": item.nodeid})
+                self._conn.send(
+                    "item_start_id", {"id": item.nodeid, "timeout": self._effective_timeout(item)}
+                )
                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
                 self._conn.send("item_done_id", {"id": item.nodeid})
                 if session.shouldfail or session.shouldstop:

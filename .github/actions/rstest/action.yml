@@ -66,12 +66,25 @@ inputs:
     description: "Bearer token for an http(s):// cache-remote; exported as RSTEST_CACHE_REMOTE_TOKEN."
     required: false
     default: ""
+  cache-push:
+    description: >-
+      Whether this job writes the cache other jobs trust. 'auto' (default):
+      the 'remote' backend pushes only on push / schedule / workflow_dispatch
+      runs of warm-from-branch, and on merge_group; the 'actions-cache'
+      backend saves on push, pull_request (a PR-scoped cache), schedule,
+      workflow_dispatch and merge_group, never on pull_request_target,
+      issue_comment or workflow_run (those save into the base branch's scope
+      while possibly running PR code). 'true' always writes, 'false' never
+      does (pull-only). The artifact backend ignores it: its segments are
+      scoped to this run and only warm-from-event runs are ever read back.
+    required: false
+    default: "auto"
   cache-compact-threshold:
     description: "--cache-compact-threshold N: fold the remote's loose segments into base.json inline on push once they exceed N (best-effort; never fails the run). Skips the need for a separate compaction job. 'remote' backend only — the artifact backend does not publish base.json (it relies on per-run segment artifacts + retention eviction), so this is ignored there."
     required: false
     default: ""
   warm-from-branch:
-    description: "Artifact backend: branch whose latest successful run seeds the warm cache (its shard segments union into a full index). Cross-branch so PRs read newest-main."
+    description: "Your trusted branch. Artifact backend: its latest successful run seeds the warm cache (its shard segments union into a full index); cross-branch so PRs read newest-main. 'remote' backend with cache-push: auto: the only branch whose push/schedule/workflow_dispatch runs push."
     required: false
     default: "main"
   warm-from-event:
@@ -220,6 +233,8 @@ runs:
         IN_ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
         IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         IN_BASE_REF: ${{ inputs.base-ref }}
+        IN_CACHE_PUSH: ${{ inputs.cache-push }}
+        IN_WARM_BRANCH: ${{ inputs.warm-from-branch }}
       run: |
         set -euo pipefail
         # Resolve runner mode.
@@ -279,6 +294,33 @@ runs:
         fi
         echo "backend=$backend" >>"$GITHUB_OUTPUT"
         echo "remote=$remote" >>"$GITHUB_OUTPUT"
+
+        # Whether this job writes the shared cache (see the cache-push input).
+        # 'auto' is an allowlist of events whose code is the ref's own, so a
+        # job that may run PR code never writes what other jobs trust.
+        event="${GITHUB_EVENT_NAME:-}"
+        push=false
+        case "$IN_CACHE_PUSH" in
+          true) push=true ;;
+          false) ;;
+          auto)
+            case "$backend" in
+              remote)
+                if [ "$event" = "merge_group" ]; then
+                  push=true
+                elif [ "${GITHUB_REF_TYPE:-}" = "branch" ] && [ "${GITHUB_REF_NAME:-}" = "$IN_WARM_BRANCH" ]; then
+                  case "$event" in push|schedule|workflow_dispatch) push=true ;; esac
+                fi
+                ;;
+              actions-cache)
+                case "$event" in push|pull_request|schedule|workflow_dispatch|merge_group) push=true ;; esac
+                ;;
+              *) push=true ;;  # artifact: run-scoped segments, always staged
+            esac
+            ;;
+          *) echo "::error::cache-push must be auto, true or false (got '$IN_CACHE_PUSH')"; exit 2 ;;
+        esac
+        echo "cache-push=$push" >>"$GITHUB_OUTPUT"
 
         # Resolve the --changed base ref: explicit base-ref wins; else infer the
         # PR base from $GITHUB_BASE_REF (set on pull_request events). Empty on a
@@ -424,7 +466,9 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         # Bearer for an http(s):// remote (ignored by dir/s3/gs transports).
-        RSTEST_CACHE_REMOTE_TOKEN: ${{ inputs.cache-remote-token }}
+        # Held under another name and exported only to the rstest command
+        # below, so the step's own helpers (the args parser) never see it.
+        IN_CACHE_REMOTE_TOKEN: ${{ inputs.cache-remote-token }}
         MODE: ${{ steps.cfg.outputs.mode }}
         BACKEND: ${{ steps.cfg.outputs.backend }}
         REMOTE: ${{ steps.cfg.outputs.remote }}
@@ -444,9 +488,14 @@ runs:
         IN_SHARD: ${{ inputs.shard }}
         IN_SHARD_TOTAL: ${{ inputs.shard-total }}
         IN_CACHE_COMPACT_THRESHOLD: ${{ inputs.cache-compact-threshold }}
+        CACHE_PUSH: ${{ steps.cfg.outputs.cache-push }}
         IN_FAIL_UNDER_RATIO: ${{ inputs.fail-under-ratio }}
       run: |
         set -uo pipefail
+        # Take the token out of the environment first: a plain shell variable
+        # is not exported, so only the rstest command below receives it.
+        tok="${IN_CACHE_REMOTE_TOKEN:-}"
+        unset IN_CACHE_REMOTE_TOKEN
         prefix=""
         [ "$MODE" = "uv" ] && prefix="uv run"
 
@@ -515,7 +564,12 @@ runs:
         # baseline arrives DURING the run (--cache-pull), so the local-file guard
         # below is skipped; --require-baseline (native) is the cold-pull guard.
         if [ "$BACKEND" = "artifact" ] || [ "$BACKEND" = "remote" ]; then
-          cmd+=(--cache-remote "$REMOTE" --cache-pull --cache-push)
+          cmd+=(--cache-remote "$REMOTE" --cache-pull)
+          if [ "$BACKEND" = "artifact" ] || [ "$CACHE_PUSH" = true ]; then
+            cmd+=(--cache-push)
+          else
+            echo "rstest: cache-push off for this job (${GITHUB_EVENT_NAME:-} on ${GITHUB_REF_NAME:-}): pulling the remote baseline only"
+          fi
           # Compaction is REMOTE-only. It folds loose segments into <root>/base.json
           # and deletes them; the artifact backend never uploads base.json (it
           # publishes per-run segment artifacts and relies on artifact retention to
@@ -554,7 +608,7 @@ runs:
           done
           if [ -n "$py" ]; then
             argsf="$(mktemp)"
-            if ! "$py" -c 'import shlex, sys; sys.stdout.write("".join(a + "\0" for a in shlex.split(sys.argv[1])))' "$IN_ARGS" >"$argsf"; then
+            if ! "$py" -I -S -c 'import shlex, sys; sys.stdout.write("".join(a + "\0" for a in shlex.split(sys.argv[1])))' "$IN_ARGS" >"$argsf"; then
               echo "::error::could not parse the args input (unbalanced quotes?): $IN_ARGS" >&2
               exit 2
             fi
@@ -573,7 +627,12 @@ runs:
         # non-zero rstest exit (e.g. a failing test) would abort this step
         # before we can capture the code and defer to the gates. Guard it.
         code=0
-        "${cmd[@]}" || code=$?
+        if [ -n "$tok" ]; then
+          RSTEST_CACHE_REMOTE_TOKEN="$tok" "${cmd[@]}" || code=$?
+        else
+          "${cmd[@]}" || code=$?
+        fi
+        unset tok
         echo "exit-code=$code" >>"$GITHUB_OUTPUT"
 
         # When a fail-ratio gate is active, defer the pass/fail decision to it.
@@ -604,7 +663,7 @@ runs:
           --rstest-exit "${RSTEST_EXIT:-}"
 
     - name: Save rstest cache
-      if: always() && steps.cfg.outputs.backend == 'actions-cache'
+      if: always() && steps.cfg.outputs.backend == 'actions-cache' && steps.cfg.outputs.cache-push == 'true'
       uses: actions/cache/save@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # v4.1.2
       with:
         # Same path spec as the restore (actions/cache keys on it too).

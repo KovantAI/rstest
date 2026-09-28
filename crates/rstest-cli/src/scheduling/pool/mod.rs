@@ -458,9 +458,7 @@ pub fn run_pool(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 prog.tick(sink);
                 // Watchdog tick: kill workers stuck on one item too long.
-                if let Some(limit) = worker_timeout {
-                    orchestrator::watchdog_tick(sink, &mut states, limit);
-                }
+                orchestrator::watchdog_tick(sink, &mut states);
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -716,9 +714,10 @@ pub fn run_pool(
             Ok(Event::NodeInput { workerinput }) => {
                 states[idx].node_input = Some(workerinput);
             }
-            Ok(Event::ItemStart { index }) => {
+            Ok(Event::ItemStart { index, timeout }) => {
                 states[idx].running = Some(index);
                 states[idx].running_since = Some(std::time::Instant::now());
+                states[idx].running_watchdog = orchestrator::watchdog_for(worker_timeout, timeout);
                 let resolved = nodeid_at(&ids_store, index).map(str::to_string);
                 // Journal the emergent schedule: worker `idx` started this
                 // nodeid, in order. Recorded per worker so replay can re-pin it.
@@ -752,6 +751,7 @@ pub fn run_pool(
                 let s = &mut states[idx];
                 s.running = None;
                 s.running_since = None;
+                s.running_watchdog = None;
                 if let Some(pos) = s.outstanding.iter().position(|&x| x == index) {
                     s.outstanding.remove(pos);
                 }
@@ -831,7 +831,13 @@ pub fn run_pool(
                 if let Some(winput) = states[idx].node_input.take() {
                     pending_downs.push_back((winput, format!("{e:#}")));
                 }
-                let was_timeout = states[idx].timeout_killed;
+                // The limit that killed it, when the watchdog did (names it in the
+                // fabricated failure).
+                let killed_by = if states[idx].timeout_killed {
+                    states[idx].running_watchdog
+                } else {
+                    None
+                };
                 let crashed = states[idx].running.take();
                 states[idx].attempt.clear();
                 states[idx].attempt_failed = false;
@@ -872,13 +878,7 @@ pub fn run_pool(
                         if dist == Dist::Each {
                             nodeid.push_str(&format!(" [gw{idx}]"));
                         }
-                        let fab = orchestrator::fabricate_crash_report(
-                            nodeid,
-                            was_timeout,
-                            worker_timeout,
-                            idx,
-                            &e,
-                        );
+                        let fab = orchestrator::fabricate_crash_report(nodeid, killed_by, idx, &e);
                         let crashed_id = fab.nodeid.clone();
                         prog.on_report(sink, Some(idx), &fab);
                         sink.emit_report(Some(idx), &fab);

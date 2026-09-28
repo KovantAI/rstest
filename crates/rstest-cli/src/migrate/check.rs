@@ -148,7 +148,8 @@ pub struct PolluterJson {
 }
 
 /// Run the migration preflight. Exit code: 0 = ready, 1 = at least one blocker
-/// (WILL-bail id or parallel-only failure). `json_path` writes findings as JSON.
+/// (WILL-bail id or parallel-only failure), 2 = the parallel pass produced no
+/// outcomes to judge. `json_path` writes findings as JSON.
 /// `allow` holds accepted-finding substrings: reported but excluded from the gate.
 pub fn run_migrate_check(
     python: &Path,
@@ -193,7 +194,7 @@ pub fn run_migrate_check(
                 &json_unstable,
                 parallel,
             );
-            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+            crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
         }
         Ok(exit)
     };
@@ -263,7 +264,7 @@ pub fn run_migrate_check(
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
         );
-        return finish(false, Some(ParallelReport::not_run()), 1);
+        return finish(false, Some(ParallelReport::not_run()), 2);
     }
     let verdicts = classify_failures(python, args, &par, 1, sink)?;
     if verdicts.is_empty() {

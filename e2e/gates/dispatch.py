@@ -560,6 +560,23 @@ def gate_worker_timeout_watchdog(g, args, binary):
         r.returncode == 1 and "exceeded --worker-timeout" in r.stdout and "2 passed" in r.stdout,
         r.stdout[-300:],
     )
+    # The auto-armed watchdog is sized per test from that test's own timeout.
+    # A marker longer than the global --timeout must not be killed at the
+    # global limit (3*1+10 = 13s here): it runs 15s under timeout(30) and passes.
+    g.write(
+        "longmark/test_long.py",
+        "import time, pytest\n"
+        "@pytest.mark.timeout(30)\n"
+        "def test_long():\n"
+        "    time.sleep(15)\n"
+        "def test_quick(): pass\n",
+    )
+    r = g.run("test_long.py", "-n", "2", "--timeout", "1", cwd=g.tmp / "longmark", timeout=90)
+    check(
+        "watchdog: a marker longer than --timeout is not killed at the global limit",
+        r.returncode == 0 and "2 passed" in r.stdout and "watchdog" not in r.stdout + r.stderr,
+        r.stdout[-300:] + r.stderr[-300:],
+    )
 
 
 def _count(stdout, word):

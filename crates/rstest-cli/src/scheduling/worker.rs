@@ -645,6 +645,18 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_JUNITXML",
 ];
 
+/// Credentials rstest itself consumes and test code never needs. Stripped from
+/// every process that runs the user's tests so a test or conftest (e.g. in a
+/// pull request) can't read the shared cache's write token.
+const SECRET_ENV: &[&str] = &["RSTEST_CACHE_REMOTE_TOKEN"];
+
+/// Remove [`SECRET_ENV`] from a child that will execute test code.
+pub fn scrub_secrets(command: &mut Command) {
+    for key in SECRET_ENV {
+        command.env_remove(key);
+    }
+}
+
 /// Build the worker's [`Command`] (argv + per-run child environment + stdio)
 /// without spawning it. Split out of [`Worker::spawn_with_io`] so the arg/env
 /// wiring is unit-testable via `Command::get_args`/`get_envs` — no live process.
@@ -700,6 +712,7 @@ fn build_worker_command(
     for key in INTERNAL_ENV {
         command.env_remove(key);
     }
+    scrub_secrets(&mut command);
     if worker.is_none() {
         // Outside a pool there is no xdist identity; the pool sets its own
         // (rstest_worker assigns these per worker).
@@ -969,6 +982,7 @@ fn parse_pid_report(text: &str, n: usize) -> Result<Vec<u32>> {
 /// environment, so each applies its own identity by index post-fork.
 #[cfg(unix)]
 fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
+    scrub_secrets(command);
     command
         .env("PYTHONPATH", worker_pythonpath())
         .env("RSTEST_RUN_UID", &env.run_uid)
@@ -1430,6 +1444,21 @@ mod tests {
             );
         }
         assert_eq!(envs_of(&cmd)["RSTEST_RUN_UID"], "uid-1");
+    }
+
+    #[test]
+    fn worker_commands_never_carry_the_remote_cache_token() {
+        // Test code runs in these processes; the cache write token must not
+        // reach it, on the plain spawn path or the fork-pool zygote.
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &base_env(), 3, 4);
+        assert!(removed_of(&cmd)
+            .iter()
+            .any(|r| r == "RSTEST_CACHE_REMOTE_TOKEN"));
+        let mut zygote = Command::new("python3");
+        super::apply_shared_worker_env(&mut zygote, 2, &base_env());
+        assert!(removed_of(&zygote)
+            .iter()
+            .any(|r| r == "RSTEST_CACHE_REMOTE_TOKEN"));
     }
 
     #[test]

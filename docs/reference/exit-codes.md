@@ -11,9 +11,12 @@ rstest uses pytest's exit-code vocabulary:
 | 4 | **Usage error from the vendored pytest core**: an unrecognized argument forwarded to it, or a bad pytest option |
 | 5 | No tests collected |
 
-**Exit 1 is not only "tests failed".** Only syntax errors caught by rstest's
-argument parser exit 2. Every other error rstest raises itself exits **1**,
-the same code as a test failure. That includes:
+**Exit 1 is not only "tests failed".** On a test run, only syntax errors
+caught by rstest's argument parser exit 2. Every other error rstest raises
+itself exits **1**, the same code as a test failure. (The verdict
+subcommands `try`, `migrate-check`, `audit` and `bisect` differ: their
+errors exit 2, see [below](#gating-flags-and-their-exit-codes).) That
+includes:
 
 - a bad value or combination for an rstest flag: a non-integer `-n`,
   `--dist no`, `--order bogus`, `--shard 1/2` with `-n 0` (or an `-n auto`
@@ -42,7 +45,7 @@ records the test session's result **before** the post-run gates
 | 0 | **none** | n/a | `--changed` selected nothing, so nothing ran (use [`--changed-strict`](cli.md#-changed-strict) to get 5 instead) |
 | 1 | written | 1 | tests failed |
 | 1 | written | 0 | tests passed, a post-run gate failed |
-| 1 | **none** | n/a | rstest refused to run: bad flag value, failed cache pull, no interpreter, `--require-baseline` with a cold cache |
+| 1 | **none** | n/a | a test run rstest refused: bad flag value, failed cache pull, no interpreter, `--require-baseline` with a cold cache |
 | 2 | written | 2 | collection errors interrupted the run |
 | 5 | written | 5 | no tests collected |
 | 5 | **none** | n/a | `--changed-strict` and nothing affected |
@@ -64,8 +67,8 @@ Flags that gate CI have exit semantics beyond the table above:
 
 | Flag | Exit codes |
 |---|---|
-| [`try`](cli-commands.md#try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest or rstest refused to dispatch |
-| [`migrate-check`](cli-commands.md#migrate-check) / `--migrate-check-json` | non-zero (`0` clean) when any WILL-bail unstable id **or** parallel-only failure is found |
+| [`try`](cli-commands.md#try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest, rstest refused to dispatch, or an error |
+| [`migrate-check`](cli-commands.md#migrate-check) / `--migrate-check-json` | `0` ready, `1` any WILL-bail unstable id **or** parallel-only failure, `2` the parallel pass produced no outcomes or an error |
 | [`--durations-regress`](cli.md#-durations-regress-ratio) | `1` on a duration regression over the threshold |
 | [`--cov-fail-under`](../guides/coverage.md) | `1` when coverage falls below the target |
 | [`--changed-strict`](cli.md#-changed-strict) | `5` when nothing is affected (instead of `0`) |
@@ -74,11 +77,25 @@ Flags that gate CI have exit semantics beyond the table above:
 | [`--fail-on-leak`](cli.md#-fail-on-leak) | `1` when any thread/fd leak is found |
 | [`--require-baseline`](cli.md#-require-baseline) | `1` before the run when `--durations-regress` has no duration baseline |
 | [`--quarantine`](cli.md#-quarantine-file) | `0` when every failure is on the quarantine list; `1` if any failure is outside it |
-| [`audit`](cli-commands.md#audit) | **Unreleased.** `0` parallel-safe, `1` at least one parallel-only failure, `2` rstest refused to dispatch |
-| [`bisect`](cli-commands.md#bisect-nodeid) | **Unreleased.** `0` order-dependent culprit found, `1` not order-dependent, `2` nodeid not in the suite or a selection passed after `--` |
-| [`shard-verify`](cli-commands.md#shard-verify) | **Unreleased.** `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
-| [`explain`](cli-commands.md#explain) | **Unreleased.** human mode: `1` for an unknown nodeid; with `--json`: always `0` |
+| [`audit`](cli-commands.md#audit) | `0` parallel-safe, `1` at least one parallel-only failure, `2` rstest refused to dispatch or an error |
+| [`bisect`](cli-commands.md#bisect-nodeid) | `0` order-dependent culprit found, `1` not order-dependent, `2` nodeid not in the suite, a selection passed after `--`, or an error |
+| [`replay`](cli-commands.md#replay) | the replayed run's own code; `1` with an `Error:` line when the journal is missing or unreadable |
+| [`shard-verify`](cli-commands.md#shard-verify) | `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
+| [`explain`](cli-commands.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
 | [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift |
+
+For `try`, `migrate-check`, `audit` and `bisect`, `1` is always a verdict
+("found something"), never an rstest error: an error inside them (no usable
+interpreter, a failed spawn) exits `2` and prints an `Error:` line on stderr,
+so a CI gate can treat `1` as "fix the suite" and `2` as "fix the job". A
+parse error from rstest's argument parser also exits `2` (with clap's
+`error:` prefix, lowercase).
+
+Put flags such as `--python` **after** the subcommand
+(`rstest try --python .venv/bin/python`). rstest recognizes a subcommand
+only as the first argument, so in `rstest --python X try` the word `try`
+is read as a test path: that is a plain test run, and its exit codes are
+the test-run ones above.
 
 When several gates fire, the exit is still `1`; each gate only raises a `0`
 to `1`, never lowers a failing code.
