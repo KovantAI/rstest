@@ -5,8 +5,8 @@
 //! classifiers (unstable ids, parallel-only failures); [`check`] is the
 //! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run.
 
-mod audit;
-mod bisect;
+pub(crate) mod audit;
+pub(crate) mod bisect;
 pub(crate) mod check;
 mod classify;
 mod try_cmd;

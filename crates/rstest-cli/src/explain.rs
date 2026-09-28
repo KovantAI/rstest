@@ -26,19 +26,28 @@ use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
 const SCHEMA: u32 = 1;
 
+/// Envelope metadata for the explain document.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Meta {
+    /// Constant producer tag: always `"rstest"`.
     runner: &'static str,
+    /// Constant discriminator: always `"explain"`.
     kind: &'static str,
+    /// Document schema version.
     schema: u32,
+    /// The rstest version that wrote the document.
     rstest_version: &'static str,
 }
 
 /// The coverage footprint of one test: the source files it covered and the
 /// total number of covered lines across them.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Coverage {
+    /// Number of source files the test covered.
     file_count: usize,
+    /// Covered lines, summed across those files.
     line_count: usize,
     /// Covered source files, sorted, cwd-relative (the coverage-index keys).
     files: Vec<String>,
@@ -48,22 +57,33 @@ struct Coverage {
 /// cache (e.g. a never-flaked test has no `flakes` entry). `found` is false when
 /// the nodeid appears in no cache at all.
 #[derive(Serialize)]
-struct ExplainReport {
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub(crate) struct ExplainReport {
     meta: Meta,
+    /// The node id that was explained, as given.
     nodeid: String,
+    /// Whether the node id appears in any cache.
     found: bool,
     /// Last recorded call-phase duration in seconds (latest value only; local
     /// caches keep no history).
+    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<f64>"))]
     duration_seconds: Option<f64>,
     /// `"passed"` if the test was green on the last incremental run; `null`
-    /// otherwise (absence is not proof of failure — see `flakes` for fail
+    /// otherwise (absence is not proof of failure; see `flakes` for fail
     /// history).
+    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<String>"))]
     last_outcome: Option<&'static str>,
     /// Source def line (1-based) recorded on the last incremental run, if known.
+    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<u64>"))]
     source_line: Option<u64>,
     /// Cross-run flake/fail counts + last-event epoch, if the test has any.
+    #[cfg_attr(
+        test,
+        schemars(schema_with = "crate::schema::nullable::<crate::reporting::flakes::FlakeStats>")
+    )]
     flakes: Option<FlakeStats>,
     /// Files this test covered, if a warm coverage index has it.
+    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<Coverage>"))]
     coverage: Option<Coverage>,
 }
 

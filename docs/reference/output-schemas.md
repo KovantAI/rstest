@@ -4,10 +4,9 @@ Generated field references and full [JSON Schemas](https://json-schema.org/)
 (draft-07) for the rstest JSON outputs that are built from typed Rust structs.
 
 **This list is partial.** Outputs still assembled by hand, and so not covered
-here yet, include the run snapshot (`--report-json`), discovery JSON, streaming
-JSON (`--output json` / `--stream-json`), migrate-check JSON, `audit` /
-`bisect` JSON, `explain --json` and `--cov-diff-json`. Those are documented in
-prose in [Report JSON](report-json.md) and the [CLI reference](cli.md).
+here yet, include streaming JSON (`--output json` / `--stream-json`) and
+`--cov-diff-json`. Those are documented in prose in
+[Report JSON](report-json.md) and the [CLI reference](cli.md).
 
 Everything on this page is **generated from the Rust types that produce the
 output**. A golden test in the build regenerates these artifacts and fails CI
@@ -54,6 +53,30 @@ itself is documented only there, in [Shape](report-json.md#shape).
 
     ```json
     --8<-- "docs/reference/schemas/migrate-check.schema.json"
+    ```
+
+--8<-- "docs/reference/schemas/audit.md"
+
+??? note "Audit: full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/audit.schema.json"
+    ```
+
+--8<-- "docs/reference/schemas/bisect.md"
+
+??? note "Bisect: full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/bisect.schema.json"
+    ```
+
+--8<-- "docs/reference/schemas/explain.md"
+
+??? note "Explain: full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/explain.schema.json"
     ```
 
 --8<-- "docs/reference/schemas/flake-log.md"

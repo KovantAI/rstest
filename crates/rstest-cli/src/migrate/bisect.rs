@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use serde::Serialize;
 
 use super::{collect_session, file_of, run_session, run_session_seq, Collected, Outcomes, Phase};
 use crate::config;
@@ -721,6 +722,55 @@ fn print_report(sink: &mut Sink, victim: &str, culprits: &[String], repro: &str,
     sink.out_line("================================================");
 }
 
+// Field order is alphabetical to match the historical `serde_json` map output
+// (no `preserve_order`), so the emitted bytes are unchanged by the move to
+// typed structs.
+/// The `--bisect-json` document (schema 1). A run that ended without a verdict
+/// (refused, or an error) carries `error` and no `rootdir`/`cwd`.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct BisectDoc {
+    /// The culprit test ids, in the order they run before the victim. Empty
+    /// when the victim is not order-dependent or the run ended without a verdict.
+    pub culprits: Vec<String>,
+    /// Directory `reproduce_command` runs from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Why the run ended without a verdict (absent on a completed bisect).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub meta: BisectMeta,
+    /// The victim test's node id, relative to `rootdir`.
+    pub nodeid: String,
+    /// Whether the victim fails only after the culprits run first.
+    pub order_dependent: bool,
+    /// A command that reproduces the failure, or `null` when the victim is
+    /// not order-dependent.
+    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<String>"))]
+    pub reproduce_command: Option<String>,
+    /// The pytest rootdir the node ids are relative to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rootdir: Option<String>,
+}
+
+/// Envelope metadata for the bisect document.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct BisectMeta {
+    /// Constant discriminator: always `"bisect"`.
+    pub kind: &'static str,
+    /// Constant producer tag: always `"rstest"`.
+    pub runner: &'static str,
+    /// Document schema version.
+    pub schema: u32,
+}
+
+const BISECT_META: BisectMeta = BisectMeta {
+    kind: "bisect",
+    runner: "rstest",
+    schema: 1,
+};
+
 /// Write the `--bisect-json` document for a run that ended without a verdict
 /// (refused, or an error), when a path was given: no culprits, no command, and
 /// the reason in `error`.
@@ -728,14 +778,16 @@ pub fn write_error_json(json_path: Option<&Path>, nodeid: &str, error: &str) -> 
     let Some(path) = json_path else {
         return Ok(());
     };
-    let doc = serde_json::json!({
-        "meta": { "runner": "rstest", "kind": "bisect", "schema": 1 },
-        "nodeid": nodeid,
-        "order_dependent": false,
-        "culprits": [],
-        "reproduce_command": null,
-        "error": error,
-    });
+    let doc = BisectDoc {
+        culprits: vec![],
+        cwd: None,
+        error: Some(error.to_string()),
+        meta: BISECT_META,
+        nodeid: nodeid.to_string(),
+        order_dependent: false,
+        reproduce_command: None,
+        rootdir: None,
+    };
     crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
     Ok(())
 }
@@ -754,15 +806,16 @@ fn write_json(
     let Some(path) = json_path else {
         return Ok(());
     };
-    let doc = serde_json::json!({
-        "meta": { "runner": "rstest", "kind": "bisect", "schema": 1 },
-        "nodeid": victim,
-        "rootdir": rootdir.to_string_lossy(),
-        "cwd": cwd.to_string_lossy(),
-        "order_dependent": reproduce.is_some(),
-        "culprits": culprits,
-        "reproduce_command": reproduce,
-    });
+    let doc = BisectDoc {
+        culprits: culprits.to_vec(),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        error: None,
+        meta: BISECT_META,
+        nodeid: victim.to_string(),
+        order_dependent: reproduce.is_some(),
+        reproduce_command: reproduce.map(str::to_string),
+        rootdir: Some(rootdir.to_string_lossy().into_owned()),
+    };
     crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
     Ok(())
 }

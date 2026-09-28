@@ -285,11 +285,14 @@ jobs:
           working-directory: smoke
           args: "-n 2"
           cache-remote: ./rcache          # local dir => remote backend
+          # auto is pull-only on pull_request for the remote backend; this job
+          # needs the cold run to seed the remote regardless of event.
+          cache-push: "true"
           durations-regress: "2.0"
       - name: assert a segment was pushed
         run: |
           set -euo pipefail
-          count=$(ls smoke/rcache/segments/seg-*.json 2>/dev/null | wc -l | tr -d ' ')
+          count=$( (ls smoke/rcache/segments/seg-*.json 2>/dev/null || true) | wc -l | tr -d ' ')
           test "$count" -ge 1 || { echo "expected >=1 pushed segment, found $count"; exit 1; }
           echo "OK: $count segment(s) in the remote"
 

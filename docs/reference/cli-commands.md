@@ -207,6 +207,7 @@ audit that stops early (the `-n auto` pass produced no run, exit `2`, or a child
 session failed) leaves `ran: false` rather than a stale result from an earlier
 run. `-x`/`--maxfail` from your args or `addopts` is lifted for every run the
 audit makes, so the whole suite is checked.
+Field reference: [Audit JSON](output-schemas.md#audit).
 Only read by the `audit` subcommand (`rstest audit --audit-json out.json`); on
 its own it is ignored and no file is written.
 
@@ -322,7 +323,8 @@ Nodeids are relative to `rootdir`; `reproduce_command` runs from `cwd` and is
 null when the test isn't order-dependent. A run that ends without a verdict
 (exit `2`, or an error) still writes the document, with an `error` message
 and no culprits, so a stale result from an earlier run is never left behind.
-Used with the `bisect` subcommand.
+Used with the `bisect` subcommand. Field reference:
+[Bisect JSON](output-schemas.md#bisect).
 
 ### `replay`
 
@@ -500,7 +502,8 @@ test: tests/test_api.py::test_login
 Add `--json` for a schema-stamped object on stdout (`{meta, nodeid, found,
 duration_seconds, last_outcome, source_line, flakes, coverage}`), suitable for an
 editor or CI step. Absent fields are `null`: a never-flaked test has no `flakes`,
-a cold coverage index yields `null` coverage.
+a cold coverage index yields `null` coverage. Field reference:
+[Explain JSON](output-schemas.md#explain).
 
 It reads only cache files, needs no interpreter, and runs no tests. The data
 comes from `.rstest_cache/`: `durations.json` (last recorded call time),

@@ -5,6 +5,11 @@ between 0.x releases and are listed here.
 
 ## 0.8.0 (Unreleased)
 
+- **JSON Schemas for `audit`, `bisect` and `explain`.** `--audit-json`,
+  `--bisect-json` and `explain --json` are now built from typed structs and
+  get generated field references and full draft-07 schemas on the
+  [Output schemas](docs/reference/output-schemas.md) page, checked by the same
+  golden test as the others. The emitted JSON is unchanged.
 - **`--incremental` no longer caches a test on a stale pass when coverage
   measures only part of the project.** First-party files that coverage never
   measures used to be invisible to `--incremental`, so editing one left

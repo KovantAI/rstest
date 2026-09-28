@@ -65,6 +65,24 @@ fn outputs() -> Vec<Output> {
             schema: schema_of::<crate::migrate::check::MigrateCheckDoc>(),
         },
         Output {
+            name: "audit",
+            title: "Audit",
+            source: "`audit --audit-json`",
+            schema: schema_of::<crate::migrate::audit::AuditDoc>(),
+        },
+        Output {
+            name: "bisect",
+            title: "Bisect",
+            source: "`bisect --bisect-json`",
+            schema: schema_of::<crate::migrate::bisect::BisectDoc>(),
+        },
+        Output {
+            name: "explain",
+            title: "Explain",
+            source: "`explain --json`",
+            schema: schema_of::<crate::explain::ExplainReport>(),
+        },
+        Output {
             name: "flake-log",
             title: "Flake log",
             source: "`.rstest_cache/flakes.json`",
