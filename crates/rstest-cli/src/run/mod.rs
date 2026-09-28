@@ -1303,6 +1303,8 @@ fn dispatch_run(
                 // load: lazy defaults to strict file affinity, since stealing
                 // exposes cross-file/in-file order dependence affinity doesn't.
                 lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
+                // A shard is a partial suite: no journal (same as run_pool).
+                shard.is_none().then_some(dist_name.as_str()),
                 sink,
             )?
         } else {
@@ -1493,7 +1495,24 @@ fn collect_lazy(
         // the auto-pick never silently disables --incremental or turns
         // --shuffle (which errors under lazy) into a hard failure. An explicit
         // --collect lazy still conflicts with these loudly downstream.
-        None if cli.shuffle.is_some() || cli.incremental => Ok(false),
+        //
+        // --shard is vetoed too: auto-lazy would switch it to file-granular
+        // partitioning with no collection hash (so `shard-verify` finds no shard
+        // metadata), and shard jobs whose caches differ (one cold) would pick
+        // different modes and partition the suite inconsistently. A fail-fast
+        // order (explicit or the --watch auto-pick) is ignored under lazy, so it
+        // keeps full collection rather than silently losing its ordering.
+        None if cli.shuffle.is_some()
+            || cli.incremental
+            || cli.shard.is_some()
+            || matches!(resolve_order(cli, settings), Ok(pool::Order::FailFast)) =>
+        {
+            Ok(false)
+        }
+        // Cheap gates first: the duration-cache load hashes every cached test
+        // source, so skip it when the count cannot matter (serial run, affinity-
+        // breaking dist); `auto_lazy` re-checks these for its own callers.
+        None if n < 2 || !matches!(dist_name, "load" | "loadfile") => Ok(false),
         None => Ok(auto_lazy(dist_name, args, n, durations::load().len())),
     }
 }
@@ -2380,6 +2399,28 @@ mod tests {
         // the veto path returns full without touching the cache count.
         let mut c = cli();
         c.shuffle = Some("random".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.shard = Some("1/2".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.order = Some("fail-fast".into());
         assert!(!collect_lazy(
             &c,
             &settings_collect(None),

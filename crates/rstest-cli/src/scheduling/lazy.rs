@@ -15,7 +15,7 @@
 //! --dist loadscope/loadgroup need cross-file consolidation over a global
 //! id list, which lazy mode never builds; they are rejected at the CLI.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -128,6 +128,9 @@ pub fn run_lazy_pool(
     // --dist loadfile => steal=false: strict file affinity, the remedy
     // for order-dependent suites (same contract as the full pool).
     steal: bool,
+    // `--dist` name to record in the replay journal, or `None` to write none
+    // (a shard: partial suite, same rule as the full pool).
+    journal_dist: Option<&str>,
     sink: &mut Sink,
 ) -> Result<PoolOutcome> {
     let &crate::scheduling::pool::PoolConfig {
@@ -203,6 +206,18 @@ pub fn run_lazy_pool(
     let mut done_workers = 0usize;
     let mut restarts_left = n.max(4);
     let mut designate = 0usize;
+    // Replay journaling, as in run_pool: each worker's ordered item starts,
+    // keyed by nodeid, so `rstest replay` can re-pin this schedule on the
+    // eager pool. A one-worker run has no parallel schedule to reproduce.
+    let journaling = journal_dist.is_some() && n >= 2 && crate::replay::journaling_enabled();
+    let mut recorder: Vec<Vec<String>> = if journaling {
+        vec![Vec::new(); n]
+    } else {
+        Vec::new()
+    };
+    // Keep only the FIRST attempt of a rerun/redistributed id: replay runs
+    // with reruns off, so a duplicate entry would run the test twice.
+    let mut journaled: HashSet<String> = HashSet::new();
 
     loop {
         let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
@@ -322,6 +337,9 @@ pub fn run_lazy_pool(
             Ok(Event::ItemStartId { id }) => {
                 states[idx].running = Some(id.clone());
                 states[idx].running_since = Some(std::time::Instant::now());
+                if journaling && journaled.insert(id.clone()) {
+                    recorder[idx].push(id.clone());
+                }
                 prog.item_started(sink, idx, id);
             }
             Ok(Event::ItemDoneId { id }) => {
@@ -630,6 +648,11 @@ pub fn run_lazy_pool(
         }
     }
 
+    // Files left uncollected (-x/--maxfail or a collection error stopped the
+    // run) make `total_items` a partial count; record 0 then, which skips
+    // replay's size-drift check instead of flagging a suite change.
+    let fully_collected =
+        file_queue.is_empty() && states.iter().all(|s| s.uncollected_files.is_empty());
     let mut workers: Vec<_> = states.into_iter().map(|s| s.worker).collect();
     for w in &mut workers {
         let _ = w.send(&proto::Command::Shutdown);
@@ -639,6 +662,25 @@ pub fn run_lazy_pool(
     }
     let exitstatus =
         orchestrator::finalize_exit(&statuses, run.all_passed(), reruns, collect_aborted);
+    // Persist the schedule for `rstest replay`. Best-effort, like run_pool. No
+    // collection hash: lazy never agrees on one ordered nodeid list, so replay's
+    // drift check falls back to the collected count (when it is complete).
+    if let (true, Some(dist)) = (journaling, journal_dist) {
+        crate::replay::write(&crate::replay::Journal::record(
+            worker_env.run_uid.clone(),
+            n,
+            dist.to_string(),
+            None,
+            args.to_vec(),
+            None,
+            if fully_collected {
+                total_items as u64
+            } else {
+                0
+            },
+            recorder,
+        ));
+    }
     Ok(PoolOutcome {
         run,
         prog,

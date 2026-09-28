@@ -22,9 +22,10 @@ The estimate reads `.rstest_cache/durations.json`, so a **cold cache
 counts as zero tests** and the first run of a suite stays `full`; a warm
 run of a large suite flips to `lazy`. When auto picks `lazy` it prints a
 banner naming the test and worker counts. Force either strategy with an
-explicit `--collect full` / `--collect lazy` (explicit `lazy` also
-work-steals under `--dist load`; auto does not). Auto never *rejects* a
-config — on `--dist loadscope|loadgroup`, a nodeid, or `--pyargs` it just
+explicit `--collect full` / `--collect lazy`. An explicit `--dist load`
+enables work-stealing under lazy however lazy was chosen. Auto never
+*rejects* a config: on `--dist loadscope|loadgroup`, a nodeid, `--pyargs`,
+`--shard`, `--shuffle`, `--incremental`, or a fail-fast `--order` it just
 stays `full`.
 
 ```console
@@ -95,8 +96,8 @@ Every divergence we found in the public-suite corpus reproduces under
 plain pytest with the same isolation or ordering: lazy doesn't break
 correct suites; it surfaces order/import dependence that full-suite
 alphabetical runs mask. But that distinction doesn't make a red CI
-green: if your suite has these patterns, use `--collect full` (the
-default) or fix the tests.
+green: if your suite has these patterns, use `--collect full` (which
+also overrides the auto default) or fix the tests.
 
 ## Semantics preserved
 
