@@ -434,6 +434,9 @@ fn resolve_run_config(
 /// already opened for reading. Open failure is non-fatal — the run continues
 /// without the side channel.
 fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
     match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -669,10 +672,10 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     let mut sink = Sink::stdio(color::Palette::detect(args));
     // cache-compact, shard-verify and explain are interpreter-free (they only touch
     // cache/report files); the rest resolve Python first, lazily, so the
-    // interpreter-free modes never probe one. One `?` for every arm.
+    // interpreter-free modes never probe one.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = || discover::resolve(&scope, cli.python.as_deref());
-    let code = match command {
+    let result = match command {
         Command::CacheCompact { keep_last, max_age } => {
             run_cache_compact(cli, &mut sink, *keep_last, max_age.as_deref())
         }
@@ -734,8 +737,52 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         Command::Replay { run_id, journal } => {
             crate::replay::run_replay(cli, run_id.as_deref(), journal.as_deref(), &mut sink)
         }
-    }?;
+    };
+    // Verdict subcommands spend exit 1 on "found something", so an error
+    // inside them (no interpreter, a failed spawn) must not read as a finding:
+    // report it the way `main` would and exit 2, their "couldn't run" code.
+    let verdict = matches!(
+        command,
+        Command::Try | Command::MigrateCheck | Command::Audit | Command::Bisect { .. }
+    );
+    let code = match result {
+        Err(e) if verdict => {
+            eprintln!("Error: {e:?}");
+            record_verdict_error(cli, command, &e);
+            2
+        }
+        other => other?,
+    };
     Ok(Some(code))
+}
+
+/// A verdict subcommand failed before (or outside) its own JSON bookkeeping,
+/// e.g. no usable interpreter: leave its `--*-json` document saying so, never a
+/// stale result from an earlier run that a CI gate would read as current.
+fn record_verdict_error(cli: &Cli, command: &crate::cli::Command, e: &anyhow::Error) {
+    use crate::cli::Command;
+    match command {
+        Command::Bisect { nodeid, .. } => {
+            let _ = migrate::write_bisect_error_json(
+                cli.bisect_json.as_deref(),
+                nodeid,
+                &format!("{e:#}"),
+            );
+        }
+        Command::Audit => {
+            if let Some(path) = cli.audit_json.as_deref() {
+                let doc =
+                    serde_json::to_string_pretty(&migrate::audit_not_run_doc()).unwrap_or_default();
+                let _ = crate::reporting::write_output(path, doc);
+            }
+        }
+        Command::MigrateCheck => {
+            if let Some(path) = cli.migrate_check_json.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// `cache-compact` subcommand: fold policy-selected remote segments into a
@@ -1260,7 +1307,9 @@ fn dispatch_run(
              the journal was recorded from a pool run"
         );
     }
-    let watchdog = watchdog_duration(worker_timeout, cli.timeout);
+    // Only the explicit cap travels here: without one, the pool sizes each
+    // test's watchdog from the timeout the worker reports at item_start.
+    let watchdog = worker_timeout.map(std::time::Duration::from_secs);
     // Compiled once and shared by both pool paths (a config-struct field, so it
     // must outlive the borrow); the passthrough path below ignores it.
     let only_rerun = cli
@@ -1713,9 +1762,9 @@ fn warn_windows_timeout(
         let _ = writeln!(
             w,
             "rstest: warning: --timeout can't interrupt a blocked test in-process on Windows \
-             (no SIGALRM). rstest auto-arms the coarser --worker-timeout watchdog from it, which \
-             kills the whole worker (not just the stuck test) once the deadline is well exceeded; \
-             set --worker-timeout SECS to tune that cap."
+             (no SIGALRM). Only the coarser per-test hang watchdog applies (3x the test's timeout \
+             + 10s), and it kills the whole worker, not just the stuck test; set --worker-timeout \
+             SECS for a fixed, tighter cap."
         );
     }
 }
@@ -1800,28 +1849,6 @@ fn silent_master_plugin_warnings(n: usize, args: &[String]) -> Vec<String> {
         );
     }
     out
-}
-
-/// Watchdog duration for a run: explicit `--worker-timeout` wins; otherwise
-/// auto-arm from `--timeout` at a generous multiple, so the worker's in-process
-/// interrupt fires first and the watchdog only catches a C-ext deadlock the
-/// signal can't reach (the test never returns to the interpreter). Only a
-/// positive, finite `--timeout` arms it — mirroring the worker's
-/// `_parse_timeout` (0/negative/NaN = disabled) — and the computed duration is
-/// clamped so a huge or near-overflow value can't panic `from_secs_f64`. A bad
-/// `--timeout` must not crash the run.
-fn watchdog_duration(
-    worker_timeout: Option<u64>,
-    timeout: Option<f64>,
-) -> Option<std::time::Duration> {
-    worker_timeout
-        .map(std::time::Duration::from_secs)
-        .or_else(|| {
-            timeout.filter(|t| t.is_finite() && *t > 0.0).map(|t| {
-                std::time::Duration::try_from_secs_f64(t * 3.0 + 10.0)
-                    .unwrap_or(std::time::Duration::MAX)
-            })
-        })
 }
 
 fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
@@ -2061,7 +2088,9 @@ fn warn_quarantine_passthrough(w: &mut dyn Write) {
 
 /// Steal (split files across workers) only on an EXPLICIT `--dist load`: lazy
 /// collection defaults to strict file affinity, since stealing exposes the
-/// cross-file / in-file order dependence that affinity hides.
+/// cross-file / in-file order dependence that affinity hides. A `load` from
+/// either the CLI or `[tool.rstest] dist` enables it (by design, a CLI
+/// `loadfile` does not override a config `load`).
 fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> bool {
     cli_dist == Some("load") || settings_dist == Some("load")
 }
@@ -2153,7 +2182,7 @@ mod tests {
         requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
         resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, watchdog_duration, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
+        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -2318,48 +2347,6 @@ mod tests {
         assert_eq!(timeout_warning(true, None, None), "");
         // Off Windows: SIGALRM works, so no warning regardless of flags.
         assert_eq!(timeout_warning(false, Some(1.0), None), "");
-    }
-
-    #[test]
-    fn watchdog_explicit_worker_timeout_wins() {
-        // Explicit --worker-timeout always wins, ignoring --timeout.
-        assert_eq!(
-            watchdog_duration(Some(30), Some(2.0)),
-            Some(std::time::Duration::from_secs(30))
-        );
-        assert_eq!(
-            watchdog_duration(Some(30), None),
-            Some(std::time::Duration::from_secs(30))
-        );
-    }
-
-    #[test]
-    fn watchdog_auto_arms_from_positive_timeout() {
-        // Auto-arm at t*3 + 10 when only --timeout is set.
-        assert_eq!(
-            watchdog_duration(None, Some(2.0)),
-            Some(std::time::Duration::from_secs_f64(16.0))
-        );
-    }
-
-    #[test]
-    fn watchdog_disabled_for_non_positive_or_non_finite_timeout() {
-        // 0/negative/NaN/inf disable the auto-arm instead of panicking
-        // from_secs_f64 (mirrors the worker's _parse_timeout).
-        assert_eq!(watchdog_duration(None, None), None);
-        assert_eq!(watchdog_duration(None, Some(0.0)), None);
-        assert_eq!(watchdog_duration(None, Some(-4.0)), None);
-        assert_eq!(watchdog_duration(None, Some(f64::NAN)), None);
-        assert_eq!(watchdog_duration(None, Some(f64::INFINITY)), None);
-    }
-
-    #[test]
-    fn watchdog_clamps_overflowing_timeout_instead_of_panicking() {
-        // A finite-but-enormous --timeout must clamp to MAX, not panic.
-        assert_eq!(
-            watchdog_duration(None, Some(f64::MAX)),
-            Some(std::time::Duration::MAX)
-        );
     }
 
     #[test]
@@ -3173,6 +3160,8 @@ mod tests {
         // Default (no explicit load) keeps strict file affinity.
         assert!(!lazy_should_steal(None, None));
         assert!(!lazy_should_steal(Some("loadfile"), Some("loadscope")));
+        // Either source's `load` enables it; a CLI `loadfile` doesn't veto.
+        assert!(lazy_should_steal(Some("loadfile"), Some("load")));
     }
 
     #[test]
@@ -3282,7 +3271,13 @@ mod tests {
             None
         );
         // A scheduling-only event is a no-op in a single session.
-        assert_eq!(fold(proto::Event::ItemStart { index: 0 }), None);
+        assert_eq!(
+            fold(proto::Event::ItemStart {
+                index: 0,
+                timeout: None
+            }),
+            None
+        );
         // Done terminates with the exit status.
         assert_eq!(fold(proto::Event::Done { exitstatus: 1 }), Some(1));
 
@@ -3412,11 +3407,11 @@ mod tests {
 
     #[test]
     fn attach_stream_json_warns_when_open_fails() {
-        // A path under a nonexistent directory can't be created => warn, no panic.
-        let path = std::env::temp_dir()
-            .join(format!("rstest-streamjson-missing-{}", std::process::id()))
-            .join("nope")
-            .join("out.ndjson");
+        // A path under a regular file can't be created => warn, no panic.
+        let blocker =
+            std::env::temp_dir().join(format!("rstest-streamjson-file-{}", std::process::id()));
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("out.ndjson");
 
         let (mut sink, captured) = Sink::captured();
         attach_stream_json(&mut sink, &path);

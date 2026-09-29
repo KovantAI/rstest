@@ -18,7 +18,7 @@ $ rstest --doctor
 WAIT-BOUND: 95% of test time (176.5s) is waiting, not computing (sleeps / IO / timeouts).
     54.20s waiting of   54.25s  tests/test_proxy_functional.py::test_proxy_https_multi_conn_limit
     10.97s waiting of   10.97s  tests/test_proxy_functional.py::test_proxy_https_connect
-  ... and 33 more
+  ... and 27 more
 
 PARALLEL FLOOR: the longest test (54.2s) exceeds the ideal per-worker share (23.2s at -n 8);
 no worker count can finish faster than its longest test. Gate tests:
@@ -34,8 +34,10 @@ SLOWEST FILES:
 ===================================================
 ```
 
-(That's [aiohttp]'s real suite. One file is 81% of total test time, almost
-all of it waiting on 10-second proxy timeouts.)
+(That's [aiohttp]'s real suite, trimmed for the page: WAIT-BOUND lists up
+to 8 tests before its `... and N more` line, and the `startup:` line and the
+PARALLEL EFFICIENCY section are cut. One file is 81% of total test time,
+almost all of it waiting on 10-second proxy timeouts.)
 
 The `4442 tests` count is tests with a **recorded call duration**, which is
 what doctor analyzes: slightly fewer than the 4,469 the suite *collects*
@@ -65,11 +67,11 @@ spends 95% waiting on proxy timeouts.
 
 No worker count can finish faster than the longest single test. If your
 longest test exceeds the ideal per-worker share, the report names the gate
-tests: splitting or shrinking them raises your parallel ceiling.
+tests: splitting or shrinking them lowers that floor.
 
 ### PARALLEL EFFICIENCY
 
-Where PARALLEL FLOOR is a static ceiling, this is the *realized* speedup
+Where PARALLEL FLOOR is a static lower bound on wall time, this is the *realized* speedup
 measured from the run just finished: `test time / wall`, compared against
 the worker count. "1.5× realized of 4× possible (38%)" means the run
 converted only 38% of its worker budget into wall-clock savings: the
@@ -92,8 +94,8 @@ it and points back at WAIT-BOUND. Only emitted for multi-worker runs.
 
 Total setup time per fixture, with two pieces of advice:
 
-- A *function-scoped* fixture that ran hundreds of times and costs real
-  time is a candidate for a wider scope: one real-world suite re-parsed
+- A *function-scoped* fixture that ran 20 or more times and cost at least
+  1s in total is a candidate for a wider scope: one real-world suite re-parsed
   the same RSA key 206 times (≈20% of its total runtime) in what could
   have been a session fixture.
 - A *session-scoped* fixture that ran more than once ran **once per
@@ -214,7 +216,7 @@ flakiness. Full model, false-positive cases, and fixes:
 ### startup
 
 A one-line summary under the header reports how long spawning the worker pool
-took — wall from spawn to every worker's first event (import + collection start):
+took: wall from spawn to every worker's first event (import + collection start):
 
 ```text
 startup: 0.22s spawning 16 workers (54% of wall) — try --fork-pool to prewarm the pool

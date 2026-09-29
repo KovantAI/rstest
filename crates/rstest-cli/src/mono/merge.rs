@@ -72,7 +72,7 @@ pub fn merge_reports(
         "collect_errors": collect_errors,
         "tests": tests,
     });
-    std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
+    crate::reporting::write_output(out, serde_json::to_vec_pretty(&doc)?)?;
     Ok(())
 }
 

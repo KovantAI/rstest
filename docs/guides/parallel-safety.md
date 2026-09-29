@@ -308,8 +308,11 @@ to a fix:
 - [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) finds
   the test that pollutes a victim and prints a minimal repro command.
 - [`rstest audit`](../reference/cli-commands.md#audit) runs the suite in
-  parallel against a serial baseline and prints the parallel-only failures as a
-  ready-to-paste `@pytest.mark.serial` list.
+  parallel against a serial baseline and classifies each parallel-only
+  failure. The ones serial fixes (isolation, wall-clock) come out as a
+  ready-to-paste `@pytest.mark.serial` list; order-dependent tests are pointed
+  at `--dist loadfile`, and intrinsic flakes and inconclusive ones are listed
+  separately.
 
 If the failure only shows up on CI, don't try to recreate the schedule by
 hand: upload the run's replay journal and re-run that exact schedule locally

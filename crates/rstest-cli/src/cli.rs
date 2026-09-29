@@ -254,8 +254,8 @@ pub struct Cli {
     pub(crate) order: Option<String>,
 
     /// Write merged results as junit XML (intercepted: per-worker sessions
-    /// would clobber a shared file).
-    #[arg(long)]
+    /// would clobber a shared file). `--junit-xml` is pytest's alias.
+    #[arg(long, alias = "junit-xml")]
     pub(crate) junitxml: Option<PathBuf>,
 
     /// Write a self-contained HTML report of the merged run (rendered
@@ -792,6 +792,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--doctor-md",
     "--doctor-fail-on",
     "--junitxml",
+    "--junit-xml",
     "--html",
     "--dist",
     "--shard",
@@ -874,6 +875,18 @@ mod tests {
 
     fn v(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn junit_xml_alias_is_owned_like_junitxml() {
+        // pytest spells it both ways; forwarding the alias to every worker
+        // would bring back the shared-file clobbering the interception avoids.
+        for args in [&["--junit-xml", "o.xml"][..], &["--junit-xml=o.xml"][..]] {
+            let (own, session) = split_args(v(args));
+            assert!(session.is_empty(), "{args:?} leaked to the session");
+            let cli = Cli::try_parse_from(own).unwrap();
+            assert_eq!(cli.junitxml.as_deref(), Some(std::path::Path::new("o.xml")));
+        }
     }
 
     #[test]

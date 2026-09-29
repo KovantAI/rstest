@@ -253,6 +253,9 @@ pub enum Event {
     /// workers share no index space).
     ItemStartId {
         id: String,
+        /// The item's effective per-test timeout (see `ItemStart::timeout`).
+        #[serde(default)]
+        timeout: Option<f64>,
     },
     ItemDoneId {
         id: String,
@@ -271,6 +274,11 @@ pub enum Event {
     /// before the matching ItemDone, this is the item that killed it.
     ItemStart {
         index: u64,
+        /// The item's effective per-test timeout in seconds: its
+        /// `@pytest.mark.timeout`, else `--timeout`; absent when neither is set.
+        /// Sizes the orchestrator's hang watchdog for this item.
+        #[serde(default)]
+        timeout: Option<f64>,
     },
     /// Item at `index` finished its full runtest protocol (scheduling
     /// signal - distinct from its phase Reports, per xdist lesson).
@@ -412,7 +420,10 @@ mod tests {
     fn event_lifecycle_kinds() {
         assert!(matches!(
             from_python(serde_json::json!({"kind": "item_start", "payload": {"index": 7}})),
-            Event::ItemStart { index: 7 }
+            Event::ItemStart {
+                index: 7,
+                timeout: None
+            }
         ));
         assert!(matches!(
             from_python(serde_json::json!({"kind": "item_done", "payload": {"index": 7}})),
@@ -564,10 +575,12 @@ mod property {
             arb_file_collected(),
         ];
         let group_b = prop_oneof![
-            small_str().prop_map(|id| Event::ItemStartId { id }),
+            (small_str(), proptest::option::of(0.0f64..1e6))
+                .prop_map(|(id, timeout)| Event::ItemStartId { id, timeout }),
             small_str().prop_map(|id| Event::ItemDoneId { id }),
             small_strs().prop_map(|unrun| Event::StoppedIds { unrun }),
-            any::<u64>().prop_map(|index| Event::ItemStart { index }),
+            (any::<u64>(), proptest::option::of(0.0f64..1e6))
+                .prop_map(|(index, timeout)| Event::ItemStart { index, timeout }),
             any::<u64>().prop_map(|index| Event::ItemDone { index }),
             prop::collection::vec(any::<u64>(), 0..4).prop_map(|unrun| Event::Stopped { unrun }),
             any::<i32>().prop_map(|exitstatus| Event::Done { exitstatus }),

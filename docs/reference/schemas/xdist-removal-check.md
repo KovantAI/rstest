@@ -11,10 +11,10 @@ The `--xdist-removal-json` document (schema 1). Fields are alphabetical, as in t
 | `findings` | array of RemovalFinding | yes | Every finding, blocking ones first. |
 | `meta` | MigrateMeta | yes | Envelope: `kind` is `"xdist-removal-check"`. |
 | `ready` | boolean | yes | Whether pytest-xdist can be uninstalled now (no non-allowed blocking finding, and the trial passed when it ran). |
-| `trial` | TrialReport or null | no | The `--xdist-trial` result: `null` when the trial was not requested. |
-| `xdist_version` | string or null | no | The installed pytest-xdist version: `null` when it is not installed or the interpreter could not be probed. |
+| `trial` | TrialReport or null | yes | The `--xdist-trial` result: `null` when the trial was not requested. |
+| `xdist_version` | string or null | yes | The installed pytest-xdist version: `null` when it is not installed or the interpreter could not be probed. |
 
-### MigrateMeta
+### MigrateMeta (Xdist-removal-check)
 
 Envelope metadata shared by the migrate documents.
 

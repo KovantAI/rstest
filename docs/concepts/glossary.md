@@ -106,7 +106,7 @@ it is sleeping or waiting on IO or a timeout, not computing. `--doctor`
 reports the share of test time spent waiting. See
 [Wait-bound / IO suites](../guides/wait-bound.md).
 
-**Parallel floor**: the lower bound on wall time set by the longest single
+**Parallel floor**{#parallel-floor}: the lower bound on wall time set by the longest single
 test: no worker count can finish faster. `--doctor` names the gate tests when
 the longest test exceeds the ideal per-worker share. See
 [Suite diagnostics](../guides/doctor.md#parallel-floor).
@@ -124,6 +124,43 @@ counted and listed.
 [`--changed`](../reference/cli.md#-changedrev), derived from the
 per-test coverage index when it is warm, with the import graph as the
 fallback (see [Caching](caching.md)).
+
+**Quarantine**: a list of known-flaky tests
+([`--quarantine FILE`](../reference/cli.md#-quarantine-file)) whose failures
+are reported (counted, printed, flagged in junit and report-json) but never
+fail the run. Unlike `--reruns`, nothing is retried; the failure is just
+made non-fatal.
+
+**Gate**: a check that sets the exit code on top of the test outcomes, so CI
+can fail on it: [`--doctor-fail-on`](../reference/cli.md#-doctor-fail-on-cond),
+[`--fail-on-leak`](../reference/cli.md#-fail-on-leak),
+[`--durations-regress`](../reference/cli.md#-durations-regress-ratio),
+[`--cov-diff-fail-under`](../reference/cli.md#-cov-diff-fail-under-pct),
+[`--changed-strict`](../reference/cli.md#-changed-strict). Its output lines
+are the "gate messages". Not the same as **gate tests**, below.
+
+**Gate tests**: in the doctor report, the tests longer than the ideal
+per-worker share: they set the [parallel floor](#parallel-floor), so
+only splitting or shrinking them makes the run faster.
+
+**Baseline**: whatever a comparison is measured against. It means different
+things in different places: the plain-pytest run in
+[`rstest try`](../reference/cli-commands.md#try); the last fully green commit
+for [`--since-green`](../reference/cli.md#-since-green); and the duration
+cache for [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
+(which [`--require-baseline`](../reference/cli.md#-require-baseline) makes
+mandatory).
+
+**Journal**: the record of which worker ran which test, in what order, that
+every parallel run writes to `.rstest_cache/replay/`.
+[`rstest replay`](../reference/cli-commands.md#replay) re-runs it to
+reproduce a parallel-only failure.
+
+**Hang watchdog**: the per-test time limit after which the orchestrator kills
+a stuck worker and reports the test failed:
+[`--worker-timeout`](../reference/cli.md#-worker-timeout-secs), or
+3 × the test's timeout + 10s. See
+[Crash handling](crash-handling.md).
 
 ## Internals
 
@@ -155,3 +192,15 @@ collection against it by count and hash.)
 
 **Serial phase**{#serial-phase}: `@pytest.mark.serial` tests running exclusively on the
 designate after all other workers finish.
+
+**Cache segment**: one immutable file a run or shard pushes to the
+[shared cache](caching.md#shared-cache-backend); a pull merges the base with
+every segment, so parallel jobs never overwrite each other.
+
+**Shard bucket**: one of the `N` duration-balanced slices of the suite that
+`--shard K/N` splits the collection into; shard `K` runs bucket `K`. See
+[Sharding](../guides/sharding.md).
+
+**Fork pool**: with [`--fork-pool`](../reference/cli.md#-fork-pool) (Unix),
+workers are forked from one process that has already imported the vendored
+core, instead of each importing it from scratch.

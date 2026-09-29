@@ -89,6 +89,21 @@ def gate_pytest_randomly_real_plugin(g, args, binary):
     r = gr.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
     check("randomly: reproducible seed with pinned uid", "4 passed" in r.stdout, r.stdout[-400:])
 
+    # Same suite with pytest-xdist also installed (the staged-rollout setup):
+    # randomly then registers XdistHooks, whose configure_node must not
+    # overwrite the broadcast seed with its unresolved "default" (TypeError in
+    # _reseed on every file before the fix).
+    rx_venv = Path(args.venv + "-randomly-xdist").resolve()
+    make_venv(rx_venv, extra_deps=["pytest-randomly", "pytest-xdist"])
+    gx = Gate(binary, rx_venv)
+    gx.write("rnd/test_rnd.py", (gr.tmp / "rnd" / "test_rnd.py").read_text())
+    r = gx.run("rnd", "-n", "2", env_extra={"RSTEST_RUN_UID": uid})
+    check(
+        "randomly + xdist installed: broadcast seed survives XdistHooks, no crash at -n 2",
+        "4 passed" in r.stdout,
+        r.stdout[-400:] + r.stderr[-400:],
+    )
+
 
 def gate_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
     print("== pytest-rerunfailures + xdist (no sock_port KeyError) ==")

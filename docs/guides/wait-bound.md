@@ -28,7 +28,7 @@ here:
 - **PARALLEL FLOOR**: no worker count can finish faster than the longest
   single test. If your longest test exceeds the ideal per-worker share,
   doctor names the **gate tests**; splitting or shrinking them is the only
-  way to raise the ceiling (adding workers won't).
+  way to lower that floor (adding workers won't).
 
 ```console
 $ rstest --doctor
@@ -57,9 +57,10 @@ Here is the key move for a wait-bound suite, and it is counter-intuitive:
   more waits in flight at once, since a waiting worker isn't using a core.
 
 This is the same effect doctor reports as **PARALLEL EFFICIENCY over
-100%**: "overlapping sleeps/IO run more tests at once than there are
-cores." Doctor flags efficiency above 100% as normal for wait-bound
-suites and points you back at WAIT-BOUND. (The section is `-n ≥ 2` only.)
+100%**: overlapping sleeps and IO run more tests at once than there are
+cores. Above 105% doctor prints `over 100%: tests overlap beyond core count
+(wait-bound; see WAIT-BOUND above).`, treating it as normal for a
+wait-bound suite. (The section is `-n ≥ 2` only.)
 The [scheduler](../concepts/scheduling.md) helps here too: it dispatches
 slow tests first (a cached duration of 1s or more), longest first, so a
 54-second waiter starts at t=0 instead of stacking behind other work.

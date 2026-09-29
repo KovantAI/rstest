@@ -227,8 +227,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
 }
 
 pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::Result<()> {
-    std::fs::write(path, render_markdown(report))?;
-    Ok(())
+    crate::reporting::write_output(path, render_markdown(report))
 }
 
 /// Publish the markdown report to the CI's job-summary surface, if any:

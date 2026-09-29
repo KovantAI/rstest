@@ -484,18 +484,35 @@ class StreamPlugin:
         pytest-retry instead stashes a ReportServer port AFTER registering, so
         its configure_node KeyErrors if called then; `lenient` swallows that and
         leaves it unmarked for the sessionstart sweep to retry once populated.
+
+        A registration-time call may also run before the plugin resolved its own
+        options: pytest-randomly registers XdistHooks first and resolves
+        --randomly-seed after, so its hook copies the unresolved "default" over
+        the seed rstest broadcast, and the plugin then reads that string back as
+        its seed. So a lenient call may ADD workerinput keys but not overwrite
+        one already set; a clobbered key is restored and the hook is retried at
+        sessionstart, when (as under a real xdist master) configure is done.
         """
         if self._xdist_node is None or _is_dist_internal(plugin):
             return
         impl = getattr(plugin, "pytest_configure_node", None)
         if impl is None or id(plugin) in self._node_configured:
             return
+        workerinput = getattr(self._xdist_node, "workerinput", None)
+        if not (lenient and isinstance(workerinput, dict)):
+            workerinput = None
+        before = dict(workerinput) if workerinput is not None else None
         try:
             impl(self._xdist_node)
         except Exception:
             if lenient:
                 return  # state not ready yet; retried strictly at sessionstart
             raise
+        if workerinput is not None and before is not None:
+            clobbered = [k for k, v in before.items() if workerinput.get(k, v) is not v]
+            if clobbered:
+                workerinput.update({k: before[k] for k in clobbered})
+                return  # retried strictly at sessionstart
         self._node_configured.add(id(plugin))
 
     def _sweep_configure_node(self):

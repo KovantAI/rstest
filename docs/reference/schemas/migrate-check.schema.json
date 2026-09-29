@@ -44,6 +44,7 @@
   },
   "required": [
     "meta",
+    "parallel",
     "ready",
     "tests_collected",
     "unstable_ids",
@@ -90,6 +91,7 @@
         "allowed",
         "fix",
         "nodeid",
+        "polluter",
         "verdict",
         "why"
       ]
@@ -125,20 +127,14 @@
       "properties": {
         "findings": {
           "description": "Per-test parallel-only findings (empty when ready).",
-          "type": [
-            "array",
-            "null"
-          ],
+          "type": "array",
           "items": {
             "$ref": "#/definitions/Finding"
           }
         },
         "preexisting": {
           "description": "Tests that already fail at `-n 0` (pre-existing, not a parallelism bug).",
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": "integer",
           "format": "uint",
           "minimum": 0
         },
@@ -148,10 +144,7 @@
         },
         "ready": {
           "description": "Whether it passed (present only once the phase ran).",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": "boolean"
         }
       },
       "required": [
@@ -164,10 +157,7 @@
       "properties": {
         "file": {
           "description": "The polluting file (absent for `not_reproducible`).",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "kind": {
           "description": "Polluter kind: `other_file`, `same_file`, or `not_reproducible`.",
@@ -183,7 +173,7 @@
       "type": "object",
       "properties": {
         "allowed": {
-          "description": "Whether this site is on the `--allow-unstable` list.",
+          "description": "Whether this site matches a `--migrate-allow` entry.",
           "type": "boolean"
         },
         "fix": {

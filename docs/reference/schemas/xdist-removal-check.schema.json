@@ -45,7 +45,9 @@
   "required": [
     "findings",
     "meta",
-    "ready"
+    "ready",
+    "trial",
+    "xdist_version"
   ],
   "definitions": {
     "MigrateMeta": {

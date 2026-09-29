@@ -6,15 +6,15 @@
 //! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run;
 //! [`xdist_removal`] is the uninstall-pytest-xdist readiness check.
 
-mod audit;
-mod bisect;
+pub(crate) mod audit;
+pub(crate) mod bisect;
 pub(crate) mod check;
 mod classify;
 mod try_cmd;
 pub(crate) mod xdist_removal;
 
-pub use audit::run_audit;
-pub use bisect::run_bisect;
+pub use audit::{not_run_doc as audit_not_run_doc, run_audit};
+pub use bisect::{run_bisect, write_error_json as write_bisect_error_json};
 pub use check::run_migrate_check;
 pub use try_cmd::run_try;
 pub use xdist_removal::run_xdist_removal_check;
