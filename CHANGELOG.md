@@ -5,6 +5,20 @@ between 0.x releases and are listed here.
 
 ## 0.8.0 (Unreleased)
 
+- **`rstest xdist-removal-check`: a readiness check for uninstalling
+  pytest-xdist.** It scans the pytest config and `PYTEST_ADDOPTS` for xdist
+  flags that become a usage error once the package is gone (`--tx`,
+  `--rsyncdir`, `-d`, `--maxprocesses`, `--looponfail`, `-p xdist`, ...) and
+  for `-n` / `--dist`, which rstest never read from `addopts` (so a
+  `--dist loadgroup` there already lost its grouping); `pytest-xdist` in
+  `required_plugins`; unguarded `import xdist` sites in the project and in
+  installed plugins; xdist hook implementations not marked
+  `optionalhook=True`; and `hasplugin("xdist")` gates in the project and in
+  installed plugins. Each
+  finding prints its fix. Exits non-zero on any blocking finding;
+  `--migrate-allow` accepts known ones and `--xdist-removal-json` writes a
+  versioned document for CI. `--xdist-trial` also runs the suite with xdist
+  hidden (`-p no:xdist`) and names the tests that only pass with it.
 - **`--incremental` no longer caches a test on a stale pass when coverage
   measures only part of the project.** First-party files that coverage never
   measures used to be invisible to `--incremental`, so editing one left

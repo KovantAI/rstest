@@ -56,6 +56,14 @@ itself is documented only there, in [Shape](report-json.md#shape).
     --8<-- "docs/reference/schemas/migrate-check.schema.json"
     ```
 
+--8<-- "docs/reference/schemas/xdist-removal-check.md"
+
+??? note "Xdist-removal-check: full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/xdist-removal-check.schema.json"
+    ```
+
 --8<-- "docs/reference/schemas/flake-log.md"
 
 ??? note "Flake log: full JSON Schema (draft-07)"

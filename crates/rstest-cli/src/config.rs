@@ -32,6 +32,12 @@ pub struct ProjectConfig {
     /// The ini `addopts`, already split into args (pytest prepends them to the
     /// command line).
     pub addopts: Vec<String>,
+    /// The config file this came from (`None` for the built-in default).
+    pub inifile: Option<PathBuf>,
+    /// Every other key of the pytest section, split as a list (whitespace for
+    /// ini and string values, verbatim for a TOML array). Read by checks that
+    /// look at keys rstest itself doesn't act on (`required_plugins`, ...).
+    pub extra: Vec<(String, Vec<String>)>,
 }
 
 impl Default for ProjectConfig {
@@ -44,6 +50,8 @@ impl Default for ProjectConfig {
             python_files: vec!["test_*.py".into(), "*_test.py".into()],
             testpaths: Vec::new(),
             addopts: Vec::new(),
+            inifile: None,
+            extra: Vec::new(),
         }
     }
 }
@@ -61,6 +69,7 @@ pub fn discover(start: &Path, err: &mut dyn Write) -> ProjectConfig {
             }
             if let Some(mut cfg) = parse_config_file(&path, err) {
                 cfg.rootdir = dir.to_path_buf();
+                cfg.inifile = Some(path);
                 return cfg;
             }
         }
@@ -122,6 +131,13 @@ fn from_toml_table(table: &toml::Value) -> ProjectConfig {
         }
         Some(toml::Value::String(s)) => cfg.addopts = shell_split(s),
         _ => {}
+    }
+    if let Some(t) = table.as_table() {
+        for (k, v) in t {
+            if !matches!(k.as_str(), "python_files" | "testpaths" | "addopts") {
+                cfg.extra.push((k.clone(), toml_str_list(v)));
+            }
+        }
     }
     cfg
 }
@@ -244,7 +260,7 @@ fn parse_ini(text: &str, section: &str) -> Option<ProjectConfig> {
             "testpaths" => cfg.testpaths = values,
             // shlex over the joined value, not the whitespace split: quotes matter.
             "addopts" => cfg.addopts = shell_split(&fragments.join(" ")),
-            _ => {}
+            _ => cfg.extra.push((key.clone(), values)),
         }
     }
     Some(cfg)

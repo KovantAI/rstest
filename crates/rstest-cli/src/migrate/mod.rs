@@ -3,18 +3,21 @@
 //! This file owns the run-snapshot model (`Outcomes`/`Rec`/`Phase`) and the
 //! child-session runner shared by both commands. [`classify`] owns the two
 //! classifiers (unstable ids, parallel-only failures); [`check`] is the
-//! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run.
+//! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run;
+//! [`xdist_removal`] is the uninstall-pytest-xdist readiness check.
 
 mod audit;
 mod bisect;
 pub(crate) mod check;
 mod classify;
 mod try_cmd;
+pub(crate) mod xdist_removal;
 
 pub use audit::run_audit;
 pub use bisect::run_bisect;
 pub use check::run_migrate_check;
 pub use try_cmd::run_try;
+pub use xdist_removal::run_xdist_removal_check;
 
 use std::path::Path;
 
@@ -114,12 +117,29 @@ pub(super) fn run_session_report(
     config: &[&str],
     args: &[String],
 ) -> Result<Option<Outcomes>> {
+    Ok(run_session_capture(python, config, args)?.0)
+}
+
+/// [`run_session_report`] plus the child's stderr, for callers that explain a
+/// session that never started (a pytest usage error, a plugin validation
+/// error) instead of just reporting it produced no outcomes.
+pub(super) fn run_session_capture(
+    python: &Path,
+    config: &[&str],
+    args: &[String],
+) -> Result<(Option<Outcomes>, String)> {
     let exe = std::env::current_exe()?;
-    let tmp = std::env::temp_dir().join(format!(
-        "rstest-migrate-{}-{}.json",
-        std::process::id(),
-        run_session_seq()
+    let seq = run_session_seq();
+    let tmp =
+        std::env::temp_dir().join(format!("rstest-migrate-{}-{seq}.json", std::process::id()));
+    // stderr goes to a file, not a pipe: a pipe is only drained at EOF, which a
+    // leaked grandchild (a server a test never stopped) holding the inherited
+    // fd would never send, hanging the call after the child itself exited.
+    let err_path = std::env::temp_dir().join(format!(
+        "rstest-migrate-{}-{seq}.stderr",
+        std::process::id()
     ));
+    let err_file = std::fs::File::create(&err_path)?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--python")
         .arg(python)
@@ -140,15 +160,18 @@ pub(super) fn run_session_report(
         .arg("--")
         .arg("-q")
         .args(args)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(err_file);
     cmd.status()?; // non-zero is expected when tests fail; the snapshot is truth
+    let stderr = std::fs::read(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&err_path);
     let out = std::fs::read_to_string(&tmp)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|doc| parse_outcomes(&doc, true));
     let _ = std::fs::remove_file(&tmp);
-    Ok(out)
+    Ok((out, String::from_utf8_lossy(&stderr).into_owned()))
 }
 
 pub(super) fn run_session_seq() -> u64 {

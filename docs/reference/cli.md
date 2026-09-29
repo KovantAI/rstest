@@ -26,8 +26,8 @@ rstest <COMMAND> [OPTIONS]
     `addopts = --junitxml=x.xml` writes no file at `-n 2` or more. Move these
     flags to the command line or `[tool.rstest]`.
 
-Subcommands (`rstest try`, `rstest migrate-check`, `rstest audit`, `rstest
-bisect`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
+Subcommands (`rstest try`, `rstest migrate-check`, `rstest
+xdist-removal-check`, `rstest audit`, `rstest bisect`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
 `rstest verify-vendor`) and their own flags are on [CLI
 subcommands](cli-commands.md).
 

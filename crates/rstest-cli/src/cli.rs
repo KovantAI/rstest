@@ -30,6 +30,15 @@ pub(crate) enum Command {
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
 
+    /// Readiness check for uninstalling pytest-xdist: scan the pytest config,
+    /// `PYTEST_ADDOPTS`, the project's sources and the installed plugins for
+    /// what breaks or changes once xdist is gone (xdist-only flags, `-n` /
+    /// `--dist` in addopts, `import xdist`, xdist hook implementations,
+    /// `hasplugin("xdist")` gates), with the fix per finding. Exits non-zero on
+    /// any blocking finding. `--xdist-trial` also runs the suite with xdist
+    /// hidden; `--xdist-removal-json` writes the findings for CI.
+    XdistRemovalCheck,
+
     /// Auto parallel-safety audit: run the suite under -n auto (repeat with
     /// `--audit-repeat` to catch probabilistic flakes), diff against the -n 0
     /// oracle, and print the tests that fail ONLY in parallel with a
@@ -200,6 +209,19 @@ pub struct Cli {
     /// the exit code, so CI can gate on NEW issues while tolerating known ones.
     #[arg(long = "migrate-allow", global = true)]
     pub(crate) migrate_allow: Vec<String>,
+
+    /// Write the `xdist-removal-check` findings as JSON (stable, versioned
+    /// schema) for CI gating. Used with the `xdist-removal-check` subcommand.
+    #[arg(long, global = true)]
+    pub(crate) xdist_removal_json: Option<PathBuf>,
+
+    /// With `xdist-removal-check`: also run the suite with pytest-xdist hidden
+    /// from the plugin manager (`-p no:xdist`, which drops its options and
+    /// hook specs like an uninstall; `import xdist` still succeeds),
+    /// and, when xdist is installed, once with it loaded, to name the tests
+    /// that only pass with it.
+    #[arg(long, global = true)]
+    pub(crate) xdist_trial: bool,
 
     /// Write the `audit` findings as JSON (stable, versioned schema) for CI
     /// gating. Used with the `audit` subcommand.
@@ -698,6 +720,7 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
 /// `BOOL_FLAGS`: switches that consume no value.
 const BOOL_FLAGS: &[&str] = &[
     "--doctor",
+    "--xdist-trial",
     "--fork-pool",
     "--watch",
     "--fail-on-leak",
@@ -725,6 +748,7 @@ const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
     "migrate-check",
+    "xdist-removal-check",
     "audit",
     "bisect",
     "cache-compact",
@@ -750,6 +774,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--cache-remote",
     "--migrate-check-json",
     "--migrate-allow",
+    "--xdist-removal-json",
     "--audit-json",
     "--audit-repeat",
     "--bisect-json",

@@ -65,6 +65,12 @@ fn outputs() -> Vec<Output> {
             schema: schema_of::<crate::migrate::check::MigrateCheckDoc>(),
         },
         Output {
+            name: "xdist-removal-check",
+            title: "Xdist-removal-check",
+            source: "`xdist-removal-check --xdist-removal-json`",
+            schema: schema_of::<crate::migrate::xdist_removal::XdistRemovalDoc>(),
+        },
+        Output {
             name: "flake-log",
             title: "Flake log",
             source: "`.rstest_cache/flakes.json`",

@@ -30,11 +30,11 @@ One parallel-only failure finding.
 
 ### MigrateMeta
 
-Envelope metadata for the migrate-check document.
+Envelope metadata shared by the migrate documents.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `kind` | string | yes | Constant discriminator: always `"migrate-check"`. |
+| `kind` | string | yes | Constant discriminator: the producing subcommand (`"migrate-check"`, `"xdist-removal-check"`). |
 | `runner` | string | yes | Constant producer tag: always `"rstest"`. |
 | `schema` | integer | yes | Document schema version. |
 

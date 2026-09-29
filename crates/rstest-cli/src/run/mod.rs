@@ -683,6 +683,17 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 &mut sink,
             )
         }),
+        // Uninstall-pytest-xdist readiness: static scan, optional trial run.
+        Command::XdistRemovalCheck => python().and_then(|py| {
+            migrate::run_xdist_removal_check(
+                &py,
+                args,
+                cli.xdist_removal_json.as_deref(),
+                &cli.migrate_allow,
+                cli.xdist_trial,
+                &mut sink,
+            )
+        }),
         // Auto parallel-safety audit: repeat -n auto, diff vs -n 0, serial fix-list.
         Command::Audit => python().and_then(|py| {
             migrate::run_audit(
