@@ -104,7 +104,9 @@ both honor the marker, so uninstall it rather than run two timers.
 ## A note on `@pytest.mark.parametrize` IDs
 
 Not a marker rstest owns, but the one that most often blocks parallelism:
-parametrize **IDs must be stable across collections**. rstest collects on
+parametrize **IDs must be stable across collections**. Under full
+collection (every cold-cache run, and suites below the
+[lazy](../concepts/lazy-collection.md) auto threshold) rstest collects on
 each worker and refuses to dispatch if the id sets disagree, so an id built
 from a memory address (`repr()` fallback), a uuid, or a sub-second timestamp
 stops a parallel run (`workers collected different test sets`) until you fix

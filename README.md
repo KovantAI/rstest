@@ -160,8 +160,10 @@ Full methodology:
 - **pytest underneath.** Forwards the pytest flag surface; runs conftest, fixtures,
   parametrize, marks, and pytest plugins (pytest-django, pytest-asyncio,
   hypothesis, …) through a vendored pytest core.
-- **Parallel by design.** Test-granular work distribution with duration-aware
-  scheduling; `@pytest.mark.serial` and `--dist loadfile` safety rails;
+- **Parallel by design.** Duration-aware work distribution that starts the
+  slowest tests first (per test, or per file when a large suite gets
+  [lazy collection](https://python-rstest.readthedocs.io/en/stable/concepts/lazy-collection/)); `@pytest.mark.serial`
+  and `--dist loadfile` safety rails;
   crashed workers respawn without losing your run.
 - **`rstest --doctor`.** Wait-bound tests, parallel-floor analysis, fixture
   hotspots, slowest files.

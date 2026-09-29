@@ -1,4 +1,4 @@
-# Flag & config map — pytest / pytest-xdist → rstest
+# Flag & config map: pytest / pytest-xdist → rstest
 
 rstest forwards every unrecognized flag straight to the pytest session, so the
 **entire pytest flag surface works unchanged** (`-k`, `-m`, `-x`, `-q`, `-v`,
@@ -20,7 +20,7 @@ If the suite already uses xdist, the mental model carries over directly.
 |---|---|---|
 | `-n auto` / `-n 4` | `-n auto` / `-n 4` | same meaning |
 | `-n 0` | `-n 0` | rstest's `-n 0` is byte-exact serial; identical to `-n 1` |
-| `--dist load` | `--dist load` | default; test-granular, duration-aware |
+| `--dist load` | `--dist load` | default; test-granular, duration-aware (per file when auto picks lazy collection on a large warm suite) |
 | `--dist loadfile` | `--dist loadfile` | file affinity |
 | `--dist loadscope` | `--dist loadscope` | class/module affinity |
 | `--dist loadgroup` + `@pytest.mark.xdist_group` | same | marker honored |
@@ -34,11 +34,20 @@ installed.
 
 ## Plugins that need no action
 
-- **pytest-randomly** — rstest syncs the random seed across workers, so every
+- **pytest-randomly**: rstest syncs the random seed across workers, so every
   worker collects the same shuffled order. No `-p no:randomly` needed.
-- **pytest-cov** — coverage is collected per worker and merged by the
-  orchestrator; works as-is.
-- **pytest-reverse / pytest-ordering** — deterministic reorderers, no impact.
+
+## Plugins that need a small change
+
+- **pytest-cov**: coverage is collected per worker and merged by the
+  orchestrator, but only when `--cov` is on the rstest command line. From
+  `addopts`, a parallel run measures coverage in every worker, never combines
+  or reports it, and still exits 0. Move `--cov`/`--cov-report` to the command
+  line.
+- **pytest-reverse / pytest-ordering**: reordering holds only within one
+  worker; at `-n >= 2` rstest schedules by duration and ignores reordering in
+  `pytest_collection_modifyitems`. If the order matters, use `-n 0`,
+  `--dist loadfile`, or fix the dependency.
 
 ## `[tool.rstest]` config (pyproject.toml)
 
@@ -48,7 +57,8 @@ Set defaults so contributors get the right behavior without remembering flags:
 [tool.rstest]
 numprocesses = "auto"   # or an int; "0" forces serial
 dist = "load"           # load | loadfile | loadscope | loadgroup | each
-collect = "full"        # "lazy" helps narrow -k/-m on huge suites
+# collect: leave unset; auto picks lazy for large warm-cache runs.
+# Set "full" only if the suite needs every test module imported.
 output = "bar"           # dots | verbose | bar | github | json
 ```
 
@@ -79,5 +89,71 @@ accepted:
 ```
 
 `--migrate-allow <substring>` (repeatable) accepts a known finding by
-nodeid/site substring — it's still reported (marked `(allowed)`) but doesn't
+nodeid/site substring. It's still reported (marked `(allowed)`) but doesn't
 fail the gate. Use `--output github` on the test run for inline PR annotations.
+
+### GitHub Actions: the bundled action
+
+On GitHub, prefer the bundled action over hand-written steps. It defaults
+`--output github`, persists `.rstest_cache` across runs (durations and flake
+history), and writes `junit.xml`:
+
+```yaml
+- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+  id: rstest
+  with:
+    python-version: "3.13"
+    args: "-n auto"
+    upload-junit: true
+```
+
+Pin a release tag (`v0.8.0` or later) or a commit SHA, and set `version:` to
+pin the rstest wheel. Other inputs: `changed`, `durations-regress`,
+`reruns`/`rerun-on`, `fail-under-ratio`, `shard`/`shard-total`. On other CI
+systems, cache `.rstest_cache` yourself but exclude `.rstest_cache/replay`
+(journals are per run).
+
+### Keep the replay journal of a failed run
+
+Every parallel run records its schedule to `.rstest_cache/replay/latest.json`.
+Upload it on failure so a CI-only failure can be replayed locally later
+(`rstest replay --journal`, see the `rstest-triage` skill):
+
+```yaml
+- uses: actions/upload-artifact@v7
+  if: failure()
+  with:
+    name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
+    path: .rstest_cache/replay/latest.json
+    if-no-files-found: ignore
+```
+
+### Sharding across jobs
+
+```console
+$ rstest -n 4 --shard "$K/$N" --report-json "shard.$K.json"
+$ rstest shard-verify shard.*.json      # final job: no drops, no overlap
+```
+
+- Pin `-n` explicitly: `--shard` needs at least two workers, and `auto` can
+  resolve to one, which makes the shard run exit 1.
+- Buckets balance by the duration cache, so every shard job must restore the
+  **same** cache; otherwise partitions can disagree. `shard-verify` catches
+  that after the fact.
+- Sharded runs write no replay journal.
+
+### Shared cache without cache-key plumbing
+
+`--cache-remote <dir|s3://…|gs://…>` with `--cache-pull` / `--cache-push`
+(or `RSTEST_CACHE_REMOTE`) warms and publishes `.rstest_cache` through a
+shared directory or bucket, using the `aws`/`gcloud` CLI already on the
+runner. Useful when many jobs or branches should share one duration and flake
+history. `--cache-pull`/`--cache-push` are refused at a monorepo root (each
+project has its own cache).
+
+### Hangs in CI
+
+Set `--timeout SECS` so a stuck test fails with a traceback at the stuck line
+instead of timing out the whole job. It also arms a hang backstop for code
+that never returns to Python; `--worker-timeout SECS` sets that backstop
+explicitly.

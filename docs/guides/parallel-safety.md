@@ -44,7 +44,11 @@ standard remedy for suites where tests within a file depend on each other.
 (`@pytest.mark.xdist_group` affinity across files) are finer-grained
 variants for expensive shared fixtures. All are xdist-compatible.
 The default (`--dist load`) distributes at test granularity, which
-balances better and splits slow files across workers.
+balances better and splits slow files across workers. On a large suite with
+a warm cache, rstest may pick [lazy collection](../concepts/lazy-collection.md)
+automatically; files then run whole on one worker, in file order, and auto
+only makes that pick when no single file would hold up the run. Pass
+`--collect full` to keep test-granular dispatch.
 
 ## Choosing the worker count
 

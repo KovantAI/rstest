@@ -24,7 +24,8 @@ Everything pytest does (via a vendored pytest core), plus:
 
 | Feature | Flag / API | Notes |
 |---|---|---|
-| Test-granular scheduling | `--dist load` (default) | duration cache runs slowest tests first; module locality preserved |
+| Duration-aware scheduling | `--dist load` (default) | duration cache runs slowest tests first; module locality preserved |
+| Collection strategy | `--collect full/lazy` (default: auto) | auto picks [lazy](../concepts/lazy-collection.md) for large warm-cache parallel runs: each file is collected once and runs whole on one worker; `full` everywhere else |
 | Affinity modes | `--dist loadfile/loadscope/loadgroup` | file, fixture-scope, or `xdist_group` affinity (xdist-compatible) |
 | Broadcast mode | `--dist each` | every worker runs the full suite (xdist `--dist=each`) for multi-environment validation; outcomes keyed `[gwN]` |
 | Crash recovery | automatic | crashed test reported failed; worker respawns; run completes |

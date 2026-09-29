@@ -45,7 +45,8 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
   ([Known gaps](../concepts/compatibility.md#known-gaps)).
 - **Unstable parametrize ids.** If ids come from memory addresses, reprs,
   uuids or sub-second timestamps, workers collect different test sets and
-  rstest refuses to dispatch (pydantic is the measured case:
+  rstest refuses to dispatch under full collection, which every cold-cache
+  run uses (pydantic is the measured case:
   [Parity divergences §2](../reference/parity-divergences.md#2-non-deterministic-nodeids-memory-addresses-reprs)).
   The fix is stable `ids=`, or `-n 0`.
 - **Windows-heavy fleets.** Windows is supported and runs the full test gate

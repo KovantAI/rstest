@@ -40,12 +40,25 @@ between 0.x releases and are listed here.
   cache counts as zero tests, so the first run of a suite stays `full`. Auto
   also stays `full` for path or `--changed` selections, when doctests are
   enabled, when the cache has tests from files the lazy walk can't see, or
-  when one file would hold up the run. Lazy workers (auto or explicit) now
+  when one file would hold up the run, and under `--shard`, `--shuffle`,
+  `--incremental` or a fail-fast `--order` (so `--watch` stays `full`). Without
+  an explicit `--dist load`, lazy runs each file whole on one worker, and it
+  has no cross-worker collection comparison. Pin `--collect full` for xdist's
+  exact collection model. Lazy workers (auto or explicit) now
   honor `norecursedirs`, `collect_ignore` and `--ignore` for the files they are
   handed, as eager recursion does. A banner
   reports the choice when auto picks `lazy`. Force either with `--collect full`
   / `--collect lazy`. See
   [Lazy collection](docs/concepts/lazy-collection.md#auto-default).
+- **`--fork-pool` prewarms the worker pool (Unix).** A zygote imports the
+  vendored pytest core once and forks the initial workers off it, so the core
+  import is no longer paid once per worker. Off by default; a no-op on
+  Windows, single-worker runs and `-s`/`--pdb`/`--co`. Crash-respawned workers
+  use the normal spawn path. `--doctor` now prints a `startup:` line with the
+  pool spawn time and suggests `--fork-pool` when startup is a real share of a
+  short run; doctor JSON gains `startup_seconds` and `fork_prewarm`. At
+  a monorepo root the flag is forwarded to every project. See
+  [`--fork-pool`](docs/reference/cli.md#-fork-pool).
 - **`--incremental` no longer caches a test on a stale pass when coverage
   measures only part of the project.** First-party files that coverage never
   measures used to be invisible to `--incremental`, so editing one left

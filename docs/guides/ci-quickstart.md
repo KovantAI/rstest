@@ -432,8 +432,7 @@ re-runs the same schedule on your machine.
 
 !!! warning "Sharded jobs record no journal"
     A run with `--shard` (or the action's `shard`/`shard-total` inputs) writes
-    no journal, and neither do `-n 0`/`-n 1`, `--dist each` and
-    `--collect lazy`. To replay a failure from a sharded matrix, re-run the
+    no journal, and neither do `-n 0`/`-n 1` and `--dist each`. To replay a failure from a sharded matrix, re-run the
     failing shard's tests unsharded with `-n` set to the CI worker count; that
     run records a journal you can replay.
 

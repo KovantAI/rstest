@@ -117,6 +117,7 @@ is the same model as xdist, where each worker also runs its own
   collection: `pytest_collection_modifyitems` sees the *entire* suite on
   every worker, exactly as under xdist; the orchestrator then dispatches only
   that worker's share to run. Under [`--collect lazy`](../reference/cli.md#-collect-fulllazy)
+  (explicit, or picked automatically for a large suite with a warm cache)
   the orchestrator assigns files and each worker collects only its assigned
   files on demand, so the hook sees a partial item set. Run at `-n 0` (or
   `--collect full`) if a hook must see the whole suite.
