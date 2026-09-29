@@ -344,6 +344,9 @@ mod tests {
             parse_pyarg("./my-python"),
             PyArg::Path("./my-python".into())
         );
+        // Bare command names resolve on PATH, not as an implementation.
+        assert_eq!(parse_pyarg("python3"), PyArg::Path("python3".into()));
+        assert_eq!(parse_pyarg("python3.12"), PyArg::Path("python3.12".into()));
     }
 
     #[test]
