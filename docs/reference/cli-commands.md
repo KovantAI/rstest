@@ -395,7 +395,7 @@ Used with the `bisect` subcommand.
 Re-run a recorded parallel schedule, so a parallel-only failure reproduces on
 demand. rstest owns dispatch (which worker runs which test, in what order), so
 unlike pytest/xdist it can record that schedule and pin it back. Every parallel
-run (`-n >= 2`, except `--dist each`, `--shard` and `--collect lazy`) journals
+run (`-n >= 2`, except `--dist each` and `--shard`) journals
 its exact per-worker assignment and order to
 `.rstest_cache/replay/`: one file per run (`<run-uid>.json`, last 10 kept) plus a
 stable `latest.json`. Journaling is on by default and costs almost nothing (it is

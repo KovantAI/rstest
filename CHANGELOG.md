@@ -19,6 +19,22 @@ between 0.x releases and are listed here.
   `--migrate-allow` accepts known ones and `--xdist-removal-json` writes a
   versioned document for CI. `--xdist-trial` also runs the suite with xdist
   hidden (`-p no:xdist`) and names the tests that only pass with it.
+- **`--collect` now defaults to auto.** With neither the `--collect` flag nor
+  `[tool.rstest] collect` set, rstest picks `lazy` collection for a big-enough
+  parallel run: at least 2000 known tests (from `.rstest_cache/durations.json`)
+  and a `tests × workers` product of at least 16 000, on a file-affine dist
+  (`--dist load`/`loadfile`). Otherwise it picks `full`. This drops the
+  `(workers − 1)` redundant full collections large parallel runs paid before,
+  without touching small suites (which keep full collection's locality). A cold
+  cache counts as zero tests, so the first run of a suite stays `full`. Auto
+  also stays `full` for path or `--changed` selections, when doctests are
+  enabled, when the cache has tests from files the lazy walk can't see, or
+  when one file would hold up the run. Lazy workers (auto or explicit) now
+  honor `norecursedirs`, `collect_ignore` and `--ignore` for the files they are
+  handed, as eager recursion does. A banner
+  reports the choice when auto picks `lazy`. Force either with `--collect full`
+  / `--collect lazy`. See
+  [Lazy collection](docs/concepts/lazy-collection.md#auto-default).
 - **`--incremental` no longer caches a test on a stale pass when coverage
   measures only part of the project.** First-party files that coverage never
   measures used to be invisible to `--incremental`, so editing one left
@@ -51,7 +67,7 @@ between 0.x releases and are listed here.
   git-derived version bump (setuptools-scm, hatch-vcs) does not force a full
   run. Existing baselines reset once after upgrading rstest.
 - **`rstest replay`: re-run a recorded parallel schedule.** Every parallel run
-  (`-n >= 2`, except `--dist each`, `--shard` and `--collect lazy`) journals
+  (`-n >= 2`, except `--dist each` and `--shard`) journals
   which worker ran which tests, in what order, to
   `.rstest_cache/replay/latest.json` (opt out with `RSTEST_NO_REPLAY_JOURNAL=1`).
   `rstest replay --journal <file>` pins that schedule back, so an
