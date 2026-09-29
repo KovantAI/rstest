@@ -21,7 +21,8 @@ use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
 use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
 use crate::{
-    collect, config, coverage_skip, discover, doctor, incremental, migrate, mono, remote, select,
+    collect, config, cov_scope, coverage_skip, discover, doctor, incremental, migrate, mono,
+    remote, select,
 };
 
 /// Resolve the effective `--changed` base rev: the flag's value, or `HEAD` when
@@ -213,7 +214,7 @@ struct PostRun<'a> {
     head: &'a Option<String>,
     env_fp: &'a str,
     incremental_active: bool,
-    config_fp: &'a str,
+    config: &'a coverage_skip::ConfigState,
     /// Coverage index snapshotted BEFORE the run (drives carry-forward after).
     prev_index: &'a select::CoverageIndex,
     baseline: &'a coverage_skip::Baseline,
@@ -433,6 +434,9 @@ fn resolve_run_config(
 /// already opened for reading. Open failure is non-fatal — the run continues
 /// without the side channel.
 fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
     match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -583,7 +587,16 @@ pub(crate) fn execute_inner(
     }
     // Resolve dispatch selection (--shuffle/--shard) and the --incremental skip
     // set in one phase.
-    let inc = resolve_incremental(&cfg, cli, &settings, &args, since_green, &mut sink)?;
+    let duration_cache = DurationCache::default();
+    let inc = resolve_incremental(
+        &cfg,
+        cli,
+        &settings,
+        &args,
+        since_green,
+        &duration_cache,
+        &mut sink,
+    )?;
     // Load the --quarantine list once, before dispatch: fail-fast ordering needs
     // it (a quarantined test must not lead the queue and trip -x), and the
     // post-run demotion reuses it. Inert under passthrough.
@@ -600,7 +613,9 @@ pub(crate) fn execute_inner(
         DispatchSelection {
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
+            lazy: inc.lazy,
             quarantine: quarantine.as_ref(),
+            durations: &duration_cache,
         },
         pinned,
         &mut sink,
@@ -634,7 +649,7 @@ pub(crate) fn execute_inner(
         head: &head,
         env_fp: &env_fp,
         incremental_active: inc.active,
-        config_fp: &inc.config_fp,
+        config: &inc.config,
         prev_index: &inc.prev_index,
         baseline: &inc.baseline,
         replay: pinned.is_some(),
@@ -657,10 +672,10 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     let mut sink = Sink::stdio(color::Palette::detect(args));
     // cache-compact, shard-verify and explain are interpreter-free (they only touch
     // cache/report files); the rest resolve Python first, lazily, so the
-    // interpreter-free modes never probe one. One `?` for every arm.
+    // interpreter-free modes never probe one.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = || discover::resolve(&scope, cli.python.as_deref());
-    let code = match command {
+    let result = match command {
         Command::CacheCompact { keep_last, max_age } => {
             run_cache_compact(cli, &mut sink, *keep_last, max_age.as_deref())
         }
@@ -711,8 +726,52 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         Command::Replay { run_id, journal } => {
             crate::replay::run_replay(cli, run_id.as_deref(), journal.as_deref(), &mut sink)
         }
-    }?;
+    };
+    // Verdict subcommands spend exit 1 on "found something", so an error
+    // inside them (no interpreter, a failed spawn) must not read as a finding:
+    // report it the way `main` would and exit 2, their "couldn't run" code.
+    let verdict = matches!(
+        command,
+        Command::Try | Command::MigrateCheck | Command::Audit | Command::Bisect { .. }
+    );
+    let code = match result {
+        Err(e) if verdict => {
+            eprintln!("Error: {e:?}");
+            record_verdict_error(cli, command, &e);
+            2
+        }
+        other => other?,
+    };
     Ok(Some(code))
+}
+
+/// A verdict subcommand failed before (or outside) its own JSON bookkeeping,
+/// e.g. no usable interpreter: leave its `--*-json` document saying so, never a
+/// stale result from an earlier run that a CI gate would read as current.
+fn record_verdict_error(cli: &Cli, command: &crate::cli::Command, e: &anyhow::Error) {
+    use crate::cli::Command;
+    match command {
+        Command::Bisect { nodeid, .. } => {
+            let _ = migrate::write_bisect_error_json(
+                cli.bisect_json.as_deref(),
+                nodeid,
+                &format!("{e:#}"),
+            );
+        }
+        Command::Audit => {
+            if let Some(path) = cli.audit_json.as_deref() {
+                let doc =
+                    serde_json::to_string_pretty(&migrate::audit_not_run_doc()).unwrap_or_default();
+                let _ = crate::reporting::write_output(path, doc);
+            }
+        }
+        Command::MigrateCheck => {
+            if let Some(path) = cli.migrate_check_json.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// `cache-compact` subcommand: fold policy-selected remote segments into a
@@ -965,13 +1024,49 @@ fn passthrough_n_warning(
 struct Incremental {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    /// Lazy collection resolved for this run ([`collect_lazy`]), decided once
+    /// here and reused by dispatch.
+    lazy: bool,
     /// `--incremental` is actually in effect this run (all preconditions met).
     active: bool,
-    config_fp: String,
+    config: coverage_skip::ConfigState,
     /// Coverage index snapshotted BEFORE the run (drives skip now, carry-forward after).
     prev_index: select::CoverageIndex,
     baseline: coverage_skip::Baseline,
     skip_ids: std::collections::HashSet<String>,
+}
+
+/// Coverage scope + config state for an active incremental run. The measured
+/// set comes from the args pytest really runs with (ini `addopts` and
+/// `PYTEST_ADDOPTS` included: [`cov_scope::effective_pytest_args`]), and the
+/// state folds config/conftest content AND — when coverage measures only part
+/// of the tree — every unmeasured first-party file, so editing
+/// coverage-invisible code busts the skip set instead of leaving a stale
+/// false-green. A run without `--cov` reuses the coverage args of the run that
+/// wrote the index. Factored out of [`resolve_incremental`] so the wiring is
+/// unit-testable without standing up a full `RunConfig`: dropping the scope
+/// here (a default [`cov_scope::CovScope`]) is a silent-false-green regression
+/// the seam test catches.
+fn incremental_config(
+    scope: &std::path::Path,
+    args: &[String],
+) -> (cov_scope::CovScope, coverage_skip::ConfigState) {
+    let effective = cov_scope::effective_pytest_args(scope, args);
+    // The index skipping trusts was written by the last COVERAGE run: without
+    // --cov now, rebuild that run's scope from its recorded args, so files it
+    // never measured still fold (see ConfigState::index_cov_args).
+    let index_cov_args = if coverage_skip::coverage_requested(&effective) {
+        Some(cov_scope::coverage_args(&effective))
+    } else {
+        coverage_skip::stored_index_cov_args(scope)
+    };
+    let cov = index_cov_args
+        .as_ref()
+        .map(|a| cov_scope::CovScope::resolve(scope, a))
+        .unwrap_or_default();
+    let mut state = coverage_skip::config_state(scope, &cov);
+    state.index_cov_args = index_cov_args;
+    (cov, state)
 }
 
 /// Resolve `--shuffle`/`--shard` and compute the `--incremental` skip set in one
@@ -987,6 +1082,7 @@ fn resolve_incremental(
     settings: &config::RstestSettings,
     args: &[String],
     since_green: bool,
+    cache: &DurationCache,
     sink: &mut Sink,
 ) -> Result<Incremental> {
     let RunConfig {
@@ -1001,7 +1097,7 @@ fn resolve_incremental(
     // full-collection pool. Refusing (not ignoring) matters: a user probing for
     // order dependence must not get a silently ordered run. `is_lazy` is computed
     // once and reused by the incremental gate below.
-    let is_lazy = collect_lazy(cli, settings, dist_name, args, sink)?;
+    let is_lazy = collect_lazy(cli, settings, dist_name, args, n, cache, sink)?;
     let shuffle_seed = resolve_shuffle_seed(
         cli.shuffle.as_deref(),
         n,
@@ -1034,12 +1130,12 @@ fn resolve_incremental(
         && shard.is_none()
         && shuffle_seed.is_none()
         && !is_lazy;
-    // The config fingerprint is only consumed under `active`; computing it
+    // The config state is only consumed under `active`; computing it
     // unconditionally would walk the whole project tree for conftests.
-    let config_fp = if active {
-        coverage_skip::config_fingerprint(scope)
+    let (cov, config) = if active {
+        incremental_config(scope, args)
     } else {
-        String::new()
+        Default::default()
     };
     warn_incremental_conflicts(
         sink.err(),
@@ -1051,21 +1147,34 @@ fn resolve_incremental(
     // --incremental relies on the coverage index advancing every run; without
     // --cov this run covtool never rewrites it, so a changed test re-runs on
     // every invocation until a coverage run refreshes the index.
-    if active && !coverage_skip::coverage_requested(args) {
+    if active && !coverage_skip::coverage_requested(&cov_scope::effective_pytest_args(scope, args))
+    {
         sink.warn(
             "rstest: --incremental without --cov: the coverage index won't be \
              refreshed this run, so changed tests keep re-running until a --cov run",
         );
     }
-    // A narrowed --cov=<pkg> makes first-party source OUTSIDE the scope
-    // coverage-invisible: editing it won't bust the skip, so a test depending on
-    // it can be wrongly cached (stale false-green). Warn; --cov=. closes the gap.
-    if active && coverage_skip::cov_scope_narrowed(args) {
+    // A narrowed --cov=<pkg> (or a coverage include/omit) makes first-party
+    // source coverage doesn't measure invisible. That gap is closed soundly:
+    // config_state folds a hash of every unmeasured first-party .py, so editing
+    // one busts the skip set wholesale. Warn only about the coarseness (any such
+    // edit re-runs everything); --cov=. restores per-file granularity.
+    if cov.is_partial() {
         sink.warn(
-            "rstest: --incremental with a scoped --cov: edits to first-party source \
-             outside the coverage scope are undetectable and may leave a test cached \
-             on a stale pass; use --cov=. to cover the whole tree",
+            "rstest: --incremental with a scoped --cov (or coverage include/omit): \
+             first-party source coverage doesn't measure is folded into the skip \
+             fingerprint, so editing any of it re-runs the whole suite; use --cov=. \
+             for per-file incrementality",
         );
+        // A scope naming no directory/module under the project can't exempt any
+        // file from that fold, so every edit re-runs everything: say which.
+        for s in cov.unmatched_sources(scope) {
+            sink.warn(&format!(
+                "rstest: --incremental: --cov scope `{s}` matches no directory or module \
+                 under the project, so every first-party .py counts as out of scope and any \
+                 edit re-runs the whole suite"
+            ));
+        }
     }
     // Snapshot the index BEFORE the run: it drives the skip decision now, and
     // post-run it supplies the cached tests' coverage to fold back in (covtool
@@ -1079,20 +1188,21 @@ fn resolve_incremental(
     // recorded def lines restore the cached (not-run) entries' source line after
     // the run (a cached test has no pytest report to supply one).
     let baseline = if active {
-        coverage_skip::load(scope, &config_fp)
+        coverage_skip::load(scope, &config.fp)
     } else {
         coverage_skip::Baseline::default()
     };
     let skip_ids = if active {
-        coverage_skip::skippable_now(&prev_index, &baseline)
+        coverage_skip::skippable_now(&prev_index, &baseline, &config)
     } else {
         std::collections::HashSet::new()
     };
     Ok(Incremental {
         shuffle_seed,
         shard,
+        lazy: is_lazy,
         active,
-        config_fp,
+        config,
         prev_index,
         baseline,
         skip_ids,
@@ -1129,12 +1239,15 @@ fn apply_quarantine(
 }
 
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
-/// the argument budget: the resolved `--shuffle` seed, `--shard` bucket, and
-/// `--quarantine` matcher (fail-fast keeps quarantined tests out of the front).
+/// the argument budget: the resolved `--shuffle` seed, `--shard` bucket,
+/// lazy-collection choice, `--quarantine` matcher (fail-fast keeps quarantined
+/// tests out of the front), and the run's shared duration cache.
 struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    lazy: bool,
     quarantine: Option<&'a regex::RegexSet>,
+    durations: &'a DurationCache,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1151,7 +1264,9 @@ fn dispatch_run(
     let DispatchSelection {
         shuffle_seed,
         shard,
+        lazy,
         quarantine,
+        durations: duration_cache,
     } = selection;
     let RunConfig {
         n,
@@ -1181,7 +1296,9 @@ fn dispatch_run(
              the journal was recorded from a pool run"
         );
     }
-    let watchdog = watchdog_duration(worker_timeout, cli.timeout);
+    // Only the explicit cap travels here: without one, the pool sizes each
+    // test's watchdog from the timeout the worker reports at item_start.
+    let watchdog = worker_timeout.map(std::time::Duration::from_secs);
     // Compiled once and shared by both pool paths (a config-struct field, so it
     // must outlive the borrow); the passthrough path below ignores it.
     let only_rerun = cli
@@ -1207,7 +1324,7 @@ fn dispatch_run(
         RunPath::Passthrough
     } else if n <= 1 && !single_worker_reruns {
         RunPath::SingleWorker
-    } else if collect_lazy(cli, settings, dist_name, args, sink)? {
+    } else if lazy {
         RunPath::Lazy
     } else {
         RunPath::Pool
@@ -1267,6 +1384,15 @@ fn dispatch_run(
                 fork_prewarmed: false,
             }
         } else if path == RunPath::Lazy {
+            // Auto-picked (neither --collect nor the setting present)? Say so once,
+            // here at the single dispatch site, so the choice is observable.
+            if cli.collect.is_none() && settings.collect.is_none() {
+                sink.warn(&format!(
+                    "rstest: auto-selected lazy collection ({} known tests x {n} workers); \
+                     pass --collect full to force eager collection",
+                    duration_cache.get().len()
+                ));
+            }
             let cwd = std::env::current_dir()?;
             let project = config::discover(&cwd, sink.err());
             let paths: Vec<PathBuf> = crate::cli::path_args(args)
@@ -1277,7 +1403,7 @@ fn dispatch_run(
             let mut files = collect::collect_test_files(&paths, &project)?;
             if let Some((k, total)) = shard {
                 let before = files.len();
-                files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
+                files = shard::shard_files(&files, duration_cache.get(), &cwd, k, total);
                 sink.warn(&format!(
                     "rstest: shard {k}/{total} -> {} of {before} test file(s)",
                     files.len()
@@ -1290,10 +1416,14 @@ fn dispatch_run(
             lazy::run_lazy_pool(
                 &cfg,
                 files,
+                duration_cache.get(),
+                durations.is_some(),
                 // Steal (split files across workers) only on an EXPLICIT --dist
                 // load: lazy defaults to strict file affinity, since stealing
                 // exposes cross-file/in-file order dependence affinity doesn't.
                 lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
+                // A shard is a partial suite: no journal (same as run_pool).
+                shard.is_none().then_some(dist_name.as_str()),
                 sink,
             )?
         } else {
@@ -1331,6 +1461,37 @@ fn resolve_order(cli: &Cli, settings: &config::RstestSettings) -> Result<pool::O
         None if cli.watch => pool::Order::FailFast,
         None => pool::Order::Throughput,
     })
+}
+
+/// Auto-lazy floor: below this many known tests, full collection's locality
+/// (contiguous module dispatch, one warm collection per worker) beats paying
+/// the on-demand per-file collection overhead, so a small suite stays eager.
+const AUTO_LAZY_MIN_TESTS: usize = 2000;
+/// Auto-lazy work floor on `tests * workers`. Lazy's win is dropping the
+/// (workers - 1) redundant full collections, so it scales with both suite
+/// size and worker count; 2000 tests need >= 8 workers, 4000 need >= 4.
+const AUTO_LAZY_MIN_WORK: usize = 16_000;
+
+/// Auto-default heuristic (only reached when neither `--collect` nor
+/// `[tool.rstest] collect` was set): pick lazy for a big-enough suite on a
+/// file-affine dist, so a large parallel run stops re-collecting the whole
+/// suite once per worker. Pure over its inputs (`tests` = cached test count)
+/// so tests can drive it without a warm cache. Conservative on purpose: a cold
+/// cache (`tests == 0`), any file-affinity-breaking selection, or a narrowed
+/// path selection keeps full collection.
+fn auto_lazy(dist_name: &str, args: &[String], n: usize, tests: usize) -> bool {
+    n >= 2
+        && matches!(dist_name, "load" | "loadfile")
+        // nodeid / --pyargs selection can't ride the file walk (same reason
+        // explicit lazy falls back), so never auto-pick lazy for those.
+        && !args.iter().any(|a| a.contains("::") || a == "--pyargs")
+        // `tests` counts the whole cached suite, not the selection. A path
+        // selection (explicit, or --changed/--since-green narrowing) can be a
+        // handful of files, and auto-lazy's strict file affinity would cap
+        // parallelism at the file count (one big file = one worker).
+        && !names_a_selection(args)
+        && tests >= AUTO_LAZY_MIN_TESTS
+        && tests.saturating_mul(n) >= AUTO_LAZY_MIN_WORK
 }
 
 /// Which run path [`dispatch_run`] takes, as far as `--order` cares.
@@ -1417,23 +1578,22 @@ fn check_order_shuffle(order: pool::Order, explicit: bool, shuffled: bool) -> Re
     Ok(())
 }
 
-/// Resolve the collection strategy (CLI > [tool.rstest] > "full") and
-/// validate lazy-mode constraints.
+/// Resolve the collection strategy (CLI > [tool.rstest] > auto) and validate
+/// lazy-mode constraints. When neither the flag nor the setting is present,
+/// [`auto_lazy`] decides from suite size and worker count.
 fn collect_lazy(
     cli: &Cli,
     settings: &config::RstestSettings,
     dist_name: &str,
     args: &[String],
+    n: usize,
+    cache: &DurationCache,
     sink: &mut Sink,
 ) -> Result<bool> {
-    let mode = cli
-        .collect
-        .clone()
-        .or_else(|| settings.collect.clone())
-        .unwrap_or_else(|| "full".into());
-    match mode.as_str() {
-        "full" => Ok(false),
-        "lazy" => {
+    let explicit = cli.collect.clone().or_else(|| settings.collect.clone());
+    match explicit.as_deref() {
+        Some("full") => Ok(false),
+        Some("lazy") => {
             if !matches!(dist_name, "load" | "loadfile") {
                 anyhow::bail!(
                     "--collect lazy is file-affine and cannot honor --dist {dist_name} \
@@ -1453,7 +1613,125 @@ fn collect_lazy(
             }
             Ok(true)
         }
-        other => anyhow::bail!("unknown --collect mode: {other} (use full|lazy)"),
+        Some(other) => anyhow::bail!("unknown --collect mode: {other} (use full|lazy)"),
+        // Auto: no warn on the file-affinity-breaking fallbacks (the user did
+        // not ask for lazy); the banner is printed once at the dispatch site.
+        // Features that require (or force) full collection veto auto-lazy so
+        // the auto-pick never silently disables --incremental or turns
+        // --shuffle (which errors under lazy) into a hard failure. An explicit
+        // --collect lazy still conflicts with these loudly downstream.
+        //
+        // --shard is vetoed too: auto-lazy would switch it to file-granular
+        // partitioning with no collection hash (so `shard-verify` finds no shard
+        // metadata), and shard jobs whose caches differ (one cold) would pick
+        // different modes and partition the suite inconsistently. A fail-fast
+        // order (explicit or the --watch auto-pick) is ignored under lazy, so it
+        // keeps full collection rather than silently losing its ordering.
+        None if cli.shuffle.is_some()
+            || cli.incremental
+            || cli.shard.is_some()
+            || matches!(resolve_order(cli, settings), Ok(pool::Order::FailFast)) =>
+        {
+            Ok(false)
+        }
+        // Cheap gates first: the duration-cache load hashes every cached test
+        // source, so skip it when the count cannot matter (serial run, affinity-
+        // breaking dist); `auto_lazy` re-checks these for its own callers.
+        None if n < 2 || !matches!(dist_name, "load" | "loadfile") => Ok(false),
+        None => Ok(auto_lazy(dist_name, args, n, cache.get().len()) && {
+            // Past the size gate, check the lazy file walk against what the
+            // last eager collection timed. Rare enough (big warm suites only)
+            // that the extra walk is noise; its config warnings are already
+            // reported by the dispatch-time discover, so drop them here.
+            let cwd = std::env::current_dir()?;
+            let project = config::discover(&cwd, &mut std::io::sink());
+            let env_addopts = std::env::var("PYTEST_ADDOPTS").unwrap_or_default();
+            let opts = args
+                .iter()
+                .chain(&project.addopts)
+                .map(String::as_str)
+                .chain(env_addopts.split_whitespace());
+            if requests_doctests(opts) {
+                return Ok(false);
+            }
+            // A walk error (a glob or missing `testpaths` entry, an unreadable
+            // dir) only means auto can't vouch for lazy: stay full, never fail
+            // a run that didn't ask for lazy.
+            let Ok(files) = collect::collect_test_files(&[], &project) else {
+                return Ok(false);
+            };
+            let rel: Vec<String> = files
+                .iter()
+                .map(|f| {
+                    f.strip_prefix(&project.rootdir)
+                        .unwrap_or(f)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            lazy_layout_fits(cache.get(), &rel, n)
+        }),
+    }
+}
+
+/// Whether pytest will collect doctests (`--doctest-modules`, `--doctest-glob`)
+/// from argv, ini `addopts` or `PYTEST_ADDOPTS`. The lazy walk never hands those
+/// items to a worker, and a cache written by an earlier lazy run would not list
+/// them either, so [`lazy_layout_fits`] alone can't catch doctests enabled later.
+fn requests_doctests<'a>(mut opts: impl Iterator<Item = &'a str>) -> bool {
+    opts.any(|o| o == "--doctest-modules" || o.starts_with("--doctest-glob"))
+}
+
+/// Whether the lazy file walk (`files`, rootdir-relative) reproduces the suite
+/// the duration cache timed, and spreads well enough for strict file affinity.
+/// Only auto-lazy asks: an explicit `--collect lazy` is the user's call.
+///
+/// Lazy dispatches only `python_files`-matching `.py` files, so it drops items
+/// eager collection finds elsewhere (`--doctest-modules` in non-test modules,
+/// `--doctest-glob`, plugin-collected non-`.py` files): a cached file the walk
+/// lacks means lazy would lose tests. The other direction is fine: a walked
+/// file with no cached timing is new, all-skipped or test-free, and one pytest
+/// would never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) is
+/// reported empty by the lazy worker, which replays pytest's ignore checks.
+///
+/// Auto-lazy never steals, so each file runs whole on one worker: a file whose
+/// cached time exceeds an even per-worker share by more than
+/// [`LAZY_LONG_POLE_SLACK_SECS`] would be the long pole the eager pool avoids
+/// by spreading its tests (this also covers `files < n`).
+fn lazy_layout_fits(
+    cache: &std::collections::HashMap<String, f64>,
+    files: &[String],
+    n: usize,
+) -> bool {
+    let mut per_file: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for (id, secs) in cache {
+        *per_file.entry(crate::text::nodeid_file(id)).or_insert(0.0) += secs;
+    }
+    let walked: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    if !per_file.keys().all(|f| walked.contains(f)) {
+        return false;
+    }
+    let total: f64 = per_file.values().sum();
+    let longest = per_file.values().copied().fold(0.0, f64::max);
+    longest - total / n as f64 <= LAZY_LONG_POLE_SLACK_SECS
+}
+
+/// Wall time a lazy long-pole file may add over an even per-worker share
+/// before auto-lazy stays eager. An absolute floor, not a ratio: a fast suite's
+/// millisecond per-file timings are noise, and a ratio on them would flip the
+/// mode from run to run while the pole costs nothing either way.
+const LAZY_LONG_POLE_SLACK_SECS: f64 = 1.0;
+
+/// The duration cache, loaded on first use and shared for the rest of the run.
+/// `durations::load` hashes every cached test source, so the auto-lazy check,
+/// the lazy banner, `--shard` file partitioning, and lazy file ordering must
+/// not each pay for their own load.
+#[derive(Default)]
+struct DurationCache(std::cell::OnceCell<std::collections::HashMap<String, f64>>);
+
+impl DurationCache {
+    fn get(&self) -> &std::collections::HashMap<String, f64> {
+        self.0.get_or_init(durations::load)
     }
 }
 
@@ -1473,9 +1751,9 @@ fn warn_windows_timeout(
         let _ = writeln!(
             w,
             "rstest: warning: --timeout can't interrupt a blocked test in-process on Windows \
-             (no SIGALRM). rstest auto-arms the coarser --worker-timeout watchdog from it, which \
-             kills the whole worker (not just the stuck test) once the deadline is well exceeded; \
-             set --worker-timeout SECS to tune that cap."
+             (no SIGALRM). Only the coarser per-test hang watchdog applies (3x the test's timeout \
+             + 10s), and it kills the whole worker, not just the stuck test; set --worker-timeout \
+             SECS for a fixed, tighter cap."
         );
     }
 }
@@ -1560,28 +1838,6 @@ fn silent_master_plugin_warnings(n: usize, args: &[String]) -> Vec<String> {
         );
     }
     out
-}
-
-/// Watchdog duration for a run: explicit `--worker-timeout` wins; otherwise
-/// auto-arm from `--timeout` at a generous multiple, so the worker's in-process
-/// interrupt fires first and the watchdog only catches a C-ext deadlock the
-/// signal can't reach (the test never returns to the interpreter). Only a
-/// positive, finite `--timeout` arms it — mirroring the worker's
-/// `_parse_timeout` (0/negative/NaN = disabled) — and the computed duration is
-/// clamped so a huge or near-overflow value can't panic `from_secs_f64`. A bad
-/// `--timeout` must not crash the run.
-fn watchdog_duration(
-    worker_timeout: Option<u64>,
-    timeout: Option<f64>,
-) -> Option<std::time::Duration> {
-    worker_timeout
-        .map(std::time::Duration::from_secs)
-        .or_else(|| {
-            timeout.filter(|t| t.is_finite() && *t > 0.0).map(|t| {
-                std::time::Duration::try_from_secs_f64(t * 3.0 + 10.0)
-                    .unwrap_or(std::time::Duration::MAX)
-            })
-        })
 }
 
 fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
@@ -1821,7 +2077,9 @@ fn warn_quarantine_passthrough(w: &mut dyn Write) {
 
 /// Steal (split files across workers) only on an EXPLICIT `--dist load`: lazy
 /// collection defaults to strict file affinity, since stealing exposes the
-/// cross-file / in-file order dependence that affinity hides.
+/// cross-file / in-file order dependence that affinity hides. A `load` from
+/// either the CLI or `[tool.rstest] dist` enables it (by design, a CLI
+/// `loadfile` does not override a config `load`).
 fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> bool {
     cli_dist == Some("load") || settings_dist == Some("load")
 }
@@ -1906,13 +2164,14 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
-        collect_lazy, dispatch_command, fold_run_event, head_to_none, lazy_should_steal,
-        names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
-        parse_numprocesses, resolve_changed_base, resolve_order, resolve_retention_policy,
+        attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
+        check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
+        incremental_config, lazy_layout_fits, lazy_should_steal, names_a_selection,
+        names_existing_path, order_ignored_warning, parse_duration_secs, parse_numprocesses,
+        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
         resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, watchdog_duration, RunPath,
+        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -1984,6 +2243,60 @@ mod tests {
     }
 
     #[test]
+    fn incremental_config_threads_cov_scope() {
+        // Wiring guard for resolve_incremental's config seam: under a narrowed
+        // --cov — on the CLI or only in the ini addopts — the fingerprint MUST
+        // fold unmeasured first-party source. If the scope is ever dropped,
+        // editing coverage-invisible code would not move the fp -> a silent
+        // false-green.
+        let scope = std::env::temp_dir().join(format!("rstest-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(scope.join("pkg")).unwrap();
+        std::fs::create_dir_all(scope.join("other")).unwrap();
+        std::fs::write(scope.join("pkg/mod.py"), b"x = 1\n").unwrap();
+        std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
+        let fp = |args: &[&str]| incremental_config(&scope, &sv(args)).1.fp;
+
+        // Under --cov=pkg, editing out-of-scope other/mod.py MUST move the fp.
+        let before = fp(&["--cov=pkg"]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 2\n").unwrap();
+        assert_ne!(
+            before,
+            fp(&["--cov=pkg"]),
+            "out-of-scope edit must bust under --cov=pkg"
+        );
+
+        // Sanity: no --cov does NOT fold out-of-scope source, so the same edit
+        // leaves the fp stable — proving the difference above is scoping.
+        let wt = fp(&[]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 3\n").unwrap();
+        assert_eq!(wt, fp(&[]), "no --cov: out-of-scope source is not folded");
+
+        // --cov=pkg only in the ini addopts narrows just the same.
+        std::fs::write(scope.join("pytest.ini"), b"[pytest]\naddopts = --cov=pkg\n").unwrap();
+        let (cov, _) = incremental_config(&scope, &sv(&[]));
+        assert_eq!(cov.sources, vec!["pkg"], "addopts --cov must be seen");
+        let before = fp(&[]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 4\n").unwrap();
+        assert_ne!(before, fp(&[]), "addopts-only --cov=pkg must fold other/");
+
+        // A later run WITHOUT --cov reuses the recorded scope of the run that
+        // wrote the index: other/ still folds. With nothing recorded, the
+        // index's scope is unknown and the state says so.
+        std::fs::remove_file(scope.join("pytest.ini")).unwrap();
+        let (_, state) = incremental_config(&scope, &sv(&[]));
+        assert_eq!(state.index_cov_args, None, "nothing recorded yet");
+        let (_, cov_run) = incremental_config(&scope, &sv(&["--cov=pkg"]));
+        crate::coverage_skip::record(&scope, &cov_run, Default::default(), Default::default());
+        let (cov, plain) = incremental_config(&scope, &sv(&[]));
+        assert_eq!(plain.index_cov_args, Some(sv(&["--cov=pkg"])));
+        assert_eq!(cov.sources, vec!["pkg"]);
+        std::fs::write(scope.join("other/mod.py"), b"y = 5\n").unwrap();
+        assert_ne!(plain.fp, fp(&[]), "no-cov run still folds other/");
+        let _ = std::fs::remove_dir_all(&scope);
+    }
+
+    #[test]
     fn silent_master_warnings_ignore_rstest_owned_report_flags() {
         // rstest OWNS --html/--junitxml/--report-json (rendered from merged
         // results) — passing them is the fix, so never warn.
@@ -2026,48 +2339,6 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_explicit_worker_timeout_wins() {
-        // Explicit --worker-timeout always wins, ignoring --timeout.
-        assert_eq!(
-            watchdog_duration(Some(30), Some(2.0)),
-            Some(std::time::Duration::from_secs(30))
-        );
-        assert_eq!(
-            watchdog_duration(Some(30), None),
-            Some(std::time::Duration::from_secs(30))
-        );
-    }
-
-    #[test]
-    fn watchdog_auto_arms_from_positive_timeout() {
-        // Auto-arm at t*3 + 10 when only --timeout is set.
-        assert_eq!(
-            watchdog_duration(None, Some(2.0)),
-            Some(std::time::Duration::from_secs_f64(16.0))
-        );
-    }
-
-    #[test]
-    fn watchdog_disabled_for_non_positive_or_non_finite_timeout() {
-        // 0/negative/NaN/inf disable the auto-arm instead of panicking
-        // from_secs_f64 (mirrors the worker's _parse_timeout).
-        assert_eq!(watchdog_duration(None, None), None);
-        assert_eq!(watchdog_duration(None, Some(0.0)), None);
-        assert_eq!(watchdog_duration(None, Some(-4.0)), None);
-        assert_eq!(watchdog_duration(None, Some(f64::NAN)), None);
-        assert_eq!(watchdog_duration(None, Some(f64::INFINITY)), None);
-    }
-
-    #[test]
-    fn watchdog_clamps_overflowing_timeout_instead_of_panicking() {
-        // A finite-but-enormous --timeout must clamp to MAX, not panic.
-        assert_eq!(
-            watchdog_duration(None, Some(f64::MAX)),
-            Some(std::time::Duration::MAX)
-        );
-    }
-
-    #[test]
     fn parse_numprocesses_parses_and_rejects() {
         assert_eq!(parse_numprocesses("4", &[]).unwrap(), 4);
         assert_eq!(parse_numprocesses("0", &[]).unwrap(), 0);
@@ -2092,13 +2363,16 @@ mod tests {
     }
 
     #[test]
-    fn collect_lazy_defaults_to_full() {
-        // No CLI flag, no setting => "full" => not lazy.
+    fn collect_lazy_cold_cache_stays_full() {
+        // No CLI flag, no setting, and (in the test cwd) no warm duration
+        // cache => auto sees ~0 known tests => full.
         assert!(!collect_lazy(
             &cli(),
             &settings_collect(None),
             "load",
             &[],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
@@ -2107,18 +2381,63 @@ mod tests {
     #[test]
     fn collect_lazy_enabled_for_file_affine_dist() {
         let s = settings_collect(Some("lazy"));
-        assert!(collect_lazy(&cli(), &s, "load", &[], &mut Sink::captured().0).unwrap());
-        assert!(collect_lazy(&cli(), &s, "loadfile", &[], &mut Sink::captured().0).unwrap());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "load",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "loadfile",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
     }
 
     #[test]
     fn collect_lazy_rejects_incompatible_dist() {
         let s = settings_collect(Some("lazy"));
         // loadscope/loadgroup need a global id list; lazy is file-affine.
-        assert!(collect_lazy(&cli(), &s, "loadscope", &[], &mut Sink::captured().0).is_err());
-        assert!(collect_lazy(&cli(), &s, "loadgroup", &[], &mut Sink::captured().0).is_err());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "loadscope",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .is_err());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "loadgroup",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .is_err());
         // each runs the whole suite per worker: no file-level dispatch either.
-        let err = collect_lazy(&cli(), &s, "each", &[], &mut Sink::captured().0).unwrap_err();
+        let err = collect_lazy(
+            &cli(),
+            &s,
+            "each",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("each runs the full suite"),
             "{err}"
@@ -2134,6 +2453,8 @@ mod tests {
             &s,
             "load",
             &["test_x.py::test_a".to_string()],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
@@ -2143,6 +2464,8 @@ mod tests {
             &s,
             "load",
             &["--pyargs".to_string()],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
@@ -2155,6 +2478,8 @@ mod tests {
             &settings_collect(Some("sometimes")),
             "load",
             &[],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .is_err());
@@ -2306,6 +2631,185 @@ mod tests {
         assert!(check_order_shuffle(FailFast, false, true).is_ok());
         assert!(check_order_shuffle(FailFast, true, false).is_ok());
         assert!(check_order_shuffle(Throughput, true, true).is_ok());
+    }
+
+    #[test]
+    fn auto_lazy_picks_lazy_for_big_parallel_suite() {
+        // 4000 tests * 8 workers well past the work floor => lazy.
+        assert!(auto_lazy("load", &[], 8, 4000));
+        assert!(auto_lazy("loadfile", &[], 8, 4000));
+    }
+
+    #[test]
+    fn auto_lazy_stays_full_below_thresholds() {
+        // Under the test floor, regardless of worker count.
+        assert!(!auto_lazy("load", &[], 64, AUTO_LAZY_MIN_TESTS - 1));
+        // Over the test floor but under the work floor (too few workers).
+        assert!(!auto_lazy("load", &[], 2, AUTO_LAZY_MIN_TESTS + 1));
+        // Serial run never goes lazy.
+        assert!(!auto_lazy("load", &[], 1, 100_000));
+    }
+
+    #[test]
+    fn collect_lazy_auto_vetoed_by_shuffle_or_incremental() {
+        // Auto must not silently disable --incremental or turn --shuffle (which
+        // errors under lazy) into a hard failure, even for a huge suite. No warm
+        // cache in the test cwd, so the baseline is already full anyway; assert
+        // the veto path returns full without touching the cache count.
+        let mut c = cli();
+        c.shuffle = Some("random".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.shard = Some("1/2".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.order = Some("fail-fast".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.incremental = true;
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn auto_lazy_declines_when_file_affinity_breaks() {
+        // Big suite, but nodeid/--pyargs selection and non-file-affine dists
+        // can't ride the file walk => stay full.
+        assert!(!auto_lazy("load", &["a.py::t".to_string()], 8, 100_000));
+        assert!(!auto_lazy("load", &["--pyargs".to_string()], 8, 100_000));
+        assert!(!auto_lazy("loadscope", &[], 8, 100_000));
+        assert!(!auto_lazy("loadgroup", &[], 8, 100_000));
+    }
+
+    fn timings(entries: &[(&str, f64)]) -> std::collections::HashMap<String, f64> {
+        entries.iter().map(|&(id, s)| (id.to_string(), s)).collect()
+    }
+
+    fn walked(files: &[&str]) -> Vec<String> {
+        files.iter().map(|f| f.to_string()).collect()
+    }
+
+    #[test]
+    fn lazy_layout_fits_an_even_suite_the_walk_reproduces() {
+        let cache = timings(&[
+            ("tests/test_a.py::t1", 1.0),
+            ("tests/test_a.py::t2", 1.0),
+            ("tests/test_b.py::t", 2.0),
+        ]);
+        assert!(lazy_layout_fits(
+            &cache,
+            &walked(&["tests/test_a.py", "tests/test_b.py"]),
+            2
+        ));
+    }
+
+    #[test]
+    fn lazy_layout_rejects_items_the_walk_cannot_see() {
+        // A doctest in a non-test module (or a --doctest-glob text file) was
+        // collected eagerly but is not a python_files match: lazy would drop it.
+        let cache = timings(&[("tests/test_a.py::t", 1.0), ("pkg/mod.py::pkg.mod.f", 1.0)]);
+        assert!(!lazy_layout_fits(&cache, &walked(&["tests/test_a.py"]), 1));
+    }
+
+    #[test]
+    fn lazy_layout_accepts_walked_files_without_timings() {
+        // All-skipped, test-free or new files never get a call timing; the
+        // lazy worker reports norecursedirs-pruned ones empty on its own.
+        let cache = timings(&[("tests/test_a.py::t", 1.0)]);
+        assert!(lazy_layout_fits(
+            &cache,
+            &walked(&["tests/test_a.py", "tests/test_skipped_on_linux.py"]),
+            1
+        ));
+    }
+
+    #[test]
+    fn lazy_layout_rejects_a_file_longer_than_a_worker_share() {
+        // 2 files, 8 workers: strict affinity leaves 6 workers idle.
+        let cache = timings(&[("test_a.py::t", 10.0), ("test_b.py::t", 10.0)]);
+        assert!(!lazy_layout_fits(
+            &cache,
+            &walked(&["test_a.py", "test_b.py"]),
+            8
+        ));
+        // A fast suite's noisy millisecond skew is below the slack: fine.
+        let cache = timings(&[("test_a.py::t", 0.03), ("test_b.py::t", 0.001)]);
+        assert!(lazy_layout_fits(
+            &cache,
+            &walked(&["test_a.py", "test_b.py"]),
+            8
+        ));
+        // One dominant file among many: the long pole serialises the run.
+        let cache = timings(&[
+            ("test_big.py::t", 50.0),
+            ("test_c.py::t", 1.0),
+            ("test_d.py::t", 1.0),
+        ]);
+        assert!(!lazy_layout_fits(
+            &cache,
+            &walked(&["test_big.py", "test_c.py", "test_d.py"]),
+            2
+        ));
+    }
+
+    #[test]
+    fn requests_doctests_spots_both_doctest_flags() {
+        assert!(requests_doctests(["-q", "--doctest-modules"].into_iter()));
+        assert!(requests_doctests(["--doctest-glob=*.txt"].into_iter()));
+        assert!(requests_doctests(["--doctest-glob", "*.rst"].into_iter()));
+        assert!(!requests_doctests(
+            ["-q", "--doctest-continue-on-failure"].into_iter()
+        ));
+    }
+
+    #[test]
+    fn auto_lazy_declines_on_path_selection() {
+        // The cached count is suite-wide; a path selection (explicit or
+        // --changed narrowing) may be one file, which strict affinity would
+        // run on a single worker. `src` exists (cwd is the crate dir).
+        assert!(!auto_lazy("load", &["src".to_string()], 8, 100_000));
+        // Flags with on-disk values are not a selection.
+        assert!(auto_lazy(
+            "load",
+            &["-k".to_string(), "src".to_string()],
+            8,
+            100_000
+        ));
     }
 
     #[test]
@@ -2645,6 +3149,8 @@ mod tests {
         // Default (no explicit load) keeps strict file affinity.
         assert!(!lazy_should_steal(None, None));
         assert!(!lazy_should_steal(Some("loadfile"), Some("loadscope")));
+        // Either source's `load` enables it; a CLI `loadfile` doesn't veto.
+        assert!(lazy_should_steal(Some("loadfile"), Some("load")));
     }
 
     #[test]
@@ -2754,7 +3260,13 @@ mod tests {
             None
         );
         // A scheduling-only event is a no-op in a single session.
-        assert_eq!(fold(proto::Event::ItemStart { index: 0 }), None);
+        assert_eq!(
+            fold(proto::Event::ItemStart {
+                index: 0,
+                timeout: None
+            }),
+            None
+        );
         // Done terminates with the exit status.
         assert_eq!(fold(proto::Event::Done { exitstatus: 1 }), Some(1));
 
@@ -2884,11 +3396,11 @@ mod tests {
 
     #[test]
     fn attach_stream_json_warns_when_open_fails() {
-        // A path under a nonexistent directory can't be created => warn, no panic.
-        let path = std::env::temp_dir()
-            .join(format!("rstest-streamjson-missing-{}", std::process::id()))
-            .join("nope")
-            .join("out.ndjson");
+        // A path under a regular file can't be created => warn, no panic.
+        let blocker =
+            std::env::temp_dir().join(format!("rstest-streamjson-file-{}", std::process::id()));
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("out.ndjson");
 
         let (mut sink, captured) = Sink::captured();
         attach_stream_json(&mut sink, &path);

@@ -114,7 +114,7 @@ environment for this one command.)
 
 Real open-source suites, end-to-end, with per-test outcome diffing against
 the pytest baseline: 100% parity on pandas, django-allauth and rich, and
-99.93-100% on aiohttp, whose socket-leak warning flake hits xdist too (every
+99.93-99.96% on aiohttp, whose socket-leak warning flake hits xdist too (every
 known flake is catalogued in the docs).
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->

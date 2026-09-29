@@ -28,7 +28,8 @@ the real values.
 ## Set by the orchestrator (internal)
 
 `RSTEST_BASETEMP`, `RSTEST_SEND_IDS`, `RSTEST_DOCTOR`, `RSTEST_TIMEOUT`,
-`RSTEST_LEAKCHECK`, `RSTEST_DEBUGPY_PORT`, `RSTEST_STREAM_OUTPUT` coordinate
+`RSTEST_LEAKCHECK`, `RSTEST_DEBUGPY_PORT`, `RSTEST_STREAM_OUTPUT`,
+`RSTEST_JUNITXML` coordinate
 workers and may change between versions. Don't depend on them. rstest clears
 them before starting each worker and sets only the ones the run needs (for
 example `RSTEST_DOCTOR` only under `--doctor`, `--doctor-json`, `--doctor-md` or
@@ -50,9 +51,10 @@ listening, so a re-imported child process doesn't bind the port twice).
 | `VIRTUAL_ENV` | worker interpreter discovery (first after `--python`) |
 | `NO_COLOR` | disables rstest's colored output when set, even to an empty value. Only `--color=yes` or `--color=no`, written with `=`, overrides it (the flag is also forwarded to pytest) |
 | `PYTEST_ADDOPTS` | read by the vendored core, exactly as under pytest. rstest-owned flags placed here (`--reruns`, `--junitxml`, `--timeout`, ...) are **not** seen by rstest; see [CLI](cli.md) |
-| `RSTEST_CACHE` | relocates the project cache directory (default `.rstest_cache` in the invocation directory): durations, flakes, coverage index, last-green baseline. At a [monorepo](../concepts/monorepo.md#caches-per-project) root each project gets `<RSTEST_CACHE>/<slug>` (a relative value resolves against the monorepo root); unset, each project keeps its own `<project>/.rstest_cache` |
+| `RSTEST_CACHE` | relocates the project cache directory (default `.rstest_cache` in the invocation directory): durations, flakes, coverage index, last-green baseline, and [replay journals](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally) (`replay/`). At a [monorepo](../concepts/monorepo.md#caches-per-project) root each project gets `<RSTEST_CACHE>/<slug>` (a relative value resolves against the monorepo root); unset, each project keeps its own `<project>/.rstest_cache` |
 | `RSTEST_CACHE_REMOTE` | default for [`--cache-remote`](cli.md#-cache-remote-urldir-cache-pull-cache-push) (the flag wins) |
-| `RSTEST_CACHE_REMOTE_TOKEN` | bearer token sent to an `http(s)://` cache remote |
+| `RSTEST_CACHE_REMOTE_TOKEN` | bearer token sent to an `http(s)://` cache remote. rstest removes it from the environment it gives test processes (workers, and the pytest baseline of `rstest try`), so it doesn't show up in `os.environ`. That is defense in depth, not a secret boundary: the rstest process itself still holds it, and a test running as the same user can read another process's environment (`/proc/<pid>/environ` on Linux). Give jobs that run untrusted code a read-only token |
+| `RSTEST_NO_REPLAY_JOURNAL` | set to `1` to stop parallel runs writing a [replay journal](cli-commands.md#replay); empty, `0` and `false` leave journaling on |
 | `RSTEST_CACHE_KEEP_LAST` | `cache-compact` / auto-compaction retention: keep the newest N segments loose (default for `--keep-last`) |
 | `RSTEST_CACHE_MAX_AGE` | retention by age: keep segments younger than this loose, e.g. `30d` (default for `--max-age`) |
 | `RSTEST_CACHE_COMPACT_THRESHOLD` | default for [`--cache-compact-threshold`](cli.md#-cache-compact-threshold-n); an unparseable value is reported, not ignored |

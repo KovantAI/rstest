@@ -1,0 +1,118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditDoc",
+  "description": "The `--audit-json` document (schema 1). Every field but `meta`, `ran` and\n`parallel_safe` is absent when the audit did not run.",
+  "type": "object",
+  "properties": {
+    "inconclusive": {
+      "description": "Tests that failed under `-n auto` but did not run in the follow-up\nruns, so could not be classified. They still fail the gate.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "intrinsic_flakes": {
+      "description": "Tests that fail intermittently whatever the scheduling (intrinsic flakes).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "meta": {
+      "$ref": "#/definitions/AuditMeta"
+    },
+    "order_dependent": {
+      "description": "Tests that pass under `--dist loadfile`: they depend on a sibling in\ntheir file running first, so keep the file together rather than serial.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "parallel_safe": {
+      "description": "Whether the suite is parallel-safe (no parallel-only failures). Always\n`false` when the audit did not run.",
+      "type": "boolean"
+    },
+    "preexisting_failures": {
+      "description": "Tests that already fail at `-n 0`: pre-existing, not a parallelism\nissue, and not counted against the gate.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "ran": {
+      "description": "Whether the `-n auto` pass produced a run to audit.",
+      "type": "boolean"
+    },
+    "serial_candidates": {
+      "description": "Tests fixable by pinning them to `@pytest.mark.serial`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SerialCandidate"
+      }
+    },
+    "serial_conftest": {
+      "description": "A paste-able `conftest.py` block that marks every serial candidate.",
+      "type": "string"
+    },
+    "tests": {
+      "description": "Tests audited (0 when the selection matched nothing).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "meta",
+    "parallel_safe",
+    "ran"
+  ],
+  "definitions": {
+    "AuditMeta": {
+      "description": "Envelope metadata for the audit document.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Constant discriminator: always `\"audit\"`.",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "kind",
+        "runner",
+        "schema"
+      ]
+    },
+    "SerialCandidate": {
+      "description": "One test fixable by `@pytest.mark.serial`.",
+      "type": "object",
+      "properties": {
+        "fix": {
+          "description": "The underlying (non-stopgap) fix for this verdict.",
+          "type": "string"
+        },
+        "nodeid": {
+          "description": "The failing test's node id.",
+          "type": "string"
+        },
+        "verdict": {
+          "description": "The classification verdict title.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fix",
+        "nodeid",
+        "verdict"
+      ]
+    }
+  }
+}

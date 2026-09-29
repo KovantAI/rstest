@@ -104,12 +104,9 @@
         },
         "shard": {
           "description": "Sharding identity; present only under `--shard K/N`.",
-          "anyOf": [
+          "allOf": [
             {
               "$ref": "#/definitions/ShardJson"
-            },
-            {
-              "type": "null"
             }
           ]
         },
@@ -146,17 +143,11 @@
           "type": "boolean"
         },
         "call": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "cpu": {
           "description": "Call-phase CPU time (process_time), present only when measured\n(`--doctor` or a live-stream run). Serialized when present so a\nreport-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on\na plain run so the snapshot stays byte-comparable to the pytest baseline.",
-          "type": [
-            "number",
-            "null"
-          ],
+          "type": "number",
           "format": "double"
         },
         "crashed": {
@@ -164,10 +155,7 @@
           "type": "boolean"
         },
         "duration": {
-          "type": [
-            "number",
-            "null"
-          ],
+          "type": "number",
           "format": "double"
         },
         "flaky": {
@@ -175,52 +163,34 @@
           "type": "boolean"
         },
         "lineno": {
-          "description": "Source line of the test (0-based, from pytest's report.location),\nfor editor mapping. None when pytest reports no location.",
-          "type": [
-            "integer",
-            "null"
-          ],
+          "description": "Source line of the test (0-based, from pytest's report.location),\nfor editor mapping. Absent when pytest reports no location.",
+          "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "longrepr": {
           "description": "Failure text (assertion repr / traceback), failures only.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "quarantined": {
           "description": "Failed, but matched the --quarantine list: reported distinctly,\nnever fatal to the run.",
           "type": "boolean"
         },
         "setup": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "skip_reason": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "teardown": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "wasxfail": {
           "type": "boolean"
         },
         "worker": {
           "description": "Worker that produced the final outcome (pool runs only).",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       }
     }

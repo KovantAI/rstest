@@ -8,7 +8,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from rstest_worker._internal.dispatch import ItemDispatchPlugin, LazyDispatchPlugin, _session_roots
+from rstest_worker._internal.dispatch import (
+    ItemDispatchPlugin,
+    LazyDispatchPlugin,
+    _ignored_by_recursion,
+    _session_roots,
+)
 
 
 class FakeConn:
@@ -242,6 +247,25 @@ def test_eager_runtestloop_runs_all_items_with_nextitem_scoping():
     assert calls == [("a", "b"), ("b", "c"), ("c", None)]
     starts = [p["index"] for k, p in conn.sent if k == "item_start"]
     assert starts == [0, 1, 2]
+    # No --timeout and no marker: no per-test timeout, so no watchdog.
+    assert [p["timeout"] for k, p in conn.sent if k == "item_start"] == [None] * 3
+
+
+def test_item_start_reports_the_effective_timeout(monkeypatch):
+    # The marker wins over the global --timeout; the orchestrator sizes each
+    # test's hang watchdog from this value.
+    monkeypatch.setenv("RSTEST_TIMEOUT", "2")
+    marked = FakeItem("b", closest={"timeout": SimpleNamespace(args=(300,), kwargs={})})
+    session, _ = _eager_session([FakeItem("a"), marked])
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0, 1]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    ItemDispatchPlugin(conn).pytest_runtestloop(session)
+    assert [p["timeout"] for k, p in conn.sent if k == "item_start"] == [2.0, 300.0]
 
 
 def test_eager_runtestloop_collectonly_returns_early():
@@ -351,6 +375,58 @@ def test_lazy_collect_file_reports_ids_serial_and_flaky():
         "serial": ["t.py::a"],
         "flaky": {"t.py::b": 2},
     }
+
+
+def _recursion_session(tmp_path, args, ignored):
+    """A session rooted at `tmp_path` whose ignore hook answers from
+    `ignored` (paths relative to tmp_path); records every path it is asked."""
+    asked: list[str] = []
+
+    def ignore(collection_path, config):
+        rel = collection_path.relative_to(tmp_path).as_posix()
+        asked.append(rel)
+        return rel in ignored or None
+
+    config = SimpleNamespace(args=args, invocation_params=SimpleNamespace(dir=tmp_path))
+    session = SimpleNamespace(
+        config=config,
+        gethookproxy=lambda p: SimpleNamespace(pytest_ignore_collect=ignore),
+    )
+    return session, asked
+
+
+def test_ignored_by_recursion_checks_dirs_below_the_initial_arg(tmp_path):
+    session, asked = _recursion_session(tmp_path, ["tests"], {"tests/build"})
+    assert _ignored_by_recursion(session, "tests/build/test_copy.py")
+    # The initial arg itself is exempt; checking stops at the ignored dir.
+    assert asked == ["tests/build"]
+    session, asked = _recursion_session(tmp_path, ["tests"], set())
+    assert not _ignored_by_recursion(session, "tests/a/test_x.py")
+    assert asked == ["tests/a", "tests/a/test_x.py"]
+
+
+def test_ignored_by_recursion_exempts_initial_paths_and_their_parents(tmp_path):
+    # An explicitly passed file (and the dirs above it) is never ignored,
+    # exactly as pytest's isinitpath(with_parents=True) exemption.
+    session, asked = _recursion_session(
+        tmp_path, [str(tmp_path), "build/test_copy.py"], {"build", "build/test_copy.py"}
+    )
+    assert not _ignored_by_recursion(session, "build/test_copy.py")
+    assert asked == []
+
+
+def test_ignored_by_recursion_ignores_files_outside_args_or_without_config(tmp_path):
+    session, _ = _recursion_session(tmp_path, ["tests"], {"other"})
+    assert not _ignored_by_recursion(session, "other/test_x.py")
+    assert not _ignored_by_recursion(SimpleNamespace(), "t.py")
+
+
+def test_lazy_collect_file_reports_an_ignored_file_empty(tmp_path):
+    session, _ = _recursion_session(tmp_path, ["."], {"build"})
+    session.perform_collect = lambda paths, genitems: pytest.fail("collected")
+    conn = FakeConn()
+    assert LazyDispatchPlugin(conn)._collect_file(session, "build/test_copy.py", {}) == 0
+    assert conn.sent == [("file_collected", {"path": "build/test_copy.py", "ids": []})]
 
 
 def _lazy_session(perform_collect, *, collectonly=False):

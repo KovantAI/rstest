@@ -35,7 +35,7 @@ keep doing this?": that's the history.
 
 ## Remember: the flake history
 
-Every run (except `--dist each`) merges its events into
+Every run (except `--dist each` and `rstest replay`) merges its events into
 `.rstest_cache/flakes.json`:
 
 ```json

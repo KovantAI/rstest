@@ -69,7 +69,9 @@ licensing is in [License](license.md#vendored-software). Key points:
   pytest 9's behavior regardless of the pytest version installed elsewhere in
   your environment; there is no older-core build.
 - The vendored core's own runtime dependencies must exist in the target
-  virtualenv: `pluggy>=1.5`, `iniconfig`, `packaging`, `pygments`. rstest
+  virtualenv: `pluggy>=1.5`, `iniconfig`, `packaging`, `pygments`, plus
+  `exceptiongroup` and `tomli` on Python 3.10 and `colorama` on Windows
+  (pytest's own conditional dependencies). rstest
   depends on the **real** pluggy by design.
 
 ### Handling pytest security fixes
@@ -230,6 +232,60 @@ tests or make `--reruns-only-known-flaky` hide failures. Only trusted
 default-branch runs should push; PR jobs (especially from forks) should pull
 only. See [Caching: trust boundary](../concepts/caching.md#trust-boundary).
 
+The credential is the real boundary, because your tests run with whatever the
+job holds:
+
+- **Tests can reach any credential the job holds.** rstest keeps
+  `RSTEST_CACHE_REMOTE_TOKEN` out of the environment it gives workers and
+  the pytest baseline `rstest try` runs, so the token doesn't show up in a
+  test's `os.environ`. The rstest process itself still holds it, though,
+  and a test running as the same user can read another process's
+  environment (`/proc/<pid>/environ` on Linux, `ps eww` on macOS). Treat
+  that as defense in depth: a job that runs untrusted code must hold a
+  read-only token or none.
+- **Cloud CLI credentials are not stripped.** For `s3://` / `gs://` remotes,
+  the `aws` / `gcloud` credentials (`AWS_*` variables, an assumed OIDC role,
+  `gcloud` config) are the job's own, and tests that talk to the cloud may
+  need them. Give PR jobs a role or token that can only read the cache
+  prefix.
+- **The GitHub action writes the cache only from trusted runs.** With
+  `cache-push: auto` (the default), the `remote` backend pushes only on
+  `push`, `schedule` and `workflow_dispatch` runs of `warm-from-branch`,
+  plus `merge_group`. The `actions-cache` backend never saves on
+  `pull_request_target`, `issue_comment` or `workflow_run`, which write
+  into the base branch's cache scope while possibly running PR code. The
+  action also passes the token only to the rstest command, not to the rest
+  of its run step.
+
+### Replay journals
+
+A [replay journal](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)
+records the run's arguments, and `rstest replay` passes them on to pytest
+as they are. They can include `-p <plugin>`, `-c <file>`, `-o <option>` or
+`--rootdir`, which load code or change configuration on your machine.
+They can also point `--basetemp` at a directory (pytest deletes and
+recreates it), or write files with `--junitxml`, `--report-log` or
+`--cov-report`. rstest prints the recorded arguments, with control
+characters escaped, before the tests start. Replay doesn't pause for
+confirmation, so for a journal you didn't produce, look at its `args`
+field first (`python -m json.tool latest.json`).
+
+- **Replay only journals from runs you trust.** A journal downloaded from a
+  fork's CI run (for example as a PR artifact) is written by that fork's
+  workflow and can carry any arguments.
+- **Journals on public repositories are public.** Anyone who can download
+  the workflow's artifacts can read the arguments, the test order and the
+  nodeids in the journal. The journal records the pytest arguments given
+  on the command line (the action's `args` input, for example), not
+  `addopts` or `PYTEST_ADDOPTS`, so keep secrets out of those command-line
+  arguments. Shorten the artifact's `retention-days` if the order itself is
+  sensitive.
+- **Replaying a fork's failure runs the fork's code.** Checking out the
+  failing commit and installing its dependencies runs its conftest,
+  plugins and install hooks on your machine, whatever the journal says. Do
+  that in a container or a throwaway environment, not on a machine with
+  credentials you care about.
+
 ### GitHub action inputs
 
 !!! note "Pin `v0.8.0` or later"
@@ -246,7 +302,10 @@ attacker-influenced context such as `github.head_ref` or a PR title.
 
 With the artifact cache backend, the action warms only from a successful run
 triggered by `warm-from-event` (default `push`) on `warm-from-branch`, so a
-pull_request run, fork or not, can't seed the cache main reads.
+pull_request run, fork or not, can't seed the cache main reads. With the
+`remote` and `actions-cache` backends, `cache-push: auto` (the default)
+decides which events may write the cache: see
+[Shared cache is a trust boundary](#shared-cache-is-a-trust-boundary).
 
 ## Verifying your install
 

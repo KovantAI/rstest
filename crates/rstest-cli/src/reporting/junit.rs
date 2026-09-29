@@ -156,8 +156,7 @@ pub fn write(path: &Path, run: &Run, suite_seconds: f64) -> Result<()> {
         xml.push_str("</testsuite>");
     }
     xml.push_str("</testsuites>");
-    std::fs::write(path, xml)?;
-    Ok(())
+    super::write_output(path, xml)
 }
 
 /// Add rstest's signals to a streamed pytest element.

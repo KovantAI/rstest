@@ -166,6 +166,31 @@ mount (`cache-remote: /mnt/ci-cache/rstest`) needs no pull/push bookends beyond
 the flags. Add `durations-regress` + `require-baseline: true` to make a cold or
 failed pull a hard error instead of a silent green.
 
+**Only trusted runs write.** With the default `cache-push: auto`, the
+`remote` backend pushes only on `push`, `schedule` and `workflow_dispatch`
+runs of `warm-from-branch`, and on `merge_group`. Every other job (pull
+requests, feature-branch pushes, `issue_comment` or `workflow_run` jobs)
+reads the baseline but writes no segment. Set `cache-push: true` to push
+anyway, or `false` for a pull-only job on any event. With the
+`actions-cache` backend, `auto` saves on `push`, `pull_request` (whose cache
+only that PR can restore), `schedule`, `workflow_dispatch` and
+`merge_group`, but not on `pull_request_target`, `issue_comment` or
+`workflow_run`, which save into the base branch's scope.
+
+`cache-push` only decides whether rstest pushes. The job's credentials are
+the real boundary, because test code can read whatever the job holds: the
+action passes `cache-remote-token` only to the rstest command, and rstest
+keeps it out of the test processes' environment, but a test running as the
+same user can still read the rstest process's environment. Give PR jobs a
+read-only role or token, for example by choosing the role per event:
+
+```yaml
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'arn:aws:iam::…:role/ci-cache-write' || 'arn:aws:iam::…:role/ci-cache-read' }}
+      aws-region: us-east-1
+```
+
 `id-token: write` is for the OIDC role assumption; the assumed role needs
 `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix (`Delete` only if
 `cache-compact-threshold` is set or you run a `cache-compact` job): the
@@ -187,8 +212,9 @@ covers GCS / Azure / HTTP.
 | `cache-backend` | `actions-cache` | `actions-cache` / `artifact` / `remote`: see [Warm cache as a service](#warm-cache-as-a-service) |
 | `cache-remote` | `""` | dir / `file://` / `s3://` / `gs://` / `http(s)://` remote; non-empty ⇒ `remote` backend |
 | `cache-remote-token` | `""` | bearer for an `http(s)://` remote → `RSTEST_CACHE_REMOTE_TOKEN` |
+| `cache-push` | `auto` | whether this job writes the cache: `auto` = `remote` pushes only from `push`/`schedule`/`workflow_dispatch` on `warm-from-branch` and `merge_group`; `actions-cache` skips `pull_request_target`/`issue_comment`/`workflow_run`. `true` always, `false` never |
 | `cache-compact-threshold` | `""` | `--cache-compact-threshold N`: fold loose segments inline on push past N (best-effort) |
-| `warm-from-branch` | `main` | artifact backend: branch whose latest successful run seeds the warm cache |
+| `warm-from-branch` | `main` | your trusted branch. Artifact backend: its latest successful run seeds the warm cache. `remote` backend with `cache-push: auto`: the only branch whose runs push |
 | `warm-from-event` | `push` | Artifact backend: only warm from a run triggered by this event (empty = any); keeps PR runs from becoming the warm source |
 | `artifact-suffix` | derived | Scopes artifact names per matrix leg; default is `<os>-py<version>[-<working-directory>]` |
 | `artifact-cache-dir` | `.rstest-rcache` | artifact backend: workspace dir segments materialize into |

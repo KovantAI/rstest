@@ -64,7 +64,7 @@ Per-test fields (absent when not applicable):
 | `longrepr` | string | failure text (assertion repr / traceback), failures only, capped at 20,000 bytes (cut on a UTF-8 character boundary) |
 | `crashed` | `true` | the failure was fabricated by the orchestrator: worker crash or `--worker-timeout` kill; pytest never reported it. `longrepr` says which |
 | `worker` | `"gw2"` | worker that produced the final outcome (pool runs only) |
-| `cached` | `true` | not executed this run: skipped by [`--incremental`](cli.md#-incremental) because it passed last run and its covered source is unchanged. Counts as passed. A cached entry carries only `"call": "passed"` and `"cached": true` (no `setup`, `teardown` or `duration`) |
+| `cached` | `true` | not executed this run: skipped by [`--incremental`](cli.md#-incremental) because it passed last run and its covered source is unchanged. Counts as passed. A cached entry carries only `"call": "passed"`, `"cached": true` and, when the prior run recorded it, `lineno` (no `setup`, `teardown` or `duration`) |
 
 `meta.schema` is the document version, currently `5`. History: `1` was
 the unversioned original (phases, `duration`, `wasxfail`,
@@ -102,8 +102,12 @@ result of every project: test keys are root-relative nodeids
 (`libs/core/tests/test_x.py::test_y`), collect-error paths are prefixed
 the same way, and `meta.projects` maps each project to
 `{"exitstatus": N, "counts": {...}}` or `{"skipped": true}`;
-`meta.counts` holds the grand totals across projects. It carries the same
-`meta.schema` as a single-project document.
+`meta.counts` holds the grand totals across projects. `meta.projects` is
+added by the merge and is not in the generated
+[Run report schema](output-schemas.md#run-report). It carries the same
+`meta.schema` as a single-project document. (rstest 0.7.0 stamped merged
+documents `"schema": 4` although they carried schema-5 fields; treat those as
+schema 5.)
 
 For *suite-health* data (timings analysis, wait-bound tests, fixture
 costs) use [`--doctor-json`](cli.md#-doctor-json-path) instead; the two
@@ -151,7 +155,7 @@ Per-test fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `nodeid` | string | pytest nodeid (parametrized variants are separate entries) |
-| `file` | string | absolute path to the test file (editor-ready URI) |
+| `file` | string | absolute path to the test file (editor-ready URI); empty when pytest reports no location |
 | `lineno` | int / `null` | 0-based source line; `null` when pytest reports none |
 | `markers` | string[] | every pytest marker **name** on the item: own and inherited from class/module (`pytestmark`), sorted and de-duplicated. Includes `serial`, `flaky`, `skip`, `xfail`, `parametrize`, `xdist_group`, and any custom marks. Names only (no args/reason) |
 
@@ -230,7 +234,7 @@ run, so a tree can mark the file red live rather than waiting for
 | `path` | string | the failing collector: rootdir-relative file or nodeid |
 | `longrepr` | string | the collection traceback |
 
-Under full collection (the default) every worker collects the whole suite, so
+Under full collection every worker collects the whole suite, so
 the same file's `collecterror` is emitted **once per worker**: dedupe by
 `path` if you need one entry per file (the human summary's `N collect errors`
 counts the same way).
@@ -388,8 +392,9 @@ reference doesn't spell out:
 `schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
 `cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
 `slowest_files`); `2` added the `parallel_efficiency` object; `3` added the
-per-fixture `constant` / `projected_saving_seconds` scope-promotion fields
-and the `coverage_waste` object. The `leaks` array is a conditional, no-bump
+per-fixture `constant` / `projected_saving_seconds` scope-promotion fields,
+the `coverage_waste` object, and the `startup_seconds` / `fork_prewarm`
+fields. The `leaks` array is a conditional, no-bump
 addition (omitted when empty); read a missing key as no leaks.
 
 `schema` aside, all times are raw seconds (no rounding): round in your
@@ -450,7 +455,7 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `meta` | object | `{runner, kind, schema}`; `schema` is the document version, currently `1` |
-| `ready` | bool | `true` only when the suite is parallel-ready: no unstable ids and no parallelism-specific failures |
+| `ready` | bool | `true` only when no id forces `-n 0` (WILL-bail) and the parallel phase ran with no parallel-only failures. Unstable ids that don't bail, and tests already failing at `-n 0`, don't clear it; allow-listing doesn't set it (an all-allow-listed run exits `0` with `ready: false`) |
 | `tests_collected` | int | tests seen across the two collection passes (their union) |
 | `will_bail_count` | int | count of unstable ids that are per-process (address / uuid): these force `-n 0` |
 | `unstable_ids` | array | the unstable-id findings, grouped by parametrize site (see below) |
@@ -467,12 +472,12 @@ Top-level fields:
 | `sample` | string | a sample unstable param value from this site |
 | `fix` | string | the upstream fix (give the parametrize a stable `ids=`) |
 
-`parallel` (present only when the parallel phase ran):
+`parallel` (`{"ran": false}` alone when the phase started but captured no outcomes):
 
 | Field | Type | Meaning |
 |---|---|---|
 | `ran` | bool | whether the `-n auto` classification actually executed |
-| `ready` | bool | `true` when the parallel run was green |
+| `ready` | bool | `true` when no test failed only in parallel (tests already failing at `-n 0` don't count) |
 | `preexisting` | int | tests already failing at `-n 0` (a pre-existing bug, not a migration concern) |
 | `findings` | array | the classified parallel-only failures (see below) |
 
@@ -481,12 +486,14 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `nodeid` | string | the failing test |
-| `verdict` | string | `NOT PARALLEL-SPECIFIC` / `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` / `INCONCLUSIVE` |
+| `verdict` | string | `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` / `INCONCLUSIVE` |
 | `why` | string | the evidence behind the verdict |
 | `fix` | string | the recommended fix plus rstest stopgap |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |
 | `polluter` | object / `null` | for `ORDER DEPENDENCY` / `ISOLATION / CO-LOCATION`: `{kind: "other_file", file}`, `{kind: "same_file", file}`, or `{kind: "not_reproducible"}`; `null` otherwise |
 
-The exit code is **not** in the document; read it from the process: non-zero
-when any non-allow-listed WILL-bail id or parallel finding exists.
+The exit code is **not** in the document; read it from the process: `1`
+when any non-allow-listed WILL-bail id or parallel finding exists, `2` when
+the parallel pass produced no outcomes (`parallel` is `{"ran": false}`) or
+rstest hit an error.
 Increment-only: incompatible changes bump `meta.schema`.

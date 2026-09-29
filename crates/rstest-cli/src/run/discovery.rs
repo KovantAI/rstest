@@ -333,7 +333,10 @@ mod tests {
         // A non-discovery event (collect-only emits no run events) is a no-op.
         assert_eq!(
             fold_collect_event(
-                proto::Event::ItemStart { index: 0 },
+                proto::Event::ItemStart {
+                    index: 0,
+                    timeout: None,
+                },
                 &mut ids,
                 &mut locations,
                 &mut marks,

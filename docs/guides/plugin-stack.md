@@ -11,9 +11,12 @@ pytest-xdist), and the one question that matters
 before switching runners is: *will these keep working under rstest's
 parallel pool and its vendored pytest 9 core?*
 
-The one-line reassurance: **every plugin in this stack loads and runs; the
-only adjustments are two report/terminal plugins you move to `-n 0`, and
-nothing needs re-installing or porting**. The config moves are small: an ini
+The one-line reassurance: **every plugin in this stack either works as-is or
+is replaced by an rstest-native equivalent (coverage, timeouts, reruns,
+parallelism), and nothing needs porting**. The adjustments are two
+report/terminal plugins you move to `-n 0`, and pytest-timeout, which you
+uninstall or disable with `-p no:timeout` so a test doesn't get two timers.
+The config moves are small: an ini
 `timeout =` goes to `rstest --timeout`, and xdist's `--dist` mode goes to
 `[tool.rstest] dist`. Plugins load
 through the standard `pytest11` entry points against a real

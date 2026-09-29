@@ -22,6 +22,8 @@ pub(super) struct WorkerState {
     pub(super) running: Option<u64>,
     /// When the in-flight item started (hang watchdog).
     pub(super) running_since: Option<std::time::Instant>,
+    /// The in-flight item's hang limit (from its reported timeout).
+    pub(super) running_watchdog: Option<crate::scheduling::orchestrator::Watchdog>,
     /// Set when the watchdog killed this worker (better crash message).
     pub(super) timeout_killed: bool,
     /// Reports of the in-flight attempt (only used when reruns are on).
@@ -50,6 +52,9 @@ impl crate::scheduling::orchestrator::Slot for WorkerState {
     fn running_since(&self) -> Option<std::time::Instant> {
         self.running_since
     }
+    fn running_watchdog(&self) -> Option<crate::scheduling::orchestrator::Watchdog> {
+        self.running_watchdog
+    }
     fn kill_worker(&mut self) {
         self.worker.kill();
     }
@@ -70,6 +75,7 @@ impl WorkerState {
             outstanding: VecDeque::new(),
             running: None,
             running_since: None,
+            running_watchdog: None,
             timeout_killed: false,
             attempt: Vec::new(),
             attempt_failed: false,

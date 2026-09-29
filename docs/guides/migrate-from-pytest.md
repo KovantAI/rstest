@@ -280,8 +280,9 @@ each, and bisects the polluting file for order and isolation failures. The
 full classification is in the
 [`migrate-check` reference](../reference/cli-commands.md#migrate-check).
 
-It exits non-zero if any blocking unstable id or parallelism-specific failure is
-found, so it doubles as a **CI gate** that blocks new parallel-unsafe tests:
+It exits `1` if any blocking unstable id or parallelism-specific failure is
+found (`2` if it couldn't judge, for example no usable interpreter), so it
+doubles as a **CI gate** that blocks new parallel-unsafe tests:
 
 ```console
 $ rstest migrate-check --migrate-check-json migrate.json \

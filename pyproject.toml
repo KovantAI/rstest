@@ -19,6 +19,9 @@ dependencies = [
     "iniconfig",
     "packaging",
     "pygments>=2.7.2",
+    "exceptiongroup>=1; python_version < '3.11'",
+    "tomli>=1; python_version < '3.11'",
+    "colorama>=0.4; sys_platform == 'win32'",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

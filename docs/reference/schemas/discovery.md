@@ -28,7 +28,7 @@ One discovered test item.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `file` | string | yes | Absolute source file, or empty when pytest reported no location. |
-| `lineno` | integer or null | no | 0-based definition line, or null when pytest reported none. |
+| `lineno` | integer or null | yes | 0-based definition line, or null when pytest reported none. |
 | `markers` | array of string | yes | All pytest marker names on the item (own + inherited). |
 | `nodeid` | string | yes | The pytest node id. |
 

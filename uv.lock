@@ -333,11 +333,14 @@ name = "rstest"
 version = "0.8.0"
 source = { editable = "." }
 dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "iniconfig" },
     { name = "msgpack" },
     { name = "packaging" },
     { name = "pluggy" },
     { name = "pygments" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -350,11 +353,14 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "colorama", marker = "sys_platform == 'win32'", specifier = ">=0.4" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11'", specifier = ">=1" },
     { name = "iniconfig" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "packaging" },
     { name = "pluggy", specifier = ">=1.5,<2" },
     { name = "pygments", specifier = ">=2.7.2" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1" },
 ]
 
 [package.metadata.requires-dev]

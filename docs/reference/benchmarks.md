@@ -42,7 +42,7 @@ individual timed walls behind each median.
 | Suite | Tests | pytest serial | xdist `-n 8` | rstest `-n 8` | Outcome parity |
 |---|---|---|---|---|---|
 | pandas | 193,843 | 186s | 89s | **42s** | 100% |
-| aiohttp | 4,469 | 193s | 161s | **67s** warm (150s cold) | 99.93-100% (socket-leak flake, hits xdist too) |
+| aiohttp | 4,469 | 193s | 161s | **67s** warm (150s cold) | 99.93-99.96% (socket-leak flake, hits xdist too) |
 | django-allauth | 2,050 | 26s | 8.8s | **5.7s** (8.4s at its recommended `-n 4`) | 100% |
 | rich | 981 | 3.7s | 2.7s | **2.4s** | 100% |
 <!-- --8<-- [end:suite-table] -->
@@ -193,7 +193,7 @@ ride along on single workers. The cold run has no caches to plan from, so it
 lands at 3.6×.
 
 **Policy.** `checkpoint-sqlite` is a small suite and runs single-worker
-(`-n 0`). It pulls in pytest-retry, whose worker reporter reads
+(`-n 1`, the same as `-n 0`). It pulls in pytest-retry, whose worker reporter reads
 `workerinput["server_port"]`. That key once had no source under rstest (no
 central controller to set it) and forced this pin. It is now **resolved**: rstest starts pytest-retry's own
 report server inside each worker and seeds `workerinput["server_port"]`, so
@@ -216,8 +216,8 @@ per-test parity exact.
   collection order, with no duration history, and never moves a test once
   it is queued on a worker. The file's tests are adjacent in collection
   order, so most of them land in one worker's queue and run back to back
-  there: in a verification run, 28 of the 34 (about 153s of test time) ran
-  on one worker, which sets the 161s floor. With a warm duration cache,
+  there: in a verification run, 28 of the 34, including all ten slow ones
+  (so nearly all of the file's ~153s), ran on one worker, which sets the 161s floor. With a warm duration cache,
   rstest dispatches every test with a cached duration of 1s or more first,
   longest first and one at a time, so those tests spread across workers
   (67s, close to the single ~55s test). Without the cache the first run is

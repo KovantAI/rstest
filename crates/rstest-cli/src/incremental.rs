@@ -8,11 +8,16 @@
 //! failing test keeps being selected until it passes.
 //!
 //! Soundness: like `--changed`, this reasons over FIRST-PARTY source tracked by
-//! git. An environment change invisible to git — a dependency upgraded in place
-//! in site-packages — is not detected. After such a change, bust the baseline
-//! (delete the cache file, or do one explicit `--changed`/full run).
+//! git. An environment change invisible to git is caught by [`env_fingerprint`],
+//! which folds the dependency manifests AND every installed distribution's
+//! identity (dist-info / egg-info name + RECORD / PKG-INFO size) — so an in-place `pip install -U`
+//! that never touches a lockfile still busts the baseline instead of a sticky
+//! false green. A change under an interpreter outside a recognizable venv layout
+//! (no discoverable site-packages), or a same-version in-place reinstall, remains
+//! the residual gap: bust the baseline (delete the cache file, or do one explicit
+//! `--changed`/full run).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -64,7 +69,8 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
 }
 
 /// A hash of the test environment that git can't see: the resolved interpreter
-/// (size only) and the content of any dependency manifests under `scope`.
+/// (size only), the content of any dependency manifests under `scope`, and every
+/// installed distribution's identity (see [`hash_installed_dists`]).
 /// `--changed`-style source selection is blind to an in-place dependency
 /// upgrade; folding this into the baseline makes such a change bust it (a full
 /// run re-establishes), instead of a sticky false green. Interpreter mtime is
@@ -74,7 +80,7 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
 /// PATH is likewise NOT hashed: an absolute venv path varies across machines,
 /// checkouts, and CI-vs-local for the SAME environment, so keying on it busted
 /// the baseline on every relocation — a spurious full run. Its size stands in
-/// as the cheap content proxy the lockfiles then refine.
+/// as the cheap content proxy the lockfiles and installed-dist set then refine.
 pub fn env_fingerprint(scope: &Path, python: &Path) -> String {
     let mut h = Sha256::new();
     if let Ok(md) = std::fs::metadata(python) {
@@ -87,7 +93,168 @@ pub fn env_fingerprint(scope: &Path, python: &Path) -> String {
             h.update(&bytes);
         }
     }
+    hash_installed_dists(&mut h, scope, python);
     hex_encode(&h.finalize())
+}
+
+/// The site-packages directories for `python`, derived from the venv layout
+/// (`<venv>/bin/python` -> `<venv>/lib/pythonX.Y/site-packages`, plus the Windows
+/// `<venv>/Lib/site-packages`). Best-effort: a system interpreter with no venv
+/// layout yields nothing (the RECORD signal is simply unavailable there).
+fn site_packages_dirs(python: &Path) -> Vec<PathBuf> {
+    let Some(venv) = python.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    // POSIX: <venv>/lib/python3.X/site-packages (the minor version varies).
+    if let Ok(rd) = std::fs::read_dir(venv.join("lib")) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with("python") {
+                let sp = e.path().join("site-packages");
+                if sp.is_dir() {
+                    dirs.push(sp);
+                }
+            }
+        }
+    }
+    // Windows: <venv>/Lib/site-packages.
+    let win = venv.join("Lib").join("site-packages");
+    if win.is_dir() {
+        dirs.push(win);
+    }
+    dirs.sort();
+    dirs
+}
+
+/// The file whose size stands in for a site-packages entry's content, if the
+/// entry is an installed distribution: a wheel's `*.dist-info/RECORD`, a legacy
+/// setuptools `*.egg-info/PKG-INFO` (or the `*.egg-info` itself when it is a
+/// single file), or a `setup.py develop` `*.egg-link`. `None` = not a dist.
+fn dist_size_path(name: &str, path: &Path) -> Option<PathBuf> {
+    if name.ends_with(".dist-info") {
+        Some(path.join("RECORD"))
+    } else if name.ends_with(".egg-info") {
+        Some(if path.is_dir() {
+            path.join("PKG-INFO")
+        } else {
+            path.to_path_buf()
+        })
+    } else if name.ends_with(".egg-link") {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Whether the `*.dist-info` at `dist_info` was installed from the project
+/// itself, per its PEP 610 `direct_url.json`: an editable install, or a local
+/// `file://` directory inside `scope`. Absent / unreadable -> third-party.
+fn is_first_party_dist(scope: &Path, dist_info: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(dist_info.join("direct_url.json")) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let editable = doc
+        .pointer("/dir_info/editable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let local_in_scope = doc
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .and_then(file_url_path)
+        .is_some_and(|p| {
+            let canon = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
+            canon(&p).starts_with(canon(scope))
+        });
+    editable || local_in_scope
+}
+
+/// The local path a PEP 610 `file://` URL names. pip percent-encodes the path
+/// (`%20` for a space) and writes a Windows path as `file:///C:/dir`, so the
+/// slash before the drive letter is dropped there. `None` for any other scheme
+/// or a remote host.
+fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (bytes[i], bytes.get(i + 1), bytes.get(i + 2)) {
+            (b'%', Some(&h), Some(&l)) if hex(h).is_some() && hex(l).is_some() => {
+                out.push((hex(h)? * 16 + hex(l)?) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    let d = path.as_bytes();
+    let path = if cfg!(windows)
+        && d.len() >= 3
+        && d[0] == b'/'
+        && d[1].is_ascii_alphabetic()
+        && d[2] == b':'
+    {
+        &path[1..]
+    } else {
+        &path[..]
+    };
+    Some(PathBuf::from(path))
+}
+
+/// Fold every installed distribution's identity into `h`, order-stable: the
+/// `*.dist-info` dir NAME (which encodes package + version) plus its RECORD file
+/// SIZE (legacy `*.egg-info` / `*.egg-link` entries likewise, see
+/// [`dist_size_path`]). An in-place `pip install -U` bumps the version, renaming the dist-info
+/// dir; a reinstall that adds/removes files changes RECORD's length — either
+/// shifts the fingerprint and busts the baseline, WITHOUT reading a single RECORD
+/// body (only a cheap `stat` per distribution, so a venv of hundreds of packages
+/// stays fast). Keyed by dir NAME, not absolute path, for the same reason the
+/// interpreter path is not hashed: the site-packages location varies across
+/// machines/checkouts for the SAME environment. Residual gap: a same-version
+/// reinstall that rewrites file CONTENTS without changing the file list — rare,
+/// and shares the manual-bust escape with the no-venv case. A FIRST-PARTY dist
+/// ([`is_first_party_dist`]) folds by package name only: an editable install
+/// whose version is derived from git (setuptools-scm, hatch-vcs) is renamed on
+/// every commit's re-sync, which would otherwise bust the baseline every time;
+/// its code is first-party source that git already tracks.
+fn hash_installed_dists(h: &mut Sha256, scope: &Path, python: &Path) {
+    let mut dists: Vec<(String, u64)> = Vec::new();
+    for sp in site_packages_dirs(python) {
+        let Ok(rd) = std::fs::read_dir(&sp) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let Some(sized) = dist_size_path(&name, &e.path()) else {
+                continue;
+            };
+            if name.ends_with(".dist-info") && is_first_party_dist(scope, &e.path()) {
+                let pkg = name.split('-').next().unwrap_or(&name);
+                dists.push((format!("first-party:{pkg}"), 0));
+                continue;
+            }
+            let size = std::fs::metadata(sized).map(|m| m.len()).unwrap_or(0);
+            dists.push((name.into_owned(), size));
+        }
+    }
+    // Sort by (name, size) so multiple site-packages dirs fold deterministically.
+    dists.sort();
+    for (name, size) in &dists {
+        h.update(name.as_bytes());
+        h.update(size.to_le_bytes());
+    }
 }
 
 /// Lowercase hex of raw bytes. Replaces the `{:x}` formatting `sha2` 0.11's
@@ -238,6 +405,205 @@ mod tests {
         std::fs::write(&a, b"#!fake\n").unwrap();
         std::fs::write(&b, b"#!fake\n").unwrap();
         assert_eq!(env_fingerprint(&scope, &a), env_fingerprint(&scope, &b));
+    }
+
+    /// Build a venv layout `<root>/bin/python` + `<root>/lib/python3.X/site-packages`
+    /// and return (python path, site-packages dir).
+    fn fake_venv(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = tmp(name);
+        let py = root.join("bin").join("python");
+        std::fs::create_dir_all(py.parent().unwrap()).unwrap();
+        std::fs::write(&py, b"#!fake\n").unwrap();
+        let sp = root.join("lib").join("python3.12").join("site-packages");
+        std::fs::create_dir_all(&sp).unwrap();
+        (py, sp)
+    }
+
+    /// Install a distribution: write `<site-packages>/<name>.dist-info/RECORD`.
+    fn install(sp: &Path, dist_info: &str, record: &[u8]) {
+        let d = sp.join(dist_info);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("RECORD"), record).unwrap();
+    }
+
+    #[test]
+    fn env_fingerprint_reflects_dist_info_records() {
+        // An in-place `pip install -U` touches no lockfile but rewrites a
+        // dist-info RECORD (new version dir, new file hashes). The fingerprint
+        // must move so the baseline busts.
+        let scope = tmp("distinfo");
+        let (py, sp) = fake_venv("distinfo-venv");
+        let before = env_fingerprint(&scope, &py);
+        install(
+            &sp,
+            "acme-1.0.dist-info",
+            b"acme/__init__.py,sha256=aaa,10\n",
+        );
+        let installed = env_fingerprint(&scope, &py);
+        assert_ne!(before, installed, "installing a dist must move the fp");
+        // Upgrade in place: new version dir + new RECORD content.
+        std::fs::remove_dir_all(sp.join("acme-1.0.dist-info")).unwrap();
+        install(
+            &sp,
+            "acme-2.0.dist-info",
+            b"acme/__init__.py,sha256=bbb,12\n",
+        );
+        let upgraded = env_fingerprint(&scope, &py);
+        assert_ne!(installed, upgraded, "upgrading a dist must move the fp");
+    }
+
+    #[test]
+    fn env_fingerprint_dist_info_is_path_independent() {
+        // The SAME installed set at two venv locations yields the SAME fingerprint:
+        // dist-info is keyed by dir NAME, not absolute path (relocation is benign).
+        let scope = tmp("distinfo-path");
+        let (py_a, sp_a) = fake_venv("distinfo-venv-a");
+        let (py_b, sp_b) = fake_venv("distinfo-venv-b");
+        install(
+            &sp_a,
+            "acme-1.0.dist-info",
+            b"acme/__init__.py,sha256=aaa,10\n",
+        );
+        install(
+            &sp_b,
+            "acme-1.0.dist-info",
+            b"acme/__init__.py,sha256=aaa,10\n",
+        );
+        assert_eq!(
+            env_fingerprint(&scope, &py_a),
+            env_fingerprint(&scope, &py_b)
+        );
+    }
+
+    #[test]
+    fn env_change_busts_a_recorded_baseline() {
+        // Composition guard: env_fingerprint and the baseline gate must compose —
+        // a baseline stamped with the fingerprint is refused once the environment
+        // changes. Install a dist in place (no lockfile edit) -> the recomputed
+        // fingerprint differs -> baseline() returns None -> the caller runs
+        // everything and re-establishes.
+        let scope = tmp("compose");
+        let (py, sp) = fake_venv("compose-venv");
+        let fp1 = env_fingerprint(&scope, &py);
+        record_green(&scope, "commit1", &fp1);
+        assert_eq!(baseline(&scope, &fp1).as_deref(), Some("commit1"));
+        install(
+            &sp,
+            "acme-1.0.dist-info",
+            b"acme/__init__.py,sha256=aaa,10\n",
+        );
+        let fp2 = env_fingerprint(&scope, &py);
+        assert_ne!(fp1, fp2, "in-place install must move the fingerprint");
+        assert_eq!(
+            baseline(&scope, &fp2),
+            None,
+            "changed env must bust the stored baseline"
+        );
+    }
+
+    #[test]
+    fn env_fingerprint_reflects_legacy_egg_installs() {
+        // setuptools-era installs leave no dist-info: an `*.egg-info` (dir or
+        // file) or a develop-mode `*.egg-link` must move the fingerprint too.
+        let scope = tmp("egginfo");
+        let (py, sp) = fake_venv("egginfo-venv");
+        let base = env_fingerprint(&scope, &py);
+        std::fs::create_dir_all(sp.join("old-1.0-py3.12.egg-info")).unwrap();
+        std::fs::write(
+            sp.join("old-1.0-py3.12.egg-info/PKG-INFO"),
+            b"Version: 1.0\n",
+        )
+        .unwrap();
+        let dir_egg = env_fingerprint(&scope, &py);
+        assert_ne!(base, dir_egg, "egg-info dir must move the fp");
+        std::fs::write(sp.join("flat-2.0.egg-info"), b"Version: 2.0\n").unwrap();
+        let file_egg = env_fingerprint(&scope, &py);
+        assert_ne!(dir_egg, file_egg, "egg-info file must move the fp");
+        std::fs::write(sp.join("dev.egg-link"), b"/src/dev\n.\n").unwrap();
+        assert_ne!(
+            file_egg,
+            env_fingerprint(&scope, &py),
+            "egg-link must move the fp"
+        );
+    }
+
+    #[test]
+    fn file_url_path_decodes_pip_urls() {
+        assert_eq!(
+            file_url_path("file:///home/me/my%20proj"),
+            Some(PathBuf::from("/home/me/my proj"))
+        );
+        assert_eq!(
+            file_url_path("file://localhost/srv/p"),
+            Some(PathBuf::from("/srv/p"))
+        );
+        assert_eq!(
+            file_url_path("file:///a/100%"),
+            Some(PathBuf::from("/a/100%"))
+        );
+        assert_eq!(file_url_path("file://host/share"), None);
+        assert_eq!(file_url_path("https://example.com/x"), None);
+        let drive = file_url_path("file:///C:/proj").unwrap();
+        if cfg!(windows) {
+            assert_eq!(drive, PathBuf::from("C:/proj"));
+        } else {
+            assert_eq!(drive, PathBuf::from("/C:/proj"));
+        }
+    }
+
+    #[test]
+    fn first_party_dist_version_bump_keeps_the_fingerprint() {
+        // An editable (or in-project local) install renamed by a git-derived
+        // version bump must NOT move the fp; a third-party bump still must.
+        let scope = tmp("firstparty");
+        let (py, sp) = fake_venv("firstparty-venv");
+        let editable = |sp: &Path, dist: &str| {
+            install(sp, dist, b"proj/__init__.py,,\n");
+            std::fs::write(
+                sp.join(dist).join("direct_url.json"),
+                br#"{"url": "file:///elsewhere/proj", "dir_info": {"editable": true}}"#,
+            )
+            .unwrap();
+        };
+        editable(&sp, "proj-0.1.dev3+g1111111.dist-info");
+        let before = env_fingerprint(&scope, &py);
+        std::fs::remove_dir_all(sp.join("proj-0.1.dev3+g1111111.dist-info")).unwrap();
+        editable(&sp, "proj-0.1.dev12+g2222222222.dist-info");
+        assert_eq!(
+            before,
+            env_fingerprint(&scope, &py),
+            "editable version bump"
+        );
+        // A non-editable local install from inside the project counts too.
+        let local = sp.join("local-1.0.dist-info");
+        install(&sp, "local-1.0.dist-info", b"x\n");
+        // pip's form: forward slashes, `file:///C:/...` on Windows.
+        let url = format!(
+            r#"{{"url": "file:///{}", "dir_info": {{}}}}"#,
+            scope
+                .display()
+                .to_string()
+                .replace('\\', "/")
+                .trim_start_matches('/')
+        );
+        std::fs::write(local.join("direct_url.json"), url).unwrap();
+        assert!(is_first_party_dist(&scope, &local));
+        // A third-party dist keeps its version in the fp.
+        install(&sp, "acme-1.0.dist-info", b"acme,,\n");
+        let with_acme = env_fingerprint(&scope, &py);
+        std::fs::remove_dir_all(sp.join("acme-1.0.dist-info")).unwrap();
+        install(&sp, "acme-1.1.dist-info", b"acme,,\n");
+        assert_ne!(with_acme, env_fingerprint(&scope, &py), "third-party bump");
+    }
+
+    #[test]
+    fn site_packages_dirs_absent_for_bare_interpreter() {
+        // A path with no venv layout (no lib/python*/site-packages) yields no
+        // dirs — the residual system-interpreter gap, handled without panicking.
+        let scope = tmp("bare");
+        let py = scope.join("python");
+        std::fs::write(&py, b"#!fake\n").unwrap();
+        assert!(site_packages_dirs(&py).is_empty());
     }
 
     #[test]

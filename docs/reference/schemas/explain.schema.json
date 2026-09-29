@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExplainReport",
+  "description": "The merged per-nodeid dossier. `null` fields are simply absent from every\ncache (e.g. a never-flaked test has no `flakes` entry). `found` is false when\nthe nodeid appears in no cache at all.",
+  "type": "object",
+  "properties": {
+    "coverage": {
+      "description": "Files this test covered, if a warm coverage index has it.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Coverage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "duration_seconds": {
+      "description": "Last recorded call-phase duration in seconds (latest value only; local\ncaches keep no history).",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "flakes": {
+      "description": "Cross-run flake/fail counts + last-event epoch, if the test has any.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/FlakeStats"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "found": {
+      "description": "Whether the node id appears in any cache.",
+      "type": "boolean"
+    },
+    "last_outcome": {
+      "description": "`\"passed\"` if the test was green on the last incremental run; `null`\notherwise (absence is not proof of failure; see `flakes` for fail\nhistory).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "meta": {
+      "$ref": "#/definitions/Meta"
+    },
+    "nodeid": {
+      "description": "The node id that was explained, as given.",
+      "type": "string"
+    },
+    "source_line": {
+      "description": "Source def line (1-based) recorded on the last incremental run, if known.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "meta",
+    "nodeid",
+    "found",
+    "duration_seconds",
+    "last_outcome",
+    "source_line",
+    "flakes",
+    "coverage"
+  ],
+  "definitions": {
+    "Coverage": {
+      "description": "The coverage footprint of one test: the source files it covered and the\ntotal number of covered lines across them.",
+      "type": "object",
+      "properties": {
+        "file_count": {
+          "description": "Number of source files the test covered.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "files": {
+          "description": "Covered source files, sorted, cwd-relative (the coverage-index keys).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "line_count": {
+          "description": "Covered lines, summed across those files.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "file_count",
+        "line_count",
+        "files"
+      ]
+    },
+    "FlakeStats": {
+      "type": "object",
+      "properties": {
+        "failed": {
+          "description": "Runs where the test hard-failed (quarantined failures included).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "flaky": {
+          "description": "Runs where the test passed only after rerun(s).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "last_epoch": {
+          "description": "Unix epoch of the last recorded event (flake or failure).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "last_failed_epoch": {
+          "description": "Unix epoch of the last hard failure. 0 = none, or a cache written\nbefore this field existed (readers then fall back to\n`last_epoch` when `failed` is non-zero).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "flaky",
+        "failed",
+        "last_epoch",
+        "last_failed_epoch"
+      ]
+    },
+    "Meta": {
+      "description": "Envelope metadata for the explain document.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Constant discriminator: always `\"explain\"`.",
+          "type": "string"
+        },
+        "rstest_version": {
+          "description": "The rstest version that wrote the document.",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "runner",
+        "kind",
+        "schema",
+        "rstest_version"
+      ]
+    }
+  }
+}

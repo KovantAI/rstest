@@ -191,7 +191,12 @@ jobs:
       - id: lookup
         uses: actions/cache/restore@v6
         with:
-          path: .rstest_cache
+          # Replay journals stay out, so a restore never brings back an
+          # older run's latest.json. The path list is part of the cache version, so all three steps must
+          # list the same paths or the restores never match the save.
+          path: |
+            .rstest_cache
+            !.rstest_cache/replay
           lookup-only: true         # find the key, don't download
           # The `durations` job saves `...-<run_id>`, so this exact key never
           # hits; the restore-keys prefix matches the newest saved cache.
@@ -221,7 +226,9 @@ jobs:
       - uses: actions/cache/restore@v6
         if: needs.resolve.outputs.key != ''
         with:
-          path: .rstest_cache
+          path: |
+            .rstest_cache
+            !.rstest_cache/replay
           key: ${{ needs.resolve.outputs.key }}
 
       - name: test shard ${{ matrix.shard }}
@@ -251,7 +258,9 @@ jobs:
       - run: pip install -r requirements.txt && pip install rstest
       - uses: actions/cache@v6
         with:
-          path: .rstest_cache
+          path: |
+            .rstest_cache
+            !.rstest_cache/replay
           key: rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
           restore-keys: |
             rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-

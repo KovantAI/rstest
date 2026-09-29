@@ -48,7 +48,8 @@ to run yet.
   scale.
 
 rstest installs its own runtime dependencies (`msgpack`, `pluggy`,
-`iniconfig`, `packaging`, `pygments`). It does **not** require pytest to be
+`iniconfig`, `packaging`, `pygments`, plus `exceptiongroup` and `tomli` on
+Python 3.10 and `colorama` on Windows). It does **not** require pytest to be
 installed (it is not a dependency, so installing rstest never installs or
 upgrades pytest), and it does not conflict with an installed pytest either: the
 vendored pytest core lives inside the `rstest_worker` package and never

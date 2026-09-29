@@ -24,25 +24,75 @@ pub(crate) trait Slot {
     fn timeout_killed(&self) -> bool;
     fn set_timeout_killed(&mut self);
     fn running_since(&self) -> Option<Instant>;
+    /// The hang limit for the in-flight item, set at its `item_start`.
+    fn running_watchdog(&self) -> Option<Watchdog>;
     /// Hard-kill the worker process (hang watchdog).
     fn kill_worker(&mut self);
     /// Tell the worker its queue is closed (`NoMoreItems`); it drains and ends.
     fn send_no_more_items(&mut self);
 }
 
-/// Hang watchdog: kill any worker stuck on a single item past `limit`. The
-/// crash machinery (reader thread sees EOF) then reports the in-flight item
-/// failed. Call sites gate on `worker_timeout.is_some()` and pass the limit.
-pub(crate) fn watchdog_tick(sink: &mut Sink, states: &mut [impl Slot], limit: Duration) {
+/// The hang limit for one in-flight item: how long its worker may sit on it
+/// before the watchdog kills the worker.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Watchdog {
+    pub limit: Duration,
+    /// Set by `--worker-timeout` (vs derived from the test's own timeout).
+    pub explicit: bool,
+}
+
+impl Watchdog {
+    /// What the limit is, for the kill warning and the fabricated failure.
+    fn describe(&self) -> String {
+        let secs = self.limit.as_secs();
+        if self.explicit {
+            format!("--worker-timeout ({secs}s)")
+        } else {
+            format!("the hang watchdog ({secs}s: 3x the test's timeout + 10s)")
+        }
+    }
+}
+
+/// The watchdog for one item. An explicit `--worker-timeout` wins for every
+/// test. Otherwise it is derived from the item's own effective timeout (its
+/// `@pytest.mark.timeout`, else `--timeout`), which the worker reports at
+/// `item_start`, at a generous multiple: the worker's in-process interrupt
+/// fires first and the watchdog only catches a hang the signal can't reach (a
+/// C-extension deadlock, or any test on Windows, which has no SIGALRM). Sizing
+/// it per item keeps a marker longer than the global `--timeout` from being
+/// killed at the global limit. Only a positive, finite timeout arms it, and the
+/// duration is clamped so a huge value can't panic `from_secs_f64`.
+pub(crate) fn watchdog_for(
+    explicit: Option<Duration>,
+    test_timeout: Option<f64>,
+) -> Option<Watchdog> {
+    if let Some(limit) = explicit {
+        return Some(Watchdog {
+            limit,
+            explicit: true,
+        });
+    }
+    test_timeout
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .map(|t| Watchdog {
+            limit: Duration::try_from_secs_f64(t * 3.0 + 10.0).unwrap_or(Duration::MAX),
+            explicit: false,
+        })
+}
+
+/// Hang watchdog: kill any worker stuck on its in-flight item past that item's
+/// limit. The crash machinery (reader thread sees EOF) then reports the item
+/// failed. Called on every idle tick; items without a limit are never killed.
+pub(crate) fn watchdog_tick(sink: &mut Sink, states: &mut [impl Slot]) {
     for (widx, s) in states.iter_mut().enumerate() {
         if s.dead() || s.timeout_killed() {
             continue;
         }
-        if let Some(since) = s.running_since() {
-            if since.elapsed() > limit {
+        if let (Some(since), Some(wd)) = (s.running_since(), s.running_watchdog()) {
+            if since.elapsed() > wd.limit {
                 sink.warn(&format!(
-                    "rstest: worker gw{widx} exceeded --worker-timeout ({}s) on one test; killing it",
-                    limit.as_secs()
+                    "rstest: worker gw{widx} exceeded {} on one test; killing it",
+                    wd.describe()
                 ));
                 s.set_timeout_killed();
                 s.kill_worker();
@@ -68,8 +118,7 @@ pub(crate) fn stop_all(states: &mut [impl Slot]) {
 /// the lazy pool passes the bare nodeid).
 pub(crate) fn fabricate_crash_report(
     nodeid: String,
-    was_timeout: bool,
-    worker_timeout: Option<Duration>,
+    killed_by: Option<Watchdog>,
     worker_idx: usize,
     error: &anyhow::Error,
 ) -> proto::Report {
@@ -78,10 +127,10 @@ pub(crate) fn fabricate_crash_report(
         when: "call".into(),
         outcome: "failed".into(),
         duration: 0.0,
-        longrepr: Some(if was_timeout {
+        longrepr: Some(if let Some(wd) = killed_by {
             format!(
-                "test exceeded --worker-timeout ({}s); its worker was killed (reported failed)",
-                worker_timeout.map(|d| d.as_secs()).unwrap_or(0)
+                "test exceeded {}; its worker was killed (reported failed)",
+                wd.describe()
             )
         } else {
             format!(
@@ -186,6 +235,7 @@ mod tests {
         finishing: bool,
         timeout_killed: bool,
         running_since: Option<Instant>,
+        watchdog: Option<Watchdog>,
         killed: u32,
         no_more_sent: u32,
     }
@@ -208,6 +258,9 @@ mod tests {
         }
         fn running_since(&self) -> Option<Instant> {
             self.running_since
+        }
+        fn running_watchdog(&self) -> Option<Watchdog> {
+            self.watchdog
         }
         fn kill_worker(&mut self) {
             self.killed += 1;
@@ -257,6 +310,13 @@ mod tests {
         assert!(states[3].finishing && states[3].no_more_sent == 1);
     }
 
+    fn wd(secs: u64) -> Option<Watchdog> {
+        Some(Watchdog {
+            limit: Duration::from_secs(secs),
+            explicit: true,
+        })
+    }
+
     #[test]
     fn watchdog_kills_only_over_limit_running_workers() {
         let stuck = Instant::now()
@@ -265,42 +325,123 @@ mod tests {
         let mut states = vec![
             MockSlot {
                 running_since: Some(stuck),
+                watchdog: wd(1),
                 ..Default::default()
             }, // over limit -> killed
             MockSlot {
                 running_since: None,
+                watchdog: wd(1),
                 ..Default::default()
             }, // idle -> untouched
             // Over limit but already killed once: not re-killed.
             MockSlot {
                 running_since: Some(stuck),
+                watchdog: wd(1),
                 timeout_killed: true,
                 ..Default::default()
             },
             // Over limit but dead: skipped.
             MockSlot {
                 running_since: Some(stuck),
+                watchdog: wd(1),
                 dead: true,
                 ..Default::default()
             },
             MockSlot {
                 running_since: Some(Instant::now()),
+                watchdog: wd(1),
                 ..Default::default()
             }, // fresh -> under limit
+            // Running for an hour with no limit (no timeout anywhere): kept.
+            MockSlot {
+                running_since: Some(stuck),
+                watchdog: None,
+                ..Default::default()
+            },
         ];
         let (mut sink, _cap) = Sink::captured();
-        watchdog_tick(&mut sink, &mut states, Duration::from_secs(1));
+        watchdog_tick(&mut sink, &mut states);
         assert!(states[0].killed == 1 && states[0].timeout_killed);
         assert_eq!(states[1].killed, 0);
         assert_eq!(states[2].killed, 0);
         assert_eq!(states[3].killed, 0);
         assert_eq!(states[4].killed, 0);
+        assert_eq!(states[5].killed, 0);
+    }
+
+    #[test]
+    fn watchdog_is_per_item_not_global() {
+        // Same elapsed time, two workers: one on a --timeout 1 item (limit 13s),
+        // one on a @pytest.mark.timeout(300) item (limit 910s). Only the first
+        // is over its own limit.
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("subtract a minute");
+        let mut states = vec![
+            MockSlot {
+                running_since: Some(started),
+                watchdog: watchdog_for(None, Some(1.0)),
+                ..Default::default()
+            },
+            MockSlot {
+                running_since: Some(started),
+                watchdog: watchdog_for(None, Some(300.0)),
+                ..Default::default()
+            },
+        ];
+        let (mut sink, cap) = Sink::captured();
+        watchdog_tick(&mut sink, &mut states);
+        assert_eq!(states[0].killed, 1);
+        assert_eq!(states[1].killed, 0);
+        assert!(
+            cap.err().contains("the hang watchdog (13s"),
+            "{}",
+            cap.err()
+        );
+    }
+
+    #[test]
+    fn watchdog_for_explicit_worker_timeout_wins() {
+        let w = watchdog_for(Some(Duration::from_secs(30)), Some(300.0)).unwrap();
+        assert_eq!(w.limit, Duration::from_secs(30));
+        assert!(w.explicit);
+        assert_eq!(
+            watchdog_for(Some(Duration::from_secs(30)), None)
+                .unwrap()
+                .limit
+                .as_secs(),
+            30
+        );
+    }
+
+    #[test]
+    fn watchdog_for_derives_from_the_items_timeout() {
+        let w = watchdog_for(None, Some(2.0)).unwrap();
+        assert_eq!(w.limit, Duration::from_secs(16));
+        assert!(!w.explicit);
+    }
+
+    #[test]
+    fn watchdog_for_disabled_for_non_positive_or_non_finite_timeout() {
+        assert_eq!(watchdog_for(None, None), None);
+        assert_eq!(watchdog_for(None, Some(0.0)), None);
+        assert_eq!(watchdog_for(None, Some(-4.0)), None);
+        assert_eq!(watchdog_for(None, Some(f64::NAN)), None);
+        assert_eq!(watchdog_for(None, Some(f64::INFINITY)), None);
+    }
+
+    #[test]
+    fn watchdog_for_clamps_overflowing_timeout_instead_of_panicking() {
+        assert_eq!(
+            watchdog_for(None, Some(f64::MAX)).unwrap().limit,
+            Duration::MAX
+        );
     }
 
     #[test]
     fn crash_report_is_failed_call_with_reason() {
         let e = anyhow::anyhow!("boom");
-        let r = fabricate_crash_report("t.py::x [gw2]".into(), false, None, 2, &e);
+        let r = fabricate_crash_report("t.py::x [gw2]".into(), None, 2, &e);
         assert_eq!(r.nodeid, "t.py::x [gw2]");
         assert_eq!(r.when, "call");
         assert_eq!(r.outcome, "failed");
@@ -312,12 +453,16 @@ mod tests {
     #[test]
     fn crash_report_timeout_variant_names_the_limit() {
         let e = anyhow::anyhow!("eof");
-        let r =
-            fabricate_crash_report("t.py::x".into(), true, Some(Duration::from_secs(30)), 0, &e);
+        let r = fabricate_crash_report("t.py::x".into(), wd(30), 0, &e);
         let msg = r.longrepr.unwrap();
         assert!(msg.contains("--worker-timeout (30s)"), "{msg}");
         // Timeout variant must NOT leak the raw decode error.
         assert!(!msg.contains("eof"), "{msg}");
+        let derived = watchdog_for(None, Some(5.0));
+        let msg = fabricate_crash_report("t.py::x".into(), derived, 0, &e)
+            .longrepr
+            .unwrap();
+        assert!(msg.contains("the hang watchdog (25s"), "{msg}");
     }
 
     #[test]

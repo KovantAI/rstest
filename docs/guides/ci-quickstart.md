@@ -122,7 +122,8 @@ jobs:
       # see the Sharding guide.
 
       # Monorepo roots: caches live in EACH project (.rstest_cache per
-      # package; widen the cache path to **/.rstest_cache), and junit
+      # package; widen the cache path to **/.rstest_cache and exclude
+      # !**/.rstest_cache/replay), and junit
       # files are written per project as junit.<slug>.xml; glob them
       # in the artifact step.
 
@@ -321,11 +322,12 @@ uploads a single JUnit file, which is not what a root run writes.
     `cd repo && rstest` from the [Monorepos guide](monorepo.md) is simpler:
     one job, one merged `--report-json`, per-project `junit.<slug>.xml` (glob
     `**/junit.*.xml`), and `.rstest_cache` persisted via `actions/cache` on
-    `**/.rstest_cache`. It also keeps `--changed`'s cross-package skip logic in
-    one place. Reach for the matrix above when project count outgrows the
-    runner, or when you want the segment-merge shared cache per package. A
-    project-level concurrency cap for the root case is on the roadmap
-    ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
+    `**/.rstest_cache` (with `!**/.rstest_cache/replay` excluded). It also
+    keeps `--changed`'s cross-package skip logic in one place. Reach for the
+    matrix above when project count outgrows the runner, or when you want the
+    segment-merge shared cache per package. A project-level concurrency cap
+    for the root case is on the roadmap ([Monorepo
+    mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
 
 ## Suite-health trending with doctor
 
@@ -393,8 +395,9 @@ Two practical notes:
 
 ## Gating new parallel-unsafe tests with migrate-check
 
-[`migrate-check`](../reference/cli-commands.md#migrate-check) exits non-zero when a
-test has a run-to-run unstable id or fails only under parallelism, so a
+[`migrate-check`](../reference/cli-commands.md#migrate-check) exits `1` when a
+test has a run-to-run unstable id or fails only under parallelism (and `2`
+when it couldn't judge, so a red job tells you which one to fix), so a
 dedicated job keeps a migrating suite from regressing: no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use
 `--migrate-allow` to tolerate a triaged backlog so the gate fires only on
@@ -427,30 +430,65 @@ worker ran which tests, in what order, to `.rstest_cache/replay/latest.json`.
 Keep that file when a job fails and [`rstest replay`](../reference/cli-commands.md#replay)
 re-runs the same schedule on your machine.
 
+!!! warning "Sharded jobs record no journal"
+    A run with `--shard` (or the action's `shard`/`shard-total` inputs) writes
+    no journal, and neither do `-n 0`/`-n 1`, `--dist each` and
+    `--collect lazy`. To replay a failure from a sharded matrix, re-run the
+    failing shard's tests unsharded with `-n` set to the CI worker count; that
+    run records a journal you can replay.
+
 **1. In CI, upload the journal when the tests fail.** With the bundled action,
-add one step after it:
+give it an `id` and add one step after it:
 
 ```yaml
-      - uses: KovantAI/rstest/.github/actions/rstest@v1
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+        id: rstest
         with:
           python-version: "3.13"
           args: "-n auto"
-      - uses: actions/upload-artifact@v4
-        if: failure()
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.rstest.outputs.exit-code != '0'
         with:
           name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
           path: .rstest_cache/replay/latest.json
+          if-no-files-found: ignore
 ```
+
+The condition reads the action's `exit-code` output, not `failure()`. With
+`fail-under-ratio` set, the action's step can pass while tests failed, and
+`failure()` would then skip the upload. `if-no-files-found: ignore` covers a
+run that recorded nothing (for example `-n auto` resolving to one worker).
 
 The job name and matrix index in the artifact name keep the uploads apart
 when a matrix (Python versions, OSes) fails in several jobs at once:
-`upload-artifact@v4` refuses a second artifact with the same name in a run.
-Outside a matrix, `strategy.job-index` is `0`.
+`upload-artifact` (v4 and later) refuses a second artifact with the same name
+in a run. Outside a matrix, `strategy.job-index` is `0`.
+
+Where the journal lands:
+
+- **With a `working-directory`**, prefix the path with it
+  (`libs/core/.rstest_cache/replay/latest.json`).
+- **At a monorepo root**, each project records its own journal inside the
+  project directory. Upload them all with a glob and keep the directory
+  layout, so you know which project each came from. `upload-artifact`
+  skips dot-directories such as `.rstest_cache` when it expands a glob, so
+  turn that off, or the step uploads nothing:
+
+    ```yaml
+          path: "**/.rstest_cache/replay/latest.json"
+          include-hidden-files: true
+    ```
+
+    Replay from inside that project's directory, not from the root.
+
+- **With `RSTEST_CACHE` set**, journals move with the cache:
+  `$RSTEST_CACHE/replay/latest.json` for a single project, or
+  `$RSTEST_CACHE/<slug>/replay/latest.json` per project at a monorepo root.
 
 With raw YAML, put the same `upload-artifact` step after your `rstest -n auto`
-step. On other CI systems, save `.rstest_cache/replay/latest.json` as a
-failure artifact the same way you save `junit.xml`. If the action runs with a
-`working-directory`, prefix the path with it.
+step, with `if: failure()`. On other CI systems, save
+`.rstest_cache/replay/latest.json` as a failure artifact the same way you
+save `junit.xml`.
 
 **2. Locally, check out the failing commit and download the journal.**
 
@@ -468,9 +506,20 @@ if you're unsure of the name.
 ```console
 $ rstest replay --journal ci-replay/latest.json
 rstest: replay: run 18d93d9429580fb015f7d (0.8.0 recorded), 4 worker(s), 22 test(s) across 4 slot(s)
+rstest: replay: args: tests -k 'not slow'
 ...
 --- FAILED [gw0] tests/test_m2.py::test_victim ---
 ```
+
+Check the `args:` line before the tests start. It shows the pytest
+arguments the CI run was given on the command line (paths, `-k`, `-p` and
+so on), `(none)` if there were none. rstest's own flags such as `-n` are
+not part of it, and neither are `addopts` or `PYTEST_ADDOPTS`, which
+replay reads from your checkout. Replay hands the recorded arguments to
+pytest as they are, so only replay journals from runs you trust
+(see [Security: replay journals](../reference/security.md#replay-journals)).
+To pick the interpreter, put `--python` after the subcommand:
+`rstest replay --journal ci-replay/latest.json --python .venv/bin/python`.
 
 Replay forces the recorded worker count (even on a laptop with fewer cores),
 runs each worker's recorded tests in the recorded order, and turns off reruns
@@ -495,8 +544,9 @@ Things that keep a journal portable:
 - **Match the code and dependencies.** If the suite changed since the
   recording, replay says so, runs the tests that still match, and reports how
   many recorded tests no longer collect. The reproduction may then be lost.
-- **Only parallel eager runs record.** `-n 0`/`-n 1`, `--dist each`,
-  `--shard` and `--collect lazy` write no journal.
+- **Only parallel runs record.** `-n 0`/`-n 1`, `--dist each` and
+  `--shard` write no journal. A `--collect lazy` run records too, and replay
+  re-runs its schedule with full collection.
 - **Keep journals out of the CI cache.** The bundled action already leaves
   `.rstest_cache/replay` out of the cache it persists. If you cache
   `.rstest_cache` yourself (raw YAML, or another CI system's cache), exclude
@@ -575,9 +625,10 @@ not show up at all.
   narrowing above is Linux-specific), with the same file and time caps.
   Windows has two behavior differences, both with automatic fallbacks:
 
-    - The per-test timeout has no signal-based interrupt, so
-      `--worker-timeout` (the watchdog) is the only backstop there. See
-      [`--worker-timeout`](../reference/cli.md#-worker-timeout-secs).
+    - The per-test timeout has no signal-based interrupt, so a slow test is
+      only stopped by the hang watchdog, at 3 × its timeout + 10 s, which
+      kills its worker. Set `--worker-timeout` for a tighter cap. See
+      [`--timeout`](../reference/cli.md#-timeout-secs).
     - File-descriptor leak tracking is unavailable (it reads `/proc/self/fd`
       or `/dev/fd`), so `--doctor` reports thread leaks but not fd leaks. See
       [Resource leaks](resource-leaks.md).

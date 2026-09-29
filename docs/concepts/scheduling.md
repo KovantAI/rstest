@@ -32,7 +32,8 @@ workers may have started by then.
    when a worker half-drains.
 
 The duration cache (`.rstest_cache/durations.json`) is written after every
-normal run (not under [`--dist each`](#broadcast-mode-dist-each)), so the
+normal run (not under [`--dist each`](#broadcast-mode-dist-each) or
+`rstest replay`), so the
 first run is collection-ordered and every later run is duration-aware.
 
 ### Fail-fast ordering (`--order fail-fast`)
@@ -96,5 +97,5 @@ Consequences:
   worker.
 - The duration cache is **not** written: N× runs would poison LPT
   (longest-processing-time-first) scheduling on the next normal run.
-- `--reruns` is rejected: every worker already runs the suite, so a rerun
-  has no distinct meaning.
+- `--reruns` is rejected: rstest reruns a failure on another worker, and
+  with every worker running the full suite that has no meaning.

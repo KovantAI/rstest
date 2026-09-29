@@ -92,7 +92,7 @@ ________________________________ test_add_wrong ________________________________
 E       assert 4 == 5
 E        +  where 4 = add(2, 2)
 
-test_first.py:14: AssertionError
+test_first.py:15: AssertionError
 =========================== short test summary info ============================
 FAILED test_first.py::test_add_wrong - assert 4 == 5
 ========================= 1 failed, 2 passed in 0.01s ==========================

@@ -7,8 +7,9 @@
     runs; see [`try`](../reference/cli-commands.md#try).
 
 Run rstest from your project root, exactly where you would run pytest. This
-sample is django-allauth's 2,050-test suite at `-n 4`, the run recorded in
-[Benchmarks](../reference/benchmarks.md) (the middle lines are elided):
+sample is one run of django-allauth's 2,050-test suite at `-n 4`, the suite
+measured in [Benchmarks](../reference/benchmarks.md) (the middle lines are
+elided):
 
 ```console
 $ rstest -n 4
@@ -207,8 +208,8 @@ Command-line flags override these; full key list in
 rstest records per-test durations in `.rstest_cache/`. From the second run
 on, the scheduler starts your slowest tests first, which is what keeps
 workers busy at the end of the run instead of waiting on one long test.
-On wait-heavy suites this is dramatic: aiohttp's suite nearly halves
-between its cold and warm runs (see [Benchmarks](../reference/benchmarks.md)).
+On wait-heavy suites this is dramatic: aiohttp's suite more than halves
+between its cold and warm runs (150s to 67s) (see [Benchmarks](../reference/benchmarks.md)).
 
 ## When something fails
 

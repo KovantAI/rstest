@@ -64,9 +64,10 @@ skips, xfails, and expected failures, with the suites' real plugins loaded.
 See [Benchmarks](reference/benchmarks.md) for methodology and caveats.
 
 Reading the speed numbers: the wins come from suite *shape*, not magic.
-Wait-bound suites (aiohttp) gain most, and only on a **warm** duration cache:
-the first run is cold, since duration-aware scheduling needs one run of timing
-data. CPU-bound suites already split well under xdist, so rstest lands at
+Wait-bound suites (aiohttp) gain most, and most of all on a **warm** duration
+cache: the first run is cold, since duration-aware scheduling needs one run of
+timing data (aiohttp's cold run still beats xdist, but the warm one more than
+halves it). CPU-bound suites already split well under xdist, so rstest lands at
 parity there, not a win (sympy, [measured](reference/benchmarks.md#cpu-bound-suites)): see [Already fast under
 xdist?](guides/migrate-from-xdist.md#already-fast-cpu-bound) for what's still
 worth it. In ephemeral CI, cache `.rstest_cache`
