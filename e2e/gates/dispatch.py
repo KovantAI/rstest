@@ -572,9 +572,13 @@ def gate_worker_timeout_watchdog(g, args, binary):
         "def test_quick(): pass\n",
     )
     r = g.run("test_long.py", "-n", "2", "--timeout", "1", cwd=g.tmp / "longmark", timeout=90)
+    # Match the kill message ("the hang watchdog (13s: ..."), not the bare
+    # word: on Windows the --timeout warning itself mentions the watchdog.
     check(
         "watchdog: a marker longer than --timeout is not killed at the global limit",
-        r.returncode == 0 and "2 passed" in r.stdout and "watchdog" not in r.stdout + r.stderr,
+        r.returncode == 0
+        and "2 passed" in r.stdout
+        and "hang watchdog (" not in r.stdout + r.stderr,
         r.stdout[-300:] + r.stderr[-300:],
     )
 

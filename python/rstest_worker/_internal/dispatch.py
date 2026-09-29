@@ -30,6 +30,41 @@ def _maxfail(config) -> int:
     return int(getattr(getattr(config, "option", None), "maxfail", 0) or 0)
 
 
+def _ignored_by_recursion(session, path: str) -> bool:
+    """Whether pytest's directory recursion from the session's initial args
+    would skip `path`, a file the orchestrator assigned by explicit path.
+
+    `perform_collect([path])` makes the file an initial path, which bypasses
+    `pytest_ignore_collect`: `norecursedirs`, `collect_ignore(_glob)` and
+    `--ignore(-glob)` would all be lost, so a `build/` copy of the tests would
+    run. Replay the checks `Dir.collect` makes on the way down, from the
+    initial arg that contains the file, with the same hook proxies (a
+    directory's entries are checked with that directory's conftests) and the
+    same exemption for initial paths and their parents. A file outside every
+    initial arg, or a session without the needed config, is not ignored.
+    """
+    config = getattr(session, "config", None)
+    invocation = getattr(getattr(config, "invocation_params", None), "dir", None)
+    args = getattr(config, "args", None)
+    if invocation is None or not args:
+        return False
+    initial = [(invocation / a.split("::", 1)[0]).absolute() for a in args]
+    target = (invocation / path).absolute()
+    roots = [r for r in initial if r == target or r in target.parents]
+    if not roots:
+        return False
+    root = max(roots, key=lambda r: len(r.parts))
+    chain = [p for p in reversed(target.parents) if root in p.parents] + [target]
+    for p in chain:
+        # isinitpath: a file only as itself, a directory also as a parent.
+        if any(i == p or (p != target and p in i.parents) for i in initial):
+            continue
+        ihook = session.gethookproxy(p.parent)
+        if ihook.pytest_ignore_collect(collection_path=p, config=config):
+            return True
+    return False
+
+
 def _session_roots(config) -> m.SessionRootsPayload:
     """pytest's own view of where this session is rooted, for `rstest bisect`:
     the rootdir nodeids are relative to, where the initial args came from, and
@@ -227,7 +262,12 @@ class LazyDispatchPlugin(StreamPlugin):
         return True
 
     def _collect_file(self, session, path, items_by_id):
-        items = session.perform_collect([path], genitems=True)
+        # Eager recursion would never reach an ignored file: report it empty.
+        items = (
+            []
+            if _ignored_by_recursion(session, path)
+            else session.perform_collect([path], genitems=True)
+        )
         ids = [it.nodeid for it in items]
         serial = [it.nodeid for it in items if it.get_closest_marker("serial") is not None]
         payload: m.FileCollectedPayload = {"path": path, "ids": ids}

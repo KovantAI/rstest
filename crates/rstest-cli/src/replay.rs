@@ -207,7 +207,7 @@ pub fn load(run_id: Option<&str>, path: Option<&Path>) -> Result<Journal> {
     if !file.exists() {
         anyhow::bail!(
             "no replay journal at {}. Only parallel runs record one (-n >= 2, not \
-             --dist each / --shard / --collect lazy); run the suite that way once, or \
+             --dist each / --shard); run the suite that way once, or \
              pass --journal <file> for a downloaded CI artifact",
             file.display()
         );
