@@ -168,6 +168,7 @@ pub(super) fn execute_monorepo(
             durations_regress: cli.durations_regress,
             require_baseline: cli.require_baseline,
             incremental: cli.incremental,
+            fork_pool: cli.fork_pool,
         };
         let mut cmd = std::process::Command::new(&exe);
         cmd.current_dir(project)
@@ -377,6 +378,7 @@ struct ChildSpec<'a> {
     durations_regress: Option<f64>,
     require_baseline: bool,
     incremental: bool,
+    fork_pool: bool,
 }
 
 /// Build the args appended to a child `rstest` process (after the env/pipe
@@ -498,6 +500,9 @@ fn build_child_args(spec: &ChildSpec) -> Vec<String> {
     }
     if spec.incremental {
         a.push("--incremental".into());
+    }
+    if spec.fork_pool {
+        a.push("--fork-pool".into());
     }
     a
 }
@@ -721,6 +726,7 @@ mod tests {
             durations_regress: None,
             require_baseline: false,
             incremental: false,
+            fork_pool: false,
         }
     }
 
@@ -776,6 +782,7 @@ mod tests {
         spec.durations_regress = Some(2.0);
         spec.require_baseline = true;
         spec.incremental = true;
+        spec.fork_pool = true;
 
         let args = build_child_args(&spec);
 
@@ -826,6 +833,7 @@ mod tests {
             "--reruns-only-known-flaky",
             "--incremental",
             "--shuffle=42",
+            "--fork-pool",
         ] {
             assert!(args.iter().any(|a| a == flag), "missing {flag}: {args:?}");
         }

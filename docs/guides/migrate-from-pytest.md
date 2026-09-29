@@ -91,6 +91,13 @@ header line. Check each item against your suite:
 - [ ] *Tests run in a different order*, interleaved across workers. Tests
   that depend on a previous test's side effects need [`--dist
   loadfile`](parallel-safety.md#file-affinity) or a fix.
+- [ ] *Large suites may switch to lazy collection* once the cache is warm
+  (at least 2000 cached tests and `tests × workers` of at least 16 000). Each
+  worker then imports only the test files it runs, so a `skipif` that reads
+  `sys.modules` or a test that relies on a sibling module's import can behave
+  differently. A banner line says when this happens; pin `--collect full` if
+  your suite depends on every module being imported. See
+  [Lazy collection](../concepts/lazy-collection.md#the-compatibility-trade).
 - [ ] *Reordering in `pytest_collection_modifyitems` is ignored* at
   `-n ≥ 2` (deselection is honored). rstest schedules by duration instead.
   This includes plugins that reorder: pytest-django, for example, moves

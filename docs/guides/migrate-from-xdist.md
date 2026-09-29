@@ -23,6 +23,14 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   duration-aware slowest-first scheduling. Pass the mode on the rstest command
   line or set `[tool.rstest] dist`: rstest does not read `--dist` from
   `addopts` (see [below](#if-xdist-is-still-in-your-ini)).
+- **Collection** (no xdist equivalent): xdist always has every worker collect
+  the whole suite. rstest does the same by default, but on a large suite with
+  a warm cache (at least 2000 cached tests and `tests × workers` of at least
+  16 000) it switches to [lazy collection](../concepts/lazy-collection.md):
+  each file is collected once, on one worker, and runs whole there. Conftest
+  collection hooks then see only that worker's files. Pin `--collect full`
+  (or `[tool.rstest] collect = "full"`) to keep xdist's collection model
+  exactly.
 - **`-n 1`**: differs. xdist's `-n 1` is one `gw0` worker with `workerinput`;
   rstest's `-n 1`, like `-n 0`, is
   [byte-exact mode](../concepts/glossary.md#byte-exact-mode), with no worker identity.
@@ -247,9 +255,10 @@ these before you switch:
 ## What improves
 
 - **Single collection authority**: xdist aborts runs when workers collect
-  differently ("Different tests were collected..."); rstest verifies by
-  hash and refuses **before** misassigning, and its error names the cause
-  (usually an unstable `parametrize` id). `rstest
+  differently ("Different tests were collected..."). Under full collection
+  rstest verifies by hash and refuses **before** misassigning, and its error
+  names the cause (usually an unstable `parametrize` id). Lazy collection
+  collects each file once, so there is nothing to disagree about. `rstest
   migrate-check` finds this *before* the first run: it collects twice,
   diffs the nodeid sets, and names the exact `parametrize` site with the
   unstable id (memory address / uuid); see
@@ -262,7 +271,9 @@ these before you switch:
   order, so a slow file's tests tend to travel together, and a slow file
   late in collection order starts late (`loadfile` / `loadscope` pin files
   outright). rstest's default mode dispatches slowest-first from the
-  duration cache and splits slow files across workers. On wait-heavy
+  duration cache and splits slow files across workers (when auto picks lazy
+  collection it dispatches whole files, slowest first, and only does so when
+  no file would be the long pole). On wait-heavy
   suites this more than halves the wall time vs xdist (see
   [Benchmarks](../reference/benchmarks.md)).
 - **One merged output**: summary, `--lf` cache, junitxml, and coverage, with

@@ -1,4 +1,4 @@
-# Fix playbook — one entry per `migrate-check` finding
+# Fix playbook: one entry per `migrate-check` finding
 
 For each finding rstest reports, this is the root cause, the **upstream fix**
 (removes the problem), and the **rstest stopgap** (caps parallelism but
@@ -23,10 +23,12 @@ touch the test now. The deeper background for each class is in the project's
 `address`/`uuid`) or "may bail (timing)" (for `time`).
 
 **Cause.** A `@pytest.mark.parametrize` whose generated **id** isn't stable
-across collections. Full-collect dispatch is index-based — every worker must
-agree on the ordered id list — so an id embedding a memory address (`0x…`, the
+across collections. Full-collect dispatch is index-based (every worker must
+agree on the ordered id list), so an id embedding a memory address (`0x…`, the
 `repr()` fallback for an object), a `uuid4()`, or a timestamp differs per worker
-and the workers can't agree → rstest refuses to dispatch (forces `-n 0`).
+and the workers can't agree → rstest refuses to dispatch and exits. It does
+not fall back to `-n 0` on its own; the user has to fix the ids or pass `-n 0`.
+Every cold-cache run uses full collection, so this shows up on the first run.
 
 **Upstream fix.** Give the parametrize explicit, stable `ids=`. The *values*
 under test are fine; only the auto-generated id string is unstable.
@@ -41,34 +43,36 @@ under test are fine; only the auto-generated id string is unstable.
 For ids derived from `datetime.now()` / uuids, either freeze the clock for the
 parametrize source or pass `ids=` with fixed labels. `time`-class ids are
 usually stable *enough* within one run (all workers collect near-simultaneously)
-so they often don't actually bail — fix them anyway to remove the fragility.
+so they often don't actually bail; fix them anyway to remove the fragility.
 
-**Stopgap.** `-n 0` (the suite stays serial). Pointless to fix with
-`--collect lazy` — its file-affine reorder can *break* positional id pairing.
+**Stopgap.** `-n 0` (the suite stays serial). Don't rely on `--collect lazy`
+to dodge it: lazy does no cross-worker comparison, but every cold-cache run
+(and every suite below the auto-lazy threshold) uses full collection and
+refuses again.
 
 ---
 
 ## NOT PARALLEL-SPECIFIC
 
-**Cause.** The test fails at `-n 0` too — it's a pre-existing bug or environment
+**Cause.** The test fails at `-n 0` too: it's a pre-existing bug or environment
 gap, not a parallelism problem. migrate-check summarizes these and sets them
 aside.
 
 **Action.** Out of scope for the migration. Tell the user the count and point
 them at `rstest -n 0` (≡ pytest) to reproduce. Don't "fix" these as part of
-adopting rstest — they were already failing.
+adopting rstest; they were already failing.
 
 ---
 
 ## INTRINSIC FLAKE
 
-**Cause.** Two serial repeats disagree — the test is nondeterministic under *any*
+**Cause.** Two serial repeats disagree: the test is nondeterministic under *any*
 runner (a real race, an unseeded random, a wall-clock dependency). Not caused by
 parallelism; parallelism just made you run it more.
 
 **Upstream fix.** Make it deterministic: seed the RNG, mock the clock, remove the
 real race. `--reruns N` will hide it (green on retry) but that masks real
-intermittent bugs — prefer fixing.
+intermittent bugs, so prefer fixing.
 
 **Stopgap.** `--reruns 2` (visible, counted, not red).
 
@@ -77,7 +81,7 @@ intermittent bugs — prefer fixing.
 ## ORDER DEPENDENCY
 
 **Cause.** Passes serial and under `--dist loadfile`, fails only under `--dist
-load` — a **cross-file** coupling: some other file's tests leave state this test
+load`. That is a **cross-file** coupling: some other file's tests leave state this test
 depends on (or is broken by), and `load` can run them on the same worker in a
 different order. migrate-check **bisects and names the polluting file**
 ("POLLUTED BY: …").
@@ -87,7 +91,7 @@ global, env var, monkeypatch not undone, shared file) and make this test set up
 its own state / the polluter clean up after itself (autouse fixture).
 
 **Stopgap.** Run the suite with `--dist loadfile` (keeps each file's tests on one
-worker, preserving in-file order) — set it in `[tool.rstest]`.
+worker, preserving in-file order); set it in `[tool.rstest]`.
 
 ---
 
@@ -110,7 +114,7 @@ upper bound (a `< 3s` assertion breaks under load).
 ## ISOLATION / CO-LOCATION
 
 **Cause.** Passes serial, fails under both `load` and `loadfile`, and is *not*
-wait-bound — a **same-process state leak**: a sibling test (often in the same
+wait-bound. That is a **same-process state leak**: a sibling test (often in the same
 file; migrate-check tells you "SAME-FILE co-location" or names the polluting
 file) mutates global state this test reads, and parallel co-location runs them
 in an order that surfaces it. The classic case: leftover `warnings` filters,
@@ -130,11 +134,11 @@ def _isolate_warnings():
         yield
 ```
 
-If migrate-check says "not reproducible serially — likely a concurrent-resource
-race", it's not state pollution — treat it as a real concurrency bug or a fixed
+If migrate-check says "not reproducible serially, likely a concurrent-resource
+race", it's not state pollution; treat it as a real concurrency bug or a fixed
 resource (below).
 
-**Stopgap.** `@pytest.mark.serial` (the marker is auto-registered) — the test
+**Stopgap.** `@pytest.mark.serial` (the marker is auto-registered): the test
 runs alone after the parallel phase.
 
 ---
@@ -143,11 +147,12 @@ runs alone after the parallel phase.
 
 **Cause.** A session-scoped fixture binds a **fixed port** (or opens a fixed
 socket/file). Session scope is per-worker, so every worker binds the same port →
-clash/hang. Usually shows up as a hang (the `--worker-timeout` turns it into a
-failure) or a bind error in the longrepr.
+clash/hang. Usually shows up as a hang or a bind error in the longrepr. A hang
+only becomes a failure with a hang backstop: pass `--worker-timeout SECS` (off
+by default), or `--timeout SECS`, which also arms it.
 
 **Upstream fix.** Bind an **ephemeral** port (`port=0`, then read back the
-assigned port) — the standard xdist-safe pattern. Then the fixture duplicates
+assigned port), the standard xdist-safe pattern. Then the fixture duplicates
 safely per worker.
 
 **Stopgap.** `@pytest.mark.serial` if the resource is truly single-instance, or

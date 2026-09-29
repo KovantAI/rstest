@@ -27,7 +27,7 @@ enables work-stealing under lazy however lazy was chosen. Auto never
 *rejects* a config: on `--dist loadscope|loadgroup`, a nodeid, `--pyargs`,
 a path selection (explicit paths, or `--changed`/`--since-green`
 narrowing), `--shard`, `--shuffle`, `--incremental`, or a fail-fast
-`--order` it just stays `full`. The test count covers the whole cached
+`--order` (including the one `--watch` picks by default) it just stays `full`. The test count covers the whole cached
 suite, so a run narrowed to a few files keeps full collection's per-test
 spread across workers.
 
@@ -39,8 +39,9 @@ file the lazy walk doesn't find. Files the walk finds but pytest would
 never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) are safe
 in any lazy run: the worker applies pytest's own ignore checks and reports
 them empty.
-Auto-lazy never splits a file across workers, so it also stays `full` when
-one file's cached time exceeds an even per-worker share
+Without an explicit `--dist load`, lazy never splits a file across workers,
+so auto also stays `full` when one file's cached time exceeds an even
+per-worker share
 (`total time / workers`) by more than a second, since that file would hold
 up the run.
 
