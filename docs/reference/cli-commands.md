@@ -163,14 +163,19 @@ the fix:
 | xdist-only flags in `addopts` (`--tx`, `--rsyncdir`, `-d`, `--maxprocesses`, `--looponfail`, `-p xdist`, ...) | yes | usage error (exit 4) | drop the flag (`--looponfail`: use `--watch`) |
 | `pytest-xdist` in `required_plugins` | yes | pytest refuses to start | remove it |
 | unguarded `import xdist` / `from xdist... import` | yes | `ImportError` | the native `worker_id` / `testrun_uid` fixtures, `config.workerinput`, or `PYTEST_XDIST_WORKER` |
-| an xdist hook (`pytest_configure_node`, `pytest_testnode*`, `pytest_xdist_*`) in a conftest or plugin module, not marked `optionalhook=True` | yes | `PluginValidationError: unknown hook` | `@pytest.hookimpl(optionalhook=True)` |
+| an xdist hook (`pytest_configure_node`, `pytest_testnode*`, `pytest_xdist_*`) in a conftest or plugin module, not marked `optionalhook=True` | yes (no for a hook class the file never registers) | `PluginValidationError: unknown hook` | `@pytest.hookimpl(optionalhook=True)` |
 | `hasplugin("xdist")` in your code | no | the branch flips | gate on `config.workerinput` or `PYTEST_XDIST_WORKER` |
-| unguarded module-level `import xdist` in an installed plugin | yes in the entry-point module, no elsewhere | `ImportError` at startup (entry module) or when that module is imported | upgrade or drop the plugin, or keep pytest-xdist |
+| unguarded module-level `import xdist` in an installed plugin | yes in the entry-point module and its packages' `__init__.py`, no elsewhere | `ImportError` at startup (entry module) or when that module is imported | upgrade or drop the plugin, or keep pytest-xdist |
 | `hasplugin("xdist")` in an installed plugin | no | the plugin takes its non-xdist path | check that plugin's behavior |
 | `rsyncdirs` / `rsyncignore` / `looponfailroots` | no | a `PytestConfigWarning` (an error under `--strict-config`) | remove the key |
 
-An import inside a `try:` or `if TYPE_CHECKING:` block is treated as
-guarded and not reported. Hook names the project declares itself (through
+An import inside a `try:` block, an `if TYPE_CHECKING:` block, or an
+`if config.pluginmanager.hasplugin("xdist"):` block is treated as guarded
+and not reported. The `if` counts only when its body can't run without the
+guard: `and` chains count, while `or`, `not` and comparisons (other than
+`getplugin("xdist") is not None`) don't. An xdist
+hook under such a gate, or in a class the same file registers only under
+one, isn't reported either. Hook names the project declares itself (through
 `pytest_addhooks` and `@pytest.hookspec`) don't need pytest-xdist, and
 neither do hook-named functions in test modules, which pytest never
 registers as plugins, so neither is reported. Exits non-zero on any blocking finding that isn't

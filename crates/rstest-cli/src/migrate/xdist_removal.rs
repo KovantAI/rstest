@@ -12,7 +12,7 @@
 //! uninstall, but the `xdist` module stays importable, so `import xdist`
 //! sites are only caught by the static scan.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -76,6 +76,10 @@ pub struct TrialReport {
     /// The tail of the child's stderr when the session never started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The tail of the child's stderr when pytest-xdist is installed but the
+    /// run with it loaded never started, so nothing could be compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_error: Option<String>,
     /// Whether a run with pytest-xdist loaded was compared against (`false`
     /// when it isn't installed, so nothing can be called a regression).
     pub compared: bool,
@@ -91,10 +95,10 @@ pub struct TrialReport {
 }
 
 impl TrialReport {
-    /// A trial blocks the removal when the session didn't start or a test
+    /// A trial blocks the removal when either session didn't start or a test
     /// regressed.
     fn passed(&self) -> bool {
-        self.started && self.regressions.is_empty()
+        self.started && self.baseline_error.is_none() && self.regressions.is_empty()
     }
 }
 
@@ -151,6 +155,29 @@ for dist in md.distributions():
         out["plugins"].append({"dist": name, "root": root, "entry": entry})
 print(json.dumps(out))
 "#;
+
+/// The probed plugins grouped by package root, each scanned once: a dist can
+/// list several `pytest11` entry points in one package.
+fn plugin_roots<'a>(
+    plugins: impl Iterator<Item = &'a ProbedPlugin>,
+) -> BTreeMap<PathBuf, (String, Vec<PathBuf>)> {
+    let mut roots: BTreeMap<PathBuf, (String, Vec<PathBuf>)> = BTreeMap::new();
+    for p in plugins {
+        let (_, entries) = roots
+            .entry(p.root.clone())
+            .or_insert_with(|| (p.dist.clone(), Vec::new()));
+        entries.extend(p.entry.clone());
+    }
+    roots
+}
+
+/// Whether importing the entry module `entry` runs `file`: the module itself,
+/// or the `__init__.py` of any package on its import path.
+fn imported_at_startup(file: &Path, entry: &Path) -> bool {
+    file == entry
+        || (file.file_name().is_some_and(|n| n == "__init__.py")
+            && file.parent().is_some_and(|dir| entry.starts_with(dir)))
+}
 
 fn probe(python: &Path) -> Option<Probe> {
     let out = std::process::Command::new(python)
@@ -225,13 +252,13 @@ pub fn run_xdist_removal_check(
         ));
     }
     let xdist_version = probed.as_ref().and_then(|p| p.xdist.clone());
-    for plugin in probed.iter().flat_map(|p| &p.plugins) {
-        for file in plugin_py_files(&plugin.root) {
+    for (root, (dist, entries)) in plugin_roots(probed.iter().flat_map(|p| &p.plugins)) {
+        for file in plugin_py_files(&root) {
             if let Ok(text) = std::fs::read_to_string(&file) {
-                let is_entry = plugin.entry.as_deref() == Some(file.as_path());
+                let is_entry = entries.iter().any(|e| imported_at_startup(&file, e));
                 findings.extend(scan_plugin_source(
                     &text,
-                    &plugin.dist,
+                    &dist,
                     &file.display().to_string(),
                     is_entry,
                 ));
@@ -320,9 +347,15 @@ fn render(findings: &[RemovalFinding], sink: &mut Sink) {
         sink.out_line("  no findings: config, sources and plugins don't depend on pytest-xdist.\n");
         return;
     }
-    let blocking = findings.iter().filter(|f| f.blocking).count();
+    let blocking = findings.iter().filter(|f| f.blocking && !f.allowed).count();
+    let allowed = findings.iter().filter(|f| f.allowed).count();
+    let allowed_note = if allowed > 0 {
+        format!(", {allowed} allowed")
+    } else {
+        String::new()
+    };
     sink.out_line(&format!(
-        "  {} finding(s), {blocking} blocking:\n",
+        "  {} finding(s), {blocking} blocking{allowed_note}:\n",
         findings.len()
     ));
     for f in findings {
@@ -354,12 +387,17 @@ fn run_trial(
         .cloned()
         .chain([MAXFAIL_LIFT.to_string()])
         .collect();
-    let baseline = if xdist_installed {
+    let (mut baseline, baseline_stderr) = if xdist_installed {
         sink.warn("rstest xdist-removal-check: running the suite with pytest-xdist loaded…");
-        run_session_capture(python, &[], &base)?.0
+        run_session_capture(python, &[], &base)?
     } else {
-        None
+        (None, String::new())
     };
+    let baseline_error = baseline_failure(xdist_installed, baseline.as_ref(), &baseline_stderr);
+    if baseline_error.is_some() {
+        // Nothing to compare against: don't treat an empty report as a baseline.
+        baseline = None;
+    }
     sink.warn(
         "rstest xdist-removal-check: running the suite with pytest-xdist hidden (-p no:xdist)…",
     );
@@ -369,9 +407,23 @@ fn run_trial(
         .chain(["-p".to_string(), "no:xdist".to_string()])
         .collect();
     let (hidden, stderr) = run_session_capture(python, &[], &hidden_args)?;
-    let report = trial_report(baseline.as_ref(), hidden.as_ref(), &stderr);
+    let mut report = trial_report(baseline.as_ref(), hidden.as_ref(), &stderr);
+    report.baseline_error = baseline_error;
     render_trial(&report, sink);
     Ok(report)
+}
+
+/// The stderr tail when pytest-xdist is installed but the run with it loaded
+/// didn't start: no report at all, or an empty one next to an error (a usage
+/// error or INTERNALERROR still writes a report, with no tests).
+fn baseline_failure(
+    xdist_installed: bool,
+    baseline: Option<&Outcomes>,
+    stderr: &str,
+) -> Option<String> {
+    let failed =
+        baseline.is_none_or(|b| b.is_empty() && stderr.to_ascii_lowercase().contains("error"));
+    (xdist_installed && failed).then(|| stderr_tail(stderr, 12))
 }
 
 /// Compare the two trial runs. `baseline` is `None` when xdist isn't
@@ -404,6 +456,7 @@ fn trial_report(
         .map(|(id, _)| id.clone())
         .collect();
     TrialReport {
+        baseline_error: None,
         compared: baseline.is_some(),
         error: None,
         failed: hidden.values().filter(|r| r.phase == Phase::Fail).count(),
@@ -414,6 +467,14 @@ fn trial_report(
 }
 
 fn render_trial(t: &TrialReport, sink: &mut Sink) {
+    if let Some(err) = &t.baseline_error {
+        sink.out_line(
+            "TRIAL: the session did not start with pytest-xdist loaded, so nothing was compared:",
+        );
+        for line in err.lines() {
+            sink.out_line(&format!("    {line}"));
+        }
+    }
     if !t.started {
         sink.out_line("TRIAL: the session did not start with pytest-xdist hidden:");
         for line in t.error.as_deref().unwrap_or("").lines() {
@@ -425,6 +486,7 @@ fn render_trial(t: &TrialReport, sink: &mut Sink) {
         let note = match (t.failed, t.compared) {
             (0, _) => String::new(),
             (n, true) => format!(" ({n} failed, and fail with pytest-xdist loaded too)"),
+            (n, false) if t.baseline_error.is_some() => format!(" ({n} failed)"),
             (n, false) => {
                 format!(" ({n} failed; pytest-xdist isn't installed, nothing to compare)")
             }
@@ -733,7 +795,11 @@ fn scan_ini_keys(extra: &[(String, Vec<String>)], ini_name: &str) -> Vec<Removal
 fn re_import() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^\s*(?:import\s+xdist\b|from\s+xdist(?:\.[\w.]+)?\s+import\b)").unwrap()
+        // `xdist` anywhere in an `import a, b as c, ...` list, or `from xdist[...] import`.
+        Regex::new(
+            r"^\s*(?:import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*xdist\b|from\s+xdist(?:\.[\w.]+)?\s+import\b)",
+        )
+        .unwrap()
     })
 }
 
@@ -756,11 +822,10 @@ fn indent(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
-/// An import is guarded when any enclosing block is a `try:` (with an
-/// `except ImportError` presumably below) or an `if TYPE_CHECKING:` /
-/// `if typing.TYPE_CHECKING:`. Enclosing blocks are the earlier code lines
-/// with strictly less indentation, walking outward.
-fn import_guarded(lines: &[&str], idx: usize) -> bool {
+/// Whether any block enclosing line `idx` satisfies `pred` (given the block's
+/// header, trimmed). Enclosing blocks are the earlier code lines with strictly
+/// less indentation, walking outward.
+fn enclosed_by(lines: &[&str], idx: usize, mut pred: impl FnMut(&str) -> bool) -> bool {
     let mut level = indent(lines[idx]);
     for line in lines[..idx].iter().rev() {
         let code = line.trim();
@@ -771,13 +836,68 @@ fn import_guarded(lines: &[&str], idx: usize) -> bool {
             continue;
         }
         level = indent(line);
-        if code == "try:"
-            || (code.starts_with("if ") && code.ends_with(':') && code.contains("TYPE_CHECKING"))
-        {
+        if pred(code) {
             return true;
         }
     }
     false
+}
+
+/// The condition of an `if` / `elif` header.
+fn if_cond(code: &str) -> Option<&str> {
+    code.strip_prefix("if ")
+        .or_else(|| code.strip_prefix("elif "))
+        .and_then(|c| c.strip_suffix(':'))
+}
+
+/// An import is guarded when any enclosing block is a `try:` (with an
+/// `except ImportError` presumably below), or an `if`/`elif` that only runs
+/// under a type checker or while xdist is loaded (see [`and_chain_requires`]).
+fn import_guarded(lines: &[&str], idx: usize) -> bool {
+    enclosed_by(lines, idx, |code| {
+        code == "try:"
+            || if_cond(code).is_some_and(|c| {
+                and_chain_requires(c, re_type_checking()) || and_chain_requires(c, re_xdist_gate())
+            })
+    })
+}
+
+/// A block that only runs while xdist is loaded.
+fn xdist_gated(lines: &[&str], idx: usize) -> bool {
+    enclosed_by(lines, idx, |code| {
+        if_cond(code).is_some_and(|c| and_chain_requires(c, re_xdist_gate()))
+    })
+}
+
+fn re_type_checking() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^(?:\w+\.)*TYPE_CHECKING$").unwrap())
+}
+
+/// `hasplugin("xdist")` (a bool) or `getplugin("xdist")`, which may also be
+/// compared `is not None`.
+fn re_xdist_gate() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"^[\w.]*\b(?:has_?plugin\(\s*["']xdist["']\s*\)|getplugin\(\s*["']xdist["']\s*\)(?:\s+is\s+not\s+None)?)$"#,
+        )
+        .unwrap()
+    })
+}
+
+/// Whether an `if` condition is true only when `term` holds: an `and` chain
+/// with a bare `term` in it. Any `or`, and negated or compared terms, don't
+/// count: their body can still run when `term` is false.
+fn and_chain_requires(cond: &str, term: &Regex) -> bool {
+    let mut cond = cond.trim();
+    while let Some(inner) = cond.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
+        cond = inner.trim();
+    }
+    if cond.split_whitespace().any(|w| w == "or") {
+        return false;
+    }
+    cond.split(" and ").any(|t| term.is_match(t.trim()))
 }
 
 /// The decorator block right above the `def` at `idx`: stacked `@...` lines,
@@ -860,6 +980,53 @@ fn import_fix(text: &str) -> String {
     }
 }
 
+/// The name of the class whose body line `idx` is in, if any.
+fn enclosing_class(lines: &[&str], idx: usize) -> Option<String> {
+    let mut found = None;
+    enclosed_by(lines, idx, |code| {
+        found = code
+            .strip_prefix("class ")
+            .and_then(|rest| {
+                rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+            })
+            .filter(|n| !n.is_empty())
+            .map(str::to_string);
+        found.is_some()
+    });
+    found
+}
+
+#[derive(PartialEq, Debug)]
+enum Registration {
+    /// Every `register(Class...)` in the file sits under an xdist gate.
+    Gated,
+    /// Some `register(Class...)` runs without xdist.
+    Ungated,
+    /// The file never registers the class.
+    NotFound,
+}
+
+/// How a hook class is registered with the plugin manager in its own file.
+fn registration(lines: &[&str], class: &str) -> Registration {
+    let re = Regex::new(&format!(r"\bregister\(\s*{}\b", regex::escape(class))).unwrap();
+    let mut seen = false;
+    for (idx, l) in lines.iter().enumerate() {
+        if l.trim_start().starts_with('#') || !re.is_match(l) {
+            continue;
+        }
+        if !xdist_gated(lines, idx) {
+            return Registration::Ungated;
+        }
+        seen = true;
+    }
+    if seen {
+        Registration::Gated
+    } else {
+        Registration::NotFound
+    }
+}
+
 /// Scan one project source file: unguarded `xdist` imports, xdist hook
 /// implementations not marked optional, and `hasplugin("xdist")` gates.
 ///
@@ -901,7 +1068,30 @@ fn scan_source(
                 || own_specs.contains(name)
                 || re_optional().is_match(&deco)
                 || re_hookspec().is_match(&deco)
+                || xdist_gated(&lines, idx)
             {
+                continue;
+            }
+            let registration = enclosing_class(&lines, idx).map(|c| registration(&lines, &c));
+            if registration == Some(Registration::Gated) {
+                continue;
+            }
+            if let Some(Registration::NotFound) = registration {
+                out.push(RemovalFinding {
+                    allowed: false,
+                    blocking: false,
+                    fix: "register the class only under `if config.pluginmanager.hasplugin(\"xdist\"):`, \
+                          or mark the hook `@pytest.hookimpl(optionalhook=True)`"
+                        .to_string(),
+                    kind: "hook".to_string(),
+                    location: at,
+                    text: snippet,
+                    why: format!(
+                        "a method of a class registered outside this file: if it is registered \
+                         without an xdist gate, every run stops with `PluginValidationError: \
+                         unknown hook '{name}'` once pytest-xdist is gone"
+                    ),
+                });
                 continue;
             }
             let emulated = matches!(
@@ -1186,11 +1376,15 @@ mod tests {
             "import xdist.plugin",
             "from xdist.scheduler import LoadScheduling",
             "  from xdist import is_xdist_worker",
+            "import os, xdist",
+            "import pytest, xdist.plugin",
+            "import os as o, xdist as x",
         ] {
             assert_eq!(scan(line, "c.py").len(), 1, "{line}");
         }
         for line in [
             "import xdistlike",
+            "import os, xdistlike",
             "# import xdist",
             "x = 'import xdist'",
             "pytest.importorskip(\"xdist\")",
@@ -1210,6 +1404,130 @@ mod tests {
         assert!(scan(src, "c.py").is_empty());
         let src = "try:\n    import os\n    if os.name:\n        import xdist\nexcept ImportError:\n    pass\n";
         assert!(scan(src, "c.py").is_empty());
+    }
+
+    #[test]
+    fn render_header_excludes_allowed_from_blocking() {
+        let mut f = scan_addopts(&v(&["-n", "4"]), "pytest.ini", None);
+        assert!(f.iter().all(|f| f.blocking));
+        let total = f.len();
+        f[0].allowed = true;
+        let (mut sink, cap) = Sink::captured();
+        render(&f, &mut sink);
+        let header = cap.out().lines().next().unwrap().to_string();
+        assert_eq!(
+            header,
+            format!("  {total} finding(s), {} blocking, 1 allowed:", total - 1)
+        );
+    }
+
+    #[test]
+    fn source_hasplugin_gated_import_is_fine() {
+        let src = "\
+def pytest_configure(config):
+    if config.pluginmanager.hasplugin(\"xdist\"):
+        from xdist import is_xdist_worker
+";
+        let f = scan(src, "conftest.py");
+        assert_eq!(kinds(&f), BTreeMap::from([("hasplugin_gate", 1)]), "{f:?}");
+        for cond in [
+            "pm.hasplugin('xdist') and not config.option.foo",
+            "config.option.foo and pm.hasplugin('xdist')",
+            "pm.getplugin('xdist')",
+            "pm.getplugin('xdist') is not None",
+            "(pm.hasplugin('xdist'))",
+        ] {
+            let src = format!("if {cond}:\n    from xdist import is_xdist_worker\n");
+            assert_eq!(kinds(&scan(&src, "c.py")).get("import"), None, "{cond}");
+        }
+        // Gates whose body can still run without xdist don't guard it.
+        for cond in [
+            "not pm.hasplugin('xdist')",
+            "not(pm.hasplugin('xdist'))",
+            "pm.getplugin('xdist') is None",
+            "pm.hasplugin('xdist') or os.environ.get('PYTEST_XDIST_WORKER')",
+            "pm.hasplugin('xdist') == False",
+            "pm.hasplugin('xdist') is not None",
+        ] {
+            let src = format!("if {cond}:\n    from xdist import is_xdist_worker\n");
+            assert_eq!(kinds(&scan(&src, "c.py")).get("import"), Some(&1), "{cond}");
+        }
+    }
+
+    #[test]
+    fn source_type_checking_guard_must_be_positive() {
+        for cond in [
+            "TYPE_CHECKING and sys.version_info >= (3, 9)",
+            "(typing.TYPE_CHECKING)",
+        ] {
+            let src = format!("if {cond}:\n    import xdist\n");
+            assert!(scan(&src, "c.py").is_empty(), "{cond}");
+        }
+        for cond in [
+            "not TYPE_CHECKING",
+            "TYPE_CHECKING or sys.version_info < (3, 9)",
+            "TYPE_CHECKING_LATER",
+        ] {
+            let src = format!("if {cond}:\n    import xdist\n");
+            assert_eq!(scan(&src, "c.py").len(), 1, "{cond}");
+        }
+        // The `else` of a TYPE_CHECKING block runs.
+        let src = "if TYPE_CHECKING:\n    pass\nelse:\n    import xdist\n";
+        assert_eq!(scan(src, "c.py").len(), 1);
+    }
+
+    #[test]
+    fn source_hook_class_registration() {
+        let class = "\
+class XdistHooks:
+    def pytest_configure_node(self, node):
+        pass
+";
+        // Registered only behind an xdist gate: safe.
+        let src = format!(
+            "{class}\ndef pytest_configure(config):\n    if config.pluginmanager.hasplugin('xdist'):\n        config.pluginmanager.register(XdistHooks())\n"
+        );
+        assert_eq!(kinds(&scan(&src, "conftest.py")).get("hook"), None);
+        // Registered unconditionally: blocks.
+        let src = format!(
+            "{class}\ndef pytest_configure(config):\n    config.pluginmanager.register(XdistHooks(), 'x')\n"
+        );
+        let f = scan(&src, "conftest.py");
+        assert!(f.iter().any(|f| f.kind == "hook" && f.blocking), "{f:?}");
+        // Registered elsewhere: flagged, but not blocking.
+        let f = scan(class, "conftest.py");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].kind == "hook" && !f[0].blocking);
+        // A module-level hook defined only under a gate.
+        let src = "if pm.hasplugin('xdist'):\n    def pytest_configure_node(node):\n        pass\n";
+        assert_eq!(kinds(&scan(src, "conftest.py")).get("hook"), None);
+    }
+
+    #[test]
+    fn plugin_roots_dedup_and_startup_modules() {
+        let p = |entry: &str| ProbedPlugin {
+            dist: "pytest-foo".into(),
+            root: "/sp/pytest_foo".into(),
+            entry: Some(entry.into()),
+        };
+        let plugins = [p("/sp/pytest_foo/a.py"), p("/sp/pytest_foo/b.py")];
+        let roots = plugin_roots(plugins.iter());
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[Path::new("/sp/pytest_foo")].1.len(), 2);
+        let entry = Path::new("/sp/pytest_foo/sub/plugin.py");
+        for f in [
+            "/sp/pytest_foo/sub/plugin.py",
+            "/sp/pytest_foo/__init__.py",
+            "/sp/pytest_foo/sub/__init__.py",
+        ] {
+            assert!(imported_at_startup(Path::new(f), entry), "{f}");
+        }
+        for f in [
+            "/sp/pytest_foo/other.py",
+            "/sp/pytest_foo/other/__init__.py",
+        ] {
+            assert!(!imported_at_startup(Path::new(f), entry), "{f}");
+        }
     }
 
     #[test]
@@ -1249,6 +1567,10 @@ class Plugin:
     @pytest.hookimpl(tryfirst=True)
     def pytest_xdist_make_scheduler(self, config, log):
         pass
+
+
+def pytest_configure(config):
+    config.pluginmanager.register(Plugin())
 ";
         let f = scan(src, "conftest.py");
         let locs: Vec<&str> = f.iter().map(|f| f.location.as_str()).collect();
@@ -1449,6 +1771,38 @@ def pytest_configure(config):
         assert!(t.passed(), "no baseline, nothing to call a regression");
         assert!(!t.compared);
         assert_eq!(t.failed, 1);
+    }
+
+    #[test]
+    fn baseline_that_never_started_is_a_failure() {
+        let err = "ERROR: usage: pytest [options]\npytest: error: unrecognized arguments: --foo\n";
+        let empty = Outcomes::new();
+        let ran = outcomes(&[("a", Phase::Pass)]);
+        assert!(baseline_failure(true, None, "").is_some());
+        let e = baseline_failure(true, Some(&empty), err).unwrap();
+        assert!(e.contains("unrecognized arguments: --foo"));
+        // An empty selection with no error, or a run with tests, is a baseline.
+        assert!(baseline_failure(true, Some(&empty), "").is_none());
+        assert!(baseline_failure(true, Some(&ran), err).is_none());
+        // Not installed: there is no baseline to fail.
+        assert!(baseline_failure(false, None, err).is_none());
+    }
+
+    #[test]
+    fn trial_with_failed_baseline_does_not_pass() {
+        let hidden = outcomes(&[("a", Phase::Pass), ("b", Phase::Fail)]);
+        let mut t = trial_report(None, Some(&hidden), "");
+        t.baseline_error = Some("ERROR: unrecognized arguments: --foo".into());
+        assert!(t.started && !t.passed());
+        let (mut sink, cap) = Sink::captured();
+        render_trial(&t, &mut sink);
+        let out = cap.out();
+        assert!(
+            out.contains("did not start with pytest-xdist loaded"),
+            "{out}"
+        );
+        assert!(out.contains("unrecognized arguments: --foo"), "{out}");
+        assert!(!out.contains("isn't installed"), "{out}");
     }
 
     #[test]

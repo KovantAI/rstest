@@ -120,6 +120,13 @@
       "description": "Result of the `--xdist-trial` run with `-p no:xdist`.",
       "type": "object",
       "properties": {
+        "baseline_error": {
+          "description": "The tail of the child's stderr when pytest-xdist is installed but the\nrun with it loaded never started, so nothing could be compared.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "compared": {
           "description": "Whether a run with pytest-xdist loaded was compared against (`false`\nwhen it isn't installed, so nothing can be called a regression).",
           "type": "boolean"

@@ -44,6 +44,7 @@ Result of the `--xdist-trial` run with `-p no:xdist`.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `baseline_error` | string or null | no | The tail of the child's stderr when pytest-xdist is installed but the run with it loaded never started, so nothing could be compared. |
 | `compared` | boolean | yes | Whether a run with pytest-xdist loaded was compared against (`false` when it isn't installed, so nothing can be called a regression). |
 | `error` | string or null | no | The tail of the child's stderr when the session never started. |
 | `failed` | integer | yes | Tests that failed with xdist hidden. |
