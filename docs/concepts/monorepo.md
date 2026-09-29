@@ -102,9 +102,9 @@ dropped those flags at a monorepo root).
 | `-n` | split into per-project shares (see [Worker budget](#worker-budget-and-scheduling)) |
 | `--python`, `--dist`, `--order`, `--output` (except `json`/`tap`), `--reruns`, `--only-rerun`, `--quarantine`, `--worker-timeout`, `--doctor`, `--doctor-fail-on` | forwarded to every project (`--order` is itself Unreleased) |
 | `--changed[=REV]`, `--changed-strict` | classified once at the root, then forwarded to the directly changed projects (see [Changed-aware runs](#changed-aware-runs)) |
-| `--timeout`, `--collect`, `--incremental`, `--reruns-only-known-flaky` | forwarded to every project (**Unreleased**) |
-| `--fail-on-leak`, `--durations-regress`, `--require-baseline` | forwarded; each gate applies per project, and a project that fails its gate fails the root through the merged exit code (**Unreleased**) |
-| `--shuffle[=SEED]` | resolved once at the root, so every project uses the same seed. A bare `--shuffle` picks one and prints `rstest: shuffle seed <N> for every project (reproduce with --shuffle=<N>)`. Each project still needs `-n 2` or more, so a project whose share is one worker errors (**Unreleased**) |
+| `--timeout`, `--collect`, `--incremental`, `--reruns-only-known-flaky`, `--fork-pool` | forwarded to every project |
+| `--fail-on-leak`, `--durations-regress`, `--require-baseline` | forwarded; each gate applies per project, and a project that fails its gate fails the root through the merged exit code |
+| `--shuffle[=SEED]` | resolved once at the root, so every project uses the same seed. A bare `--shuffle` picks one and prints `rstest: shuffle seed <N> for every project (reproduce with --shuffle=<N>)`. Each project still needs `-n 2` or more, so a project whose share is one worker errors |
 | `--junitxml`, `--doctor-json`, `--doctor-md` | one file per project, slug before the extension (see below) |
 | `--html` | one file per project, like `--junitxml`: `out.html` -> `out.libs-core.html` (**Unreleased**) |
 | `--report-json` | one merged document at the requested path (see below) |

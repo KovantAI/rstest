@@ -238,10 +238,12 @@ collect`, rstest picks `lazy` automatically for a big-enough parallel run:
 at least 2000 known tests (from the duration cache) and a
 `tests × workers` product of at least 16 000, on a file-affine dist
 (`--dist load`/`loadfile`) with no path selection (explicit paths or
-`--changed`/`--since-green` narrowing), no doctest collection, every cached
-test's file found by the lazy walk, and no file outweighing an even
-per-worker share;
-otherwise `full`. A cold cache (no
+`--changed`/`--since-green` narrowing), no nodeid or `--pyargs` argument,
+no doctest collection, every cached test's file found by the lazy walk, and
+no file outweighing an even per-worker share. `--shard`, `--shuffle`,
+`--incremental` and a fail-fast `--order` (including the one `--watch` picks
+by default) also keep it `full`, so a `--watch` run never auto-picks lazy.
+Otherwise `full`. A cold cache (no
 `.rstest_cache/durations.json` yet) counts as zero tests, so the first
 run of a suite stays `full`; warm runs of large suites flip to `lazy`.
 When auto picks `lazy`, a banner line reports it. Pass `--collect full`

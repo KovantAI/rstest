@@ -39,9 +39,11 @@ such as `--reruns-delay` are not implemented). In parallel
   you get xdist's semantics (session fixtures once per worker) plus a
   [short list of differences](guides/migrate-from-pytest.md#what-changes);
   at `-n 0` outcomes match pytest exactly.
-- **Parallel by design.** Test-granular work distribution across worker
-  processes, duration-aware scheduling that starts your slowest tests
-  first, and safety rails for tests that can't parallelize
+- **Parallel by design.** Work distribution across worker processes,
+  duration-aware scheduling that starts your slowest tests first (per test,
+  or per file when a large suite gets
+  [lazy collection](concepts/lazy-collection.md)), and safety rails for
+  tests that can't parallelize
   (`@pytest.mark.serial`, `--dist loadfile`).
 - **Crash-safe.** A segfaulting test costs you one FAILED line: the worker
   is replaced, its remaining tests redistribute, and the run completes.

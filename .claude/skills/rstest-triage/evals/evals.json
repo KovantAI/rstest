@@ -1,0 +1,57 @@
+{
+  "skill_name": "rstest-triage",
+  "evals": [
+    {
+      "id": 0,
+      "name": "ci-only-failure-from-journal",
+      "prompt": "Our CI job went red on tests/test_report.py::test_totals (\"report rendered in 'debug' mode\") but it passes every time I run the suite locally, serial or parallel. I downloaded the rstest replay artifact from the failed job, it's ci-latest.json in the repo root. Figure out what's actually breaking it and fix it.",
+      "expected_output": "Replays the journal and reproduces the failure, notices bisect only searches collection order (the polluter collects after test_report), searches the worker's recorded order (journal_bisect.py or equivalent), names tests/test_zz_cli_flags.py::test_verbose_flag (via app.cli.configure(verbose=True)) as the polluter leaking app.settings.MODE, and fixes the polluter (monkeypatch or restore) rather than marking serial or quarantining.",
+      "files": [
+        "fixture-repo-big"
+      ],
+      "assertions": [
+        "Ran rstest replay with --journal ci-latest.json and reproduced the test_totals failure",
+        "Named tests/test_zz_cli_flags.py::test_verbose_flag as the polluter",
+        "Explained that cli.configure(verbose=True) sets app.settings.MODE globally and it is never restored",
+        "Fixed the leak (monkeypatch/restore/fixture) rather than only marking serial, --dist loadfile, or quarantine",
+        "Did not conclude the failure is concurrency/parallel-only after bisect reported it does not reproduce from collection order",
+        "After the fix, the replayed schedule (or the minimal ordered repro) passes"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "flaky-policy-for-ci",
+      "prompt": "we moved to rstest a month ago and CI is ok mostly but tests/test_ws.py::test_reconnect and a couple of the websocket tests flake maybe 1 in 10 runs. people just hit rerun. can you set up something so the known flaky ones don't turn the build red, but a real regression still fails? we're on github actions with the rstest action. write what you'd change to outputs/plan.md",
+      "expected_output": "Plan uses --reruns with --reruns-only-known-flaky, explains it never learns new flakes so needs a learning run with plain --reruns, persists .rstest_cache (the action does), a committed quarantine.txt with tracking comments for persistent offenders, notes new failures still fail, suggests explain to check history and bisect/audit before quarantining in case it is order dependence.",
+      "files": [
+        "fixture-repo"
+      ],
+      "assertions": [
+        "Recommends --reruns together with --reruns-only-known-flaky",
+        "Explains --reruns-only-known-flaky does not learn new flakes and needs a separate learning run with plain --reruns",
+        "Keeps .rstest_cache (flake history) persisted across CI runs",
+        "Proposes a committed quarantine file with tracking-issue comments for persistent offenders",
+        "States that failures outside the known-flaky/quarantine set still fail the build",
+        "Suggests checking for order dependence (bisect/audit/shuffle) or history (explain) before quarantining",
+        "Uses only flags/inputs that exist in rstest 0.8.0 (no invented options)"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "ci-hang",
+      "prompt": "rstest -n auto on our CI runner sometimes just sits there until the job's 6h timeout kills it, no output after ~98%. locally it never happens. how do I find which test is hanging and stop it from eating the whole job? put your answer in outputs/answer.md",
+      "expected_output": "Recommends --timeout SECS (in-process, traceback at the stuck line, also arms the worker-timeout backstop) and/or --worker-timeout for blocked C code, explains the stuck test is reported failed and the run completes, suggests uploading the replay journal and replaying locally, and points at shared-resource causes (fixed port across workers) with the ephemeral-port fix.",
+      "files": [
+        "fixture-repo"
+      ],
+      "assertions": [
+        "Recommends --timeout SECS to fail the stuck test with a traceback",
+        "Mentions --worker-timeout as the backstop for code that never returns to Python (blocked C extension)",
+        "Explains the timed-out test is reported failed and the run still completes",
+        "Suggests replaying the CI schedule locally via the uploaded replay journal (rstest replay --journal)",
+        "Names a shared cross-worker resource (e.g. fixed port) as a likely CI-only hang cause, with an ephemeral-port or per-worker fix",
+        "Uses only flags that exist in rstest 0.8.0 (no invented options)"
+      ]
+    }
+  ]
+}
