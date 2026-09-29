@@ -554,6 +554,30 @@ worker-timeout = 120
     }
 
     #[test]
+    fn discover_reads_addopts_from_ini_and_pyproject() {
+        let d = tmpdir("doctest-addopts-ini");
+        std::fs::write(
+            d.join("pytest.ini"),
+            "[pytest]\naddopts =\n    -q\n    --doctest-modules\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&d, &mut std::io::sink()).addopts,
+            vec!["-q", "--doctest-modules"]
+        );
+        let d = tmpdir("doctest-addopts-toml");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.pytest.ini_options]\naddopts = \"-q --doctest-modules\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&d, &mut std::io::sink()).addopts,
+            vec!["-q", "--doctest-modules"]
+        );
+    }
+
+    #[test]
     fn discover_reads_pytest_ini_python_files() {
         let d = tmpdir("ini");
         std::fs::write(

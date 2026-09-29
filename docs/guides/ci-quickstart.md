@@ -501,8 +501,9 @@ Things that keep a journal portable:
 - **Match the code and dependencies.** If the suite changed since the
   recording, replay says so, runs the tests that still match, and reports how
   many recorded tests no longer collect. The reproduction may then be lost.
-- **Only parallel eager runs record.** `-n 0`/`-n 1`, `--dist each`,
-  `--shard` and `--collect lazy` write no journal.
+- **Only parallel runs record.** `-n 0`/`-n 1`, `--dist each` and
+  `--shard` write no journal. A `--collect lazy` run records too, and replay
+  re-runs its schedule with full collection.
 - **Keep journals out of the CI cache.** The bundled action already leaves
   `.rstest_cache/replay` out of the cache it persists. If you cache
   `.rstest_cache` yourself (raw YAML, or another CI system's cache), exclude

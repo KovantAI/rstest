@@ -506,3 +506,41 @@ fn opt_out_writes_no_journal() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!existed, "opt-out must write no journal");
 }
+
+#[test]
+fn lazy_run_journals_then_replays() {
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("lazy");
+    write_suite(&dir);
+    std::fs::write(dir.join("test_c.py"), "def test_c():\n    assert False\n").unwrap();
+
+    // Record under lazy collection (what auto picks for a big warm-cache suite).
+    let (code, out) = run(&venv, &dir, &["-n", "2", "--collect", "lazy"]);
+    assert_eq!(code, 1, "a failing test fails the record run\n{out}");
+
+    let latest = dir.join(".rstest_cache").join("replay").join("latest.json");
+    let txt = std::fs::read_to_string(&latest).expect("lazy run writes a journal");
+    let j: serde_json::Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(j["workers"], 2, "recorded worker count\n{txt}");
+    assert_eq!(j["collection_size"], 7, "all tests collected\n{txt}");
+    let assigned: usize = j["assignment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_array().unwrap().len())
+        .sum();
+    assert_eq!(assigned, 7, "every test journaled once\n{txt}");
+
+    // Replay runs on the eager pool and keeps the failure.
+    let (rcode, rout) = run(&venv, &dir, &["replay"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(rcode, 1, "replay preserves the failure exit code\n{rout}");
+    assert!(
+        rout.contains("1 failed, 6 passed"),
+        "all tests replayed\n{rout}"
+    );
+    assert!(
+        !rout.contains("suite changed"),
+        "no false drift warning\n{rout}"
+    );
+}

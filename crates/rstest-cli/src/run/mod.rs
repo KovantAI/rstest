@@ -584,7 +584,16 @@ pub(crate) fn execute_inner(
     }
     // Resolve dispatch selection (--shuffle/--shard) and the --incremental skip
     // set in one phase.
-    let inc = resolve_incremental(&cfg, cli, &settings, &args, since_green, &mut sink)?;
+    let duration_cache = DurationCache::default();
+    let inc = resolve_incremental(
+        &cfg,
+        cli,
+        &settings,
+        &args,
+        since_green,
+        &duration_cache,
+        &mut sink,
+    )?;
     // Load the --quarantine list once, before dispatch: fail-fast ordering needs
     // it (a quarantined test must not lead the queue and trip -x), and the
     // post-run demotion reuses it. Inert under passthrough.
@@ -601,7 +610,9 @@ pub(crate) fn execute_inner(
         DispatchSelection {
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
+            lazy: inc.lazy,
             quarantine: quarantine.as_ref(),
+            durations: &duration_cache,
         },
         pinned,
         &mut sink,
@@ -966,6 +977,9 @@ fn passthrough_n_warning(
 struct Incremental {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    /// Lazy collection resolved for this run ([`collect_lazy`]), decided once
+    /// here and reused by dispatch.
+    lazy: bool,
     /// `--incremental` is actually in effect this run (all preconditions met).
     active: bool,
     config: coverage_skip::ConfigState,
@@ -1021,6 +1035,7 @@ fn resolve_incremental(
     settings: &config::RstestSettings,
     args: &[String],
     since_green: bool,
+    cache: &DurationCache,
     sink: &mut Sink,
 ) -> Result<Incremental> {
     let RunConfig {
@@ -1035,7 +1050,7 @@ fn resolve_incremental(
     // full-collection pool. Refusing (not ignoring) matters: a user probing for
     // order dependence must not get a silently ordered run. `is_lazy` is computed
     // once and reused by the incremental gate below.
-    let is_lazy = collect_lazy(cli, settings, dist_name, args, sink)?;
+    let is_lazy = collect_lazy(cli, settings, dist_name, args, n, cache, sink)?;
     let shuffle_seed = resolve_shuffle_seed(
         cli.shuffle.as_deref(),
         n,
@@ -1138,6 +1153,7 @@ fn resolve_incremental(
     Ok(Incremental {
         shuffle_seed,
         shard,
+        lazy: is_lazy,
         active,
         config,
         prev_index,
@@ -1176,12 +1192,15 @@ fn apply_quarantine(
 }
 
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
-/// the argument budget: the resolved `--shuffle` seed, `--shard` bucket, and
-/// `--quarantine` matcher (fail-fast keeps quarantined tests out of the front).
+/// the argument budget: the resolved `--shuffle` seed, `--shard` bucket,
+/// lazy-collection choice, `--quarantine` matcher (fail-fast keeps quarantined
+/// tests out of the front), and the run's shared duration cache.
 struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    lazy: bool,
     quarantine: Option<&'a regex::RegexSet>,
+    durations: &'a DurationCache,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1198,7 +1217,9 @@ fn dispatch_run(
     let DispatchSelection {
         shuffle_seed,
         shard,
+        lazy,
         quarantine,
+        durations: duration_cache,
     } = selection;
     let RunConfig {
         n,
@@ -1254,7 +1275,7 @@ fn dispatch_run(
         RunPath::Passthrough
     } else if n <= 1 && !single_worker_reruns {
         RunPath::SingleWorker
-    } else if collect_lazy(cli, settings, dist_name, args, sink)? {
+    } else if lazy {
         RunPath::Lazy
     } else {
         RunPath::Pool
@@ -1314,6 +1335,15 @@ fn dispatch_run(
                 fork_prewarmed: false,
             }
         } else if path == RunPath::Lazy {
+            // Auto-picked (neither --collect nor the setting present)? Say so once,
+            // here at the single dispatch site, so the choice is observable.
+            if cli.collect.is_none() && settings.collect.is_none() {
+                sink.warn(&format!(
+                    "rstest: auto-selected lazy collection ({} known tests x {n} workers); \
+                     pass --collect full to force eager collection",
+                    duration_cache.get().len()
+                ));
+            }
             let cwd = std::env::current_dir()?;
             let project = config::discover(&cwd, sink.err());
             let paths: Vec<PathBuf> = crate::cli::path_args(args)
@@ -1324,7 +1354,7 @@ fn dispatch_run(
             let mut files = collect::collect_test_files(&paths, &project)?;
             if let Some((k, total)) = shard {
                 let before = files.len();
-                files = shard::shard_files(&files, &durations::load(), &cwd, k, total);
+                files = shard::shard_files(&files, duration_cache.get(), &cwd, k, total);
                 sink.warn(&format!(
                     "rstest: shard {k}/{total} -> {} of {before} test file(s)",
                     files.len()
@@ -1337,10 +1367,14 @@ fn dispatch_run(
             lazy::run_lazy_pool(
                 &cfg,
                 files,
+                duration_cache.get(),
+                durations.is_some(),
                 // Steal (split files across workers) only on an EXPLICIT --dist
                 // load: lazy defaults to strict file affinity, since stealing
                 // exposes cross-file/in-file order dependence affinity doesn't.
                 lazy_should_steal(cli.dist.as_deref(), settings.dist.as_deref()),
+                // A shard is a partial suite: no journal (same as run_pool).
+                shard.is_none().then_some(dist_name.as_str()),
                 sink,
             )?
         } else {
@@ -1378,6 +1412,37 @@ fn resolve_order(cli: &Cli, settings: &config::RstestSettings) -> Result<pool::O
         None if cli.watch => pool::Order::FailFast,
         None => pool::Order::Throughput,
     })
+}
+
+/// Auto-lazy floor: below this many known tests, full collection's locality
+/// (contiguous module dispatch, one warm collection per worker) beats paying
+/// the on-demand per-file collection overhead, so a small suite stays eager.
+const AUTO_LAZY_MIN_TESTS: usize = 2000;
+/// Auto-lazy work floor on `tests * workers`. Lazy's win is dropping the
+/// (workers - 1) redundant full collections, so it scales with both suite
+/// size and worker count; 2000 tests need >= 8 workers, 4000 need >= 4.
+const AUTO_LAZY_MIN_WORK: usize = 16_000;
+
+/// Auto-default heuristic (only reached when neither `--collect` nor
+/// `[tool.rstest] collect` was set): pick lazy for a big-enough suite on a
+/// file-affine dist, so a large parallel run stops re-collecting the whole
+/// suite once per worker. Pure over its inputs (`tests` = cached test count)
+/// so tests can drive it without a warm cache. Conservative on purpose: a cold
+/// cache (`tests == 0`), any file-affinity-breaking selection, or a narrowed
+/// path selection keeps full collection.
+fn auto_lazy(dist_name: &str, args: &[String], n: usize, tests: usize) -> bool {
+    n >= 2
+        && matches!(dist_name, "load" | "loadfile")
+        // nodeid / --pyargs selection can't ride the file walk (same reason
+        // explicit lazy falls back), so never auto-pick lazy for those.
+        && !args.iter().any(|a| a.contains("::") || a == "--pyargs")
+        // `tests` counts the whole cached suite, not the selection. A path
+        // selection (explicit, or --changed/--since-green narrowing) can be a
+        // handful of files, and auto-lazy's strict file affinity would cap
+        // parallelism at the file count (one big file = one worker).
+        && !names_a_selection(args)
+        && tests >= AUTO_LAZY_MIN_TESTS
+        && tests.saturating_mul(n) >= AUTO_LAZY_MIN_WORK
 }
 
 /// Which run path [`dispatch_run`] takes, as far as `--order` cares.
@@ -1464,23 +1529,22 @@ fn check_order_shuffle(order: pool::Order, explicit: bool, shuffled: bool) -> Re
     Ok(())
 }
 
-/// Resolve the collection strategy (CLI > [tool.rstest] > "full") and
-/// validate lazy-mode constraints.
+/// Resolve the collection strategy (CLI > [tool.rstest] > auto) and validate
+/// lazy-mode constraints. When neither the flag nor the setting is present,
+/// [`auto_lazy`] decides from suite size and worker count.
 fn collect_lazy(
     cli: &Cli,
     settings: &config::RstestSettings,
     dist_name: &str,
     args: &[String],
+    n: usize,
+    cache: &DurationCache,
     sink: &mut Sink,
 ) -> Result<bool> {
-    let mode = cli
-        .collect
-        .clone()
-        .or_else(|| settings.collect.clone())
-        .unwrap_or_else(|| "full".into());
-    match mode.as_str() {
-        "full" => Ok(false),
-        "lazy" => {
+    let explicit = cli.collect.clone().or_else(|| settings.collect.clone());
+    match explicit.as_deref() {
+        Some("full") => Ok(false),
+        Some("lazy") => {
             if !matches!(dist_name, "load" | "loadfile") {
                 anyhow::bail!(
                     "--collect lazy is file-affine and cannot honor --dist {dist_name} \
@@ -1500,7 +1564,125 @@ fn collect_lazy(
             }
             Ok(true)
         }
-        other => anyhow::bail!("unknown --collect mode: {other} (use full|lazy)"),
+        Some(other) => anyhow::bail!("unknown --collect mode: {other} (use full|lazy)"),
+        // Auto: no warn on the file-affinity-breaking fallbacks (the user did
+        // not ask for lazy); the banner is printed once at the dispatch site.
+        // Features that require (or force) full collection veto auto-lazy so
+        // the auto-pick never silently disables --incremental or turns
+        // --shuffle (which errors under lazy) into a hard failure. An explicit
+        // --collect lazy still conflicts with these loudly downstream.
+        //
+        // --shard is vetoed too: auto-lazy would switch it to file-granular
+        // partitioning with no collection hash (so `shard-verify` finds no shard
+        // metadata), and shard jobs whose caches differ (one cold) would pick
+        // different modes and partition the suite inconsistently. A fail-fast
+        // order (explicit or the --watch auto-pick) is ignored under lazy, so it
+        // keeps full collection rather than silently losing its ordering.
+        None if cli.shuffle.is_some()
+            || cli.incremental
+            || cli.shard.is_some()
+            || matches!(resolve_order(cli, settings), Ok(pool::Order::FailFast)) =>
+        {
+            Ok(false)
+        }
+        // Cheap gates first: the duration-cache load hashes every cached test
+        // source, so skip it when the count cannot matter (serial run, affinity-
+        // breaking dist); `auto_lazy` re-checks these for its own callers.
+        None if n < 2 || !matches!(dist_name, "load" | "loadfile") => Ok(false),
+        None => Ok(auto_lazy(dist_name, args, n, cache.get().len()) && {
+            // Past the size gate, check the lazy file walk against what the
+            // last eager collection timed. Rare enough (big warm suites only)
+            // that the extra walk is noise; its config warnings are already
+            // reported by the dispatch-time discover, so drop them here.
+            let cwd = std::env::current_dir()?;
+            let project = config::discover(&cwd, &mut std::io::sink());
+            let env_addopts = std::env::var("PYTEST_ADDOPTS").unwrap_or_default();
+            let opts = args
+                .iter()
+                .chain(&project.addopts)
+                .map(String::as_str)
+                .chain(env_addopts.split_whitespace());
+            if requests_doctests(opts) {
+                return Ok(false);
+            }
+            // A walk error (a glob or missing `testpaths` entry, an unreadable
+            // dir) only means auto can't vouch for lazy: stay full, never fail
+            // a run that didn't ask for lazy.
+            let Ok(files) = collect::collect_test_files(&[], &project) else {
+                return Ok(false);
+            };
+            let rel: Vec<String> = files
+                .iter()
+                .map(|f| {
+                    f.strip_prefix(&project.rootdir)
+                        .unwrap_or(f)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            lazy_layout_fits(cache.get(), &rel, n)
+        }),
+    }
+}
+
+/// Whether pytest will collect doctests (`--doctest-modules`, `--doctest-glob`)
+/// from argv, ini `addopts` or `PYTEST_ADDOPTS`. The lazy walk never hands those
+/// items to a worker, and a cache written by an earlier lazy run would not list
+/// them either, so [`lazy_layout_fits`] alone can't catch doctests enabled later.
+fn requests_doctests<'a>(mut opts: impl Iterator<Item = &'a str>) -> bool {
+    opts.any(|o| o == "--doctest-modules" || o.starts_with("--doctest-glob"))
+}
+
+/// Whether the lazy file walk (`files`, rootdir-relative) reproduces the suite
+/// the duration cache timed, and spreads well enough for strict file affinity.
+/// Only auto-lazy asks: an explicit `--collect lazy` is the user's call.
+///
+/// Lazy dispatches only `python_files`-matching `.py` files, so it drops items
+/// eager collection finds elsewhere (`--doctest-modules` in non-test modules,
+/// `--doctest-glob`, plugin-collected non-`.py` files): a cached file the walk
+/// lacks means lazy would lose tests. The other direction is fine: a walked
+/// file with no cached timing is new, all-skipped or test-free, and one pytest
+/// would never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) is
+/// reported empty by the lazy worker, which replays pytest's ignore checks.
+///
+/// Auto-lazy never steals, so each file runs whole on one worker: a file whose
+/// cached time exceeds an even per-worker share by more than
+/// [`LAZY_LONG_POLE_SLACK_SECS`] would be the long pole the eager pool avoids
+/// by spreading its tests (this also covers `files < n`).
+fn lazy_layout_fits(
+    cache: &std::collections::HashMap<String, f64>,
+    files: &[String],
+    n: usize,
+) -> bool {
+    let mut per_file: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for (id, secs) in cache {
+        *per_file.entry(crate::text::nodeid_file(id)).or_insert(0.0) += secs;
+    }
+    let walked: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+    if !per_file.keys().all(|f| walked.contains(f)) {
+        return false;
+    }
+    let total: f64 = per_file.values().sum();
+    let longest = per_file.values().copied().fold(0.0, f64::max);
+    longest - total / n as f64 <= LAZY_LONG_POLE_SLACK_SECS
+}
+
+/// Wall time a lazy long-pole file may add over an even per-worker share
+/// before auto-lazy stays eager. An absolute floor, not a ratio: a fast suite's
+/// millisecond per-file timings are noise, and a ratio on them would flip the
+/// mode from run to run while the pole costs nothing either way.
+const LAZY_LONG_POLE_SLACK_SECS: f64 = 1.0;
+
+/// The duration cache, loaded on first use and shared for the rest of the run.
+/// `durations::load` hashes every cached test source, so the auto-lazy check,
+/// the lazy banner, `--shard` file partitioning, and lazy file ordering must
+/// not each pay for their own load.
+#[derive(Default)]
+struct DurationCache(std::cell::OnceCell<std::collections::HashMap<String, f64>>);
+
+impl DurationCache {
+    fn get(&self) -> &std::collections::HashMap<String, f64> {
+        self.0.get_or_init(durations::load)
     }
 }
 
@@ -1953,13 +2135,14 @@ fn fold_run_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_stream_json, cap_workers_by_files, cap_workers_by_time, check_order_shuffle,
-        collect_lazy, dispatch_command, fold_run_event, head_to_none, incremental_config,
-        lazy_should_steal, names_a_selection, names_existing_path, order_ignored_warning,
-        parse_duration_secs, parse_numprocesses, resolve_changed_base, resolve_order,
-        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
-        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
-        warn_quarantine_passthrough, warn_windows_timeout, watchdog_duration, RunPath,
+        attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
+        check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
+        incremental_config, lazy_layout_fits, lazy_should_steal, names_a_selection,
+        names_existing_path, order_ignored_warning, parse_duration_secs, parse_numprocesses,
+        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
+        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
+        warn_windows_timeout, watchdog_duration, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -2193,13 +2376,16 @@ mod tests {
     }
 
     #[test]
-    fn collect_lazy_defaults_to_full() {
-        // No CLI flag, no setting => "full" => not lazy.
+    fn collect_lazy_cold_cache_stays_full() {
+        // No CLI flag, no setting, and (in the test cwd) no warm duration
+        // cache => auto sees ~0 known tests => full.
         assert!(!collect_lazy(
             &cli(),
             &settings_collect(None),
             "load",
             &[],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
@@ -2208,18 +2394,63 @@ mod tests {
     #[test]
     fn collect_lazy_enabled_for_file_affine_dist() {
         let s = settings_collect(Some("lazy"));
-        assert!(collect_lazy(&cli(), &s, "load", &[], &mut Sink::captured().0).unwrap());
-        assert!(collect_lazy(&cli(), &s, "loadfile", &[], &mut Sink::captured().0).unwrap());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "load",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "loadfile",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
     }
 
     #[test]
     fn collect_lazy_rejects_incompatible_dist() {
         let s = settings_collect(Some("lazy"));
         // loadscope/loadgroup need a global id list; lazy is file-affine.
-        assert!(collect_lazy(&cli(), &s, "loadscope", &[], &mut Sink::captured().0).is_err());
-        assert!(collect_lazy(&cli(), &s, "loadgroup", &[], &mut Sink::captured().0).is_err());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "loadscope",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .is_err());
+        assert!(collect_lazy(
+            &cli(),
+            &s,
+            "loadgroup",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .is_err());
         // each runs the whole suite per worker: no file-level dispatch either.
-        let err = collect_lazy(&cli(), &s, "each", &[], &mut Sink::captured().0).unwrap_err();
+        let err = collect_lazy(
+            &cli(),
+            &s,
+            "each",
+            &[],
+            8,
+            &DurationCache::default(),
+            &mut Sink::captured().0,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("each runs the full suite"),
             "{err}"
@@ -2235,6 +2466,8 @@ mod tests {
             &s,
             "load",
             &["test_x.py::test_a".to_string()],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
@@ -2244,6 +2477,8 @@ mod tests {
             &s,
             "load",
             &["--pyargs".to_string()],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
@@ -2256,6 +2491,8 @@ mod tests {
             &settings_collect(Some("sometimes")),
             "load",
             &[],
+            8,
+            &DurationCache::default(),
             &mut Sink::captured().0
         )
         .is_err());
@@ -2407,6 +2644,185 @@ mod tests {
         assert!(check_order_shuffle(FailFast, false, true).is_ok());
         assert!(check_order_shuffle(FailFast, true, false).is_ok());
         assert!(check_order_shuffle(Throughput, true, true).is_ok());
+    }
+
+    #[test]
+    fn auto_lazy_picks_lazy_for_big_parallel_suite() {
+        // 4000 tests * 8 workers well past the work floor => lazy.
+        assert!(auto_lazy("load", &[], 8, 4000));
+        assert!(auto_lazy("loadfile", &[], 8, 4000));
+    }
+
+    #[test]
+    fn auto_lazy_stays_full_below_thresholds() {
+        // Under the test floor, regardless of worker count.
+        assert!(!auto_lazy("load", &[], 64, AUTO_LAZY_MIN_TESTS - 1));
+        // Over the test floor but under the work floor (too few workers).
+        assert!(!auto_lazy("load", &[], 2, AUTO_LAZY_MIN_TESTS + 1));
+        // Serial run never goes lazy.
+        assert!(!auto_lazy("load", &[], 1, 100_000));
+    }
+
+    #[test]
+    fn collect_lazy_auto_vetoed_by_shuffle_or_incremental() {
+        // Auto must not silently disable --incremental or turn --shuffle (which
+        // errors under lazy) into a hard failure, even for a huge suite. No warm
+        // cache in the test cwd, so the baseline is already full anyway; assert
+        // the veto path returns full without touching the cache count.
+        let mut c = cli();
+        c.shuffle = Some("random".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.shard = Some("1/2".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.order = Some("fail-fast".into());
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+        let mut c = cli();
+        c.incremental = true;
+        assert!(!collect_lazy(
+            &c,
+            &settings_collect(None),
+            "load",
+            &[],
+            64,
+            &DurationCache::default(),
+            &mut Sink::captured().0
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn auto_lazy_declines_when_file_affinity_breaks() {
+        // Big suite, but nodeid/--pyargs selection and non-file-affine dists
+        // can't ride the file walk => stay full.
+        assert!(!auto_lazy("load", &["a.py::t".to_string()], 8, 100_000));
+        assert!(!auto_lazy("load", &["--pyargs".to_string()], 8, 100_000));
+        assert!(!auto_lazy("loadscope", &[], 8, 100_000));
+        assert!(!auto_lazy("loadgroup", &[], 8, 100_000));
+    }
+
+    fn timings(entries: &[(&str, f64)]) -> std::collections::HashMap<String, f64> {
+        entries.iter().map(|&(id, s)| (id.to_string(), s)).collect()
+    }
+
+    fn walked(files: &[&str]) -> Vec<String> {
+        files.iter().map(|f| f.to_string()).collect()
+    }
+
+    #[test]
+    fn lazy_layout_fits_an_even_suite_the_walk_reproduces() {
+        let cache = timings(&[
+            ("tests/test_a.py::t1", 1.0),
+            ("tests/test_a.py::t2", 1.0),
+            ("tests/test_b.py::t", 2.0),
+        ]);
+        assert!(lazy_layout_fits(
+            &cache,
+            &walked(&["tests/test_a.py", "tests/test_b.py"]),
+            2
+        ));
+    }
+
+    #[test]
+    fn lazy_layout_rejects_items_the_walk_cannot_see() {
+        // A doctest in a non-test module (or a --doctest-glob text file) was
+        // collected eagerly but is not a python_files match: lazy would drop it.
+        let cache = timings(&[("tests/test_a.py::t", 1.0), ("pkg/mod.py::pkg.mod.f", 1.0)]);
+        assert!(!lazy_layout_fits(&cache, &walked(&["tests/test_a.py"]), 1));
+    }
+
+    #[test]
+    fn lazy_layout_accepts_walked_files_without_timings() {
+        // All-skipped, test-free or new files never get a call timing; the
+        // lazy worker reports norecursedirs-pruned ones empty on its own.
+        let cache = timings(&[("tests/test_a.py::t", 1.0)]);
+        assert!(lazy_layout_fits(
+            &cache,
+            &walked(&["tests/test_a.py", "tests/test_skipped_on_linux.py"]),
+            1
+        ));
+    }
+
+    #[test]
+    fn lazy_layout_rejects_a_file_longer_than_a_worker_share() {
+        // 2 files, 8 workers: strict affinity leaves 6 workers idle.
+        let cache = timings(&[("test_a.py::t", 10.0), ("test_b.py::t", 10.0)]);
+        assert!(!lazy_layout_fits(
+            &cache,
+            &walked(&["test_a.py", "test_b.py"]),
+            8
+        ));
+        // A fast suite's noisy millisecond skew is below the slack: fine.
+        let cache = timings(&[("test_a.py::t", 0.03), ("test_b.py::t", 0.001)]);
+        assert!(lazy_layout_fits(
+            &cache,
+            &walked(&["test_a.py", "test_b.py"]),
+            8
+        ));
+        // One dominant file among many: the long pole serialises the run.
+        let cache = timings(&[
+            ("test_big.py::t", 50.0),
+            ("test_c.py::t", 1.0),
+            ("test_d.py::t", 1.0),
+        ]);
+        assert!(!lazy_layout_fits(
+            &cache,
+            &walked(&["test_big.py", "test_c.py", "test_d.py"]),
+            2
+        ));
+    }
+
+    #[test]
+    fn requests_doctests_spots_both_doctest_flags() {
+        assert!(requests_doctests(["-q", "--doctest-modules"].into_iter()));
+        assert!(requests_doctests(["--doctest-glob=*.txt"].into_iter()));
+        assert!(requests_doctests(["--doctest-glob", "*.rst"].into_iter()));
+        assert!(!requests_doctests(
+            ["-q", "--doctest-continue-on-failure"].into_iter()
+        ));
+    }
+
+    #[test]
+    fn auto_lazy_declines_on_path_selection() {
+        // The cached count is suite-wide; a path selection (explicit or
+        // --changed narrowing) may be one file, which strict affinity would
+        // run on a single worker. `src` exists (cwd is the crate dir).
+        assert!(!auto_lazy("load", &["src".to_string()], 8, 100_000));
+        // Flags with on-disk values are not a selection.
+        assert!(auto_lazy(
+            "load",
+            &["-k".to_string(), "src".to_string()],
+            8,
+            100_000
+        ));
     }
 
     #[test]
