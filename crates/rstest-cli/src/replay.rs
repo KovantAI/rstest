@@ -256,7 +256,12 @@ fn display_args(args: &[String]) -> String {
     }
     args.iter()
         .map(|a| {
-            if a.is_empty() || a.chars().any(char::is_whitespace) {
+            // A journal may come from an untrusted run: print control characters
+            // (ANSI escapes, carriage returns) escaped, so none can rewrite the
+            // line the user is told to read before replaying.
+            if a.chars().any(char::is_control) {
+                format!("{a:?}")
+            } else if a.is_empty() || a.chars().any(char::is_whitespace) {
                 format!("'{a}'")
             } else {
                 a.clone()
@@ -705,6 +710,14 @@ mod tests {
         let a: Vec<String> = ["tests", "-k", "not slow", ""].map(String::from).to_vec();
         assert_eq!(display_args(&a), "tests -k 'not slow' ''");
         assert_eq!(display_args(&[]), "(none)");
+    }
+
+    #[test]
+    fn display_args_escapes_control_characters() {
+        let a: Vec<String> = ["-p", "evil\x1b[2K\rtests"].map(String::from).to_vec();
+        let shown = display_args(&a);
+        assert!(!shown.chars().any(char::is_control), "got {shown:?}");
+        assert!(shown.contains("evil"), "got {shown:?}");
     }
 
     #[test]

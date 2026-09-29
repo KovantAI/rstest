@@ -5,6 +5,31 @@ between 0.x releases and are listed here.
 
 ## 0.8.0 (Unreleased)
 
+- **`pip install rstest` works on Python 3.10 without pytest.** The vendored
+  pytest core imports `exceptiongroup` and `tomli` below Python 3.11 (and
+  `colorama` on Windows), but rstest didn't declare them, so a fresh 3.10
+  environment without pytest failed to start any worker. They are now
+  declared with pytest's own markers, and CI checks a clean install.
+- **A worker that dies says why.** Its failure now carries the exit code (or
+  the signal) and the last lines it wrote to stderr, so the report, junit and
+  report-json name the actual error (for example a `ModuleNotFoundError` at
+  startup). A worker that dies before sending anything reads "exited during
+  startup" instead of msgpack's "failed to fill whole buffer". Worker stderr is
+  still shown live; outside `-s`/`--pdb` it now reaches the terminal through
+  rstest, so it is no longer a TTY for the worker.
+- **`--junit-xml` is intercepted like `--junitxml`.** pytest's alias used to
+  reach every worker session, which then all wrote the same file.
+- **Worker messages are size-capped.** One worker-to-orchestrator message is
+  capped at 256 MiB, so a crashed or wedged worker can't drive an unbounded
+  read. Raise it with `RSTEST_MAX_MESSAGE_BYTES` for the rare suite that
+  genuinely exceeds it.
+- **JSON Schemas for `audit`, `bisect` and `explain`.** `--audit-json`,
+  `--bisect-json` and `explain --json` are now built from typed structs and
+  get generated field references and full draft-07 schemas on the
+  [Output schemas](docs/reference/output-schemas.md) page, checked by the same
+  golden test as the others. The emitted JSON is unchanged. All schemas now
+  describe what rstest writes: a field that is omitted when empty is optional
+  and never `null`, and a field always written is required.
 - **`--collect` now defaults to auto.** With neither the `--collect` flag nor
   `[tool.rstest] collect` set, rstest picks `lazy` collection for a big-enough
   parallel run: at least 2000 known tests (from `.rstest_cache/durations.json`)
@@ -66,6 +91,53 @@ between 0.x releases and are listed here.
   The bundled GitHub Action now leaves `.rstest_cache/replay` out of the cache
   it persists; the changed path spec makes the first run after upgrading miss
   the cache once.
+- **Report files create their parent directory.** `--junitxml`,
+  `--report-json`, `--html`, `--stream-json`, `--doctor-json`/`--doctor-md`,
+  `--cov-diff-json`, the merged monorepo report and the
+  `migrate-check`/`audit`/`bisect` JSON outputs now create a missing
+  parent directory, as pytest does for `--junitxml`. Before, a path such as
+  `test-results/junit.xml` on a fresh checkout ran the whole suite and then
+  exited 1 with `No such file or directory`. A write that still fails names
+  the path.
+- **Verdict subcommands exit 2 on an error.** `try`, `migrate-check`, `audit`
+  and `bisect` use exit `1` for "found something". An error inside them (no
+  usable interpreter, a failed spawn) now exits `2` with an `Error:` line
+  instead of `1`, and `migrate-check` exits `2` when its parallel pass
+  produced no outcomes to judge. When such an error happens before the run
+  (for example no usable interpreter), `--bisect-json` still records it in
+  `error`, `--audit-json` says `ran: false`, and a stale `--migrate-check-json`
+  is removed, so a CI gate never reads an earlier run's result.
+- **`rstest try --python` reaches both runs.** The `rstest -n auto` half of
+  `try` now uses the same interpreter as the pytest baseline; before, it
+  re-ran discovery and, outside an activated venv, could find none.
+- **The remote cache token is kept out of test processes' environment.**
+  `RSTEST_CACHE_REMOTE_TOKEN` is removed from the environment of workers and
+  of the pytest baseline `rstest try` runs. This is defense in depth: a test
+  running as the same user can still read the rstest process's environment,
+  so jobs that run untrusted code need a read-only token.
+- **pytest-randomly works with pytest-xdist installed.** With both plugins
+  installed, every `-n >= 2` run failed with an internal error, `TypeError:
+  can only concatenate str (not "int") to str`: randomly's xdist hook copied its
+  unresolved `"default"` seed over the one rstest broadcasts. A
+  `pytest_configure_node` hook called while its plugin registers may now add
+  `workerinput` keys but not overwrite them; it is called again at session
+  start, as under a real xdist controller.
+- **The hang watchdog is sized per test.** The watchdog rstest arms from a
+  timeout used one limit for the whole run, 3 × `--timeout` + 10 s, so a
+  test with a longer `@pytest.mark.timeout` was killed at the global limit
+  (`timeout(300)` under `--timeout 30` died at 100 s). Each test's watchdog
+  is now 3 × its own timeout + 10 s: its marker, else `--timeout`. A marker
+  also arms the watchdog without `--timeout`, which gives Windows (no
+  in-process interrupt) a backstop for marked tests. An explicit
+  `--worker-timeout` still sets one limit for every test. Watchdog kills now
+  say which limit fired.
+- **GitHub action: `cache-push` input.** Decides which runs write the cache
+  other jobs trust. With the default `auto`, the `remote` backend pushes only
+  on `push` / `schedule` / `workflow_dispatch` runs of `warm-from-branch` and
+  on `merge_group`, and the `actions-cache` backend no longer saves on
+  `pull_request_target`, `issue_comment` or `workflow_run`. `true` always
+  writes, `false` never does. The action also hands `cache-remote-token`
+  only to the rstest command instead of its whole run step.
 - **Byte-exact mode now prints pytest's own terminal output.** At `-n 0` /
   `-n 1` (and `-n auto` capped to one worker), with no `--output` set, the
   pytest session writes to stdout directly instead of rstest re-rendering it:

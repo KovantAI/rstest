@@ -104,7 +104,8 @@ fail/pass/error signature, which its service-dependent tests produce
 identically under vanilla pytest. The corpus run measured 100% per-test
 parity across all 4,284 tests. The one fragile spot is a TTL timing test
 that langgraph's own source marks `@pytest.mark.flaky`; it lives in
-`checkpoint-sqlite`, a small suite the corpus runs in byte-exact mode (`-n 0`).
+`checkpoint-sqlite`, a small suite the corpus runs on a single worker
+(`-n 1` in the banner above, the same as byte-exact mode, `-n 0`).
 That pin was once forced by a pytest-retry limitation (`server_port`); it is
 now resolved: pytest-retry runs its `@pytest.mark.flaky` marker correctly
 under the pool too (see [Benchmarks](../reference/benchmarks.md#monorepo) for

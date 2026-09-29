@@ -185,6 +185,9 @@ fn apply_diff_cov_gate(
 /// Copy covtool's scored result at `src` to the `--cov-diff-json` `dst`. A copy
 /// failure warns (to `w`) but never gates — the run's verdict already stands.
 fn copy_diff_cov_json(w: &mut dyn Write, src: &std::path::Path, dst: &std::path::Path) {
+    if let Some(parent) = dst.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Err(e) = std::fs::copy(src, dst) {
         let _ = writeln!(
             w,

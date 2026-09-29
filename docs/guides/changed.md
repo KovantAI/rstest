@@ -138,7 +138,7 @@ space, `--changed origin/main` is bare `--changed` plus a test path
     selection exits 5 instead of 0:
 
     ```yaml
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0          # the merge-base needs the base branch history
     - name: Changed tests (PR)

@@ -115,6 +115,8 @@ class DonePayload(TypedDict):
 
 class ItemStartPayload(TypedDict):
     index: int
+    # Effective per-test timeout (marker, else --timeout); sizes the watchdog.
+    timeout: float | None
 
 
 class ItemDonePayload(TypedDict):
@@ -128,6 +130,7 @@ class StoppedPayload(TypedDict):
 
 class ItemStartIdPayload(TypedDict):
     id: str
+    timeout: float | None
 
 
 class ItemDoneIdPayload(TypedDict):

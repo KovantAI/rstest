@@ -13,6 +13,27 @@ at the [shared-cache backend](ci-shared-cache.md) instead.
 
 --8<-- "docs/_snippets/ci-pin-tip.md"
 
+!!! warning "Keep replay journals out of the cache"
+    Every parallel run also writes [replay journals](ci-quickstart.md#replaying-a-ci-only-failure-locally)
+    to `.rstest_cache/replay/`: up to 11 files, several MB each on a large
+    suite. The recipes below cache the whole `.rstest_cache`, so they carry
+    those journals from build to build, and a build that recorded nothing
+    can then upload an older `latest.json` it restored. Pick one of these:
+
+    - **Remove the directory before the cache is saved**, after any step
+      that uploads `latest.json` as a failure artifact:
+      `python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"`
+      works in bash, PowerShell and cmd.exe alike.
+    - **Cache only the files that matter** where the provider takes file
+      paths: `durations.json`, `flakes.json`, `coverage_index.json`,
+      `wall.json`, `last_green.json` and `incremental_outcomes.json` under
+      `.rstest_cache/`.
+    - **Turn journaling off** with `RSTEST_NO_REPLAY_JOURNAL=1` if you won't
+      replay CI failures.
+
+    To replay a CI failure, save `.rstest_cache/replay/latest.json` as a
+    failure artifact the same way you save `junit.xml`.
+
 ## AWS CodeBuild
 
 CodeBuild has no log-side annotation command (no equivalent of GitHub's

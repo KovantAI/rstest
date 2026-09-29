@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use serde::Serialize;
 
 use super::bisect::MAXFAIL_LIFT;
 use super::classify::{classify_failures, Verdict};
@@ -152,7 +153,7 @@ pub fn run_audit(
     // refused run, an error from a child session) leaves `ran: false` behind
     // instead of a stale result from an earlier run for a CI gate to read.
     if let Some(path) = json_path {
-        std::fs::write(path, serde_json::to_string_pretty(&not_run_doc())?)?;
+        crate::reporting::write_output(path, serde_json::to_string_pretty(&not_run_doc())?)?;
     }
     sink.warn(&format!(
         "rstest audit: running -n auto {runs}× to surface parallel-only failures…"
@@ -183,7 +184,7 @@ pub fn run_audit(
         // and not a failure, but say so, since it is usually a selection typo.
         if let Some(path) = json_path {
             let doc = audit_doc(0, &partition(&[]));
-            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+            crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
         }
         sink.out_line(
             "rstest audit: no tests were selected (check your -k/-m/path args); \
@@ -202,7 +203,7 @@ pub fn run_audit(
 
     if let Some(path) = json_path {
         let doc = audit_doc(par.len(), &b);
-        std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+        crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
     }
     Ok(report(par.len(), &b, sink))
 }
@@ -324,42 +325,123 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
     1
 }
 
+// Field order is alphabetical to match the historical `serde_json` map output
+// (no `preserve_order`), so the emitted bytes are unchanged by the move to
+// typed structs.
+/// The `--audit-json` document (schema 1). Every field but `meta`, `ran` and
+/// `parallel_safe` is absent when the audit did not run.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct AuditDoc {
+    /// Tests that failed under `-n auto` but did not run in the follow-up
+    /// runs, so could not be classified. They still fail the gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
+    pub inconclusive: Option<Vec<String>>,
+    /// Tests that fail intermittently whatever the scheduling (intrinsic flakes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
+    pub intrinsic_flakes: Option<Vec<String>>,
+    pub meta: AuditMeta,
+    /// Tests that pass under `--dist loadfile`: they depend on a sibling in
+    /// their file running first, so keep the file together rather than serial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
+    pub order_dependent: Option<Vec<String>>,
+    /// Whether the suite is parallel-safe (no parallel-only failures). Always
+    /// `false` when the audit did not run.
+    pub parallel_safe: bool,
+    /// Tests that already fail at `-n 0`: pre-existing, not a parallelism
+    /// issue, and not counted against the gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "usize"))]
+    pub preexisting_failures: Option<usize>,
+    /// Whether the `-n auto` pass produced a run to audit.
+    pub ran: bool,
+    /// Tests fixable by pinning them to `@pytest.mark.serial`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "Vec<SerialCandidate>"))]
+    pub serial_candidates: Option<Vec<SerialCandidate>>,
+    /// A paste-able `conftest.py` block that marks every serial candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "String"))]
+    pub serial_conftest: Option<String>,
+    /// Tests audited (0 when the selection matched nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(with = "usize"))]
+    pub tests: Option<usize>,
+}
+
+/// Envelope metadata for the audit document.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct AuditMeta {
+    /// Constant discriminator: always `"audit"`.
+    pub kind: &'static str,
+    /// Constant producer tag: always `"rstest"`.
+    pub runner: &'static str,
+    /// Document schema version.
+    pub schema: u32,
+}
+
+const AUDIT_META: AuditMeta = AuditMeta {
+    kind: "audit",
+    runner: "rstest",
+    schema: 1,
+};
+
+/// One test fixable by `@pytest.mark.serial`.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct SerialCandidate {
+    /// The underlying (non-stopgap) fix for this verdict.
+    pub fix: &'static str,
+    /// The failing test's node id.
+    pub nodeid: String,
+    /// The classification verdict title.
+    pub verdict: &'static str,
+}
+
 /// The `--audit-json` envelope.
-fn audit_doc(tests: usize, b: &Buckets) -> serde_json::Value {
-    let serial_json: Vec<serde_json::Value> = b
+fn audit_doc(tests: usize, b: &Buckets) -> AuditDoc {
+    let serial_candidates = b
         .serial
         .iter()
-        .map(|(nodeid, v)| {
-            serde_json::json!({
-                "nodeid": nodeid,
-                "verdict": v.title(),
-                "fix": v.advice().1,
-            })
+        .map(|(nodeid, v)| SerialCandidate {
+            fix: v.advice().1,
+            nodeid: nodeid.clone(),
+            verdict: v.title(),
         })
         .collect();
-    serde_json::json!({
-        "meta": { "runner": "rstest", "kind": "audit", "schema": 1 },
-        "ran": true,
-        "parallel_safe": b.parallel_safe(),
-        "tests": tests,
-        "serial_candidates": serial_json,
-        "serial_conftest": serial_conftest_block(
-            &b.serial.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()
-        ),
-        "order_dependent": b.order,
-        "intrinsic_flakes": b.intrinsic,
-        "inconclusive": b.inconclusive,
-        "preexisting_failures": b.preexisting,
-    })
+    let serial_ids: Vec<String> = b.serial.iter().map(|(n, _)| n.clone()).collect();
+    AuditDoc {
+        inconclusive: Some(b.inconclusive.clone()),
+        intrinsic_flakes: Some(b.intrinsic.clone()),
+        meta: AUDIT_META,
+        order_dependent: Some(b.order.clone()),
+        parallel_safe: b.parallel_safe(),
+        preexisting_failures: Some(b.preexisting),
+        ran: true,
+        serial_candidates: Some(serial_candidates),
+        serial_conftest: Some(serial_conftest_block(&serial_ids)),
+        tests: Some(tests),
+    }
 }
 
 /// The `--audit-json` envelope when the `-n auto` pass produced no run.
-fn not_run_doc() -> serde_json::Value {
-    serde_json::json!({
-        "meta": { "runner": "rstest", "kind": "audit", "schema": 1 },
-        "ran": false,
-        "parallel_safe": false,
-    })
+pub fn not_run_doc() -> AuditDoc {
+    AuditDoc {
+        inconclusive: None,
+        intrinsic_flakes: None,
+        meta: AUDIT_META,
+        order_dependent: None,
+        parallel_safe: false,
+        preexisting_failures: None,
+        ran: false,
+        serial_candidates: None,
+        serial_conftest: None,
+        tests: None,
+    }
 }
 
 #[cfg(test)]
@@ -456,7 +538,7 @@ mod tests {
             inconclusive: vec!["q.py::gone".to_string()],
             preexisting: 2,
         };
-        let doc = audit_doc(10, &b);
+        let doc = serde_json::to_value(audit_doc(10, &b)).unwrap();
         assert_eq!(doc["ran"], true);
         assert_eq!(doc["inconclusive"][0], "q.py::gone");
         assert_eq!(doc["order_dependent"][0], "o.py::order");
@@ -600,7 +682,7 @@ mod tests {
 
     #[test]
     fn not_run_doc_says_it_did_not_run() {
-        let doc = not_run_doc();
+        let doc = serde_json::to_value(not_run_doc()).unwrap();
         assert_eq!(doc["meta"]["kind"], "audit");
         assert_eq!(doc["ran"], false);
         assert_eq!(doc["parallel_safe"], false);

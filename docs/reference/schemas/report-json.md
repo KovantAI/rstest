@@ -35,7 +35,7 @@ Run-level envelope for the report document.
 | `exitstatus` | integer | yes | Process exit status. |
 | `runner` | string | yes | Constant producer tag: always `"rstest"`. |
 | `schema` | integer | yes | Document schema version. |
-| `shard` | ShardJson or null | no | Sharding identity; present only under `--shard K/N`. |
+| `shard` | ShardJson | no | Sharding identity; present only under `--shard K/N`. |
 | `started_at_epoch` | integer | yes | Unix epoch (seconds) the run started. |
 | `workers` | integer | yes | Worker count for the run (`-n`). |
 
@@ -46,16 +46,16 @@ Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-re
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `cached` | boolean | no | Not executed this run: unchanged since the last green run, so its prior pass was carried forward (`--incremental`). Still counts as passed. |
-| `call` | string or null | no |  |
-| `cpu` | number or null | no | Call-phase CPU time (process_time), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline. |
+| `call` | string | no |  |
+| `cpu` | number | no | Call-phase CPU time (process_time), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline. |
 | `crashed` | boolean | no | The outcome was fabricated because the worker died on this test (crash or --worker-timeout kill), not produced by pytest. |
-| `duration` | number or null | no |  |
+| `duration` | number | no |  |
 | `flaky` | boolean | no | Passed only after one or more reruns (--reruns). |
-| `lineno` | integer or null | no | Source line of the test (0-based, from pytest's report.location), for editor mapping. None when pytest reports no location. |
-| `longrepr` | string or null | no | Failure text (assertion repr / traceback), failures only. |
+| `lineno` | integer | no | Source line of the test (0-based, from pytest's report.location), for editor mapping. Absent when pytest reports no location. |
+| `longrepr` | string | no | Failure text (assertion repr / traceback), failures only. |
 | `quarantined` | boolean | no | Failed, but matched the --quarantine list: reported distinctly, never fatal to the run. |
-| `setup` | string or null | no |  |
-| `skip_reason` | string or null | no |  |
-| `teardown` | string or null | no |  |
+| `setup` | string | no |  |
+| `skip_reason` | string | no |  |
+| `teardown` | string | no |  |
 | `wasxfail` | boolean | no |  |
-| `worker` | string or null | no | Worker that produced the final outcome (pool runs only). |
+| `worker` | string | no | Worker that produced the final outcome (pool runs only). |

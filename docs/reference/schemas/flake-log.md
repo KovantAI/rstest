@@ -6,11 +6,11 @@ Source: `.rstest_cache/flakes.json`
 
 An object mapping each key to a FlakeStats value.
 
-### FlakeStats
+### FlakeStats (Flake log)
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `failed` | integer | no | Runs where the test hard-failed (quarantined failures included). |
-| `flaky` | integer | no | Runs where the test passed only after rerun(s). |
-| `last_epoch` | integer | no | Unix epoch of the last recorded event (flake or failure). |
-| `last_failed_epoch` | integer | no | Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed (readers then fall back to `last_epoch` when `failed` is non-zero). |
+| `failed` | integer | yes | Runs where the test hard-failed (quarantined failures included). |
+| `flaky` | integer | yes | Runs where the test passed only after rerun(s). |
+| `last_epoch` | integer | yes | Unix epoch of the last recorded event (flake or failure). |
+| `last_failed_epoch` | integer | yes | Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed (readers then fall back to `last_epoch` when `failed` is non-zero). |

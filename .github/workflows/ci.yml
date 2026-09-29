@@ -186,6 +186,23 @@ jobs:
       - name: test gate
         run: python e2e/gate.py --binary target/release/rstest
 
+      # The gate venv above carries pytest-cov, which pulls in pytest and its
+      # conditional deps, so a runtime dep missing from pyproject.toml (e.g.
+      # exceptiongroup/tomli below 3.11) passes there. Install the package
+      # alone into a clean venv and run a real test through the vendored core.
+      - name: declared deps suffice
+        shell: bash
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/pip install -q .
+          if /tmp/bare/bin/python -c "import pytest" 2>/dev/null; then
+            echo "pytest leaked into the bare venv" && exit 1
+          fi
+          mkdir -p /tmp/bare-suite
+          printf 'def test_ok():\n    assert 1\n' > /tmp/bare-suite/test_bare.py
+          source /tmp/bare/bin/activate
+          cd /tmp/bare-suite && rstest -n 2 -q
+
       # Worker unit tests under the matrix interpreter (pure-python helpers).
       - name: worker unit tests
         run: |

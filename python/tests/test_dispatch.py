@@ -247,6 +247,25 @@ def test_eager_runtestloop_runs_all_items_with_nextitem_scoping():
     assert calls == [("a", "b"), ("b", "c"), ("c", None)]
     starts = [p["index"] for k, p in conn.sent if k == "item_start"]
     assert starts == [0, 1, 2]
+    # No --timeout and no marker: no per-test timeout, so no watchdog.
+    assert [p["timeout"] for k, p in conn.sent if k == "item_start"] == [None] * 3
+
+
+def test_item_start_reports_the_effective_timeout(monkeypatch):
+    # The marker wins over the global --timeout; the orchestrator sizes each
+    # test's hang watchdog from this value.
+    monkeypatch.setenv("RSTEST_TIMEOUT", "2")
+    marked = FakeItem("b", closest={"timeout": SimpleNamespace(args=(300,), kwargs={})})
+    session, _ = _eager_session([FakeItem("a"), marked])
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0, 1]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    ItemDispatchPlugin(conn).pytest_runtestloop(session)
+    assert [p["timeout"] for k, p in conn.sent if k == "item_start"] == [2.0, 300.0]
 
 
 def test_eager_runtestloop_collectonly_returns_early():

@@ -129,13 +129,17 @@ test): rstest interrupts a test whose call phase runs past the limit, reports
 it failed with a traceback at the line it was stuck on, and the run
 completes. `@pytest.mark.timeout(N)` sets a per-test limit. This is built in;
 you don't need pytest-timeout (and rstest consumes `--timeout`, so the plugin
-never sees it).
+never sees it). On Windows there is no in-process interrupt: the test is
+only stopped by the hang watchdog below, at 3 × its timeout + 10 s, which
+kills its worker instead of printing a traceback.
 
 For a hang the in-process interrupt can't break (a test blocked inside a C
 extension), [`--worker-timeout 300`](cli.md#-worker-timeout-secs) is the
 backstop: a worker stuck on one test past the limit is killed, the test
-reported failed, and the run completes. `--timeout` arms it automatically at
-a generous multiple. Caveat: the watchdog covers
+reported failed, and the run completes. Without it, rstest arms a watchdog
+per test at 3 × that test's timeout + 10 s (its `@pytest.mark.timeout`, else
+`--timeout`), so a long marker is not cut short by a short global
+`--timeout`. Caveat: the watchdog covers
 hangs on a **test** (any phase); a hang during collection or session config
 is outside it, so wrap the invocation in an external timeout if your
 environment can hang before tests start.
@@ -150,4 +154,28 @@ both the rerun and restart budgets so a repeatable crash can't loop. Its
 remaining tests are redistributed to other workers automatically. If you see
 `worker terminated unexpectedly` instead, the restart budget was
 exhausted: something is killing workers repeatedly, and the longrepr of
-the first crash is the lead.
+the first crash is the lead. Each such failure carries the worker's exit
+code (or the signal that killed it) and the last lines it wrote to stderr.
+
+## `worker terminated unexpectedly: exited during startup`
+
+The worker process died before it sent anything back, so it never collected
+a test and isn't restarted. The failure shows its exit code and the last
+lines of its stderr, which is usually the actual error, for example:
+
+```text
+--- FAILED <worker gw0> ---
+worker terminated unexpectedly: exited during startup, before sending any event
+  exited with code 1
+  last lines of its stderr:
+    ...
+    ModuleNotFoundError: No module named 'exceptiongroup'
+```
+
+A missing module here means the interpreter rstest picked can't import
+rstest's worker or the vendored pytest core: reinstall rstest into the
+environment you run tests in (`pip install --force-reinstall rstest`), or
+check that rstest is using the interpreter you expect (see
+[`rstest` runs the wrong Python](#rstest-runs-the-wrong-python-cant-find-my-venv)).
+Anything else in the tail, such as an error from a `sitecustomize` or a
+`.pth` file, comes from the environment itself.

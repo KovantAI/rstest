@@ -96,6 +96,7 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
         .env("PYTHONPATH", worker::worker_pythonpath())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    worker::scrub_secrets(&mut py);
     let (py_out, py_wall, py_code) = time_run(py, &py_json);
     let _ = std::fs::remove_file(&py_json);
 
@@ -110,7 +111,11 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     sink.warn("rstest try: running it under rstest (-n auto)…");
     let exe = std::env::current_exe()?;
     let mut rs = std::process::Command::new(exe);
-    rs.arg("-n")
+    // Same interpreter as the pytest baseline: without it the child re-runs
+    // discovery and, outside an activated venv, may find none.
+    rs.arg("--python")
+        .arg(python)
+        .arg("-n")
         .arg("auto")
         .args(args)
         .arg("--report-json")

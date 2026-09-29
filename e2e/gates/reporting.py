@@ -284,8 +284,10 @@ def gate_html_report(g, args, binary):
     # Report write failure must surface as a nonzero exit, not a silent green:
     # the run completes, then the post-run report writer errors and that error
     # propagates out of execute() (run.rs write_run_reports `?`). Point --html
-    # into a nonexistent directory so fs::write fails.
-    bad = hp / "nope" / "report.html"
+    # under a regular file so no parent directory can be created.
+    blocker = hp / "not-a-dir"
+    blocker.write_text("")
+    bad = blocker / "report.html"
     r = g.run("test_h.py", "-n", "2", "--html", str(bad), cwd=hp, env_extra={"PYTHONPATH": str(hp)})
     check(
         "html: unwritable report path fails the run (error propagated, not swallowed)",
@@ -303,6 +305,15 @@ def gate_junitxml(g, args, binary):
         "junit counts",
         ts is not None and ts.get("tests") == "9" and ts.get("failures") == "1",
         str(dict(ts.attrib) if ts is not None else None),
+    )
+    # CI recipes point --junitxml into a fresh directory (test-results/); like
+    # pytest, rstest creates it rather than failing the run after the tests.
+    nested = g.tmp / "fresh-results" / "junit.xml"
+    r = g.run("maxfail", "-n", "2", "--junitxml", str(nested), timeout=60)
+    check(
+        "junit: missing parent directory is created",
+        nested.exists() and r.returncode == 1,  # 1 = the suite's known failure
+        f"rc={r.returncode} stderr={r.stderr[-200:]}",
     )
 
 

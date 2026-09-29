@@ -49,27 +49,14 @@ pub struct DoctorReport {
     test_time_seconds: f64,
     /// Sum of call-phase CPU time, over tests where it was measured.
     cpu_time_seconds: f64,
-    #[cfg_attr(test, schemars(schema_with = "crate::schema::nullable::<WaitBound>"))]
     wait_bound: Option<WaitBound>,
-    #[cfg_attr(
-        test,
-        schemars(schema_with = "crate::schema::nullable::<ParallelFloor>")
-    )]
     parallel_floor: Option<ParallelFloor>,
-    #[cfg_attr(
-        test,
-        schemars(schema_with = "crate::schema::nullable::<ParallelEfficiency>")
-    )]
     parallel_efficiency: Option<ParallelEfficiency>,
     fixtures: Vec<FixtureEntry>,
     slowest_files: Vec<FileEntry>,
     /// Slow tests whose every covered line is also covered by another test -
     /// delete/merge candidates. `None` unless a per-test coverage index was
     /// warm (`--cov --cov-context=test`) and at least one test qualified.
-    #[cfg_attr(
-        test,
-        schemars(schema_with = "crate::schema::nullable::<CoverageWaste>")
-    )]
     coverage_waste: Option<CoverageWaste>,
     /// Tests that leaked threads / fds (net positive after teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
@@ -549,7 +536,7 @@ pub fn detect_leaks(run: &Run) -> Vec<Leak> {
 }
 
 pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Result<()> {
-    std::fs::write(path, serde_json::to_vec_pretty(report)?)?;
+    crate::reporting::write_output(path, serde_json::to_vec_pretty(report)?)?;
     Ok(())
 }
 
