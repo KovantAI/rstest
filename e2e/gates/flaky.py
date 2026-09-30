@@ -281,7 +281,8 @@ def gate_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
     )
     check(
         "crashed test retried within budget",
-        r.returncode == 0 and "1 flaky" in r.stdout and "2 passed" in r.stdout,
+        # 2 tests: the recovered one counts as flaky only, not also passed.
+        r.returncode == 0 and "1 flaky, 1 passed" in r.stdout,
         r.stdout[-200:],
     )
     marker.unlink(missing_ok=True)

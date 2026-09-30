@@ -616,7 +616,10 @@ not show up at all.
   (fails the stuck test with a traceback, and also arms the
   [`--worker-timeout`](../reference/cli.md#-worker-timeout-secs) watchdog for
   C code that never returns), and a job-level cap such as `timeout-minutes:`
-  on GitHub Actions.
+  on GitHub Actions. When that cap cancels the job, the runner sends
+  SIGTERM (or SIGINT): a parallel run then stops its workers, names the test
+  each was running and records it failed, writes the replay journal and any
+  `--junitxml`/`--report-json`, and exits 2. A second signal exits at once.
 - **Reproducing order-dependent failures**: `--shuffle` prints its seed;
   rerun with `--shuffle=SEED` to replay the same order. `rstest bisect
   <nodeid>` (on `main`, not in 0.7.0) narrows a test that fails only after

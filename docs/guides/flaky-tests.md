@@ -125,11 +125,11 @@ a team decision and its diff history is the audit trail):
 ```text
 # quarantine.txt: tracked in JIRA-1234; remove entries when fixed
 tests/test_ws.py::test_reconnect
-tests/test_legacy_sync.py::*
+tests/test_legacy_sync.py::*  # JIRA-1301
 ```
 
-One nodeid or `*` glob per line; `#` comments and blank lines are
-skipped. Then:
+One nodeid or `*` glob per line; `#` comments (whole-line or trailing,
+after whitespace) and blank lines are skipped. Then:
 
 ```console
 $ rstest -n auto --quarantine quarantine.txt

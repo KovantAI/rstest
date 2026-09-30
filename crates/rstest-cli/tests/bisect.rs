@@ -182,7 +182,7 @@ fn fails_in_isolation_is_not_order_dependent() {
 
 #[test]
 fn first_in_collection_has_no_predecessors() {
-    // Passes alone and is collected first: nothing precedes it to bisect.
+    // Passes alone, is collected first, and nothing after it pollutes either.
     let Some(venv) = pytest_env() else { return };
     let dir = fresh_dir("first");
     std::fs::write(
@@ -204,8 +204,47 @@ fn first_in_collection_has_no_predecessors() {
     let doc = read_json(&jpath);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("first in collection order"), "{out}");
+    assert!(out.contains("does not reproduce"), "{out}");
     assert_eq!(doc["order_dependent"], false);
+}
+
+#[test]
+fn a_polluter_collected_after_the_victim_is_found() {
+    // On CI the polluter ran first (another worker's order); in collection
+    // order it comes after the victim, so the prefix alone never reproduces.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("after");
+    std::fs::write(
+        dir.join("test_report.py"),
+        "import os\n\ndef test_a():\n    assert True\n\n\
+         def test_totals():\n    assert os.environ.get('RSTEST_BISECT_LATE') is None\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("test_zz_debug.py"),
+        "import os\n\ndef test_enable_debug():\n    os.environ['RSTEST_BISECT_LATE'] = '1'\n\n\
+         def test_other():\n    assert True\n",
+    )
+    .unwrap();
+    let jpath = dir.join("b.json");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &[
+            "bisect",
+            "test_report.py::test_totals",
+            "--bisect-json",
+            jpath.to_str().unwrap(),
+        ],
+    );
+    let doc = read_json(&jpath);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(doc["order_dependent"], true);
+    assert_eq!(
+        doc["culprits"],
+        serde_json::json!(["test_zz_debug.py::test_enable_debug"])
+    );
 }
 
 #[test]

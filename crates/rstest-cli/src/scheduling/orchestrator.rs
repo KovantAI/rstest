@@ -30,6 +30,8 @@ pub(crate) trait Slot {
     fn kill_worker(&mut self);
     /// Tell the worker its queue is closed (`NoMoreItems`); it drains and ends.
     fn send_no_more_items(&mut self);
+    /// Kill (if running) and reap the worker process, marking the slot dead.
+    fn reap_dead(&mut self);
 }
 
 /// The hang limit for one in-flight item: how long its worker may sit on it
@@ -108,6 +110,61 @@ pub(crate) fn stop_all(states: &mut [impl Slot]) {
     for s in states.iter_mut().filter(|s| !s.dead() && !s.finishing()) {
         s.set_finishing(true);
         s.send_no_more_items();
+    }
+}
+
+/// Stop the run on SIGINT/SIGTERM (see [`crate::scheduling::interrupt`]):
+/// name each in-flight test, record it failed (a CI job killed by its timeout
+/// then shows the hung test in every report), and kill and reap every worker,
+/// so none outlives the orchestrator. `running` gives slot i's in-flight nodeid.
+/// The caller pushes exit status 2 (pytest's INTERRUPTED) and leaves its loop
+/// for the normal wind-down, which writes the journal.
+pub(crate) fn interrupt_all<S: Slot>(
+    sink: &mut Sink,
+    run: &mut Run,
+    prog: &mut Progress,
+    states: &mut [S],
+    running: impl Fn(usize, &S) -> Option<String>,
+    sig: i32,
+) {
+    let sig = crate::scheduling::interrupt::name(sig);
+    let in_flight: Vec<(usize, String, f64)> = states
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.dead())
+        .filter_map(|(i, s)| {
+            let secs = s.running_since().map_or(0.0, |t| t.elapsed().as_secs_f64());
+            running(i, s).map(|id| (i, id, secs))
+        })
+        .collect();
+    if in_flight.is_empty() {
+        sink.warn(&format!(
+            "rstest: interrupted by {sig}; stopping the workers"
+        ));
+    } else {
+        sink.warn(&format!(
+            "rstest: interrupted by {sig}; stopping the workers. Running at the time:"
+        ));
+        for (i, id, secs) in &in_flight {
+            sink.warn(&format!("  gw{i}  {id}  ({secs:.1}s)"));
+        }
+    }
+    for (i, id, secs) in in_flight {
+        let r = proto::Report {
+            longrepr: Some(format!(
+                "interrupted by {sig} after {secs:.1}s: worker gw{i} was stopped \
+                 while running this test (reported failed)"
+            )),
+            ..fabricate_crash_report(id, None, i, &anyhow::anyhow!("interrupted"))
+        };
+        let nodeid = r.nodeid.clone();
+        prog.on_report(sink, Some(i), &r);
+        sink.emit_report(Some(i), &r);
+        run.record(Some(i), r);
+        run.mark_crashed(&nodeid);
+    }
+    for s in states.iter_mut().filter(|s| !s.dead()) {
+        s.reap_dead();
     }
 }
 
@@ -205,11 +262,13 @@ pub(crate) fn finalize_attempt(
 /// recorded outcomes. Recorded outcomes win over session codes both ways: a
 /// fabricated crash failure never hits a session (codes read 0), and a flaky
 /// test's first attempt fails inside a session (code 1) though it finally
-/// passed. `collect_aborted` (lazy only) forces at least "interrupted" (2).
+/// passed. `retried` says retries were in play (a global `--reruns` budget,
+/// or any test marked flaky, which covers `@pytest.mark.flaky` retrying on
+/// its own). `collect_aborted` (lazy only) forces at least "interrupted" (2).
 pub(crate) fn finalize_exit(
     statuses: &[i32],
     all_passed: bool,
-    reruns: u32,
+    retried: bool,
     collect_aborted: bool,
 ) -> i32 {
     let mut exitstatus = crate::scheduling::pool::merge_statuses(statuses);
@@ -219,7 +278,7 @@ pub(crate) fn finalize_exit(
     if exitstatus == 0 && !all_passed {
         exitstatus = 1;
     }
-    if reruns > 0 && exitstatus == 1 && all_passed {
+    if retried && exitstatus == 1 && all_passed {
         exitstatus = 0;
     }
     exitstatus
@@ -238,6 +297,8 @@ mod tests {
         watchdog: Option<Watchdog>,
         killed: u32,
         no_more_sent: u32,
+        reaped: u32,
+        running: Option<String>,
     }
 
     impl Slot for MockSlot {
@@ -267,6 +328,10 @@ mod tests {
         }
         fn send_no_more_items(&mut self) {
             self.no_more_sent += 1;
+        }
+        fn reap_dead(&mut self) {
+            self.reaped += 1;
+            self.dead = true;
         }
     }
 
@@ -400,6 +465,48 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_all_names_and_fails_running_tests_and_reaps_every_worker() {
+        let mut states = vec![
+            MockSlot {
+                running: Some("t.py::hang".into()),
+                running_since: Some(Instant::now()),
+                ..Default::default()
+            },
+            MockSlot::default(), // alive, idle
+            MockSlot {
+                dead: true, // already gone: left alone
+                running: Some("t.py::ghost".into()),
+                ..Default::default()
+            },
+        ];
+        let (mut sink, cap) = Sink::captured();
+        let mut run = Run::default();
+        let mut prog = Progress::default();
+        interrupt_all(
+            &mut sink,
+            &mut run,
+            &mut prog,
+            &mut states,
+            |_, s| s.running.clone(),
+            libc::SIGTERM,
+        );
+        assert_eq!(
+            states.iter().map(|s| s.reaped).collect::<Vec<_>>(),
+            [1, 1, 0]
+        );
+        assert!(
+            cap.err().contains("interrupted by SIGTERM"),
+            "{}",
+            cap.err()
+        );
+        assert!(cap.err().contains("gw0  t.py::hang"), "{}", cap.err());
+        assert!(!cap.err().contains("ghost"), "{}", cap.err());
+        assert_eq!(run.counts()["failed"], 1);
+        assert!(run.failure_text("t.py::hang").unwrap().contains("SIGTERM"));
+    }
+
     #[test]
     fn watchdog_for_explicit_worker_timeout_wins() {
         let w = watchdog_for(Some(Duration::from_secs(30)), Some(300.0)).unwrap();
@@ -493,22 +600,22 @@ mod tests {
     #[test]
     fn finalize_exit_recorded_outcomes_win() {
         // Clean sessions but a recorded failure (fabricated crash) -> 1.
-        assert_eq!(finalize_exit(&[0, 0], false, 0, false), 1);
-        // Session says failed (1) but everything ultimately passed and reruns
-        // are on -> flaky pass, downgrade to 0.
-        assert_eq!(finalize_exit(&[1], true, 3, false), 0);
-        // Same without reruns stays failed.
-        assert_eq!(finalize_exit(&[1], true, 0, false), 1);
+        assert_eq!(finalize_exit(&[0, 0], false, false, false), 1);
+        // Session says failed (1) but everything ultimately passed after a
+        // retry (--reruns or a lone @mark.flaky) -> flaky pass, downgrade to 0.
+        assert_eq!(finalize_exit(&[1], true, true, false), 0);
+        // Same with no retry in play stays failed.
+        assert_eq!(finalize_exit(&[1], true, false, false), 1);
         // All green -> 0.
-        assert_eq!(finalize_exit(&[0, 0], true, 0, false), 0);
+        assert_eq!(finalize_exit(&[0, 0], true, false, false), 0);
     }
 
     #[test]
     fn finalize_exit_collect_abort_forces_interrupted() {
         // collect_aborted floors at 2 even when sessions were clean...
-        assert_eq!(finalize_exit(&[0], true, 0, true), 2);
+        assert_eq!(finalize_exit(&[0], true, false, true), 2);
         // ...and never downgrades a more severe code.
-        assert_eq!(finalize_exit(&[3], false, 0, true), 3);
+        assert_eq!(finalize_exit(&[3], false, false, true), 3);
     }
 
     #[test]

@@ -61,6 +61,10 @@ impl crate::scheduling::orchestrator::Slot for WorkerState {
     fn send_no_more_items(&mut self) {
         let _ = self.worker.send(&proto::Command::NoMoreItems);
     }
+    fn reap_dead(&mut self) {
+        self.worker.reap();
+        self.dead = true;
+    }
 }
 
 impl WorkerState {

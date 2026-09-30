@@ -927,7 +927,8 @@ fn print_warnings_summary(
 }
 
 /// Compile the --quarantine file into one matcher: exact nodeids or `*`
-/// globs, one per line, `#` comments and blanks skipped.
+/// globs, one per line, `#` comments and blanks skipped. A trailing
+/// comment (whitespace then `#`, e.g. `test_a  # JIRA-1`) is stripped too.
 pub(super) fn quarantine_matcher(
     path: &std::path::Path,
     sink: &mut Sink,
@@ -936,8 +937,8 @@ pub(super) fn quarantine_matcher(
         .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
     let patterns: Vec<String> = text
         .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(strip_quarantine_comment)
+        .filter(|l| !l.is_empty())
         .map(|l| {
             format!(
                 "^{}$",
@@ -955,6 +956,21 @@ pub(super) fn quarantine_matcher(
         ));
     }
     Ok(regex::RegexSet::new(patterns)?)
+}
+
+/// One quarantine line without its comment: a leading `#` blanks the line,
+/// and a `#` preceded by whitespace ends the pattern. A `#` glued to the
+/// nodeid (a param id like `test_a[#1]`) stays part of the pattern.
+fn strip_quarantine_comment(line: &str) -> &str {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return "";
+    }
+    let end = line
+        .char_indices()
+        .find(|&(i, c)| c == '#' && line[..i].ends_with(char::is_whitespace))
+        .map_or(line.len(), |(i, _)| i);
+    line[..end].trim_end()
 }
 
 #[cfg(test)]
@@ -1150,6 +1166,20 @@ mod tests {
         assert!(!set.is_match("test_foo.py::test_ab")); // anchored: no substring match
         assert!(set.is_match("test_bar.py::test_z")); // glob
         assert!(!set.is_match("other.py::test_a"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn quarantine_matcher_strips_trailing_comments() {
+        let path = write_quarantine(
+            "trailing",
+            "test_foo.py::test_a  # JIRA-1\ntest_bar.py::*\t# flaky on CI\ntest_p.py::test_b[#1]\n",
+        );
+        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
+        assert_eq!(set.len(), 3);
+        assert!(set.is_match("test_foo.py::test_a"));
+        assert!(set.is_match("test_bar.py::test_z"));
+        assert!(set.is_match("test_p.py::test_b[#1]")); // glued `#` is not a comment
         std::fs::remove_file(&path).ok();
     }
 
