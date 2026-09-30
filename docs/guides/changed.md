@@ -18,9 +18,9 @@ the index warm.
 With no coverage index, `--changed` maps each changed `.py` file through the
 project's import graph to every test file that could reach it, and runs those.
 It is conservative by construction: ambiguous module names select every
-match, function-local imports still count as edges, a changed `conftest.py`
-selects its whole subtree, and any config or non-Python change falls back to a
-full run. The one documented gap is dynamic imports
+match, function-local imports still count as edges, a deleted or renamed
+module selects the tests that imported it, a changed `conftest.py` selects its
+whole subtree, and any config or non-Python change falls back to a full run. The one documented gap is dynamic imports
 (`importlib.import_module`), which produce no edges; use
 [`--changed-strict`](../reference/cli.md#-changed-strict) for
 correctness-critical runs.

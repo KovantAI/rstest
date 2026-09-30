@@ -341,6 +341,43 @@ def gate_smart_selection(g, args, binary):
     )
 
 
+def gate_changed_deleted_module(g, args, binary):
+    print("== --changed: deleted / renamed module ==")
+    sp = g.tmp / "delproj"
+    g.write("delproj/pkg/__init__.py", "")
+    g.write("delproj/pkg/gone.py", "def h():\n    return 1\n")
+    g.write(
+        "delproj/tests/test_gone.py",
+        "from pkg.gone import h\n\ndef test_gone(): assert h() == 1\n",
+    )
+    g.write("delproj/tests/test_other.py", "def test_other(): assert True\n")
+    g.write("delproj/pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')
+    git_init_commit(sp, "init")
+    env = {"PYTHONPATH": str(sp)}
+    # Deleting a module must select its importers (which now fail to import),
+    # not report "no tests affected" and exit 0.
+    git(sp, "rm", "-q", "pkg/gone.py")
+    r = g.run("--changed", "-v", cwd=sp, env_extra=env)
+    check(
+        "deleted module selects its importer",
+        r.returncode != 0
+        and "test_gone.py" in r.stdout
+        and "no tests affected" not in r.stdout
+        and "test_other" not in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-300:] + r.stdout[-300:],
+    )
+    git(sp, "reset", "-q", "--hard")
+    # A rename is the same delete: the old path's importers must be selected.
+    git(sp, "mv", "pkg/gone.py", "pkg/moved.py")
+    r = g.run("--changed", "-v", cwd=sp, env_extra=env)
+    check(
+        "renamed module selects the old path's importer",
+        r.returncode != 0 and "test_gone.py" in r.stdout and "test_other" not in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-300:] + r.stdout[-300:],
+    )
+    git(sp, "reset", "-q", "--hard")
+
+
 def gate_coverage_based_selection_changed_uses_th(g, args, binary):
     print("== coverage-based selection (--changed uses the cov index) ==")
     # Warm a line->test index, then prove --changed narrows to only the tests
@@ -557,12 +594,12 @@ def gate_coverage_based_selection_changed_uses_th(g, args, binary):
 
     # Deleted SOURCE file under --changed-strict: -U0 shows +++ /dev/null (no
     # hunk). Pre-fix it was dropped and falsely SKIPPED everything; the
-    # --name-only union routes it to the strict rail, forcing a full run.
+    # --name-only union routes it to the graph, which selects both importers.
     (cs / "mymod.py").unlink()
     r = g.run("--changed-strict", cwd=cs, env_extra={"PYTHONPATH": str(cs)})
     check(
-        "changed-strict: deleted source file forces full run (not a false skip)",
-        "falling back to full run" in r.stderr and "no tests affected" not in r.stdout,
+        "changed-strict: deleted source file selects its importers (not a false skip)",
+        "2 whole-file target(s)" in r.stderr and "no tests affected" not in r.stdout,
         r.stderr[-250:] + " || " + r.stdout[-150:],
     )
     git(cs, "checkout", "-q", ".")

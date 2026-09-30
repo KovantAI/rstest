@@ -56,11 +56,17 @@ fn select_from_index(
     strict: bool,
     index: &ProjectIndex,
 ) -> Result<Selection> {
+    let rootdir_canon = rootdir
+        .canonicalize()
+        .unwrap_or_else(|_| rootdir.to_path_buf());
     let mut affected: HashSet<PathBuf> = HashSet::new();
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    // A changed file that is gone (deleted, or the old side of a rename) is in
+    // no reverse edge: those come from files on disk. Its importers still name
+    // its dotted module, now unresolved, so link them by name instead.
+    let mut ghosts: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for c in changed {
-        let abs = rootdir.join(c);
-        let canon = abs.canonicalize().unwrap_or(abs);
+        let canon = canonical_lossy(&rootdir.join(c));
         // Rule 2: conftest.py affects every test below its directory.
         if canon.file_name().and_then(|n| n.to_str()) == Some("conftest.py") {
             if let Some(dir) = canon.parent() {
@@ -72,8 +78,20 @@ fn select_from_index(
             }
             continue;
         }
+        if !canon.exists() {
+            let importers = index.importers_of_missing(&dotted_of(&rootdir_canon, &canon));
+            ghosts.insert(canon.clone(), importers);
+        }
         queue.push_back(canon);
     }
+    let importers_of = |f: &PathBuf| {
+        index
+            .reverse
+            .get(f)
+            .into_iter()
+            .chain(ghosts.get(f))
+            .flatten()
+    };
 
     // Strict: every changed SOURCE file must provably reach a test.
     // (Tests select themselves; conftest covers its subtree by rule 2.)
@@ -90,11 +108,9 @@ fn select_from_index(
                     covered = true;
                     break;
                 }
-                if let Some(importers) = index.reverse.get(f) {
-                    for imp in importers {
-                        if seen.insert(imp) {
-                            reach.push_back(imp);
-                        }
+                for imp in importers_of(f) {
+                    if seen.insert(imp) {
+                        reach.push_back(imp);
                     }
                 }
             }
@@ -113,11 +129,9 @@ fn select_from_index(
     let mut seen: HashSet<PathBuf> = queue.iter().cloned().collect();
     while let Some(file) = queue.pop_front() {
         affected.insert(file.clone());
-        if let Some(importers) = index.reverse.get(&file) {
-            for imp in importers {
-                if seen.insert(imp.clone()) {
-                    queue.push_back(imp.clone());
-                }
+        for imp in importers_of(&file) {
+            if seen.insert(imp.clone()) {
+                queue.push_back(imp.clone());
             }
         }
     }
@@ -141,6 +155,29 @@ struct ProjectIndex {
     files: Vec<PathBuf>,
     /// imported file -> files importing it
     reverse: HashMap<PathBuf, Vec<PathBuf>>,
+    /// imported module name that resolves to no project file -> files
+    /// importing it (a deleted module's importers are only reachable here)
+    unresolved: HashMap<String, Vec<PathBuf>>,
+}
+
+impl ProjectIndex {
+    /// The files importing `dotted`, a module no longer on disk: every
+    /// unresolved name that would have resolved to it, i.e. `dotted` itself or
+    /// any dotted suffix of it (the [`Resolver`]'s suffix rule, inverted).
+    fn importers_of_missing(&self, dotted: &str) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut name = dotted;
+        loop {
+            if let Some(importers) = self.unresolved.get(name) {
+                out.extend(importers.iter().cloned());
+            }
+            match name.split_once('.') {
+                Some((_, rest)) => name = rest,
+                None => break,
+            }
+        }
+        out
+    }
 }
 
 /// All project `.py` files (canonical), pruning the same dirs as the test-file
@@ -244,19 +281,24 @@ impl ProjectIndex {
             .collect();
         let resolver = Resolver::build(dotted.iter().map(|(d, f)| (d, f)));
         let mut reverse: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        let mut unresolved: HashMap<String, Vec<PathBuf>> = HashMap::new();
         for (importer_dotted, f) in &dotted {
             let Some(modules) = parse_imports(f, importer_dotted) else {
                 continue;
             };
-            for module in modules {
-                for target in resolver.resolve(&module) {
-                    if &target != f {
-                        reverse.entry(target).or_default().push(f.clone());
-                    }
-                }
+            let (out, missing) = resolve_out(&resolver, &modules, f);
+            for target in out {
+                reverse.entry(target).or_default().push(f.clone());
+            }
+            for module in missing {
+                unresolved.entry(module).or_default().push(f.clone());
             }
         }
-        Ok(Self { files, reverse })
+        Ok(Self {
+            files,
+            reverse,
+            unresolved,
+        })
     }
 }
 
@@ -280,7 +322,8 @@ fn stamp_of(file: &Path) -> Option<Stamp> {
 }
 
 /// One cached file: its stamp, the module names it imports (the costly read +
-/// scan), and those names resolved to target files (the forward edges). The raw
+/// scan), those names resolved to target files (the forward edges), and the
+/// names that resolved to nothing (a deleted module's importers). The raw
 /// names are what a rebuild reuses: resolution depends on the current file set,
 /// so it is redone whenever that set moves. The resolved targets let an edit
 /// patch the reverse index by removing the file's old out-edges and adding its
@@ -290,6 +333,7 @@ struct CachedFile {
     stamp: Option<Stamp>,
     modules: Vec<String>,
     out: Vec<PathBuf>,
+    unresolved: Vec<String>,
 }
 
 /// A stateful import-graph index that survives across `--watch` reselections.
@@ -466,13 +510,14 @@ impl CollectionCache {
                     parse_imports(f, &dotted).unwrap_or_default()
                 }
             };
-            let out = resolve_out(&resolver, &modules, f);
+            let (out, unresolved) = resolve_out(&resolver, &modules, f);
             fresh.insert(
                 f.clone(),
                 CachedFile {
                     stamp: now,
                     modules,
                     out,
+                    unresolved,
                 },
             );
         }
@@ -508,7 +553,7 @@ impl CollectionCache {
             .or_insert_with(|| dotted_of(rootdir_canon, file))
             .clone();
         let modules = parse_imports(file, &dotted).unwrap_or_default();
-        let out = resolve_out(resolver, &modules, file);
+        let (out, unresolved) = resolve_out(resolver, &modules, file);
         for target in &out {
             self.reverse
                 .entry(target.clone())
@@ -521,6 +566,7 @@ impl CollectionCache {
                 stamp,
                 modules,
                 out,
+                unresolved,
             },
         );
     }
@@ -543,9 +589,19 @@ impl CollectionCache {
             .iter()
             .map(|(t, importers)| (t.clone(), importers.iter().cloned().collect()))
             .collect();
+        let mut unresolved: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for (f, cached) in &self.files {
+            for module in &cached.unresolved {
+                unresolved
+                    .entry(module.clone())
+                    .or_default()
+                    .push(f.clone());
+            }
+        }
         ProjectIndex {
             files: self.files.keys().cloned().collect(),
             reverse,
+            unresolved,
         }
     }
 }
@@ -651,13 +707,24 @@ pub fn import_closures(rootdir: &Path, roots: &[PathBuf]) -> HashMap<PathBuf, Ve
         .collect()
 }
 
-/// `file`'s imported `modules` resolved to project files, minus self-edges.
-fn resolve_out(resolver: &Resolver, modules: &[String], file: &Path) -> Vec<PathBuf> {
-    modules
-        .iter()
-        .flat_map(|m| resolver.resolve(m))
-        .filter(|t| t != file)
-        .collect()
+/// `file`'s imported `modules` resolved to project files, minus self-edges,
+/// plus the modules that resolved to no file at all (stdlib, third-party, or
+/// a project module that has since been deleted).
+fn resolve_out(
+    resolver: &Resolver,
+    modules: &[String],
+    file: &Path,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut unresolved = Vec::new();
+    for m in modules {
+        let targets = resolver.resolve(m);
+        if targets.is_empty() {
+            unresolved.push(m.clone());
+        }
+        out.extend(targets.into_iter().filter(|t| t != file));
+    }
+    (out, unresolved)
 }
 
 /// Modules imported by `src`. Includes indented (function-local /
@@ -976,6 +1043,64 @@ mod tests {
             }
             Selection::FullRun(r) => panic!("unexpected full run: {r}"),
         }
+    }
+
+    #[test]
+    fn a_deleted_module_selects_its_importers() {
+        // pkg/gone.py is gone from disk, so it is in no reverse edge; its
+        // importers still name it and must be selected (they now fail to
+        // import). An unrelated test stays out.
+        let root = tmp("del-module");
+        write(&root, "pkg/__init__.py", "");
+        write(&root, "pkg/other.py", "");
+        write(&root, "tests/test_gone.py", "from pkg.gone import h\n");
+        write(&root, "tests/test_pkg.py", "from pkg import gone\n");
+        write(&root, "tests/test_plain.py", "import pkg.gone as g\n");
+        write(&root, "tests/test_other.py", "from pkg import other\n");
+        let proj = ProjectConfig::default();
+        let changed = [PathBuf::from("pkg/gone.py")];
+        let want = vec![
+            PathBuf::from("tests/test_gone.py"),
+            PathBuf::from("tests/test_pkg.py"),
+            PathBuf::from("tests/test_plain.py"),
+        ];
+        assert_eq!(
+            tests_of(affected_tests(&root, &proj, &changed, false).unwrap()),
+            want
+        );
+        // --changed-strict: the importers prove the deleted file reaches tests.
+        assert_eq!(
+            tests_of(affected_tests(&root, &proj, &changed, true).unwrap()),
+            want
+        );
+        // The watch cache agrees, cold and after the delete is reported.
+        write(&root, "pkg/gone.py", "def h():\n    return 1\n");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        std::fs::remove_file(root.join("pkg/gone.py")).unwrap();
+        assert_eq!(
+            tests_of(affected_tests_cached(&root, &proj, &changed, false, &mut cache).unwrap()),
+            want
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_deleted_module_reaches_tests_through_a_surviving_importer() {
+        // gone.py <- mid.py <- test_mid.py: mid.py survives the delete and is
+        // linked by name, then the BFS continues through the normal edges.
+        let root = tmp("del-transitive");
+        write(&root, "mid.py", "import gone\n");
+        write(&root, "test_mid.py", "import mid\n");
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("gone.py")],
+            true,
+        )
+        .unwrap();
+        assert_eq!(tests_of(sel), vec![PathBuf::from("test_mid.py")]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn tests_of(sel: Selection) -> Vec<PathBuf> {

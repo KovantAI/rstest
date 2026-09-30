@@ -286,8 +286,9 @@ The hint stays silent for test-only, `conftest.py`, config, or non-Python
 changes, so it never nags a suite that doesn't use coverage.
 
 Conservative by construction: ambiguous module names select every match,
-function-local imports count, a changed `conftest.py` selects its whole
-subtree, and any config or non-Python change falls back to a full run.
+function-local imports count, a deleted or renamed module selects the
+tests that imported it, a changed `conftest.py` selects its whole subtree,
+and any config or non-Python change falls back to a full run.
 Known gap: dynamic imports (`importlib.import_module`) produce no graph
 edges; for correctness-critical runs, use `--changed-strict` below.
 With nothing affected, the run prints

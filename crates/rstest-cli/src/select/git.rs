@@ -138,8 +138,15 @@ pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
     let diff_base = rev.unwrap_or("HEAD");
     // --relative: paths relative to the CWD and limited to its subtree -
     // running from a repo subdirectory (or a monorepo project child) must
-    // see ITS files, not repo-rooted paths.
-    let out = git_stdout(&["diff", "--name-only", "--relative", diff_base])?;
+    // see ITS files, not repo-rooted paths. --no-renames: a rename lists both
+    // sides, so the old path's importers are still selected.
+    let out = git_stdout(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--relative",
+        diff_base,
+    ])?;
     for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
@@ -186,7 +193,9 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     // -U0: zero context lines, so every hunk's new-side range is exactly
     // the changed lines. --relative: paths relative to CWD (monorepo child
     // safety), matching changed_files_from_git and the index keys.
-    let out = git_stdout(&["diff", "-U0", "--relative", diff_base])?;
+    // --no-renames: a renamed file is its old path deleted plus its new path
+    // added, so the old path reaches its importers and the new one is new code.
+    let out = git_stdout(&["diff", "-U0", "--no-renames", "--relative", diff_base])?;
     let mut map: ChangedLines = parse_diff_hunks(&out)
         .into_iter()
         .map(|(path, change)| (PathBuf::from(path), change))
@@ -194,7 +203,13 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     // `git diff -U0` emits no hunks for files without a line-diff (deletions,
     // renames, binary, mode-only), which still affect selection. Union the
     // authoritative `--name-only` set; hunk-parsed keys win, the rest fall back.
-    let out = git_stdout(&["diff", "--name-only", "--relative", diff_base])?;
+    let out = git_stdout(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--relative",
+        diff_base,
+    ])?;
     for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
@@ -563,6 +578,28 @@ mod tests {
         let b = ranges.get(Path::new("b.py")).expect("b.py present");
         assert!(b.has_new_code && b.old_ranges.is_empty(), "{b:?}");
         assert!(!ranges.contains_key(Path::new(".coverage")), "{ranges:?}");
+    }
+
+    #[test]
+    fn a_staged_rename_lists_the_old_path_too() {
+        // With rename detection the old path vanishes from the diff, and with
+        // it every importer of the old module. Both sides must be listed.
+        let held = test_env::lock();
+        let repo = init_repo(&held, "rename");
+        write(&repo, "pkg/gone.py", "def h():\n    return 1\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        git(&repo, &["mv", "pkg/gone.py", "pkg/moved.py"]);
+        let _cwd = test_env::set_cwd(&held, &repo);
+
+        let files = changed_files_from_git(None).unwrap();
+        assert!(files.contains(&PathBuf::from("pkg/gone.py")), "{files:?}");
+        assert!(files.contains(&PathBuf::from("pkg/moved.py")), "{files:?}");
+        let ranges = changed_line_ranges(None).unwrap();
+        let old = ranges.get(Path::new("pkg/gone.py")).expect("old side");
+        assert!(old.has_new_code, "{old:?}");
+        let new = ranges.get(Path::new("pkg/moved.py")).expect("new side");
+        assert!(new.has_new_code, "{new:?}");
     }
 
     #[test]
