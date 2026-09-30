@@ -39,7 +39,7 @@ pytest-cov. The recorded runs in
 rate-limit-window tests can flake at high worker counts).
 
 pandas, django-allauth and rich measured 100% parity on the recorded runs;
-aiohttp measured 99.93-99.96%, from a socket-leak warning flake that moves
+aiohttp measured 99.91-99.98%, from a socket-leak warning flake that moves
 under any parallel runner, xdist included. rich and django-allauth also
 contain tests that flake *under plain pytest itself*, so an individual run
 can land at about 99.x% when the baseline and rstest draw different flakes.

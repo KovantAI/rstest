@@ -129,7 +129,10 @@ pub struct SnapshotMeta<'a> {
     pub counts: BTreeMap<&'static str, u64>,
     /// Wall-clock run duration, rounded to two decimals.
     pub duration_seconds: f64,
-    /// Process exit status.
+    /// Test-session exit status, recorded before the post-run gates
+    /// (`--fail-on-leak`, `--durations-regress`, `--doctor-fail-on`,
+    /// `--cov-fail-under`, `--cov-diff-fail-under`) can raise the process
+    /// exit to 1.
     pub exitstatus: i32,
     /// Constant producer tag: always `"rstest"`.
     pub runner: &'static str,

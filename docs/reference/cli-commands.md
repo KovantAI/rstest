@@ -137,8 +137,6 @@ JSON) but excluded from the non-zero gate. This lets CI gate on **new**
 parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
 findings, and the build only goes red when a fresh one appears.
 
-The first slice of a broader migration assistant.
-
 ### `xdist-removal-check`
 
 Readiness check for the last migration step: uninstalling pytest-xdist.

@@ -84,7 +84,7 @@ The wins come from suite *shape*, not magic. Quick self-check:
 | Your suite | What to expect |
 |---|---|
 | Wait-bound (IO, sleeps, network, timeouts) | **Biggest win**: xdist's default `--dist load` hands out consecutive batches in collection order with no timing data, so a file of slow tests clusters on a few workers and starts late; rstest's duration cache starts the slowest tests first, spread across workers. |
-| CPU-bound, already splits well under xdist | **Parity, not a win**: gain up to the performance-core count, same as xdist (sympy `-n 8`: 15.6s vs 15.5s). |
+| CPU-bound, already splits well under xdist | **Parity, not a win**: gain up to the performance-core count, same as xdist (sympy `-n 8`: 16.1s vs 14.8s, overlapping spreads). |
 | Very many tests (100k+) | **Win over xdist**: xdist's single Python controller becomes the bottleneck; rstest's orchestrator is Rust (pandas `-n 8`: 43s vs 89s). |
 | Gated by one long test | **No win beyond that test**: no worker count beats the long pole. `--doctor` names it. |
 | Small (< ~10s serial) | **Little wall-time change**: value is `--watch`, `--changed`, `--doctor`, not raw speed. |

@@ -42,9 +42,9 @@ almost all of it waiting on 10-second proxy timeouts.)
 The `4442 tests` count is tests with a **recorded call duration**, which is
 what doctor analyzes: slightly fewer than the 4,469 the suite *collects*
 ([benchmarks](../reference/benchmarks.md)), because skips and zero-duration
-tests contribute no timing. This suite is heavily wait-bound, so its
-**PARALLEL EFFICIENCY** section (see below) reports over 100% and is omitted
-from the sample for brevity; it appears in any `-n ≥ 2` run.
+tests contribute no timing. The
+**PARALLEL EFFICIENCY** section (see below) is omitted from the sample for
+brevity; it appears in any `-n ≥ 2` run.
 
 [aiohttp]: https://github.com/aio-libs/aiohttp
 
@@ -86,9 +86,11 @@ Two things cap it, both named in the section:
   scheduler couldn't spread the work evenly (usually a few long tests
   pinned to one worker); consider splitting them or `--dist load`.
 
-Efficiency **over 100%** is normal for wait-bound suites: overlapping
-sleeps/IO run more tests at once than there are cores, so the report flags
-it and points back at WAIT-BOUND. Only emitted for multi-worker runs.
+Efficiency is measured against the worker count, so it stays at or below
+100%. On a wait-bound suite, set `-n` above the core count: overlapping
+sleeps/IO run more tests at once than there are cores, and the realized
+speedup climbs past the core count (see
+[Wait-bound suites](wait-bound.md)). Only emitted for multi-worker runs.
 
 ### FIXTURE HOTSPOTS
 

@@ -9,8 +9,9 @@ the [Monorepos guide](../guides/monorepo.md). This page is the reference for
 
 Monorepo mode engages when the current directory has **no pytest
 configuration of its own** but subdirectories do. Discovery descends at most
-five directory levels below the root (projects nested deeper are not found;
-list them in `projects` explicitly), looking for any of pytest 9's config
+five directory levels below the root (projects nested deeper are not found,
+even when listed in `projects`, which only filters what discovery found; run
+those from their own directory), looking for any of pytest 9's config
 files: `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`,
 `pyproject.toml`, `tox.ini`, `setup.cfg`. The first four count even when
 empty; `pyproject.toml` counts with a `[tool.pytest]` table (pytest 9's native

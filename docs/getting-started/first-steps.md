@@ -80,7 +80,10 @@ the rest of this page describes `dots`. On a single worker with no
 - **Failures** print with full pytest-style tracebacks (assertion rewriting
   included) and captured stdout/stderr/log sections.
 - The **summary line** uses pytest's accounting: the counts match what
-  pytest would print for the same run, including warnings.
+  pytest would print for the same run, including warnings, with two
+  exceptions at `-n 2` or more: the `deselected` count is not shown, and a
+  test whose teardown errors counts only as an error (pytest also counts its
+  call outcome).
 
 The live footer described above belongs to the `bar` view on a terminal;
 it is disabled automatically when output is piped or in CI. It is what

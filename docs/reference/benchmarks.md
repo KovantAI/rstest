@@ -301,7 +301,7 @@ raw JSON next to themselves, so the tables can be re-rendered.
 matched pytest exactly. Both suites contain tests that are intermittently
 flaky *under plain pytest* (rich has a lexer-guess test that flakes ~1 in 5
 sequential pytest runs; django-allauth has wall-clock rate-limit windows),
-so on some runs the pytest baseline and rstest can disagree (~99.8–99.9%).
+so on some runs the pytest baseline and rstest can disagree (~99.8-99.9%).
 Per-case detail: [Parity divergences](parity-divergences.md).
 
 [^pandas]: Measured, not estimated. pandas' default suite on Apple

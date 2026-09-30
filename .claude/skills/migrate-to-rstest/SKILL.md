@@ -79,7 +79,7 @@ may need the upgrade steps in `docs/guides/upgrade-to-pytest9.md`.
   `-n 4` / `@pytest.mark.serial` only cap parallelism. Offer both, recommend the
   fix.
 - **Leave pre-existing failures alone.** Anything `migrate-check` calls
-  NOT-PARALLEL-SPECIFIC or INTRINSIC FLAKE was already failing under pytest, not
+  NOT PARALLEL-SPECIFIC or INTRINSIC FLAKE was already failing under pytest, not
   rstest's to fix. Report the count; don't delete/skip it to force green.
   Conflating "already red" with "rstest broke it" is the #1 migration mistake.
 - **Ask before editing** tests or CI: show the diff and the why. (Non-

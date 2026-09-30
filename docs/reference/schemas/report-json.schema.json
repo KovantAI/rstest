@@ -88,7 +88,7 @@
           "format": "double"
         },
         "exitstatus": {
-          "description": "Process exit status.",
+          "description": "Test-session exit status, recorded before the post-run gates\n(`--fail-on-leak`, `--durations-regress`, `--doctor-fail-on`,\n`--cov-fail-under`, `--cov-diff-fail-under`) can raise the process\nexit to 1.",
           "type": "integer",
           "format": "int32"
         },

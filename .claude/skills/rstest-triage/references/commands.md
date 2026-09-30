@@ -95,14 +95,15 @@ $ rstest audit --audit-repeat 5 --audit-json audit.json
 ```
 
 - Runs the suite at `-n auto` (N times with `--audit-repeat`), diffs against
-  the `-n 0` oracle, and classifies each parallel-only failure: ISOLATION,
-  WALL-CLOCK, ORDER-DEPENDENCY, INTRINSIC FLAKE, or pre-existing.
-- Emits a paste-ready `conftest.py` block marking the ISOLATION and
-  WALL-CLOCK tests `@pytest.mark.serial`. If `conftest.py` already defines
-  `pytest_collection_modifyitems`, paste only the `_RSTEST_SERIAL` set and add
-  the loop to the existing hook; a second definition silently replaces the
-  first.
-- ORDER-DEPENDENCY tests are listed separately with a `--dist loadfile`
+  the `-n 0` oracle, and classifies each parallel-only failure: ISOLATION /
+  CO-LOCATION, WALL-CLOCK / LOAD-SENSITIVE, ORDER DEPENDENT, INTRINSIC FLAKE,
+  or pre-existing.
+- Emits a paste-ready `conftest.py` block marking the ISOLATION /
+  CO-LOCATION and WALL-CLOCK / LOAD-SENSITIVE tests `@pytest.mark.serial`. If
+  `conftest.py` already defines `pytest_collection_modifyitems`, paste only
+  the `_RSTEST_SERIAL` set and add the loop to the existing hook; a second
+  definition silently replaces the first.
+- ORDER DEPENDENT tests are listed separately with a `--dist loadfile`
   recommendation, because serial would run them apart from the tests they
   depend on. Intrinsic flakes and inconclusive tests are also separate.
 - A test flaky in every mode can still pass all serial runs by chance and be

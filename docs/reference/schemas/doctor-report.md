@@ -75,11 +75,11 @@ Realized parallel speedup measured from an actual run. Unlike `ParallelFloor` (a
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `efficiency_pct` | number | yes | 100 * realized / ideal. >100% signals wait-bound overlap. |
+| `efficiency_pct` | number | yes | 100 * realized / ideal: how busy the workers were, up to 100%. |
 | `ideal_speedup` | integer | yes | Worker count (`-n`) - the ceiling for a purely CPU-bound suite. |
 | `imbalance_pct` | number | yes | 100 * (busiest - idlest) / busiest. High = uneven distribution. |
 | `long_pole_seconds` | number | yes | Slowest single test: the hard floor no worker count beats. |
-| `realized_speedup` | number | yes | test_time / wall. May exceed `ideal_speedup` for wait-bound suites, where overlapping sleeps/IO run more tests at once than there are cores. |
+| `realized_speedup` | number | yes | test_time / wall. At most `ideal_speedup`, since each worker runs one test at a time; a wait-bound suite run with `-n` above the core count can realize more than the core count. |
 | `workers_busy` | array of WorkerLoad | yes | Busy time summed per worker, descending - the load-balance picture. |
 
 ### ParallelFloor

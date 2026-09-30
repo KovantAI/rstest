@@ -26,7 +26,7 @@ snapshot's prose walkthrough and examples, see [Shape](report-json.md#shape).
 
 --8<-- "docs/reference/schemas/report-json.md"
 
-??? note "Run report — full JSON Schema (draft-07)"
+??? note "Run report: full JSON Schema (draft-07)"
 
     ```json
     --8<-- "docs/reference/schemas/report-json.schema.json"
@@ -42,7 +42,7 @@ snapshot's prose walkthrough and examples, see [Shape](report-json.md#shape).
 
 --8<-- "docs/reference/schemas/discovery.md"
 
-??? note "Discovery — full JSON Schema (draft-07)"
+??? note "Discovery: full JSON Schema (draft-07)"
 
     ```json
     --8<-- "docs/reference/schemas/discovery.schema.json"
@@ -50,7 +50,7 @@ snapshot's prose walkthrough and examples, see [Shape](report-json.md#shape).
 
 --8<-- "docs/reference/schemas/migrate-check.md"
 
-??? note "Migrate-check — full JSON Schema (draft-07)"
+??? note "Migrate-check: full JSON Schema (draft-07)"
 
     ```json
     --8<-- "docs/reference/schemas/migrate-check.schema.json"

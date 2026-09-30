@@ -392,4 +392,4 @@ own suite). `--doctor` does not measure memory; use `/usr/bin/time -v`,
 **How to decide for real.** [`rstest try`](../reference/cli-commands.md#try) runs your own
 suite under plain pytest and under `rstest -n auto`, reporting parity and speed
 before you change any config. Confirm the parity-not-a-win call on your tests
-and cores, not on pandas'.
+and cores, not on sympy's.
