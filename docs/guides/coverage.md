@@ -18,7 +18,7 @@ The combined data covers the same lines a serial run executes, so the
 percentages should match a serial pytest run with the same coverage config.
 No gate compares the two numbers yet; the e2e coverage gate checks that the
 pool renders a report and that `--cov-fail-under` fails the run. If yours
-differ, first check the `--cov-config` note below.
+differ, first check that both runs read the same coverage config.
 
 !!! warning "Pass `--cov` flags on the rstest command line, not in `addopts`"
     rstest decides whether to combine and render coverage from its own
@@ -57,7 +57,7 @@ Supported pytest-cov options:
 | `--cov-precision=N` | the precision the report prints and the fail-under check rounds to; defaults to `[report] precision` |
 | `--cov-context=test` | per-test line contexts, preserved through the parallel merge (see below) |
 | `.coveragerc` / `[tool.coverage.*]` config | honored (read by coverage itself from its default locations) |
-| `--cov-config=PATH` | **not honored by the combine and report step**: rstest renders with coverage's default config lookup (`.coveragerc`, `setup.cfg`, `tox.ini`, `pyproject.toml`), at `-n 0` too, so `omit` / `exclude_lines` in a custom-named file are ignored in the report. Move the settings to a default location |
+| `--cov-config=PATH` | honored by the combine and report step too, at `-n 0` and in parallel: `omit`, `exclude_lines`, `data_file`, `fail_under` and `precision` come from the named file. Without it, coverage's default lookup applies (`.coveragerc`, `setup.cfg`, `tox.ini`, `pyproject.toml`) |
 | `--cov-append` | does not merge a previous run's `.coverage` into the parallel run's report |
 | `--no-cov` | combined with `--cov` on the command line, the report step finds no data and the run **exits 1** (`coverage report failed: No data to report.`). Drop `--cov` instead of adding `--no-cov` |
 
@@ -108,8 +108,7 @@ under `--cov`) passes: there is nothing to score.
 - At `-n 0` pytest-cov runs in its ordinary central mode and writes
   `.coverage` through the vendored pytest session. With `--cov` on the
   command line, rstest then renders the requested reports from that file
-  after the summary, the same step it runs after a parallel run (so the
-  `--cov-config` row above applies at `-n 0` too). In parallel mode rstest
+  after the summary, the same step it runs after a parallel run. In parallel mode rstest
   first combines the per-worker data, as xdist's controller would.
 - **With `--shard`, each shard measures only the tests it ran.** For a
   suite-wide number, skip rendering on each shard (`--cov-report=`), then
