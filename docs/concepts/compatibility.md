@@ -138,7 +138,9 @@ would. Clear it there before scaling to workers. For the common stack see
 ## Measured at scale
 
 Beyond the four-suite battery, the public-suite corpus runs rstest
-against 33 well-known projects. The one that matters for advanced
+against 35 well-known projects (the suites in
+`corpus/suites.toml`: 33 single-project suites and two monorepos,
+langgraph and langchain). The one that matters for advanced
 xdist users: **SQLAlchemy** (about 25,300 tests) runs at `-n auto` with its
 controller-side hooks exercised end-to-end: `pytest_configure_node`
 filling `follower_ident`, follower databases provisioned per worker,
@@ -158,7 +160,7 @@ Maintained as things close:
 
 | Gap | Status |
 |---|---|
-| Windows at corpus scale | supported: the full gate runs on `windows-latest` in CI every commit and wheels are smoke-tested there; the 33-suite public corpus, however, is run only on macOS/Linux, so large-real-world-suite validation on Windows is lighter than on the other platforms |
+| Windows at corpus scale | supported: the full gate runs on `windows-latest` in CI every commit and wheels are smoke-tested there; the 35-suite public corpus, however, is run only on macOS/Linux, so large-real-world-suite validation on Windows is lighter than on the other platforms |
 | Terminal-rendering plugins (pytest-sugar, pytest-rich UIs) | by design at `-n ≥ 2`: rstest owns the terminal; data-level plugin behavior unaffected |
 | hypothesis's shared `.hypothesis` example database under many workers | untested at high worker counts; hypothesis itself handles concurrent DB access, but rstest has not verified it beyond `-n 8`. Mitigation if you hit contention: in a `settings` profile give each worker its own DB (`database=DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('RSTEST_WORKER_ID', 'master')}")`) or set `database=None` in CI to disable it entirely |
 | `--sw` (stepwise, `--stepwise-skip`, `--stepwise-reset`) | runs in a single pytest session automatically (like `--pdb`/`-s`/`--co`): the vendored stepwise plugin owns resume/stop and its `cache/stepwise` round-trips exactly as upstream. Sequential by nature: stop-at-first-failure + resume-from-a-single-cursor has no meaning under split, duration-ordered parallel dispatch, so it does not run at `-n ≥ 2`. Same constraint as xdist. |

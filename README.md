@@ -60,7 +60,7 @@ project environment; see
 [Installation](https://python-rstest.readthedocs.io/en/stable/getting-started/installation/).)
 
 Requires Python 3.10+ on macOS, Linux, or Windows. Windows runs the full
-test gate in CI, but the 33-suite public corpus runs only on macOS/Linux, so
+test gate in CI, but the 35-suite public corpus runs only on macOS/Linux, so
 Windows is validated at a smaller scale. rstest is alpha (0.x):
 expect breaking changes between minor versions until 1.0.
 

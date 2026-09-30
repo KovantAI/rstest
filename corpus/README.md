@@ -106,7 +106,10 @@ ordinary CI on it.
 A historical snapshot, kept as the per-suite parity record. The current
 published numbers (re-measured 2026-09-30 with rstest 0.8.0) are in
 [docs/reference/benchmarks.md](../docs/reference/benchmarks.md); test counts
-and walls there differ from this table.
+and walls there differ from this table. The snapshot covers 31 of the 35
+suites in `suites.toml`: langgraph is measured separately
+([below](#monorepo-mono-mode-rstest-060)), and langchain, sympy and
+scikit-learn were added after it.
 
 25/31 suites at 100% per-test outcome parity; every non-100% suite is
 explained below (permanent by-design diffs or upstream flakes that hit

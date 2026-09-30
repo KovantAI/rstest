@@ -50,7 +50,7 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
   [Parity divergences §2](../reference/parity-divergences.md#2-non-deterministic-nodeids-memory-addresses-reprs)).
   The fix is stable `ids=`, or `-n 0`.
 - **Windows-heavy fleets.** Windows is supported and runs the full test gate
-  in CI, but the 33-suite public corpus runs only on macOS/Linux, so
+  in CI, but the 35-suite public corpus runs only on macOS/Linux, so
   real-world validation on Windows is lighter
   ([Known gaps](../concepts/compatibility.md#known-gaps)).
 - **No tolerance for 0.x churn.** rstest is alpha: expect breaking changes
