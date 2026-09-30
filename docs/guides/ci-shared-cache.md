@@ -275,8 +275,9 @@ pull/push bookends beyond the flags.
 
 ## Reliability
 
-Add `--require-baseline` to `--durations-regress` so a cold or failed pull is a
-hard error, never a silent green:
+A failed pull (an unreachable remote, an auth error, a corrupt `base.json`)
+always fails the run. Add `--require-baseline` to `--durations-regress` so a
+cold (empty) pull is a hard error too, never a silent green:
 
 ```console
 $ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5

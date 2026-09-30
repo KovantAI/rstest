@@ -163,8 +163,9 @@ steps:
 
 Setting `cache-remote` selects the `remote` backend automatically. A shared
 mount (`cache-remote: /mnt/ci-cache/rstest`) needs no pull/push bookends beyond
-the flags. Add `durations-regress` + `require-baseline: true` to make a cold or
-failed pull a hard error instead of a silent green.
+the flags. A failed pull always fails the step; add `durations-regress` +
+`require-baseline: true` to make a cold (empty) pull a hard error too, instead
+of a silent green.
 
 **Only trusted runs write.** With the default `cache-push: auto`, the
 `remote` backend pushes only on `push`, `schedule` and `workflow_dispatch`
@@ -242,7 +243,7 @@ covers GCS / Azure / HTTP.
 |---|---|
 | `exit-code` | rstest exit code (before the fail-ratio gate) |
 | `junit-path` | JUnit path written (empty if none) |
-| `passed` / `failed` | test counts parsed from JUnit (when the gate ran) |
+| `passed` / `failed` | test counts parsed from JUnit; set only when the fail-ratio gate ran (`fail-under-ratio` set) |
 
 ## Cache design
 
