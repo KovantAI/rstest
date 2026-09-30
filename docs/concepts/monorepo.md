@@ -31,6 +31,11 @@ projects = ["libs/*", "services/api"]
 Passing an explicit path (`rstest libs/core`) opts out of monorepo mode and
 runs that project alone.
 
+Auto-discovery engages only when it finds **at least two** projects: a root
+with a single configured subdirectory runs as an ordinary single-project
+session from the current directory. With `projects` set, one matching project
+is enough.
+
 ## Session isolation
 
 Each project runs as its own full session group: an isolated child run with
