@@ -125,6 +125,9 @@ pub(super) fn parse_pyarg(s: &str) -> PyArg {
     }
 }
 
+/// `sys.implementation.name` values accepted as a bare request (no `@`).
+const BARE_IMPLEMENTATIONS: &[&str] = &["cpython", "pypy", "graalpy"];
+
 /// Parse `[impl@]constraints[t]`, e.g. `pypy@>=3.10,<3.12`, `3.13t`, `3`.
 /// None when the version portion isn't numeric (so the caller can fall back to
 /// treating the whole string as a path).
@@ -135,8 +138,13 @@ fn parse_request(s: &str) -> Option<Request> {
             req.implementation = Some(impl_.to_ascii_lowercase());
             rest
         }
-        // A leading letter with no '@' is a bare implementation name (`pypy`).
-        None if s.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) => {
+        // A known implementation name with no '@' is a bare request (`pypy`).
+        // Any other word (`python3`, `python3.12`) is a command looked up on
+        // PATH, so it falls through to the path branch.
+        None if BARE_IMPLEMENTATIONS
+            .iter()
+            .any(|i| s.eq_ignore_ascii_case(i)) =>
+        {
             req.implementation = Some(s.to_ascii_lowercase());
             ""
         }

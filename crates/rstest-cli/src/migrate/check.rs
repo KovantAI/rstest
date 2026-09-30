@@ -38,11 +38,12 @@ pub struct MigrateCheckDoc {
     pub will_bail_count: usize,
 }
 
-/// Envelope metadata for the migrate-check document.
+/// Envelope metadata shared by the migrate documents.
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct MigrateMeta {
-    /// Constant discriminator: always `"migrate-check"`.
+    /// Constant discriminator: the producing subcommand (`"migrate-check"`,
+    /// `"xdist-removal-check"`).
     pub kind: String,
     /// Constant producer tag: always `"rstest"`.
     pub runner: String,

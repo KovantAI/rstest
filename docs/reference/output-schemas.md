@@ -56,6 +56,14 @@ snapshot's prose walkthrough and examples, see [Shape](report-json.md#shape).
     --8<-- "docs/reference/schemas/migrate-check.schema.json"
     ```
 
+--8<-- "docs/reference/schemas/xdist-removal-check.md"
+
+??? note "Xdist-removal-check: full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/xdist-removal-check.schema.json"
+    ```
+
 --8<-- "docs/reference/schemas/audit.md"
 
 ??? note "Audit: full JSON Schema (draft-07)"

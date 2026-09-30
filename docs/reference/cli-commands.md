@@ -3,7 +3,8 @@
 These commands don't run your suite as a normal test run. Each is given as
 the first argument (`rstest try`); a path literally named after one is
 disambiguated with `rstest ./try` or `rstest -- try`. `try`,
-`migrate-check`, `audit`, `bisect` and `replay` do run pytest sessions, but as their
+`migrate-check`, `audit`, `bisect` and `replay` (and `xdist-removal-check`
+with `--xdist-trial`) do run pytest sessions, but as their
 own analysis, not as a normal test run. The flags that only apply to a
 subcommand are documented with it; everything else is on
 [CLI flags](cli.md).
@@ -12,7 +13,7 @@ subcommand are documented with it; everything else is on
 rstest <COMMAND> [OPTIONS]
 ```
 
-- **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
+- **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`xdist-removal-check`](#xdist-removal-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
 - **CI and the shared cache:** [`shard-verify`](#shard-verify), [`cache-compact`](#cache-compact)
 - **Inspection and integrity:** [`explain`](#explain), [`verify-vendor`](#verify-vendor)
 
@@ -137,6 +138,81 @@ parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
 findings, and the build only goes red when a fresh one appears.
 
 The first slice of a broader migration assistant.
+
+### `xdist-removal-check`
+
+!!! note "Unreleased"
+    Not in rstest 0.7.0 (the latest release); available when installing from
+    source, and in the next release.
+
+Readiness check for the last migration step: uninstalling pytest-xdist.
+rstest never needs the package, but removing it breaks or changes things that
+worked while it was installed. This command finds them before you uninstall,
+without running your suite. It reads:
+
+- the pytest config file (`addopts`, `required_plugins`, and xdist's ini keys)
+  and `PYTEST_ADDOPTS`;
+- every `.py` file under the rootdir (skipping virtualenvs, caches and hidden
+  directories);
+- the source of every installed pytest plugin (its `pytest11` entry point).
+
+Each finding prints where it is, what happens once pytest-xdist is gone, and
+the fix:
+
+| Finding | Blocks? | What happens without pytest-xdist | Fix it names |
+|---|---|---|---|
+| `-n` / `--numprocesses` in `addopts` | yes | usage error (exit 4); rstest never read it anyway | `rstest -n N` or `[tool.rstest] numprocesses` |
+| `--dist` in `addopts` | yes | usage error (exit 4); rstest never read it, so `loadgroup` / `loadscope` / `loadfile` grouping is already lost | `[tool.rstest] dist = "..."` |
+| xdist-only flags in `addopts` (`--tx`, `--rsyncdir`, `-d`, `--maxprocesses`, `--looponfail`, `-p xdist`, ...) | yes | usage error (exit 4) | drop the flag (`--looponfail`: use `--watch`) |
+| `pytest-xdist` in `required_plugins` | yes | pytest refuses to start | remove it |
+| unguarded `import xdist` / `from xdist... import` | yes | `ImportError` | the native `worker_id` / `testrun_uid` fixtures, `config.workerinput`, or `PYTEST_XDIST_WORKER` |
+| an xdist hook (`pytest_configure_node`, `pytest_testnode*`, `pytest_xdist_*`) in a conftest or plugin module, not marked `optionalhook=True` | yes (no for a hook class the file never registers) | `PluginValidationError: unknown hook` | `@pytest.hookimpl(optionalhook=True)` |
+| `hasplugin("xdist")` in your code | no | the branch flips | gate on `config.workerinput` or `PYTEST_XDIST_WORKER` |
+| unguarded module-level `import xdist` in an installed plugin | yes in the entry-point module and its packages' `__init__.py`, no elsewhere | `ImportError` at startup (entry module) or when that module is imported | upgrade or drop the plugin, or keep pytest-xdist |
+| `hasplugin("xdist")` in an installed plugin | no | the plugin takes its non-xdist path | check that plugin's behavior |
+| `rsyncdirs` / `rsyncignore` / `looponfailroots` | no | a `PytestConfigWarning` (an error under `--strict-config`) | remove the key |
+
+An import inside a `try:` block, an `if TYPE_CHECKING:` block, or an
+`if config.pluginmanager.hasplugin("xdist"):` block is treated as guarded
+and not reported. The `if` counts only when its body can't run without the
+guard: `and` chains count, while `or`, `not` and comparisons (other than
+`getplugin("xdist") is not None`) don't. An xdist
+hook under such a gate, or in a class the same file registers only under
+one, isn't reported either. Hook names the project declares itself (through
+`pytest_addhooks` and `@pytest.hookspec`) don't need pytest-xdist, and
+neither do hook-named functions in test modules, which pytest never
+registers as plugins, so neither is reported. Exits non-zero on any blocking finding that isn't
+allow-listed with [`--migrate-allow`](#-migrate-allow-substring), which here
+matches against the finding's location (`pytest.ini addopts`,
+`tests/conftest.py:12`, a plugin's distribution name).
+
+```console
+$ rstest xdist-removal-check
+$ rstest xdist-removal-check --xdist-trial tests/
+```
+
+Session args (paths, `-k`, `-m`, `-p`) are forwarded to the trial runs only.
+The static scan always covers the whole project.
+
+### `--xdist-trial`
+
+Also run the suite with pytest-xdist hidden from the plugin manager
+(`-p no:xdist`), which drops its options and hook specs as uninstalling it
+would. The `xdist` module stays importable, so `import xdist` sites are
+caught only by the static scan. When pytest-xdist is installed it first runs the suite with it
+loaded, then names every test that passes with it and fails (or is no longer
+collected) without it. If the session with xdist hidden never starts (a usage
+error, a plugin validation error), it prints pytest's error. A regression or a
+session that doesn't start fails the gate. Costs one or two full runs; without
+this flag the command runs nothing.
+
+### `--xdist-removal-json <path>`
+
+Write the findings as a versioned JSON document (schema `1`) for CI gating:
+`{meta, ready, xdist_version, findings[], trial}`, each finding carrying its
+`kind`, `location`, `text`, `why`, `fix`, `blocking` and `allowed`. Only read
+by `xdist-removal-check`. Field reference:
+[Xdist-removal-check](output-schemas.md#xdist-removal-check).
 
 ### `audit`
 

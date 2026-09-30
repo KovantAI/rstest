@@ -97,11 +97,11 @@
       ]
     },
     "MigrateMeta": {
-      "description": "Envelope metadata for the migrate-check document.",
+      "description": "Envelope metadata shared by the migrate documents.",
       "type": "object",
       "properties": {
         "kind": {
-          "description": "Constant discriminator: always `\"migrate-check\"`.",
+          "description": "Constant discriminator: the producing subcommand (`\"migrate-check\"`,\n`\"xdist-removal-check\"`).",
           "type": "string"
         },
         "runner": {

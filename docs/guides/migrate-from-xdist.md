@@ -215,6 +215,8 @@ rstest neutralizes it, so remove `-n` from `addopts` before debugging with
 remove it and pass `-n` to rstest. Uninstall pytest-xdist only after that,
 and only once no conftest or plugin implements its hooks (see
 [Controller-side hooks](#controller-side-hooks)).
+[`rstest xdist-removal-check`](#removing-pytest-xdist) checks all of this for
+you.
 
 rstest reads neither `-n` nor `--dist` from `addopts` (or `PYTEST_ADDOPTS`):
 its worker count comes from the command line or `[tool.rstest] numprocesses`
@@ -251,6 +253,28 @@ these before you switch:
 - **`--tx`, `--rsync*`, `-d`, `--maxprocesses`, `--max-worker-restart`**: see
   the [flag map](#flag-map) above; drop them once no pytest-xdist job still
   needs them.
+
+## Removing pytest-xdist
+
+The last step of the migration is uninstalling pytest-xdist. Once no
+pytest-xdist CI job is left as a fallback, check that nothing still depends
+on it:
+
+```console
+$ rstest xdist-removal-check --xdist-trial
+```
+
+It scans the pytest config, `PYTEST_ADDOPTS`, your conftests, tests and
+local plugins, and the installed pytest plugins for every edge above: xdist
+flags in `addopts`, `-n` / `--dist` that rstest never read, `pytest-xdist` in
+`required_plugins`, `import xdist` sites (yours and installed plugins'),
+xdist hook implementations not marked `optionalhook=True`, and
+`hasplugin("xdist")` gates. Each finding comes with its fix. `--xdist-trial`
+then runs the suite with pytest-xdist hidden (`-p no:xdist`, which drops its
+options and hook specs like an uninstall) and names any test that only passes
+with it installed. When it prints `ready`, uninstall pytest-xdist
+and drop it from your dependency lists. See
+[`xdist-removal-check`](../reference/cli-commands.md#xdist-removal-check).
 
 ## What improves
 

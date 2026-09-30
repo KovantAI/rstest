@@ -28,13 +28,13 @@ One parallel-only failure finding.
 | `verdict` | string | yes | The classification verdict title. |
 | `why` | string | yes | Why it fails only under parallelism. |
 
-### MigrateMeta
+### MigrateMeta (Migrate-check)
 
-Envelope metadata for the migrate-check document.
+Envelope metadata shared by the migrate documents.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `kind` | string | yes | Constant discriminator: always `"migrate-check"`. |
+| `kind` | string | yes | Constant discriminator: the producing subcommand (`"migrate-check"`, `"xdist-removal-check"`). |
 | `runner` | string | yes | Constant producer tag: always `"rstest"`. |
 | `schema` | integer | yes | Document schema version. |
 
