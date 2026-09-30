@@ -116,3 +116,47 @@ fn allow_list_passes_the_gate() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("[ALLOWED]"), "{out}");
 }
+
+#[test]
+fn json_report_creates_its_parent_directory() {
+    let Some(py) = python() else { return };
+    let dir = fresh_dir("jsondir");
+    std::fs::write(dir.join("test_a.py"), "def test_a():\n    pass\n").unwrap();
+    let (code, out) = run(&py, &dir, &["--xdist-removal-json", "out/nested/x.json"]);
+    let doc = std::fs::read_to_string(dir.join("out/nested/x.json"));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&doc.expect("json written")).unwrap();
+    assert_eq!(doc["ready"], true);
+}
+
+#[test]
+fn unwritable_json_report_names_the_path_and_exits_2() {
+    let Some(py) = python() else { return };
+    let dir = fresh_dir("jsonblocked");
+    std::fs::write(dir.join("test_a.py"), "def test_a():\n    pass\n").unwrap();
+    // A regular file where the report's parent directory should be.
+    std::fs::write(dir.join("blocker"), "").unwrap();
+    let (code, out) = run(&py, &dir, &["--xdist-removal-json", "blocker/x.json"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    // Exit 1 means "not ready"; an rstest error must not read as a finding.
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("blocker"), "{out}");
+}
+
+#[test]
+fn internal_error_exits_2_and_drops_a_stale_report() {
+    // No interpreter needed: the run fails resolving the bogus one.
+    let dir = fresh_dir("noipy");
+    let json = dir.join("x.json");
+    std::fs::write(&json, r#"{"ready": true}"#).unwrap();
+    let (code, out) = run(
+        Path::new("/nonexistent/rstest-python"),
+        &dir,
+        &["--xdist-removal-json", json.to_str().unwrap()],
+    );
+    let stale = json.exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 2, "{out}");
+    assert!(!stale, "a stale ready report must not survive a failed run");
+}

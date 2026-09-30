@@ -175,10 +175,13 @@ hook under such a gate, or in a class the same file registers only under
 one, isn't reported either. Hook names the project declares itself (through
 `pytest_addhooks` and `@pytest.hookspec`) don't need pytest-xdist, and
 neither do hook-named functions in test modules, which pytest never
-registers as plugins, so neither is reported. Exits non-zero on any blocking finding that isn't
+registers as plugins, so neither is reported. Exits `1` on any blocking finding that isn't
 allow-listed with [`--migrate-allow`](#-migrate-allow-substring), which here
 matches against the finding's location (`pytest.ini addopts`,
-`tests/conftest.py:12`, a plugin's distribution name).
+`tests/conftest.py:12`, a plugin's distribution name), and `0` when ready. An
+error inside the check (no usable interpreter, an unwritable
+`--xdist-removal-json` path) exits `2`, as for the other verdict commands (see
+[Exit codes](exit-codes.md#gating-flags-and-their-exit-codes)).
 
 ```console
 $ rstest xdist-removal-check
@@ -205,7 +208,9 @@ this flag the command runs nothing.
 Write the findings as a versioned JSON document (schema `1`) for CI gating:
 `{meta, ready, xdist_version, findings[], trial}`, each finding carrying its
 `kind`, `location`, `text`, `why`, `fix`, `blocking` and `allowed`. Only read
-by `xdist-removal-check`. Field reference:
+by `xdist-removal-check`. Missing parent directories are created. A run that
+errors (exit `2`) deletes a report left at this path by an earlier run, so a
+stale `"ready": true` is never read as current. Field reference:
 [Xdist-removal-check](output-schemas.md#xdist-removal-check).
 
 ### `audit`

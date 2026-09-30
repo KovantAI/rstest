@@ -14,8 +14,9 @@ rstest uses pytest's exit-code vocabulary:
 **Exit 1 is not only "tests failed".** On a test run, only syntax errors
 caught by rstest's argument parser exit 2. Every other error rstest raises
 itself exits **1**, the same code as a test failure. (The verdict
-subcommands `try`, `migrate-check`, `audit` and `bisect` differ: their
-errors exit 2, see [below](#gating-flags-and-their-exit-codes).) That
+subcommands `try`, `migrate-check`, `xdist-removal-check`, `audit` and
+`bisect` differ: their errors exit 2, see
+[below](#gating-flags-and-their-exit-codes).) That
 includes:
 
 - a bad value or combination for an rstest flag: a non-integer `-n`,
@@ -69,6 +70,7 @@ Flags that gate CI have exit semantics beyond the table above:
 |---|---|
 | [`try`](cli-commands.md#try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest, rstest refused to dispatch, or an error |
 | [`migrate-check`](cli-commands.md#migrate-check) / `--migrate-check-json` | `0` ready, `1` any WILL-bail unstable id **or** parallel-only failure, `2` the parallel pass produced no outcomes or an error |
+| [`xdist-removal-check`](cli-commands.md#xdist-removal-check) / `--xdist-removal-json` | `0` ready to uninstall pytest-xdist, `1` a blocking finding not allowed by `--migrate-allow`, or a `--xdist-trial` session that didn't start or regressed, `2` an error |
 | [`--durations-regress`](cli.md#-durations-regress-ratio) | `1` on a duration regression over the threshold |
 | [`--cov-fail-under`](../guides/coverage.md) | `1` when coverage falls below the target |
 | [`--changed-strict`](cli.md#-changed-strict) | `5` when nothing is affected (instead of `0`) |
@@ -84,8 +86,9 @@ Flags that gate CI have exit semantics beyond the table above:
 | [`explain`](cli-commands.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
 | [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift |
 
-For `try`, `migrate-check`, `audit` and `bisect`, `1` is always a verdict
-("found something"), never an rstest error: an error inside them (no usable
+For `try`, `migrate-check`, `xdist-removal-check`, `audit` and `bisect`,
+`1` is always a verdict ("found something"), never an rstest error: an
+error inside them (no usable
 interpreter, a failed spawn) exits `2` and prints an `Error:` line on stderr,
 so a CI gate can treat `1` as "fix the suite" and `2` as "fix the job". A
 parse error from rstest's argument parser also exits `2` (with clap's

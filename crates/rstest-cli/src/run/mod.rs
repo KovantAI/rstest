@@ -743,7 +743,11 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     // report it the way `main` would and exit 2, their "couldn't run" code.
     let verdict = matches!(
         command,
-        Command::Try | Command::MigrateCheck | Command::Audit | Command::Bisect { .. }
+        Command::Try
+            | Command::MigrateCheck
+            | Command::XdistRemovalCheck
+            | Command::Audit
+            | Command::Bisect { .. }
     );
     let code = match result {
         Err(e) if verdict => {
@@ -778,6 +782,13 @@ fn record_verdict_error(cli: &Cli, command: &crate::cli::Command, e: &anyhow::Er
         }
         Command::MigrateCheck => {
             if let Some(path) = cli.migrate_check_json.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        // A stale `"ready": true` would let a CI gate uninstall pytest-xdist
+        // on the strength of a run that never happened.
+        Command::XdistRemovalCheck => {
+            if let Some(path) = cli.xdist_removal_json.as_deref() {
                 let _ = std::fs::remove_file(path);
             }
         }
