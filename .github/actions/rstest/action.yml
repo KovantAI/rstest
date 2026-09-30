@@ -528,7 +528,10 @@ runs:
         preset_regex=""
         IFS=',' read -ra presets <<< "$IN_RERUN_ON"
         for p in ${presets[@]+"${presets[@]}"}; do
-          p="$(echo "$p" | xargs)"
+          # Trim with parameter expansion, not xargs: xargs eats backslashes
+          # (`\s` -> `s`) and dies on an unpaired quote (`can't`).
+          p="${p#"${p%%[![:space:]]*}"}"
+          p="${p%"${p##*[![:space:]]}"}"
           case "$p" in
             http-5xx) r='429|500|502|503|504|Too Many Requests|ServerBusy' ;;
             timeouts) r='Timeout|TimeoutError|APITimeoutError|APIConnectionError' ;;
@@ -549,7 +552,8 @@ runs:
         if [ -n "$IN_DOCTOR_FAIL_ON" ]; then
           IFS=',' read -ra dconds <<< "$IN_DOCTOR_FAIL_ON"
           for c in ${dconds[@]+"${dconds[@]}"}; do
-            c="$(echo "$c" | xargs)"
+            c="${c#"${c%%[![:space:]]*}"}"
+            c="${c%"${c##*[![:space:]]}"}"
             [ -n "$c" ] && cmd+=(--doctor-fail-on "$c")
           done
         fi
