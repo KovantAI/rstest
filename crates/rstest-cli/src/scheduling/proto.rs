@@ -56,6 +56,12 @@ pub enum Command {
         workerinput: serde_json::Value,
         error: String,
     },
+    /// Answer to AwaitVerdict: `stop` = the run-global -x/--maxfail limit is
+    /// reached, so the worker stops as pytest would (Stopped follows); else it
+    /// carries on.
+    Verdict {
+        stop: bool,
+    },
     /// Every item's outcome is final: finish the session (Done follows).
     EndSession,
     Shutdown,
@@ -299,6 +305,12 @@ pub enum Event {
     Stopped {
         unrun: Vec<u64>,
     },
+    /// Under -x/--maxfail, the item just finished failed. Sent after its
+    /// ItemDone/ItemDoneId; the worker waits for a Verdict, since only the
+    /// orchestrator knows whether the failure counts (a --reruns attempt that
+    /// will be retried does not). Workers switch off pytest's session-local
+    /// limit and rely on this instead.
+    AwaitVerdict {},
     Done {
         exitstatus: i32,
     },
@@ -350,6 +362,7 @@ mod tests {
             "run_items"
         );
         assert_eq!(kind_of(&Command::NoMoreItems), "no_more_items");
+        assert_eq!(kind_of(&Command::Verdict { stop: true }), "verdict");
         assert_eq!(kind_of(&Command::EndSession), "end_session");
         assert_eq!(kind_of(&Command::Shutdown), "shutdown");
     }
@@ -445,6 +458,10 @@ mod tests {
         assert!(matches!(
             from_python(serde_json::json!({"kind": "stopped", "payload": {"unrun": [1, 2]}})),
             Event::Stopped { .. }
+        ));
+        assert!(matches!(
+            from_python(serde_json::json!({"kind": "await_verdict", "payload": {}})),
+            Event::AwaitVerdict {}
         ));
     }
 }
@@ -595,6 +612,7 @@ mod property {
                 .prop_map(|(index, timeout)| Event::ItemStart { index, timeout }),
             any::<u64>().prop_map(|index| Event::ItemDone { index }),
             prop::collection::vec(any::<u64>(), 0..4).prop_map(|unrun| Event::Stopped { unrun }),
+            Just(()).prop_map(|()| Event::AwaitVerdict {}),
             any::<i32>().prop_map(|exitstatus| Event::Done { exitstatus }),
             (small_str(), small_strs())
                 .prop_map(|(nodeid, cases)| Event::JunitCase { nodeid, cases }),
@@ -627,6 +645,7 @@ mod property {
         "run_ids",
         "no_more_items",
         "node_down",
+        "verdict",
         "end_session",
         "shutdown",
     ];
@@ -645,6 +664,7 @@ mod property {
                 workerinput: serde_json::Value::Null,
                 error,
             }),
+            any::<bool>().prop_map(|stop| Command::Verdict { stop }),
             Just(Command::EndSession),
             Just(Command::Shutdown),
         ]

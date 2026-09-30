@@ -148,6 +148,55 @@ def _session_roots(config) -> m.SessionRootsPayload:
     return roots
 
 
+class _FailGate:
+    """-x / --maxfail in a pool worker, where the orchestrator owns the count.
+
+    pytest's own limit would stop this session on a failure that does not
+    count run-wide: a --reruns / @flaky attempt about to be retried. So the
+    session-local limit is switched off when the run loop starts (after the
+    eager collection, which keeps pytest's accounting; lazy collection errors
+    are the orchestrator's to act on anyway), and each failed item instead
+    asks the orchestrator for a Verdict.
+    """
+
+    def __init__(self, session) -> None:
+        self.limit = _maxfail(session.config)
+        if self.limit:
+            session.config.option.maxfail = 0
+        self._failed = getattr(session, "testsfailed", 0)
+
+    def failed(self, session) -> bool:
+        """Whether the item just run failed while a limit is in force."""
+        now = getattr(session, "testsfailed", 0)
+        failed = now > self._failed
+        self._failed = now
+        return bool(self.limit) and failed
+
+
+def _await_verdict(conn, inbox) -> bool | None:
+    """Block until the orchestrator rules on a failed item (see _FailGate).
+
+    Commands that arrive meanwhile are queued on `inbox` for the run loop.
+    Returns the verdict's `stop`, or None when the session is told to end (or
+    the orchestrator vanished) before a verdict arrives.
+    """
+    conn.send("await_verdict", {})
+    while True:
+        msg = conn.recv_one()
+        if msg is None:
+            return None
+        if msg["kind"] == "verdict":
+            return bool(msg["payload"]["stop"])
+        inbox.append(msg)
+        if msg["kind"] in ("end_session", "shutdown"):
+            return None
+
+
+def _next_command(conn, inbox):
+    """The next command: one queued while awaiting a verdict, else the pipe's."""
+    return inbox.popleft() if inbox else conn.recv_one()
+
+
 class ItemDispatchPlugin(StreamPlugin):
     """xdist remote.py model: collect everything, run items on command.
 
@@ -225,6 +274,8 @@ class ItemDispatchPlugin(StreamPlugin):
         if session.config.option.collectonly:
             return True
         pending = deque()
+        inbox = deque()  # commands read while awaiting a verdict
+        gate = _FailGate(session)
         draining = False
         while True:
             while len(pending) >= (1 if draining else self.MIN_PENDING):
@@ -240,14 +291,26 @@ class ItemDispatchPlugin(StreamPlugin):
                 )
                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
                 self._conn.send("item_done", {"index": index})
+                if gate.failed(session):
+                    stop = _await_verdict(self._conn, inbox)
+                    if stop is None:
+                        return True
+                    if stop:
+                        session.shouldfail = f"stopping after {session.testsfailed} failures"
                 if session.shouldfail or session.shouldstop:
                     # Session-local -x/--maxfail tripped: stop here, report
                     # what never ran, end the session (orchestrator does
                     # the run-global coordination).
+                    queued = [
+                        i
+                        for c in inbox
+                        if c["kind"] == "run_items"
+                        for i in c["payload"]["indices"]
+                    ]
                     self._conn.send(
                         "stopped",
                         {
-                            "unrun": list(pending),
+                            "unrun": list(pending) + queued,
                             "reason": str(session.shouldfail or session.shouldstop),
                         },
                     )
@@ -255,7 +318,7 @@ class ItemDispatchPlugin(StreamPlugin):
             # Even after draining, keep listening: a failed item from any
             # worker may be rerun HERE (--reruns). Only end_session (every
             # outcome final) or shutdown closes the session.
-            msg = self._conn.recv_one()
+            msg = _next_command(self._conn, inbox)
             if msg is None:
                 return True  # orchestrator vanished; finish session cleanly
             kind = msg["kind"]
@@ -377,6 +440,8 @@ class LazyDispatchPlugin(StreamPlugin):
         pending = deque()  # collected items ready to run
         files = deque()  # assigned files not yet collected
         items_by_id = {}  # nodeid -> item, for reruns by id
+        inbox = deque()  # commands read while awaiting a verdict
+        gate = _FailGate(session)
         total = 0
         draining = False
         while True:
@@ -398,15 +463,27 @@ class LazyDispatchPlugin(StreamPlugin):
                 )
                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
                 self._conn.send("item_done_id", {"id": item.nodeid})
+                if gate.failed(session):
+                    # As in ItemDispatchPlugin: the orchestrator decides.
+                    stop = _await_verdict(self._conn, inbox)
+                    if stop is None:
+                        session.testscollected = total
+                        return True
+                    if stop:
+                        session.shouldfail = f"stopping after {session.testsfailed} failures"
                 if session.shouldfail or session.shouldstop:
+                    # Ids queued while awaiting the verdict never ran either.
+                    queued = [
+                        i for c in inbox if c["kind"] == "run_ids" for i in c["payload"]["ids"]
+                    ]
                     self._conn.send(
                         "stopped_ids",
-                        {"unrun": [it.nodeid for it in pending]},
+                        {"unrun": [it.nodeid for it in pending] + queued},
                     )
                     session.testscollected = total
                     return True
                 continue
-            msg = self._conn.recv_one()
+            msg = _next_command(self._conn, inbox)
             if msg is None:
                 session.testscollected = total
                 return True

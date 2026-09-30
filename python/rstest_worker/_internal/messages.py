@@ -130,6 +130,10 @@ class StoppedPayload(TypedDict):
     reason: str
 
 
+class AwaitVerdictPayload(TypedDict):
+    pass  # empty: the item it concerns is the one just reported done
+
+
 class ItemStartIdPayload(TypedDict):
     id: str
     timeout: float | None
@@ -193,6 +197,7 @@ EventKind = Literal[
     "item_start",
     "item_done",
     "stopped",
+    "await_verdict",
     "done",
     "junit_case",
     "junit_suite",
@@ -221,6 +226,10 @@ class RunIdsPayload(TypedDict):
 class NodeDownPayload(TypedDict):
     workerinput: dict[str, object]
     error: str
+
+
+class VerdictPayload(TypedDict):
+    stop: bool  # the run-global -x/--maxfail limit is reached
 
 
 # Full inbound envelopes, for discriminated-union narrowing on `kind`.
@@ -259,6 +268,11 @@ class CmdNodeDown(TypedDict):
     payload: NodeDownPayload
 
 
+class CmdVerdict(TypedDict):
+    kind: Literal["verdict"]
+    payload: VerdictPayload
+
+
 # Unit commands carry only `kind` (Rust serializes the unit variant with no
 # `payload` field).
 class CmdNoMoreItems(TypedDict):
@@ -281,6 +295,7 @@ Command = (
     | CmdRunFiles
     | CmdRunIds
     | CmdNodeDown
+    | CmdVerdict
     | CmdNoMoreItems
     | CmdEndSession
     | CmdShutdown
@@ -294,6 +309,7 @@ CommandKind = Literal[
     "run_files",
     "run_ids",
     "node_down",
+    "verdict",
     "no_more_items",
     "end_session",
     "shutdown",

@@ -1,6 +1,7 @@
 """e2e gate sections: flaky."""
 
 import json
+import shutil
 import time
 
 from _harness import CRASHFLAKY, FLAKY, MARKS, check
@@ -458,3 +459,93 @@ def gate_flaky_marks_only_rerun(g, args, binary):
         "1 flaky" in r.stdout and cnt.read_text() == "1",
         f"count={cnt.read_text()} " + r.stdout[-160:],
     )
+
+
+# One always-failing test among passing ones. Each attempt drops a file named
+# after its process and a counter, so the gate can count attempts across
+# workers without a shared append (not atomic across processes on Windows).
+MAXFAIL_RERUN_SUITE = """\
+import os
+import time
+
+import pytest
+
+
+def _attempt():
+    d = os.environ["ATTEMPTS"]
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, f"{os.getpid()}-{time.monotonic_ns()}"), "w").close()
+
+
+def test_bad():
+    _attempt()
+    time.sleep(float(os.environ.get("BAD_SLEEP", "0")))
+    assert False
+
+
+@pytest.mark.parametrize("i", range(int(os.environ.get("N_OK", "40"))))
+def test_ok(i):
+    pass
+"""
+
+
+def gate_maxfail_with_reruns(g, args, binary):
+    print("== -x / --maxfail with --reruns ==")
+    g.write("mfrerun/test_mf.py", MAXFAIL_RERUN_SUITE)
+    g.write(
+        "mfflaky/test_mf.py",
+        MAXFAIL_RERUN_SUITE.replace("def test_bad", "@pytest.mark.flaky(reruns=1)\ndef test_bad"),
+    )
+    attempts = g.tmp / "mf_attempts"
+
+    def run(suite, flags, env):
+        shutil.rmtree(attempts, ignore_errors=True)
+        r = g.run(
+            ".",
+            *flags,
+            cwd=g.tmp / suite,
+            env_extra={"ATTEMPTS": str(attempts), **env},
+            timeout=90,
+        )
+        return r, len(list(attempts.iterdir())) if attempts.exists() else 0
+
+    # A worker's own pytest -x used to trip on the first attempt, which the
+    # orchestrator still held for a rerun: the rerun went to a worker that had
+    # left its run loop, the failure was never recorded, and the run exited 0.
+    # pytest-rerunfailures: rerun first, then the failure counts and -x stops.
+    slow = {"BAD_SLEEP": "0.5", "N_OK": "2"}
+    cases = [
+        ("-n 2 -x --reruns 1", "mfrerun", ["-n", "2", "-x", "--reruns", "1"], {}, 2),
+        (
+            "-n 2 --maxfail 1 --reruns 2",
+            "mfrerun",
+            ["-n", "2", "--maxfail", "1", "--reruns", "2"],
+            {},
+            3,
+        ),
+        ("-n 1 -x --reruns 1", "mfrerun", ["-n", "1", "-x", "--reruns", "1"], {}, 2),
+        ("-n 2 -x @flaky(reruns=1)", "mfflaky", ["-n", "2", "-x"], {}, 2),
+        # Slow failure + two others: lazy used to report "no tests ran" and
+        # eager to lose the rerun (or hang with it queued for no live worker).
+        (
+            "lazy, slow failure",
+            "mfrerun",
+            ["-n", "2", "-x", "--reruns", "1", "--collect", "lazy"],
+            slow,
+            2,
+        ),
+        (
+            "eager, slow failure",
+            "mfrerun",
+            ["-n", "2", "-x", "--reruns", "1", "--collect", "full"],
+            slow,
+            2,
+        ),
+    ]
+    for name, suite, flags, env, want in cases:
+        r, n = run(suite, flags, env)
+        check(
+            f"maxfail+reruns: {name} reruns, then fails the run",
+            r.returncode == 1 and "1 failed" in r.stdout and n == want,
+            f"rc={r.returncode} attempts={n} (want {want}) " + r.stdout[-200:],
+        )

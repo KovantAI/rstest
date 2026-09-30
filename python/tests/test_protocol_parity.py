@@ -56,5 +56,5 @@ def test_send_overloads_match_event_kinds():
 def test_kind_literals_are_nonempty():
     # Guards against get_args returning () if EventKind/CommandKind stop being
     # Literal aliases (which would make the parity asserts vacuously pass).
-    assert len(get_args(messages.EventKind)) == 18
-    assert len(get_args(messages.CommandKind)) == 10
+    assert len(get_args(messages.EventKind)) == 19
+    assert len(get_args(messages.CommandKind)) == 11

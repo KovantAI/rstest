@@ -1215,7 +1215,9 @@ Three of them get extra orchestration on top of their per-session meaning:
 - **`-x` / `--maxfail=N`**: coordinated globally, whether given on the
   command line, in ini `addopts`, or in `PYTEST_ADDOPTS`. When the threshold
   is reached across all workers, dispatch halts and every worker winds down.
-  In-flight tests finish (bounded overshoot, as with pytest-xdist).
+  In-flight tests finish (bounded overshoot, as with pytest-xdist). A failed
+  attempt that `--reruns` or `@pytest.mark.flaky` retries does not count;
+  only the test's final outcome does, as with pytest-rerunfailures.
 - **`--lf` / `--ff`**: the last-failed cache is written by rstest from
   merged results (workers each see only their own failures), so a
   follow-up `--lf` behaves exactly as after a serial run.

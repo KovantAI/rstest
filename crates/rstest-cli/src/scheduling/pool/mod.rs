@@ -245,6 +245,15 @@ fn pin_send(s: &mut WorkerState, indices: Vec<u64>) {
     }
 }
 
+/// Take back everything assigned to a worker that will never run it (its
+/// session stopped or ended): the outstanding items, minus any unsent backlog
+/// tail (a subset of them). Clears the backlog so nothing more is fed.
+fn reclaim(s: &mut WorkerState) -> Vec<u64> {
+    s.backlog.clear();
+    s.release_after_backlog = false;
+    s.outstanding.drain(..).collect()
+}
+
 /// The clean nodeid for a dispatched index, from the designate's id list.
 fn nodeid_at(ids_store: &Option<Vec<String>>, index: u64) -> Option<&str> {
     ids_store
@@ -735,22 +744,40 @@ pub fn run_pool(
                 let nodeid = resolved.unwrap_or_else(|| format!("<item #{index}>"));
                 prog.item_started(sink, idx, nodeid);
             }
-            Ok(Event::Stopped { unrun }) => {
-                // Session-local -x tripped: those items never ran there.
+            Ok(Event::Stopped { unrun: _ }) => {
+                // The worker's session stopped early (a Verdict to stop, or a
+                // plugin's shouldstop such as --sw) and left its run loop: it
+                // never runs another item. Reclaim everything still assigned
+                // to it, not just the `unrun` it listed: items sent after it
+                // stopped are in `outstanding` too.
                 let s = &mut states[idx];
                 s.finishing = true;
                 s.stopped = true;
-                for i in &unrun {
-                    if let Some(pos) = s.outstanding.iter().position(|x| x == i) {
-                        s.outstanding.remove(pos);
-                    }
-                }
+                let reclaimed = reclaim(s);
                 if !stopping {
                     // Not a global stop: redistribute to other workers.
                     if let Some(d) = dispatch.as_mut() {
-                        d.requeued.extend(unrun);
+                        d.requeued.extend(reclaimed);
                     }
                 }
+                if idx == designate {
+                    // The serial phase needs a host that still listens.
+                    if let Some(next) = states
+                        .iter()
+                        .position(|s| !s.dead && !s.ended && !s.stopped)
+                    {
+                        designate = next;
+                    }
+                }
+            }
+            Ok(Event::AwaitVerdict {}) => {
+                // Under -x/--maxfail the item the worker just finished failed.
+                // Its ItemDone was handled first (events arrive in order), so
+                // `stopping` already reflects whether that failure counted: a
+                // --reruns attempt being retried leaves the run going.
+                let _ = states[idx]
+                    .worker
+                    .send(&proto::Command::Verdict { stop: stopping });
             }
             Ok(Event::ItemDone { index }) => {
                 prog.item_finished(sink, idx);
@@ -825,6 +852,15 @@ pub fn run_pool(
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
                 states[idx].dead = true;
+                // A session that ended with work still assigned (it stopped
+                // early, or EndSession raced a dispatch) never runs it: hand it
+                // to the survivors (the idle-survivor kick below).
+                let reclaimed = reclaim(&mut states[idx]);
+                if !stopping {
+                    if let Some(d) = dispatch.as_mut() {
+                        d.requeued.extend(reclaimed);
+                    }
+                }
                 done_workers += 1;
                 if done_workers == states.len() {
                     break;

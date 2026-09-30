@@ -112,7 +112,8 @@ pub(super) fn dispatch_to(
     chunk: usize,
     is_designate: bool,
 ) -> Result<()> {
-    if s.dead || s.ended {
+    // A stopped worker left its run loop: anything sent now would never run.
+    if s.dead || s.ended || s.stopped {
         return Ok(());
     }
     // Long-pole zone at the head of `order`: hand out ONE slow item per
@@ -204,6 +205,54 @@ mod tests {
         feed(&mut s, true);
         assert!(s.backlog.is_empty());
         assert_eq!(s.outstanding.len(), 2 * FEED_CHUNK);
+        assert!(!s.release_after_backlog);
+        s.worker.reap();
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[test]
+    fn a_stopped_worker_is_never_dispatched_to_and_gives_its_work_back() {
+        // A worker whose session stopped (Stopped) left its run loop: a refill
+        // sent to it would be lost, and whatever it still held must go back
+        // to the queue for the survivors.
+        let (mut s, script) = silent_worker("stopped");
+        let names: Vec<String> = (0..4).map(|i| format!("t.py::t{i}")).collect();
+        let mut d = super::super::dispatch::build_dispatch(
+            &names,
+            vec![],
+            Default::default(),
+            &Default::default(),
+            &Default::default(),
+            super::super::Dist::Load,
+            super::super::Order::Throughput,
+            None,
+            None,
+        )
+        .unwrap();
+        dispatch_to(&mut s, &mut d, 2, false).unwrap();
+        assert_eq!(s.outstanding, [0, 1]);
+        s.stopped = true;
+        dispatch_to(&mut s, &mut d, 2, false).unwrap();
+        assert_eq!(s.outstanding, [0, 1], "refilled a stopped worker");
+        assert_eq!(d.cursor, 2, "took items off the queue for a stopped worker");
+        assert_eq!(super::super::reclaim(&mut s), vec![0, 1]);
+        assert!(s.outstanding.is_empty());
+        s.worker.reap();
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[test]
+    fn reclaim_drops_the_unsent_backlog_with_the_rest() {
+        let (mut s, script) = silent_worker("reclaim");
+        seed_list(&mut s, (0..(3 * FEED_CHUNK) as u64).collect());
+        assert!(!s.backlog.is_empty());
+        let back = super::super::reclaim(&mut s);
+        assert_eq!(
+            back.len(),
+            3 * FEED_CHUNK,
+            "every assigned item comes back once"
+        );
+        assert!(s.backlog.is_empty() && s.outstanding.is_empty());
         assert!(!s.release_after_backlog);
         s.worker.reap();
         let _ = std::fs::remove_file(script);

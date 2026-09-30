@@ -320,6 +320,80 @@ def test_eager_runtestloop_stops_on_shouldfail():
     assert stopped == [{"unrun": [1, 2], "reason": "maxfail"}]
 
 
+def _failing(session, nodeids):
+    """Make the named items fail: bump testsfailed the way pytest's Session
+    does for a failed report."""
+    orig = session.config.hook.pytest_runtest_protocol
+
+    def protocol(item, nextitem):
+        orig(item, nextitem)
+        if item.nodeid in nodeids:
+            session.testsfailed += 1
+
+    session.config.hook.pytest_runtest_protocol = protocol
+
+
+def test_eager_maxfail_asks_for_a_verdict_and_carries_on_when_told():
+    # -x in a pool: a failed item may be a rerun attempt the orchestrator
+    # retries elsewhere, so the worker asks instead of stopping on its own.
+    items = [FakeItem("a"), FakeItem("b"), FakeItem("c")]
+    session, calls = _eager_session(items)
+    session.config.option.maxfail = 1
+    _failing(session, {"a"})
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0, 1, 2]}},
+            {"kind": "verdict", "payload": {"stop": False}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("a", "b"), ("b", "c"), ("c", None)]
+    # pytest's session-local limit is off: it would have stopped after "a".
+    assert session.config.option.maxfail == 0
+    assert not session.shouldfail
+    kinds = [k for k, _ in conn.sent]
+    assert kinds.count("await_verdict") == 1
+    assert kinds.index("await_verdict") == kinds.index("item_done") + 1
+    assert "stopped" not in kinds
+
+
+def test_eager_maxfail_verdict_stop_reports_items_queued_meanwhile_as_unrun():
+    items = [FakeItem("a"), FakeItem("b"), FakeItem("c"), FakeItem("d")]
+    session, calls = _eager_session(items)
+    session.config.option.maxfail = 1
+    _failing(session, {"a"})
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0, 1]}},
+            # A refill that crosses the verdict request on the pipe.
+            {"kind": "run_items", "payload": {"indices": [2, 3]}},
+            {"kind": "verdict", "payload": {"stop": True}},
+        ]
+    )
+    assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("a", "b")]
+    assert session.shouldfail == "stopping after 1 failures"
+    stopped = [p for k, p in conn.sent if k == "stopped"]
+    assert stopped == [{"unrun": [1, 2, 3], "reason": "stopping after 1 failures"}]
+
+
+def test_eager_no_verdict_without_a_limit_or_a_failure():
+    items = [FakeItem("a"), FakeItem("b")]
+    session, _ = _eager_session(items)
+    session.config.option.maxfail = 1
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0, 1]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    ItemDispatchPlugin(conn).pytest_runtestloop(session)
+    assert "await_verdict" not in [k for k, _ in conn.sent]
+
+
 def test_eager_runtestloop_orchestrator_vanish_finishes_cleanly():
     items = [FakeItem("a"), FakeItem("b")]
     session, calls = _eager_session(items)
@@ -692,6 +766,28 @@ def test_lazy_runtestloop_stops_on_shouldfail():
     assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
     stopped = [p for k, p in conn.sent if k == "stopped_ids"]
     assert stopped == [{"unrun": ["t.py::b"]}]
+
+
+def test_lazy_maxfail_verdict_carries_on_then_stops():
+    items = [FakeItem("t.py::a"), FakeItem("t.py::b"), FakeItem("t.py::c")]
+    session, calls = _lazy_session(lambda paths: items)
+    session.config.option.maxfail = 1
+    session.testsfailed = 0
+    _failing(session, {"t.py::a", "t.py::b"})
+    conn = FakeConn(
+        [
+            {"kind": "run_files", "payload": {"paths": ["t.py"]}},
+            {"kind": "run_ids", "payload": {"ids": ["t.py::a", "t.py::b", "t.py::c"]}},
+            # "a" is retried elsewhere; "b" is the failure that counts.
+            {"kind": "verdict", "payload": {"stop": False}},
+            {"kind": "verdict", "payload": {"stop": True}},
+        ]
+    )
+    assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("t.py::a", "t.py::b"), ("t.py::b", "t.py::c")]
+    assert [k for k, _ in conn.sent].count("await_verdict") == 2
+    stopped = [p for k, p in conn.sent if k == "stopped_ids"]
+    assert stopped == [{"unrun": ["t.py::c"]}]
 
 
 def test_lazy_runtestloop_orchestrator_vanish_finishes_cleanly():

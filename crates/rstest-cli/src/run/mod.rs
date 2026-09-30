@@ -2182,7 +2182,8 @@ fn fold_run_event(
         | proto::Event::FileCollected { .. }
         | proto::Event::ItemStartId { .. }
         | proto::Event::ItemDoneId { .. }
-        | proto::Event::StoppedIds { .. } => None,
+        | proto::Event::StoppedIds { .. }
+        | proto::Event::AwaitVerdict {} => None,
         proto::Event::JunitCase { nodeid, cases } => {
             run.junit.record_case(nodeid, cases);
             None

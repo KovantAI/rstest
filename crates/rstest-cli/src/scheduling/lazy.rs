@@ -35,6 +35,9 @@ struct WorkerState {
     finishing: bool,
     ended: bool,
     dead: bool,
+    /// Its session stopped early (StoppedIds) and left its run loop: it
+    /// must not be handed files or ids again.
+    stopped: bool,
     /// File paths assigned and not yet collected (reclaimed on crash).
     uncollected_files: Vec<String>,
     /// Ids collected by this worker, not yet dispatched anywhere
@@ -88,6 +91,7 @@ impl WorkerState {
             finishing: false,
             ended: false,
             dead: false,
+            stopped: false,
             uncollected_files: Vec::new(),
             own_queue: VecDeque::new(),
             outstanding: Vec::new(),
@@ -99,6 +103,15 @@ impl WorkerState {
             attempt_failed: false,
         }
     }
+}
+
+/// Take back everything assigned to a worker that will never run it (its
+/// session stopped or ended): dispatched-but-unfinished ids, collected ids not
+/// yet dispatched (survivors re-collect their file), and files not collected.
+fn reclaim(s: &mut WorkerState) -> (Vec<String>, Vec<String>) {
+    let mut ids = std::mem::take(&mut s.outstanding);
+    ids.extend(s.own_queue.drain(..));
+    (ids, std::mem::take(&mut s.uncollected_files))
 }
 
 /// Order files by cached duration totals, biggest first (long-pole files
@@ -404,21 +417,47 @@ pub fn run_lazy_pool(
                     }
                 }
             }
-            Ok(Event::StoppedIds { unrun }) => {
+            Ok(Event::StoppedIds { unrun: _ }) => {
+                // The session stopped early and left its run loop: reclaim all
+                // of its work (ids sent after it stopped included), not just
+                // the `unrun` it listed.
                 let s = &mut states[idx];
                 s.finishing = true;
-                for id in &unrun {
-                    if let Some(pos) = s.outstanding.iter().position(|x| x == id) {
-                        s.outstanding.remove(pos);
+                s.stopped = true;
+                let (ids, files) = reclaim(s);
+                if !stopping {
+                    requeued.extend(ids);
+                    for f in files.into_iter().rev() {
+                        file_queue.push_front(f);
                     }
                 }
-                if !stopping {
-                    requeued.extend(unrun);
+                if idx == designate {
+                    if let Some(next) = states
+                        .iter()
+                        .position(|s| !s.dead && !s.ended && !s.stopped)
+                    {
+                        designate = next;
+                    }
                 }
+            }
+            Ok(Event::AwaitVerdict {}) => {
+                // As in run_pool: the ItemDoneId before it already decided
+                // whether the failure counts (a retried attempt does not).
+                let _ = states[idx]
+                    .worker
+                    .send(&proto::Command::Verdict { stop: stopping });
             }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
                 states[idx].dead = true;
+                // Work still assigned to an ended session never runs there.
+                let (ids, files) = reclaim(&mut states[idx]);
+                if !stopping {
+                    requeued.extend(ids);
+                    for f in files.into_iter().rev() {
+                        file_queue.push_front(f);
+                    }
+                }
                 done_workers += 1;
                 if done_workers == states.len() {
                     break;
@@ -528,7 +567,10 @@ pub fn run_lazy_pool(
         // up when it has nothing left to collect and little left to run
         // (a busy worker must not hoard files an idle one could collect).
         if !stopping {
-            for s in states.iter_mut().filter(|s| s.ready && !s.dead && !s.ended) {
+            for s in states
+                .iter_mut()
+                .filter(|s| s.ready && !s.dead && !s.ended && !s.stopped)
+            {
                 if s.uncollected_files.is_empty() && s.outstanding.len() <= chunk {
                     if let Some(f) = file_queue.pop_front() {
                         s.uncollected_files.push(f.clone());
@@ -545,7 +587,7 @@ pub fn run_lazy_pool(
         // queue, then STEAL from the longest queue (only when no files left).
         if !stopping {
             for i in 0..states.len() {
-                if !states[i].ready || states[i].dead || states[i].ended {
+                if !states[i].ready || states[i].dead || states[i].ended || states[i].stopped {
                     continue;
                 }
                 // Top up safely above the hold threshold: the worker holds
