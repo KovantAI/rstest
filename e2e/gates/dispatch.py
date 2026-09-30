@@ -30,6 +30,29 @@ from _harness import (
     read_e2e_rows,
 )
 
+LAZY_PKG_CONFTEST = """
+import pytest
+
+@pytest.fixture(scope="package")
+def pkg_setups(request):
+    request.config._pkg_setups = getattr(request.config, "_pkg_setups", 0) + 1
+    return request.config._pkg_setups
+
+@pytest.fixture(autouse=True)
+def pkg_auto():
+    pass
+"""
+
+LAZY_PKG_TEST = """
+def test_a(pkg_setups, request):
+    assert pkg_setups == 1
+    assert "pkg_auto" in request.fixturenames
+
+def test_b(pkg_setups, request):
+    assert pkg_setups == 1
+    assert "pkg_auto" in request.fixturenames
+"""
+
 
 def gate_lazy_collection(g, args, binary):
     print("== lazy collection ==")
@@ -61,6 +84,19 @@ def gate_lazy_collection(g, args, binary):
         "lazy: session fixture once per worker",
         "3 passed" in r.stdout and "failed" not in r.stdout,
         r.stdout[-300:],
+    )
+    # Each file is its own perform_collect; the package node must be shared
+    # across them, or its fixtures rerun per file and the conftest's autouse
+    # fixtures stop applying after a worker's first file.
+    g.write("lazypkg/pkg/__init__.py", "")
+    g.write("lazypkg/pkg/conftest.py", LAZY_PKG_CONFTEST)
+    for i in range(6):
+        g.write(f"lazypkg/pkg/test_{i}.py", LAZY_PKG_TEST)
+    r = g.run("lazypkg", "-n", "2", "--collect", "lazy")
+    check(
+        "lazy: package fixture once per worker, autouse on every file",
+        "12 passed" in r.stdout and "failed" not in r.stdout,
+        r.stdout[-600:],
     )
     r = g.run("empty", "--collect", "lazy", "-n", "2")
     check("lazy: no tests exit 5", r.returncode in (4, 5), f"rc={r.returncode}")
