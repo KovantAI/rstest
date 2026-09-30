@@ -69,3 +69,23 @@ def gate_worker_identity_fixtures(g, args, binary):
     # single-worker mode, so still "master".
     r = g.run("widfix/test_master.py", "-n", "0", "--reruns", "1")
     check("worker_id is 'master' at -n 0 --reruns", "1 passed" in r.stdout, r.stdout[-300:])
+
+
+def gate_lone_surrogate_in_report(g, args, binary):
+    print("== lone surrogate in reported text ==")
+    # os.fsdecode of a non-UTF-8 filename yields a lone surrogate; a strict
+    # UTF-8 wire encode used to crash the worker (INTERNALERROR, exit 3).
+    g.write(
+        "surrogate/test_surrogate.py",
+        "import os\n"
+        "def test_a(): pass\n"
+        "def test_bad(): raise FileNotFoundError(os.fsdecode(b'bad\\xff.txt'))\n"
+        "def test_c(): pass\n",
+    )
+    for n in ("0", "2"):
+        r = g.run("surrogate/test_surrogate.py", "-n", n)
+        check(
+            f"-n {n}: surrogate reported as a plain failure",
+            "1 failed, 2 passed" in r.stdout and r.returncode == 1,
+            f"rc={r.returncode} " + r.stdout[-300:],
+        )

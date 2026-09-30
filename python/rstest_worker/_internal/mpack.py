@@ -111,7 +111,10 @@ def _pack(out: bytearray, obj: object) -> None:
         out += b"\xcb"
         out += _PACK_F64.pack(obj)
     elif isinstance(obj, str):
-        data = obj.encode("utf-8")
+        # backslashreplace, not strict: a lone surrogate (e.g. os.fsdecode of a
+        # non-UTF-8 filename in an exception message) must not crash the worker.
+        # Not surrogatepass either: the Rust side rejects invalid UTF-8.
+        data = obj.encode("utf-8", "backslashreplace")
         n = len(data)
         if n <= 0x1F:  # fixstr
             out.append(0xA0 | n)
@@ -353,7 +356,8 @@ except ImportError:  # pragma: no cover - exercised only in a msgpack-less venv
 
 
 def _msgpack_packb(obj: object) -> bytes:
-    return _msgpack.packb(obj)
+    # Same lone-surrogate policy as the pure encoder (see `_pack`).
+    return _msgpack.packb(obj, unicode_errors="backslashreplace")
 
 
 class _MsgpackUnpacker:
