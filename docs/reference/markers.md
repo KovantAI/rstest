@@ -42,12 +42,14 @@ Per-test rerun budget: the mark overrides a global
 flaky exactly like global reruns. The plugin itself is neutralized inside
 rstest workers to prevent double reruns. Registered automatically.
 
-The marker name matches pytest-rerunfailures, but rstest reads **only the
-`reruns=` keyword**, defaulting to 1. The positional form (`flaky(3)`) and
-the plugin's other options (`reruns_delay`, `condition`, `only_rerun`) are
-ignored by rstest's own retry, so `@pytest.mark.flaky(3)` retries once. Write
-`@pytest.mark.flaky(reruns=3)`, and use the global
-[`--only-rerun`](cli.md#-only-rerun-regex) to filter by error.
+The marker name and budget match pytest-rerunfailures: the `reruns=`
+keyword, else the first positional argument (`flaky(3)`), else 1. A false
+`condition=` (a bool, or a string evaluated with `os`, `sys`, `platform`,
+`config` and the test module's globals) sets the budget to 0, which also
+overrides a global `--reruns` for that test. The plugin's other mark options
+(`reruns_delay`, `only_rerun`, `rerun_except`) are ignored by rstest's own
+retry; use the global [`--only-rerun`](cli.md#-only-rerun-regex) to filter
+by error.
 
 Reruns are coordinated by the orchestrator:
 

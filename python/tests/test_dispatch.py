@@ -11,6 +11,7 @@ import pytest
 from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
+    _flaky_reruns,
     _ignored_by_recursion,
     _session_roots,
 )
@@ -384,6 +385,60 @@ def test_lazy_collect_file_reports_ids_serial_and_flaky():
         "serial": ["t.py::a"],
         "flaky": {"t.py::b": 2},
     }
+
+
+# ── _flaky_reruns: pytest-rerunfailures' get_reruns_count / condition ──────
+
+_FLAKY_GLOBAL = True  # visible to string conditions via the test's __globals__
+
+
+def _flaky_item():
+    return SimpleNamespace(config=SimpleNamespace(), obj=_flaky_item)
+
+
+@pytest.mark.parametrize(
+    ("mark", "expected"),
+    [
+        (pytest.mark.flaky, 1),
+        (pytest.mark.flaky(3), 3),
+        (pytest.mark.flaky(reruns=4), 4),
+        (pytest.mark.flaky(2, reruns=5), 5),  # keyword wins over positional
+        (pytest.mark.flaky(reruns=3, condition=True), 3),
+        (pytest.mark.flaky(reruns=3, condition=False), 0),
+        (pytest.mark.flaky(3, condition=0), 0),
+        (pytest.mark.flaky(reruns=2, condition="sys.platform == 'no-such-os'"), 0),
+        (pytest.mark.flaky(reruns=2, condition="os.sep and _FLAKY_GLOBAL"), 2),
+        (pytest.mark.flaky(reruns=2, condition="config is not None"), 2),
+        (pytest.mark.flaky(reruns=2, condition="undefined_name"), 2),  # eval error keeps reruns
+        (pytest.mark.flaky(reruns=-1), 0),
+    ],
+)
+def test_flaky_reruns_mirrors_rerunfailures(mark, expected):
+    assert _flaky_reruns(_flaky_item(), mark.mark) == expected
+
+
+def test_collection_finish_flaky_positional_and_condition(monkeypatch):
+    monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    conn = FakeConn()
+    items = [
+        FakeItem("t.py::a", closest={"flaky": pytest.mark.flaky(3).mark}),
+        FakeItem("t.py::b", closest={"flaky": pytest.mark.flaky(reruns=3, condition=False).mark}),
+    ]
+    session = SimpleNamespace(items=items, config=SimpleNamespace())
+    ItemDispatchPlugin(conn).pytest_collection_finish(session)
+    # A false condition still ships (0 overrides --reruns, as in rerunfailures).
+    assert conn.sent[0][1]["flaky"] == {"0": 3, "1": 0}
+
+
+def test_lazy_collect_file_flaky_positional_and_condition():
+    conn = FakeConn()
+    items = [
+        FakeItem("t.py::a", closest={"flaky": pytest.mark.flaky(3).mark}),
+        FakeItem("t.py::b", closest={"flaky": pytest.mark.flaky(reruns=3, condition=False).mark}),
+    ]
+    session = SimpleNamespace(perform_collect=lambda paths, genitems: items)
+    LazyDispatchPlugin(conn)._collect_file(session, "t.py", {})
+    assert conn.sent[0][1]["flaky"] == {"t.py::a": 3, "t.py::b": 0}
 
 
 def _recursion_session(tmp_path, args, ignored):

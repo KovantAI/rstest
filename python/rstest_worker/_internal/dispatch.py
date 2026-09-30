@@ -65,6 +65,38 @@ def _ignored_by_recursion(session, path: str) -> bool:
     return False
 
 
+def _flaky_reruns(item, mark) -> int:
+    """Rerun budget of a `@pytest.mark.flaky` mark, the way pytest-rerunfailures
+    reads it (`get_reruns_count` + `get_reruns_condition`): `reruns=` wins,
+    else the first positional arg, else 1; a false `condition=` means 0 (the
+    marker still overrides `--reruns`). A string condition is evaluated with
+    rerunfailures' globals (os, sys, platform, config + the test module's);
+    one that fails to evaluate keeps the reruns instead of breaking the run.
+    Per-mark `only_rerun` / `rerun_except` are not honored (the orchestrator
+    only takes a count per test)."""
+    if "reruns" in mark.kwargs:
+        reruns = mark.kwargs["reruns"]
+    elif mark.args:
+        reruns = mark.args[0]
+    else:
+        reruns = 1
+    if "condition" in mark.kwargs:
+        condition = mark.kwargs["condition"]
+        if isinstance(condition, str):
+            import platform
+            import sys
+
+            globals_ = {"os": os, "sys": sys, "platform": platform, "config": item.config}
+            globals_.update(getattr(getattr(item, "obj", None), "__globals__", {}))
+            try:
+                condition = eval(compile(condition, "<flaky condition>", "eval"), globals_)
+            except Exception:
+                condition = True
+        if not condition:
+            return 0
+    return max(0, int(reruns))
+
+
 def _session_roots(config) -> m.SessionRootsPayload:
     """pytest's own view of where this session is rooted, for `rstest bisect`:
     the rootdir nodeids are relative to, where the initial args came from, and
@@ -165,7 +197,7 @@ class ItemDispatchPlugin(StreamPlugin):
             for i, item in enumerate(session.items):
                 mark = item.get_closest_marker("flaky")
                 if mark is not None:
-                    flaky[str(i)] = int(mark.kwargs.get("reruns", 1))
+                    flaky[str(i)] = _flaky_reruns(item, mark)
                 gmark = item.get_closest_marker("xdist_group")
                 if gmark is not None:
                     name = gmark.args[0] if gmark.args else gmark.kwargs.get("name", "default")
@@ -279,7 +311,7 @@ class LazyDispatchPlugin(StreamPlugin):
         for it in items:
             mark = it.get_closest_marker("flaky")
             if mark is not None:
-                flaky[it.nodeid] = int(mark.kwargs.get("reruns", 1))
+                flaky[it.nodeid] = _flaky_reruns(it, mark)
         if flaky:
             payload["flaky"] = flaky
         for it in items:

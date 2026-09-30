@@ -81,11 +81,10 @@ see
 Not carried over from pytest-rerunfailures when rstest owns the retry (the
 pool, or any run with rstest's own `--reruns`):
 
-- **Positional `@pytest.mark.flaky(3)`**: rstest reads only the `reruns=`
-  keyword, so this retries **once**. Write `flaky(reruns=3)`.
-- **Mark keywords `reruns_delay`, `condition`, `only_rerun`**: ignored. A
-  test marked `condition=False` or with a non-matching `only_rerun` is
-  still retried. Use the global `--only-rerun` to filter by error.
+- **Mark keywords `reruns_delay`, `only_rerun`, `rerun_except`**: ignored.
+  A test with a non-matching `only_rerun` is still retried. Use the global
+  `--only-rerun` to filter by error. (The positional `flaky(3)` budget and
+  `condition=` are honored.)
 - **`--reruns-delay` and `--rerun-except`**: not rstest flags, so they are
   forwarded to pytest. With pytest-rerunfailures installed they parse and do
   nothing (no delay, no exception filter); without it they are a pytest usage
