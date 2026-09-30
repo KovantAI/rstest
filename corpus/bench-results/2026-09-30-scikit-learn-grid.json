@@ -1,11 +1,11 @@
 {
  "environment": {
-  "date": "2026-09-26",
+  "date": "2026-09-30",
   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
   "logical_cpus": 14,
-  "load_1m_at_start": 14.42,
-  "rstest": "rstest 0.7.0",
-  "rstest_commit": "b477551",
+  "load_1m_at_start": 2.15,
+  "rstest": "rstest 0.8.0",
+  "rstest_commit": "caa9bcc",
   "suite_commits": {
    "aiohttp": "12ea5a580ac02f5062b927ac3fa278000d7abb04",
    "anyio": "b7ea84c275fde6420ea242844bc7fb0fee6132f7",
@@ -47,11 +47,11 @@
  "spectrum": [
   {
    "suite": "scikit-learn",
-   "pytest_wall": 31.7,
-   "pytest_band": "31.7 (31.4-31.8)",
+   "pytest_wall": 31.9,
+   "pytest_band": "31.9 (31.8-32.0)",
    "rstest_wall": 6.9,
-   "rstest_band": "6.9 (6.7-7.0)",
-   "speedup": 4.63,
+   "rstest_band": "6.9 (6.9-7.0)",
+   "speedup": 4.62,
    "parity": 100.0,
    "parity_missing": 0,
    "parity_mismatch": 0,
@@ -69,78 +69,45 @@
     "points": [
      {
       "workers": 1,
-      "max_proc_rss_mib": 410.2,
-      "peak_tree_rss_mib": 920.0,
-      "wall": 32.5
+      "max_proc_rss_mib": 409.0,
+      "peak_tree_rss_mib": 917.3,
+      "wall": 32.2
      },
      {
       "workers": 2,
-      "max_proc_rss_mib": 406.4,
-      "peak_tree_rss_mib": 1467.4,
-      "wall": 17.9
+      "max_proc_rss_mib": 407.1,
+      "peak_tree_rss_mib": 1466.3,
+      "wall": 18.1
      },
      {
       "workers": 4,
-      "max_proc_rss_mib": 399.3,
-      "peak_tree_rss_mib": 2138.2,
-      "wall": 10.6
+      "max_proc_rss_mib": 399.0,
+      "peak_tree_rss_mib": 2138.4,
+      "wall": 11.2
      },
      {
       "workers": 8,
-      "max_proc_rss_mib": 396.7,
-      "peak_tree_rss_mib": 3669.7,
-      "wall": 7.7
+      "max_proc_rss_mib": 400.7,
+      "peak_tree_rss_mib": 3683.1,
+      "wall": 7.6
+     },
+     {
+      "workers": 10,
+      "max_proc_rss_mib": 402.6,
+      "peak_tree_rss_mib": 4352.5,
+      "wall": 7.2
      },
      {
       "workers": 14,
-      "max_proc_rss_mib": 395.4,
-      "peak_tree_rss_mib": 5437.1,
-      "wall": 6.9
-     }
-    ],
-    "fit": {
-     "fixed_mib": 730.6,
-     "per_worker_mib": 344.1,
-     "r2": 0.994
-    }
-   },
-   "xdist": {
-    "points": [
-     {
-      "workers": 1,
-      "max_proc_rss_mib": 410.0,
-      "peak_tree_rss_mib": 1088.3,
-      "wall": 33.0
-     },
-     {
-      "workers": 2,
-      "max_proc_rss_mib": 420.0,
-      "peak_tree_rss_mib": 1798.7,
-      "wall": 18.8
-     },
-     {
-      "workers": 4,
-      "max_proc_rss_mib": 412.0,
-      "peak_tree_rss_mib": 2474.8,
-      "wall": 11.3
-     },
-     {
-      "workers": 8,
-      "max_proc_rss_mib": 418.6,
-      "peak_tree_rss_mib": 4109.5,
+      "max_proc_rss_mib": 382.9,
+      "peak_tree_rss_mib": 5710.5,
       "wall": 7.0
-     },
-     {
-      "workers": 14,
-      "max_proc_rss_mib": 424.0,
-      "peak_tree_rss_mib": 6082.4,
-      "wall": 6.7
      }
     ],
     "fit": {
-     "fixed_mib": 930.4,
-     "per_worker_mib": 375.9,
-     "r2": 0.993
+     "fixed_mib": 669.1,
+     "per_worker_mib": 365.5,
+     "r2": 0.998
     }
    }
   }
@@ -157,122 +124,122 @@
    {
     "workers": 1,
     "threads": "1",
-    "wall": 32.1,
-    "band": "32.1 (32.0-32.4)"
+    "wall": 31.9,
+    "band": "31.9 (31.9-32.0)"
    },
    {
     "workers": 1,
     "threads": "2",
-    "wall": 32.1,
-    "band": "32.1 (32.0-32.3)"
+    "wall": 32.0,
+    "band": "32.0 (31.9-32.0)"
    },
    {
     "workers": 1,
     "threads": "4",
     "wall": 32.1,
-    "band": "32.1 (32.0-32.1)"
+    "band": "32.1 (32.0-32.6)"
    },
    {
     "workers": 1,
     "threads": "unset",
-    "wall": 32.2,
-    "band": "32.2 (32.1-32.3)"
+    "wall": 34.4,
+    "band": "34.4 (34.1-36.0)"
    },
    {
     "workers": 2,
     "threads": "1",
-    "wall": 17.9,
-    "band": "17.9 (17.5-18.0)"
+    "wall": 19.2,
+    "band": "19.2 (18.6-19.2)"
    },
    {
     "workers": 2,
     "threads": "2",
-    "wall": 17.9,
-    "band": "17.9 (17.5-18.0)"
+    "wall": 19.2,
+    "band": "19.2 (18.5-19.3)"
    },
    {
     "workers": 2,
     "threads": "4",
-    "wall": 17.6,
-    "band": "17.6 (17.5-18.1)"
+    "wall": 19.2,
+    "band": "19.2 (18.6-19.4)"
    },
    {
     "workers": 2,
     "threads": "unset",
-    "wall": 18.0,
-    "band": "18.0 (17.5-18.1)"
+    "wall": 19.2,
+    "band": "19.2 (18.6-19.3)"
    },
    {
     "workers": 4,
     "threads": "1",
-    "wall": 11.0,
-    "band": "11.0 (10.6-11.1)"
+    "wall": 11.6,
+    "band": "11.6 (10.6-11.6)"
    },
    {
     "workers": 4,
     "threads": "2",
-    "wall": 10.9,
-    "band": "10.9 (10.6-11.7)"
+    "wall": 11.4,
+    "band": "11.4 (10.8-11.4)"
    },
    {
     "workers": 4,
     "threads": "4",
-    "wall": 10.9,
-    "band": "10.9 (10.8-10.9)"
+    "wall": 11.3,
+    "band": "11.3 (11.0-11.4)"
    },
    {
     "workers": 4,
     "threads": "unset",
-    "wall": 10.9,
-    "band": "10.9 (10.5-11.1)"
+    "wall": 11.1,
+    "band": "11.1 (10.8-11.5)"
    },
    {
     "workers": 10,
     "threads": "1",
+    "wall": 7.2,
+    "band": "7.2 (7.2-7.3)"
+   },
+   {
+    "workers": 10,
+    "threads": "2",
     "wall": 7.1,
-    "band": "7.1 (7.1-7.1)"
-   },
-   {
-    "workers": 10,
-    "threads": "2",
-    "wall": 7.1,
-    "band": "7.1 (6.5-7.2)"
+    "band": "7.1 (6.6-7.3)"
    },
    {
     "workers": 10,
     "threads": "4",
-    "wall": 7.1,
-    "band": "7.1 (7.0-7.2)"
+    "wall": 7.2,
+    "band": "7.2 (7.1-7.4)"
    },
    {
     "workers": 10,
     "threads": "unset",
-    "wall": 7.0,
-    "band": "7.0 (6.5-7.1)"
+    "wall": 7.2,
+    "band": "7.2 (7.1-7.6)"
    },
    {
     "workers": 14,
     "threads": "1",
-    "wall": 6.1,
-    "band": "6.1 (6.0-7.1)"
+    "wall": 6.5,
+    "band": "6.5 (6.4-6.8)"
    },
    {
     "workers": 14,
     "threads": "2",
-    "wall": 6.2,
-    "band": "6.2 (6.1-6.5)"
+    "wall": 6.5,
+    "band": "6.5 (6.4-6.8)"
    },
    {
     "workers": 14,
     "threads": "4",
-    "wall": 6.0,
-    "band": "6.0 (6.0-6.2)"
+    "wall": 6.6,
+    "band": "6.6 (6.4-6.9)"
    },
    {
     "workers": 14,
     "threads": "unset",
-    "wall": 6.1,
-    "band": "6.1 (6.1-6.4)"
+    "wall": 6.6,
+    "band": "6.6 (6.5-7.1)"
    }
   ],
   "outcome_drift": []

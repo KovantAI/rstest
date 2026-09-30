@@ -3,7 +3,7 @@
   "date": "2026-09-30",
   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
   "logical_cpus": 14,
-  "load_1m_at_start": 11.46,
+  "load_1m_at_start": 2.49,
   "rstest": "rstest 0.8.0",
   "rstest_commit": "caa9bcc",
   "suite_commits": {
@@ -42,108 +42,65 @@
   },
   "repeat": 5,
   "warmup": 1,
-  "rstest_cache": "warm"
+  "rstest_cache": "cold"
  },
  "spectrum": [
   {
-   "suite": "scikit-learn",
-   "pytest_wall": 31.7,
-   "pytest_band": "31.7 (31.7-31.8)",
-   "rstest_wall": 6.1,
-   "rstest_band": "6.1 (6.1-6.5)",
-   "speedup": 5.17,
-   "parity": 100.0,
+   "suite": "aiohttp",
+   "pytest_wall": 194.2,
+   "pytest_band": "194.2 (193.1-194.9)",
+   "rstest_wall": 124.0,
+   "rstest_band": "124.0 (124.0-124.0)",
+   "speedup": 1.57,
+   "parity": 99.91,
    "parity_missing": 0,
-   "parity_mismatch": 0,
+   "parity_mismatch": 4,
    "parity_unexplained": 0,
    "baseline_collect_errors": 0,
-   "baseline_tests": 3941,
+   "baseline_tests": 4469,
    "candidate_collect_errors": 0
   }
  ],
- "sweeps": [],
- "memory": [
+ "sweeps": [
   {
-   "suite": "scikit-learn",
-   "rstest": {
-    "points": [
-     {
-      "workers": 1,
-      "max_proc_rss_mib": 407.6,
-      "peak_tree_rss_mib": 924.6,
-      "wall": 32.1
-     },
-     {
-      "workers": 2,
-      "max_proc_rss_mib": 407.2,
-      "peak_tree_rss_mib": 1466.1,
-      "wall": 18.0
-     },
-     {
-      "workers": 4,
-      "max_proc_rss_mib": 404.2,
-      "peak_tree_rss_mib": 2124.1,
-      "wall": 11.0
-     },
-     {
-      "workers": 8,
-      "max_proc_rss_mib": 398.4,
-      "peak_tree_rss_mib": 3376.9,
-      "wall": 7.5
-     },
-     {
-      "workers": 14,
-      "max_proc_rss_mib": 392.1,
-      "peak_tree_rss_mib": 5694.1,
-      "wall": 7.0
+   "suite": "aiohttp",
+   "pytest_wall": 194.2,
+   "pytest_band": "194.2 (193.1-194.9)",
+   "points": [
+    {
+     "workers": 8,
+     "rstest_wall": 150.0,
+     "rstest_band": "150.0 (150.0-150.0)",
+     "min": 149.99,
+     "max": 150.01,
+     "speedup": 1.29,
+     "efficiency": 0.16,
+     "parity": 99.96,
+     "parity_missing": 0,
+     "parity_mismatch": 2,
+     "parity_unexplained": 0,
+     "baseline_collect_errors": 0,
+     "baseline_tests": 4469,
+     "candidate_collect_errors": 0,
+     "xdist": {
+      "wall": 160.0,
+      "band": "160.0 (160.0-160.5)",
+      "min": 159.99,
+      "max": 160.51,
+      "speedup": 1.21,
+      "efficiency": 0.15,
+      "parity": 99.96,
+      "parity_missing": 0,
+      "parity_mismatch": 2,
+      "parity_unexplained": 0,
+      "baseline_collect_errors": 0,
+      "baseline_tests": 4469,
+      "candidate_collect_errors": 0
      }
-    ],
-    "fit": {
-     "fixed_mib": 645.6,
-     "per_worker_mib": 357.2,
-     "r2": 0.997
     }
-   },
-   "xdist": {
-    "points": [
-     {
-      "workers": 1,
-      "max_proc_rss_mib": 410.3,
-      "peak_tree_rss_mib": 1087.2,
-      "wall": 33.1
-     },
-     {
-      "workers": 2,
-      "max_proc_rss_mib": 423.6,
-      "peak_tree_rss_mib": 1804.5,
-      "wall": 18.3
-     },
-     {
-      "workers": 4,
-      "max_proc_rss_mib": 412.2,
-      "peak_tree_rss_mib": 2496.0,
-      "wall": 11.7
-     },
-     {
-      "workers": 8,
-      "max_proc_rss_mib": 419.6,
-      "peak_tree_rss_mib": 4079.1,
-      "wall": 7.6
-     },
-     {
-      "workers": 14,
-      "max_proc_rss_mib": 423.7,
-      "peak_tree_rss_mib": 6096.8,
-      "wall": 6.8
-     }
-    ],
-    "fit": {
-     "fixed_mib": 932.6,
-     "per_worker_mib": 375.9,
-     "r2": 0.994
-    }
-   }
+   ]
   }
  ],
+ "memory": [],
  "grid": null
 }

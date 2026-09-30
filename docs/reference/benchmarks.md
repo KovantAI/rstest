@@ -12,8 +12,8 @@ measured under the [methodology](#methodology) below.
 | Machine | Apple M4 Max, 10 performance + 4 efficiency cores, 14 logical CPUs |
 | OS | macOS 26.6.1 (arm64) |
 | Python | CPython 3.13.13 |
-| Runners | rstest 0.7.0, pytest 9.1.1, pytest-xdist 3.8.0 |
-| Date | 2026-09-26 |
+| Runners | rstest 0.8.0, pytest 9.1.1, pytest-xdist 3.8.0 |
+| Date | 2026-09-30 |
 
 Suite versions: pandas 3.0.5 (wheel), aiohttp `12ea5a58`, django-allauth
 `d7d5d39a`, rich `46cebbb0`, sympy `d701e594`, scikit-learn 1.9.1 (wheel).
@@ -24,14 +24,15 @@ string, logical CPU count, 1-minute load average at the start, `rstest
 --version`, the rstest repo commit, every suite's pinned commit, repeat and
 warm-up counts, and warm or cold cache. Per point it stores the median and
 min-max of the timed walls and the parity counts. Recorded load at the start:
-1.98 (suite table), 1.84 (aiohttp cold), 9.6 (sympy and scikit-learn sweep),
-14.42 (scikit-learn memory grid). rstest commit: `b477551`, except the aiohttp
-cold run (`728e2d4`); both are 0.7.0.
+2.36 (suite table), 2.49 (aiohttp cold), 1.84 (sympy and scikit-learn sweep),
+2.15 (scikit-learn BLAS grid), 11.46 (scikit-learn memory, started right after
+the grid run). rstest commit: `caa9bcc` (0.8.0) for every file.
 
 **Not recorded in those files:** the CPU model (taken from the
 [`examples/cpu-bench`](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench)
-run the same day, which records it), memory size, power state, whether the
-machine was kept awake by `caffeinate` (the tooling only detects and re-runs a
+run the same day, which records it), memory size, power state (AC for this
+run), whether the machine was kept awake by `caffeinate` (it was for this run;
+the tooling only detects and re-runs a
 slept-through run), the Python / pytest / pytest-xdist versions (they come from
 the suites' venvs and per-run snapshots, which later runs overwrite), and the
 individual timed walls behind each median.
@@ -41,10 +42,10 @@ individual timed walls behind each median.
 <!-- --8<-- [start:suite-table] -->
 | Suite | Tests | pytest serial | xdist `-n 8` | rstest `-n 8` | Outcome parity |
 |---|---|---|---|---|---|
-| pandas | 193,843 | 186s | 89s | **42s** | 100% |
-| aiohttp | 4,469 | 193s | 161s | **67s** warm (150s cold) | 99.93-99.96% (socket-leak flake, hits xdist too) |
-| django-allauth | 2,050 | 26s | 8.8s | **5.7s** (8.4s at its recommended `-n 4`) | 100% |
-| rich | 981 | 3.7s | 2.7s | **2.4s** | 100% |
+| pandas | 193,843 | 190s | 89s | **43s** | 100% |
+| aiohttp | 4,469 | 193s | 160s | **67s** warm (150s cold) | 99.91-99.98% (socket-leak flake, hits xdist too) |
+| django-allauth | 2,050 | 26s | 8.9s | **5.8s** (8.4s at its recommended `-n 4`) | 100% |
+| rich | 981 | 3.7s | 2.7s | **2.5s** | 100% |
 <!-- --8<-- [end:suite-table] -->
 
 Median of 5 timed runs after one warm-up, same `-n` for both runners. Bold:
@@ -75,9 +76,9 @@ performance + 4 efficiency cores).
 <!-- --8<-- [start:cpu-table] -->
 | Suite | What it is | pytest serial | `-n 4` | `-n 10` | `-n 14` | rstest vs xdist |
 |---|---|---|---|---|---|---|
-| [cpu-bench](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench) | 64 synthetic pure-Python tests | 15.0s | 3.7x | 7.6x | 8.6x | rstest ahead at every `-n` (2-17%) |
-| sympy (`polys`, `solvers`) | 3,061 tests, pure-Python symbolic math | 83.5s | 3.4x | 6.6x | 7.2x | parity at every `-n` |
-| scikit-learn (`linear_model`) | 3,941 tests, numpy, 1 BLAS thread | 31.8s | 2.9x | 4.5x | 4.6x | rstest ahead to `-n 4` (3-4%), parity from `-n 8` |
+| [cpu-bench](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench) | 64 synthetic pure-Python tests | 15.2s | 3.8x | 7.6x | 8.6x | parity at `-n 1`-`2`, rstest ahead from `-n 4` (4-15%) |
+| sympy (`polys`, `solvers`) | 3,061 tests, pure-Python symbolic math | 80.8s | 3.2x | 6.3x | 5.7x | parity at every `-n` |
+| scikit-learn (`linear_model`) | 3,941 tests, numpy, 1 BLAS thread | 31.9s | 3.0x | 4.5x | 4.6x | rstest ahead at `-n 2` (4%), parity elsewhere |
 <!-- --8<-- [end:cpu-table] -->
 
 Speedups are rstest's, vs serial pytest. 100% per-test outcome parity at
@@ -86,14 +87,16 @@ every measured point of every suite.
 **What the data says:**
 
 - **CPU-bound suites gain up to the performance-core count, then flatten.**
-  Efficiency is 85-93% at `-n 4` on the two pure-Python suites and falls past
-  `-n 10`: the last four workers land on efficiency cores. On a machine with
-  uniform cores, expect the bend at the physical core count.
+  Efficiency is 80-94% at `-n 4` on the two pure-Python suites and falls past
+  `-n 10`: the last four workers land on efficiency cores. sympy got slower
+  from `-n 10` to `-n 14` on both runners (12.8s to 14.1s under rstest, with a
+  wide spread). On a machine with uniform cores, expect the bend at the
+  physical core count.
 - **Against xdist it is parity, not a win**, once the suite is long enough
   for per-run overhead to vanish. On sympy the spreads overlap at every `-n`.
-  The synthetic suite shows rstest ahead because it is short (15 s serial,
-  1.7 s at `-n 14`), where start-up and dispatch cost is a visible share of
-  the wall.
+  The synthetic suite shows rstest ahead from `-n 4` because it is short
+  (15 s serial, 1.8 s at `-n 14`), where start-up and dispatch cost is a
+  visible share of the wall.
 - **numpy-heavy suites scale less.** scikit-learn stops at about 4.6x: each
   worker pays the same imports and collection before it runs a test, and
   that fixed cost doesn't parallelize.
@@ -104,28 +107,32 @@ Wall seconds, median of 5 (min-max). **Bold**: faster, with no overlap in the
 spreads; otherwise the runners are at parity.
 
 **sympy** (`sympy/polys sympy/solvers`, commit `d701e594`), pytest serial
-83.5 (82.3-88.5):
+80.8 (80.0-82.4):
 
 | -n | rstest | speedup | xdist | speedup |
 |---|---|---|---|---|
-| 1 | 83.4 (83.2-86.5) | 1.00x | 82.9 (81.3-89.7) | 1.01x |
-| 2 | 45.2 (44.2-47.5) | 1.85x | 44.3 (44.2-47.7) | 1.89x |
-| 4 | 24.5 (24.2-25.5) | 3.41x | 24.2 (24.1-24.4) | 3.46x |
-| 8 | 15.6 (15.3-15.6) | 5.37x | 15.5 (14.0-18.2) | 5.40x |
-| 10 | 12.6 (11.8-13.3) | 6.63x | 12.2 (11.6-14.6) | 6.81x |
-| 14 | 11.7 (11.2-12.1) | 7.16x | 11.8 (11.3-22.1) | 7.09x |
+| 1 | 84.4 (82.6-88.1) | 0.96x | 84.0 (82.0-85.3) | 0.96x |
+| 2 | 47.8 (46.1-48.3) | 1.69x | 46.0 (44.9-47.7) | 1.75x |
+| 4 | 25.1 (24.6-29.0) | 3.22x | 24.6 (24.4-25.4) | 3.28x |
+| 8 | 16.1 (15.3-16.6) | 5.00x | 14.8 (13.8-24.4) | 5.47x |
+| 10 | 12.8 (12.3-15.9) | 6.30x | 12.6 (12.2-13.0) | 6.40x |
+| 14 | 14.1 (13.1-20.4) | 5.73x | 14.5 (12.9-14.9) | 5.59x |
 
 **scikit-learn** (`--pyargs sklearn.linear_model`, scikit-learn 1.9.1, numpy
-2.5.3, `OMP_NUM_THREADS` and friends set to 1), pytest serial 31.8 (31.8-31.9):
+2.5.3, `OMP_NUM_THREADS` and friends set to 1), pytest serial 31.9 (31.8-33.5):
 
 | -n | rstest | speedup | xdist | speedup |
 |---|---|---|---|---|
-| 1 | **32.0** (32.0-32.2) | 0.99x | 32.9 (32.9-32.9) | 0.97x |
-| 2 | **17.9** (17.5-18.0) | 1.78x | 18.4 (18.2-18.8) | 1.73x |
-| 4 | **11.0** (10.6-11.0) | 2.88x | 11.4 (11.3-11.4) | 2.80x |
-| 8 | 7.6 (7.6-8.2) | 4.17x | 7.2 (6.8-7.8) | 4.41x |
-| 10 | 7.0 (6.6-7.1) | 4.52x | 7.1 (7.0-7.2) | 4.51x |
-| 14 | 6.9 (6.8-7.2) | 4.62x | 6.6 (6.5-6.8) | 4.79x |
+| 1 | 36.1 (33.2-37.3) | 0.88x | 35.6 (35.2-38.0) | 0.90x |
+| 2 | **19.0** (18.3-19.2) | 1.67x | 19.7 (19.6-19.8) | 1.62x |
+| 4 | 10.7 (10.6-11.5) | 2.97x | 11.5 (11.4-11.6) | 2.76x |
+| 8 | 7.6 (7.2-7.8) | 4.16x | 7.4 (7.1-7.8) | 4.28x |
+| 10 | 7.2 (6.7-7.4) | 4.45x | 7.3 (7.3-7.5) | 4.35x |
+| 14 | 6.9 (6.9-7.1) | 4.61x | 7.0 (6.8-7.2) | 4.52x |
+
+The `-n 1` rows sit above the serial baseline on both runners; the memory run
+below measured rstest at 32.1 on the same point, so read it as noise, not
+per-worker overhead.
 
 The synthetic sweep, memory and BLAS-thread tables are in
 [`examples/cpu-bench`](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#measured-result).
@@ -150,16 +157,17 @@ scikit-learn `linear_model`, peak memory of the whole process tree (median of 3)
 
 | -n | rstest | xdist |
 |---|---|---|
-| 1 | 920 MiB | 1,088 MiB |
-| 4 | 2,138 MiB | 2,475 MiB |
-| 8 | 3,670 MiB | 4,110 MiB |
-| 14 | 5,437 MiB | 6,082 MiB |
+| 1 | 925 MiB | 1,087 MiB |
+| 4 | 2,124 MiB | 2,496 MiB |
+| 8 | 3,377 MiB | 4,079 MiB |
+| 14 | 5,694 MiB | 6,097 MiB |
 
-Both grow linearly with `-n` (rstest ≈ 731 MiB + N x 344 MiB, R² 0.994). The
+Both grow linearly with `-n` (rstest ≈ 646 MiB + N x 357 MiB, R² 0.997). The
 intercept is large because some scikit-learn tests start their own joblib
 worker pools. Setting the BLAS thread cap to 1, 2, 4 or leaving it unset made
-no measurable difference at any `-n` (1 to 14) on this suite, and no test
-changed outcome. The memory model and thread guidance are in
+no measurable difference from `-n 2` to `-n 14` on this suite. At `-n 1`,
+leaving it unset was slower: 34.4s (34.1-36.0) against 31.9-32.1s with any
+cap. No test changed outcome in any cell. The memory model and thread guidance are in
 [Migrating from xdist](../guides/migrate-from-xdist.md#already-fast-cpu-bound).
 
 ## Monorepo
@@ -217,7 +225,7 @@ per-test parity exact.
   it is queued on a worker. The file's tests are adjacent in collection
   order, so most of them land in one worker's queue and run back to back
   there: in a verification run, 28 of the 34, including all ten slow ones
-  (so nearly all of the file's ~153s), ran on one worker, which sets the 161s floor. With a warm duration cache,
+  (so nearly all of the file's ~153s), ran on one worker, which sets the 160s floor. With a warm duration cache,
   rstest dispatches every test with a cached duration of 1s or more first,
   longest first and one at a time, so those tests spread across workers
   (67s, close to the single ~55s test). Without the cache the first run is
@@ -226,11 +234,11 @@ per-test parity exact.
 - **pandas is controller-bound under xdist.** With 193,843 tests, xdist's
   controller (one Python process handling every test report) sat at 100% CPU
   for most of the run, and the workers waited on it. rstest's orchestrator is
-  Rust, so the same `-n 8` finishes in 42s against 89s. An earlier single run
+  Rust, so the same `-n 8` finishes in 43s against 89s. An earlier single run
   on this page had the two at parity (61s vs 63s) on an older pandas; that
-  number is superseded. (The 186s serial baseline is real, not
+  number is superseded. (The 190s serial baseline is real, not
   estimated.[^pandas])
-- **django-allauth at matched `-n`**: 5.7s against 8.8s. Its corpus policy
+- **django-allauth at matched `-n`**: 5.8s against 8.9s. Its corpus policy
   is `-n 4` for wall-clock rate-limit tests that can flake at high worker
   counts; that run is 8.4s.
 - **Small suites don't change much.** rich saves under a second. As a

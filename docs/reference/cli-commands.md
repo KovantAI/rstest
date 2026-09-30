@@ -141,10 +141,6 @@ The first slice of a broader migration assistant.
 
 ### `xdist-removal-check`
 
-!!! note "Unreleased"
-    Not in rstest 0.7.0 (the latest release); available when installing from
-    source, and in the next release.
-
 Readiness check for the last migration step: uninstalling pytest-xdist.
 rstest never needs the package, but removing it breaks or changes things that
 worked while it was installed. This command finds them before you uninstall,
