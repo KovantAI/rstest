@@ -25,10 +25,9 @@ session. The `q` option is left out, and the prompt says only `Ctrl+C`, when
 the run hands pytest the terminal (`-s`, `--capture=...`, `--pdb`, `--trace`,
 `--co`/`--collect-only`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
 `--sw-reset`/`--stepwise-reset`, rstest's `--debug`) or rstest runs as a
-background job (`rstest --watch &`). **Unreleased:** `q` to quit is not in
-rstest 0.7.0, whose prompt reads `(Ctrl+C to quit, last exit: 0)`.
+background job (`rstest --watch &`).
 
-Quitting with `q` (Unreleased) exits **0**, whatever the last cycle's result
+Quitting with `q` exits **0**, whatever the last cycle's result
 was: the `last exit` in the prompt is informational, so don't use `--watch` as
 a pass/fail gate. An rstest-level error (not a test failure), such as an
 invalid `--dist` mode or no usable interpreter, ends the session with exit 1.

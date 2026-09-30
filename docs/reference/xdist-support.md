@@ -66,13 +66,13 @@ Two structural caveats on the three emulated hooks: they run **N times concurren
 - `worker_id`: the worker the test runs on, `gw0`, `gw1`, ..., or `"master"` below `-n 2` (byte-exact mode, no worker identity).
 - `testrun_uid`: one uid shared by every worker in a run. Below `-n 2` a fresh uid is generated per session, matching xdist's standalone behavior.
 
-When pytest-xdist is also installed it defines the same two fixtures. rstest's definitions take precedence over xdist's (a conftest or test-module fixture of the same name still overrides both), and in a pool of two or more workers the two definitions return identical values anyway. **Unreleased:** in rstest 0.7.0 xdist's definitions won when pytest-xdist was installed, so its `testrun_uid` failed with `KeyError: 'testrunuid'` in the pool, and its `worker_id` returned `gw0` in the `--reruns` one-worker pool.
+When pytest-xdist is also installed it defines the same two fixtures. rstest's definitions take precedence over xdist's (a conftest or test-module fixture of the same name still overrides both), and in a pool of two or more workers the two definitions return identical values anyway.
 
 Under the fixtures, rstest sets the full xdist-compatible surface on every pool worker, for plugins and conftests that read it directly:
 
 - `RSTEST_WORKER_ID` env var, the `gwN` value, rstest-specific.
-- `PYTEST_XDIST_WORKER`, `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` env vars, set so environment-grepping plugins/conftests keep working (`PYTEST_XDIST_TESTRUNUID` is Unreleased).
-- `config.workerinput`, which carries `workerid` (`gwN`), `workercount`, the run uid under both `testrunuid` (xdist's key, Unreleased) and `testrun_uid` (one uid per run, shared by all workers), `mainargv`, and the `cov_master_*` keys pytest-cov expects.
+- `PYTEST_XDIST_WORKER`, `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` env vars, set so environment-grepping plugins/conftests keep working.
+- `config.workerinput`, which carries `workerid` (`gwN`), `workercount`, the run uid under both `testrunuid` (xdist's key) and `testrun_uid` (one uid per run, shared by all workers), `mainargv`, and the `cov_master_*` keys pytest-cov expects.
 
 Reading the surface directly, instead of via the fixtures, also works:
 

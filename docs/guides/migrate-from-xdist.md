@@ -102,9 +102,8 @@ rstest workers announce themselves exactly like xdist workers.
 keys pytest-cov expects. The `PYTEST_XDIST_WORKER`,
 `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` environment
 variables are set too, so plugins and conftests that grep the
-environment keep working as-is. (`testrunuid` and `PYTEST_XDIST_TESTRUNUID`
-are Unreleased: rstest 0.7.0 had only `testrun_uid`.) Plugins
-keying per-worker resources on worker identity work unchanged. The canonical
+environment keep working as-is. Plugins keying per-worker resources on
+worker identity work unchanged. The canonical
 case is pytest-django's per-worker test database (`test_<name>_gw0`, ...),
 which follows from the `workerid` above; note that rstest's corpus only
 exercises pytest-django on SQLite `:memory:`, so check a server-backed
@@ -119,9 +118,6 @@ pytest-xdist is installed. Removing pytest-xdist from your config keeps them
 working (`worker_id` is `"master"` below `-n 2`, `gwN` in the pool). With
 pytest-xdist installed, rstest's definitions take precedence over xdist's (a
 conftest override still wins), and in the pool both return the same values.
-**Unreleased:** in 0.7.0 xdist's definitions won when pytest-xdist was
-installed (see the
-[xdist support matrix](../reference/xdist-support.md#fixtures-worker-identity)).
 One caveat: `--reruns` at `-n 0/1` runs a one-worker pool where
 `config.workerinput` and `PYTEST_XDIST_WORKER=gw0` exist, so xdist's
 `get_xdist_worker_id()` / `is_xdist_worker()` report `gw0` while the fixtures

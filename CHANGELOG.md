@@ -3,7 +3,7 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
-## 0.8.0 (Unreleased)
+## 0.8.0 (2026-09-28)
 
 - **`rstest xdist-removal-check`: a readiness check for uninstalling
   pytest-xdist.** It scans the pytest config and `PYTEST_ADDOPTS` for xdist

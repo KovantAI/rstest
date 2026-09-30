@@ -23,7 +23,7 @@ already does natively, it just wires it into GitHub Actions:
 ## Usage
 
 ```yaml
-- uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
   with:
     python-version: "3.13"
     args: "-n auto"
@@ -39,7 +39,7 @@ it the action installs the latest rstest from PyPI.
 - uses: actions/checkout@v7
   with:
     fetch-depth: 0            # --changed needs history to diff the base
-- uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
   with:
     changed: strict          # full run on unconnectable files; exit 5 on nothing-affected
     base-ref: origin/main
@@ -49,7 +49,7 @@ it the action installs the latest rstest from PyPI.
 ### Real-LLM / nondeterministic suite (fail-ratio gate)
 
 ```yaml
-- uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
   with:
     args: "-m acceptance -n 2"
     reruns: "2"
@@ -62,7 +62,7 @@ it the action installs the latest rstest from PyPI.
 ### Gate on suite health (doctor metrics)
 
 ```yaml
-- uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
   with:
     args: "-n auto"
     doctor-fail-on: "parallel_efficiency<25, imbalance_pct>70"
@@ -79,7 +79,7 @@ strategy:
   matrix:
     shard: [1, 2, 3, 4]
 steps:
-  - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+  - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
     with:
       args: "-n 4"            # explicit: -n auto can resolve to 1 worker, which --shard rejects
       cache-backend: artifact # the default actions-cache backend is for single unsharded jobs
@@ -126,7 +126,7 @@ permissions: { contents: read, actions: read }
 strategy: { matrix: { shard: [1, 2, 3, 4] } }
 steps:
   - uses: actions/checkout@v7
-  - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+  - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
     with:
       python-version: "3.13"
       cache-backend: artifact
@@ -152,7 +152,7 @@ permissions: { id-token: write, contents: read }
 steps:
   - uses: aws-actions/configure-aws-credentials@v4
     with: { role-to-assume: arn:aws:iam::…:role/ci, aws-region: us-east-1 }
-  - uses: KovantAI/rstest/.github/actions/rstest@v0.7.0
+  - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
     with:
       python-version: "3.13"
       cache-remote: s3://ci-cache/rstest        # gs://… or https://… too
@@ -201,7 +201,7 @@ covers GCS / Azure / HTTP.
 
 | input | default | purpose |
 |---|---|---|
-| `args` | `-n auto` | extra rstest flags / paths, appended after the other flags. Split with shell quoting rules (`-k "a and b"` stays one argument), never glob-expanded or evaluated (Unreleased, 0.8.0; `@v0.7.0` word-splits it unquoted) |
+| `args` | `-n auto` | extra rstest flags / paths, appended after the other flags. Split with shell quoting rules (`-k "a and b"` stays one argument), never glob-expanded or evaluated |
 | `python-version` | `""` | run `setup-python` at this version; else assume Python is set up |
 | `runner` | `auto` | `uv` / `plain` / `auto` (uv when `uv.lock` or `[tool.uv]` present) |
 | `install` | `""` | install override; empty = infer from `runner` |
@@ -232,7 +232,7 @@ covers GCS / Azure / HTTP.
 | `doctor-fail-on` | `""` | fail on doctor metrics, e.g. `parallel_efficiency<30, imbalance_pct>60` (each forwarded to native `--doctor-fail-on`; breach fails via exit code, report auto-published to job summary; inapplicable metrics skipped) |
 | `quarantine` | `""` | `--quarantine FILE` |
 | `shard` / `shard-total` | `""` | `--shard K/N` |
-| `fail-under-ratio` | `""` | max tolerated assertion-failure fraction (0–1); non-test exit codes still fail (Unreleased, 0.8.0; see [Security and matrix behavior](#security-and-matrix-behavior)) |
+| `fail-under-ratio` | `""` | max tolerated assertion-failure fraction (0–1); non-test exit codes still fail (see [Security and matrix behavior](#security-and-matrix-behavior)) |
 | `hard-fail-on` | `""` | regex; matching failures fail immediately, bypassing the ratio |
 | `upload-junit` | `false` | upload JUnit as an artifact |
 
@@ -263,11 +263,8 @@ restore the newest matching entry read-only.
 
 ## Security and matrix behavior
 
-> **Unreleased.** Everything in this section describes the action on `main`,
-> which ships with rstest 0.8.0. The `@v0.7.0` action pastes inputs into its
-> scripts, has no `artifact-suffix` or `warm-from-event` input (artifact names
-> are unscoped, and any successful run on `warm-from-branch` can seed the warm
-> cache), and its fail-ratio gate judges only the JUnit ratio.
+> Tags before `v0.8.0` lack these fixes: they paste inputs into their
+> scripts and have no `artifact-suffix` or `warm-from-event` input.
 
 - **Inputs never reach the shell as code.** Every input is passed to the
   action's scripts through `env:` and quoted, so a value such as a branch name

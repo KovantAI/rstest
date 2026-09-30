@@ -562,7 +562,7 @@ steps:
   - label: ":pytest: rstest"
     command: |
       pip install -r requirements.txt
-      pip install rstest==0.7.0
+      pip install rstest==0.8.0
       rstest -n auto --output buildkite --junitxml junit.xml
     artifact_paths:
       - junit.xml
@@ -584,7 +584,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.7.0             # pin a released tag
+    rev: v0.8.0             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```

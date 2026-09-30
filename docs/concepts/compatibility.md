@@ -14,11 +14,10 @@ What rstest promises about matching pytest's behavior, how that promise is measu
    rstest's native timeout too (its SIGALRM timer is armed for marked tests
    even without `--timeout`). To give one of these flags to pytest instead,
    pass it after `--`. With no `--output` set, the terminal output at `-n 0`
-   is pytest's own too (**Unreleased**; rstest 0.7.0 printed its own view),
-   with rstest's extras (doctor, coverage, gate messages) appended after
-   pytest's summary line; an explicit `--output` switches back to rstest's
-   renderer. `--junitxml` is pytest's own document at every worker count
-   (**Unreleased**), plus rstest's `flaky` / `quarantined` properties; see
+   is pytest's own too, with rstest's extras (doctor, coverage, gate
+   messages) appended after pytest's summary line; an explicit `--output` switches back to rstest's
+   renderer. `--junitxml` is pytest's own document at every worker count,
+   plus rstest's `flaky` / `quarantined` properties; see
    [`--junitxml`](../reference/cli.md#-junitxml-path).
 2. **In parallel modes: outcomes preserved for parallel-safe tests.**
    Identical per-test outcomes (setup/call/teardown, skips, xfails) for
@@ -127,8 +126,7 @@ in your environment. Two consequences:
   prints one `rstest: warning: <plugin> <version> requires pytest<9, ...` line
   per plugin to stderr, once per run, telling you the pin is not enforced and
   to upgrade the plugin if it misbehaves. Requirements gated behind an extra
-  (such as hypothesis's `[pytest]`) are ignored. The run itself is unaffected
-  (**Unreleased:** the warning is not in 0.7.0).
+  (such as hypothesis's `[pytest]`) are ignored. The run itself is unaffected.
 
 rstest does not maintain a per-plugin minimum-version table. Instead,
 `rstest -n 0` runs your installed plugins against the vendored core in one

@@ -22,7 +22,7 @@ options are read normally.
 
 Because plugins load into the vendored core, each plugin's own code must
 support pytest 9, and a `pytest<9` install pin has no effect at runtime (rstest
-warns about such pins; **Unreleased**, not in 0.7.0); see
+warns about such pins); see
 [Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
 
 !!! tip "Looking for a specific plugin?"
