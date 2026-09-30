@@ -4,6 +4,8 @@ import json
 import os
 import types
 
+import coverage.exceptions as _real_cov_exceptions
+import coverage.results as _real_cov_results
 from rstest_worker import covtool
 
 
@@ -280,10 +282,18 @@ def test_build_index_skips_lines_with_only_empty_contexts(tmp_path, monkeypatch)
 class _FakeCoverageModule(types.ModuleType):
     """A fake `coverage` module injected into sys.modules for main()."""
 
-    class CoverageException(Exception):
-        pass
+    # The real class: coverage's ConfigError (raised by should_fail_under for
+    # an out-of-range threshold) derives from it.
+    CoverageException = _real_cov_exceptions.CoverageException
 
-    def __init__(self, report_pct=100.0, raise_on_report=False, raise_on_combine=False):
+    def __init__(
+        self,
+        report_pct=100.0,
+        raise_on_report=False,
+        raise_on_combine=False,
+        config_fail_under=0.0,
+        config_precision=0,
+    ):
         super().__init__("coverage")
         self._report_pct = report_pct
         self._raise_on_report = raise_on_report
@@ -294,6 +304,10 @@ class _FakeCoverageModule(types.ModuleType):
         class Coverage:
             def __init__(self, config_file=True):
                 module.calls.append(("init", config_file))
+                # coverage's CoverageConfig: [report] fail_under / precision.
+                self.config = types.SimpleNamespace(
+                    fail_under=config_fail_under, precision=config_precision
+                )
 
             def combine(self, keep=False):
                 module.calls.append(("combine", keep))
@@ -311,8 +325,10 @@ class _FakeCoverageModule(types.ModuleType):
             def get_data(self):
                 return _FakeData([], [], {})
 
-            def report(self, show_missing=False):
-                module.calls.append(("report", show_missing))
+            def report(self, show_missing=False, precision=None, file=None, ignore_errors=None):
+                if file is None:  # a printed report, not the silent total
+                    module.calls.append(("report", show_missing))
+                    module.calls.append(("precision", precision))
                 if module._raise_on_report:
                     raise module.CoverageException("boom")
                 return module._report_pct
@@ -340,8 +356,11 @@ class _FakeCoverageModule(types.ModuleType):
 
 
 def _install_fake_coverage(monkeypatch, **kwargs):
+    # The fake replaces the package; keep coverage's real results helpers
+    # (should_fail_under, display_covered) reachable under it.
     fake = _FakeCoverageModule(**kwargs)
     monkeypatch.setitem(__import__("sys").modules, "coverage", fake)
+    monkeypatch.setitem(__import__("sys").modules, "coverage.results", _real_cov_results)
     return fake
 
 
@@ -390,6 +409,77 @@ def test_main_fail_under_met_returns_0(monkeypatch):
     assert covtool.main(["--cov-fail-under=80"]) == 0
 
 
+def test_main_fail_under_prints_pytest_cov_lines(monkeypatch, capsys):
+    _install_fake_coverage(monkeypatch, report_pct=77.777)
+    assert covtool.main(["--cov-fail-under=90"]) == 1
+    out = capsys.readouterr().out
+    assert "ERROR: Coverage failure: total of 78 is less than fail-under=90" in out
+    assert "FAIL Required test coverage of 90% not reached. Total coverage: 77.78%" in out
+    _install_fake_coverage(monkeypatch, report_pct=95.0)
+    covtool.main(["--cov-fail-under=80"])
+    out = capsys.readouterr().out
+    assert "Required test coverage of 80% reached. Total coverage: 95.00%" in out
+    assert "ERROR" not in out and "FAIL" not in out
+
+
+def test_main_fail_under_falls_back_to_config(monkeypatch, capsys):
+    # No --cov-fail-under: pytest-cov gates on [report] fail_under.
+    _install_fake_coverage(monkeypatch, report_pct=80.0, config_fail_under=99.0)
+    assert covtool.main(["--cov=mod"]) == 1
+    assert "Required test coverage of 99.0% not reached" in capsys.readouterr().out
+    # The flag wins over the config.
+    _install_fake_coverage(monkeypatch, report_pct=80.0, config_fail_under=99.0)
+    assert covtool.main(["--cov=mod", "--cov-fail-under=70"]) == 0
+    capsys.readouterr()
+    # The config default (0) gates nothing and prints no Required line.
+    _install_fake_coverage(monkeypatch, report_pct=10.0)
+    assert covtool.main(["--cov=mod"]) == 0
+    assert "Required" not in capsys.readouterr().out
+
+
+def test_main_fail_under_rounds_to_precision(monkeypatch, capsys):
+    # 77.78% at precision 0 rounds to 78: pytest-cov passes, though its
+    # Required line (worded on the raw total) still says "not reached".
+    _install_fake_coverage(monkeypatch, report_pct=77.78)
+    assert covtool.main(["--cov-fail-under=78"]) == 0
+    out = capsys.readouterr().out
+    assert "ERROR" not in out
+    assert "FAIL Required test coverage of 78% not reached" in out
+    # At precision 2 (config or flag) it stays 77.78 and fails.
+    _install_fake_coverage(monkeypatch, report_pct=77.78, config_precision=2)
+    assert covtool.main(["--cov-fail-under=78"]) == 1
+    assert "total of 77.78 is less than fail-under=78.00" in capsys.readouterr().out
+    fake = _install_fake_coverage(monkeypatch, report_pct=77.78)
+    assert covtool.main(["--cov-fail-under=78", "--cov-precision", "2"]) == 1
+    # The term report is printed at that precision too.
+    assert ("precision", 2) in fake.calls
+
+
+def test_main_fail_under_100_means_exactly_100(monkeypatch):
+    _install_fake_coverage(monkeypatch, report_pct=99.99)
+    assert covtool.main(["--cov-fail-under=100"]) == 1
+
+
+def test_main_fail_under_checked_once_across_reports(monkeypatch, capsys):
+    _install_fake_coverage(monkeypatch, report_pct=50.0)
+    status = covtool.main(["--cov-report=term", "--cov-report=xml", "--cov-fail-under=80"])
+    assert status == 1
+    assert capsys.readouterr().out.count("not reached") == 1
+
+
+def test_main_fail_under_without_reports(monkeypatch):
+    # --cov-report= prints nothing but pytest-cov still gates on the total.
+    _install_fake_coverage(monkeypatch, report_pct=50.0)
+    assert covtool.main(["--cov-report=", "--cov-fail-under=80"]) == 1
+
+
+def test_main_bad_threshold_returns_1(monkeypatch):
+    _install_fake_coverage(monkeypatch)
+    assert covtool.main(["--cov-precision=x"]) == 1
+    _install_fake_coverage(monkeypatch, config_fail_under=150.0)
+    assert covtool.main(["--cov=mod"]) == 1
+
+
 def test_main_coverage_exception_returns_1(monkeypatch):
     _install_fake_coverage(monkeypatch, raise_on_report=True)
     assert covtool.main(["--cov-report=term"]) == 1
@@ -412,6 +502,9 @@ def test_main_no_data_to_combine_trips_fail_under(monkeypatch, capsys):
     status = covtool.main(["--cov-report=term", "--cov-fail-under=80"])
     assert status == 1
     assert "not reached" in capsys.readouterr().out
+    # Also from the config's fail_under.
+    _install_fake_coverage(monkeypatch, raise_on_combine=True, config_fail_under=50.0)
+    assert covtool.main(["--cov-report=term"]) == 1
 
 
 def test_main_unknown_report_kind_is_skipped(monkeypatch, caplog):

@@ -53,7 +53,8 @@ Supported pytest-cov options:
 | `--cov=PKG` (repeatable) | measured in every worker |
 | `--cov-report=term` / `term-missing` | printed after the summary |
 | `--cov-report=xml[:path]` / `html[:dir]` / `json` / `lcov` / `annotate` | written by the orchestrator |
-| `--cov-fail-under=N` | enforced after combining; run exits 1 below N |
+| `--cov-fail-under=N` | enforced after combining; run exits 1 below N. As under pytest-cov, without the flag the coverage config's `[report] fail_under` applies, and the total is rounded to the report precision before the comparison, so 77.78% passes `--cov-fail-under=78` at the default precision of 0 |
+| `--cov-precision=N` | the precision the report prints and the fail-under check rounds to; defaults to `[report] precision` |
 | `--cov-context=test` | per-test line contexts, preserved through the parallel merge (see below) |
 | `.coveragerc` / `[tool.coverage.*]` config | honored (read by coverage itself from its default locations) |
 | `--cov-config=PATH` | **not honored by the combine and report step**: rstest renders with coverage's default config lookup (`.coveragerc`, `setup.cfg`, `tox.ini`, `pyproject.toml`), at `-n 0` too, so `omit` / `exclude_lines` in a custom-named file are ignored in the report. Move the settings to a default location |

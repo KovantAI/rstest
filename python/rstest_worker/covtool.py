@@ -12,12 +12,16 @@ also (a) enables `show_contexts` so html/json reports surface them and
 (b) writes a line->test index to `.rstest_cache/coverage_index.json` for
 coverage-based `--changed` selection.
 
-Exit code: 0, or 1 when --cov-fail-under is not met (matching pytest-cov).
+Exit code: 0, or 1 when the coverage threshold is not met. The threshold and
+the precision it is judged at follow pytest-cov: `--cov-fail-under` /
+`--cov-precision`, else the coverage config's `[report] fail_under` /
+`precision`, and the total is rounded to that precision before comparing.
 """
 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -68,6 +72,57 @@ def _arg_value(args: list[str], name: str) -> str | None:
         if a.startswith(name + "="):
             return a.split("=", 1)[1]
     return None
+
+
+def _fail_under_value(raw: str) -> float:
+    """A `--cov-fail-under` value as pytest-cov parses it: an int when it is
+    one, so the messages print `78%` rather than `78.0%`."""
+    try:
+        return int(raw)
+    except ValueError:
+        return float(raw)
+
+
+def _gate_settings(argv: list[str], flag: str | None, config: Any) -> tuple[float | None, int]:
+    """The fail-under threshold and precision pytest-cov would gate with: the
+    `--cov-fail-under` / `--cov-precision` flags, else the coverage config's
+    `fail_under` / `precision`."""
+    fail_under = (
+        _fail_under_value(flag) if flag is not None else getattr(config, "fail_under", None)
+    )
+    raw_precision = _arg_value(argv, "--cov-precision")
+    precision = int(raw_precision) if raw_precision is not None else getattr(config, "precision", 0)
+    return fail_under, precision
+
+
+def _fails_under(total: float, fail_under: float | None, precision: int) -> bool:
+    """Whether `total` misses the threshold, judged as pytest-cov does
+    (coverage's `should_fail_under`: rounded to `precision`, and 100 means
+    exactly 100); prints pytest-cov's error line when it does."""
+    from coverage.results import display_covered, should_fail_under
+
+    if not fail_under:
+        return False
+    if not should_fail_under(total, fail_under, precision):
+        return False
+    print(
+        f"ERROR: Coverage failure: total of {display_covered(total, precision)} "
+        f"is less than fail-under={fail_under:.{precision}f}"
+    )
+    return True
+
+
+def _print_required(total: float, fail_under: float | None) -> None:
+    """pytest-cov's closing `Required test coverage` line. Like pytest-cov it
+    words the line on the raw total, so a total that rounds up to the
+    threshold reads "not reached" while the run passes."""
+    if fail_under is None or fail_under <= 0:
+        return
+    failed = total < fail_under
+    print(
+        f"{'FAIL ' if failed else ''}Required test coverage of {fail_under}% "
+        f"{'not reached' if failed else 'reached'}. Total coverage: {total:.2f}%"
+    )
 
 
 def _fmt_ranges(lines: list[int]) -> str:
@@ -199,7 +254,7 @@ def main(argv: list[str]) -> int:
     # declared worker dependency; imported lazily so the worker loads without it.
     import coverage
 
-    reports, fail_under = parse(argv)
+    reports, fail_under_flag = parse(argv)
     context_mode = _context_mode(argv)
 
     # Honor --cov-config as pytest-cov does: the workers wrote their data where
@@ -207,6 +262,11 @@ def main(argv: list[str]) -> int:
     # ".coveragerc" is pytest-cov's default, which coverage treats as "search
     # the usual config files".
     cov = coverage.Coverage(config_file=_arg_value(argv, "--cov-config") or ".coveragerc")
+    try:
+        fail_under, precision = _gate_settings(argv, fail_under_flag, cov.config)
+    except (ValueError, coverage.CoverageException) as exc:
+        log.error("bad coverage threshold: %s", exc)
+        return 1
     # Suffixed worker data files exist after a pool run; a single-worker
     # run already wrote a plain .coverage.
     try:
@@ -218,47 +278,52 @@ def main(argv: list[str]) -> int:
         # (NoDataError). Report 0% instead of crashing the whole run.
         log.warning("no coverage data to combine: %s", exc)
         print("Total coverage: 0.00%")
-        if fail_under is not None and float(fail_under) > 0.0:
-            print(
-                f"FAIL Required test coverage of {fail_under}% not reached. Total coverage: 0.00%"
-            )
+        try:
+            failed = _fails_under(0.0, fail_under, precision)
+        except coverage.CoverageException as exc:
+            log.error("coverage threshold check failed: %s", exc)
             return 1
-        return 0
+        _print_required(0.0, fail_under)
+        return 1 if failed else 0
 
+    # One total gates the run, as in pytest-cov (not one check per report).
     status = 0
+    total = 0.0
+    if fail_under:
+        try:
+            total = cov.report(file=io.StringIO(), ignore_errors=True)
+            if _fails_under(total, fail_under, precision):
+                status = 1
+        except coverage.CoverageException as exc:
+            log.error("coverage threshold check failed: %s", exc)
+            return 1
     for spec in reports:
         kind, _, arg = spec.partition(":")
         show_missing = kind == "term-missing"
         try:
             if kind in ("term", "term-missing"):
-                pct = cov.report(show_missing=show_missing)
+                cov.report(show_missing=show_missing, precision=precision)
             elif kind == "xml":
-                pct = cov.xml_report(outfile=arg or None)
+                cov.xml_report(outfile=arg or None)
                 print(f"Coverage XML written to file {arg or 'coverage.xml'}")
             elif kind == "html":
                 # show_contexts surfaces per-test contexts in the HTML report
                 # (only meaningful under --cov-context; harmless otherwise).
-                pct = cov.html_report(directory=arg or None, show_contexts=context_mode)
+                cov.html_report(directory=arg or None, show_contexts=context_mode)
                 print(f"Coverage HTML written to dir {arg or 'htmlcov'}")
             elif kind == "json":
-                pct = cov.json_report(outfile=arg or None, show_contexts=context_mode)
+                cov.json_report(outfile=arg or None, show_contexts=context_mode)
             elif kind == "lcov":
-                pct = cov.lcov_report(outfile=arg or None)
+                cov.lcov_report(outfile=arg or None)
             elif kind == "annotate":
                 cov.annotate(directory=arg or None)
-                pct = None
             else:
                 log.warning("unknown --cov-report kind: %r", kind)
                 continue
         except coverage.CoverageException as exc:
             log.error("coverage report failed: %s", exc)
             return 1
-        if fail_under is not None and pct is not None and pct < float(fail_under):
-            print(
-                f"FAIL Required test coverage of {fail_under}% not reached. "
-                f"Total coverage: {pct:.2f}%"
-            )
-            status = 1
+    _print_required(total, fail_under)
 
     # Build the line->test index from the merged contexts (coverage-based
     # --changed reads this). Best-effort - a failure here must not fail the run.

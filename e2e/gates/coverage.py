@@ -67,6 +67,48 @@ def gate_coverage(g, args, binary):
         f"rc={r.returncode} leftovers={leftovers} " + (r.stdout + r.stderr)[-300:],
     )
 
+    # The pool's fail-under gate must decide as pytest-cov does: fall back to
+    # [report] fail_under, and compare the total rounded to the precision.
+    # 7 of 9 statements run: 77.78%, which rounds to 78 at precision 0.
+    fudir = g.tmp / "covfu"
+    g.write(
+        "covfu/fumod.py",
+        "def f(x):\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n"
+        "    if x:\n        return a + b + c + d\n    y = 5\n    return y\n",
+    )
+    g.write("covfu/test_fu.py", "from fumod import f\n\n\ndef test_f():\n    assert f(1) == 10\n")
+    fu_env = {"PYTHONPATH": str(fudir)}
+    g.write("covfu/.coveragerc", "[report]\nfail_under = 99\n")
+    r = g.run("-n", "2", "--cov=fumod", cwd=fudir, env_extra=fu_env)
+    check(
+        "coverage [report] fail_under gates the pool run",
+        r.returncode == 1
+        and "FAIL Required test coverage of 99.0% not reached. Total coverage: 77.78%" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:],
+    )
+    (fudir / ".coveragerc").unlink()
+    r = g.run("-n", "2", "--cov=fumod", "--cov-fail-under=78", cwd=fudir, env_extra=fu_env)
+    check(
+        "coverage fail-under compares the rounded total (77.78% passes 78)",
+        r.returncode == 0 and "Coverage failure" not in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:],
+    )
+    r = g.run(
+        "-n",
+        "2",
+        "--cov=fumod",
+        "--cov-fail-under=78",
+        "--cov-precision=2",
+        cwd=fudir,
+        env_extra=fu_env,
+    )
+    check(
+        "coverage fail-under honors --cov-precision",
+        r.returncode == 1
+        and "Coverage failure: total of 77.78 is less than fail-under=78.00" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:],
+    )
+
 
 def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
     print("== coverage contexts + line->test index (--cov-context) ==")
