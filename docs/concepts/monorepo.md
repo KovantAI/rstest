@@ -153,8 +153,10 @@ flag is silently dropped.
 projects containing changes run with `--changed` (their own import graph
 narrows further); projects *depending* on a changed project (via
 `[project].dependencies`, optional dependencies, or `[dependency-groups]`,
-transitively) run their full suite (their own files didn't change, so there
-is nothing to narrow by); everything else is **skipped** outright. Changes
+transitively) run their full suite, even when they have changes of their own
+(their import graph covers only their own files, so it cannot see which of
+their tests reach the sibling's change); everything else is **skipped**
+outright. Changes
 outside every project (root configs, shared scripts) conservatively run
 everything in full. Dependency-group edges count on purpose: a package whose
 dev group installs a sibling runs that sibling's code in its tests.

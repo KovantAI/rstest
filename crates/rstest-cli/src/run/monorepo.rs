@@ -132,7 +132,7 @@ pub(super) fn execute_monorepo(
         }
         let slug = mono::slug(root, project);
         // Only directly-changed projects narrow further; a dependent runs its
-        // full suite (its own files didn't change).
+        // full suite (its import graph cannot see the sibling's changes).
         let changed = mono_changed
             .as_deref()
             .filter(|_| impact == mono::ChangeImpact::Direct)
