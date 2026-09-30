@@ -234,10 +234,10 @@ run, so a tree can mark the file red live rather than waiting for
 | `path` | string | the failing collector: rootdir-relative file or nodeid |
 | `longrepr` | string | the collection traceback |
 
-Under full collection every worker collects the whole suite, so
-the same file's `collecterror` is emitted **once per worker**: dedupe by
-`path` if you need one entry per file (the human summary's `N collect errors`
-counts the same way).
+Under full collection every worker collects the whole suite, but a file's
+`collecterror` is emitted **once**, from the first worker that reports it
+(the human summary's `N collect errors`, `collect_errors` and
+`meta.counts.collect_errors` count it once too).
 
 The stream closes with exactly one `sessionfinish`:
 
