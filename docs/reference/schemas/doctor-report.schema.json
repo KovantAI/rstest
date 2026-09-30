@@ -252,7 +252,7 @@
       "type": "object",
       "properties": {
         "efficiency_pct": {
-          "description": "100 * realized / ideal. >100% signals wait-bound overlap.",
+          "description": "100 * realized / ideal: how busy the workers were, up to 100%.",
           "type": "number",
           "format": "double"
         },
@@ -273,7 +273,7 @@
           "format": "double"
         },
         "realized_speedup": {
-          "description": "test_time / wall. May exceed `ideal_speedup` for wait-bound suites,\nwhere overlapping sleeps/IO run more tests at once than there are\ncores.",
+          "description": "test_time / wall. At most `ideal_speedup`, since each worker runs one\ntest at a time; a wait-bound suite run with `-n` above the core count\ncan realize more than the core count.",
           "type": "number",
           "format": "double"
         },

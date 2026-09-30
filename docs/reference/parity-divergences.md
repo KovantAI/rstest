@@ -326,15 +326,17 @@ serial run no longer skips them.
 
 ## 10. Leaked-resource warning attribution
 
-### aiohttp: a different 2-3 tests per run
+### aiohttp: a different few tests per run
 
 aiohttp runs with warnings as errors, and some of its tests leak a socket.
 The leak is only noticed when the garbage collector finalizes the socket,
 which raises an unraisable `ResourceWarning` inside **whatever test is running
 at that moment**, and that test fails. In serial order the collection point is
 stable, so the baseline is clean; under any parallel runner the tests around it
-change and the failure lands somewhere else. Measured 2026-09-26 at `-n 8`
-(99.93-99.96% parity): rstest failed
+change and the failure lands somewhere else. The 2026-09-30 benchmark runs
+measured 99.91-99.98% parity (1 to 4 mismatched tests per run; see
+[Benchmarks](benchmarks.md)). In an earlier sample (2026-09-26, `-n 8`),
+rstest failed
 `test_connector.py::test_tcp_connector_do_not_raise_connector_ssl_error[domain name]`
 and `test_formdata.py::test_formdata_field_name_is_quoted` with
 `ResourceWarning: unclosed <socket.socket ...>`, plus one

@@ -32,7 +32,7 @@ Run-level envelope for the report document.
 | `argv` | array of string | yes | The process argv the run was invoked with. |
 | `counts` | object of integer | yes | Outcome counts (pytest accounting); all keys always present. |
 | `duration_seconds` | number | yes | Wall-clock run duration, rounded to two decimals. |
-| `exitstatus` | integer | yes | Process exit status. |
+| `exitstatus` | integer | yes | Test-session exit status, recorded before the post-run gates (`--fail-on-leak`, `--durations-regress`, `--doctor-fail-on`, `--cov-fail-under`, `--cov-diff-fail-under`) can raise the process exit to 1. |
 | `runner` | string | yes | Constant producer tag: always `"rstest"`. |
 | `schema` | integer | yes | Document schema version. |
 | `shard` | ShardJson | no | Sharding identity; present only under `--shard K/N`. |

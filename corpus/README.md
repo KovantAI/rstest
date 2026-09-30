@@ -1,8 +1,8 @@
 # Public-suite corpus
 
 Parity + timing runs of rstest against well-known open-source pytest
-suites. Every suite runs twice from the same venv — baseline `pytest`
-(pinned to the vendored version) and `rstest` — and per-test outcomes
+suites. Every suite runs twice from the same venv (baseline `pytest`,
+pinned to the vendored version, and `rstest`), and per-test outcomes
 are diffed (setup/call/teardown phases plus `wasxfail`).
 
 The plugins these suites load (and pass under rstest) are inventoried in
@@ -33,9 +33,9 @@ python3 corpus/run.py --skip sqlalchemy
 
 Two strict phases:
 
-1. **prepare** — all network: clone (SHA-pinned via `lock.json`), venv,
+1. **prepare**, all network: clone (SHA-pinned via `lock.json`), venv,
    installs, the rstest wheel (newest in `target/wheels`, or `--wheel`).
-2. **execute** — fully offline: baseline run, rstest run, diff. Results
+2. **execute**, fully offline: baseline run, rstest run, diff. Results
    land in `results.json` and a markdown table on stdout.
 
 Reproducibility measures:
@@ -63,16 +63,16 @@ cores). The default spectrum is picked to span every regime, not just the wins:
 
 | suite | regime | ~speedup |
 |---|---|---|
-| python-dateutil | struggler — tiny suite, rstest startup dominates | 0.94× |
-| httpx | struggler — forced `-n 0` (session fixture, fixed port) | ~1.0× |
+| python-dateutil | struggler: tiny suite, rstest startup dominates | 0.94× |
+| httpx | struggler: forced `-n 0` (session fixture, fixed port) | ~1.0× |
 | fastapi | mid gain | 2.6× |
 | anyio | big gain (also the sweep suite) | 3.9× |
-| langgraph | monorepo — N serial per-lib pytest vs one root run | 1.45× |
+| langgraph | monorepo: N serial per-lib pytest vs one root run | 1.45× |
 
 Speedup tracks the *parallelizable share*, not raw size (a tiny or
 serial-pinned suite can sit at or below 1×). Every point is the **median** of
 `--repeat` runs with the min-max spread shown, since wall time on shared
-runners is noisy. Each rstest run is still diffed against pytest — parity below
+runners is noisy. Each rstest run is still diffed against pytest; parity below
 `--parity-floor` fails, so a fast-but-wrong run is never counted as a win (all
 five defaults are documented at 100% parity). Report → stdout +
 `$GITHUB_STEP_SUMMARY`, data → `bench.json`.
@@ -96,14 +96,19 @@ wrap long runs in `caffeinate -ims` anyway. `bench.json` holds the latest run;
 runs published in the docs are archived in `bench-results/`.
 
 Runs weekly (+ manual) on a standard GitHub runner via
-`.github/workflows/corpus-bench.yml` — a fresh measured datapoint on public
+`.github/workflows/corpus-bench.yml`: a fresh measured datapoint on public
 hardware, never a projection. Soft gate: the sweep suite's best speedup must
 clear `--floor` (default 2x). Wall time is otherwise advisory; never gate
 ordinary CI on it.
 
 ## Results (2026-06-13, M-series macOS, wheel 0.0.5)
 
-26/31 suites at 100% per-test outcome parity; every non-100% suite is
+A historical snapshot, kept as the per-suite parity record. The current
+published numbers (re-measured 2026-09-30 with rstest 0.8.0) are in
+[docs/reference/benchmarks.md](../docs/reference/benchmarks.md); test counts
+and walls there differ from this table.
+
+25/31 suites at 100% per-test outcome parity; every non-100% suite is
 explained below (permanent by-design diffs or upstream flakes that hit
 plain pytest equally).
 
@@ -141,7 +146,7 @@ plain pytest equally).
 | pluggy | 139 | 100% | 0.2s | 0.2s |
 | markupsafe | 80 | 100% | 0.6s | 0.2s |
 
-Totals: ~341k tests. Headline walls: pandas 4.6×, aiohttp 3.0×,
+Totals: ~337k tests. Headline walls: pandas 4.6×, aiohttp 3.0×,
 anyio 3.9×, allauth 3.0×, requests 5.5×, typer 3.1×.
 
 ### Monorepo (mono mode, rstest 0.6.0)
@@ -150,15 +155,15 @@ Measured separately from the table above (wheel 0.6.0, pytest 9.1.1 pin,
 10-run mean ± σ on an idle M-series box). langgraph is a monorepo: N
 per-lib pytest configs the baseline runs serially vs one root rstest
 pass. The measured subset is the five DB-free, service-free libs
-(`libs/langgraph` itself is excluded — its live-app/service tests hang
+(`libs/langgraph` itself is excluded: its live-app/service tests hang
 the plain-pytest baseline in a service-less env; see `suites.toml`).
 
 | suite | tests | parity | pytest | rstest | speedup |
 |---|---|---|---|---|---|
 | langgraph (5 libs) | 838 | 100% | 187.4±4.4s | 128.9±3.2s | 1.45× |
 
-The 1.45× (vs 2.9–3.0× on the flat suites) is capped by a few slow
-wait/IO-bound tests in `libs/checkpoint`, not by dispatch — per-test
+The 1.45× (vs 3.0-5.5× for the headline flat suites above) is capped by a few slow
+wait/IO-bound tests in `libs/checkpoint`, not by dispatch; per-test
 outcome parity is exact across the separate-pyproject libs in one run.
 
 ## Per-suite policies
@@ -181,33 +186,33 @@ itself: it builds a shim `WorkerController` and runs every plugin's
 for plugins that register mid-`configure`). This covers hooks whose
 injected value is **self-derivable** (a `uuid4`, or a `workerid` suffix):
 
-- **sqlalchemy** (`follower_ident`) — runs at full **`-n auto`, 10×**
-  (533s→53s), 99.97%. xdist installed → its `XDistHooks` registers → the
+- **sqlalchemy** (`follower_ident`) runs at full **`-n auto`, 10×**
+  (524.5s→52.6s), 99.97%. xdist installed → its `XDistHooks` registers → the
   emulation fires `configure_node` → each worker self-assigns
   `follower_ident=uuid4()` and provisions its own follower DB. The 7-test
   gap is serial-baseline-vs-parallel (those IMV/RETURNING tests skip in the
-  serial baseline but pass under real xdist *and* rstest) — not a follower
+  serial baseline but pass under real xdist *and* rstest), not a follower
   bug.
 
-The model can't substitute for a real master when the injected value needs
-**single-allocator cross-worker coordination** — e.g. pytest-retry's
-`server_port`, one `ReportServer` all workers dial. Worse, its master
-branch is gated on `numprocesses`, which rstest nulls to stop xdist's
-session — so the server never starts and the worker `KeyError`s on the
-missing port. That's the langgraph `checkpoint-sqlite` serial pin, and the
-one case that would need a controller-side configure pass (or letting
-plugin master-detection see a truthy `numprocesses` without engaging
-xdist's session).
+A value that needs **single-allocator cross-worker coordination** (one
+counter or registry shared by all workers) can't be emulated this way.
+pytest-retry's `server_port` looked like that case but isn't: rstest keeps
+`numprocesses` visible (it stops xdist's session with `dist="no"` instead),
+so with xdist installed the plugin's controller branch runs in each worker
+and provisions its own `ReportServer`; without xdist, rstest starts that
+server in each worker and seeds `workerinput["server_port"]`. The langgraph
+`checkpoint-sqlite` lib runs at full worker count with no per-lib policy.
+Details: [xdist hook emulation](../docs/concepts/xdist-hooks.md).
 
 ### Test-order plugins (pytest-randomly / reverse / ordering)
 
 No impact, no policy needed. The collection-mismatch guard hashes each
 worker's `session.items` in collection order (order-sensitive), so a
-plugin that shuffles per process *would* diverge — but rstest syncs the
+plugin that shuffles per process *would* diverge, but rstest syncs the
 randomly seed across workers (via its emulated `workerinput`), so every
 worker collects the same shuffled order, hashes match, and dispatch is
 safe. **structlog** (pytest-randomly) runs at full `-n auto` with no
-policy, 100% parity — verified stable across runs. Deterministic
+policy, 100% parity, verified stable across runs. Deterministic
 reorderers (reverse/ordering) never diverge in the first place.
 
 ### Run-dependent parametrize IDs (`now()`/`uuid4`/addresses)
@@ -218,7 +223,7 @@ breaks that depends on **where** the nondeterminism lives:
 
 - **positionally stable across workers** (a `now()` timestamp each worker
   evaluates at the same collection position) → hashes match, no bail, ids pair
-  1:1 against the baseline. **marshmallow** runs at full `-n auto`, **100%** —
+  1:1 against the baseline. **marshmallow** runs at full `-n auto`, **100%**,
   *as long as collection order is preserved*. (Do **not** use `--collect lazy`
   here: its file-affine reorder breaks the positional pairing → 99.66%.)
 - **per-worker-process values** (object **memory addresses** `0x…`, generator
@@ -230,33 +235,33 @@ breaks that depends on **where** the nondeterminism lives:
 `--collect lazy` (one worker per file, no cross-worker hash compare) is the
 escape hatch when the divergence is real but the per-file order is stable:
 
-- **arrow** — was `-n 0`, now `--collect lazy` at full `-n auto` (100%).
+- **arrow**: was `-n 0`, now `--collect lazy` at full `-n auto` (100%).
 
 httpx `-n 0` has no flag fix: its session fixture binds a fixed port
 (port-using tests span 9 files, so even `--dist loadfile` can't confine
-them to one worker — `-n 4` deadlocks on the double bind, and there are no
+them to one worker; `-n 4` deadlocks on the double bind, and there are no
 `xdist_group` markers for `--dist loadgroup` to use).
 
 ## Known permanent diffs
 
-Each entry below — root cause plus the concrete upstream change that would
-remove it — is catalogued in
+Each entry below (root cause plus the concrete upstream change that would
+remove it) is catalogued in
 [Parity divergences & upstream fixes](../docs/reference/parity-divergences.md).
 
-- **requests** — one test parametrizes on `pytest.__file__`, which
+- **requests**: one test parametrizes on `pytest.__file__`, which
   resolves to the vendored core inside workers. Visible vendoring,
   by design (decision D7).
-- **pydantic** — one test parametrizes on `sys.path`, which inside
+- **pydantic**: one test parametrizes on `sys.path`, which inside
   workers contains the vendored-core entry. Same class as requests.
-- **werkzeug** — one unix-socket server test is parallel-unsafe and
+- **werkzeug**: one unix-socket server test is parallel-unsafe and
   flaky under any runner at load.
-- **rich** — `test_syntax.py` lexer-guess tests flake under plain
+- **rich**: `test_syntax.py` lexer-guess tests flake under plain
   sequential pytest too (~1 in 5 full-suite runs; verified
   pytest=failed/rstest=passed): upstream test pollution, both runners
   affected equally. Installing ipywidgets (unused by the tests) makes
-  it worse — its IPython dependency registers a pygments plugin lexer
+  it worse: its IPython dependency registers a pygments plugin lexer
   with nondeterministic tie-breaking.
-- **typer** — one warning-assertion test is load-sensitive; flakes at
+- **typer**: one warning-assertion test is load-sensitive; flakes at
   high worker counts (hence the `-n 4` policy).
 
 ## Corpus-found bugs (fixed)
@@ -264,11 +269,11 @@ remove it — is catalogued in
 The corpus exists to find real-world gaps; the notable catches:
 
 - pool mode ran tests past collection errors (pytest's abort guard
-  lives in the `pytest_runtestloop` that item dispatch replaces) —
+  lives in the `pytest_runtestloop` that item dispatch replaces),
   caught by jsonschema,
 - `multiprocessing` spawn / `anyio.to_process` children re-import the
   worker's `__main__` without package context (relative import,
-  unguarded `main()`, non-idempotent sys.path bootstrap) — caught by
+  unguarded `main()`, non-idempotent sys.path bootstrap), caught by
   anyio, including `test_identical_sys_path`,
 - broken-pipe tracebacks from workers after a collection-mismatch
   refusal, and the refusal message itself not naming the common causes.
