@@ -46,6 +46,26 @@ def gate_coverage(g, args, binary):
         r.returncode == 1 and "FAIL Required" in r.stdout,
         r.stdout[-200:],
     )
+    # --cov-config must reach the combine step too: the workers write their
+    # data where that config's data_file says, so a combine that ignores it
+    # finds nothing ("No data to report") and leaves the worker files behind.
+    g.write("cov/cov.cfg", "[run]\ndata_file = covdata/.coverage\n")
+    (covdir / "covdata").mkdir(exist_ok=True)
+    r = g.run(
+        "test_cov.py",
+        "-n",
+        "2",
+        "--cov=mypkg",
+        "--cov-config=cov.cfg",
+        cwd=covdir,
+        env_extra={"PYTHONPATH": str(covdir)},
+    )
+    leftovers = sorted(p.name for p in (covdir / "covdata").glob(".coverage.*"))
+    check(
+        "--cov-config honored when combining",
+        r.returncode == 0 and "__init__.py" in r.stdout and not leftovers,
+        f"rc={r.returncode} leftovers={leftovers} " + (r.stdout + r.stderr)[-300:],
+    )
 
 
 def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):

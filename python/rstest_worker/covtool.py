@@ -202,7 +202,11 @@ def main(argv: list[str]) -> int:
     reports, fail_under = parse(argv)
     context_mode = _context_mode(argv)
 
-    cov = coverage.Coverage()
+    # Honor --cov-config as pytest-cov does: the workers wrote their data where
+    # that config says (e.g. a custom `data_file`), so combine must look there.
+    # ".coveragerc" is pytest-cov's default, which coverage treats as "search
+    # the usual config files".
+    cov = coverage.Coverage(config_file=_arg_value(argv, "--cov-config") or ".coveragerc")
     # Suffixed worker data files exist after a pool run; a single-worker
     # run already wrote a plain .coverage.
     try:

@@ -292,6 +292,9 @@ class _FakeCoverageModule(types.ModuleType):
         module = self
 
         class Coverage:
+            def __init__(self, config_file=True):
+                module.calls.append(("init", config_file))
+
             def combine(self, keep=False):
                 module.calls.append(("combine", keep))
                 if module._raise_on_combine:
@@ -350,6 +353,23 @@ def test_main_combines_saves_loads_and_reports(monkeypatch):
     assert ("save",) in fake.calls
     assert ("load",) in fake.calls
     assert ("report", False) in fake.calls
+
+
+def test_main_defaults_config_file_like_pytest_cov(monkeypatch):
+    fake = _install_fake_coverage(monkeypatch)
+    covtool.main(["--cov-report=term"])
+    assert ("init", ".coveragerc") in fake.calls
+
+
+def test_main_honors_cov_config(monkeypatch):
+    # Workers wrote data where --cov-config says (e.g. a custom data_file), so
+    # combine must load the same config or it finds nothing.
+    fake = _install_fake_coverage(monkeypatch)
+    covtool.main(["--cov=mod", "--cov-config=cov.cfg"])
+    assert ("init", "cov.cfg") in fake.calls
+    fake.calls.clear()
+    covtool.main(["--cov-config", "other.cfg"])
+    assert ("init", "other.cfg") in fake.calls
 
 
 def test_main_term_missing_sets_show_missing(monkeypatch):
