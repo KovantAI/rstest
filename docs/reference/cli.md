@@ -363,9 +363,10 @@ failing test keeps being selected until it passes.
 
 ### `--incremental`
 
-Dispatch-level incremental testing, without git. rstest collects the whole
-suite, then **skips** every test that passed last run and whose covered source
-is byte-identical now (content-addressed through the coverage index). Skipped
+Dispatch-level incremental testing; git is not required. rstest collects the
+whole suite, then **skips** every test that passed last run and whose covered
+source and imported modules are byte-identical now (content-addressed through
+the coverage index). Skipped
 tests are carried forward as cached passes: they count as passed and carry
 `"cached": true` in [`--report-json`](report-json.md).
 
@@ -376,8 +377,19 @@ tests are carried forward as cached passes: they count as passed and carry
 - Needs the parallel pool with full collection and `--dist load`. Under
   `-n 0/1`, another `--dist`, `--collect lazy`, `--shard` or `--shuffle`,
   rstest warns and runs everything.
+- A test also re-runs when any first-party module its test file imports,
+  directly or transitively (package `__init__.py` files included), has
+  changed. This catches import-time code such as a module-level constant,
+  which coverage records under no test.
 - A config-file change (conftest, pytest config) disables skipping for that
-  run.
+  run. So does a change to any **git-tracked non-Python file** in the
+  project (a JSON fixture, a template, a golden file), since coverage never
+  measures what a test reads. Untracked and ignored files are not watched,
+  and outside a git checkout no non-Python file is: after editing a data file
+  there, do one run without `--incremental`.
+- Other residual gaps: a module loaded by a dynamic import
+  (`importlib.import_module(name)`) or a script a test runs in a subprocess
+  is invisible to both coverage and the import scan.
 - Mutually exclusive with `--changed` (which owns selection) and
   `--since-green`.
 

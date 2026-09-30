@@ -600,6 +600,57 @@ fn walk_would_index(rootdir_canon: &Path, path: &Path) -> bool {
     true
 }
 
+/// The forward import closure of each of `roots` (test files, paths relative to
+/// the CWD or absolute): every project `.py` under `rootdir` it transitively
+/// imports, plus the `__init__.py` of every package on the way (Python runs a
+/// package's `__init__` before any submodule, so `import pkg.sub` executes
+/// `pkg/__init__.py` with no edge naming it). Keyed by the root as given;
+/// values are canonical paths, sorted, the root itself excluded. Suffix
+/// resolution over-approximates, which only ever adds files: callers use the
+/// closure to decide what can invalidate a cached result.
+pub fn import_closures(rootdir: &Path, roots: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
+    let Ok(index) = ProjectIndex::build(rootdir) else {
+        return HashMap::new();
+    };
+    let mut forward: HashMap<&Path, Vec<&Path>> = HashMap::new();
+    for (target, importers) in &index.reverse {
+        for imp in importers {
+            forward
+                .entry(imp.as_path())
+                .or_default()
+                .push(target.as_path());
+        }
+    }
+    let root_canon = canonical_lossy(rootdir);
+    roots
+        .iter()
+        .map(|root| {
+            let start = canonical_lossy(root);
+            let mut seen: HashSet<PathBuf> = HashSet::from([start.clone()]);
+            let mut queue: VecDeque<PathBuf> = VecDeque::from([start.clone()]);
+            while let Some(file) = queue.pop_front() {
+                let edges = forward.get(file.as_path()).into_iter().flatten();
+                let inits = file
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|d| d.starts_with(&root_canon))
+                    .map(|d| d.join("__init__.py"))
+                    .filter(|p| p.is_file());
+                let next: Vec<PathBuf> = edges.map(|p| p.to_path_buf()).chain(inits).collect();
+                for n in next {
+                    if seen.insert(n.clone()) {
+                        queue.push_back(n);
+                    }
+                }
+            }
+            seen.remove(&start);
+            let mut deps: Vec<PathBuf> = seen.into_iter().collect();
+            deps.sort();
+            (root.clone(), deps)
+        })
+        .collect()
+}
+
 /// `file`'s imported `modules` resolved to project files, minus self-edges.
 fn resolve_out(resolver: &Resolver, modules: &[String], file: &Path) -> Vec<PathBuf> {
     modules
@@ -685,6 +736,36 @@ mod tests {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn import_closures_follow_transitive_imports_and_package_inits() {
+        let root = tmp("closure");
+        write(&root, "consts.py", "LIMIT = 5\n");
+        write(&root, "wrap.py", "from consts import LIMIT\n");
+        write(&root, "unrelated.py", "X = 1\n");
+        write(&root, "pkg/__init__.py", "FACTOR = 2\n");
+        write(&root, "pkg/sub/__init__.py", "");
+        write(&root, "pkg/sub/calc.py", "def calc():\n    return 1\n");
+        write(&root, "tests/test_a.py", "import wrap\n");
+        write(&root, "tests/test_b.py", "import pkg.sub.calc\n");
+        let a = root.join("tests/test_a.py");
+        let b = root.join("tests/test_b.py");
+        let closures = super::import_closures(&root, &[a.clone(), b.clone()]);
+        assert_eq!(
+            closures[&a],
+            vec![root.join("consts.py"), root.join("wrap.py")]
+        );
+        // `import pkg.sub.calc` names only calc.py; both package inits run too.
+        assert_eq!(
+            closures[&b],
+            vec![
+                root.join("pkg/__init__.py"),
+                root.join("pkg/sub/__init__.py"),
+                root.join("pkg/sub/calc.py"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub use git::{changed_files_from_git, changed_line_ranges, changed_new_lines, re
 pub use graph::{affected_tests_cached, CollectionCache};
 // pub(crate) helpers reused elsewhere in the crate (not part of the public API).
 pub(crate) use coverage::current_sha256;
-pub(crate) use graph::imports_of;
+pub(crate) use graph::{import_closures, imports_of};
 
 /// Why a full run is required instead of a selection.
 pub enum Selection {

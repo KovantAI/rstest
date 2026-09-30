@@ -37,9 +37,12 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   working tree, stamped with an environment fingerprint (interpreter and dependency manifests). Read by
   [`--since-green`](../reference/cli.md#-since-green); an environment change
   busts it, so the next run selects everything. Safe to delete.
-- `incremental_outcomes.json`: per-test outcomes, source lines and coverage
-  hashes from the last [`--incremental`](../reference/cli.md#-incremental)
-  run, so an unchanged green test can be skipped. Also read by
+- `incremental_outcomes.json`: per-test outcomes, source lines, coverage
+  hashes and each test file's import closure (with content hashes) from the
+  last [`--incremental`](../reference/cli.md#-incremental) run, so an
+  unchanged green test can be skipped. Its fingerprint also covers config
+  files, conftests and git-tracked non-Python files; non-Python files are
+  not tracked outside a git checkout (see the flag's caveats). Also read by
   [`rstest explain`](../reference/cli-commands.md#explain). Safe to delete:
   the next run re-runs everything and rebuilds it.
 - `replay/`: the schedule of each parallel run (`<run-uid>.json`, the last 10
