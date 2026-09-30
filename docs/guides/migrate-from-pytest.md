@@ -90,7 +90,11 @@ header line. Check each item against your suite:
   that depend on a previous test's side effects need [`--dist
   loadfile`](parallel-safety.md#file-affinity) or a fix.
 - [ ] *Large suites may switch to lazy collection* once the cache is warm
-  (at least 2000 cached tests and `tests × workers` of at least 16 000). Each
+  (at least 2000 cached tests and `tests × workers` of at least 16 000),
+  under `--dist load` or `loadfile` only, and never with `--shard`,
+  `--shuffle`, `--incremental`, a fail-fast order (including `--watch`'s),
+  a nodeid, `--pyargs` or path selection, or doctests enabled
+  ([full rules](../concepts/lazy-collection.md#auto-default)). Each
   worker then imports only the test files it runs, so a `skipif` that reads
   `sys.modules` or a test that relies on a sibling module's import can behave
   differently. A banner line says when this happens; pin `--collect full` if
