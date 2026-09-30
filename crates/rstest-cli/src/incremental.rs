@@ -5,7 +5,8 @@
 //! the cache. The working tree is diffed against that commit, so only tests
 //! affected by changes since then are selected; everything else is provably
 //! unaffected and skipped. The baseline advances ONLY on a green run, so a
-//! failing test keeps being selected until it passes.
+//! failing test keeps being selected until it passes, and only from a clean
+//! working tree: a green run over uncommitted edits says nothing about HEAD.
 //!
 //! Soundness: like `--changed`, this reasons over FIRST-PARTY source tracked by
 //! git. An environment change invisible to git is caught by [`env_fingerprint`],
@@ -67,6 +68,25 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
         let _ = cache::write_atomic(&cache::file_in(scope, FILE), &bytes);
     }
 }
+
+/// Advance the green baseline to `head`, but only when the working tree is
+/// clean as `--changed` sees it (no diff against HEAD, no untracked files;
+/// runner artifacts ignored). A green run over uncommitted edits proves the
+/// WORKING TREE green, not HEAD: recording HEAD there would let a revert of
+/// those edits diff as "0 changed" against a red commit. A dirty tree keeps the
+/// old baseline, so the next run re-diffs from it (edits included). Returns
+/// whether the baseline was recorded; a git failure counts as dirty.
+pub fn record_green_if_clean(scope: &Path, head: &str, fingerprint: &str) -> bool {
+    let clean = crate::select::changed_files_from_git(None).is_ok_and(|f| f.is_empty());
+    if clean {
+        record_green(scope, head, fingerprint);
+    }
+    clean
+}
+
+/// The one-line notice for a green run that could not advance the baseline.
+pub const DIRTY_TREE_NOTICE: &str = "rstest: --since-green: working tree has uncommitted \
+     changes; the green baseline stays put until a green run on a clean tree";
 
 /// A hash of the test environment that git can't see: the resolved interpreter
 /// (size only), the content of any dependency manifests under `scope`, and every

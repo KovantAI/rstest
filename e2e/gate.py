@@ -56,6 +56,7 @@ from gates.incremental import (
     gate_incremental_dispatch_skip,
     gate_incremental_guards,
     gate_incremental_out_of_scope_source,
+    gate_since_green_dirty_tree,
     gate_since_green_incremental,
 )
 from gates.misc import (
@@ -248,6 +249,7 @@ def main():
         gate_diff_coverage_gate,
         gate_smart_selection,
         gate_since_green_incremental,
+        gate_since_green_dirty_tree,
         gate_incremental_dispatch_skip,
         gate_incremental_guards,
         gate_incremental_out_of_scope_source,

@@ -144,10 +144,14 @@ fn apply_selection(
                 }
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
-                // don't force a re-run next time.
+                // don't force a re-run next time. Clean tree only: uncommitted
+                // edits can mask a red HEAD (a local revert of a bad commit
+                // diffs as "nothing changed" against the old baseline).
                 if since_green {
                     if let Some(h) = &head {
-                        incremental::record_green(&cwd, h, env_fp);
+                        if !incremental::record_green_if_clean(&cwd, h, env_fp) {
+                            sink.warn(incremental::DIRTY_TREE_NOTICE);
+                        }
                     }
                 }
                 // Strict gating still wins on the exit code: it needs to

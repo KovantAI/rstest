@@ -755,10 +755,13 @@ pub(super) fn run_post_gates(
     // Incremental testing: a fully green run advances the baseline to the commit
     // we ran at, so the next --since-green run only re-selects changes made after
     // it. Recorded only on green (exitstatus 0) — a failing test keeps being
-    // selected until it passes.
+    // selected until it passes - and only on a clean tree, since a green dirty
+    // tree says nothing about HEAD itself.
     if since_green && exitstatus == 0 {
         if let Some(h) = head {
-            incremental::record_green(&std::env::current_dir()?, h, env_fp);
+            if !incremental::record_green_if_clean(&std::env::current_dir()?, h, env_fp) {
+                sink.warn(incremental::DIRTY_TREE_NOTICE);
+            }
         }
     }
     // --incremental: persist this run's green set (tests that ran green + the

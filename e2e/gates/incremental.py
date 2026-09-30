@@ -127,6 +127,75 @@ def gate_since_green_incremental(g, args, binary):
     )
 
 
+def gate_since_green_dirty_tree(g, args, binary):
+    """A green run over uncommitted edits proves the working tree green, not
+    HEAD. Recording HEAD there let a later revert of the edit diff as "0
+    changed" against a red commit: a false green."""
+    print("== since-green dirty tree ==")
+    sp = g.tmp / "sgdirty"
+    g.write("sgdirty/mod.py", "def f():\n    return 1\n")
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 2\n")
+    g.write("sgdirty/pyproject.toml", "[tool.pytest.ini_options]\n")
+    g.write("sgdirty/.gitignore", ".rstest_cache/\n.pytest_cache/\n__pycache__/\n")
+    git_init_commit(sp, "red")
+    env = {"PYTHONPATH": str(sp)}
+
+    # Fix HEAD's failure in the working tree only: green, but HEAD is red.
+    # (Edits change file size so a same-second revert cannot reuse a stale .pyc.)
+    g.write("sgdirty/mod.py", "def f():\n    return 1 + 1\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: green run on a dirty tree does not record HEAD",
+        r.returncode == 0
+        and _since_green_baseline(sp) is None
+        and "working tree has uncommitted changes" in r.stderr,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} {r.stderr[-300:]}",
+    )
+
+    # Revert the fix: the tree now IS the red HEAD, which must be re-run.
+    git(sp, "checkout", "-q", "mod.py")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: reverting to a red HEAD still runs and fails",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # Commit the fix: green on a clean tree now records HEAD.
+    g.write("sgdirty/mod.py", "def f():\n    return 1 + 1\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "fix")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: green run on a clean tree records HEAD",
+        r.returncode == 0 and _since_green_baseline(sp) == _head_sha(sp),
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # "Nothing affected" also records only on a clean tree: commit a break, undo
+    # it in the working tree, and the baseline..worktree diff is empty, so no
+    # test runs. That must not advance the baseline to the red commit.
+    base = _since_green_baseline(sp)
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 333\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "break-test")
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 2\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: a masked red commit does not advance the baseline",
+        r.returncode == 0 and _since_green_baseline(sp) == base,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} base={base} "
+        f"{r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    git(sp, "checkout", "-q", "test_mod.py")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: the red HEAD is still selected after the revert",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+
 def gate_incremental_dispatch_skip(g, args, binary):
     print("== incremental dispatch skip (--incremental) ==")
     sp = g.tmp / "incrdisp"

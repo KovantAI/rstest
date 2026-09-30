@@ -345,8 +345,9 @@ pub struct Cli {
     /// Incremental testing: run only what changed since the last GREEN run,
     /// re-using --changed's coverage-aware selection with an auto-managed
     /// baseline (the commit of the last all-passing run, stored in the cache).
-    /// The baseline advances only when a run is fully green, so a failing test
-    /// keeps being selected until it passes. First run (no baseline) runs
+    /// The baseline advances only when a run is fully green on a clean working
+    /// tree (no uncommitted or untracked changes), so a failing test keeps being
+    /// selected until it passes at a commit. First run (no baseline) runs
     /// everything. Ignored when --changed is given explicitly.
     #[arg(long = "since-green")]
     pub(crate) since_green: bool,

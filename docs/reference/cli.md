@@ -344,6 +344,12 @@ the [`--changed`](#-changedrev) base, so only tests affected by changes since
 then run. The baseline advances **only when a run is fully green**, so a
 failing test keeps being selected until it passes.
 
+- The baseline advances only from a **clean working tree** (nothing
+  uncommitted or untracked, as `--changed` sees it). A green run over local
+  edits proves those edits green, not the commit under them, so it keeps the
+  old baseline and says so on stderr; the next run diffs from that older
+  commit, edits included. Commit, then run once more to advance it.
+
 - First run (no baseline yet) runs everything.
 - The baseline is keyed to an environment fingerprint (interpreter plus the
   content of `uv.lock`, `poetry.lock`, `pdm.lock`, `requirements.txt`); a
