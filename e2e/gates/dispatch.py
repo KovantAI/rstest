@@ -540,6 +540,25 @@ def gate_duration_regression_gate(g, args, binary):
         and "1 duration regression" in r.stderr,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-150:],
     )
+    # Editing the test file stales its scheduling timings, but the gate still
+    # compares against them, so --require-baseline must accept that baseline.
+    with open(ddir / "test_d.py", "a") as f:
+        f.write("\n# edited\n")
+    r = g.run(
+        ".",
+        "-n",
+        "2",
+        "--durations-regress",
+        "2.0",
+        "--require-baseline",
+        cwd=ddir,
+        env_extra={"DREG_SLEEP": "0.1"},
+    )
+    check(
+        "durations-regress: require-baseline accepts an edited file's baseline",
+        r.returncode == 0 and "no regressions" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
 
 
 def gate_native_timeout(g, args, binary):

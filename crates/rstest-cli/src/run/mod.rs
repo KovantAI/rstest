@@ -943,7 +943,7 @@ fn check_require_baseline(cli: &Cli, passthrough: bool) -> Result<()> {
     if cli.require_baseline
         && cli.durations_regress.is_some()
         && !passthrough
-        && durations::load().is_empty()
+        && durations::load_baseline().is_empty()
     {
         anyhow::bail!(
             "--require-baseline: --durations-regress needs a duration baseline in \
@@ -2176,13 +2176,14 @@ fn fold_run_event(
 mod tests {
     use super::{
         attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
-        check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
-        incremental_config, lazy_layout_fits, lazy_should_steal, names_a_selection,
-        names_existing_path, order_ignored_warning, parse_duration_secs, parse_numprocesses,
-        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
-        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
+        check_order_shuffle, check_require_baseline, collect_lazy, dispatch_command,
+        fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
+        names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
+        parse_numprocesses, requests_doctests, resolve_changed_base, resolve_order,
+        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
+        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
+        AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -2919,6 +2920,32 @@ mod tests {
         );
         // A bad duration flag is a hard error, never a silent fold-all.
         assert!(resolve_retention_policy(None, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn require_baseline_accepts_the_baseline_the_regress_gate_uses() {
+        // B11: an edited test file stales its scheduling timing (`load` prunes
+        // it), but `--durations-regress` still compares against it, so
+        // `--require-baseline` must not call that a cold cache.
+        let held = test_env::lock();
+        let dir =
+            std::env::temp_dir().join(format!("rstest-require-baseline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = test_env::set_var(&held, "RSTEST_CACHE", &dir);
+        let cli = Cli::parse_from(["rstest", "--durations-regress", "2", "--require-baseline"]);
+        // Cold: no durations.json at all.
+        assert!(check_require_baseline(&cli, false).is_err());
+        // Passthrough runs no gate, so there is nothing to require.
+        assert!(check_require_baseline(&cli, true).is_ok());
+        std::fs::write(
+            dir.join("durations.json"),
+            br#"{"gone.py::t":{"secs":1.0,"src":"rstest-no-such-dir/gone.py","hash":"00"}}"#,
+        )
+        .unwrap();
+        assert!(crate::scheduling::durations::load().is_empty());
+        assert!(check_require_baseline(&cli, false).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
