@@ -66,8 +66,10 @@ around it, **pytest-freezegun** and **pytest-freezer**
 ([top-100](../reference/top-100-plugins.md)), are marked **✅ Works (i,
 inferred)**: same in-process time-freeze model, not yet runtime-verified.
 
-Nine of the eleven run unchanged or via a native flag; the only two that need
-a mode switch are pytest-html and pytest-sugar.
+Eight of the eleven run unchanged or via a native flag. Three need a change:
+pytest-html and pytest-sugar need a mode switch (`-n 0`), and pytest-timeout
+must be uninstalled or disabled with `-p no:timeout` so rstest's native
+`--timeout` is the only timer.
 
 ## Plugin versions vs the vendored pytest 9
 
