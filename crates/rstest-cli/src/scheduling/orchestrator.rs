@@ -148,6 +148,47 @@ pub(crate) fn fabricate_crash_report(
     }
 }
 
+/// Build the synthetic report for a test that never started because its worker
+/// died for good (restart budget spent) and no surviving worker could take it
+/// over. Reported as a setup failure, so it counts as an error: it did not fail,
+/// it could not run. Without it the test would vanish from every artifact.
+pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Report {
+    proto::Report {
+        nodeid,
+        when: "setup".into(),
+        outcome: "failed".into(),
+        duration: 0.0,
+        longrepr: Some(format!("not run: {reason}")),
+        wasxfail: false,
+        skip_reason: None,
+        cpu: None,
+        thread_delta: None,
+        fd_delta: None,
+        sections: Vec::new(),
+        lineno: None,
+    }
+}
+
+/// Why a swept-up test never ran, for [`fabricate_lost_report`].
+pub(crate) const LOST_NO_WORKER: &str =
+    "every worker that could run it crashed and the restart budget was spent";
+
+/// Record an orchestrator-fabricated report (a crash or a lost test) as final:
+/// render, emit, record, and flag the entry as crash-fabricated.
+pub(crate) fn record_fabricated(
+    sink: &mut Sink,
+    run: &mut Run,
+    prog: &mut Progress,
+    worker_idx: Option<usize>,
+    report: proto::Report,
+) {
+    let nodeid = report.nodeid.clone();
+    prog.on_report(sink, worker_idx, &report);
+    sink.emit_report(worker_idx, &report);
+    run.record(worker_idx, report);
+    run.mark_crashed(&nodeid);
+}
+
 /// Whether a finished item's failed attempt is retry-eligible under
 /// `--only-rerun`: an empty pattern list always allows; otherwise at least one
 /// buffered report must be a failure whose `longrepr` matches a pattern. (The
@@ -509,6 +550,25 @@ mod tests {
         assert_eq!(finalize_exit(&[0], true, 0, true), 2);
         // ...and never downgrades a more severe code.
         assert_eq!(finalize_exit(&[3], false, 0, true), 3);
+    }
+
+    #[test]
+    fn lost_report_records_as_crash_fabricated_error() {
+        // A test no worker was left to run is an error (it could not run),
+        // flagged crash-fabricated, with the reason in its text.
+        let mut run = Run::default();
+        let mut prog = Progress::default();
+        let (mut sink, _cap) = Sink::captured();
+        let fab = fabricate_lost_report("t.py::lost".into(), LOST_NO_WORKER);
+        record_fabricated(&mut sink, &mut run, &mut prog, None, fab);
+        let e = &run.tests()["t.py::lost"];
+        assert_eq!(e.outcome(), "errors");
+        assert!(e.crashed);
+        assert!(e
+            .longrepr
+            .as_deref()
+            .is_some_and(|t| t.starts_with("not run: ")));
+        assert!(!run.all_passed());
     }
 
     #[test]

@@ -16,6 +16,9 @@ pub(super) struct WorkerState {
     /// Told EndSession (no resend).
     pub(super) ended: bool,
     pub(super) dead: bool,
+    /// Its session-local `-x` tripped (Stopped): the worker left its run loop,
+    /// so it must not be handed reclaimed items.
+    pub(super) stopped: bool,
     /// Indices dispatched but not yet item_done'd, in dispatch order.
     pub(super) outstanding: VecDeque<u64>,
     /// The item the worker announced via item_start and hasn't finished.
@@ -72,6 +75,7 @@ impl WorkerState {
             finishing: false,
             ended: false,
             dead: false,
+            stopped: false,
             outstanding: VecDeque::new(),
             running: None,
             running_since: None,

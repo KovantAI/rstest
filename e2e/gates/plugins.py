@@ -49,7 +49,15 @@ def gate_crash_handling(g, args, binary):
     check("crash exit 1", r.returncode == 1)
     g.write("crashloop/test_loop.py", CRASHLOOP)
     r = g.run("crashloop", "-n", "2", timeout=60)
-    check("crash-loop terminates", r.returncode != 0 and "passed" in r.stdout, r.stdout[-200:])
+    # 6 crashes spend the budget (4 respawns) and kill both workers; test_ok
+    # either ran first or is reported not run, but every test is accounted for.
+    check(
+        "crash-loop terminates",
+        r.returncode == 3
+        and "6 failed" in r.stdout
+        and ("1 passed" in r.stdout or "1 errors" in r.stdout),
+        r.stdout[-200:],
+    )
 
 
 def gate_pytest_randomly_real_plugin(g, args, binary):

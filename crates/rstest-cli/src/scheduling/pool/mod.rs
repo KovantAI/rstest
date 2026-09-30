@@ -268,6 +268,18 @@ fn nodeid_at(ids_store: &Option<Vec<String>>, index: u64) -> Option<&str> {
         .map(String::as_str)
 }
 
+/// The report nodeid for a dispatched index: the clean nodeid, with the
+/// ` [gwN]` suffix under `--dist each` (every worker runs its own copy).
+fn report_nodeid(ids_store: &Option<Vec<String>>, dist: Dist, worker: usize, index: u64) -> String {
+    let mut nodeid = nodeid_at(ids_store, index)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("<collected item #{index}>"));
+    if dist == Dist::Each {
+        nodeid.push_str(&format!(" [gw{worker}]"));
+    }
+    nodeid
+}
+
 /// Whether `index` is rerun-eligible under `--reruns-only-known-flaky`: no gate
 /// set (feature off) always passes; otherwise an explicit `@mark.flaky` (present
 /// in `flaky_budget`) or a prior-flaky nodeid in the set qualifies. Matches on
@@ -407,6 +419,9 @@ pub fn run_pool(
     // worker is told no_more_items (it finishes in-flight work and ends;
     // bounded overshoot, same trade xdist makes).
     let mut stopping = false;
+    // A worker died with the restart budget spent: its items moved to
+    // survivors, and anything left unrun at the end is reported as not run.
+    let mut lost_worker = false;
 
     // Replay journaling: record each worker's ordered item_starts so the
     // schedule can be re-pinned later. Off during a replay (don't re-journal),
@@ -739,6 +754,7 @@ pub fn run_pool(
                 // Session-local -x tripped: those items never ran there.
                 let s = &mut states[idx];
                 s.finishing = true;
+                s.stopped = true;
                 for i in &unrun {
                     if let Some(pos) = s.outstanding.iter().position(|x| x == i) {
                         s.outstanding.remove(pos);
@@ -850,57 +866,46 @@ pub fn run_pool(
                 let crashed = states[idx].running.take();
                 states[idx].attempt.clear();
                 states[idx].attempt_failed = false;
-                let orphaned: Vec<u64> = states[idx].outstanding.drain(..).collect();
+                // Gotcha: the crashed item appears in BOTH `running` and
+                // `outstanding`; `rest` excludes it by identity so it never
+                // runs twice (whether retried below or reported failed).
+                let rest: Vec<u64> = states[idx]
+                    .outstanding
+                    .drain(..)
+                    .filter(|&i| Some(i) != crashed)
+                    .collect();
                 let restartable = states[idx].collected && restarts_left > 0;
+                // The crashed item retries only when BOTH the rerun and the
+                // restart budgets allow (segfault-loop guard); otherwise it is
+                // reported failed, not retried.
+                let mut report_crash = crashed;
+                if let (true, Some(i)) = (restartable, crashed) {
+                    // Same known-flaky gate as the ItemDone path: a crash of a
+                    // non-known-flaky, unmarked test is not retried when
+                    // --reruns-only-known-flaky is on.
+                    let known_ok = known_flaky_ok(known_flaky, &flaky_budget, &ids_store, i);
+                    let used = rerun_used.entry(i).or_insert(0);
+                    if *used < budget_of(&flaky_budget, i) && known_ok {
+                        *used += 1;
+                        if let Some(d) = dispatch.as_mut() {
+                            d.requeued.push_back(i);
+                        }
+                        report_crash = None;
+                    }
+                }
+                if let Some(i) = report_crash {
+                    let fab = orchestrator::fabricate_crash_report(
+                        report_nodeid(&ids_store, dist, idx, i),
+                        killed_by,
+                        idx,
+                        &e,
+                    );
+                    orchestrator::record_fabricated(sink, &mut run, &mut prog, Some(idx), fab);
+                }
                 if restartable {
                     restarts_left -= 1;
-                    // Crashed item retries on the replacement worker when it
-                    // has budget, bounded by BOTH rerun and restart budgets
-                    // (segfault-loop guard); else reported failed, not retried.
-
-                    // Gotcha: it appears in BOTH `running` and `outstanding`;
-                    // the orphan loop must skip it by ORIGINAL identity even
-                    // when the rerun branch clears `crashed`, else it runs twice.
-                    let crashed_orig = crashed;
-                    let mut crashed = crashed;
-                    {
-                        if let Some(i) = crashed {
-                            // Same known-flaky gate as the ItemDone path: a
-                            // crash of a non-known-flaky, unmarked test is not
-                            // retried when --reruns-only-known-flaky is on.
-                            let known_ok =
-                                known_flaky_ok(known_flaky, &flaky_budget, &ids_store, i);
-                            let used = rerun_used.entry(i).or_insert(0);
-                            if *used < budget_of(&flaky_budget, i) && known_ok {
-                                *used += 1;
-                                if let Some(d) = dispatch.as_mut() {
-                                    d.requeued.push_back(i);
-                                }
-                                crashed = None;
-                            }
-                        }
-                    }
-                    if let Some(i) = crashed {
-                        let mut nodeid = nodeid_at(&ids_store, i)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("<collected item #{i}>"));
-                        if dist == Dist::Each {
-                            nodeid.push_str(&format!(" [gw{idx}]"));
-                        }
-                        let fab = orchestrator::fabricate_crash_report(nodeid, killed_by, idx, &e);
-                        let crashed_id = fab.nodeid.clone();
-                        prog.on_report(sink, Some(idx), &fab);
-                        sink.emit_report(Some(idx), &fab);
-                        run.record(Some(idx), fab);
-                        run.mark_crashed(&crashed_id);
-                    }
                     if dist == Dist::Each {
-                        each_remnant[idx] = Some(
-                            orphaned
-                                .into_iter()
-                                .filter(|&i| Some(i) != crashed_orig)
-                                .collect(),
-                        );
+                        each_remnant[idx] = Some(rest);
                     } else if pinned.is_some() && states[idx].seeded {
                         // Replay: the replacement runs only what this worker
                         // had left, in order. Without this it would be seeded
@@ -909,16 +914,9 @@ pub fn run_pool(
                         // until the restart budget ran out). A worker that died
                         // before it was seeded ran nothing, so its replacement
                         // takes the full recorded list (no remnant).
-                        pin_remnant[idx] = Some(
-                            orphaned
-                                .into_iter()
-                                .filter(|&i| Some(i) != crashed_orig)
-                                .collect(),
-                        );
+                        pin_remnant[idx] = Some(rest);
                     } else if let Some(d) = dispatch.as_mut() {
-                        for i in orphaned.into_iter().filter(|&i| Some(i) != crashed_orig) {
-                            d.requeued.push_back(i);
-                        }
+                        d.requeued.extend(rest);
                     }
                     sink.warn(&format!(
                         "rstest: worker gw{idx} crashed; respawning \
@@ -936,6 +934,40 @@ pub fn run_pool(
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
+                    lost_worker = true;
+                    // No replacement. Under --dist each and replay the items
+                    // are bound to this slot (each worker runs its own copy;
+                    // replay pins the recorded worker), so they cannot move:
+                    // report them as not run. Otherwise survivors take them
+                    // over (the idle-survivor kick below), and whatever no
+                    // survivor is left to run is swept up after the loop.
+                    if dist == Dist::Each || pinned.is_some() {
+                        let held = pin_serial_held[idx].take().unwrap_or_default();
+                        let reason = format!(
+                            "worker gw{idx} crashed and the restart budget was spent; \
+                             under {} its tests cannot move to another worker",
+                            if dist == Dist::Each {
+                                "--dist each"
+                            } else {
+                                "replay"
+                            }
+                        );
+                        for i in rest.into_iter().chain(held) {
+                            let fab = orchestrator::fabricate_lost_report(
+                                report_nodeid(&ids_store, dist, idx, i),
+                                &reason,
+                            );
+                            orchestrator::record_fabricated(
+                                sink,
+                                &mut run,
+                                &mut prog,
+                                Some(idx),
+                                fab,
+                            );
+                        }
+                    } else if let Some(d) = dispatch.as_mut() {
+                        d.requeued.extend(rest);
+                    }
                     run.collect_error(
                         format!("<worker gw{idx}>"),
                         format!("worker terminated unexpectedly: {e:#}"),
@@ -948,22 +980,15 @@ pub fn run_pool(
                     states[idx].worker.reap();
                     done_workers += 1;
                     if idx == designate {
-                        // Serial phase needs a host; promote the lowest alive
-                        // worker. A finishing worker can't host (session already
-                        // draining); if none remain, serial items are lost (below).
-                        if let Some(next) = states.iter().position(|s| !s.dead && !s.finishing) {
+                        // Serial phase needs a host; promote the lowest worker
+                        // still listening (a finishing one keeps listening, as
+                        // for reruns). With none left the serial items are
+                        // swept up as not run after the loop.
+                        if let Some(next) = states
+                            .iter()
+                            .position(|s| !s.dead && !s.ended && !s.stopped)
+                        {
                             designate = next;
-                        } else if let Some(d) = &dispatch {
-                            if !d.serial.is_empty() {
-                                run.collect_error(
-                                    "<serial phase>".into(),
-                                    format!(
-                                        "{} @serial tests lost: no worker left \
-                                         to host the serial phase",
-                                        d.serial.len()
-                                    ),
-                                );
-                            }
                         }
                     }
                     if done_workers == states.len() {
@@ -1166,7 +1191,10 @@ pub fn run_pool(
         // crash replacement's remainder) and released immediately. No shared
         // queue and no reruns, so it drains then EndSessions independently.
         if dist == Dist::Each {
-            if reference.is_some() {
+            // Wait for the designate's id list (unless it died without one):
+            // a crash report needs it to name the test, and the id list can
+            // lag another worker's CollectionDone.
+            if reference.is_some() && (ids_store.is_some() || states[0].dead) {
                 for (i, s) in states
                     .iter_mut()
                     .enumerate()
@@ -1232,6 +1260,21 @@ pub fn run_pool(
                 dispatch_to(s, d, chunk, i == designate)?;
                 dispatch_to(s, d, chunk, i == designate)?;
             }
+            // Items reclaimed from a worker that died for good have no
+            // replacement to seed, and an idle survivor sends no ItemDone to
+            // trigger a refill: kick it (twice, as when seeding, so a lone
+            // item is released). A busy survivor refills on its next ItemDone.
+            if !stopping && !d.requeued.is_empty() {
+                for (i, s) in states.iter_mut().enumerate() {
+                    if d.requeued.is_empty() {
+                        break;
+                    }
+                    if s.seeded && !s.dead && !s.ended && !s.stopped && s.outstanding.is_empty() {
+                        dispatch_to(s, d, chunk, i == designate)?;
+                        dispatch_to(s, d, chunk, i == designate)?;
+                    }
+                }
+            }
         }
 
         // Session lifecycle: workers stay alive after draining so failed items
@@ -1269,6 +1312,26 @@ pub fn run_pool(
     }
     for w in workers {
         let _ = w.wait();
+    }
+    // Every worker able to run the rest died for good: report what never ran
+    // (reclaimed, never dispatched, or serial) instead of dropping it from the
+    // artifacts. Not after a -x/--maxfail stop, where unrun tests are expected.
+    if lost_worker && !stopping {
+        if let Some(d) = dispatch.as_mut() {
+            let unrun: Vec<u64> = d
+                .requeued
+                .drain(..)
+                .chain(d.order.drain(d.cursor..))
+                .chain(d.serial.drain(..))
+                .collect();
+            for i in unrun {
+                let fab = orchestrator::fabricate_lost_report(
+                    report_nodeid(&ids_store, dist, 0, i),
+                    orchestrator::LOST_NO_WORKER,
+                );
+                orchestrator::record_fabricated(sink, &mut run, &mut prog, None, fab);
+            }
+        }
     }
     // --incremental: carry forward the skipped tests as cached passes so every
     // artifact reflects the whole suite. They passed last run and their source
