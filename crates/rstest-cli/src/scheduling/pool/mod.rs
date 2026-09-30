@@ -146,9 +146,10 @@ pub struct PoolConfig<'a> {
     /// only; ignored elsewhere / on the crash-respawn path). Pays the vendored
     /// pytest import once per run instead of once per worker.
     pub fork_prewarm: bool,
-    /// `--quarantine` matcher. Fail-fast ordering drops matching ids from the
-    /// suspect set: a quarantined test fails every run by design, so leading
-    /// with it would trip `-x`/`--maxfail` and then be forgiven post-run.
+    /// `--quarantine` matcher. A matching failure never counts toward
+    /// `-x`/`--maxfail` (it is forgiven post-run), and fail-fast ordering drops
+    /// matching ids from the suspect set: a quarantined test fails every run
+    /// by design, so it should not lead the queue.
     pub quarantine: Option<&'a regex::RegexSet>,
 }
 
@@ -494,7 +495,7 @@ pub fn run_pool(
                         continue;
                     }
                 }
-                if r.outcome == "failed" {
+                if orchestrator::counts_toward_maxfail(&r, quarantine) {
                     fail_count += 1;
                 }
                 prog.on_report(sink, Some(idx), &r);
@@ -774,7 +775,8 @@ pub fn run_pool(
                 // Under -x/--maxfail the item the worker just finished failed.
                 // Its ItemDone was handled first (events arrive in order), so
                 // `stopping` already reflects whether that failure counted: a
-                // --reruns attempt being retried leaves the run going.
+                // --reruns attempt being retried, or a quarantined test, leaves
+                // the run going.
                 let _ = states[idx]
                     .worker
                     .send(&proto::Command::Verdict { stop: stopping });
@@ -832,6 +834,7 @@ pub fn run_pool(
                                 failed: failed_now,
                                 flaky_key,
                             },
+                            quarantine,
                         );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;

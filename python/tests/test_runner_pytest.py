@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from rstest_worker._internal import runner_pytest
@@ -32,6 +33,52 @@ def test_run_uses_stream_plugin(monkeypatch):
     assert runner_pytest.run(["t.py"], FakeConn()) == 0
     assert captured["args"] == ["t.py"]
     assert isinstance(captured["plugins"][0], StreamPlugin)
+
+
+def test_run_adds_the_quarantine_fail_limit_only_when_asked(monkeypatch):
+    captured = _capture_main(monkeypatch)
+    monkeypatch.delenv("RSTEST_QUARANTINE", raising=False)
+    runner_pytest.run(["t.py"], FakeConn())
+    assert len(captured["plugins"]) == 1
+    monkeypatch.setenv("RSTEST_QUARANTINE", "^q\\.py::t$")
+    runner_pytest.run(["t.py"], FakeConn())
+    assert isinstance(captured["plugins"][1], runner_pytest.QuarantineFailLimit)
+
+
+def _report(nodeid, outcome="failed", **extra):
+    r = type("R", (), {"nodeid": nodeid, "failed": outcome == "failed"})()
+    for k, v in extra.items():
+        setattr(r, k, v)
+    return r
+
+
+def test_quarantine_fail_limit_skips_quarantined_failures():
+    # -x at -n 0: a quarantined failure must not stop the session (it is
+    # forgiven after the run); the next real failure does, as pytest would.
+    gate = runner_pytest.QuarantineFailLimit(["^q\\.py::.*$", "(unbalanced"])
+    option = SimpleNamespace(maxfail=1)
+    session = SimpleNamespace(
+        testsfailed=0, shouldfail=False, config=SimpleNamespace(option=option)
+    )
+    gate.pytest_collection_finish(session)
+    assert option.maxfail == 0  # pytest's own limit is handed over
+    gate.pytest_runtest_logreport(_report("q.py::flake"))
+    gate.pytest_runtest_logreport(_report("a.py::ok", outcome="passed"))
+    gate.pytest_runtest_logreport(_report("a.py::xf", wasxfail="reason"))
+    assert not session.shouldfail
+    gate.pytest_runtest_logreport(_report("a.py::real"))
+    assert session.shouldfail == "stopping after 1 failures"
+
+
+def test_quarantine_fail_limit_is_inert_without_a_limit():
+    gate = runner_pytest.QuarantineFailLimit(["^q\\.py::.*$"])
+    option = SimpleNamespace(maxfail=0)
+    session = SimpleNamespace(
+        testsfailed=0, shouldfail=False, config=SimpleNamespace(option=option)
+    )
+    gate.pytest_collection_finish(session)
+    gate.pytest_runtest_logreport(_report("a.py::real"))
+    assert not session.shouldfail
 
 
 def test_run_reports_collected_count_for_progress(monkeypatch):

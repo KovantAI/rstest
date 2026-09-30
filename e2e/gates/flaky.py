@@ -549,3 +549,34 @@ def gate_maxfail_with_reruns(g, args, binary):
             r.returncode == 1 and "1 failed" in r.stdout and n == want,
             f"rc={r.returncode} attempts={n} (want {want}) " + r.stdout[-200:],
         )
+
+
+def gate_maxfail_with_quarantine(g, args, binary):
+    print("== -x / --maxfail with --quarantine ==")
+    # The quarantined test runs first; the real failure is the last test.
+    g.write(
+        "mfquar/test_mq.py",
+        "import pytest\n\n"
+        "def test_quarantined():\n    assert False\n\n"
+        "@pytest.mark.parametrize('i', range(30))\n"
+        "def test_ok(i):\n    pass\n\n"
+        "def test_real_failure():\n    assert False\n",
+    )
+    g.write("mfquar/q.txt", "test_mq.py::test_quarantined\n")
+    # -x used to count the quarantined failure: the run stopped on it, it was
+    # then forgiven, and the run exited 0 with the real failure never run.
+    for flags in (
+        ["-n", "2", "-x"],
+        ["-n", "2", "--maxfail=1"],
+        ["-n", "2", "-x", "--collect", "lazy"],
+        ["-n", "2", "-x", "--reruns", "1"],
+        ["-n", "0", "-x"],
+    ):
+        r = g.run(".", *flags, "--quarantine", "q.txt", cwd=g.tmp / "mfquar", timeout=90)
+        # -n 0 prints pytest's own summary (quarantine is applied after it).
+        ran_real = "test_real_failure" in r.stdout
+        check(
+            f"maxfail+quarantine: {' '.join(flags)} runs on to the real failure",
+            r.returncode == 1 and ran_real and "quarantined" in r.stdout,
+            f"rc={r.returncode} " + r.stdout[-300:],
+        )

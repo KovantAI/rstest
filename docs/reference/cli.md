@@ -1217,7 +1217,8 @@ Three of them get extra orchestration on top of their per-session meaning:
   is reached across all workers, dispatch halts and every worker winds down.
   In-flight tests finish (bounded overshoot, as with pytest-xdist). A failed
   attempt that `--reruns` or `@pytest.mark.flaky` retries does not count;
-  only the test's final outcome does, as with pytest-rerunfailures.
+  only the test's final outcome does, as with pytest-rerunfailures. A
+  [`--quarantine`](#-quarantine-file)d failure never counts, at any `-n`.
 - **`--lf` / `--ff`**: the last-failed cache is written by rstest from
   merged results (workers each see only their own failures), so a
   follow-up `--lf` behaves exactly as after a serial run.

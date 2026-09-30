@@ -86,6 +86,11 @@ pub struct WorkerEnv {
     /// `--junitxml` was given (the user's path, verbatim): the worker runs
     /// pytest's LogXML and streams its testcase elements back. None = off.
     pub junitxml: Option<String>,
+    /// `--quarantine` patterns (the matcher's regexes, one per line) for the
+    /// lone single-session worker, whose pytest owns `-x`/`--maxfail`: it keeps
+    /// matching failures out of the count. Pool workers leave the count to the
+    /// orchestrator. None = off.
+    pub quarantine: Option<String>,
 }
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
@@ -839,6 +844,7 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_DEBUGPY_PORT",
     "RSTEST_STREAM_OUTPUT",
     "RSTEST_JUNITXML",
+    "RSTEST_QUARANTINE",
 ];
 
 /// Credentials rstest itself consumes and test code never needs. Stripped from
@@ -940,6 +946,9 @@ fn build_worker_command(
     }
     if let Some(path) = &env.junitxml {
         command.env("RSTEST_JUNITXML", path);
+    }
+    if let Some(patterns) = &env.quarantine {
+        command.env("RSTEST_QUARANTINE", patterns);
     }
     // Exactly one worker ships the full id list (D5); the rest verify their
     // collection by count+hash. Worker 0 in a pool; the lone worker only
@@ -1209,6 +1218,9 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
     }
     if let Some(path) = &env.junitxml {
         command.env("RSTEST_JUNITXML", path);
+    }
+    if let Some(patterns) = &env.quarantine {
+        command.env("RSTEST_QUARANTINE", patterns);
     }
 }
 
@@ -1601,6 +1613,7 @@ mod tests {
             debug_port: None,
             stream_output: false,
             junitxml: None,
+            quarantine: None,
         }
     }
 
@@ -1639,9 +1652,21 @@ mod tests {
             "RSTEST_TIMEOUT",
             "RSTEST_LEAKCHECK",
             "RSTEST_WORKER_ID",
+            "RSTEST_QUARANTINE",
         ] {
             assert!(!envs.contains_key(absent), "unexpected {absent}");
         }
+    }
+
+    #[test]
+    fn build_command_hands_quarantine_patterns_to_the_worker() {
+        let mut env = base_env();
+        env.quarantine = Some("^a\\.py::t$\n^b\\.py::.*$".into());
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &env, 3, 4);
+        assert_eq!(
+            envs_of(&cmd)["RSTEST_QUARANTINE"],
+            "^a\\.py::t$\n^b\\.py::.*$"
+        );
     }
 
     #[test]
@@ -1921,6 +1946,7 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                quarantine: None,
             };
             // A freshly spawned worker blocks on its first command: alive, and never
             // sent anything — the decode-error/respawn precondition (child still
@@ -1964,6 +1990,7 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                quarantine: None,
             };
             let n = 3;
             let workers = Worker::spawn_pool(python, n, &env, true).expect("fork-prewarm pool");
@@ -2012,6 +2039,7 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                quarantine: None,
             };
             let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
             let mut worker = workers.pop().expect("one forked worker");

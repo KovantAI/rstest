@@ -14,8 +14,10 @@ This module is the session entrypoint. The moving parts live alongside it:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -25,6 +27,7 @@ from rstest_worker._internal import messages as m
 from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
+    _maxfail,
 )
 from rstest_worker._internal.stream import StreamPlugin
 
@@ -208,7 +211,55 @@ def run(args: list[str], conn) -> int:
     # `rstest --debug` routes here (single-worker passthrough): wait for the
     # editor to attach before pytest collects, so early breakpoints hold.
     _maybe_start_debugpy()
-    return _contained(lambda: pytest.main(list(args), plugins=[SessionStreamPlugin(conn)]), conn)
+    plugins: list[object] = [SessionStreamPlugin(conn)]
+    quarantine = os.environ.get("RSTEST_QUARANTINE")
+    if quarantine:
+        plugins.append(QuarantineFailLimit(quarantine.splitlines()))
+    return _contained(lambda: pytest.main(list(args), plugins=plugins), conn)
+
+
+class QuarantineFailLimit:
+    """-x / --maxfail for the single session, minus `--quarantine`d failures.
+
+    rstest forgives a quarantined failure after the run. Counted by pytest's
+    own limit, it would stop the session first, and the run would then exit 0
+    with the rest of the suite never run. So once collection is done
+    (collection errors keep pytest's accounting) this takes the limit over and
+    counts only failures whose nodeid matches none of the patterns: the
+    orchestrator's regexes, anchored, one per line. A pool worker needs none of
+    this: it leaves the count to the orchestrator.
+    """
+
+    def __init__(self, patterns: list[str]) -> None:
+        self._patterns = []
+        for p in patterns:
+            # One Python can't compile matches nothing: its failures count,
+            # as without quarantine.
+            with contextlib.suppress(re.error):
+                self._patterns.append(re.compile(p))
+        self._session = None
+        self._limit = 0
+        self._failed = 0
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_finish(self, session):
+        self._limit = _maxfail(session.config)
+        if self._limit:
+            self._session = session
+            self._failed = session.testsfailed
+            session.config.option.maxfail = 0
+
+    def pytest_runtest_logreport(self, report):
+        # pytest's own test (Session.pytest_runtest_logreport) minus quarantine.
+        if self._session is None or not report.failed or hasattr(report, "wasxfail"):
+            return
+        if any(p.match(report.nodeid) for p in self._patterns):
+            return
+        self._failed += 1
+        if self._failed >= self._limit:
+            # Set during the report, as pytest does, so this item's teardown
+            # already sees the session stopping.
+            self._session.shouldfail = f"stopping after {self._failed} failures"
 
 
 class SessionStreamPlugin(StreamPlugin):

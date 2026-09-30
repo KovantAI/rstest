@@ -167,8 +167,9 @@ pub fn run_lazy_pool(
         known_flaky,
         worker_env,
         fork_prewarm,
-        // Lazy never reorders by flake history, so quarantine is post-run only.
-        quarantine: _,
+        // Lazy never reorders by flake history; the matcher only keeps
+        // quarantined failures out of the -x/--maxfail count.
+        quarantine,
     } = cfg;
     // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
     let mut maxfail = maxfail;
@@ -266,7 +267,7 @@ pub fn run_lazy_pool(
                         continue;
                     }
                 }
-                if r.outcome == "failed" {
+                if orchestrator::counts_toward_maxfail(&r, quarantine) {
                     fail_count += 1;
                 }
                 prog.on_report(sink, Some(idx), &r);
@@ -409,6 +410,7 @@ pub fn run_lazy_pool(
                                 failed: failed_now,
                                 flaky_key: Some(id),
                             },
+                            quarantine,
                         );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
@@ -442,7 +444,8 @@ pub fn run_lazy_pool(
             }
             Ok(Event::AwaitVerdict {}) => {
                 // As in run_pool: the ItemDoneId before it already decided
-                // whether the failure counts (a retried attempt does not).
+                // whether the failure counts (a retried attempt or a
+                // quarantined test does not).
                 let _ = states[idx]
                     .worker
                     .send(&proto::Command::Verdict { stop: stopping });

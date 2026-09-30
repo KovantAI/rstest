@@ -404,6 +404,8 @@ fn resolve_run_config(
         // live JSON consumer is attached, so editors get per-passing-test output.
         stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
         junitxml: cli.junitxml.as_ref().map(|p| p.display().to_string()),
+        // Set per spawn once the matcher is loaded (single-session path only).
+        quarantine: None,
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -1369,7 +1371,11 @@ fn dispatch_run(
             } else {
                 worker::Stdio::Null
             };
-            let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
+            // pytest's own -x/--maxfail runs this session: hand it the
+            // quarantine patterns so a quarantined failure does not count.
+            let mut env = worker_env.clone();
+            env.quarantine = quarantine.map(|q| q.patterns().join("\n"));
+            let mut w = worker::Worker::spawn_with_io(python, None, io, &env)?;
             w.send(&proto::Command::RunTests {
                 args: args.to_vec(),
             })?;

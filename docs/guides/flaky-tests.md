@@ -153,6 +153,8 @@ The exact semantics:
   becomes a blanket mute: a new failure exits 1 as always.
 - A run whose only failures are quarantined **exits 0**. Exit codes
   ≥ 2 (usage/internal errors) are never touched.
+- A quarantined failure does not count toward `-x` / `--maxfail`, so it
+  never stops the run before the tests after it get their turn.
 - A listed test that **passes** is a plain pass, no penalty for
   being on the list on a good day.
 - The traceback still prints, in its own section. A quarantined test

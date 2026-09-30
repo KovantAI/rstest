@@ -174,6 +174,7 @@ mod tests {
             debug_port: None,
             stream_output: false,
             junitxml: None,
+            quarantine: None,
         };
         let worker = Worker::spawn(&script, Some((0, 1)), &env).expect("spawn stand-in");
         (WorkerState::fresh(worker), script)

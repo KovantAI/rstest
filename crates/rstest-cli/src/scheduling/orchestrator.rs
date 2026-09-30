@@ -203,6 +203,16 @@ pub(crate) fn rerun_allowed(only_rerun: &[regex::Regex], attempt: &[proto::Repor
         })
 }
 
+/// Whether a report counts toward `-x`/`--maxfail`. A `--quarantine`d test
+/// fails by design and is forgiven after the run, so its failure must not cut
+/// the run short first (it would then exit 0 with the rest never run).
+pub(crate) fn counts_toward_maxfail(
+    r: &proto::Report,
+    quarantine: Option<&regex::RegexSet>,
+) -> bool {
+    r.outcome == "failed" && !quarantine.is_some_and(|q| q.is_match(&r.nodeid))
+}
+
 /// A finished item's buffered rerun attempt, ready to be committed as final.
 pub(crate) struct FinishedAttempt {
     /// Retries already spent on this item (0 = ran once, no rerun).
@@ -216,7 +226,8 @@ pub(crate) struct FinishedAttempt {
 }
 
 /// Commit a finished item's buffered attempt reports as final: record each
-/// (counting failures toward `fail_count`) and, if the item ultimately passed
+/// (counting failures toward `fail_count`, quarantined ones aside) and, if the
+/// item ultimately passed
 /// after >0 retries, mark it flaky under `flaky_key`. Called on the terminal
 /// (non-requeued) branch of the ItemDone rerun logic in both loops.
 pub(crate) fn finalize_attempt(
@@ -226,9 +237,10 @@ pub(crate) fn finalize_attempt(
     fail_count: &mut u64,
     worker_idx: usize,
     attempt: FinishedAttempt,
+    quarantine: Option<&regex::RegexSet>,
 ) {
     for r in attempt.reports {
-        if r.outcome == "failed" {
+        if counts_toward_maxfail(&r, quarantine) {
             *fail_count += 1;
         }
         prog.on_report(sink, Some(worker_idx), &r);
@@ -591,6 +603,7 @@ mod tests {
                 failed: false,
                 flaky_key: Some("t.py::x".into()),
             },
+            None,
         );
         assert_eq!(fail_count, 0);
         assert!(run.all_passed());
@@ -614,8 +627,44 @@ mod tests {
                 failed: true,
                 flaky_key: None,
             },
+            None,
         );
         assert_eq!(fail_count, 1);
+        assert!(!run.all_passed());
+    }
+
+    #[test]
+    fn quarantined_failures_do_not_count_toward_maxfail() {
+        let q = regex::RegexSet::new(["^t\\.py::x$"]).unwrap();
+        let failed = rep("failed", Some("assert"));
+        assert!(counts_toward_maxfail(&failed, None));
+        assert!(!counts_toward_maxfail(&failed, Some(&q)));
+        assert!(!counts_toward_maxfail(&rep("passed", None), None));
+        let mut other = rep("failed", Some("assert"));
+        other.nodeid = "t.py::y".into();
+        assert!(counts_toward_maxfail(&other, Some(&q)));
+
+        // The final attempt of a quarantined test is still recorded (it is
+        // demoted after the run) but leaves the -x/--maxfail count alone.
+        let mut run = Run::default();
+        let mut prog = Progress::default();
+        let mut fail_count = 0u64;
+        let (mut sink, _cap) = Sink::captured();
+        finalize_attempt(
+            &mut sink,
+            &mut run,
+            &mut prog,
+            &mut fail_count,
+            0,
+            FinishedAttempt {
+                attempts_used: 1,
+                reports: vec![failed],
+                failed: true,
+                flaky_key: None,
+            },
+            Some(&q),
+        );
+        assert_eq!(fail_count, 0);
         assert!(!run.all_passed());
     }
 }

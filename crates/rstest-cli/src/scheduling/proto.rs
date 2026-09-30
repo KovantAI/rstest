@@ -308,8 +308,8 @@ pub enum Event {
     /// Under -x/--maxfail, the item just finished failed. Sent after its
     /// ItemDone/ItemDoneId; the worker waits for a Verdict, since only the
     /// orchestrator knows whether the failure counts (a --reruns attempt that
-    /// will be retried does not). Workers switch off pytest's session-local
-    /// limit and rely on this instead.
+    /// will be retried, or a quarantined test, does not). Workers switch off
+    /// pytest's session-local limit and rely on this instead.
     AwaitVerdict {},
     Done {
         exitstatus: i32,

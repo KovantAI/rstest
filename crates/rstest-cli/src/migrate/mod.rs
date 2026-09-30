@@ -240,6 +240,7 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
         debug_port: None,
         stream_output: false,
         junitxml: None,
+        quarantine: None,
     };
     let mut collect_args = args.to_vec();
     if !collect_args
