@@ -70,8 +70,14 @@ fn nonempty(key: &str) -> Option<String> {
 /// contextualized; a non-zero exit is an error carrying the argv and git's
 /// stderr. Callers wanting a bespoke hint wrap the error with `.with_context`.
 pub(crate) fn git_stdout(args: &[&str]) -> Result<String> {
+    git_stdout_in(Path::new("."), args)
+}
+
+/// [`git_stdout`], run with `dir` as git's working directory.
+pub(crate) fn git_stdout_in(dir: &Path, args: &[&str]) -> Result<String> {
     let out = std::process::Command::new("git")
         .args(args)
+        .current_dir(dir)
         .output()
         .with_context(|| format!("running git {}", args.join(" ")))?;
     if !out.status.success() {
@@ -133,25 +139,31 @@ pub fn resolve_base_rev(rev: &str, sink: &mut Sink) -> Result<String> {
     Ok(sha)
 }
 
-pub fn changed_files_from_git(rev: Option<&str>) -> Result<Vec<PathBuf>> {
+/// The changed files under `dir` (the project rootdir, or a monorepo root),
+/// as paths relative to it. Git runs IN `dir`, so the result is independent
+/// of the directory rstest was started from.
+pub fn changed_files_from_git(dir: &Path, rev: Option<&str>) -> Result<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
     let diff_base = rev.unwrap_or("HEAD");
-    // --relative: paths relative to the CWD and limited to its subtree -
-    // running from a repo subdirectory (or a monorepo project child) must
-    // see ITS files, not repo-rooted paths. --no-renames: a rename lists both
+    // --relative: paths relative to `dir` and limited to its subtree - a
+    // project below the git toplevel (a monorepo project child) must see
+    // ITS files, not repo-rooted paths. --no-renames: a rename lists both
     // sides, so the old path's importers are still selected.
-    let out = git_stdout(&[
-        "diff",
-        "--name-only",
-        "--no-renames",
-        "--relative",
-        diff_base,
-    ])?;
+    let out = git_stdout_in(
+        dir,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--relative",
+            diff_base,
+        ],
+    )?;
     for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
-    // Untracked files are changes too.
-    let out = git_stdout(&["ls-files", "--others", "--exclude-standard"])?;
+    // Untracked files are changes too (ls-files is dir-relative by default).
+    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
     for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
@@ -188,14 +200,19 @@ pub struct FileChange {
 
 pub type ChangedLines = BTreeMap<PathBuf, FileChange>;
 
-pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
+/// The changed lines of every changed file under `dir` (the project rootdir),
+/// keyed by path relative to it, like [`changed_files_from_git`].
+pub fn changed_line_ranges(dir: &Path, rev: Option<&str>) -> Result<ChangedLines> {
     let diff_base = rev.unwrap_or("HEAD");
     // -U0: zero context lines, so every hunk's new-side range is exactly
-    // the changed lines. --relative: paths relative to CWD (monorepo child
-    // safety), matching changed_files_from_git and the index keys.
+    // the changed lines. --relative: paths relative to `dir` and limited to
+    // it, matching changed_files_from_git.
     // --no-renames: a renamed file is its old path deleted plus its new path
     // added, so the old path reaches its importers and the new one is new code.
-    let out = git_stdout(&["diff", "-U0", "--no-renames", "--relative", diff_base])?;
+    let out = git_stdout_in(
+        dir,
+        &["diff", "-U0", "--no-renames", "--relative", diff_base],
+    )?;
     let mut map: ChangedLines = parse_diff_hunks(&out)
         .into_iter()
         .map(|(path, change)| (PathBuf::from(path), change))
@@ -203,13 +220,16 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     // `git diff -U0` emits no hunks for files without a line-diff (deletions,
     // renames, binary, mode-only), which still affect selection. Union the
     // authoritative `--name-only` set; hunk-parsed keys win, the rest fall back.
-    let out = git_stdout(&[
-        "diff",
-        "--name-only",
-        "--no-renames",
-        "--relative",
-        diff_base,
-    ])?;
+    let out = git_stdout_in(
+        dir,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--relative",
+            diff_base,
+        ],
+    )?;
     for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
@@ -218,7 +238,7 @@ pub fn changed_line_ranges(rev: Option<&str>) -> Result<ChangedLines> {
     }
     // Untracked files are all-new code with no old-side lines: mark
     // has_new_code so the caller falls back to import-graph for them.
-    let out = git_stdout(&["ls-files", "--others", "--exclude-standard"])?;
+    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
     for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
             old_ranges: Vec::new(),
@@ -451,7 +471,7 @@ mod tests {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
         let _cwd = test_env::set_cwd(&held, &repo);
-        let err = changed_files_from_git(Some("no-such-ref-xyz")).unwrap_err();
+        let err = changed_files_from_git(Path::new("."), Some("no-such-ref-xyz")).unwrap_err();
         assert!(err.to_string().contains("git diff"), "{err}");
     }
 
@@ -463,7 +483,7 @@ mod tests {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
         let _cwd = test_env::set_cwd(&held, &repo);
-        let err = changed_line_ranges(Some("no-such-ref-xyz")).unwrap_err();
+        let err = changed_line_ranges(Path::new("."), Some("no-such-ref-xyz")).unwrap_err();
         assert!(err.to_string().contains("git diff -U0"), "{err}");
     }
 
@@ -519,9 +539,9 @@ mod tests {
         let _path = test_env::set_var(&held, "PATH", &path);
 
         // diff succeeds (real git), ls-files is forced to fail.
-        let e1 = changed_files_from_git(None).unwrap_err();
+        let e1 = changed_files_from_git(Path::new("."), None).unwrap_err();
         // both diffs succeed, ls-files (the 3rd command) is forced to fail.
-        let e2 = changed_line_ranges(None).unwrap_err();
+        let e2 = changed_line_ranges(Path::new("."), None).unwrap_err();
 
         assert!(e1.to_string().contains("git ls-files --others"), "{e1}");
         assert!(e2.to_string().contains("git ls-files --others"), "{e2}");
@@ -543,7 +563,7 @@ mod tests {
         let _path = test_env::set_var(&held, "PATH", &path);
 
         // diff -U0 succeeds; the follow-up `diff --name-only` is forced to fail.
-        let err = changed_line_ranges(None).unwrap_err();
+        let err = changed_line_ranges(Path::new("."), None).unwrap_err();
 
         assert!(err.to_string().contains("git diff --name-only"), "{err}");
     }
@@ -564,13 +584,13 @@ mod tests {
 
         let _cwd = test_env::set_cwd(&held, &repo);
 
-        let files = changed_files_from_git(None).unwrap();
+        let files = changed_files_from_git(Path::new("."), None).unwrap();
         assert!(files.contains(&PathBuf::from("a.py")), "{files:?}");
         assert!(files.contains(&PathBuf::from("b.py")), "{files:?}");
         assert!(!files.contains(&PathBuf::from(".coverage")), "{files:?}");
         assert!(!files.iter().any(|f| f.starts_with("htmlcov")), "{files:?}");
 
-        let ranges = changed_line_ranges(None).unwrap();
+        let ranges = changed_line_ranges(Path::new("."), None).unwrap();
         // Tracked modification: an old-side range recorded.
         let a = ranges.get(Path::new("a.py")).expect("a.py present");
         assert!(!a.old_ranges.is_empty(), "{a:?}");
@@ -578,6 +598,35 @@ mod tests {
         let b = ranges.get(Path::new("b.py")).expect("b.py present");
         assert!(b.has_new_code && b.old_ranges.is_empty(), "{b:?}");
         assert!(!ranges.contains_key(Path::new(".coverage")), "{ranges:?}");
+    }
+
+    #[test]
+    fn changed_paths_are_relative_to_dir_not_the_cwd() {
+        // Started from a subdirectory: paths must still be relative to (and
+        // cover all of) the project dir, not the cwd subtree. A project below
+        // the git toplevel (monorepo child) sees only its own subtree.
+        let held = test_env::lock();
+        let repo = init_repo(&held, "subdir");
+        write(&repo, "q/mod.py", "x = 1\n");
+        write(&repo, "tests/test_q.py", "import q.mod\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        write(&repo, "q/mod.py", "x = 2\n");
+        write(&repo, "q/new.py", "y = 1\n");
+        let _cwd = test_env::set_cwd(&held, &repo.join("tests"));
+
+        let want = vec![PathBuf::from("q/mod.py"), PathBuf::from("q/new.py")];
+        assert_eq!(changed_files_from_git(&repo, None).unwrap(), want);
+        let ranges = changed_line_ranges(&repo, None).unwrap();
+        assert_eq!(ranges.keys().cloned().collect::<Vec<_>>(), want);
+
+        let sub = vec![PathBuf::from("mod.py"), PathBuf::from("new.py")];
+        assert_eq!(changed_files_from_git(&repo.join("q"), None).unwrap(), sub);
+        let ranges = changed_line_ranges(&repo.join("q"), None).unwrap();
+        assert_eq!(ranges.keys().cloned().collect::<Vec<_>>(), sub);
+        assert!(changed_files_from_git(&repo.join("tests"), None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -592,10 +641,10 @@ mod tests {
         git(&repo, &["mv", "pkg/gone.py", "pkg/moved.py"]);
         let _cwd = test_env::set_cwd(&held, &repo);
 
-        let files = changed_files_from_git(None).unwrap();
+        let files = changed_files_from_git(Path::new("."), None).unwrap();
         assert!(files.contains(&PathBuf::from("pkg/gone.py")), "{files:?}");
         assert!(files.contains(&PathBuf::from("pkg/moved.py")), "{files:?}");
-        let ranges = changed_line_ranges(None).unwrap();
+        let ranges = changed_line_ranges(Path::new("."), None).unwrap();
         let old = ranges.get(Path::new("pkg/gone.py")).expect("old side");
         assert!(old.has_new_code, "{old:?}");
         let new = ranges.get(Path::new("pkg/moved.py")).expect("new side");

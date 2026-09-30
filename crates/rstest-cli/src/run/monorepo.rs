@@ -67,7 +67,7 @@ pub(super) fn execute_monorepo(
     let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
         Some(rev) => {
             let rev = head_to_none(rev);
-            let changed = select::changed_files_from_git(rev)?;
+            let changed = select::changed_files_from_git(root, rev)?;
             let impacts =
                 mono::classify_changes(root, &projects, &changed, cli.changed_strict, sink);
             let skipped = impacts

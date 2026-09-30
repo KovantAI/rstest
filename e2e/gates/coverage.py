@@ -433,6 +433,42 @@ def gate_changed_import_forms(g, args, binary):
     )
 
 
+def gate_changed_from_subdir(g, args, binary):
+    print("== --changed: started from a subdirectory ==")
+    # The project (app/) sits below the git toplevel, like a monorepo child:
+    # changes outside it (other/) are not its changes.
+    repo = g.tmp / "subdirrepo"
+    sp = repo / "app"
+    g.write("subdirrepo/other/x.py", "X = 1\n")
+    g.write("subdirrepo/app/q/__init__.py", "")
+    g.write("subdirrepo/app/q/mod.py", "def v():\n    return 4\n")
+    g.write(
+        "subdirrepo/app/tests/test_q.py",
+        "from q.mod import v\n\ndef test_q(): assert v() == 4\n",
+    )
+    g.write("subdirrepo/app/tests/test_other.py", "def test_other(): assert True\n")
+    g.write(
+        "subdirrepo/app/pyproject.toml",
+        '[tool.pytest.ini_options]\ntestpaths = ["tests"]\npythonpath = ["."]\n',
+    )
+    git_init_commit(repo, "init")
+    with open(sp / "q" / "mod.py", "a") as f:
+        f.write("# touched\n")
+    with open(repo / "other" / "x.py", "a") as f:
+        f.write("# outside the project\n")
+    for where in ("", "q", "tests"):
+        r = g.run("--changed", "-v", cwd=sp / where)
+        check(
+            f"--changed from app/{where} selects the importer",
+            r.returncode == 0
+            and "1 changed file(s) -> 1 affected test target(s)" in r.stderr
+            and "test_q PASSED" in r.stdout
+            and "test_other" not in r.stdout,
+            f"rc={r.returncode} " + r.stderr[-300:] + r.stdout[-300:],
+        )
+    git(repo, "checkout", "-q", ".")
+
+
 def gate_coverage_based_selection_changed_uses_th(g, args, binary):
     print("== coverage-based selection (--changed uses the cov index) ==")
     # Warm a line->test index, then prove --changed narrows to only the tests

@@ -253,7 +253,10 @@ other test. `--doctest-glob` and friends forward the same way.
 
 Run only tests affected by changed files. Changes come from git (working
 tree + untracked vs `HEAD`, or vs `REV`, e.g. `--changed=origin/main` in
-CI) and map to the affected tests; only those run. Attach `REV` with `=`:
+CI) and map to the affected tests; only those run. The changes considered
+are the whole project's (everything under its rootdir, even when that is
+below the git root), whichever subdirectory you start rstest from. Attach
+`REV` with `=`:
 `--changed origin/main` is a bare `--changed` (diff against `HEAD`) plus a
 test path `origin/main` (see [Optional-value flags](#argument-splitting)).
 

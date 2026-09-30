@@ -3,7 +3,7 @@
 `rstest --changed` runs only the tests affected by your changes instead of the
 whole suite: the fast inner-loop and per-commit-CI gate. Changes come from git
 (working tree + untracked vs `HEAD`, or vs a `REV` like `--changed=origin/main`
-in CI).
+in CI), across the whole project whichever subdirectory you start it from.
 
 Two selection engines back it, and rstest picks the tightest one available:
 

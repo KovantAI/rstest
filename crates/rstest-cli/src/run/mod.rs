@@ -92,9 +92,11 @@ fn apply_selection(
         // Coverage-aware selection: uses the line->test index when it is warm
         // (any --cov-context=test run writes it), else falls back per-file to
         // import-graph reachability, so --changed only ever gets tighter.
-        let changes = select::changed_line_ranges(rev)?;
+        // Paths are rootdir-relative and cover the whole project, whichever
+        // subdirectory rstest was started from.
+        let changes = select::changed_line_ranges(&project.rootdir, rev)?;
         // Coverage-map health, for the "of K mapped" ratio and the cold-map hint.
-        let mapped = select::mapped_test_count();
+        let mapped = select::mapped_test_count(&project.rootdir);
         let selection = select::affected_with_coverage(
             &project.rootdir,
             &project,
@@ -189,8 +191,7 @@ fn apply_selection(
                         tests.len()
                     )),
                 }
-                let mut selected: Vec<String> =
-                    tests.iter().map(|t| t.display().to_string()).collect();
+                let mut selected = select::targets_as_args(&project.rootdir, &cwd, &tests);
                 // Keep the user's flags; drop any explicit path args in
                 // favor of the selection.
                 selected.extend(crate::cli::without_path_args(&args));

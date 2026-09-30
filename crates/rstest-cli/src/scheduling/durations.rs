@@ -123,7 +123,7 @@ fn content_hash(path: &Path) -> Option<String> {
 /// `path` expressed relative to `base` (both absolute), walking up with `..`
 /// past their common prefix. None when they share no root (another Windows
 /// drive), in which case callers keep the absolute path.
-fn relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
+pub(crate) fn relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
     let (p, b): (Vec<Component>, Vec<Component>) =
         (path.components().collect(), base.components().collect());
     let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
