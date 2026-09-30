@@ -92,34 +92,17 @@ pub(super) fn run_collect_discovery(
         args: args.to_vec(),
     })?;
 
-    let mut ids: Vec<String> = Vec::new();
-    let mut locations: Vec<(String, Option<u64>)> = Vec::new();
-    let mut marks: Vec<Vec<String>> = Vec::new();
-    let mut collect_errors: Vec<(String, String)> = Vec::new();
+    let mut acc = Collected::default();
     let exitstatus = loop {
-        if let Some(code) = fold_collect_event(
-            w.recv()?,
-            &mut ids,
-            &mut locations,
-            &mut marks,
-            &mut collect_errors,
-        ) {
+        if let Some(code) = fold_collect_event(w.recv()?, &mut acc) {
             break code;
         }
     };
     w.shutdown()?;
 
-    // Absolute rootdir so `file` resolves to an editor-usable URI.
-    let cwd = std::env::current_dir()?;
-    let rootdir = config::discover(&cwd, &mut std::io::stderr()).rootdir;
-    let rootdir = if rootdir.is_absolute() {
-        rootdir
-    } else {
-        cwd.join(rootdir)
-    };
-    let rootdir = strip_verbatim(std::fs::canonicalize(&rootdir).unwrap_or(rootdir));
-    let tests = build_tests(&ids, &locations, &marks, &rootdir);
-    let doc = discovery_doc(tests, &collect_errors, &rootdir);
+    let rootdir = discovery_rootdir(acc.rootdir.as_deref(), &std::env::current_dir()?);
+    let tests = build_tests(&acc.ids, &acc.locations, &acc.marks, &rootdir);
+    let doc = discovery_doc(tests, &acc.collect_errors, &rootdir);
     std::fs::write(out, serde_json::to_vec_pretty(&doc)?)?;
     Ok(exitstatus)
 }
@@ -150,43 +133,71 @@ fn discovery_doc(
     }
 }
 
-/// Fold one collect-session event into the discovery accumulators. Returns
+/// What a collect-only session reported, accumulated by [`fold_collect_event`].
+#[derive(Default)]
+struct Collected {
+    ids: Vec<String>,
+    /// (rootdir-relative file, 0-based lineno), aligned to `ids`.
+    locations: Vec<(String, Option<u64>)>,
+    marks: Vec<Vec<String>>,
+    collect_errors: Vec<(String, String)>,
+    /// pytest's `config.rootpath`: what `locations` are relative to.
+    rootdir: Option<String>,
+}
+
+/// Fold one collect-session event into the discovery accumulator. Returns
 /// `Some(exitstatus)` on `Done` (loop terminator); `None` otherwise. The
-/// designated worker's `CollectionDone` carries the id+location+marker payload;
-/// per-collector `CollectError`s accumulate; every other event is a no-op here
-/// (the collect-only session emits no run events).
-fn fold_collect_event(
-    event: proto::Event,
-    ids: &mut Vec<String>,
-    locations: &mut Vec<(String, Option<u64>)>,
-    marks: &mut Vec<Vec<String>>,
-    collect_errors: &mut Vec<(String, String)>,
-) -> Option<i32> {
+/// designated worker's `CollectionDone` carries the id+location+marker payload
+/// and pytest's rootdir; per-collector `CollectError`s accumulate; every other
+/// event is a no-op here (the collect-only session emits no run events).
+fn fold_collect_event(event: proto::Event, acc: &mut Collected) -> Option<i32> {
     match event {
         proto::Event::CollectionDone {
-            ids: i,
-            locations: l,
-            marks: m,
+            ids,
+            locations,
+            marks,
+            rootdir,
             ..
         } => {
-            if let Some(i) = i {
-                *ids = i;
+            if let Some(i) = ids {
+                acc.ids = i;
             }
-            if let Some(l) = l {
-                *locations = l;
+            if let Some(l) = locations {
+                acc.locations = l;
             }
-            if let Some(m) = m {
-                *marks = m;
+            if let Some(m) = marks {
+                acc.marks = m;
+            }
+            if rootdir.is_some() {
+                acc.rootdir = rootdir;
             }
             None
         }
         proto::Event::CollectError { path, longrepr } => {
-            collect_errors.push((path, longrepr));
+            acc.collect_errors.push((path, longrepr));
             None
         }
         proto::Event::Done { exitstatus } => Some(exitstatus),
         _ => None,
     }
+}
+
+/// The absolute, canonical rootdir `file` paths are joined onto, so each one is
+/// an editor-usable URI. pytest's own rootdir (`reported`) is what item
+/// locations are relative to; it can differ from what rstest's config discovery
+/// finds from `cwd` (a project marked only by `setup.py`, run from `tests/`).
+/// The discovered one is only a fallback for a session that never reported.
+fn discovery_rootdir(reported: Option<&str>, cwd: &std::path::Path) -> std::path::PathBuf {
+    let rootdir = match reported {
+        Some(r) => std::path::PathBuf::from(r),
+        None => config::discover(cwd, &mut std::io::stderr()).rootdir,
+    };
+    let rootdir = if rootdir.is_absolute() {
+        rootdir
+    } else {
+        cwd.join(rootdir)
+    };
+    strip_verbatim(std::fs::canonicalize(&rootdir).unwrap_or(rootdir))
 }
 
 /// Build the per-test discovery docs (nodeid + absolute file + lineno + markers)
@@ -225,7 +236,10 @@ fn build_tests(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_tests, discovery_doc, fold_collect_event, strip_verbatim};
+    use super::{
+        build_tests, discovery_doc, discovery_rootdir, fold_collect_event, strip_verbatim,
+        Collected,
+    };
     use crate::scheduling::proto;
 
     #[test]
@@ -251,6 +265,7 @@ mod tests {
         ids: Option<Vec<String>>,
         locations: Option<Vec<(String, Option<u64>)>>,
         marks: Option<Vec<Vec<String>>>,
+        rootdir: Option<String>,
     ) -> proto::Event {
         proto::Event::CollectionDone {
             count: ids.as_ref().map(|v| v.len() as u64).unwrap_or(0),
@@ -262,7 +277,7 @@ mod tests {
             cache_dir: None,
             flaky: None,
             groups: None,
-            rootdir: None,
+            rootdir,
             args_source: None,
             root_args: None,
             inifile: None,
@@ -274,10 +289,7 @@ mod tests {
 
     #[test]
     fn fold_collect_event_accumulates_payload_errors_and_ignores_rest() {
-        let mut ids = Vec::new();
-        let mut locations = Vec::new();
-        let mut marks = Vec::new();
-        let mut errors = Vec::new();
+        let mut acc = Collected::default();
 
         // CollectionDone loads the designated worker's id+location+marker payload.
         assert_eq!(
@@ -286,33 +298,27 @@ mod tests {
                     Some(vec!["t.py::a".into()]),
                     Some(vec![("t.py".into(), Some(3))]),
                     Some(vec![vec!["slow".into()]]),
+                    Some("/repo".into()),
                 ),
-                &mut ids,
-                &mut locations,
-                &mut marks,
-                &mut errors,
+                &mut acc,
             ),
             None
         );
-        assert_eq!(ids, vec!["t.py::a".to_string()]);
-        assert_eq!(locations, vec![("t.py".to_string(), Some(3))]);
-        assert_eq!(marks, vec![vec!["slow".to_string()]]);
+        assert_eq!(acc.ids, vec!["t.py::a".to_string()]);
+        assert_eq!(acc.locations, vec![("t.py".to_string(), Some(3))]);
+        assert_eq!(acc.marks, vec![vec!["slow".to_string()]]);
+        assert_eq!(acc.rootdir.as_deref(), Some("/repo"));
 
         // An all-None CollectionDone (older worker sent no payload) leaves the
         // accumulators untouched — exercises the None branches.
         assert_eq!(
-            fold_collect_event(
-                collection_done(None, None, None),
-                &mut ids,
-                &mut locations,
-                &mut marks,
-                &mut errors,
-            ),
+            fold_collect_event(collection_done(None, None, None, None), &mut acc),
             None
         );
-        assert_eq!(ids, vec!["t.py::a".to_string()]);
-        assert_eq!(locations, vec![("t.py".to_string(), Some(3))]);
-        assert_eq!(marks, vec![vec!["slow".to_string()]]);
+        assert_eq!(acc.ids, vec!["t.py::a".to_string()]);
+        assert_eq!(acc.locations, vec![("t.py".to_string(), Some(3))]);
+        assert_eq!(acc.marks, vec![vec!["slow".to_string()]]);
+        assert_eq!(acc.rootdir.as_deref(), Some("/repo"));
 
         // CollectError accumulates (path, longrepr).
         assert_eq!(
@@ -321,14 +327,14 @@ mod tests {
                     path: "bad.py".into(),
                     longrepr: "boom".into(),
                 },
-                &mut ids,
-                &mut locations,
-                &mut marks,
-                &mut errors,
+                &mut acc,
             ),
             None
         );
-        assert_eq!(errors, vec![("bad.py".to_string(), "boom".to_string())]);
+        assert_eq!(
+            acc.collect_errors,
+            vec![("bad.py".to_string(), "boom".to_string())]
+        );
 
         // A non-discovery event (collect-only emits no run events) is a no-op.
         assert_eq!(
@@ -337,25 +343,47 @@ mod tests {
                     index: 0,
                     timeout: None,
                 },
-                &mut ids,
-                &mut locations,
-                &mut marks,
-                &mut errors,
+                &mut acc,
             ),
             None
         );
 
         // Done terminates the loop with the exit status.
         assert_eq!(
-            fold_collect_event(
-                proto::Event::Done { exitstatus: 5 },
-                &mut ids,
-                &mut locations,
-                &mut marks,
-                &mut errors,
-            ),
+            fold_collect_event(proto::Event::Done { exitstatus: 5 }, &mut acc),
             Some(5)
         );
+    }
+
+    #[test]
+    fn discovery_rootdir_prefers_pytests_rootdir_over_cwd_discovery() {
+        // B12: a project marked only by `setup.py`, run from `tests/`. rstest's
+        // config discovery stops at the cwd, but pytest's rootdir is the parent,
+        // and item locations (`tests/test_x.py`) are relative to that.
+        let base = std::env::temp_dir().join(format!("rstest-disc-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("tests")).unwrap();
+        std::fs::write(base.join("setup.py"), "").unwrap();
+        std::fs::write(base.join("tests/test_x.py"), "def test_x(): pass").unwrap();
+        let root = strip_verbatim(base.canonicalize().unwrap());
+
+        let got = discovery_rootdir(Some(&base.to_string_lossy()), &base.join("tests"));
+        assert_eq!(got, root);
+        let tests = build_tests(
+            &["tests/test_x.py::test_x".to_string()],
+            &[("tests/test_x.py".to_string(), Some(0))],
+            &[],
+            &got,
+        );
+        assert!(
+            std::path::Path::new(&tests[0].file).is_file(),
+            "{}",
+            tests[0].file
+        );
+
+        // A relative report still comes out absolute (anchored at the cwd).
+        assert_eq!(discovery_rootdir(Some("."), &base), root);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

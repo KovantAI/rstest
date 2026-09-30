@@ -214,6 +214,22 @@ def gate_collect_only_discovery_json(g, args, binary):
         and byid["test_p[1]"]["markers"] == ["parametrize"],
         str({k: v["markers"] for k, v in byid.items()}),
     )
+    # pytest's rootdir can sit above the cwd where rstest's own config
+    # discovery would stop (a setup.py-only project run from tests/): `file`
+    # must resolve against pytest's rootdir, never cwd + a rootdir-relative path.
+    g.write("disco_setup/setup.py", "")
+    g.write("disco_setup/tests/test_x.py", "def test_x():\n    pass\n")
+    dj2 = g.tmp / "disco_setup.json"
+    g.run("--collect-only", "--report-json", str(dj2), cwd=g.tmp / "disco_setup" / "tests")
+    ddoc2 = json.loads(dj2.read_text(encoding="utf-8"))
+    files = [t["file"] for t in ddoc2["tests"]]
+    check(
+        "discovery: file resolves against pytest's rootdir, not the cwd",
+        len(files) == 1
+        and os.path.isfile(files[0])
+        and os.path.samefile(ddoc2["meta"]["rootdir"], g.tmp / "disco_setup"),
+        f"rootdir={ddoc2['meta']['rootdir']} files={files}",
+    )
     g.write(
         "xdistenv/test_env.py",
         "import os\n"
