@@ -34,6 +34,10 @@ Two consequences for CI:
 
 - **Restore the same duration cache on every shard.** If job 2 sees a
   different cache than job 3, their partitions can overlap or drop tests.
+  Every shard run also writes its timings back to the local `.rstest_cache`,
+  so shards run one after another in the same checkout do *not* see the same
+  cache: each must start from the same restored snapshot (restore, or reset
+  `.rstest_cache`, before every shard).
   Restore one shared cache key across the matrix (recipes below), and, for a
   gating pipeline, prove coverage with the check in
   [Verify no test was dropped](#verify-no-test-was-dropped).
@@ -247,8 +251,9 @@ jobs:
             shard.${{ matrix.shard }}.json
 
   # One job runs the WHOLE suite and saves the fresh cache so the next
-  # push's shards are wall-time balanced. (Shards run against a restored,
-  # read-only cache; something has to write the authoritative one.)
+  # push's shards are wall-time balanced. (Each shard writes only its own
+  # slice's timings to its local copy of the cache, which the job discards;
+  # something has to write the authoritative whole-suite one.)
   durations:
     runs-on: ubuntu-latest
     steps:
