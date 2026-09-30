@@ -184,7 +184,7 @@ def gate_report_json_contract(g, args, binary):
         "collect error counted once across workers",
         doc3["collect_errors"] == ["colerr/test_bad.py"]
         and doc3["meta"]["counts"]["collect_errors"] == 1
-        and "1 collect errors" in r.stdout
+        and "1 collect error in" in r.stdout
         and r.stdout.count("--- FAILED colerr/test_bad.py ---") == 1,
         str(doc3["collect_errors"]) + " " + r.stdout[-300:],
     )
@@ -381,7 +381,88 @@ def gate_warnings(g, args, binary):
     g.write("warn/test_warn.py", WARN)
     r = g.run("warn", "-n", "2")
     check("warnings summary section", "warnings summary" in r.stdout and "UserWarning" in r.stdout)
-    check("warnings in counts", "warnings in" in r.stdout, r.stdout[-120:])
+    # pytest wording: "1 warning", singular.
+    check("warnings in counts", "2 passed, 1 warning in" in r.stdout, r.stdout[-120:])
+
+
+ACCOUNTING = """
+import pytest
+
+
+@pytest.fixture
+def bad_td():
+    yield
+    raise RuntimeError("teardown boom")
+
+
+def test_pass_td(bad_td):
+    pass
+
+
+def test_fail_td(bad_td):
+    assert 0
+
+
+@pytest.mark.xfail
+def test_xfail_td(bad_td):
+    assert 0
+
+
+@pytest.mark.xfail
+def test_xpass_td(bad_td):
+    pass
+
+
+@pytest.mark.skip
+def test_skip():
+    pass
+
+
+@pytest.mark.parametrize("i", range(6))
+def test_ok(i):
+    pass
+"""
+
+
+def _summary(stdout):
+    """The final summary line without its timing or pytest's `===` rule."""
+    lines = [ln.strip("= ") for ln in stdout.splitlines() if " in " in ln]
+    lines = [ln for ln in lines if ln[:1].isdigit()]
+    return lines[-1].rsplit(" in ", 1)[0] if lines else ""
+
+
+def gate_parallel_summary_accounting(g, args, binary):
+    print("== parallel summary accounting ==")
+    g.write("acct/test_acct.py", ACCOUNTING)
+    # pytest counts reports, not tests: a teardown error adds an error on top
+    # of the call outcome, and an xfail test's teardown error is xfailed. The
+    # pool summary must match pytest's own line (-n 0 prints pytest's).
+    expected = "1 failed, 7 passed, 1 skipped, 3 xfailed, 1 xpassed, 2 errors"
+    serial = _summary(g.run("acct", "-n", "0").stdout)
+    rj = g.tmp / "acct.json"
+    r = g.run("acct", "-n", "2", "--report-json", str(rj))
+    counts = json.loads(rj.read_text(encoding="utf-8"))["meta"]["counts"]
+    check(
+        "pool summary matches pytest on teardown errors and xfail teardown",
+        serial == expected and _summary(r.stdout) == expected,
+        f"-n 0: {serial!r} -n 2: {_summary(r.stdout)!r}",
+    )
+    check(
+        "report-json counts follow the same accounting",
+        (counts["passed"], counts["failed"], counts["errors"], counts["xfailed"]) == (7, 1, 2, 3),
+        str(counts),
+    )
+    # -k deselection is pytest's: every worker deselects the same items, so
+    # the count is shown once (eager and lazy collection alike).
+    expected = "6 passed, 5 deselected"
+    serial = _summary(g.run("acct", "-n", "0", "-k", "test_ok").stdout)
+    eager = _summary(g.run("acct", "-n", "2", "-k", "test_ok").stdout)
+    lazy = _summary(g.run("acct", "-n", "2", "-k", "test_ok", "--collect", "lazy").stdout)
+    check(
+        "pool summary shows N deselected like pytest",
+        serial == eager == lazy == expected,
+        f"-n 0: {serial!r} eager: {eager!r} lazy: {lazy!r}",
+    )
 
 
 def gate_doctor(g, args, binary):

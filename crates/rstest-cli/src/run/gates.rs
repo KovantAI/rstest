@@ -898,11 +898,6 @@ pub(super) fn finalize_output(
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
-        let warn_part = if warn_total > 0 {
-            format!(", {warn_total} warnings")
-        } else {
-            String::new()
-        };
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
         // the stable summary line (which tooling/CI greps, so keep it intact).
@@ -920,8 +915,8 @@ pub(super) fn finalize_output(
             String::new()
         };
         let summary = format!(
-            "{}{warn_part} in {elapsed:.2}s{cached_note}",
-            outcome.run.summary_line()
+            "{} in {elapsed:.2}s{cached_note}",
+            outcome.run.summary_line_with(warn_total)
         );
         let summary = if outcome.run.all_passed() {
             palette.green(&summary)

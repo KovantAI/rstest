@@ -224,6 +224,11 @@ pub enum Event {
         /// ini `addopts` and `PYTEST_ADDOPTS` included), sent only when > 0.
         #[serde(default)]
         maxfail: Option<u64>,
+        /// Items pytest deselected at collection (`pytest_deselected`: `-k`,
+        /// `-m`, `--deselect`, plugins). Every worker sends it; identical
+        /// sessions agree, so the orchestrator counts it once.
+        #[serde(default)]
+        deselected: u64,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.
@@ -248,6 +253,10 @@ pub enum Event {
         serial: Vec<String>,
         #[serde(default)]
         flaky: std::collections::HashMap<String, u32>,
+        /// Items of this file pytest deselected at collection. Each file is
+        /// collected once, so the orchestrator sums these.
+        #[serde(default)]
+        deselected: u64,
     },
     /// Lazy-mode twins of ItemStart/ItemDone, keyed by nodeid (lazy
     /// workers share no index space).
@@ -529,10 +538,12 @@ mod property {
                 prop::option::of(small_str()),
                 prop::option::of(any::<u64>()),
             ),
+            deselected in any::<u64>(),
         ) -> Event {
             Event::CollectionDone {
                 count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
                 rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail,
+                deselected,
             }
         }
     }
@@ -543,8 +554,9 @@ mod property {
             ids in small_strs(),
             serial in small_strs(),
             flaky in prop::collection::hash_map(small_str(), any::<u32>(), 0..4),
+            deselected in any::<u64>(),
         ) -> Event {
-            Event::FileCollected { path, ids, serial, flaky }
+            Event::FileCollected { path, ids, serial, flaky, deselected }
         }
     }
 

@@ -328,8 +328,10 @@ pub fn run_lazy_pool(
                 ids,
                 serial: ser,
                 flaky,
+                deselected,
             }) => {
                 total_items += ids.len();
+                run.deselected += deselected;
                 prog.set_total(total_items);
                 sources.record(&ids);
                 let s = &mut states[idx];

@@ -550,6 +550,7 @@ pub fn run_pool(
                 order_flags: _,
                 confcutdir: _,
                 maxfail: reported_maxfail,
+                deselected,
             }) => {
                 // pytest's own resolution (argv + addopts, last wins) is
                 // authoritative; it arrives before any item is dispatched.
@@ -581,6 +582,8 @@ pub fn run_pool(
                 match &reference {
                     None => {
                         reference = Some((count, hash));
+                        // Every worker deselected the same items; count once.
+                        run.deselected = deselected;
                         total_items = count as usize;
                         prog.set_total(if dist == Dist::Each {
                             total_items * states.len()

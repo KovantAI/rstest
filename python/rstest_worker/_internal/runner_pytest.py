@@ -218,6 +218,8 @@ class SessionStreamPlugin(StreamPlugin):
 
     def pytest_collection_finish(self, session):
         payload: m.CollectionDonePayload = {"count": len(session.items), "hash": ""}
+        if self._deselected:
+            payload["deselected"] = self._deselected
         self._conn.send("collection_done", payload)
 
 

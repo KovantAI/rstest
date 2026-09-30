@@ -284,6 +284,7 @@ mod tests {
             order_flags: None,
             confcutdir: None,
             maxfail: None,
+            deselected: 0,
         }
     }
 

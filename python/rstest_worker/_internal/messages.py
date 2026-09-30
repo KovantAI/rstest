@@ -91,6 +91,7 @@ class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=
     serial: list[int]  # indices of @pytest.mark.serial items
     flaky: dict[str, int]  # stringified index -> rerun budget
     groups: dict[str, str]  # stringified index -> xdist_group name
+    deselected: int  # items pytest deselected (-k/-m/--deselect), when > 0
 
 
 class _FileCollectedRequired(TypedDict):
@@ -101,6 +102,7 @@ class _FileCollectedRequired(TypedDict):
 class FileCollectedPayload(_FileCollectedRequired, total=False):
     serial: list[str]  # nodeids with the serial marker
     flaky: dict[str, int]  # nodeid -> rerun budget
+    deselected: int  # items of this file pytest deselected, when > 0
 
 
 class LazyReadyPayload(TypedDict, total=False):

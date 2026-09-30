@@ -238,6 +238,9 @@ class StreamPlugin:
         # (when, category, message, filename, lineno) -> count; aggregated
         # because big suites emit thousands of duplicate warnings.
         self._warnings: dict[tuple[Any, ...], int] = {}
+        # Items pytest deselected at collection (-k, -m, --deselect, plugins),
+        # shipped with collection_done / file_collected: pytest's "N deselected".
+        self._deselected = 0
         # xdist master-side hook emulation (pytest_configure_node etc.):
         # the shim node standing in for xdist's WorkerController.
         self._xdist_node: Any = None
@@ -811,6 +814,9 @@ class StreamPlugin:
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
         self._conn.send("report", payload)
+
+    def pytest_deselected(self, items):
+        self._deselected += len(items)
 
     def pytest_collectreport(self, report):
         if report.failed:

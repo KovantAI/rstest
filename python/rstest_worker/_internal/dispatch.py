@@ -165,6 +165,9 @@ class ItemDispatchPlugin(StreamPlugin):
         ids = [item.nodeid for item in session.items]
         digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
         payload: m.CollectionDonePayload = {"count": len(ids), "hash": digest}
+        # Every worker sends it (tiny); the orchestrator counts it once.
+        if self._deselected:
+            payload["deselected"] = self._deselected
         # Full id list rides the wire from ONE worker only (orchestrator needs
         # it once, for duration-cache ordering); the rest verify by hash - at
         # pandas scale that's 8x15MB saved on the startup path.
@@ -335,6 +338,7 @@ class LazyDispatchPlugin(StreamPlugin):
 
     def _collect_file(self, session, path, items_by_id):
         # Eager recursion would never reach an ignored file: report it empty.
+        deselected_before = self._deselected
         items = (
             []
             if _ignored_by_recursion(session, path)
@@ -352,6 +356,11 @@ class LazyDispatchPlugin(StreamPlugin):
                 flaky[it.nodeid] = _flaky_reruns(it, mark)
         if flaky:
             payload["flaky"] = flaky
+        # perform_collect runs modifyitems per file, so -k/-m deselection
+        # happens here; each file is collected once, the orchestrator sums.
+        deselected = self._deselected - deselected_before
+        if deselected:
+            payload["deselected"] = deselected
         for it in items:
             items_by_id[it.nodeid] = it
         # Items are NOT queued here: the orchestrator owns dispatch, chunking

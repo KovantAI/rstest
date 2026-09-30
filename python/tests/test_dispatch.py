@@ -61,6 +61,19 @@ def test_collection_finish_minimal_payload_without_send_ids(monkeypatch):
     assert conn.sent == [("collection_done", {"count": 2, "hash": _digest(["t.py::a", "t.py::b"])})]
 
 
+def test_collection_finish_carries_deselected_count(monkeypatch):
+    # pytest's "N deselected": every worker ships it, the orchestrator keeps one.
+    monkeypatch.delenv("RSTEST_SEND_IDS", raising=False)
+    conn = FakeConn()
+    plugin = ItemDispatchPlugin(conn)
+    plugin.pytest_deselected([FakeItem("t.py::x"), FakeItem("t.py::y")])
+    plugin.pytest_deselected([FakeItem("t.py::z")])
+    plugin.pytest_collection_finish(SimpleNamespace(items=[FakeItem("t.py::a")]))
+    assert conn.sent == [
+        ("collection_done", {"count": 1, "hash": _digest(["t.py::a"]), "deselected": 3})
+    ]
+
+
 def test_collection_finish_full_payload_with_send_ids(monkeypatch):
     monkeypatch.setenv("RSTEST_SEND_IDS", "1")
     conn = FakeConn()
@@ -495,6 +508,26 @@ def test_lazy_collect_file_flaky_positional_and_condition():
     session = SimpleNamespace(perform_collect=lambda paths, genitems: items)
     LazyDispatchPlugin(conn)._collect_file(session, "t.py", {})
     assert conn.sent[0][1]["flaky"] == {"t.py::a": 3, "t.py::b": 0}
+
+
+def test_lazy_collect_file_reports_its_own_deselected_count():
+    # perform_collect runs modifyitems per file: only this file's deselections
+    # ride its file_collected, so the orchestrator can sum them.
+    conn = FakeConn()
+    plugin = LazyDispatchPlugin(conn)
+    plugin.pytest_deselected([FakeItem("old.py::x")])  # an earlier file's
+
+    def perform_collect(paths, genitems):
+        plugin.pytest_deselected([FakeItem("t.py::b"), FakeItem("t.py::c")])
+        return [FakeItem("t.py::a")]
+
+    session = SimpleNamespace(perform_collect=perform_collect)
+    plugin._collect_file(session, "t.py", {})
+    plugin._collect_file(SimpleNamespace(perform_collect=lambda paths, genitems: []), "u.py", {})
+    assert conn.sent == [
+        ("file_collected", {"path": "t.py", "ids": ["t.py::a"], "deselected": 2}),
+        ("file_collected", {"path": "u.py", "ids": []}),
+    ]
 
 
 def _recursion_session(tmp_path, args, ignored):

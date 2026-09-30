@@ -20,7 +20,7 @@ outputs that have one, see [Output schemas](output-schemas.md).
     "runner": "rstest", "schema": 5, "exitstatus": 0,
     "counts": { "passed": 12, "failed": 0, "errors": 0, "skipped": 1,
                 "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0,
-                "collect_errors": 0 },
+                "collect_errors": 0, "deselected": 0 },
     "duration_seconds": 4.21, "started_at_epoch": 1765500000,
     "workers": 8, "argv": ["rstest", "-n", "8"]
   },
@@ -76,6 +76,13 @@ walking `tests`), `duration_seconds`, `started_at_epoch`, `workers`,
 and `argv`; `4` added per-test `lineno`; `5` added per-test
 `quarantined` and the `quarantined` counts key. Parse it:
 incompatible changes will bump it.
+
+`meta.counts` follows pytest's terminal accounting, which counts phase
+reports rather than tests: a test that passes and then errors in teardown
+adds 1 to `passed` and 1 to `errors`, and an xfail test's teardown error
+adds to `xfailed`. The keys can therefore sum to more than the number of
+tests. `deselected` (items pytest deselected with `-k`, `-m`, `--deselect`
+or a plugin) arrived without a schema bump.
 
 The per-test `cpu` field arrived **without** a schema bump: it is
 conditional (present only on `--doctor` / live-stream runs), so a plain
@@ -203,7 +210,7 @@ Three event kinds, discriminated by `event`:
 ```json
 {"event": "testreport", "nodeid": "tests/test_api.py::test_get", "when": "call", "outcome": "passed", "duration": 0.0123, "wasxfail": false, "lineno": 41, "worker": "gw2"}
 {"event": "collecterror", "path": "tests/test_bad.py", "longrepr": "ImportError while importing test module ..."}
-{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0, "collect_errors": 0}}
+{"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0, "collect_errors": 0, "deselected": 0}}
 ```
 
 One `testreport` is emitted **per phase** (`setup`, `call`, `teardown`), so
