@@ -25,7 +25,7 @@ pub(crate) enum Command {
     Try,
 
     /// Parallel-readiness preflight: collect twice and report tests with
-    /// unstable ids, then run -n auto and classify any parallel-only failure
+    /// unstable ids, then run in parallel and classify any parallel-only failure
     /// (polluter bisected). Exits non-zero on any such finding. Combine with
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
@@ -39,7 +39,7 @@ pub(crate) enum Command {
     /// hidden; `--xdist-removal-json` writes the findings for CI.
     XdistRemovalCheck,
 
-    /// Auto parallel-safety audit: run the suite under -n auto (repeat with
+    /// Auto parallel-safety audit: run the suite in parallel (repeat with
     /// `--audit-repeat` to catch probabilistic flakes), diff against the -n 0
     /// oracle, and print the tests that fail ONLY in parallel with a
     /// ready-to-paste `@pytest.mark.serial` fix-list. Exits non-zero on any
@@ -228,7 +228,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub(crate) audit_json: Option<PathBuf>,
 
-    /// How many times `audit` repeats the `-n auto` run; a parallel flake is
+    /// How many times `audit` repeats the parallel run; a parallel flake is
     /// probabilistic, so more repeats catch more of them. [default: 1]
     #[arg(long, global = true, value_name = "N")]
     pub(crate) audit_repeat: Option<u32>,

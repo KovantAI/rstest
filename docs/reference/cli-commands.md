@@ -86,12 +86,21 @@ each offending parametrize site, classified by why its id is unstable:
 The fix for both is a stable `ids=` on the `parametrize`. If a WILL-bail id
 is found, it stops here: nothing runs in parallel until the ids are stable.
 
-**2. Parallel classification.** Otherwise it **runs the suite at `-n auto`**
-and classifies every test that fails only under parallelism. The
-discriminator reruns (`-n 0` twice and `--dist loadfile`) are **scoped to
-the files containing failures**, so cost scales with the number of failing
-files, not the suite size; a clean suite runs no discriminators at all. Each
-failure lands in one class:
+**2. Parallel classification.** Otherwise it **runs the suite in parallel**
+and classifies every test that fails only under parallelism. The parallel
+pass uses one worker per test file, up to your logical cores and never fewer
+than two. It does not use `-n auto`: auto's duration-cache cap would put a
+small suite, or any suite after one run, on a single worker, where nothing
+runs concurrently. The discriminator reruns (`-n 0` twice and `--dist
+loadfile`) are **scoped to the files containing failures**, so cost scales
+with the number of failing files, not the suite size; a clean suite runs no
+discriminators at all. One exception: with only one or two failing files the
+`--dist loadfile` run covers the whole selection, because each worker is
+handed two files to start with, so one or two files would run one after the
+other on a single worker and a cross-file race would never show. A selection
+of fewer than three files can't run two files at once under loadfile at all;
+the check then prints a note that an ORDER DEPENDENCY verdict may also be two
+tests of the same file racing. Each failure lands in one class:
 
 | Class | Meaning | Fix it names |
 |---|---|---|
@@ -216,8 +225,9 @@ stale `"ready": true` is never read as current. Field reference:
 ### `audit`
 
 Auto parallel-safety audit: the one-command answer to "which of my tests
-aren't parallel-safe, and how do I fix them?" It **runs the suite at `-n auto`**
-(repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
+aren't parallel-safe, and how do I fix them?" It **runs the suite in parallel**
+(one worker per test file, up to your logical cores and never fewer than two,
+as `migrate-check` does; repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
 probabilistic), then diffs against the `-n 0` oracle and classifies every test
 that fails **only** under parallelism, reusing `migrate-check`'s discriminators
 (`-n 0` at least twice + `--dist loadfile`, repeated with `--audit-repeat` and scoped to the failing files) and verdicts
@@ -256,7 +266,7 @@ recommendation instead: they depend on tests that run before them in the same
 file, and the serial phase would run them apart from those tests, so marking
 them serial wouldn't make them pass. Intrinsic flakes (serial repeats disagree)
 and pre-existing `-n 0` failures are also reported separately; serial won't fix
-those. A test that fails under `-n auto` but is missing from a
+those. A test that fails in the parallel pass but is missing from a
 follow-up run (for example an unstable parametrize id) is reported as
 **inconclusive** rather than guessed at. Exits non-zero on any parallel-only
 failure (serial-fixable, order-dependent, intrinsic or inconclusive), so it
@@ -274,7 +284,7 @@ order_dependent[], intrinsic_flakes[], inconclusive[], preexisting_failures}`. `
 carries each `{nodeid, verdict, fix}`; `serial_conftest` is the paste-able block
 as a string. The file is written as `{meta, ran: false, parallel_safe: false}`
 before the audit starts and replaced with the full result at the end, so an
-audit that stops early (the `-n auto` pass produced no run, exit `2`, or a child
+audit that stops early (the parallel pass produced no run, exit `2`, or a child
 session failed) leaves `ran: false` rather than a stale result from an earlier
 run. `-x`/`--maxfail` from your args or `addopts` is lifted for every run the
 audit makes, so the whole suite is checked.
@@ -284,7 +294,7 @@ its own it is ignored and no file is written.
 
 ### `--audit-repeat <N>`
 
-How many times `audit` reruns the `-n auto` pass (default `1`; `0` is treated
+How many times `audit` reruns the parallel pass (default `1`; `0` is treated
 as `1`). A parallel-only
 failure is probabilistic (a race may not fire every run), so a test that fails
 in **any** repeat is treated as a candidate. Raise it (e.g. `--audit-repeat 5`)

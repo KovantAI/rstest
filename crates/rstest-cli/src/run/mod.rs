@@ -1907,6 +1907,17 @@ fn auto_workers(args: &[String]) -> usize {
     n.max(1)
 }
 
+/// Test files in the project from the same ini-aware walk `auto` sizes by, or
+/// `None` when the walk fails or finds none. The parallel-safety checks
+/// (`audit`, `migrate-check`) size their own pool from it: `auto`'s duration
+/// cap would put a small or already-run suite on a single worker.
+pub(crate) fn project_test_file_count() -> Option<usize> {
+    let cwd = std::env::current_dir().ok()?;
+    let project = config::discover(&cwd, &mut std::io::stderr());
+    let files = collect::collect_test_files(&[], &project).ok()?;
+    (!files.is_empty()).then_some(files.len())
+}
+
 /// Whether the args select something on disk: a path, or a nodeid
 /// (`file.py::test`) whose file exists. Over-matching only keeps the
 /// empty-walk shortcut off, which is the safe direction.

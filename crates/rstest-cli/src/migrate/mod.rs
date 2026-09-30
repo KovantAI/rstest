@@ -174,6 +174,30 @@ pub(super) fn run_session_capture(
     Ok((out, String::from_utf8_lossy(&stderr).into_owned()))
 }
 
+/// The `-n` for a parallel-safety run over `files` test files (`None` =
+/// unknown): one worker per file up to the logical cores, never fewer than
+/// two. Not `-n auto`, which also caps by the duration cache (~1 worker per
+/// 2s of test time): a small suite, or any suite once one run has warmed the
+/// cache, would resolve to one worker and the "parallel" pass would run
+/// nothing concurrently, so it could only ever report the suite safe.
+pub(super) fn check_workers(files: Option<usize>) -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    workers_for(cores, files)
+}
+
+/// [`check_workers`] for a given core count; pure so it is unit-testable.
+fn workers_for(cores: usize, files: Option<usize>) -> usize {
+    files.map_or(cores, |f| cores.min(f)).max(2)
+}
+
+/// [`check_workers`] for the whole project, sized by the same file walk
+/// `-n auto` uses.
+pub(super) fn project_check_workers() -> usize {
+    check_workers(crate::run::project_test_file_count())
+}
+
 pub(super) fn run_session_seq() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
@@ -294,6 +318,18 @@ mod tests {
         assert!(!is_fail(&json!({})));
         // A non-string phase value is ignored, not treated as a failure.
         assert!(!is_fail(&json!({ "call": 1 })));
+    }
+
+    #[test]
+    fn check_workers_is_at_least_two_and_capped_by_files_and_cores() {
+        // One file, or a one-core box: still two workers, so the run is parallel.
+        assert_eq!(workers_for(8, Some(1)), 2);
+        assert_eq!(workers_for(1, Some(8)), 2);
+        assert_eq!(workers_for(1, None), 2);
+        // Otherwise one per file, up to the cores.
+        assert_eq!(workers_for(8, Some(4)), 4);
+        assert_eq!(workers_for(8, Some(20)), 8);
+        assert_eq!(workers_for(8, None), 8);
     }
 
     #[test]

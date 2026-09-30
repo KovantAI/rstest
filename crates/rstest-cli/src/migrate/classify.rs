@@ -91,7 +91,7 @@ pub(super) fn split_param(nodeid: &str) -> (&str, &str) {
     (nodeid, "")
 }
 
-/// The classifier verdict for one test that failed under `-n auto`.
+/// The classifier verdict for one test that failed in the parallel pass.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Verdict {
     NotParallel,     // fails at -n 0 too (deterministically) - a plain bug / env
@@ -124,7 +124,7 @@ impl Verdict {
                 "fix the flake (mock the clock / remove the race); --reruns hides it",
             ),
             Verdict::OrderDependency => (
-                "passes serial and under --dist loadfile, fails under -n auto (load)",
+                "passes serial and under --dist loadfile, fails in parallel (load)",
                 "run this suite with --dist loadfile, or fix the in-file order coupling",
             ),
             Verdict::WallClock => (
@@ -145,7 +145,7 @@ impl Verdict {
     }
 }
 
-/// Classify the parallel-only failures. `par` = -n auto outcomes, pooled over
+/// Classify the parallel-only failures. `par` = parallel-pass outcomes, pooled over
 /// `repeat` parallel runs; the function runs the discriminators (serial
 /// ×max(`repeat`, 2), loadfile ×max(`repeat`, 1)) and decides per failing test.
 /// Matching the discriminator run counts to the parallel pass keeps the
@@ -175,7 +175,7 @@ pub(super) fn classify_failures(
     // become `tests/tests/test_a.py` and collect nothing. Anchor them at the
     // rootdir, and pin the rootdir, config file and conftest cutoff the way
     // bisect does: absolute paths under a nested `pkg/pytest.ini` would
-    // otherwise load that config instead of the one the -n auto pass used.
+    // otherwise load that config instead of the one the parallel pass used.
     // Best effort: without a rootdir the paths stay as-is, and any test the
     // children then miss comes back INCONCLUSIVE below rather than a pass.
     let collected = super::collect_session(python, args).ok();
@@ -189,17 +189,38 @@ pub(super) fn classify_failures(
     // INCONCLUSIVE, for a reason that has nothing to do with them.
     scoped.push(MAXFAIL_LIFT.into());
     let (serial_runs, loadfile_runs) = (repeat.max(2), repeat.max(1));
+    // loadfile keeps each file on one worker, so it can only show a
+    // co-location failure when two files run at once. The pool seeds every
+    // worker with two dispatches (a whole file each under loadfile), so N
+    // files keep at most ceil(N/2) workers busy: scoped to one or two
+    // failing files, the run is serial in all but name and every cross-file
+    // race would read as ORDER DEPENDENCY. Below that, run beside the rest of
+    // the selection, which the parallel pass just ran without refusing.
+    let (lf_sel, lf_files) = loadfile_selection(scoped.clone(), files.len(), par, args);
+    let lf_scope = if lf_files > files.len() {
+        " beside the rest of the selection"
+    } else {
+        ""
+    };
     sink.warn(&format!(
-        "  {} parallel failure(s) in {} file(s); running discriminators (serial ×{serial_runs}, \
-         loadfile ×{loadfile_runs}, scoped to those files)…",
+        "  {} parallel failure(s) in {} file(s); running discriminators (serial ×{serial_runs} \
+         scoped to those files, loadfile ×{loadfile_runs}{lf_scope})…",
         failed.len(),
         files.len(),
     ));
     let serial: Vec<Outcomes> = (0..serial_runs)
         .map(|_| run_session(python, &["-n", "0"], &scoped))
         .collect::<Result<_>>()?;
+    if lf_files < LOADFILE_MIN_FILES {
+        sink.warn(
+            "  note: too few test files to run two at once, so the loadfile check is a \
+             serial run here: an ORDER DEPENDENCY verdict below may also be a race between \
+             tests of the same file.",
+        );
+    }
+    let lf_workers = super::check_workers(Some(lf_files)).to_string();
     let loadfile: Vec<Outcomes> = (0..loadfile_runs)
-        .map(|_| run_session(python, &["--dist", "loadfile"], &scoped))
+        .map(|_| run_session(python, &["-n", &lf_workers, "--dist", "loadfile"], &lf_sel))
         .collect::<Result<_>>()?;
 
     let fails = |o: &Outcomes, n: &str| matches!(o.get(n).map(|r| r.phase), Some(Phase::Fail));
@@ -225,6 +246,33 @@ pub(super) fn classify_failures(
         out.push((n.clone(), v));
     }
     Ok(out)
+}
+
+/// Fewest files a `--dist loadfile` run needs for two of them to run at once
+/// (see [`loadfile_selection`]).
+const LOADFILE_MIN_FILES: usize = 3;
+
+/// The loadfile discriminator's selection and its file count: `scoped` (the
+/// failing files, `scoped_files` of them) when they are enough to run two at
+/// once, else the whole selection (`args`, with `-x` lifted) that produced
+/// `par`, when that has more files.
+fn loadfile_selection(
+    scoped: Vec<String>,
+    scoped_files: usize,
+    par: &Outcomes,
+    args: &[String],
+) -> (Vec<String>, usize) {
+    let all_files = par
+        .keys()
+        .map(|n| file_of(n))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if scoped_files >= LOADFILE_MIN_FILES || all_files <= scoped_files {
+        return (scoped, scoped_files);
+    }
+    let mut whole = args.to_vec();
+    whole.push(MAXFAIL_LIFT.into());
+    (whole, all_files)
 }
 
 /// The discriminator selection for the failing `files`: anchored at the
@@ -255,7 +303,7 @@ fn scoped_selection(
     Ok(scoped)
 }
 
-/// The pure classifier decision for a test that failed under `-n auto`, given
+/// The pure classifier decision for a test that failed in parallel, given
 /// whether it also failed the two serial repeats, the loadfile run, and whether
 /// its parallel run was wait-bound. Kept separate from the I/O so it's testable.
 pub(super) fn decide(serial1: bool, serial2: bool, loadfile: bool, wait_bound: bool) -> Verdict {
@@ -348,6 +396,7 @@ pub(super) fn bisect_polluter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migrate::Rec;
 
     #[test]
     fn classify_by_pattern() {
@@ -387,6 +436,41 @@ mod tests {
         let (site, param) = split_param("a.py::test_plain");
         assert_eq!(site, "a.py::test_plain");
         assert_eq!(param, "");
+    }
+
+    fn outcomes(files: &[&str]) -> Outcomes {
+        files
+            .iter()
+            .map(|f| {
+                let rec = Rec {
+                    phase: Phase::Pass,
+                    wall: 0.0,
+                    cpu: None,
+                };
+                (format!("{f}::test_x"), rec)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn loadfile_selection_widens_when_too_few_failing_files() {
+        let scoped = vec!["/root/a.py".to_string(), "--rootdir=/root".to_string()];
+        let args = vec!["-k".to_string(), "x".to_string()];
+        let four = outcomes(&["a.py", "b.py", "c.py", "d.py"]);
+        // One failing file of four: loadfile scoped to it alone is a serial
+        // run, so it runs beside the whole selection (with -x lifted).
+        let (sel, n) = loadfile_selection(scoped.clone(), 1, &four, &args);
+        assert_eq!(n, 4);
+        assert_eq!(sel, vec!["-k", "x", MAXFAIL_LIFT]);
+        // Two failing files: still one busy worker (two dispatches per seed).
+        assert_eq!(loadfile_selection(scoped.clone(), 2, &four, &args).1, 4);
+        // Three can run two at once: keep the cheap scoped run.
+        let (sel, n) = loadfile_selection(scoped.clone(), 3, &four, &args);
+        assert_eq!((sel, n), (scoped.clone(), 3));
+        // Nothing more to add: the suite is just the failing files.
+        let two = outcomes(&["a.py", "b.py"]);
+        let (sel, n) = loadfile_selection(scoped.clone(), 2, &two, &args);
+        assert_eq!((sel, n), (scoped, 2));
     }
 
     #[test]

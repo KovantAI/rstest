@@ -3,7 +3,8 @@
 //! Collects the suite twice in fresh sessions and diffs the id sets; ids
 //! present in only one are run-to-run unstable. Per-process-unstable ones
 //! (memory address / uuid) force rstest to `-n 0`; we name them and the fix.
-//! Then runs `-n auto` and classifies any parallel-only failures.
+//! Then runs the suite in parallel (at least two workers) and classifies any
+//! parallel-only failures.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -51,7 +52,7 @@ pub struct MigrateMeta {
     pub schema: u32,
 }
 
-/// Result of the `-n auto` parallel phase. Fields other than `ran` are absent
+/// Result of the parallel phase. Fields other than `ran` are absent
 /// when the phase did not actually run to completion.
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -256,15 +257,21 @@ pub fn run_migrate_check(
         return finish(false, None, if blocking > 0 { 1 } else { 0 });
     }
 
-    // Phase 2: run -n auto and classify any parallel-only failures.
-    sink.warn("rstest migrate-check: running -n auto to check parallel behaviour…");
+    // Phase 2: run in parallel and classify any parallel-only failures. An
+    // explicit -n sized by the collected files, not auto: auto's duration cap
+    // puts a small or already-run suite on one worker, which tests nothing.
+    let files: HashSet<&str> = run1.iter().map(|n| super::file_of(n)).collect();
+    let workers = super::check_workers((!files.is_empty()).then_some(files.len())).to_string();
+    sink.warn(&format!(
+        "rstest migrate-check: running -n {workers} to check parallel behaviour…"
+    ));
     // Lift -x/--maxfail so the parallel pass covers the whole suite (see audit).
     let par_args: Vec<String> = args
         .iter()
         .cloned()
         .chain([MAXFAIL_LIFT.to_string()])
         .collect();
-    let par = run_session(python, &[], &par_args)?;
+    let par = run_session(python, &["-n", &workers], &par_args)?;
     if par.is_empty() {
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
@@ -274,7 +281,7 @@ pub fn run_migrate_check(
     let verdicts = classify_failures(python, args, &par, 1, sink)?;
     if verdicts.is_empty() {
         sink.out_line(&format!(
-            "PARALLEL: ready — {} tests pass at -n auto.",
+            "PARALLEL: ready — {} tests pass in parallel.",
             par.len()
         ));
         return finish(true, Some(ParallelReport::ready(0)), 0);
@@ -292,7 +299,7 @@ pub fn run_migrate_check(
         .collect();
 
     if migration.is_empty() {
-        sink.out_line("PARALLEL: ready — every test that passes at -n 0 also passes at -n auto.");
+        sink.out_line("PARALLEL: ready — every test that passes at -n 0 also passes in parallel.");
         if preexisting > 0 {
             sink.out_line(&format!(
                 "  ({preexisting} test(s) already fail at -n 0 — pre-existing, not a parallelism \
