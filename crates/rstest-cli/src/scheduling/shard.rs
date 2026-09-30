@@ -35,19 +35,37 @@ pub fn parse_shard(spec: &str) -> anyhow::Result<(usize, usize)> {
     Ok((k, n))
 }
 
+/// A cached duration as whole microseconds. Weights are integers so sums
+/// are exact and order-independent: jobs summing the same cache in a
+/// different order (HashMap iteration is seeded per process) must still
+/// compare weights identically, or LPT order and tie-breaks diverge and an
+/// item lands in two shards or none. Negative and NaN count as 0.
+fn micros(secs: f64) -> u64 {
+    (secs.max(0.0) * 1e6).round() as u64
+}
+
+/// Integer mean of the known weights, or 1s when none are known.
+fn avg_weight(known: &[u64]) -> u64 {
+    if known.is_empty() {
+        return 1_000_000;
+    }
+    let sum: u128 = known.iter().map(|&w| w as u128).sum();
+    (sum / known.len() as u128) as u64
+}
+
 /// LPT assignment: bucket index (0-based) each item lands in. Heaviest first,
 /// each to the currently-lightest bucket; ties break by lowest index, so
 /// equal weights (cold cache) produce a round-robin even split.
-fn lpt_assign(weights: &[f64], n: usize) -> Vec<usize> {
+fn lpt_assign(weights: &[u64], n: usize) -> Vec<usize> {
     let mut order: Vec<usize> = (0..weights.len()).collect();
-    order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]).then(a.cmp(&b)));
-    let mut loads = vec![0.0f64; n];
+    order.sort_by(|&a, &b| weights[b].cmp(&weights[a]).then(a.cmp(&b)));
+    let mut loads = vec![0u64; n];
     let mut assign = vec![0usize; weights.len()];
     for i in order {
         let b = (0..n)
-            .min_by(|&x, &y| loads[x].total_cmp(&loads[y]).then(x.cmp(&y)))
+            .min_by(|&x, &y| loads[x].cmp(&loads[y]).then(x.cmp(&y)))
             .unwrap();
-        loads[b] += weights[i].max(0.0);
+        loads[b] = loads[b].saturating_add(weights[i]);
         assign[i] = b;
     }
     assign
@@ -55,15 +73,14 @@ fn lpt_assign(weights: &[f64], n: usize) -> Vec<usize> {
 
 /// Fill untimed tests with the average known weight so they don't all pile
 /// into one bucket; a fully cold cache leaves every weight equal.
-fn weights_from(ids: &[String], cache: &HashMap<String, f64>) -> Vec<f64> {
-    let known: Vec<f64> = ids.iter().filter_map(|id| cache.get(id).copied()).collect();
-    let avg = if known.is_empty() {
-        1.0
-    } else {
-        known.iter().sum::<f64>() / known.len() as f64
-    };
+fn weights_from(ids: &[String], cache: &HashMap<String, f64>) -> Vec<u64> {
+    let known: Vec<u64> = ids
+        .iter()
+        .filter_map(|id| cache.get(id).map(|&s| micros(s)))
+        .collect();
+    let avg = avg_weight(&known);
     ids.iter()
-        .map(|id| cache.get(id).copied().unwrap_or(avg))
+        .map(|id| cache.get(id).map_or(avg, |&s| micros(s)))
         .collect()
 }
 
@@ -112,9 +129,13 @@ pub fn shard_groups(
         });
         members.get_mut(&g).unwrap().push(i as u64);
     }
-    let group_weights: Vec<f64> = order
+    let group_weights: Vec<u64> = order
         .iter()
-        .map(|g| members[g].iter().map(|&i| weights[i as usize]).sum())
+        .map(|g| {
+            members[g]
+                .iter()
+                .fold(0u64, |acc, &i| acc.saturating_add(weights[i as usize]))
+        })
         .collect();
     let assign = lpt_assign(&group_weights, n);
     let mut out: Vec<u64> = order
@@ -140,28 +161,29 @@ pub fn shard_files(
     if n <= 1 {
         return files.to_vec();
     }
-    // Cache keys are nodeids relative to the invocation dir; sum per file.
-    let mut totals: HashMap<String, f64> = HashMap::new();
-    for (id, secs) in cache {
+    // Cache keys are nodeids relative to the invocation dir; sum per file in
+    // integer microseconds, so a file's total is the same whatever order
+    // this process's HashMap yields its tests in.
+    let mut totals: HashMap<String, u64> = HashMap::new();
+    for (id, &secs) in cache {
         let file = id.split("::").next().unwrap_or(id);
-        *totals.entry(file.to_string()).or_insert(0.0) += secs;
+        let t = totals.entry(file.to_string()).or_insert(0);
+        *t = t.saturating_add(micros(secs));
     }
     let rel = |f: &Path| -> String {
         f.strip_prefix(cwd)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| f.to_string_lossy().into_owned())
     };
-    let weights: Vec<f64> = {
+    // Ties break by index; `files` arrives path-sorted from discovery, so
+    // that is a total order by path, the same in every job.
+    let weights: Vec<u64> = {
         // Untimed files get the average known file weight.
-        let known: Vec<f64> = files
+        let known: Vec<u64> = files
             .iter()
             .filter_map(|f| totals.get(&rel(f)).copied())
             .collect();
-        let avg = if known.is_empty() {
-            1.0
-        } else {
-            known.iter().sum::<f64>() / known.len() as f64
-        };
+        let avg = avg_weight(&known);
         files
             .iter()
             .map(|f| totals.get(&rel(f)).copied().unwrap_or(avg))
@@ -250,6 +272,59 @@ mod tests {
             shard_indices(&names, &cache, 2, 5),
             shard_indices(&names, &cache, 2, 5)
         );
+    }
+
+    /// Each call stands for a separate CI job: the cache map is rebuilt per
+    /// job, so each has its own (randomly seeded) iteration order.
+    fn job_cache(entries: &[(String, f64)]) -> HashMap<String, f64> {
+        entries.iter().cloned().collect()
+    }
+
+    /// Every file in exactly one of the `n` shards.
+    fn assert_files_partition(files: &[PathBuf], entries: &[(String, f64)], n: usize) {
+        let cwd = Path::new("/r");
+        let mut seen: Vec<PathBuf> = (1..=n)
+            .flat_map(|k| shard_files(files, &job_cache(entries), cwd, k, n))
+            .collect();
+        seen.sort();
+        assert_eq!(seen, files, "shards of {entries:?} do not partition");
+    }
+
+    #[test]
+    fn shard_files_partition_with_float_near_ties() {
+        // b.py = 0.1 + 0.2 + 0.3 sums to 0.6 or 0.6000000000000001 depending
+        // on the order the map yields its tests; a.py = 0.6 exactly. On a
+        // tie a.py (lower index) goes first, otherwise b.py does: a float
+        // sum tipped this differently between jobs, and a file landed in
+        // both shards or neither.
+        let files: Vec<PathBuf> = ["/r/a.py", "/r/b.py"].iter().map(PathBuf::from).collect();
+        let entries: Vec<(String, f64)> = [
+            ("a.py::t1", 0.6),
+            ("b.py::t1", 0.1),
+            ("b.py::t2", 0.2),
+            ("b.py::t3", 0.3),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+        for _ in 0..200 {
+            assert_files_partition(&files, &entries, 2);
+        }
+    }
+
+    #[test]
+    fn shard_files_partition_many_near_tied_files() {
+        let files: Vec<PathBuf> = (0..40)
+            .map(|i| PathBuf::from(format!("/r/t{i:02}.py")))
+            .collect();
+        let entries: Vec<(String, f64)> = (0..40)
+            .flat_map(|i| {
+                (0..3).map(move |j| (format!("t{i:02}.py::c{j}"), 0.1 * (1 + (i + j) % 3) as f64))
+            })
+            .collect();
+        for _ in 0..50 {
+            assert_files_partition(&files, &entries, 4);
+        }
     }
 
     #[test]
