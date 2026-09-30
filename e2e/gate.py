@@ -15,6 +15,7 @@ import _harness
 from _harness import REPO, WINDOWS, Gate, make_venv
 from gates.coverage import (
     gate_changed_deleted_module,
+    gate_changed_import_forms,
     gate_coverage,
     gate_coverage_based_selection_changed_uses_th,
     gate_coverage_contexts_line_test_index_cov_co,
@@ -251,6 +252,7 @@ def main():
         gate_diff_coverage_gate,
         gate_smart_selection,
         gate_changed_deleted_module,
+        gate_changed_import_forms,
         gate_since_green_incremental,
         gate_since_green_dirty_tree,
         gate_incremental_dispatch_skip,

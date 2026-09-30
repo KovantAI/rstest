@@ -264,7 +264,8 @@ impl Resolver {
 /// Read + scan `file`'s imports. `None` when unreadable (no edges, as before).
 fn parse_imports(file: &Path, dotted: &str) -> Option<Vec<String>> {
     let src = std::fs::read_to_string(file).ok()?;
-    Some(imports_of(&src, dotted))
+    let is_package = file.file_name().and_then(|n| n.to_str()) == Some("__init__.py");
+    Some(imports_of(&src, dotted, is_package))
 }
 
 impl ProjectIndex {
@@ -729,18 +730,28 @@ fn resolve_out(
 
 /// Modules imported by `src`. Includes indented (function-local /
 /// conditional) imports - extra edges only ever widen the selection.
-pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
+/// `importer_dotted` is the importing file's module name and `is_package`
+/// whether it is a package `__init__.py` (its dotted name is the package
+/// itself, so a relative import resolves one level lower than a module's).
+/// Every parent package of an imported module is a candidate too:
+/// `import q.mod` also executes `q/__init__.py`.
+pub(crate) fn imports_of(src: &str, importer_dotted: &str, is_package: bool) -> Vec<String> {
     let mut modules = Vec::new();
-    for line in src.lines() {
+    let mut lines = src.lines();
+    while let Some(line) = lines.next() {
         let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("import ") {
+        if !(t.starts_with("import ") || t.starts_with("from ")) {
+            continue;
+        }
+        let stmt = logical_import(t, &mut lines);
+        if let Some(rest) = stmt.strip_prefix("import ") {
             for part in rest.split(',') {
                 let m = part.split_whitespace().next().unwrap_or("");
                 if !m.is_empty() {
-                    modules.push(m.to_string());
+                    push_with_parents(&mut modules, m);
                 }
             }
-        } else if let Some(rest) = t.strip_prefix("from ") {
+        } else if let Some(rest) = stmt.strip_prefix("from ") {
             let Some((module_part, names)) = rest.split_once(" import ") else {
                 continue;
             };
@@ -748,9 +759,10 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
             let level = module_part.chars().take_while(|&c| c == '.').count();
             let named = &module_part[level..];
             let base = if level > 0 {
-                // Relative: resolve against the importer's package.
+                // Relative: resolve against the importer's package, which for
+                // an `__init__.py` is its own dotted name.
                 let mut pkg: Vec<&str> = importer_dotted.split('.').collect();
-                for _ in 0..level {
+                for _ in 0..level - usize::from(is_package) {
                     pkg.pop();
                 }
                 let mut base = pkg.join(".");
@@ -764,24 +776,59 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
             } else {
                 named.to_string()
             };
-            if !base.is_empty() {
-                modules.push(base.clone());
+            if base.is_empty() {
+                continue;
             }
+            push_with_parents(&mut modules, &base);
             // `from pkg import x` may import the submodule pkg.x: add a
             // candidate per imported name (misses just don't resolve).
-            for name in names.trim_start_matches('(').split(',') {
+            for name in names.trim().trim_start_matches('(').split(',') {
                 let n = name
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
                     .trim_end_matches(')');
-                if !n.is_empty() && n != "*" && !base.is_empty() {
+                if !n.is_empty() && n != "*" {
                     modules.push(format!("{base}.{n}"));
                 }
             }
         }
     }
+    let mut seen = HashSet::new();
+    modules.retain(|m| seen.insert(m.clone()));
     modules
+}
+
+/// The import statement starting at `first`, with its comment dropped and any
+/// continuation joined on: backslash-continued lines, and a parenthesized
+/// `from x import (` name list up to its closing paren. Import statements
+/// hold no string literals, so `#` always starts a comment.
+fn logical_import<'a>(first: &str, rest: &mut impl Iterator<Item = &'a str>) -> String {
+    fn code(line: &str) -> &str {
+        line.split('#').next().unwrap_or("").trim_end()
+    }
+    let mut stmt = code(first).to_string();
+    loop {
+        if let Some(head) = stmt.strip_suffix('\\') {
+            stmt = head.to_string();
+        } else if !(stmt.starts_with("from ") && stmt.contains('(') && !stmt.contains(')')) {
+            return stmt;
+        }
+        let Some(next) = rest.next() else {
+            return stmt;
+        };
+        stmt.push(' ');
+        stmt.push_str(code(next).trim_start());
+    }
+}
+
+/// Push `module` and each of its parent packages (`a.b.c` -> `a`, `a.b`,
+/// `a.b.c`): importing a submodule runs every enclosing `__init__.py`.
+fn push_with_parents(modules: &mut Vec<String>, module: &str) {
+    for (i, _) in module.match_indices('.') {
+        modules.push(module[..i].to_string());
+    }
+    modules.push(module.to_string());
 }
 
 #[cfg(test)]
@@ -837,7 +884,11 @@ mod tests {
 
     #[test]
     fn plain_and_comma_imports() {
-        let mods = imports_of("import os, mypkg.utils\nimport json as j\n", "tests.test_x");
+        let mods = imports_of(
+            "import os, mypkg.utils\nimport json as j\n",
+            "tests.test_x",
+            false,
+        );
         assert!(mods.contains(&"os".to_string()));
         assert!(mods.contains(&"mypkg.utils".to_string()));
         assert!(mods.contains(&"json".to_string()));
@@ -845,7 +896,7 @@ mod tests {
 
     #[test]
     fn from_imports_add_submodule_candidates() {
-        let mods = imports_of("from mypkg import utils, helpers\n", "tests.test_x");
+        let mods = imports_of("from mypkg import utils, helpers\n", "tests.test_x", false);
         // the package itself AND each name as a possible submodule
         assert!(mods.contains(&"mypkg".to_string()));
         assert!(mods.contains(&"mypkg.utils".to_string()));
@@ -855,11 +906,11 @@ mod tests {
     #[test]
     fn relative_imports_resolve_against_importer_package() {
         // tests/sub/test_a.py doing `from ..core import thing`
-        let mods = imports_of("from ..core import thing\n", "tests.sub.test_a");
+        let mods = imports_of("from ..core import thing\n", "tests.sub.test_a", false);
         assert!(mods.contains(&"tests.core".to_string()), "{mods:?}");
         assert!(mods.contains(&"tests.core.thing".to_string()));
         // `from . import sibling`
-        let mods = imports_of("from . import sibling\n", "tests.sub.test_a");
+        let mods = imports_of("from . import sibling\n", "tests.sub.test_a", false);
         assert!(mods.contains(&"tests.sub.sibling".to_string()), "{mods:?}");
     }
 
@@ -867,7 +918,7 @@ mod tests {
     fn from_without_import_keyword_is_skipped() {
         // `from x` with no ` import ` clause is incomplete: it contributes no
         // module and must not panic (the split_once returns None -> continue).
-        let mods = imports_of("from x\nfrom y import z\n", "tests.test_x");
+        let mods = imports_of("from x\nfrom y import z\n", "tests.test_x", false);
         assert!(!mods.iter().any(|m| m == "x"), "{mods:?}");
         assert!(mods.contains(&"y".to_string()), "{mods:?}");
     }
@@ -938,14 +989,88 @@ mod tests {
 
     #[test]
     fn star_imports_keep_base_only() {
-        let mods = imports_of("from mypkg.core import *\n", "tests.test_x");
-        assert_eq!(mods, vec!["mypkg.core".to_string()]);
+        let mods = imports_of("from mypkg.core import *\n", "tests.test_x", false);
+        assert_eq!(mods, vec!["mypkg".to_string(), "mypkg.core".to_string()]);
+    }
+
+    #[test]
+    fn relative_import_in_a_package_init_resolves_against_that_package() {
+        // pkg/__init__.py's dotted name is already `pkg`, so `from . import x`
+        // there means pkg.x, not a top-level x.
+        let mods = imports_of("from . import helper\n", "pkg", true);
+        assert!(mods.contains(&"pkg.helper".to_string()), "{mods:?}");
+        let mods = imports_of("from .. import up\nfrom .sub import y\n", "pkg.inner", true);
+        assert!(mods.contains(&"pkg.up".to_string()), "{mods:?}");
+        assert!(mods.contains(&"pkg.inner.sub.y".to_string()), "{mods:?}");
+    }
+
+    #[test]
+    fn multi_line_from_imports_record_every_name() {
+        let src = "from pkg import (\n    a,  # first\n    b as bee,\n)\n\
+                   from other import x, \\\n    y\nimport after\n";
+        let mods = imports_of(src, "tests.test_x", false);
+        for want in ["pkg", "pkg.a", "pkg.b", "other.x", "other.y", "after"] {
+            assert!(mods.contains(&want.to_string()), "{want}: {mods:?}");
+        }
+        assert!(!mods.iter().any(|m| m.contains('#')), "{mods:?}");
+    }
+
+    #[test]
+    fn dotted_imports_add_every_parent_package() {
+        let mods = imports_of(
+            "import q.sub.mod\nfrom r.s import t\n",
+            "tests.test_x",
+            false,
+        );
+        for want in ["q", "q.sub", "q.sub.mod", "r", "r.s", "r.s.t"] {
+            assert!(mods.contains(&want.to_string()), "{want}: {mods:?}");
+        }
+    }
+
+    #[test]
+    fn import_forms_reach_the_modules_they_execute() {
+        // pkg/__init__.py re-exports helper; test_pkg only imports pkg.
+        // q/__init__.py runs on `import q.mod`. Multi-line names are edges too.
+        let root = tmp("import-forms");
+        write(&root, "pkg/__init__.py", "from . import helper\n");
+        write(&root, "pkg/helper.py", "");
+        write(&root, "pkg/multi.py", "");
+        write(&root, "q/__init__.py", "");
+        write(&root, "q/mod.py", "");
+        write(&root, "tests/test_pkg.py", "import pkg\n");
+        write(&root, "tests/test_q.py", "import q.mod\n");
+        write(
+            &root,
+            "tests/test_multi.py",
+            "from pkg import (\n    multi,\n)\n",
+        );
+        let proj = ProjectConfig::default();
+        let sel =
+            |f: &str| tests_of(affected_tests(&root, &proj, &[PathBuf::from(f)], false).unwrap());
+        // helper <- pkg/__init__ <- every test importing pkg (or under it).
+        assert_eq!(
+            sel("pkg/helper.py"),
+            vec![
+                PathBuf::from("tests/test_multi.py"),
+                PathBuf::from("tests/test_pkg.py")
+            ]
+        );
+        assert_eq!(sel("q/__init__.py"), vec![PathBuf::from("tests/test_q.py")]);
+        assert_eq!(
+            sel("pkg/multi.py"),
+            vec![PathBuf::from("tests/test_multi.py")]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn indented_imports_inside_functions_count() {
         // over-selection by design: function-local imports still create edges
-        let mods = imports_of("def test_x():\n    import lazy_dep\n", "tests.test_x");
+        let mods = imports_of(
+            "def test_x():\n    import lazy_dep\n",
+            "tests.test_x",
+            false,
+        );
         assert!(mods.contains(&"lazy_dep".to_string()));
     }
 

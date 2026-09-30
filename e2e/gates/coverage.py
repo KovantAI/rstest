@@ -378,6 +378,61 @@ def gate_changed_deleted_module(g, args, binary):
     git(sp, "reset", "-q", "--hard")
 
 
+def gate_changed_import_forms(g, args, binary):
+    print("== --changed: package re-exports, multi-line and dotted imports ==")
+    sp = g.tmp / "formproj"
+    g.write("formproj/pkg/__init__.py", "from . import helper\n")
+    g.write("formproj/pkg/helper.py", "def f():\n    return 2\n")
+    g.write("formproj/pkg/multi.py", "def m():\n    return 3\n")
+    g.write("formproj/q/__init__.py", "READY = True\n")
+    g.write("formproj/q/mod.py", "def v():\n    return 4\n")
+    g.write(
+        "formproj/tests/test_reexport.py",
+        "import pkg\n\ndef test_reexport(): assert pkg.helper.f() == 2\n",
+    )
+    g.write(
+        "formproj/tests/test_multi.py",
+        "from pkg import (\n    multi,\n)\n\ndef test_multi(): assert multi.m() == 3\n",
+    )
+    g.write(
+        "formproj/tests/test_dotted.py",
+        "import q.mod\n\ndef test_dotted(): assert q.READY and q.mod.v() == 4\n",
+    )
+    g.write("formproj/tests/test_other.py", "def test_other(): assert True\n")
+    g.write("formproj/pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')
+    git_init_commit(sp, "init")
+    env = {"PYTHONPATH": str(sp)}
+
+    def selected(path):
+        with open(sp / path, "a") as f:
+            f.write("# touched\n")
+        r = g.run("--changed", "-v", cwd=sp, env_extra=env)
+        git(sp, "checkout", "-q", ".")
+        return r
+
+    # `from . import helper` in pkg/__init__.py is an edge to pkg/helper.py.
+    r = selected("pkg/helper.py")
+    check(
+        "package __init__ relative import reaches its submodule",
+        "test_reexport" in r.stdout and "test_other" not in r.stdout,
+        r.stderr[-300:] + r.stdout[-300:],
+    )
+    # A parenthesized multi-line name list records every name.
+    r = selected("pkg/multi.py")
+    check(
+        "multi-line from-import records each name",
+        "test_multi" in r.stdout and "test_other" not in r.stdout,
+        r.stderr[-300:] + r.stdout[-300:],
+    )
+    # `import q.mod` runs q/__init__.py too.
+    r = selected("q/__init__.py")
+    check(
+        "dotted import reaches the parent package __init__",
+        "test_dotted" in r.stdout and "test_other" not in r.stdout,
+        r.stderr[-300:] + r.stdout[-300:],
+    )
+
+
 def gate_coverage_based_selection_changed_uses_th(g, args, binary):
     print("== coverage-based selection (--changed uses the cov index) ==")
     # Warm a line->test index, then prove --changed narrows to only the tests

@@ -254,7 +254,7 @@ pub fn scanned_sibling_edges(projects: &[PathBuf]) -> Vec<Vec<usize>> {
             let Ok(src) = std::fs::read_to_string(path) else {
                 continue;
             };
-            for module in crate::select::imports_of(&src, "") {
+            for module in crate::select::imports_of(&src, "", false) {
                 let first = module.split('.').next().unwrap_or(&module);
                 first_segments.insert(first.to_string());
             }
