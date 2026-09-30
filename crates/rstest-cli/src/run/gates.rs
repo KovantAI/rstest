@@ -56,17 +56,121 @@ fn write_run_reports(
     Ok(())
 }
 
-/// The merged lastfailed map written into pytest's cache after a pool run.
-/// Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the plain nodeids
-/// (deduped, since a test may fail on several workers). BTreeMap => stable,
-/// deduped keys with no extra pass.
-fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bool> {
-    run.failed_nodeids()
-        .map(|id| {
-            let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
-            (plain.to_string(), true)
-        })
-        .collect()
+/// pytest's `LFPlugin.pytest_runtest_logreport` verdict for one test, replayed
+/// over its phases in order: a passed call or any skipped phase clears it
+/// (`Some(false)`), any failed phase records it (`Some(true)`), the last such
+/// event wins, and a test with neither (no phase reported) leaves the prior
+/// entry alone (`None`).
+fn lastfailed_verdict(e: &report::TestEntry) -> Option<bool> {
+    let phases = [
+        ("setup", &e.setup),
+        ("call", &e.call),
+        ("teardown", &e.teardown),
+    ];
+    let mut verdict = None;
+    for (when, outcome) in phases {
+        match outcome.as_deref() {
+            Some("failed") => verdict = Some(true),
+            Some("skipped") => verdict = Some(false),
+            Some("passed") if when == "call" => verdict = Some(false),
+            _ => {}
+        }
+    }
+    verdict
+}
+
+/// The `lastfailed` map to write into pytest's cache after a pool run, built
+/// the way pytest's own `LFPlugin` updates it in a serial run: start from the
+/// `previous` map, clear every test this run executed without failing, record
+/// every failure, and record each collection error under its collector nodeid.
+///
+/// Workers can't do this themselves (pytest skips the write under
+/// `workerinput`, and each worker only sees its own share), so a subset run
+/// must keep the failures it never touched, exactly as `pytest` would.
+///
+/// Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the plain nodeid,
+/// failing if any copy failed. A collector key from an earlier collection error
+/// (a file or directory nodeid) is cleared once a test under it ran: pytest
+/// replaces it with the collector's children and then drops the ones that
+/// pass, which leaves the same map for every child this run executed.
+/// Carried-forward `--incremental` entries did not run, so they don't count.
+fn merged_lastfailed(
+    run: &report::Run,
+    previous: std::collections::BTreeMap<String, serde_json::Value>,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    use std::collections::BTreeMap;
+    let mut verdicts: BTreeMap<&str, Option<bool>> = BTreeMap::new();
+    for (id, e) in run.tests() {
+        if e.cached {
+            continue;
+        }
+        let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
+        let slot = verdicts.entry(plain).or_insert(None);
+        *slot = match (*slot, lastfailed_verdict(e)) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (None, None) => None,
+        };
+    }
+    let collect_errors: std::collections::BTreeSet<&str> = run
+        .collect_errors()
+        .iter()
+        .map(|(path, _)| path.as_str())
+        // `<worker gw1>` / `<serial phase>` are rstest's own synthetic rows,
+        // not pytest collectors: no nodeid for `--lf` to select.
+        .filter(|path| !path.starts_with('<'))
+        .collect();
+    // Did any executed test live under collector `key`? Ids are sorted, so the
+    // first id at or after `key::` (or `key/`) answers it in O(log n).
+    let ran_under = |key: &str| {
+        key.is_empty() && !verdicts.is_empty()
+            || ["::", "/"].iter().any(|sep| {
+                let prefix = format!("{key}{sep}");
+                verdicts
+                    .range::<str, _>((
+                        std::ops::Bound::Included(prefix.as_str()),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .next()
+                    .is_some_and(|(id, _)| id.starts_with(&prefix))
+            })
+    };
+    let mut lastfailed = previous;
+    lastfailed.retain(|key, _| collect_errors.contains(key.as_str()) || !ran_under(key));
+    for (id, verdict) in verdicts {
+        match verdict {
+            Some(true) => {
+                lastfailed.insert(id.to_string(), serde_json::Value::Bool(true));
+            }
+            Some(false) => {
+                lastfailed.remove(id);
+            }
+            None => {}
+        }
+    }
+    for path in collect_errors {
+        lastfailed.insert(path.to_string(), serde_json::Value::Bool(true));
+    }
+    lastfailed
+}
+
+/// Merge this pool run into `<cache_dir>/v/cache/lastfailed` (see
+/// [`merged_lastfailed`]). Best effort, like pytest's own cache writes: an
+/// unreadable or corrupt file is treated as empty, and the write is atomic so a
+/// crash mid-write can't leave `--lf` a truncated file.
+fn write_merged_lastfailed(cache_dir: &std::path::Path, run: &report::Run) {
+    let path = cache_dir.join("v/cache/lastfailed");
+    let previous = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let merged = merged_lastfailed(run, previous);
+    // Only write when serialization succeeds: a serialize error must not
+    // clobber pytest's lastfailed cache with an empty `{}`. pytest's
+    // `Cache.set` writes sorted keys with a 2-space indent; match it.
+    if let Ok(bytes) = serde_json::to_vec_pretty(&merged) {
+        let _ = cache::write_atomic(&path, &bytes);
+    }
 }
 
 /// Warn (to `w`) that `--doctor-fail-on` can't evaluate under passthrough IO
@@ -541,16 +645,10 @@ pub(super) fn run_post_gates(
         &report_meta,
     )?;
     // Merged lastfailed: workers' own writes are blocked in pool mode
-    // (each knows only its failures); write the union into pytest's cache
-    // so a follow-up `--lf` behaves exactly as after a serial run.
+    // (each knows only its failures); fold this run into pytest's cache so a
+    // follow-up `--lf` behaves exactly as after a serial run.
     if let Some(cache_dir) = &outcome.cache_dir {
-        let failed = merged_lastfailed(&outcome.run);
-        let dir = std::path::Path::new(cache_dir).join("v/cache");
-        // Only write when serialization succeeds: a serialize error must not
-        // clobber pytest's lastfailed cache with an empty `{}`.
-        if let (Ok(()), Ok(bytes)) = (std::fs::create_dir_all(&dir), serde_json::to_vec(&failed)) {
-            let _ = std::fs::write(dir.join("lastfailed"), bytes);
-        }
+        write_merged_lastfailed(std::path::Path::new(cache_dir), &outcome.run);
     }
     // Duration regression gate: must compare BEFORE durations::save
     // overwrites the baseline with this run's times.
@@ -964,7 +1062,8 @@ mod tests {
         finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
         print_warnings_summary, quarantine_matcher, quarantine_note, reconcile_cov_status,
         report_push_result, resolve_compact_threshold, results_bar_line, validate_regress_ratio,
-        warn_doctor_gate_passthrough, write_report_json, write_run_reports, write_teamcity_flaky,
+        warn_doctor_gate_passthrough, write_merged_lastfailed, write_report_json,
+        write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
     use crate::reporting::progress;
@@ -984,13 +1083,11 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
-    #[test]
-    fn merged_lastfailed_strips_worker_suffix_and_dedups() {
-        use crate::scheduling::proto::Report;
-        let fail = |nodeid: &str| Report {
+    fn report(nodeid: &str, when: &str, outcome: &str) -> crate::scheduling::proto::Report {
+        crate::scheduling::proto::Report {
             nodeid: nodeid.into(),
-            when: "call".into(),
-            outcome: "failed".into(),
+            when: when.into(),
+            outcome: outcome.into(),
             duration: 0.1,
             longrepr: None,
             wasxfail: false,
@@ -1000,19 +1097,175 @@ mod tests {
             lineno: None,
             thread_delta: None,
             fd_delta: None,
-        };
+        }
+    }
+
+    /// Record a full setup/call/teardown triple with `call` as the call outcome.
+    fn record_test(run: &mut Run, worker: Option<usize>, nodeid: &str, call: &str) {
+        run.record(worker, report(nodeid, "setup", "passed"));
+        run.record(worker, report(nodeid, "call", call));
+        run.record(worker, report(nodeid, "teardown", "passed"));
+    }
+
+    fn lf_map(keys: &[&str]) -> std::collections::BTreeMap<String, serde_json::Value> {
+        keys.iter()
+            .map(|k| (k.to_string(), serde_json::Value::Bool(true)))
+            .collect()
+    }
+
+    fn lf_keys(m: &std::collections::BTreeMap<String, serde_json::Value>) -> Vec<&str> {
+        m.keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn merged_lastfailed_strips_worker_suffix_and_dedups() {
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
-        run.record(Some(0), fail("t.py::a [gw0]"));
-        run.record(Some(1), fail("t.py::a [gw1]"));
-        run.record(Some(0), fail("t.py::b [gw0]"));
+        record_test(&mut run, Some(0), "t.py::a [gw0]", "failed");
+        record_test(&mut run, Some(1), "t.py::a [gw1]", "failed");
+        record_test(&mut run, Some(0), "t.py::b [gw0]", "failed");
         // A nodeid with no worker suffix passes through untouched.
-        run.record(None, fail("t.py::c"));
+        record_test(&mut run, None, "t.py::c", "failed");
 
-        let merged = merged_lastfailed(&run);
-        let keys: Vec<&String> = merged.keys().collect();
-        assert_eq!(keys, vec!["t.py::a", "t.py::b", "t.py::c"]);
-        assert!(merged.values().all(|&v| v));
+        let merged = merged_lastfailed(&run, Default::default());
+        assert_eq!(lf_keys(&merged), vec!["t.py::a", "t.py::b", "t.py::c"]);
+        assert!(merged.values().all(|v| *v == serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn merged_lastfailed_keeps_failures_this_run_did_not_execute() {
+        // B4: a subset run (`rstest -n 2 tests/test_other.py`) must not erase
+        // the failures it never touched, as a serial pytest run wouldn't.
+        let mut run = Run::default();
+        record_test(&mut run, Some(0), "other.py::ok", "passed");
+        let merged = merged_lastfailed(&run, lf_map(&["fail.py::a", "fail.py::b"]));
+        assert_eq!(lf_keys(&merged), vec!["fail.py::a", "fail.py::b"]);
+    }
+
+    #[test]
+    fn merged_lastfailed_follows_pytest_logreport_rules() {
+        let mut run = Run::default();
+        record_test(&mut run, Some(0), "t.py::fixed", "passed");
+        record_test(&mut run, Some(0), "t.py::skipped", "skipped");
+        record_test(&mut run, Some(1), "t.py::new_fail", "failed");
+        // Setup error: no call phase, still a failure.
+        run.record(Some(1), report("t.py::setup_err", "setup", "failed"));
+        run.record(Some(1), report("t.py::setup_err", "teardown", "passed"));
+        // Passing call but failing teardown: the teardown failure wins.
+        run.record(Some(1), report("t.py::td_err", "setup", "passed"));
+        run.record(Some(1), report("t.py::td_err", "call", "passed"));
+        run.record(Some(1), report("t.py::td_err", "teardown", "failed"));
+        // Skipped in setup (skipif): clears it, like a pass.
+        run.record(Some(0), report("t.py::skipif", "setup", "skipped"));
+        run.record(Some(0), report("t.py::skipif", "teardown", "passed"));
+        // A setup that passed with nothing after it decides nothing.
+        run.record(Some(0), report("t.py::undecided", "setup", "passed"));
+
+        let prev = lf_map(&[
+            "t.py::fixed",
+            "t.py::skipped",
+            "t.py::skipif",
+            "t.py::undecided",
+        ]);
+        let merged = merged_lastfailed(&run, prev);
+        assert_eq!(
+            lf_keys(&merged),
+            vec![
+                "t.py::new_fail",
+                "t.py::setup_err",
+                "t.py::td_err",
+                "t.py::undecided"
+            ]
+        );
+    }
+
+    #[test]
+    fn merged_lastfailed_each_mode_fails_if_any_copy_failed() {
+        let mut run = Run::default();
+        record_test(&mut run, Some(0), "t.py::a [gw0]", "passed");
+        record_test(&mut run, Some(1), "t.py::a [gw1]", "failed");
+        record_test(&mut run, Some(0), "t.py::b [gw0]", "passed");
+        record_test(&mut run, Some(1), "t.py::b [gw1]", "passed");
+        let merged = merged_lastfailed(&run, lf_map(&["t.py::b"]));
+        assert_eq!(lf_keys(&merged), vec!["t.py::a"]);
+    }
+
+    #[test]
+    fn merged_lastfailed_records_collect_errors_but_not_synthetic_rows() {
+        let mut run = Run::default();
+        run.collect_error("tests/test_bad.py".into(), "ImportError".into());
+        // One per worker (B8): still one key.
+        run.collect_error("tests/test_bad.py".into(), "ImportError".into());
+        run.collect_error("<worker gw1>".into(), "worker terminated".into());
+        run.collect_error("<serial phase>".into(), "lost".into());
+        let merged = merged_lastfailed(&run, Default::default());
+        assert_eq!(lf_keys(&merged), vec!["tests/test_bad.py"]);
+    }
+
+    #[test]
+    fn merged_lastfailed_clears_a_collector_key_once_a_test_under_it_ran() {
+        let mut run = Run::default();
+        record_test(
+            &mut run,
+            Some(0),
+            "tests/test_bad.py::test_now_ok",
+            "passed",
+        );
+        record_test(&mut run, Some(0), "pkg/sub/test_x.py::test_x", "passed");
+        let prev = lf_map(&[
+            "tests/test_bad.py",
+            // Directory collector (conftest error), cleared by a test below it.
+            "pkg",
+            // A sibling whose name only shares a prefix: not under the key.
+            "tests/test_bad",
+            // Never collected this run: kept.
+            "tests/test_still_bad.py",
+        ]);
+        let merged = merged_lastfailed(&run, prev);
+        assert_eq!(
+            lf_keys(&merged),
+            vec!["tests/test_bad", "tests/test_still_bad.py"]
+        );
+    }
+
+    #[test]
+    fn merged_lastfailed_keeps_a_collector_key_that_errored_again() {
+        let mut run = Run::default();
+        run.collect_error("tests".into(), "conftest ImportError".into());
+        record_test(&mut run, Some(0), "tests/test_a.py::t", "passed");
+        let merged = merged_lastfailed(&run, lf_map(&["tests"]));
+        assert_eq!(lf_keys(&merged), vec!["tests"]);
+    }
+
+    #[test]
+    fn merged_lastfailed_ignores_cached_incremental_entries() {
+        // `--incremental` carries a pass forward without running the test.
+        let mut run = Run::default();
+        run.record_cached("t.py::cached".into());
+        let merged = merged_lastfailed(&run, lf_map(&["t.py::cached"]));
+        assert_eq!(lf_keys(&merged), vec!["t.py::cached"]);
+    }
+
+    #[test]
+    fn write_merged_lastfailed_merges_into_pytest_file() {
+        let dir = std::env::temp_dir().join(format!("rstest-lastfailed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("v/cache/lastfailed");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, br#"{"a.py::old": true, "b.py::fixed": true}"#).unwrap();
+        let mut run = Run::default();
+        record_test(&mut run, Some(0), "b.py::fixed", "passed");
+        record_test(&mut run, Some(1), "c.py::new", "failed");
+        write_merged_lastfailed(&dir, &run);
+        // pytest's Cache.set layout: sorted keys, 2-space indent.
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text, "{\n  \"a.py::old\": true,\n  \"c.py::new\": true\n}");
+        // A corrupt file is treated as empty, never a reason to skip the write.
+        std::fs::write(&file, b"not json").unwrap();
+        write_merged_lastfailed(&dir, &run);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!({"c.py::new": true}));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

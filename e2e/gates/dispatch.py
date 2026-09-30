@@ -209,6 +209,16 @@ def gate_lf(g, args, binary):
         "1 failed" in r.stdout and "passed" not in r.stdout,
         r.stdout[-200:],
     )
+    # A parallel run of other files must keep the failures it never ran, as a
+    # serial pytest run does (it used to overwrite lastfailed with its own).
+    g.write("lf/test_lf_other.py", "def test_other():\n    pass\n")
+    g.run("test_lf_other.py", "-n", "2", cwd=lf)
+    r = g.run("test_lf.py", "-n", "2", "--lf", cwd=lf)
+    check(
+        "--lf survives a parallel subset run",
+        "1 failed" in r.stdout and "passed" not in r.stdout,
+        r.stdout[-200:],
+    )
 
 
 def gate_shard_k_n(g, args, binary):
