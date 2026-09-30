@@ -75,4 +75,5 @@ Standard variables from CI systems and tools that rstest reads when present:
 | `GITHUB_STEP_SUMMARY` | doctor runs append their markdown report to this file on GitHub Actions |
 | `BUILDKITE` | on Buildkite (non-empty), doctor reports and flaky tests are published with `buildkite-agent annotate` |
 | `UV_PYTHON_INSTALL_DIR`, `XDG_DATA_HOME`, `APPDATA` | locating uv-managed interpreters during interpreter discovery (`UV_PYTHON_INSTALL_DIR` first, else uv's default under `XDG_DATA_HOME` or `~/.local/share` on Unix, `%APPDATA%` on Windows) |
+| `COVERAGE_RCFILE` | the coverage config file to read when working out which files `--cov` measures (used by [`--incremental`](cli.md#-incremental)), as coverage.py does; an explicit `--cov-config` other than `.coveragerc` wins |
 | `XDG_CACHE_HOME`, `LOCALAPPDATA` | default base for the interpreter-probe cache (see `RSTEST_CACHE_DIR`) |
