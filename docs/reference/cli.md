@@ -821,7 +821,9 @@ report without gating the exit code.
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
-to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
+to `dots`, so logs stay byte-stable. Pass `--output` to pin a style. An
+unknown style is not an error: rstest warns (`rstest: unknown --output
+'weird' (use dots|verbose|...); using dots`) and runs with `dots`.
 
 !!! note "pytest's own output in byte-exact mode"
     In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
