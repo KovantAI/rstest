@@ -264,9 +264,12 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => {
-                prog.on_collect_error(sink, &path, &longrepr);
-                sink.emit_collect_error(&path, &longrepr);
-                run.collect_error(path, longrepr);
+                // Every worker reports the same broken collector; stream and
+                // count it once (the Run dedupes by path).
+                if run.collect_error(path.clone(), longrepr.clone()) {
+                    prog.on_collect_error(sink, &path, &longrepr);
+                    sink.emit_collect_error(&path, &longrepr);
+                }
                 if !continue_on_collect_errors && !stopping {
                     // pytest aborts on collection errors; in lazy mode the
                     // error can surface mid-run - stop dispatching and wind

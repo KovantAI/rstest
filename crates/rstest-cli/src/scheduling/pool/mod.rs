@@ -497,9 +497,12 @@ pub fn run_pool(
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => {
-                prog.on_collect_error(sink, &path, &longrepr);
-                sink.emit_collect_error(&path, &longrepr);
-                run.collect_error(path, longrepr);
+                // Every worker reports the same broken collector; stream and
+                // count it once (the Run dedupes by path).
+                if run.collect_error(path.clone(), longrepr.clone()) {
+                    prog.on_collect_error(sink, &path, &longrepr);
+                    sink.emit_collect_error(&path, &longrepr);
+                }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
             Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),

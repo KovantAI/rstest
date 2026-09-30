@@ -264,11 +264,19 @@ impl Run {
         }
     }
 
-    pub fn collect_error(&mut self, path: String, mut longrepr: String) {
+    /// Record a collection error for `path`, once. Every pool worker collects
+    /// the whole suite, so the same broken module is reported by each of them;
+    /// pytest reports it once. Returns `false` for a repeat of an already
+    /// recorded path, so callers can skip re-streaming it too.
+    pub fn collect_error(&mut self, path: String, mut longrepr: String) -> bool {
+        if self.collect_errors.iter().any(|(p, _)| *p == path) {
+            return false;
+        }
         // Same bound as failure text: html embeds this verbatim, so a giant
         // collection-error traceback must not land unbounded in the artifact.
         crate::text::truncate_on_boundary(&mut longrepr, FAILURE_TEXT_CAP);
         self.collect_errors.push((path, longrepr));
+        true
     }
 
     /// Carry forward a test that was NOT run this session because it is
@@ -636,6 +644,20 @@ mod tests {
         run.collect_error("b.py".into(), "ImportError".into());
         assert!(!run.all_passed());
         assert!(run.summary_line().contains("1 collect errors"));
+    }
+
+    #[test]
+    fn collect_error_repeated_by_every_worker_counts_once() {
+        // Each pool worker collects the whole suite, so all of them report the
+        // same broken module; pytest reports it once.
+        let mut run = Run::default();
+        assert!(run.collect_error("b.py".into(), "ImportError".into()));
+        for _ in 0..3 {
+            assert!(!run.collect_error("b.py".into(), "ImportError".into()));
+        }
+        assert!(run.collect_error("c.py".into(), "ImportError".into()));
+        assert_eq!(run.collect_errors().len(), 2);
+        assert_eq!(run.counts()["collect_errors"], 2);
     }
 
     #[test]

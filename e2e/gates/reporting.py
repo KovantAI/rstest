@@ -173,6 +173,28 @@ def gate_report_json_contract(g, args, binary):
         failed and all("longrepr" in v and v["longrepr"] for v in failed),
         str(failed[:1]),
     )
+    # Every worker collects the whole suite, so each one reports the same
+    # broken module; it must be counted, listed and streamed once (as pytest).
+    g.write("colerr/test_bad.py", "import nonexistent_module_xyz  # noqa\n")
+    g.write("colerr/test_ok.py", "def test_ok(): pass\n")
+    rj3 = g.tmp / "contract_colerr.json"
+    r = g.run("colerr", "-n", "3", "--report-json", str(rj3))
+    doc3 = json.loads(rj3.read_text(encoding="utf-8"))
+    check(
+        "collect error counted once across workers",
+        doc3["collect_errors"] == ["colerr/test_bad.py"]
+        and doc3["meta"]["counts"]["collect_errors"] == 1
+        and "1 collect errors" in r.stdout
+        and r.stdout.count("--- FAILED colerr/test_bad.py ---") == 1,
+        str(doc3["collect_errors"]) + " " + r.stdout[-300:],
+    )
+    r = g.run("colerr", "-n", "3", "--output", "json")
+    _, objs = parse_ndjson(r.stdout)
+    check(
+        "collect error streamed once across workers",
+        sum(o.get("event") == "collecterror" for o in objs) == 1,
+        r.stdout[-300:],
+    )
     rj2 = g.tmp / "contract_crash.json"
     g.run("crash", "-n", "2", "--report-json", str(rj2))
     doc2 = json.loads(rj2.read_text(encoding="utf-8"))
