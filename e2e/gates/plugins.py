@@ -55,7 +55,7 @@ def gate_crash_handling(g, args, binary):
         "crash-loop terminates",
         r.returncode == 3
         and "6 failed" in r.stdout
-        and ("1 passed" in r.stdout or "1 errors" in r.stdout),
+        and ("1 passed" in r.stdout or "1 error," in r.stdout or "1 error in" in r.stdout),
         r.stdout[-200:],
     )
 
