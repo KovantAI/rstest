@@ -353,6 +353,15 @@ def test_lazy_collection_without_cache():
     assert conn.sent == [("lazy_ready", {})]
 
 
+def test_lazy_collection_without_a_cacheprovider():
+    # `-p no:cacheprovider` leaves config with no `cache` attribute at all:
+    # lazy_ready must still go out (no cache_dir), not raise AttributeError.
+    conn = FakeConn()
+    session = SimpleNamespace(testscollected=0, items=[], config=SimpleNamespace())
+    assert LazyDispatchPlugin(conn).pytest_collection(session) is True
+    assert conn.sent == [("lazy_ready", {})]
+
+
 def test_lazy_collect_file_reports_ids_serial_and_flaky():
     conn = FakeConn()
     flaky_mark = SimpleNamespace(kwargs={"reruns": 2})

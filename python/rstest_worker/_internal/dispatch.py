@@ -250,8 +250,10 @@ class LazyDispatchPlugin(StreamPlugin):
         session.testscollected = 0
         session.items = []
         payload = {}
-        if session.config.cache is not None:
-            payload["cache_dir"] = str(session.config.cache._cachedir)
+        # No `cache` attribute at all with `-p no:cacheprovider`.
+        cache = getattr(session.config, "cache", None)
+        if cache is not None:
+            payload["cache_dir"] = str(cache._cachedir)
         rootpath = getattr(session.config, "rootpath", None)
         if rootpath is not None:
             payload["rootdir"] = str(rootpath)
