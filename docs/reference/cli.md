@@ -1172,7 +1172,7 @@ unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 `--ff`, `-W`, `-p`, `--tb`, `--color`, `--basetemp`, plugin flags, ...
 
 Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
-and subcommand list) and `-V` / `--version` (`rstest 0.8.0`). In byte-exact
+and subcommand list) and `-V` / `--version` (prints `rstest <version>`). In byte-exact
 mode with no `--output` set, `rstest -- --help` prints the vendored pytest's
 help; at `-n 2` and above or with an explicit `--output` it does not. To list pytest's and
 your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows
