@@ -29,7 +29,7 @@ aiohttp, 4,469 tests:   pytest 193s  →  rstest 67s warm (150s cold), -n 8
   <img src="https://raw.githubusercontent.com/KovantAI/rstest/main/docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (193s), then rstest --doctor (67s, 14 parallel workers) pinpointing the wait-bound file that gates the suite" width="820">
 </p>
 
-<p align="center"><sub>Same suite: <b>pytest 193s → rstest 67s</b> (warm, <code>-n auto</code> = 14 workers, as recorded); <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
+<p align="center"><sub>Same suite: <b>pytest 193s → rstest 67s</b> (warm, <code>-n auto</code> = 14 workers on the recording machine; the line above and the doctor sample below are from <code>-n 8</code> runs); <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
 
@@ -214,7 +214,7 @@ the runner already owns (per-test wall/CPU time, per-fixture setup):
 WAIT-BOUND: 95% of test time (176.5s) is waiting, not computing (sleeps / IO / timeouts).
     54.20s waiting of   54.25s  tests/test_proxy_functional.py::test_proxy_https_multi_conn_limit
     10.97s waiting of   10.97s  tests/test_proxy_functional.py::test_proxy_https_connect
-  ... and 33 more
+  ... and 27 more
 
 PARALLEL FLOOR: the longest test (54.2s) exceeds the ideal per-worker share (23.2s at -n 8);
 no worker count can finish faster than its longest test. Gate tests:
