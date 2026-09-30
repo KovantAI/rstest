@@ -42,12 +42,17 @@ trait Annotator {
     /// One error/issue line for a failed test; `msg` is its failure text
     /// (already defaulted to "test failed").
     fn error_line(&self, nodeid: &str, file: &str, lineno: Option<u64>, msg: &str) -> String;
+    /// One warning line for a quarantined failure (`--quarantine`): the run
+    /// stays green, so a red error annotation would contradict it, but the
+    /// failure is still worth surfacing on the PR.
+    fn quarantined_line(&self, nodeid: &str, file: &str, lineno: Option<u64>, msg: &str) -> String;
     /// One warning line for a flaky-passed test (green only after `attempts`).
     fn warning_line(&self, nodeid: &str, file: &str, lineno: Option<u64>, attempts: u32) -> String;
 }
 
-/// Drive an [`Annotator`] over a finished run: an error line per failed test,
-/// then a warning line per flaky-passed test.
+/// Drive an [`Annotator`] over a finished run: an error line per failed test
+/// (a warning when it is quarantined), then a warning line per flaky-passed
+/// test.
 fn print_annotations(sink: &mut Sink, run: &report::Run, a: &dyn Annotator) {
     // Under a monorepo the parent runs us with cwd=project, so nodeid paths
     // are project-relative; CI resolves the annotation file from the repo
@@ -59,7 +64,12 @@ fn print_annotations(sink: &mut Sink, run: &report::Run, a: &dyn Annotator) {
         }
         let file = source_path(nodeid, &prefix);
         let msg = entry.longrepr.as_deref().unwrap_or("test failed");
-        sink.out_line(&a.error_line(nodeid, &file, entry.lineno, msg));
+        let line = if entry.quarantined {
+            a.quarantined_line(nodeid, &file, entry.lineno, msg)
+        } else {
+            a.error_line(nodeid, &file, entry.lineno, msg)
+        };
+        sink.out_line(&line);
     }
     // Flaky-passed tests (green only after reruns) surface as warnings: the run
     // is green, but the flake is visible on the PR without opening the junit/log.
@@ -96,6 +106,14 @@ impl Annotator for Github {
         )
     }
 
+    fn quarantined_line(&self, nodeid: &str, file: &str, lineno: Option<u64>, msg: &str) -> String {
+        format!(
+            "::warning {}::quarantined (non-fatal): {}",
+            Self::props(nodeid, file, lineno),
+            gh_data(msg)
+        )
+    }
+
     fn warning_line(&self, nodeid: &str, file: &str, lineno: Option<u64>, attempts: u32) -> String {
         format!(
             "::warning {}::flaky: passed only after {attempts} rerun{}",
@@ -126,6 +144,14 @@ impl Annotator for Azure {
         format!(
             "##vso[task.logissue {}]{nodeid}: {}",
             Self::props("error", file, lineno),
+            az_line(msg)
+        )
+    }
+
+    fn quarantined_line(&self, nodeid: &str, file: &str, lineno: Option<u64>, msg: &str) -> String {
+        format!(
+            "##vso[task.logissue {}]{nodeid}: quarantined (non-fatal): {}",
+            Self::props("warning", file, lineno),
             az_line(msg)
         )
     }
@@ -312,6 +338,12 @@ mod tests {
             report_of("c.py::test_flk", "call", "passed", Some(9), None),
         );
         run.mark_flaky("c.py::test_flk".into(), 2);
+        // a quarantined failure: still annotated, but as a warning
+        run.record(
+            Some(1),
+            report_of("d.py::test_q", "call", "failed", Some(4), Some("flaky io")),
+        );
+        run.quarantine(|id| id == "d.py::test_q");
         run
     }
 
@@ -331,9 +363,15 @@ mod tests {
             lines[1],
             "::error file=b.py,title=b.py%3A%3Atest_setup::test failed"
         );
-        // flaky warning last: green run, surfaced as a warning with rerun count.
+        // quarantined failure: a warning, never an error (the run stays green).
         assert_eq!(
             lines[2],
+            "::warning file=d.py,title=d.py%3A%3Atest_q,line=5::quarantined (non-fatal): flaky io"
+        );
+        assert!(!out.contains("::error file=d.py"));
+        // flaky warning last: green run, surfaced as a warning with rerun count.
+        assert_eq!(
+            lines[3],
             "::warning file=c.py,title=c.py%3A%3Atest_flk,line=10::flaky: passed only after 2 reruns"
         );
     }
@@ -355,6 +393,10 @@ mod tests {
         );
         assert_eq!(
             lines[2],
+            "##vso[task.logissue type=warning;sourcepath=d.py;linenumber=5]d.py::test_q: quarantined (non-fatal): flaky io"
+        );
+        assert_eq!(
+            lines[3],
             "##vso[task.logissue type=warning;sourcepath=c.py;linenumber=10]c.py::test_flk: flaky, passed only after 2 reruns"
         );
     }

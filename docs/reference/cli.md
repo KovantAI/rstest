@@ -888,7 +888,10 @@ workflow-command spec. Use it as your CI `--output`.
 Tests that passed only after reruns (`--reruns` /
 `@pytest.mark.flaky`) additionally emit a `::warning` annotation
 (`flaky: passed only after N reruns`): the run stays green, but the
-flake is visible on the PR without opening the log.
+flake is visible on the PR without opening the log. Failures matched by
+[`--quarantine`](#-quarantine-file) are annotated as `::warning`
+(`quarantined (non-fatal): <traceback>`) rather than `::error`, matching the
+run's green exit.
 
 `azure` renders the normal `dots` log and additionally emits an [Azure
 Pipelines logging
@@ -904,7 +907,8 @@ per failing test, surfaced as an inline issue on the file in the PR:
 location, omitted when none is available. The message is
 collapsed to one line (logissue is single-line). Flaky-passed tests
 (`--reruns`) additionally emit a `type=warning` logissue: green run,
-visible flake.
+visible flake. Quarantined failures are also `type=warning`, never
+`type=error`.
 
 `gitlab` renders the normal `dots` log; each failure in the end-of-run
 failures block is wrapped in a [GitLab CI collapsible
