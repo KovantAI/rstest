@@ -39,7 +39,7 @@ use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
-use io::{dispatch_to, spawn_into, start_into};
+use io::{dispatch_to, feed, seed_list, spawn_into, start_into};
 use state::WorkerState;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -236,28 +236,13 @@ fn warn_replay_drift(
     }
 }
 
-/// Replay: hand `indices` to a worker and release its held last item. Chunked
-/// and best-effort like `dispatch_to`: a failed send means the worker is dying,
-/// and its crash event handles the remnant (already in `outstanding`). Called
-/// again for a slot's serial tail; the worker keeps draining, so items sent
-/// after a NoMoreItems still run.
+/// Replay: hand `indices` to a worker and release its held last item, fed a
+/// chunk at a time ([`seed_list`]). Called again for a slot's serial tail; the
+/// worker keeps draining, so items sent after a NoMoreItems still run.
 fn pin_send(s: &mut WorkerState, indices: Vec<u64>) {
-    if indices.is_empty() {
-        return;
+    if !indices.is_empty() {
+        seed_list(s, indices);
     }
-    s.outstanding.extend(indices.iter().copied());
-    for chunk in indices.chunks(4096) {
-        if s.worker
-            .send(&proto::Command::RunItems {
-                indices: chunk.to_vec(),
-            })
-            .is_err()
-        {
-            return;
-        }
-    }
-    s.finishing = true;
-    let _ = s.worker.send(&proto::Command::NoMoreItems);
 }
 
 /// The clean nodeid for a dispatched index, from the designate's id list.
@@ -777,6 +762,8 @@ pub fn run_pool(
                 if let Some(pos) = s.outstanding.iter().position(|&x| x == index) {
                     s.outstanding.remove(pos);
                 }
+                // --dist each / replay: top up from the unsent backlog.
+                feed(s, stopping);
                 let item_budget = budget_of(&flaky_budget, index);
                 if item_budget > 0 {
                     // --only-rerun: failures must match a pattern to retry.
@@ -1174,6 +1161,9 @@ pub fn run_pool(
                     ));
                 }
             }
+            if stopping {
+                states.iter_mut().for_each(|s| feed(s, true));
+            }
             for (_, s) in states.iter_mut().enumerate().filter(|(i, s)| {
                 s.seeded
                     && !s.dead
@@ -1210,25 +1200,13 @@ pub fn run_pool(
                         Some(rem) => rem,
                         None => (0..total_items as u64).collect(),
                     };
-                    s.outstanding.extend(indices.iter().copied());
-                    // Best-effort sends (see dispatch_to): a dying
+                    // Fed in chunks, released once all are sent. A dying
                     // worker's crash event re-seeds the remnant.
-                    // Chunked sends keep messages bounded at pandas scale.
-                    for chunk in indices.chunks(4096) {
-                        if s.worker
-                            .send(&proto::Command::RunItems {
-                                indices: chunk.to_vec(),
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    // No shared queue and no reruns: release the held
-                    // last item right away.
-                    s.finishing = true;
-                    let _ = s.worker.send(&proto::Command::NoMoreItems);
+                    seed_list(s, indices);
                 }
+            }
+            if stopping {
+                states.iter_mut().for_each(|s| feed(s, true));
             }
             for s in states
                 .iter_mut()
