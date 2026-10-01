@@ -17,7 +17,7 @@ Evaluating rstest for your team? Start with
 ```console
 $ pip install rstest
 $ rstest -n 4      # -n is optional; plain `rstest` picks a worker count
-rstest 0.7.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 34%]
 ........................................................................ [ 69%]
 ......................................................                   [100%]

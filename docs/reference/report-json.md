@@ -277,7 +277,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 3,
-  "rstest_version": "0.7.0",
+  "rstest_version": "0.8.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "startup_seconds": 0.6,
@@ -364,9 +364,10 @@ reference doesn't spell out:
   (the per-worker floor if work split perfectly), and `gate_tests` lists up to
   10 tests longer than that share.
 - **`parallel_efficiency`** (realized speedup against the worker budget):
-  `realized_speedup` is `test_time_seconds / wall_seconds` and can exceed
-  `ideal_speedup` (the worker count) on wait-bound suites, so `efficiency_pct`
-  over 100% signals wait-bound overlap. `workers_busy` covers every worker,
+  `realized_speedup` is `test_time_seconds / wall_seconds`. Each worker runs
+  one test at a time, so it stays at or below `ideal_speedup` (the worker
+  count) and `efficiency_pct` at or below 100%; a wait-bound suite run with
+  `-n` above the core count can realize more than the core count. `workers_busy` covers every worker,
   busiest first (the terminal report shows at most 8; the JSON is not
   truncated); tests with no recorded worker are bucketed as `"serial"`.
   `imbalance_pct` is `100 × (busiest − idlest) / busiest`. `long_pole_seconds`

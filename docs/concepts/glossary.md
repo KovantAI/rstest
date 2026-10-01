@@ -67,11 +67,10 @@ tests first and gets faster. **Don't judge rstest's speed on the first run.**
 
 **Byte-exact mode**{#byte-exact-mode}: `-n 0`: one process, runs exactly like plain
 pytest. You get the same per-test outcomes and, with no `--output` set,
-pytest's own terminal output (**Unreleased**; rstest 0.7.0 printed its own
-view), with rstest's extras (doctor report, coverage report, quarantined
-failures, gate messages) appended after it. An explicit `--output` switches
-back to rstest's renderer. `--junitxml` is pytest's own document too
-(**Unreleased**), with rstest's `flaky` / `quarantined` properties added.
+pytest's own terminal output, with rstest's extras (doctor report, coverage
+report, quarantined failures, gate messages) appended after it. An explicit
+`--output` switches back to rstest's renderer. `--junitxml` is pytest's own
+document too, with rstest's `flaky` / `quarantined` properties added.
 `-n 0` and `-n 1` are identical. Both run one
 pytest session in a single Python process, with no scheduling and no `[gwN]`
 attribution (the compatibility anchor). Also called

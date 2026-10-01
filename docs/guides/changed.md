@@ -56,7 +56,7 @@ actually executed them:
 
 ```console
 $ rstest -n auto --changed
-rstest: 1 changed file(s) -> 1 affected test target(s)
+rstest: 1 changed file(s) -> 1 of 12 mapped test(s) affected
 ```
 
 Editing one function now runs only the tests that touch that function, not

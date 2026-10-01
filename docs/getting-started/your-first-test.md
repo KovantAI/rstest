@@ -56,9 +56,8 @@ test_first.py ..                                                         [100%]
 That's the whole loop: no config file, no flags. rstest collected both tests,
 ran them, and printed pytest's familiar output. It *is* pytest's output: this
 tiny suite runs on a **single worker**, and on one worker rstest runs one
-plain pytest session and lets it print its own terminal output (**Unreleased**:
-rstest 0.7.0 printed its own `dots` view here, under a `single worker
-(pytest-exact mode)` banner; pass `--output dots` to get that view back).
+plain pytest session and lets it print its own terminal output (pass
+`--output dots` to get rstest's own `dots` view instead).
 It runs on one worker because `-n auto` (the default) deliberately caps
 itself low on tiny suites: it never starts more workers than you have test
 files, and once rstest has timings cached it also caps by how long the suite takes, since
@@ -133,7 +132,7 @@ four explicitly. Twelve one-second tests then finish in about
 
 ```console
 $ rstest -n 4 test_slow.py
-rstest 0.7.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ............ [100%]
 
 12 passed in 3.16s

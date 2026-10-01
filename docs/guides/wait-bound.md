@@ -56,11 +56,11 @@ Here is the key move for a wait-bound suite, and it is counter-intuitive:
   wait-bound suite can set `-n` **above** the logical core count to keep
   more waits in flight at once, since a waiting worker isn't using a core.
 
-This is the same effect doctor reports as **PARALLEL EFFICIENCY over
-100%**: overlapping sleeps and IO run more tests at once than there are
-cores. Above 105% doctor prints `over 100%: tests overlap beyond core count
-(wait-bound; see WAIT-BOUND above).`, treating it as normal for a
-wait-bound suite. (The section is `-n ≥ 2` only.)
+Doctor's **PARALLEL EFFICIENCY** section shows this as a realized speedup
+above the logical core count (for example `13.0x realized of 32x possible`
+on a 14-core machine): overlapping sleeps and IO run more tests at once than
+there are cores. The efficiency percentage is relative to the worker count,
+so it stays at or below 100%. (The section is `-n ≥ 2` only.)
 The [scheduler](../concepts/scheduling.md) helps here too: it dispatches
 slow tests first (a cached duration of 1s or more), longest first, so a
 54-second waiter starts at t=0 instead of stacking behind other work.
@@ -123,7 +123,9 @@ worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", "gw1", ...; unset at -n 0/
 
 Plugins that check pytest-xdist's `workerinput` get the same answer via
 `request.config.workerinput["workerid"]`; that path works under both
-runners. Full contract:
+runners when tests run in workers (`-n 2` or more). At `-n 0` there is no
+`workerinput`, so guard with `hasattr(request.config, "workerinput")`. Full
+contract:
 [Parallel safety](parallel-safety.md) and
 [Environment variables](../reference/environment.md).
 

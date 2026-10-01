@@ -3,7 +3,7 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
-## 0.8.0 (Unreleased)
+## 0.8.0 (2026-09-28)
 
 - **`rstest xdist-removal-check`: a readiness check for uninstalling
   pytest-xdist.** It scans the pytest config and `PYTEST_ADDOPTS` for xdist
@@ -240,10 +240,10 @@ between 0.x releases and are listed here.
 - **Benchmarks re-measured under one methodology, plus CPU-bound results.**
   Every published number is now the median of 5 runs after a warm-up, with
   rstest and pytest-xdist at the same `-n`, on a documented machine. Numbers
-  that moved: pandas `-n 8` is now 42s for rstest against 89s for xdist (the
+  that moved: pandas `-n 8` is now 43s for rstest against 89s for xdist (the
   old single run had them at parity, 63s vs 61s; xdist's controller is the
-  bottleneck on 193k tests), django-allauth at matched `-n 8` is 5.7s against
-  8.8s (the old row compared xdist `-n 8` with rstest `-n 4`), and aiohttp's
+  bottleneck on 193k tests), django-allauth at matched `-n 8` is 5.8s against
+  8.9s (the old row compared xdist `-n 8` with rstest `-n 4`), and aiohttp's
   cold run is 150s at `-n 8` (was 126s). New: sympy and scikit-learn sweeps
   (parity with xdist, gains up to the performance-core count), a measured
   per-worker memory model, and a worker x BLAS-thread grid, which replaces

@@ -13,7 +13,7 @@ elided):
 
 ```console
 $ rstest -n 4
-rstest 0.7.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [  3%]
 ..............................s......................................... [  7%]
 [... 25 more lines ...]
@@ -31,7 +31,7 @@ how long (`idle` when it has nothing). Here is a small four-test file at
 `-n 2`, caught mid-run:
 
 ```text
-rstest 0.7.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
 [gw0] ✓ tests/test_first.py::test_add  0.20s [ 25%]
 [gw1] ✓ tests/test_first.py::test_add_zero  0.21s [ 50%]
 [gw1] s tests/test_first.py::test_skipped [ 75%]
@@ -71,7 +71,7 @@ compact **`dots`** style shown above, so logs stay stable. Pick any style
 explicitly with [`--output dots|verbose|bar|github|json`](../reference/cli.md#-output-dotsverbosebargithubjson):
 the rest of this page describes `dots`. On a single worker with no
 `--output` set, rstest prints pytest's own terminal output instead
-(**Unreleased**; see [below](#controlling-parallelism)).
+(see [below](#controlling-parallelism)).
 
 - The **header line** states the worker count. rstest is parallel by
   default; this line is the visible reminder.
@@ -80,7 +80,10 @@ the rest of this page describes `dots`. On a single worker with no
 - **Failures** print with full pytest-style tracebacks (assertion rewriting
   included) and captured stdout/stderr/log sections.
 - The **summary line** uses pytest's accounting: the counts match what
-  pytest would print for the same run, including warnings.
+  pytest would print for the same run, including warnings, with two
+  exceptions at `-n 2` or more: the `deselected` count is not shown, and a
+  test whose teardown errors counts only as an error (pytest also counts its
+  call outcome).
 
 The live footer described above belongs to the `bar` view on a terminal;
 it is disabled automatically when output is piped or in CI. It is what
@@ -93,7 +96,7 @@ finish:
 
 ```console
 $ rstest -n 2 -v
-rstest 0.7.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
 [gw0] tests/test_first.py::test_add PASSED [ 16%]
 [gw1] tests/test_first.py::test_add_zero PASSED [ 33%]
 [gw1] tests/test_first.py::test_skipped SKIPPED [ 50%]
@@ -117,8 +120,7 @@ tests/test_login.py:3: AssertionError
 
 At `-n 0`/`-n 1` there is no worker, so there is no prefix: the single
 pytest session prints its own `-v` output, exactly as pytest does
-(**Unreleased**: rstest 0.7.0 printed its own `verbose` view here, which
-`--output verbose` still gives you):
+(`--output verbose` gives you rstest's own `verbose` view instead):
 
 ```console
 $ rstest -n 0 -v
@@ -172,8 +174,8 @@ on one or two workers. Pass an explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
 in a single worker process, pytest's own behavior in every detail. With no
-`--output` set, the terminal output is pytest's own too, byte for byte
-(**Unreleased**), and rstest only appends its extras (doctor, coverage, gate
+`--output` set, the terminal output is pytest's own too, byte for byte,
+and rstest only appends its extras (doctor, coverage, gate
 messages) after pytest's summary line. You will see this one mode under
 three names: *byte-exact* in these docs, *pytest-exact* in its run banner
 (printed only when you pin rstest's renderer with `--output`), and
@@ -234,7 +236,7 @@ Four commands answer four different questions:
 |---|---|---|
 | Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli-commands.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup: zero risk |
 | Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) | Onboarding preflight: finds unstable test ids first, then classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
-| Quarantine the parallel-unsafe tests in one step (**Unreleased**) | [`rstest audit`](../reference/cli-commands.md#audit) | Focused fix loop: same classification, repeatable to catch intermittent races, plus a ready-to-paste `conftest.py` block marking exactly the serial-fixable tests `@pytest.mark.serial` |
+| Quarantine the parallel-unsafe tests in one step | [`rstest audit`](../reference/cli-commands.md#audit) | Focused fix loop: same classification, repeatable to catch intermittent races, plus a ready-to-paste `conftest.py` block marking exactly the serial-fixable tests `@pytest.mark.serial` |
 | Understand why a passing suite is **slow** | [`rstest --doctor`](../guides/doctor.md) | Plain-English breakdown of where test time goes (wait-bound, a long-pole test, poor parallel balance) |
 
 ## A test that isn't parallel-safe

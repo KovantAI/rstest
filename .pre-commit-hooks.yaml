@@ -5,7 +5,7 @@
 #
 #   repos:
 #     - repo: https://github.com/KovantAI/rstest
-#       rev: v0.7.0            # pin a released tag
+#       rev: v0.8.0            # pin a released tag
 #       hooks:
 #         - id: rstest        # runs the whole suite on push
 #

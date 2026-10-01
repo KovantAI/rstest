@@ -10,23 +10,20 @@ Environment variables rstest sets for tests and plugins, and the ones it reads t
 | `RSTEST_WORKER_COUNT` | integer | pool size; **unset** in `-n 0`/`-n 1` mode (`1` under `--reruns`) |
 | `PYTEST_XDIST_WORKER` | `gw0`, `gw1`, ... | pytest-xdist's env var, set for compatibility, so plugins and conftests that grep it work unedited; **unset** in `-n 0`/`-n 1` mode (`gw0` under `--reruns`) |
 | `PYTEST_XDIST_WORKER_COUNT` | integer | xdist's pool-size var, same compatibility contract; **unset** in `-n 0`/`-n 1` mode (`1` under `--reruns`) |
-| `PYTEST_XDIST_TESTRUNUID` | opaque string | xdist's run-uid var, the same value as `RSTEST_RUN_UID`; set in pool workers (including the `--reruns` one-worker pool), cleared in `-n 0`/`-n 1` mode (like `PYTEST_XDIST_WORKER`). **Unreleased** (not in 0.7.0) |
-| `RSTEST_RUN_UID` | opaque string | one uid per run, shared by every worker (and every project of a monorepo run); also exposed as `workerinput["testrun_uid"]` and `workerinput["testrunuid"]` (xdist's spelling, Unreleased) |
+| `PYTEST_XDIST_TESTRUNUID` | opaque string | xdist's run-uid var, the same value as `RSTEST_RUN_UID`; set in pool workers (including the `--reruns` one-worker pool), cleared in `-n 0`/`-n 1` mode (like `PYTEST_XDIST_WORKER`) |
+| `RSTEST_RUN_UID` | opaque string | one uid per run, shared by every worker (and every project of a monorepo run); also exposed as `workerinput["testrun_uid"]` and `workerinput["testrunuid"]` (xdist's spelling) |
 | `RSTEST_MONO_PROJECT` | relative path | set inside a [monorepo](../guides/monorepo.md) child run to that project's path (e.g. `libs/core`); unset otherwise. rstest also reads it: when it is set, monorepo discovery is skipped and the run is a single-project run, so don't export it yourself |
 
 Plugins that read pytest-xdist's `workerinput` get the same information via
 `request.config.workerinput["workerid"]` / `["workercount"]` /
-`["testrunuid"]`: that path works under both runners (rstest 0.7.0 only
-had the `testrun_uid` spelling; `testrunuid` is Unreleased).
+`["testrunuid"]`: that path works under both runners.
 
 An "unset" above means the variable is absent in the worker: rstest clears
 these before starting each worker, so a `RSTEST_WORKER_ID` or
 `PYTEST_XDIST_WORKER` exported in your shell or CI (or by an outer rstest,
 when a test runs rstest itself) never reaches a test. In a parallel run each
-worker sets its own real values. (rstest 0.7.0 let inherited values through:
-an `-n 0` test saw them, and in a pool a pre-set `PYTEST_XDIST_WORKER` won, so
-every worker saw the same id.) `request.config.workerinput` always carries the
-real values.
+worker sets its own real values. `request.config.workerinput` always carries
+the real values.
 
 ## Set by the orchestrator (internal)
 
@@ -62,8 +59,8 @@ listening, so a re-imported child process doesn't bind the port twice).
 | `RSTEST_CACHE_MAX_AGE` | retention by age: keep segments younger than this loose, e.g. `30d` (default for `--max-age`) |
 | `RSTEST_CACHE_COMPACT_THRESHOLD` | default for [`--cache-compact-threshold`](cli.md#-cache-compact-threshold-n); an unparseable value is reported, not ignored |
 | `RSTEST_WORKER_PATH` | extra directory prepended to the workers' `PYTHONPATH` to locate the `rstest_worker` package (for unusual installs where the project interpreter can't import it) |
-| `RSTEST_MAX_MESSAGE_BYTES` | **Unreleased.** cap on one worker-to-orchestrator message (default 256 MiB); raise it only if a huge suite hits the limit |
-| `RSTEST_WALL_TTL_DAYS` | **Unreleased.** how long a project's recorded wall time (`.rstest_cache/wall.json`, used by the monorepo planner to weight projects) stays valid. Default `30`; `0` keeps it forever |
+| `RSTEST_MAX_MESSAGE_BYTES` | Cap on one worker-to-orchestrator message (default 256 MiB); raise it only if a huge suite hits the limit |
+| `RSTEST_WALL_TTL_DAYS` | How long a project's recorded wall time (`.rstest_cache/wall.json`, used by the monorepo planner to weight projects) stays valid. Default `30`; `0` keeps it forever |
 | `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache **only** (`<dir>/rstest/interp-probes-v1.json`), which speeds up repeated `--python` version resolution. It does **not** relocate `.rstest_cache/` (durations/flakes); use `RSTEST_CACHE` for that. Defaults to `$XDG_CACHE_HOME` (or `~/.cache`) on Unix and `%LOCALAPPDATA%` on Windows; if none resolve, probing just isn't persisted |
 | `RSTEST_FLAKE_RETENTION_DAYS` | how long a test's flake/failure history (`.rstest_cache/flakes.json`) stays relevant. A test with no flake or failure inside this window reads as fixed: its entry is dropped and it stops carrying "flaked _N_x before" annotations. Defaults to `90`; `0` keeps history forever |
 | `COVERAGE_CORE` | coverage.py's measurement core. Under `--cov-context`, rstest sets it to `ctrace` in the workers unless you already set it; your value wins. Don't set `sysmon` (Python 3.14's default core) for a `--cov-context=test` run: it keeps only the first test's context per line, which silently corrupts the coverage index behind `--changed` and `--incremental` |

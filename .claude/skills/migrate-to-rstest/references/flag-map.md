@@ -25,7 +25,7 @@ If the suite already uses xdist, the mental model carries over directly.
 | `--dist loadscope` | `--dist loadscope` | class/module affinity |
 | `--dist loadgroup` + `@pytest.mark.xdist_group` | same | marker honored |
 | `workerinput` / `PYTEST_XDIST_WORKER*` | provided | plugins that read worker identity work |
-| `pytest_configure_node` master hook | emulated per-worker | uuid/workerid-derived values work (e.g. SQLAlchemy `follower_ident`, pytest-django DB suffix); a single shared-server allocator is the one gap |
+| `pytest_configure_node` master hook | emulated per-worker | uuid/workerid-derived values work (e.g. SQLAlchemy `follower_ident`, pytest-django DB suffix); hooks that allocate from one controller-side counter or registry need rework (derive from `gateway.id` or a uuid) |
 
 rstest neutralizes xdist's own session (so the two don't both try to
 parallelize) but keeps `numprocesses` visible, so xdist-aware plugins still set

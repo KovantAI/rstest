@@ -79,6 +79,6 @@ own terminal: `--co`/`--collect-only`, `-s`, `--capture=...`, `--pdb`,
 `--sw-reset`/`--stepwise-reset`, or rstest's `--debug`. Those flags switch
 to this mode automatically. With no `--output` set, the session's own
 terminal output is what you see, and rstest only appends its extras after
-it (**Unreleased**; see
+it (see
 [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson)). It is
 the compatibility anchor: byte-exact pytest behavior.

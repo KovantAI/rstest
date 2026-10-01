@@ -102,9 +102,8 @@ rstest workers announce themselves exactly like xdist workers.
 keys pytest-cov expects. The `PYTEST_XDIST_WORKER`,
 `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` environment
 variables are set too, so plugins and conftests that grep the
-environment keep working as-is. (`testrunuid` and `PYTEST_XDIST_TESTRUNUID`
-are Unreleased: rstest 0.7.0 had only `testrun_uid`.) Plugins
-keying per-worker resources on worker identity work unchanged. The canonical
+environment keep working as-is. Plugins keying per-worker resources on
+worker identity work unchanged. The canonical
 case is pytest-django's per-worker test database (`test_<name>_gw0`, ...),
 which follows from the `workerid` above; note that rstest's corpus only
 exercises pytest-django on SQLite `:memory:`, so check a server-backed
@@ -119,9 +118,6 @@ pytest-xdist is installed. Removing pytest-xdist from your config keeps them
 working (`worker_id` is `"master"` below `-n 2`, `gwN` in the pool). With
 pytest-xdist installed, rstest's definitions take precedence over xdist's (a
 conftest override still wins), and in the pool both return the same values.
-**Unreleased:** in 0.7.0 xdist's definitions won when pytest-xdist was
-installed (see the
-[xdist support matrix](../reference/xdist-support.md#fixtures-worker-identity)).
 One caveat: `--reruns` at `-n 0/1` runs a one-worker pool where
 `config.workerinput` and `PYTEST_XDIST_WORKER=gw0` exist, so xdist's
 `get_xdist_worker_id()` / `is_xdist_worker()` report `gw0` while the fixtures
@@ -317,7 +313,7 @@ If your suite is **CPU-bound** (real compute per test, no sleeps or socket
 waits) and it already splits cleanly under xdist (`-n 8` ≈ 8× serial, workers
 stay busy, no single long test gating the run), **rstest
 lands at parity on raw speed, not a win.** sympy (3,061 pure-Python compute
-tests) runs 15.6s under rstest `-n 8` and 15.5s under xdist `-n 8`, within
+tests) runs 16.1s under rstest `-n 8` and 14.8s under xdist `-n 8`, within
 noise at every worker count from 1 to 14 (see the
 [CPU-bound benchmarks](../reference/benchmarks.md#cpu-bound-suites)). Don't
 switch for wall-clock alone.
@@ -328,8 +324,8 @@ collection-order batches leave to one worker or start late: a *wait-bound*
 pattern. A CPU-bound suite that
 already spreads evenly has no such slack; both runners saturate your cores,
 neither exceeds them. Measured on an M4 Max (10 performance + 4 efficiency
-cores), sympy scales to 6.6x at `-n 10` and 7.2x at `-n 14`: expect gains up to
-your performance-core count, then a flat curve.
+cores), sympy scales to 6.3x at `-n 10` and drops to 5.7x at `-n 14`: expect gains
+up to your performance-core count, then a flat or falling curve.
 
 **What's still worth it anyway** (beyond the improvements above):
 
@@ -350,10 +346,10 @@ on numpy with Accelerate (macOS;
 [cpu-bench grid](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#worker-x-blas-thread-grid)):
 
 - On a realistic suite (scikit-learn `linear_model`, small ops) the thread cap
-  made no difference at any `-n`.
+  made no difference from `-n 2` up (at `-n 1`, uncapped was about 7% slower).
 - On heavy matmul/solve tests, library threads **help** while `-n` is below
-  the core count (one worker: 13.2s capped at one thread, 7.5s uncapped), and
-  the cap stops mattering once `-n` reaches the core count.
+  the core count (one worker: 13.4s capped at one thread, 7.7s uncapped), and
+  the cap moves the wall by 3% at most once `-n` reaches the core count.
 
 So one thread per worker is not a free default. Pin it when you see
 oversubscription on your stack (OpenBLAS and MKL spin their own threads and
@@ -396,4 +392,4 @@ own suite). `--doctor` does not measure memory; use `/usr/bin/time -v`,
 **How to decide for real.** [`rstest try`](../reference/cli-commands.md#try) runs your own
 suite under plain pytest and under `rstest -n auto`, reporting parity and speed
 before you change any config. Confirm the parity-not-a-win call on your tests
-and cores, not on pandas'.
+and cores, not on sympy's.

@@ -26,10 +26,10 @@ aiohttp, 4,469 tests:   pytest 193s  →  rstest 67s warm (150s cold), -n 8
 ```
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/KovantAI/rstest/main/docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (197s), then rstest (68s, 8 parallel workers), then rstest --doctor pinpointing the wait-bound file that gates the suite" width="820">
+  <img src="https://raw.githubusercontent.com/KovantAI/rstest/main/docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (193s), then rstest --doctor (67s, 14 parallel workers) pinpointing the wait-bound file that gates the suite" width="820">
 </p>
 
-<p align="center"><sub>Same suite: <b>pytest 197s → rstest 68s</b> (warm, <code>-n 8</code>, as recorded), then <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
+<p align="center"><sub>Same suite: <b>pytest 193s → rstest 67s</b> (warm, <code>-n auto</code> = 14 workers, as recorded); <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
 
@@ -84,8 +84,8 @@ The wins come from suite *shape*, not magic. Quick self-check:
 | Your suite | What to expect |
 |---|---|
 | Wait-bound (IO, sleeps, network, timeouts) | **Biggest win**: xdist's default `--dist load` hands out consecutive batches in collection order with no timing data, so a file of slow tests clusters on a few workers and starts late; rstest's duration cache starts the slowest tests first, spread across workers. |
-| CPU-bound, already splits well under xdist | **Parity, not a win**: gain up to the performance-core count, same as xdist (sympy `-n 8`: 15.6s vs 15.5s). |
-| Very many tests (100k+) | **Win over xdist**: xdist's single Python controller becomes the bottleneck; rstest's orchestrator is Rust (pandas `-n 8`: 42s vs 89s). |
+| CPU-bound, already splits well under xdist | **Parity, not a win**: gain up to the performance-core count, same as xdist (sympy `-n 8`: 16.1s vs 14.8s, overlapping spreads). |
+| Very many tests (100k+) | **Win over xdist**: xdist's single Python controller becomes the bottleneck; rstest's orchestrator is Rust (pandas `-n 8`: 43s vs 89s). |
 | Gated by one long test | **No win beyond that test**: no worker count beats the long pole. `--doctor` names it. |
 | Small (< ~10s serial) | **Little wall-time change**: value is `--watch`, `--changed`, `--doctor`, not raw speed. |
 | Many tiny per-service suites | Speedup is per-suite; the aggregate CI win depends on your largest suites. |
@@ -114,16 +114,16 @@ environment for this one command.)
 
 Real open-source suites, end-to-end, with per-test outcome diffing against
 the pytest baseline: 100% parity on pandas, django-allauth and rich, and
-99.93-99.96% on aiohttp, whose socket-leak warning flake hits xdist too (every
+99.91-99.98% on aiohttp, whose socket-leak warning flake hits xdist too (every
 known flake is catalogued in the docs).
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | Suite | Tests | pytest | xdist `-n 8` | rstest `-n 8` |
 |---|---|---|---|---|
-| aiohttp | 4,469 | 193s | 161s | **67s** warm · 150s cold |
-| pandas | 193,843 | 186s | 89s | **42s** (xdist's controller is the bottleneck) |
-| django-allauth | 2,050 | 26s | 8.8s | **5.7s** |
-| rich | 981 | 3.7s | 2.7s | **2.4s** |
+| aiohttp | 4,469 | 193s | 160s | **67s** warm · 150s cold |
+| pandas | 193,843 | 190s | 89s | **43s** (xdist's controller is the bottleneck) |
+| django-allauth | 2,050 | 26s | 8.9s | **5.8s** |
+| rich | 981 | 3.7s | 2.7s | **2.5s** |
 
 Apple M4 Max, CPython 3.13, pytest-xdist 3.8, median of 5 runs at the same
 `-n` for both runners. CPU-bound suites (sympy, scikit-learn) land at parity
@@ -176,8 +176,8 @@ Full methodology:
 
 At `-n 0` (byte-exact mode), per-test outcomes match pytest exactly: one
 vendored-pytest session; any difference at `-n 0` is a bug. The guarantee is
-per-test outcomes (every phase, skips, xfails). With no `--output` set
-(**Unreleased**), the terminal output at `-n 0` is pytest's own as well, with
+per-test outcomes (every phase, skips, xfails). With no `--output` set,
+the terminal output at `-n 0` is pytest's own as well, with
 rstest's extras (doctor, coverage, gate messages) appended after it, and
 `--junitxml` is pytest's own document at every worker count. In parallel modes, outcomes are preserved for
 parallel-safe tests; tests with hidden time/ordering/shared-state

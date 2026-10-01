@@ -9,16 +9,15 @@ the [Monorepos guide](../guides/monorepo.md). This page is the reference for
 
 Monorepo mode engages when the current directory has **no pytest
 configuration of its own** but subdirectories do. Discovery descends at most
-five directory levels below the root (projects nested deeper are not found;
-list them in `projects` explicitly), looking for any of pytest 9's config
+five directory levels below the root (projects nested deeper are not found,
+even when listed in `projects`, which only filters what discovery found; run
+those from their own directory), looking for any of pytest 9's config
 files: `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`,
 `pyproject.toml`, `tox.ini`, `setup.cfg`. The first four count even when
 empty; `pyproject.toml` counts with a `[tool.pytest]` table (pytest 9's native
 TOML form) or `[tool.pytest.ini_options]` (even empty), `tox.ini` with a
 `[pytest]` section, and `setup.cfg` with `[tool:pytest]`. A `pyproject.toml`
-without a pytest section does not count. (**Unreleased:** rstest 0.7.0 knew
-only `pytest.ini` with a `[pytest]` section, `pyproject.toml` with
-`[tool.pytest.ini_options]`, `tox.ini` and `setup.cfg`.)
+without a pytest section does not count.
 Hidden directories, virtualenvs, `node_modules`, and `site-packages` are
 pruned, and a found project owns its subtree (nested configs belong to it).
 
@@ -85,38 +84,35 @@ that same cache. With `RSTEST_CACHE` unset that is `<project>/.rstest_cache`.
 With `RSTEST_CACHE` set, each project gets `<RSTEST_CACHE>/<slug>` (the slug
 as for output files below: `libs/core` -> `libs-core`), so projects never
 share one cache dir; a relative `RSTEST_CACHE` resolves against the monorepo
-root, not each project. (**Unreleased:** rstest 0.7.0 handed every project
-the same `RSTEST_CACHE`, so an absolute value made the projects share one
-cache dir.) `--cache-pull`/`--cache-push` are refused at the root;
+root, not each project. `--cache-pull`/`--cache-push` are refused at the root;
 run rstest per project for a shared remote cache.
 
 ## Flags at a monorepo root
 
 Every root flag is either forwarded to each project's rstest, forwarded with a
 per-project output path, handled at the root, or refused with exit 1; no run
-flag is silently dropped. Rows marked **Unreleased** are new since rstest 0.7.0 (0.7.0
-dropped those flags at a monorepo root).
+flag is silently dropped.
 
 | Flag | At a monorepo root |
 |---|---|
 | `-n` | split into per-project shares (see [Worker budget](#worker-budget-and-scheduling)) |
-| `--python`, `--dist`, `--order`, `--output` (except `json`/`tap`), `--reruns`, `--only-rerun`, `--quarantine`, `--worker-timeout`, `--doctor`, `--doctor-fail-on` | forwarded to every project (`--order` is itself Unreleased) |
+| `--python`, `--dist`, `--order`, `--output` (except `json`/`tap`), `--reruns`, `--only-rerun`, `--quarantine`, `--worker-timeout`, `--doctor`, `--doctor-fail-on` | forwarded to every project |
 | `--changed[=REV]`, `--changed-strict` | classified once at the root, then forwarded to the directly changed projects (see [Changed-aware runs](#changed-aware-runs)) |
 | `--timeout`, `--collect`, `--incremental`, `--reruns-only-known-flaky`, `--fork-pool` | forwarded to every project |
 | `--fail-on-leak`, `--durations-regress`, `--require-baseline` | forwarded; each gate applies per project, and a project that fails its gate fails the root through the merged exit code |
 | `--shuffle[=SEED]` | resolved once at the root, so every project uses the same seed. A bare `--shuffle` picks one and prints `rstest: shuffle seed <N> for every project (reproduce with --shuffle=<N>)`. Each project still needs `-n 2` or more, so a project whose share is one worker errors |
 | `--junitxml`, `--doctor-json`, `--doctor-md` | one file per project, slug before the extension (see below) |
-| `--html` | one file per project, like `--junitxml`: `out.html` -> `out.libs-core.html` (**Unreleased**) |
+| `--html` | one file per project, like `--junitxml`: `out.html` -> `out.libs-core.html` |
 | `--report-json` | one merged document at the requested path (see below) |
 | `--cache-remote`, `--cache-compact-threshold` | handled at the root; inert without pull/push, which are refused |
 | `--cache-pull`, `--cache-push` | refused: each project has its own cache |
 | `--watch`, `--output json`, `--output tap` | refused: run inside one project (use `--report-json` or `--junitxml` for machine-readable results) |
 | `-s`, `--capture=...`, `--pdb`, `--trace`, `--co`, stepwise flags | refused: they need a single pytest session |
-| `--debug` | refused (**Unreleased**): `--debug needs a single pytest session; run it inside one project of this monorepo` |
-| `--shard` | refused (**Unreleased**): shard buckets and `shard-verify` cover one project's collection; run `--shard` inside each project |
-| `--cov-diff-fail-under`, `--cov-diff-json` | refused (**Unreleased**): diff coverage is scored against one project's coverage data; run them inside each project |
-| `--stream-json` | refused (**Unreleased**): one live stream can't carry several concurrent project sessions; run it inside one project, or use `--report-json` |
-| `--since-green` | refused unless `--changed` is also given (**Unreleased**): use `--changed=<rev>` at the root, or run `--since-green` inside a project |
+| `--debug` | refused: `--debug needs a single pytest session; run it inside one project of this monorepo` |
+| `--shard` | refused: shard buckets and `shard-verify` cover one project's collection; run `--shard` inside each project |
+| `--cov-diff-fail-under`, `--cov-diff-json` | refused: diff coverage is scored against one project's coverage data; run them inside each project |
+| `--stream-json` | refused: one live stream can't carry several concurrent project sessions; run it inside one project, or use `--report-json` |
+| `--since-green` | refused unless `--changed` is also given: use `--changed=<rev>` at the root, or run `--since-green` inside a project |
 
 ## Output and artifacts
 

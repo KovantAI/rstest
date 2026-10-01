@@ -255,8 +255,7 @@ for the snapshot job and any PR job, and `ci-cache-write` (adds
 branch can assume. On AWS, restrict the write role's trust policy to the
 `main` ref (the OIDC `sub` claim `repo:<owner>/<repo>:ref:refs/heads/main`), so
 the `if:` above is not the only guard. Gate the merge on
-[`rstest shard-verify shard.*.json`](sharding.md#verify-no-test-was-dropped)
-(**Unreleased**; see that section for the 0.7.0 fallback).
+[`rstest shard-verify shard.*.json`](sharding.md#verify-no-test-was-dropped).
 
 To keep the segment set small, compact from the `publish` job or a schedule:
 `rstest cache-compact --cache-remote s3://ci-cache/rstest --keep-last 50`
@@ -327,10 +326,9 @@ and carry no interpreter tag. Give each distinct suite its own remote prefix
   interpreter.
 - the GitHub artifact backend: put the scope in the artifact name, before a
   `--` separator, as the example above does (`rstest-seg-py3.13--<run_id>-<attempt>-<shard>`,
-  downloaded with `pattern: "rstest-seg-py3.13--*"`). The bundled action on
-  `main` does this for you via its `artifact-suffix` input (default
-  `<os>-py<version>[-<working-directory>]`). **Unreleased:** that input is not
-  in the `@v0.7.0` action; it ships in 0.8.0.
+  downloaded with `pattern: "rstest-seg-py3.13--*"`). The bundled action
+  does this for you via its `artifact-suffix` input (default
+  `<os>-py<version>[-<working-directory>]`).
 
 ## Permissions
 
