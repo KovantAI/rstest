@@ -93,7 +93,9 @@ runs measured (see
   that never saw the dead node's `configure_node`. The shim carries the dead
   worker's `workerinput` snapshot, so workerinput-keyed cleanup works;
   conftest-side registries keyed at configure time will miss. Make teardown a
-  function of `node.workerinput` alone.
+  function of `node.workerinput` alone. This applies to `--collect full`
+  only: under [`--collect lazy`](../reference/cli.md#-collect-fulllazy) a
+  crashed worker's `pytest_testnodedown` does not run anywhere.
 
 On the normal path, a worker's own `pytest_testnodedown` fires at session
 finish: after the run-test loop has torn down all fixtures (session scope
@@ -121,19 +123,26 @@ is the same model as xdist, where each worker also runs its own
   the orchestrator assigns files and each worker collects only its assigned
   files on demand, so the hook sees a partial item set. Run at `-n 0` (or
   `--collect full`) if a hook must see the whole suite.
-- **`pytest_collection_modifyitems` reordering does not control parallel run
-  order.** Deselection is honored (a deselected item won't run), but the
-  *order* you impose is ignored at `-n ≥ 2`: the orchestrator dispatches by
-  index into the verified collection, duration-first. Run order is governed
-  only by `--dist` mode, `@pytest.mark.serial`, and `xdist_group`, not by a
-  reordering hook. A suite relying on such a hook for ordering needs `-n 0`
-  or an affinity `--dist` mode.
+- **`pytest_collection_modifyitems` reordering is a starting point, not a
+  guarantee, at `-n ≥ 2`.** Deselection is honored (a deselected item won't
+  run), and the order you impose is the order the orchestrator dispatches
+  from, with two changes: tests whose cached duration is 1s or more are
+  pulled to the front, longest first, and the rest go out in contiguous
+  chunks to whichever worker is free, so tests on different workers run
+  concurrently. `--dist` mode, `@pytest.mark.serial`, `xdist_group`,
+  `--order fail-fast` and `--shuffle` also change the order. A suite that
+  needs one test to finish before another starts needs `-n 0` or an
+  affinity `--dist` mode.
 - Hooks assuming single-process semantics (a module-level global that
   accumulates across the run) will not see other workers' contributions.
 
 ## Crash cleanup
 
-Crash cleanup is best-effort and **weaker than xdist's**: xdist's controller is a
+Crash cleanup is best-effort, **weaker than xdist's**, and runs only under
+`--collect full`. Under `--collect lazy` (explicit, or picked automatically)
+the dead worker's `pytest_testnodedown` is skipped, so per-worker resources
+it would have dropped are left behind; use `--collect full` if a suite
+relies on that cleanup. Under full collection: xdist's controller is a
 separate always-alive process; rstest needs a surviving worker (if the last
 worker crashes, cleanup is skipped with a loud warning). One ordering hazard
 to know: the crashed worker's **replacement** starts while the survivor runs the

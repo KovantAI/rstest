@@ -66,12 +66,12 @@ bisect names the polluter, and the fix goes into the polluter or the victim's
 setup. Which bisect to use depends on where the polluter sits (next
 paragraph).
 
-**Watch for this trap.** `bisect` only searches the tests that come *before*
-the victim in collection order. On CI the polluter often ran first only because
-the scheduler put it there, while it collects *after* the victim. Bisect then
-reports that the failure "does not reproduce from collection order" and
-suggests concurrency, which is wrong. When you have a journal, search the
-worker's recorded order instead with the bundled script:
+**Which bisect.** `rstest bisect` first runs every test that collects
+*before* the victim, then, if that passes, every other test including the ones
+that collect *after* it, so it also finds a polluter the CI scheduler happened
+to run first. When you have a journal, the bundled script is often quicker and
+closer to CI: it searches only the tests that ran before the victim on its
+worker, in their recorded order:
 
 ```console
 $ python <skill-dir>/scripts/journal_bisect.py latest.json "tests/test_report.py::test_totals"
@@ -79,13 +79,17 @@ worker gw1: 6 test(s) ran before tests/test_report.py::test_totals
 minimal polluter set (2 runs):
   tests/test_zz_debug.py::test_enable_debug
 reproduce:
-  rstest -n 0 -q -p no:randomly tests/test_zz_debug.py::test_enable_debug tests/test_report.py::test_totals
+  .venv/bin/rstest -n 0 -q -p no:randomly tests/test_zz_debug.py::test_enable_debug tests/test_report.py::test_totals
 ```
+
+The repro line starts with the rstest it found: the project's `.venv` first,
+then `PATH` (or `--rstest PATH`).
 
 It runs `rstest -n 0` on shrinking subsets of that worker's predecessors, in
 their recorded order, and prints the minimal set plus a repro command (`--list`
-prints the full ordered command without running anything). Only when the
-worker's own order does **not** reproduce is the cause concurrency or load
+prints the full ordered command without running anything). When neither
+`rstest bisect` nor the worker's own order reproduces it, the cause is
+concurrency or load
 (two workers sharing a port, file or database, or a timing assertion). Then go
 to `audit` or the discriminator runs in `references/commands.md`.
 

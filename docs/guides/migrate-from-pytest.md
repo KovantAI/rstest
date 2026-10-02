@@ -81,7 +81,9 @@ header line. Check each item against your suite:
 - [ ] *Session/module-scoped fixtures instantiate once per worker*, not
   once per run, the same semantics as pytest-xdist. A session-scoped
   database or server fixture must tolerate N concurrent instances.
-  (`rstest --doctor` flags session fixtures that ran more than once.)
+  (`rstest --doctor` flags session fixtures that ran more than once, but
+  only expensive ones: at least 0.5s of total setup, top 8. Check cheap
+  session fixtures by hand.)
 - [ ] *`pytest_configure`, `pytest_sessionstart` and `pytest_sessionfinish`
   run in every worker*, concurrently. A conftest hook that creates a shared
   resource or writes a shared file must be idempotent or keyed on the worker
@@ -90,7 +92,10 @@ header line. Check each item against your suite:
   that depend on a previous test's side effects need [`--dist
   loadfile`](parallel-safety.md#file-affinity) or a fix.
 - [ ] *Large suites may switch to lazy collection* once the cache is warm
-  (at least 2000 cached tests and `tests × workers` of at least 16 000). Each
+  (at least 2000 cached tests and `tests × workers` of at least 16 000, under
+  `--dist load` or `loadfile` only, and never with a path or nodeid selection,
+  `--shard`, `--shuffle`, `--incremental` or doctests; full rules in
+  [Auto-default](../concepts/lazy-collection.md#auto-default)). Each
   worker then imports only the test files it runs, so a `skipif` that reads
   `sys.modules` or a test that relies on a sibling module's import can behave
   differently. A banner line says when this happens; pin `--collect full` if
@@ -283,7 +288,9 @@ can't agree on the test set; a timestamp may bail). If the ids are stable, it
 runs the suite at `-n auto` and sorts every parallel-only failure into one
 of six verdicts (order dependency, isolation leak, wall-clock sensitivity,
 intrinsic flake, inconclusive, or not parallel-specific), names the fix for
-each, and bisects the polluting file for order and isolation failures. The
+each, and bisects the polluting file for order and isolation failures (the
+first 3 such failures only; bisect the rest with
+[`rstest bisect`](../reference/cli-commands.md#bisect-nodeid)). The
 full classification is in the
 [`migrate-check` reference](../reference/cli-commands.md#migrate-check).
 

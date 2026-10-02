@@ -95,7 +95,7 @@ covered or missed; non-executable lines (blank, comment) are ignored. Below the
 threshold the run exits `1` and the uncovered added lines are named per file:
 
 ```text
-rstest: diff coverage 83.3% (5/6 added lines covered)
+rstest: diff coverage 66.7% (8/12 added lines covered)
   mymod.py: uncovered added line(s) 7, 12-14
 ```
 
@@ -122,7 +122,10 @@ under `--cov`) passes: there is nothing to score.
   $ mv .coverage .coverage.shard-$K      # unique per shard before upload
   ```
 
-  In a final merge job, download all `.coverage.shard-*` files, then
+  The renamed file is still a dotfile, and `actions/upload-artifact` (v4.4
+  and later) skips hidden files unless you set `include-hidden-files: true`
+  on the upload step; without it the artifact is empty and the merge finds
+  nothing. In a final merge job, download all `.coverage.shard-*` files, then
   `coverage combine && coverage report`. `--cov-fail-under` is per-shard:
   enforce the global threshold in that merge step (`coverage report
   --fail-under=N`), not on individual shards.

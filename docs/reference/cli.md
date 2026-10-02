@@ -821,7 +821,10 @@ report without gating the exit code.
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
-to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
+to `dots`, so logs stay byte-stable. Pass `--output` to pin a style. An
+unknown style is not an error: rstest warns
+(`rstest: unknown --output 'X' (use dots|...); using dots`) and runs with
+`dots`.
 
 !!! note "pytest's own output in byte-exact mode"
     In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
@@ -1166,7 +1169,7 @@ unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 `--ff`, `-W`, `-p`, `--tb`, `--color`, `--basetemp`, plugin flags, ...
 
 Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
-and subcommand list) and `-V` / `--version` (`rstest 0.8.0`). In byte-exact
+and subcommand list) and `-V` / `--version` (prints `rstest <version>`). In byte-exact
 mode with no `--output` set, `rstest -- --help` prints the vendored pytest's
 help; at `-n 2` and above or with an explicit `--output` it does not. To list pytest's and
 your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows

@@ -66,8 +66,8 @@ spends 95% waiting on proxy timeouts.
 ### PARALLEL FLOOR
 
 No worker count can finish faster than the longest single test. If your
-longest test exceeds the ideal per-worker share, the report names the gate
-tests: splitting or shrinking them lowers that floor.
+longest test exceeds both the ideal per-worker share and 1 second, the
+report names the gate tests: splitting or shrinking them lowers that floor.
 
 ### PARALLEL EFFICIENCY
 
@@ -206,7 +206,9 @@ started: a resource opened and never released, its own teardown included.
 ```text
 RESOURCE LEAKS (net threads/fds still open after teardown):
   +3 threads  tests/test_pool.py::test_executor
-  +5 fds      tests/test_io.py::test_reader
+  +5 fds  tests/test_io.py::test_reader
+  a test opened a thread/fd it never released; leaked state can flake later
+  tests (reset it, or close in teardown).
 ```
 
 Only appears when something leaked. A leaked thread/fd is shared state that can

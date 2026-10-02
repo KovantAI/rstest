@@ -26,7 +26,9 @@ Most xdist flags carry over unchanged. The ones people actually touch:
 - **Collection** (no xdist equivalent): xdist always has every worker collect
   the whole suite. rstest does the same by default, but on a large suite with
   a warm cache (at least 2000 cached tests and `tests × workers` of at least
-  16 000) it switches to [lazy collection](../concepts/lazy-collection.md):
+  16 000, under `--dist load` or `loadfile` only; see the
+  [full rules](../concepts/lazy-collection.md#auto-default)) it switches to
+  [lazy collection](../concepts/lazy-collection.md):
   each file is collected once, on one worker, and runs whole there. Conftest
   collection hooks then see only that worker's files. Pin `--collect full`
   (or `[tool.rstest] collect = "full"`) to keep xdist's collection model

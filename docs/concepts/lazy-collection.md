@@ -40,10 +40,11 @@ never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) are safe
 in any lazy run: the worker applies pytest's own ignore checks and reports
 them empty.
 Without an explicit `--dist load`, lazy never splits a file across workers,
-so auto also stays `full` when one file's cached time exceeds an even
-per-worker share
-(`total time / workers`) by more than a second, since that file would hold
-up the run.
+so auto stays `full` when one file's cached time exceeds an even per-worker
+share (`total time / workers`) by more than a second, since that file would
+hold up the run. Auto applies this check even under an explicit `--dist load`,
+where lazy could split the file; pass `--collect lazy` to use lazy collection
+for such a suite anyway.
 
 ```console
 $ rstest --collect lazy
@@ -128,9 +129,10 @@ also overrides the auto default) or fix the tests.
   cross-file `nextitem` chain is maintained).
 - `-k`/`-m`/marks apply per file, exactly as pytest applies them.
 - `@pytest.mark.serial`, `@pytest.mark.flaky`, `--reruns`, crash
-  redistribution, `-x`/`--maxfail`, `--worker-timeout` all work; reruns
-  and redistribution travel by nodeid (a worker re-collects the file
-  for a nodeid it has never seen).
+  redistribution (but not crashed-worker `pytest_testnodedown` cleanup;
+  see [Crash cleanup](xdist-hooks.md#crash-cleanup)), `-x`/`--maxfail`,
+  `--worker-timeout` all work; reruns and redistribution travel by nodeid
+  (a worker re-collects the file for a nodeid it has never seen).
 - Collection errors abort the run with exit 2 (pytest semantics);
   `--continue-on-collection-errors` is honored. In lazy mode an error
   can surface after some tests have already run: those outcomes stay

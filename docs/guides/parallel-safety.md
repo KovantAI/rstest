@@ -46,8 +46,10 @@ variants for expensive shared fixtures. All are xdist-compatible.
 The default (`--dist load`) distributes at test granularity, which
 balances better and splits slow files across workers. On a large suite with
 a warm cache, rstest may pick [lazy collection](../concepts/lazy-collection.md)
-automatically; files then run whole on one worker, in file order, and auto
-only makes that pick when no single file would hold up the run. Pass
+automatically (under `--dist load` or `loadfile` only, for a whole-suite run;
+see the [full rules](../concepts/lazy-collection.md#auto-default)); files then
+run whole on one worker, in file order, and auto only makes that pick when no
+single file would hold up the run. Pass
 `--collect full` to keep test-granular dispatch.
 
 ## Choosing the worker count
@@ -102,10 +104,11 @@ worker, inside that worker. So make every resource per-worker (keyed on
 `node.workerinput` or the worker id) and let each worker clean up its own,
 in a session fixture's teardown or in `pytest_testnodedown`.
 
-`--setup-show` and `--setup-plan` are **not** passthrough-IO flags, so they
-run in the parallel pool: each worker prints its own setup/teardown trace,
-so the output is duplicated and interleaved across workers. For a single
-clean fixture plan, run them at `-n 0`:
+`--setup-show` and `--setup-plan` are **not** passthrough-IO flags, so at
+`-n ≥ 2` they run in the parallel pool, where they don't work: `--setup-show`
+prints no setup/teardown trace at all, and `--setup-plan` reports every test
+as an error while still exiting `0`. Run them at `-n 0`, where they behave
+exactly as under pytest:
 
 ```console
 $ rstest -n 0 --setup-plan        # one worker, one readable plan
@@ -300,7 +303,7 @@ whole suite and scoped to the files that actually fail: serial runs (twice)
 and a `--dist loadfile` run, with load sensitivity inferred from wall time
 far exceeding CPU time rather than from a separate `-n 2` run. It classifies
 each failure into the classes above, and bisects the polluting file for order /
-isolation defects. Reach for it instead of running the three commands by hand;
+isolation defects (the first 3; use `rstest bisect` for the rest). Reach for it instead of running the three commands by hand;
 see [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
 
 For an order-dependent suite, three more tools go from "it flakes sometimes"

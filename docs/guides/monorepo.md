@@ -47,15 +47,17 @@ isolation and the budget split work:
 [Worker budget and scheduling](../concepts/monorepo.md#worker-budget-and-scheduling).)
 
 ```console
-$ rstest          # langgraph monorepo, 14-core machine
-rstest 0.8.0 — monorepo: 6 projects, 14 workers (libs/langgraph:-n9, libs/checkpoint:-n1, libs/cli:-n1, libs/sdk:-n1, libs/prebuilt:-n1, libs/checkpoint-sqlite:-n1)
+$ rstest          # langgraph monorepo, 14-core machine, first run
+rstest 0.8.0 — monorepo: 5 projects, 14 workers (libs/checkpoint:-n3, libs/checkpoint-sqlite:-n3, libs/cli:-n3, libs/prebuilt:-n3, libs/sdk-py:-n2)
 ...
-6 projects in 245.7s   # cold run; six serial pytest invocations: 880.4s (3.6×)
 ```
 
-The 245.7s figure is the measured cold (first) run. A warm run (planned
-from the duration caches the first run writes) is projected at 121–133s
-(6.6–7.3×); see [Benchmarks](../reference/benchmarks.md#monorepo).
+Projects are listed in sorted path order. On a first run there are no
+duration caches yet, so the 14 workers are split evenly, as above. Later runs
+weight each project's share by its recorded suite time, so the slowest
+package gets most of the workers. On the corpus's five-package subset one
+root run took 128.9s against 187.4s for five serial pytest invocations
+(1.45×); see [Benchmarks](../reference/benchmarks.md#monorepo).
 
 What to set up and expect:
 
@@ -95,18 +97,13 @@ supported; keep the matrix in tox/CI and put rstest inside each cell.
 The reference target is langchain-ai/langgraph: 8 `libs/*` packages,
 each with its own `[tool.pytest]` config. rstest at the repo root
 discovers all 8 (the JS package, which has no Python config, is
-correctly skipped). The measured subset below is the six libs that need no live
-services; the other two (postgres-backed checkpoint stores) require a
-running database under any runner. One command at the root replaces six
-serial pytest invocations and cuts wall time several-fold, with per-project
-outcomes matched to the digit, including the dominant package's
-fail/pass/error signature, which its service-dependent tests produce
-identically under vanilla pytest. The corpus run measured 100% per-test
-parity across all 4,284 tests. The one fragile spot is a TTL timing test
-that langgraph's own source marks `@pytest.mark.flaky`; it lives in
-`checkpoint-sqlite`, a small suite the corpus runs on a single worker
-(`-n 1` in the banner above, the same as byte-exact mode, `-n 0`).
-That pin was once forced by a pytest-retry limitation (`server_port`); it is
-now resolved: pytest-retry runs its `@pytest.mark.flaky` marker correctly
-under the pool too (see [Benchmarks](../reference/benchmarks.md#monorepo) for
-the wall times and the policy).
+correctly skipped). The measured subset is the five libs that need no live
+services; the two postgres-backed checkpoint stores require a running
+database under any runner, and `libs/langgraph` itself is left out because
+its live-service tests hang the plain-pytest baseline without those
+services. One command at the root replaces five serial pytest invocations,
+with per-test outcome parity of 100% across all 838 tests. `checkpoint-sqlite`
+uses pytest-retry, which once forced a single-worker pin (`server_port`);
+that is resolved, and it now runs at the full worker count with no per-lib
+policy (see [Benchmarks](../reference/benchmarks.md#monorepo) for the wall
+times).

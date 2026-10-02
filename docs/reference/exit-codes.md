@@ -77,6 +77,7 @@ Flags that gate CI have exit semantics beyond the table above:
 | [`--fail-on-leak`](cli.md#-fail-on-leak) | `1` when any thread/fd leak is found |
 | [`--require-baseline`](cli.md#-require-baseline) | `1` before the run when `--durations-regress` has no duration baseline |
 | [`--quarantine`](cli.md#-quarantine-file) | `0` when every failure is on the quarantine list; `1` if any failure is outside it |
+| [`xdist-removal-check`](cli-commands.md#xdist-removal-check) / `--xdist-removal-json` | `0` no blocking finding, `1` a blocking finding that isn't allow-listed, **or** an error (an `Error:` line on stderr) |
 | [`audit`](cli-commands.md#audit) | `0` parallel-safe, `1` at least one parallel-only failure, `2` rstest refused to dispatch or an error |
 | [`bisect`](cli-commands.md#bisect-nodeid) | `0` order-dependent culprit found, `1` not order-dependent, `2` nodeid not in the suite, a selection passed after `--`, or an error |
 | [`replay`](cli-commands.md#replay) | the replayed run's own code; `1` with an `Error:` line when the journal is missing or unreadable |
@@ -87,7 +88,9 @@ Flags that gate CI have exit semantics beyond the table above:
 For `try`, `migrate-check`, `audit` and `bisect`, `1` is always a verdict
 ("found something"), never an rstest error: an error inside them (no usable
 interpreter, a failed spawn) exits `2` and prints an `Error:` line on stderr,
-so a CI gate can treat `1` as "fix the suite" and `2` as "fix the job". A
+so a CI gate can treat `1` as "fix the suite" and `2` as "fix the job".
+`xdist-removal-check` is the exception: an error there also exits `1`, so
+check stderr for an `Error:` line to tell the two apart. A
 parse error from rstest's argument parser also exits `2` (with clap's
 `error:` prefix, lowercase).
 
