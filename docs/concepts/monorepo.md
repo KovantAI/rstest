@@ -8,7 +8,12 @@ the [Monorepos guide](../guides/monorepo.md). This page is the reference for
 ## Discovery
 
 Monorepo mode engages when the current directory has **no pytest
-configuration of its own** but subdirectories do. Discovery descends at most
+configuration of its own** but subdirectories do: at least **two** discovered
+projects, or at least one when `projects` is set in the root
+`pyproject.toml`. With a single discovered project and no `projects` key,
+rstest runs one plain session from the root instead (which can fail, for
+example with an import-file-mismatch error); set `projects` or run from the
+project's directory. Discovery descends at most
 five directory levels below the root (projects nested deeper are not found,
 even when listed in `projects`, which only filters what discovery found; run
 those from their own directory), looking for any of pytest 9's config

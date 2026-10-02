@@ -46,8 +46,10 @@ variants for expensive shared fixtures. All are xdist-compatible.
 The default (`--dist load`) distributes at test granularity, which
 balances better and splits slow files across workers. On a large suite with
 a warm cache, rstest may pick [lazy collection](../concepts/lazy-collection.md)
-automatically; files then run whole on one worker, in file order, and auto
-only makes that pick when no single file would hold up the run. Pass
+automatically (under `--dist load` or `loadfile` only, for a whole-suite run;
+see the [full rules](../concepts/lazy-collection.md#auto-default)); files then
+run whole on one worker, in file order, and auto only makes that pick when no
+single file would hold up the run. Pass
 `--collect full` to keep test-granular dispatch.
 
 ## Choosing the worker count

@@ -39,6 +39,8 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 
 Either way these flags don't *do* anything under rstest; remove them from `addopts` once no pytest-xdist job still depends on them (see [the staged rollout](../guides/migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back)). If `addopts = -n 4` with pytest-xdist installed is still in your ini, it is neutralized inside rstest workers automatically (options parse, the xdist session never engages, no nested workers). Remove it at your convenience and pass `-n` to rstest. With pytest-xdist uninstalled or disabled (`-p no:xdist`), the same `addopts` line fails the run with exit 4.
 
+**Before uninstalling pytest-xdist**, run [`rstest xdist-removal-check`](cli-commands.md#xdist-removal-check). It finds the leftovers described above (`-n` and other xdist flags in `addopts`, `import xdist`, xdist hooks, `required_plugins`) and exits `1` while anything still blocks the removal.
+
 ## Hook matrix
 
 xdist's controller-side ("master") hooks fire in the controller process around each worker. rstest has no separate controller process, so the supported ones are **emulated**: each worker plays controller for itself, calling your implementation against a node shim with its own `workerinput`, `gateway.id`, and `config`. Full semantics: [xdist hook emulation](../concepts/xdist-hooks.md).

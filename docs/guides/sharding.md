@@ -36,7 +36,10 @@ Two consequences for CI:
   different cache than job 3, their partitions can overlap or drop tests.
   Restore one shared cache key across the matrix (recipes below), and, for a
   gating pipeline, prove coverage with the check in
-  [Verify no test was dropped](#verify-no-test-was-dropped).
+  [Verify no test was dropped](#verify-no-test-was-dropped). Every shard run
+  also writes its timings to the local `.rstest_cache`, so running several
+  shards one after another in one checkout gives each a different cache:
+  restore the same snapshot before each shard.
 - **A cold cache falls back to an even count split** (round-robin). The
   first run is balanced by count; from the second run on (once the cache
   is populated and restored) it balances by wall time.
@@ -247,8 +250,9 @@ jobs:
             shard.${{ matrix.shard }}.json
 
   # One job runs the WHOLE suite and saves the fresh cache so the next
-  # push's shards are wall-time balanced. (Shards run against a restored,
-  # read-only cache; something has to write the authoritative one.)
+  # push's shards are wall-time balanced. (Each shard writes only its own
+  # partial timings to its local copy and never saves it; something has to
+  # write the authoritative one.)
   durations:
     runs-on: ubuntu-latest
     steps:

@@ -133,7 +133,7 @@ inputs:
     required: false
     default: ""
   rerun-on:
-    description: "Preset name(s) -> --only-rerun regex. 'http-5xx' => 429|500|502|503|504|Too Many Requests|ServerBusy; comma-joinable. Raw regex via args still works."
+    description: "Preset name(s) -> --only-rerun regex. 'http-5xx' => 429|500|502|503|504|Too Many Requests|ServerBusy; 'timeouts' => Timeout|TimeoutError|APITimeoutError|APIConnectionError; any other name is used as a raw regex; comma-joinable. Raw regex via args still works."
     required: false
     default: ""
   worker-timeout:
@@ -201,10 +201,10 @@ outputs:
     description: "Path to the JUnit XML written (empty if none)."
     value: ${{ steps.run.outputs.junit-path }}
   passed:
-    description: "Number of passed tests parsed from JUnit (empty if no junit)."
+    description: "Number of passed tests parsed from JUnit by the fail-ratio gate; set only when fail-under-ratio is set."
     value: ${{ steps.gate.outputs.passed }}
   failed:
-    description: "Number of failed+errored tests parsed from JUnit (empty if no junit)."
+    description: "Number of failed+errored tests parsed from JUnit by the fail-ratio gate; set only when fail-under-ratio is set."
     value: ${{ steps.gate.outputs.failed }}
 
 runs:

@@ -310,18 +310,18 @@ slice="${1:-tests}"
 
 audit() {                      # $1 = worker count, $2 = output dir
   rm -rf "$2"; mkdir -p "$2"
-  # -p no:cacheprovider keeps rstest's own .rstest_cache / .pytest_cache
-  # out of the diff; add your plugin's output flags here if it needs one
-  # (e.g. --html "$2/report.html").
+  # -p no:cacheprovider keeps .pytest_cache out of the diff; rstest still
+  # writes .rstest_cache, so find skips it. Add your plugin's output flags
+  # here if it needs one (e.g. --html "$2/report.html").
   ( cd "$2" && rstest -n "$1" -p no:cacheprovider "$OLDPWD/$slice" >stdout.log 2>&1 ) || true
-  ( cd "$2" && find . -type f ! -empty | sort ) >"$2.files"
+  ( cd "$2" && find . -type f ! -empty ! -path './.rstest_cache/*' | sort ) >"$2.files"
 }
 
 audit 0 audit-n0
 audit 2 audit-n2
 
 echo "== files present at -n 0 but MISSING or EMPTY at -n 2 (silent no-op suspects) =="
-comm -23 <(sed 's#^audit-n0/##' audit-n0.files) <(sed 's#^audit-n2/##' audit-n2.files)
+comm -23 audit-n0.files audit-n2.files
 
 echo "== plugin lines in -n 0 stdout absent from -n 2 stdout (terminal-owned output) =="
 diff <(grep -v '^$' audit-n0/stdout.log) <(grep -v '^$' audit-n2/stdout.log) | grep '^<' || true
