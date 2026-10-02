@@ -81,7 +81,9 @@ header line. Check each item against your suite:
 - [ ] *Session/module-scoped fixtures instantiate once per worker*, not
   once per run, the same semantics as pytest-xdist. A session-scoped
   database or server fixture must tolerate N concurrent instances.
-  (`rstest --doctor` flags session fixtures that ran more than once.)
+  (`rstest --doctor` flags session fixtures that ran more than once, but
+  only expensive ones: at least 0.5s of total setup, top 8. Check cheap
+  session fixtures by hand.)
 - [ ] *`pytest_configure`, `pytest_sessionstart` and `pytest_sessionfinish`
   run in every worker*, concurrently. A conftest hook that creates a shared
   resource or writes a shared file must be idempotent or keyed on the worker

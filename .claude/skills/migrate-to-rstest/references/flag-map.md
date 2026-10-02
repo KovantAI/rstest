@@ -115,7 +115,9 @@ systems, cache `.rstest_cache` yourself but exclude `.rstest_cache/replay`
 
 ### Keep the replay journal of a failed run
 
-Every parallel run records its schedule to `.rstest_cache/replay/latest.json`.
+Every parallel run (except `--shard`, `--dist each`, or with
+`RSTEST_NO_REPLAY_JOURNAL=1`) records its schedule to
+`.rstest_cache/replay/latest.json`.
 Upload it on failure so a CI-only failure can be replayed locally later
 (`rstest replay --journal`, see the `rstest-triage` skill):
 

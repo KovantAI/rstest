@@ -48,13 +48,15 @@ isolation and the budget split work:
 
 ```console
 $ rstest          # langgraph monorepo, 14-core machine
-rstest 0.8.0 — monorepo: 6 projects, 14 workers (libs/langgraph:-n9, libs/checkpoint:-n1, libs/cli:-n1, libs/sdk:-n1, libs/prebuilt:-n1, libs/checkpoint-sqlite:-n1)
+rstest 0.8.0 — monorepo: 6 projects, 14 workers (libs/langgraph:-n3, libs/checkpoint:-n3, libs/cli:-n2, libs/sdk:-n2, libs/prebuilt:-n2, libs/checkpoint-sqlite:-n2)
 ...
 6 projects in 245.70s  # cold run; six serial pytest invocations: 880.4s (3.6×)
 ```
 
-The 245.7s figure is the measured cold (first) run. A warm run (planned
-from the duration caches the first run writes) is projected at 121–133s
+The 245.7s figure is the measured cold (first) run. With no caches yet, the
+14 workers are split evenly, as the banner shows. A warm run plans from the
+duration caches the first run writes, gives the dominant `libs/langgraph`
+most of the budget (`-n9`, the others `-n1`), and is projected at 121–133s
 (6.6–7.3×); see [Benchmarks](../reference/benchmarks.md#monorepo).
 
 What to set up and expect:

@@ -62,7 +62,9 @@ flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
 
 Pin the action to a release tag (`v0.8.0` or later) or a full commit SHA,
 and set `version:` to pin the rstest wheel; without it the action installs the
-latest rstest from PyPI.
+latest rstest from PyPI. Under `runner: uv` (the default when the project has a
+`uv.lock` or `[tool.uv]`) `version:` is ignored and rstest comes from your
+lockfile, so pin it there.
 
 The YAML on these pages references third-party actions by major tag
 (`actions/checkout@v7`) for readability. If your security policy requires it,

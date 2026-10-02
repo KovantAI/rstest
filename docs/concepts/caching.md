@@ -43,7 +43,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   [`rstest explain`](../reference/cli-commands.md#explain). Safe to delete:
   the next run re-runs everything and rebuilds it.
 - `replay/`: the schedule of each parallel run (`<run-uid>.json`, the last 10
-  kept, plus `latest.json`), read by
+  kept, plus `latest.json`; none for `--shard`, `--dist each`, `rstest replay`
+  or with `RSTEST_NO_REPLAY_JOURNAL=1`), read by
   [`rstest replay`](../reference/cli-commands.md#replay). Local to the
   machine that ran it: keep it **out** of any CI cache and upload
   `latest.json` as a failure artifact instead (see

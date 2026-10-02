@@ -17,8 +17,9 @@ That is genuine runtime evidence the plugin **coexists** with rstest's pool.
 It is **not** proof every plugin feature is verified:
 
 - A suite may load a plugin without exercising its feature (e.g.
-  `pytest-codspeed` / `pytest-benchmark` **auto-disable at `-n ≥ 2`**: loaded,
-  but their measurement path is inert under the pool; benchmark at `-n 0`).
+  `pytest-benchmark` **auto-disables at `-n ≥ 2`**, so its measurement path is
+  inert under the pool; `pytest-codspeed` still measures in the workers but
+  prints its results table only at `-n 0`; benchmark at `-n 0`).
 - Some suites run pinned below `-n auto` (`-n 0`, `-n 4`, `--collect lazy`); a
   plugin whose *only* corpus evidence is an `-n 0` suite carries **no parallel
   evidence**: flagged below.
@@ -42,7 +43,7 @@ corpus parity floor under rstest.
 | pytest-mock | 6 | aiohttp, anyio, arrow, langchain, langgraph, pydantic | ✅ parallel |
 | pytest-timeout | 6 | aiohttp, anyio, fastapi, jinja2, urllib3, werkzeug | ✅ parallel |
 | pytest-asyncio | 5 | aiohttp, django-allauth, langchain, langgraph, structlog | ✅ parallel |
-| pytest-codspeed | 4 | aiohttp, fastapi, langchain, pydantic | ⚠️ loaded only; auto-disables at `-n ≥ 2` |
+| pytest-codspeed | 4 | aiohttp, fastapi, langchain, pydantic | ⚠️ loaded; measures under the pool, results table printed only at `-n 0` |
 | inline-snapshot | 2 | fastapi, pydantic | ✅ parallel (fastapi `-n auto`) |
 | langsmith | 2 | langchain, langgraph | ✅ parallel |
 | pytest-benchmark | 2 | langchain, pydantic | ⚠️ loaded only; auto-disables at `-n ≥ 2` |
@@ -75,8 +76,9 @@ corpus parity floor under rstest.
 
 - **`-n 0`-only evidence** (no parallel data at all): `Faker`, `pytest-examples`,
   `pytest-pretty`; their sole corpus carrier (pydantic) runs at `-n 0`.
-- **Loaded but feature inert under the pool**: `pytest-codspeed`,
-  `pytest-benchmark` (auto-disable at `-n ≥ 2`), `pytest-sugar` (terminal
+- **Loaded but feature inert or unreported under the pool**:
+  `pytest-benchmark` (auto-disables at `-n ≥ 2`), `pytest-codspeed`
+  (measures, but its results table is not printed), `pytest-sugar` (terminal
   plugin, not painted). Coexistence is proven; the *feature* is `-n 0`-only by
   the plugin's own design.
 

@@ -44,8 +44,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Match this workflow by file name, not display name (two workflows
+          # can share a `name:`); GITHUB_WORKFLOW_REF is owner/repo/.github/workflows/<file>@ref.
+          wf="${GITHUB_WORKFLOW_REF##*/.github/workflows/}"; wf="${wf%%@*}"
           rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "${{ github.workflow }}" --branch main --event push \
+                  --workflow "$wf" --branch main --event push \
                   --status success --limit 1 \
                   --json databaseId --jq '.[0].databaseId // ""')
           echo "run-id=$rid" >> "$GITHUB_OUTPUT"

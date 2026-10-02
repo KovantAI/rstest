@@ -40,10 +40,11 @@ never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) are safe
 in any lazy run: the worker applies pytest's own ignore checks and reports
 them empty.
 Without an explicit `--dist load`, lazy never splits a file across workers,
-so auto also stays `full` when one file's cached time exceeds an even
-per-worker share
-(`total time / workers`) by more than a second, since that file would hold
-up the run.
+so auto stays `full` when one file's cached time exceeds an even per-worker
+share (`total time / workers`) by more than a second, since that file would
+hold up the run. Auto applies this check even under an explicit `--dist load`,
+where lazy could split the file; pass `--collect lazy` to use lazy collection
+for such a suite anyway.
 
 ```console
 $ rstest --collect lazy

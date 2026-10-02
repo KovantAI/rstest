@@ -151,7 +151,8 @@ cache for [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
 mandatory).
 
 **Journal**: the record of which worker ran which test, in what order, that
-every parallel run writes to `.rstest_cache/replay/`.
+a parallel run writes to `.rstest_cache/replay/` (not under `--shard`,
+`--dist each`, `rstest replay` itself, or with `RSTEST_NO_REPLAY_JOURNAL=1`).
 [`rstest replay`](../reference/cli-commands.md#replay) re-runs it to
 reproduce a parallel-only failure.
 

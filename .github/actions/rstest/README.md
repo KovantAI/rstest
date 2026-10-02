@@ -31,7 +31,9 @@ already does natively, it just wires it into GitHub Actions:
 
 Pin the action to a release tag (as above) or, for supply-chain hardening,
 to a full commit SHA. Set `version:` to pin the rstest wheel too; without
-it the action installs the latest rstest from PyPI.
+it the action installs the latest rstest from PyPI. With `runner: uv` (the
+default when the project has a `uv.lock` or `[tool.uv]`) the action runs
+`uv sync --dev` and ignores `version:`: pin rstest in your lockfile instead.
 
 ### PR change-based selection (strict gate)
 
@@ -212,7 +214,7 @@ covers GCS / Azure / HTTP.
 | `cache-backend` | `actions-cache` | `actions-cache` / `artifact` / `remote`: see [Warm cache as a service](#warm-cache-as-a-service) |
 | `cache-remote` | `""` | dir / `file://` / `s3://` / `gs://` / `http(s)://` remote; non-empty ⇒ `remote` backend |
 | `cache-remote-token` | `""` | bearer for an `http(s)://` remote → `RSTEST_CACHE_REMOTE_TOKEN` |
-| `cache-push` | `auto` | whether this job writes the cache: `auto` = `remote` pushes only from `push`/`schedule`/`workflow_dispatch` on `warm-from-branch` and `merge_group`; `actions-cache` skips `pull_request_target`/`issue_comment`/`workflow_run`. `true` always, `false` never |
+| `cache-push` | `auto` | whether this job writes the cache: `auto` = `remote` pushes only from `push`/`schedule`/`workflow_dispatch` on `warm-from-branch` and `merge_group`; `actions-cache` saves only on `push`/`pull_request`/`schedule`/`workflow_dispatch`/`merge_group` (any other event, e.g. `pull_request_target` or `release`, never saves). `true` always, `false` never |
 | `cache-compact-threshold` | `""` | `--cache-compact-threshold N`: fold loose segments inline on push past N (best-effort) |
 | `warm-from-branch` | `main` | your trusted branch. Artifact backend: its latest successful run seeds the warm cache. `remote` backend with `cache-push: auto`: the only branch whose runs push |
 | `warm-from-event` | `push` | Artifact backend: only warm from a run triggered by this event (empty = any); keeps PR runs from becoming the warm source |

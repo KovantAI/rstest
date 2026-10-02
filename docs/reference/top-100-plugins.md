@@ -72,7 +72,7 @@ plugin's category, not yet runtime-verified.
 | 42 | pytest-bdd | 3.6M | ✅ Works | V | Generates items from `.feature` at collection; scenario runs under the pool (e2e gate). |
 | 43 | pytest-durations | 3.5M | 🔶 `-n 0` / 🟦 | V | Duration summary is terminal-owned; coexists under the pool (e2e gate). rstest has `--durations` and `--doctor`. |
 | 44 | pytest-memray | 2.9M | 🔶 `-n 0` | V | `@limit_memory` is enforced per worker process: same pass/fail under the pool as at `-n 0` (e2e gate). Only the memory *summary* is terminal-owned; read it at `-n 0`. |
-| 45 | pytest-codspeed | 2.9M | 🔶 `-n 0` | V | The `benchmark` fixture + `@mark.benchmark` coexist under the pool and `--codspeed` measurement completes at any `-n` (e2e gate); measure at `-n 0` for stable numbers. |
+| 45 | pytest-codspeed | 2.9M | 🔶 `-n 0` | V | The `benchmark` fixture + `@mark.benchmark` coexist under the pool and `--codspeed` measurement completes at any `-n` (e2e gate), but its results table is printed only at `-n 0`; measure at `-n 0` for stable numbers. |
 | 46 | pytest-random-order | 2.8M | ✅ Works | V | rstest seeds the `workerinput["random_order_seed"]` its `pytest_configure` reads unconditionally: without it the plugin KeyError'd every `-n ≥ 2` run (a dead controller path, now closed; e2e gate). All workers share the seed; global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
 | 47 | pytest-factoryboy | 2.8M | ✅ Works | V | Fixture generation; registered factory fixture resolves on workers (e2e gate). |
 | 48 | pytest-ordering | 2.8M | ⚠️ Caveat | V | Same as pytest-order: `@mark.run(order=N)` honored within a worker / at `-n 0` (e2e gate). |
