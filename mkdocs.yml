@@ -119,6 +119,7 @@ nav:
       - Sharding across CI jobs: guides/sharding.md
       - Plugins: guides/plugins.md
       - Coverage: guides/coverage.md
+      - Agent skills: guides/agent-skills.md
   - Concepts:
       - concepts/index.md
       - Architecture: concepts/architecture.md

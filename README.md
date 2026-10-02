@@ -246,6 +246,7 @@ recorded call duration, so skipped tests drop out: 4442 here against the
 - [Watch mode](https://python-rstest.readthedocs.io/en/stable/guides/watch-mode/)
 - [CI quickstart](https://python-rstest.readthedocs.io/en/stable/guides/ci-quickstart/)
 - [CLI reference](https://python-rstest.readthedocs.io/en/stable/reference/cli/)
+- [Agent skills](https://python-rstest.readthedocs.io/en/stable/guides/agent-skills/): `rstest install-skills` or the Claude Code plugin
 
 ## License
 

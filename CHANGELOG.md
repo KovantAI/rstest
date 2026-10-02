@@ -3,6 +3,19 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+- **`rstest install-skills`: install the bundled agent skills.** The
+  `migrate-to-rstest` and `rstest-triage` skills now ship inside the binary.
+  `rstest install-skills` writes them into `.claude/skills/` (or
+  `~/.claude/skills/` with `--user`, `.agents/skills/` with `--agents`, any
+  directory with `--dir`), matching the installed version's flags and
+  subcommands. Skills you edited are left alone unless `--force`.
+- **The rstest repository is a Claude Code plugin marketplace.**
+  `/plugin marketplace add KovantAI/rstest` then `/plugin install rstest@rstest`
+  makes both skills available in every project. The skills moved from
+  `.claude/skills/` to `plugins/rstest/skills/`.
+
 ## 0.8.0 (2026-09-28)
 
 - **`rstest xdist-removal-check`: a readiness check for uninstalling
