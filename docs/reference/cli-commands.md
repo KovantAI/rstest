@@ -304,11 +304,13 @@ concurrency (for parallel-only failures use
 1. **Isolation check.** Runs the victim alone. If it fails by itself, that's a
    plain bug, not an order dependency; reported and done.
 2. **Reproduce.** Runs the victim after *all* preceding tests (collection
-   order). If it passes there, the failure doesn't come from ordering (likely
-   parallel-only, so try `migrate-check`).
+   order). If it passes there, it runs the victim after *every* other test,
+   including the ones that collect after it: on CI a polluter can run first
+   on another worker's schedule. If it still passes, the failure doesn't come
+   from ordering (likely parallel-only, so try `migrate-check`).
 3. **Delta-debug.** [`ddmin`](https://www.st.cs.uni-saarland.de/dd/) over the
-   predecessor set: repeatedly run the victim preceded by a subset of the
-   earlier tests, shrinking toward the **1-minimal** set that still reproduces.
+   set that reproduced: repeatedly run the victim preceded by a subset of it,
+   shrinking toward the **1-minimal** set that still reproduces.
    Handles a single polluter *and* interacting pairs.
 
 It prints the culprit(s) and a **minimal reproducing command**
@@ -332,8 +334,9 @@ pins too: `--rootdir` plus the loaded config, or `-c /dev/null` and
 `--confcutdir` when there is none.
 
 Order is the whole point, so bisect disables pytest-randomly (`-p no:randomly`)
-in the collection, every child run and the printed command. The predecessor
-set is the suite's plain collection order. To bisect a failure that only
+in the collection, every child run and the printed command. The candidate
+set is the suite's plain collection order: the preceding tests first, then
+the whole suite with the victim moved last. To bisect a failure that only
 appears in one shuffled order, reorder explicitly instead.
 
 Its runs also use a private pytest cache, new and empty for each run, so `--ff`

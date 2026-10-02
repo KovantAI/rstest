@@ -19,6 +19,30 @@ between 0.x releases and are listed here.
   `--migrate-allow` accepts known ones and `--xdist-removal-json` writes a
   versioned document for CI. `--xdist-trial` also runs the suite with xdist
   hidden (`-p no:xdist`) and names the tests that only pass with it.
+- **SIGTERM/SIGINT stop a parallel run cleanly.** rstest used to die on the
+  spot: no summary, no replay journal, no reports, and its workers kept
+  running, reparented to init. Now it stops and reaps every worker, names the
+  test each was running and records it failed ("interrupted by SIGTERM after
+  12.3s"), writes the journal and any `--junitxml`/`--report-json`, and exits
+  2. A second signal exits at once. A CI job killed by its timeout now leaves
+  a `rstest replay` journal and the name of the hung test.
+- **`@pytest.mark.flaky` alone no longer fails a green run.** A marked test
+  that recovered on retry without a global `--reruns` printed
+  `1 flaky, ... passed` but exited 1. It now exits 0, like `--reruns`.
+- **A flaky test is counted once.** It used to count as both `flaky` and
+  `passed` (two tests read `1 flaky, 2 passed`). The summary and the
+  report-json `counts` now put it in `flaky` only, so the counts add up to
+  the tests run.
+- **`bisect` finds a polluter that collects after the victim.** When the
+  preceding tests don't reproduce the failure, bisect now also runs the victim
+  after every other test before concluding it's not order-dependent. Before,
+  a polluter later in collection order (one that ran first on another
+  worker's CI schedule) was reported as a likely concurrency bug.
+- **Trailing `# comments` work in `--quarantine` files.** A line such as
+  `tests/test_q.py::test_broken  # JIRA-1` was read as one pattern, comment
+  included, and silently matched nothing. A `#` after whitespace now starts a
+  comment; a `#` inside a nodeid (`test_x[#1]`) is still part of it.
+
 - **`pip install rstest` works on Python 3.10 without pytest.** The vendored
   pytest core imports `exceptiongroup` and `tomli` below Python 3.11 (and
   `colorama` on Windows), but rstest didn't declare them, so a fresh 3.10

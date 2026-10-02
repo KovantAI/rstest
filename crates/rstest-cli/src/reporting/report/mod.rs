@@ -437,10 +437,15 @@ impl Run {
             ("collect_errors", 0),
         ]
         .into();
+        // A flaky test (passed only after a rerun) counts once, as `flaky`,
+        // not also as `passed`: the buckets partition the tests.
         for entry in self.tests.values() {
-            *counts.entry(classify(entry)).or_default() += 1;
+            let bucket = match classify(entry) {
+                "passed" if entry.flaky => "flaky",
+                b => b,
+            };
+            *counts.entry(bucket).or_default() += 1;
         }
-        *counts.entry("flaky").or_default() += self.flaky.len() as u64;
         *counts.entry("skipped").or_default() += self.collect_skips;
         *counts.entry("collect_errors").or_default() += self.collect_errors.len() as u64;
         counts
@@ -720,6 +725,18 @@ mod tests {
         run.mark_flaky("a.py::wobbly".into(), 2);
         assert!(run.tests()["a.py::wobbly"].flaky);
         assert!(run.summary_line().contains("1 flaky"));
+    }
+
+    #[test]
+    fn flaky_counts_once_not_also_as_passed() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::wobbly", "passed");
+        full(&mut run, "a.py::steady", "passed");
+        run.mark_flaky("a.py::wobbly".into(), 1);
+        let counts = run.counts();
+        assert_eq!(counts["flaky"], 1);
+        assert_eq!(counts["passed"], 1);
+        assert_eq!(run.summary_line(), "1 flaky, 1 passed");
     }
 
     #[test]

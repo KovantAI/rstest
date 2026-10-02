@@ -512,8 +512,8 @@ fn repro_command(ctx: &ReproCtx, culprits: &[String], victim: &str) -> String {
 }
 
 /// Run the order-dependency bisect. Exit code: 0 = order-dependent culprit(s)
-/// found, 1 = not order-dependent (fails in isolation, or doesn't reproduce in
-/// collection order), 2 = the nodeid isn't in the suite or `pytest_args`
+/// found, 1 = not order-dependent (fails in isolation, or doesn't reproduce
+/// with every other test run before it), 2 = the nodeid isn't in the suite or `pytest_args`
 /// carries a test selection. `python_flag` is the user's own `--python`,
 /// echoed into the reproduce command; `python` is the resolved interpreter.
 pub fn run_bisect(
@@ -655,36 +655,60 @@ fn bisect(
         return Ok(Verdict::Done(1));
     }
 
+    // The candidate polluters: the collection-order prefix first, the natural
+    // reading of "runs before it". A polluter can also collect AFTER the victim
+    // and still run before it on CI (another worker's order, `--shuffle`, a
+    // replayed schedule), so when the prefix alone doesn't reproduce, retry
+    // with every other test moved ahead of the victim before ruling ordering out.
     let preds: Vec<String> = ids[..idx].to_vec();
-    if preds.is_empty() {
+    let succs: Vec<String> = ids[idx + 1..].to_vec();
+    if preds.is_empty() && succs.is_empty() {
         sink.out_line(&format!(
-            "\n{victim}\n  is first in collection order — nothing runs before it, so there is \
-             no polluter to bisect. If it still flakes, it's parallel-only (try \
-             `rstest migrate-check`)."
+            "\n{victim}\n  is the only test collected, so there is no polluter to bisect. \
+             If it still flakes, it's parallel-only (try `rstest migrate-check`)."
         ));
         write_json(json_path, victim, &rootdir, &cwd, &[], None)?;
         return Ok(Verdict::Done(1));
     }
 
     // Baseline: does the victim fail when the whole preceding suite runs before
-    // it (collection order)? If not, there's nothing to minimize here.
-    sink.warn(&format!(
-        "rstest bisect: reproducing with all {} preceding test(s)…",
-        preds.len()
-    ));
-    if runner.reproduces(&preds)? != Some(true) {
-        sink.out_line(&format!(
-            "\n{victim}\n  passes at -n 0 after all {} preceding tests — the failure does not \
-             reproduce from collection order alone. It is likely parallel-only \
-             (concurrency, not ordering); run `rstest migrate-check`.",
+    // it (collection order)? If not, widen to the whole suite.
+    let mut candidates: Option<Vec<String>> = None;
+    if !preds.is_empty() {
+        sink.warn(&format!(
+            "rstest bisect: reproducing with all {} preceding test(s)…",
             preds.len()
+        ));
+        if runner.reproduces(&preds)? == Some(true) {
+            candidates = Some(preds.clone());
+        }
+    }
+    if candidates.is_none() && !succs.is_empty() {
+        let mut all = preds.clone();
+        all.extend(succs.iter().cloned());
+        sink.warn(&format!(
+            "rstest bisect: retrying with all {} other test(s) run first, including \
+             the {} that collect after it…",
+            all.len(),
+            succs.len()
+        ));
+        if runner.reproduces(&all)? == Some(true) {
+            candidates = Some(all);
+        }
+    }
+    let Some(candidates) = candidates else {
+        sink.out_line(&format!(
+            "\n{victim}\n  passes at -n 0 with every other test ({}) run before it: the \
+             failure does not reproduce from test order. It is likely parallel-only \
+             (concurrency, not ordering); run `rstest migrate-check`.",
+            preds.len() + succs.len()
         ));
         write_json(json_path, victim, &rootdir, &cwd, &[], None)?;
         return Ok(Verdict::Done(1));
-    }
+    };
 
     sink.warn("rstest bisect: delta-debugging the predecessor set…");
-    let (culprits, capped) = ddmin(&preds, |subset| runner.reproduces(subset))?;
+    let (culprits, capped) = ddmin(&candidates, |subset| runner.reproduces(subset))?;
 
     let repro = repro_command(&ctx, &culprits, victim);
     print_report(sink, victim, &culprits, &repro, capped);

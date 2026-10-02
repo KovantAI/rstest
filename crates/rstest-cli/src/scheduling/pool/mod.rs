@@ -452,8 +452,35 @@ pub fn run_pool(
     let mut pin_serial: HashSet<u64> = HashSet::new();
     let mut pin_serial_held: Vec<Option<Vec<u64>>> = vec![None; n];
 
+    // SIGINT/SIGTERM: stop the workers and fall through to the wind-down
+    // below, so the journal and reports are still written.
+    let _interrupt = crate::scheduling::interrupt::Guard::install();
     loop {
-        let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        let received = rx.recv_timeout(std::time::Duration::from_millis(500));
+        // Checked before the event is handled: the signal usually reached the
+        // workers too, and their dying must not read as crashes to respawn.
+        if let Some(sig) = crate::scheduling::interrupt::requested() {
+            orchestrator::interrupt_all(
+                sink,
+                &mut run,
+                &mut prog,
+                &mut states,
+                |w, s| {
+                    let i = s.running?;
+                    let mut id = nodeid_at(&ids_store, i)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("<collected item #{i}>"));
+                    if dist == Dist::Each {
+                        id.push_str(&format!(" [gw{w}]"));
+                    }
+                    Some(id)
+                },
+                sig,
+            );
+            statuses.push(2); // pytest INTERRUPTED
+            break;
+        }
+        let (idx, event) = match received {
             Ok(pair) => pair,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 prog.tick(sink);
@@ -1270,7 +1297,8 @@ pub fn run_pool(
     for id in &cached_ids {
         run.record_cached(id.clone());
     }
-    let exitstatus = orchestrator::finalize_exit(&statuses, run.all_passed(), reruns, false);
+    let retried = reruns > 0 || !run.flaky.is_empty();
+    let exitstatus = orchestrator::finalize_exit(&statuses, run.all_passed(), retried, false);
     let (collection_size, collection_hash) = match reference {
         Some((count, hash)) => (count, Some(hash)),
         None => (0, None),

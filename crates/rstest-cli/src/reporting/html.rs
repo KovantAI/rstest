@@ -30,7 +30,7 @@ const SLOWEST_PASSED: usize = 10;
 #[allow(clippy::write_with_newline)]
 pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
     let counts = run.counts();
-    let total: u64 = counts.values().sum::<u64>() - counts["flaky"] - counts["collect_errors"];
+    let total: u64 = counts.values().sum::<u64>() - counts["collect_errors"];
 
     let mut html = String::new();
     html.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
@@ -40,7 +40,7 @@ pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
     html.push_str("\n</style>\n</head>\n<body>\n");
 
     // ---- Header / summary ------------------------------------------------
-    let pass = counts["passed"];
+    let pass = counts["passed"] + counts["flaky"];
     let fail = counts["failed"] + counts["errors"] + counts["collect_errors"];
     let warn = counts["skipped"] + counts["xfailed"] + counts["xpassed"] + counts["quarantined"];
     let _ = write!(

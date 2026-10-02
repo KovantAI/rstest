@@ -78,6 +78,10 @@ impl orchestrator::Slot for WorkerState {
     fn send_no_more_items(&mut self) {
         let _ = self.worker.send(&proto::Command::NoMoreItems);
     }
+    fn reap_dead(&mut self) {
+        self.worker.reap();
+        self.dead = true;
+    }
 }
 
 impl WorkerState {
@@ -228,8 +232,24 @@ pub fn run_lazy_pool(
     // with reruns off, so a duplicate entry would run the test twice.
     let mut journaled: HashSet<String> = HashSet::new();
 
+    // SIGINT/SIGTERM: stop the workers and fall through to the wind-down, as
+    // in run_pool.
+    let _interrupt = crate::scheduling::interrupt::Guard::install();
     loop {
-        let (idx, event) = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        let received = rx.recv_timeout(std::time::Duration::from_millis(500));
+        if let Some(sig) = crate::scheduling::interrupt::requested() {
+            orchestrator::interrupt_all(
+                sink,
+                &mut run,
+                &mut prog,
+                &mut states,
+                |_, s| s.running.clone(),
+                sig,
+            );
+            statuses.push(2); // pytest INTERRUPTED
+            break;
+        }
+        let (idx, event) = match received {
             Ok(pair) => pair,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 prog.tick(sink);
@@ -672,8 +692,9 @@ pub fn run_lazy_pool(
     for w in workers {
         let _ = w.wait();
     }
+    let retried = reruns > 0 || !run.flaky.is_empty();
     let exitstatus =
-        orchestrator::finalize_exit(&statuses, run.all_passed(), reruns, collect_aborted);
+        orchestrator::finalize_exit(&statuses, run.all_passed(), retried, collect_aborted);
     // Persist the schedule for `rstest replay`. Best-effort, like run_pool. No
     // collection hash: lazy never agrees on one ordered nodeid list, so replay's
     // drift check falls back to the collected count (when it is complete).
