@@ -16,6 +16,7 @@ rstest <COMMAND> [OPTIONS]
 - **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`xdist-removal-check`](#xdist-removal-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
 - **CI and the shared cache:** [`shard-verify`](#shard-verify), [`cache-compact`](#cache-compact)
 - **Inspection and integrity:** [`explain`](#explain), [`verify-vendor`](#verify-vendor)
+- **Agent skills:** [`install-skills`](#install-skills)
 
 ## Adoption and parallel safety
 
@@ -593,3 +594,34 @@ offending file is listed). The check is **offline**: it does not contact
 PyPI. Proving the vendored tree matches *upstream* pytest (not just what
 shipped) is a separate maintainer/CI check (`vendor.yml` provenance job); see
 [Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).
+
+## Agent skills
+
+### `install-skills`
+
+Write the agent skills bundled with this rstest (`migrate-to-rstest`,
+`rstest-triage`) into a skills directory, so a coding agent can drive rstest's
+migration and triage workflows. The bundled copy matches the binary, so every
+flag and subcommand the skills mention exists in your version. Run-less: it
+needs no interpreter and runs no tests.
+
+```console
+$ rstest install-skills
+  migrate-to-rstest: installed
+  rstest-triage: installed
+rstest 0.8.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
+```
+
+| Flag | Effect |
+|------|--------|
+| (none) | Write `./.claude/skills/` |
+| `--user` | Write `~/.claude/skills/` (`~/.agents/skills/` with `--agents`) |
+| `--agents` | Write `.agents/skills/`, the layout Codex and other agents read |
+| `--dir DIR` | Write `DIR/<skill>/`; overrides `--user` / `--agents` |
+| `--force` | Overwrite installed skills that differ from the bundled copy |
+
+A skill already installed with the same contents is reported up to date. One
+whose files differ is left alone and the command exits `1`, unless `--force`.
+`--force` overwrites only the files rstest ships; files you added to a skill
+directory are kept. Installing as a Claude Code plugin instead, and what to do
+when the skills don't appear: [Agent skills](../guides/agent-skills.md).

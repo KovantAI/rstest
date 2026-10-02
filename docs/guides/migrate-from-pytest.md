@@ -261,10 +261,10 @@ differences, it points you at `migrate-check` (below).
 
 ## Driving it with Claude (the migrate-to-rstest skill)
 
-rstest ships a Claude Code skill that runs this whole checklist for you:
-`.claude/skills/migrate-to-rstest/`. Open the rstest repo (or copy that
-directory into your own project's `.claude/skills/`) and ask Claude to
-"migrate my suite to rstest" or "parallelize my tests". It has two lanes:
+rstest ships a Claude Code skill that runs this whole checklist for you. Run
+`rstest install-skills` in your project (or install the `rstest` Claude Code
+plugin; see [Agent skills](agent-skills.md)) and ask Claude to "migrate my
+suite to rstest" or "parallelize my tests". It has two lanes:
 **readiness** drives `migrate-check`, applies the right fix per verdict, and
 wires up `[tool.rstest]` config + a CI gate; **speed** drives `--doctor` to find
 the slowest tests, wait-bound (sleep/timeout) tests, the parallel-floor gate
