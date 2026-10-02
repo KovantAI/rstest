@@ -93,7 +93,9 @@ runs measured (see
   that never saw the dead node's `configure_node`. The shim carries the dead
   worker's `workerinput` snapshot, so workerinput-keyed cleanup works;
   conftest-side registries keyed at configure time will miss. Make teardown a
-  function of `node.workerinput` alone.
+  function of `node.workerinput` alone. This applies to `--collect full`
+  only: under [`--collect lazy`](../reference/cli.md#-collect-fulllazy) a
+  crashed worker's `pytest_testnodedown` does not run anywhere.
 
 On the normal path, a worker's own `pytest_testnodedown` fires at session
 finish: after the run-test loop has torn down all fixtures (session scope
@@ -133,7 +135,11 @@ is the same model as xdist, where each worker also runs its own
 
 ## Crash cleanup
 
-Crash cleanup is best-effort and **weaker than xdist's**: xdist's controller is a
+Crash cleanup is best-effort, **weaker than xdist's**, and runs only under
+`--collect full`. Under `--collect lazy` (explicit, or picked automatically)
+the dead worker's `pytest_testnodedown` is skipped, so per-worker resources
+it would have dropped are left behind; use `--collect full` if a suite
+relies on that cleanup. Under full collection: xdist's controller is a
 separate always-alive process; rstest needs a surviving worker (if the last
 worker crashes, cleanup is skipped with a loud warning). One ordering hazard
 to know: the crashed worker's **replacement** starts while the survivor runs the

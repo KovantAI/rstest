@@ -128,9 +128,10 @@ also overrides the auto default) or fix the tests.
   cross-file `nextitem` chain is maintained).
 - `-k`/`-m`/marks apply per file, exactly as pytest applies them.
 - `@pytest.mark.serial`, `@pytest.mark.flaky`, `--reruns`, crash
-  redistribution, `-x`/`--maxfail`, `--worker-timeout` all work; reruns
-  and redistribution travel by nodeid (a worker re-collects the file
-  for a nodeid it has never seen).
+  redistribution (but not crashed-worker `pytest_testnodedown` cleanup;
+  see [Crash cleanup](xdist-hooks.md#crash-cleanup)), `-x`/`--maxfail`,
+  `--worker-timeout` all work; reruns and redistribution travel by nodeid
+  (a worker re-collects the file for a nodeid it has never seen).
 - Collection errors abort the run with exit 2 (pytest semantics);
   `--continue-on-collection-errors` is honored. In lazy mode an error
   can surface after some tests have already run: those outcomes stay

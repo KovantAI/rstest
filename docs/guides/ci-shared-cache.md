@@ -143,9 +143,12 @@ if you would rather warm from the newest finished run, red or not.
     `gh run list` resolves the latest successful one above (the REST API `GET
     /repos/{owner}/{repo}/actions/artifacts` is the alternative). One complete
     sharded run is enough: its `N` shard segments union into a full index. To
-    fold *many* runs instead, add a scheduled job that `cache-compact`s the
-    segments into a base and uploads that base as its own artifact for PR jobs to
-    pull.
+    fold *many* runs instead, add a scheduled job that runs
+    `rstest cache-compact --cache-remote ./rcache` over the downloaded segments
+    and uploads the resulting `./rcache/base.json` as its own artifact. rstest
+    reads the base only from `<remote>/base.json`, so each PR job needs an extra
+    download step that puts that artifact at `./rcache/base.json` next to
+    `./rcache/segments/`; the segment download above does not fetch it.
 
 ## Object store (S3/GCS/R2), OIDC: no secrets
 

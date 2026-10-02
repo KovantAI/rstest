@@ -35,12 +35,12 @@ corpus parity floor under rstest.
 
 | Plugin | # suites | Suites | Parallel evidence |
 |---|---:|---|---|
+| pytest-xdist | 8 | aiohttp, attrs, django-allauth, fastapi, langchain, pandas, rich, sqlalchemy | ✅ parallel (neutralized inside workers) |
 | anyio | 7 | anyio, fastapi, httpx, langchain, langgraph, starlette, urllib3 | ✅ parallel (fastapi/langchain/langgraph/starlette `-n auto`; httpx `-n 0`) |
 | hypothesis | 6 | anyio, attrs, packaging, pandas, pydantic, python-dateutil | ✅ parallel |
 | pytest-cov | 6 | aiohttp, arrow, fastapi, langchain, python-dateutil, requests | ✅ parallel |
 | pytest-mock | 6 | aiohttp, anyio, arrow, langchain, langgraph, pydantic | ✅ parallel |
 | pytest-timeout | 6 | aiohttp, anyio, fastapi, jinja2, urllib3, werkzeug | ✅ parallel |
-| pytest-xdist | 6 | aiohttp, attrs, fastapi, langchain, pandas, sqlalchemy | ✅ parallel (neutralized inside workers) |
 | pytest-asyncio | 5 | aiohttp, django-allauth, langchain, langgraph, structlog | ✅ parallel |
 | pytest-codspeed | 4 | aiohttp, fastapi, langchain, pydantic | ⚠️ loaded only; auto-disables at `-n ≥ 2` |
 | inline-snapshot | 2 | fastapi, pydantic | ✅ parallel (fastapi `-n auto`) |
@@ -64,7 +64,7 @@ corpus parity floor under rstest.
 | time-machine | 1 | structlog | ✅ parallel |
 | typeguard | 1 | tenacity | ✅ parallel |
 
-**28 distinct plugin distributions across 22 suites.**
+**28 distinct plugin distributions across 23 suites.**
 
 > `pytest-xdist`, `pytest-cov`, `pytest-timeout` register `pytest11` entry points
 > but rstest **supersedes** them (native `-n`, `--cov`, `--timeout`); here they
@@ -82,10 +82,10 @@ corpus parity floor under rstest.
 
 ## Suites with no plugins (core pytest only)
 
-These 11 suites load no third-party `pytest11` plugin, so they exercise the
+These 10 suites load no third-party `pytest11` plugin, so they exercise the
 vendored core + fixtures/parametrize/marks only, not plugin compat: **click,
 flask, freezegun, itsdangerous, jsonschema, marshmallow, more-itertools, pluggy,
-rich, trio, typer.**
+trio, typer.**
 
 ## Promoted from `i` to `V`
 
@@ -115,6 +115,8 @@ that on your own suite, or with `rstest migrate-check`.
 ## How this table was produced
 
 For each prepared suite venv under `corpus/work/<suite>/venv`, enumerate the
-`pytest11` entry-point group and record the owning distribution. Regenerate after
+`pytest11` entry-point group and record the owning distribution. The two
+benchmark-only suites (sympy, scikit-learn) are not part of the 33-suite
+parity corpus and are left out. Regenerate after
 a `corpus/run.py --prepare` refresh; the inventory tracks whatever the pinned
 suites currently install.

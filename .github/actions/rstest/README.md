@@ -258,8 +258,9 @@ a `${...}-` restore-key. Two deliberate choices:
   shard's baseline. Segmenting keeps each matrix leg's baseline separate.
 
 To seed a shared baseline for PR shards, run the full unsharded suite on your
-default branch (a normal run of this action on `push` writes the cache); PR runs
-restore the newest matching entry read-only.
+default branch (a normal run of this action on `push` writes the cache). PR runs
+restore the newest matching entry; anything a PR run saves is scoped to that PR,
+so it never replaces the default branch's baseline.
 
 ## Security and matrix behavior
 

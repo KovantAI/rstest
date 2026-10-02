@@ -8,7 +8,7 @@
       "$ref": "#/definitions/MigrateMeta"
     },
     "parallel": {
-      "description": "Parallel-phase result: `null` when the phase was skipped (WILL-bail ids\nforce `-n 0`) or could not capture outcomes.",
+      "description": "Parallel-phase result: `null` when the phase was skipped (WILL-bail ids\nforce `-n 0`); `{\"ran\": false}` when it started but captured no outcomes.",
       "anyOf": [
         {
           "$ref": "#/definitions/ParallelReport"

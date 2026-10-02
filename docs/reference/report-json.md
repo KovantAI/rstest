@@ -219,7 +219,7 @@ granularity. Fields:
 | `duration` | float | phase duration in seconds (rounded to 1e-4) |
 | `wasxfail` | bool | the outcome was an expected failure / unexpected pass |
 | `lineno` | int | 0-based source line; **omitted** when pytest reports none |
-| `cpu` | float | call-phase CPU seconds (`process_time`); on the `call` report only. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). Present whenever a stream is active; **omitted** under `-n 0` passthrough |
+| `cpu` | float | call-phase CPU seconds (`process_time`); on the `call` report only. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). Present whenever a stream is active, including at `-n 0` |
 | `worker` | string | `gwN`: **pool runs only**; absent under `-n 0` |
 | `longrepr` | string | failure traceback; **present only on `failed`** |
 | `sections` | array | captured output: `[{name, text}]` (e.g. `Captured stdout call`), each tail-capped at 20 000 chars. Present on failures, and on **every** report when this stream is active (so passing-test output shows too); **omitted** when a report captured nothing |

@@ -52,10 +52,11 @@ during collection are not restarted (an import-time crash would recur).
 ## Cleanup hooks and the serial phase
 
 If the suite uses xdist's controller-side hooks, a crashed worker's
-`pytest_testnodedown` still runs, on a surviving worker, against the
-dead worker's `workerinput` snapshot (details and the ordering caveat
-with deterministic idents: [xdist hook
-emulation](xdist-hooks.md)). If the
+`pytest_testnodedown` still runs under `--collect full`, on a surviving
+worker, against the dead worker's `workerinput` snapshot (details and the
+ordering caveat with deterministic idents: [xdist hook
+emulation](xdist-hooks.md)). Under `--collect lazy` it does not run, and
+the dead worker's per-worker resources are left behind. If the
 crashed worker was the designated serial-phase host, the lowest
 surviving worker is promoted; if none can host it, the run reports the
 serial tests as lost rather than silently dropping them.

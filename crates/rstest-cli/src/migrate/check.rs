@@ -26,7 +26,7 @@ use crate::reporting::sink::Sink;
 pub struct MigrateCheckDoc {
     pub meta: MigrateMeta,
     /// Parallel-phase result: `null` when the phase was skipped (WILL-bail ids
-    /// force `-n 0`) or could not capture outcomes.
+    /// force `-n 0`); `{"ran": false}` when it started but captured no outcomes.
     pub parallel: Option<ParallelReport>,
     /// Whether the suite is parallel-ready (no blocking findings).
     pub ready: bool,
