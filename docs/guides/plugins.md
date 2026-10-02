@@ -279,8 +279,10 @@ use rstest's native --report-json, or run -n 0. See docs/reference/top-100-plugi
 
 Covered flags: `--json-report` (pytest-json-report), `--report-log`
 (pytest-reportlog), `--ctrf` (pytest-json-ctrf), `--nunit-xml` (pytest-nunit),
-`--md` (pytest-md), `--csv` (pytest-csv), and `--benchmark*` (pytest-benchmark,
-which auto-disables). The warning is argv-driven: it fires on the *flag*, so it
+`--md` (pytest-md) and `--benchmark*` (pytest-benchmark, which auto-disables).
+The same warning also covers `--csv` (pytest-csv), which does not go dark but
+writes a racy per-worker CSV under the pool (rated ⚠️ Caveat in the
+[top-100 matrix](../reference/top-100-plugins.md)). The warning is argv-driven: it fires on the *flag*, so it
 never mistakes rstest's own `--html` / `--junitxml` / `--report-json` (which are
 rendered from merged results and are parallel-safe) for a hazard, and it stays
 silent at `-n 0` where the plugin's own controller branch runs.

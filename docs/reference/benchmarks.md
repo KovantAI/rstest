@@ -235,7 +235,7 @@ per-test parity exact.
   controller (one Python process handling every test report) sat at 100% CPU
   for most of the run, and the workers waited on it. rstest's orchestrator is
   Rust, so the same `-n 8` finishes in 43s against 89s. An earlier single run
-  on this page had the two at parity (61s vs 63s) on an older pandas; that
+  on this page had the two at parity (rstest 63s, xdist 61s) on an older pandas; that
   number is superseded. (The 190s serial baseline is real, not
   estimated.[^pandas])
 - **django-allauth at matched `-n`**: 5.8s against 8.9s. Its corpus policy

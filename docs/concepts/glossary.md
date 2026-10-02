@@ -186,8 +186,9 @@ end explicitly.
 
 **Designate**: the worker chosen to host the serial phase, which is the
 lowest alive worker (promoted to the next one if it crashes). (The full
-collection nodeid list is always shipped by worker `gw0`; the others verify their
-collection against it by count and hash.)
+collection nodeid list is always shipped by worker `gw0`; every worker's
+collection is verified by count and hash against whichever worker reports
+first.)
 
 **Serial phase**{#serial-phase}: `@pytest.mark.serial` tests running exclusively on the
 designate after all other workers finish.

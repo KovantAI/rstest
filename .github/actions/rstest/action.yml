@@ -334,7 +334,7 @@ runs:
     - name: Restore rstest cache
       if: steps.cfg.outputs.backend == 'actions-cache'
       id: cache-restore
-      uses: actions/cache/restore@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # v4.1.2
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         # Replay journals are per-run artifacts, not scheduling state: caching
         # them re-uploads up to 11 of them (MBs each at scale) on every save and
@@ -664,7 +664,7 @@ runs:
 
     - name: Save rstest cache
       if: always() && steps.cfg.outputs.backend == 'actions-cache' && steps.cfg.outputs.cache-push == 'true'
-      uses: actions/cache/save@2f8e54208210a422b2efd51efaa6bd6d7ca8920f # v4.1.2
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         # Same path spec as the restore (actions/cache keys on it too).
         path: |

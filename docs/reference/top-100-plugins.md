@@ -177,8 +177,8 @@ reporters have native rstest equivalents.
 
 **Shipped: runtime flag warning.** When a parallel run (`-n ≥ 2`) is invoked
 with a flag whose plugin goes dark under the pool (`--json-report`,
-`--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--csv`, `--benchmark*`),
-rstest prints a heads-up before the run naming the plugin and the parallel-safe
+`--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--benchmark*`), or with
+`--csv` (racy rather than dark), rstest prints a heads-up before the run naming the plugin and the parallel-safe
 alternative; see
 [the silent-no-op class](../guides/plugins.md#the-silent-no-op-class). This is
 argv-driven: it catches the known-dark flags deterministically, with no false

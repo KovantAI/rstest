@@ -151,7 +151,7 @@
           "format": "double"
         },
         "crashed": {
-          "description": "The outcome was fabricated because the worker died on this test\n(crash or --worker-timeout kill), not produced by pytest.",
+          "description": "The outcome was fabricated because the worker died on this test\n(crash or --worker-timeout kill), or the test was running when\nSIGINT/SIGTERM stopped the run; not produced by pytest.",
           "type": "boolean"
         },
         "duration": {
@@ -159,7 +159,7 @@
           "format": "double"
         },
         "flaky": {
-          "description": "Passed only after one or more reruns (--reruns).",
+          "description": "Passed only after one or more reruns (--reruns or @pytest.mark.flaky).",
           "type": "boolean"
         },
         "lineno": {

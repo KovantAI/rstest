@@ -49,7 +49,7 @@ pub struct TestEntry {
     pub thread_delta: Option<i64>,
     #[serde(skip)]
     pub fd_delta: Option<i64>,
-    /// Passed only after one or more reruns (--reruns).
+    /// Passed only after one or more reruns (--reruns or @pytest.mark.flaky).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
     /// Failure text (assertion repr / traceback), failures only.
@@ -57,7 +57,8 @@ pub struct TestEntry {
     #[cfg_attr(test, schemars(with = "String"))]
     pub longrepr: Option<String>,
     /// The outcome was fabricated because the worker died on this test
-    /// (crash or --worker-timeout kill), not produced by pytest.
+    /// (crash or --worker-timeout kill), or the test was running when
+    /// SIGINT/SIGTERM stopped the run; not produced by pytest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,
     /// Source line of the test (0-based, from pytest's report.location),

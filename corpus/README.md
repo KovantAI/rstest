@@ -119,7 +119,7 @@ plain pytest equally).
 | sqlalchemy | 25,300 | 99.97% | 524.5s | 52.6s (`-n auto`, 7 serial-baseline skips) |
 | pydantic | 12,733 | 99.97% | 14.2s | 14.1s (`-n 0`, sys.path param) |
 | jsonschema | 8,337 | 100% | 4.2s | 2.7s |
-| aiohttp | 4,469 | 100% | 199.1s | 67.3s |
+| aiohttp | 4,469 | 100%† | 199.1s | 67.3s (†this run; the 2026-09-30 benchmark runs measured 99.91-99.98%, socket-leak flake) |
 | anyio | 3,814 | 100% | 103.4s | 26.5s |
 | fastapi | 3,179 | 100% | 25.9s | 10.0s |
 | urllib3 | 2,299 | 100% | 54.6s | 39.4s |
@@ -129,7 +129,7 @@ plain pytest equally).
 | click | 1,697 | 100% | 2.6s | 2.6s |
 | httpx | 1,418 | 100% | 3.3s | 3.1s (`-n 0`, fixed port) |
 | attrs | 1,391 | 100% | 4.2s | 2.6s |
-| typer | 1,374 | 99.93% | 8.9s | 2.9s (1 load-sensitive test) |
+| typer | 1,374 | 99.93% | 8.9s | 2.9s (1 isolation-defect test) |
 | marshmallow | 1,178 | 100% | 0.6s | 0.6s |
 | werkzeug | 992 | 99.9% | 5.8s | 2.4s (1 unix-socket test) |
 | rich | 981 | 99.8%* | 3.9s | 2.4s (*upstream flake, hits pytest too) |
@@ -261,8 +261,11 @@ remove it) is catalogued in
   affected equally. Installing ipywidgets (unused by the tests) makes
   it worse: its IPython dependency registers a pygments plugin lexer
   with nondeterministic tie-breaking.
-- **typer**: one warning-assertion test is load-sensitive; flakes at
-  high worker counts (hence the `-n 4` policy).
+- **typer**: one warning-assertion test has an isolation defect: it misses
+  its `pytest.warns` when a sibling that touched the warnings state runs
+  first in the same worker (see
+  [parity divergences](../docs/reference/parity-divergences.md)). The `-n 4`
+  policy is for the separate, load-sensitive progressbar timing tests.
 
 ## Corpus-found bugs (fixed)
 
