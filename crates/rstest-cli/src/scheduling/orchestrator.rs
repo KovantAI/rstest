@@ -298,6 +298,8 @@ mod tests {
         killed: u32,
         no_more_sent: u32,
         reaped: u32,
+        // Only read by the unix-only interrupt_all test.
+        #[cfg(unix)]
         running: Option<String>,
     }
 
