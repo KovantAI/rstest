@@ -42,7 +42,6 @@ between 0.x releases and are listed here.
   `tests/test_q.py::test_broken  # JIRA-1` was read as one pattern, comment
   included, and silently matched nothing. A `#` after whitespace now starts a
   comment; a `#` inside a nodeid (`test_x[#1]`) is still part of it.
-
 - **`pip install rstest` works on Python 3.10 without pytest.** The vendored
   pytest core imports `exceptiongroup` and `tomli` below Python 3.11 (and
   `colorama` on Windows), but rstest didn't declare them, so a fresh 3.10
@@ -353,7 +352,6 @@ between 0.x releases and are listed here.
 - **Monorepo merged `--report-json` now stamps the current schema.** The merged
   root document hard-coded `"schema": 4` while carrying schema-5 fields
   (`quarantined`); it now shares the single-project writer's version constant.
-
 - **rstest warns about plugins pinned to an older pytest.** When a loaded
   plugin's own metadata excludes the pytest rstest runs (for example it declares
   `pytest<9`), rstest prints one `rstest: warning: ...` line to stderr per run.

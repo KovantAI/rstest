@@ -95,7 +95,7 @@ covered or missed; non-executable lines (blank, comment) are ignored. Below the
 threshold the run exits `1` and the uncovered added lines are named per file:
 
 ```text
-rstest: diff coverage 83.3% (5/6 added lines covered)
+rstest: diff coverage 66.7% (8/12 added lines covered)
   mymod.py: uncovered added line(s) 7, 12-14
 ```
 

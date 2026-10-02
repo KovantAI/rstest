@@ -76,3 +76,4 @@ Standard variables from CI systems and tools that rstest reads when present:
 | `BUILDKITE` | on Buildkite (non-empty), doctor reports and flaky tests are published with `buildkite-agent annotate` |
 | `UV_PYTHON_INSTALL_DIR`, `XDG_DATA_HOME`, `APPDATA` | locating uv-managed interpreters during interpreter discovery (`UV_PYTHON_INSTALL_DIR` first, else uv's default under `XDG_DATA_HOME` or `~/.local/share` on Unix, `%APPDATA%` on Windows) |
 | `XDG_CACHE_HOME`, `LOCALAPPDATA` | default base for the interpreter-probe cache (see `RSTEST_CACHE_DIR`) |
+| `COVERAGE_RCFILE` | coverage.py's config-file override. When no `--cov-config` names a file, rstest reads the `[run]` settings from this file (as coverage.py would) to decide what `--cov` measures |

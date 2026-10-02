@@ -498,3 +498,23 @@ when any non-allow-listed WILL-bail id or parallel finding exists, `2` when
 the parallel pass produced no outcomes (`parallel` is `{"ran": false}`) or
 rstest hit an error.
 Increment-only: incompatible changes bump `meta.schema`.
+
+## Audit, bisect, explain and xdist-removal-check JSON
+
+These four documents have no walkthrough on this page. Their field
+references and JSON Schemas are generated from the code on
+[Output schemas](output-schemas.md), and each subcommand's page covers when
+it writes the document and what its exit codes mean:
+
+| Document | Written by | Exit codes |
+|---|---|---|
+| audit | `rstest audit --audit-json FILE` | [`audit`](cli-commands.md#audit) |
+| bisect | `rstest bisect <nodeid> --bisect-json FILE` | [`bisect`](cli-commands.md#bisect-nodeid) |
+| explain | `rstest explain <nodeid> --json` (stdout) | [`explain`](cli-commands.md#explain) |
+| xdist-removal-check | `rstest xdist-removal-check --xdist-removal-json FILE` | [`xdist-removal-check`](cli-commands.md#xdist-removal-check) |
+
+As with migrate-check, the exit code is not in the document. Two cases to
+know: `bisect` exits `1` and still writes a full document
+(`"order_dependent": false`, no culprits) when the victim is not
+order-dependent, and `explain --json` exits `0` with `"found": false` for an
+unknown nodeid, where the human-readable form exits `1`.
