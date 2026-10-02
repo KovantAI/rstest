@@ -130,18 +130,18 @@ Apple M4 Max, CPython 3.13, pytest-xdist 3.8, median of 5 runs at the same
 `-n` for both runners. CPU-bound suites (sympy, scikit-learn) land at parity
 with xdist; see the benchmarks page.
 
-**Monorepo** (langchain-ai/langgraph, 6 `libs/*` packages, 4,284 tests, each
-with its own pytest config; a single pytest can't run from the root at all):
+**Monorepo** (langchain-ai/langgraph, the 5 `libs/*` packages that need no
+live services, 838 tests, each with its own pytest config; a single pytest
+can't run from the root at all):
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | | wall | parity |
 |---|---|---|
-| pytest: 6 serial invocations | 880.4s | baseline |
-| rstest at the root, cold | **245.7s** (3.6×) | 100% |
+| pytest: 5 serial invocations | 187.4s | baseline |
+| rstest at the root | **128.9s** (1.45×) | 100% |
 
-Only the cold run is measured. From its per-project duration caches, a warm
-run is **projected** (not measured) at 121–133s (6.6–7.3×); discount that
-until you measure your own.
+Measured with rstest 0.6.0 (10-run mean) and not yet re-measured on 0.8.0.
+The gain is capped by a few slow wait-bound tests in `libs/checkpoint`.
 
 Full methodology:
 [benchmarks](https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/).

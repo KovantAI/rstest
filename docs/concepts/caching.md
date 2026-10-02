@@ -123,7 +123,7 @@ the credential to the cache prefix, not the whole bucket. Concretely:
 |---|---|
 | S3 (`s3://bucket/prefix`) | `s3:ListBucket` (on the bucket, condition `prefix`), `s3:GetObject`/`s3:PutObject`/`s3:DeleteObject` on `bucket/prefix/*` |
 | GCS (`gs://bucket/prefix`) | `storage.objects.{list,get,create,delete}`, e.g. `roles/storage.objectAdmin` scoped to the bucket/prefix |
-| Azure Blob (dir-materialize) | `Storage Blob Data Contributor` on the container (the `az` CLI needs read+write+delete) |
+| Azure Blob (dir-materialize) | `Storage Blob Data Contributor` on the container (the `az` CLI needs read+write; delete only if a job compacts) |
 | `http(s)://` | endpoint enforces its own authz; rstest sends `Authorization: Bearer $RSTEST_CACHE_REMOTE_TOKEN` |
 | dir / mount (`/path`, `file://`) | filesystem read+write+delete on the directory |
 | GitHub artifacts (the action's `artifact` backend) | workflow `permissions: { contents: read, actions: read }`; `actions: read` reaches a prior run's segments |

@@ -252,6 +252,7 @@ durations:
     fallback_keys: [rstest-durations-$CI_DEFAULT_BRANCH]
     paths: [.rstest_cache]
     policy: pull-push
+    when: always        # save even when this run has a failing test
   script:
     - pip install -r requirements.txt && pip install rstest
     - rstest -n auto -q
@@ -370,7 +371,8 @@ dir. Two supported paths:
   ```
 
   The pipeline's service connection / managed identity needs **Storage Blob Data
-  Contributor** on the container (the `az` batch calls read, write, and delete).
+  Contributor** on the container (the `az` batch calls read and write; nothing
+  here deletes, since the recipe never compacts).
   Each shard downloads at its own start time while others upload, so shards can
   see different segment sets; for a gating pipeline download once, upload from
   one follow-up job, and gate on `shard-verify` (see
@@ -451,14 +453,17 @@ jobs:
       - save_cache:
           key: rstest-durations-{{ .Branch }}-{{ .Revision }}
           paths: [".rstest_cache"]
+          when: always   # save even when this run has a failing test
 workflows:
   test-and-cache:
     jobs:
       - test
       # After the shards, so a save can't land mid-matrix and hand later
       # containers a different cache.
+      # [success, failed]: still refresh timings when a shard failed.
       - durations:
-          requires: [test]
+          requires:
+            - test: [success, failed]
 ```
 
 CircleCI keys are immutable once written, so the `{{ .Revision }}` suffix

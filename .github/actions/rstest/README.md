@@ -165,8 +165,9 @@ steps:
 
 Setting `cache-remote` selects the `remote` backend automatically. A shared
 mount (`cache-remote: /mnt/ci-cache/rstest`) needs no pull/push bookends beyond
-the flags. Add `durations-regress` + `require-baseline: true` to make a cold or
-failed pull a hard error instead of a silent green.
+the flags. A failed pull is always a hard error (exit 1). Add
+`durations-regress` + `require-baseline: true` so a pull that succeeds but
+brings no baseline (a cold remote) is one too, instead of a silent green.
 
 **Only trusted runs write.** With the default `cache-push: auto`, the
 `remote` backend pushes only on `push`, `schedule` and `workflow_dispatch`
@@ -314,8 +315,11 @@ Artifact names now carry the leg suffix. Two consequences:
   segments were named `rstest-seg-<run_id>-<shard>` and don't match the new
   pattern. It re-seeds itself.
 - Workflows that download JUnit by exact name (`rstest-junit` or
-  `rstest-junit-shard-K`) need the new names. A `pattern: rstest-junit-*` with
-  `merge-multiple: true` works across all legs and shards.
+  `rstest-junit-shard-K`) need the new names. Download them with
+  `pattern: rstest-junit-*` and **without** `merge-multiple`: every artifact
+  holds one file named after the `junit` input (`junit.xml` by default), so
+  merging them into one directory keeps only one leg's file. Each artifact
+  lands in its own subdirectory instead; read `*/junit.xml`.
 
 ## Notes
 

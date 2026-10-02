@@ -94,8 +94,8 @@ an installed pytest.
 
 **Long pole**: the slowest single test in the run (`long_pole_seconds` in
 the doctor report). No worker count can finish the run faster than it. When
-it (or any test) is longer than the ideal per-worker share
-(`test time / workers`), it sets the **parallel floor**: adding workers stops
+it (or any test) is longer than both the ideal per-worker share
+(`test time / workers`) and 1 second, it sets the **parallel floor**: adding workers stops
 helping. Slow tests from the duration cache are dispatched first,
 individually, so the long pole starts early. Written "long-pole" only as an
 adjective ("long-pole tests").
@@ -115,9 +115,9 @@ recorded in `.rstest_cache/` by earlier runs, slowest first, so long tests
 start early instead of stacking at the end. It needs one prior (warm) run.
 See [Scheduling](scheduling.md).
 
-**Flaky**: a test that failed and then passed within the
-[`--reruns`](../reference/cli.md#-reruns-n) budget; reported green but
-counted and listed.
+**Flaky**: a test that failed and then passed on a retry, from the
+[`--reruns`](../reference/cli.md#-reruns-n) budget or its own
+`@pytest.mark.flaky(reruns=N)`; reported green but counted and listed.
 
 **Selection**: the set of tests chosen to run; under
 [`--changed`](../reference/cli.md#-changedrev), derived from the
@@ -138,8 +138,8 @@ can fail on it: [`--doctor-fail-on`](../reference/cli.md#-doctor-fail-on-cond),
 [`--changed-strict`](../reference/cli.md#-changed-strict). Its output lines
 are the "gate messages". Not the same as **gate tests**, below.
 
-**Gate tests**: in the doctor report, the tests longer than the ideal
-per-worker share: they set the [parallel floor](#parallel-floor), so
+**Gate tests**: in the doctor report, the tests longer than both the ideal
+per-worker share and 1 second: they set the [parallel floor](#parallel-floor), so
 only splitting or shrinking them makes the run faster.
 
 **Baseline**: whatever a comparison is measured against. It means different

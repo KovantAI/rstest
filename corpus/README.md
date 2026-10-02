@@ -174,7 +174,8 @@ each. The classes:
 | Class | Suites | Policy |
 |---|---|---|
 | Fixed network port in session fixture | httpx | `-n 0` |
-| Run-dependent parametrize IDs (`now()`) | marshmallow, arrow, pydantic | see below |
+| Run-dependent parametrize IDs (`now()`) | marshmallow, arrow | see below |
+| Per-process parametrize IDs (memory addresses) | pydantic | `-n 0` |
 | Load-sensitive timing tests | werkzeug, urllib3, typer, anyio | `-n 4` |
 | Wall-clock-sensitive whole suite | allauth | `-n 4` |
 
@@ -186,10 +187,11 @@ itself: it builds a shim `WorkerController` and runs every plugin's
 for plugins that register mid-`configure`). This covers hooks whose
 injected value is **self-derivable** (a `uuid4`, or a `workerid` suffix):
 
-- **sqlalchemy** (`follower_ident`) runs at full **`-n auto`, 10×**
-  (524.5s→52.6s), 99.97%. xdist installed → its `XDistHooks` registers → the
+- **sqlalchemy** (`follower_ident`) runs at full **`-n auto`**: 4.6×
+  (552.4s→119.8s), 99.96% in the latest `results.json` (the table above,
+  an older snapshot, has 10× and 99.97%). xdist installed → its `XDistHooks` registers → the
   emulation fires `configure_node` → each worker self-assigns
-  `follower_ident=uuid4()` and provisions its own follower DB. The 7-test
+  `follower_ident=uuid4()` and provisions its own follower DB. The 9-test
   gap is serial-baseline-vs-parallel (those IMV/RETURNING tests skip in the
   serial baseline but pass under real xdist *and* rstest), not a follower
   bug.

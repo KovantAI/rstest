@@ -183,9 +183,9 @@ hook under such a gate, or in a class the same file registers only under
 one, isn't reported either. Hook names the project declares itself (through
 `pytest_addhooks` and `@pytest.hookspec`) don't need pytest-xdist, and
 neither do hook-named functions in test modules, which pytest never
-registers as plugins, so neither is reported. Exits non-zero on any blocking finding that isn't
-allow-listed with [`--migrate-allow`](#-migrate-allow-substring), which here
-matches against the finding's location (`pytest.ini addopts`,
+registers as plugins, so neither is reported. Exits `1` on any blocking
+finding that isn't allow-listed with
+[`--migrate-allow`](#-migrate-allow-substring), which here matches against the finding's location (`pytest.ini addopts`,
 `tests/conftest.py:12`, a plugin's distribution name).
 
 ```console

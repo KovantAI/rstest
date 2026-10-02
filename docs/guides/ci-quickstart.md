@@ -294,8 +294,9 @@ jobs:
           # <os>-py<version>-<working-directory>, e.g. Linux-py3.13-libs-core),
           # so packages never warm from each other's segments.
           cache-backend: artifact
-          # uv projects are detected and installed with `uv sync --dev`;
-          # otherwise install the package's own dependencies here.
+          # Non-uv package: install its dependencies here. For a uv package,
+          # delete this line: a set `install:` replaces the `uv sync --dev`
+          # the action would otherwise run, while tests still run under uv.
           install: pip install -r requirements.txt rstest
           args: "-n auto"
           upload-junit: true

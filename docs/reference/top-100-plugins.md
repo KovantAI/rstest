@@ -38,17 +38,17 @@ plugin's category, not yet runtime-verified.
 | 8 | hypothesis | 48.3M | ✅ Works | V | Vetted; property-based per worker. Known gap: shared `.hypothesis` DB untested past `-n 8`. |
 | 9 | pytest-metadata | 35.2M | ➖ N/A | V | Session metadata for report plugins; plugin active on workers, no parallel hazard (e2e gate). |
 | 10 | pytest-env | 24.0M | ✅ Works | i | Env vars set on every worker (its hook runs in each worker session). No gate yet. |
-| 11 | pytest-httpx | 22.9M | ✅ Works | V | Per-test httpx mock fixture; isolated per worker (e2e gate). |
+| 11 | pytest-httpx | 22.9M | ✅ Works | V | Per-test httpx mock fixture; works under the pool (e2e gate runs one test at `-n 2`, so per-worker isolation itself isn't exercised). |
 | 12 | pytest-html | 21.8M | 🔴 Silent | V | Writes no report at `-n ≥ 2` (gates on being the xdist controller, which has no `workerinput`); a command-line `--html` is rstest's native report; for the plugin's own, `rstest -n 0 -- --html=...`. |
 | 13 | pytest-django | 21.6M | ✅ Works | V\* | Per-worker test DB suffixed by `workerid`. Verified only on django-allauth, which uses SQLite `:memory:`, so the per-worker database naming path of a server-backed database (Postgres, MySQL) is not exercised; check it on your own suite. |
 | 14 | pytest-split | 21.0M | 🟦 Native | V | Group selection is deselection (honored under the pool: e2e gate); rstest sharding is native `--shard K/N`. |
 | 15 | pytest-repeat | 15.5M | ✅ Works | i | `@mark.repeat(N)` expands at collection, so the copies distribute across workers. No gate yet. |
 | 16 | pytest-json-report | 15.0M | 🔴 Silent / 🟦 | V | Report aggregator; no file at `-n ≥ 2`, written at `-n 0` (e2e gate). Use native `--report-json`. |
 | 17 | pytest-benchmark | 14.2M | 🔶 `-n 0` | V | Auto-disables at `-n ≥ 2` (sees the pool as xdist); benchmark at `-n 0`, read `--benchmark-json`. e2e gate: no `--benchmark-json` written at `-n ≥ 2`, measured + written at `-n 0`. |
-| 18 | pytest-socket | 13.9M | ✅ Works | V | `--disable-socket` blocks identically in parallel. |
+| 18 | pytest-socket | 13.9M | ✅ Works | V | Loads under the pool in the langchain and urllib3 corpus suites at `-n auto`; neither passes `--disable-socket`, so the blocking itself is not exercised. |
 | 19 | syrupy | 13.4M | ✅ Works | V | Snapshot asserts are per-test; run `--snapshot-update` at `-n 0` to avoid same-file write races. Corpus: langchain (`libs/core`) + langgraph snapshot asserts at `-n auto`. |
 | 20 | pytest-unordered | 11.0M | ➖ N/A | V | Assertion helper; works under the pool (e2e gate). |
-| 21 | pytest-base-url | 10.2M | ✅ Works | V | Config/fixture only; `--base-url` delivered to every worker (e2e gate). |
+| 21 | pytest-base-url | 10.2M | ✅ Works | V | Config/fixture only; `--base-url` reaches the fixture under the pool (e2e gate with one test, so one worker). |
 | 22 | pytest-randomly | 10.0M | ✅ Works | V | rstest synthesizes the `randomly_seed` the controller would inject (one run-level seed, all workers agree); vetted. Native `--shuffle` also available. |
 | 23 | pytest-icdiff | 9.7M | ➖ N/A | V | Assertion-diff repr; side-by-side diff reaches worker failure output (e2e gate). |
 | 24 | pytest-playwright | 9.6M | ✅ Works | V | Per-worker browser context; `page` fixture works under the pool (e2e `plugin-services` gate). |
@@ -66,16 +66,16 @@ plugin's category, not yet runtime-verified.
 | 36 | pytest-subtests | 4.9M | ✅ Works | V | Sub-results ride the normal report hook; failing subtests attributed per worker (e2e gate). |
 | 37 | pytest-testmon | 4.8M | 🔶 `-n 0` / 🟦 | V | Shared `.testmondata` isn't concurrency-safe; runs at `-n 0` (e2e gate). rstest has native `--incremental` / coverage-skip. |
 | 38 | pytest-check | 4.0M | ➖ N/A | V | Soft multi-assert per test; all soft failures survive the merge (e2e gate). |
-| 39 | pytest-httpserver | 3.9M | ✅ Works | V | Per-test server fixture on its own port (e2e gate). |
-| 40 | pytest-timeouts | 3.7M | 🟦 Native | V | Phase timeouts; coexists under the pool (e2e gate). rstest has native `--timeout` / `--worker-timeout`. |
+| 39 | pytest-httpserver | 3.9M | ✅ Works | V | Per-test server fixture works under the pool (e2e gate with one test). |
+| 40 | pytest-timeouts | 3.7M | 🟦 Native | V | Phase timeouts; loads and coexists under the pool (e2e gate, which doesn't set its timeout options). rstest has native `--timeout` / `--worker-timeout`. |
 | 41 | pytest-github-actions-annotate-failures | 3.7M | 🟦 Native | V | Coexists under the pool; rstest emits GitHub `::error` annotations natively via `--output github` (e2e gate). |
 | 42 | pytest-bdd | 3.6M | ✅ Works | V | Generates items from `.feature` at collection; scenario runs under the pool (e2e gate). |
-| 43 | pytest-durations | 3.5M | 🔶 `-n 0` / 🟦 | V | Duration summary is terminal-owned; coexists under the pool (e2e gate). rstest has `--durations` and `--doctor`. |
+| 43 | pytest-durations | 3.5M | 🔶 `-n 0` / 🟦 | V | Duration summary is terminal-owned; coexists under the pool (e2e gate, without the plugin's own flag). rstest has `--durations` and `--doctor`. |
 | 44 | pytest-memray | 2.9M | 🔶 `-n 0` | V | `@limit_memory` is enforced per worker process: same pass/fail under the pool as at `-n 0` (e2e gate). Only the memory *summary* is terminal-owned; read it at `-n 0`. |
 | 45 | pytest-codspeed | 2.9M | 🔶 `-n 0` | V | The `benchmark` fixture + `@mark.benchmark` coexist under the pool and `--codspeed` measurement completes at any `-n` (e2e gate), but its results table is printed only at `-n 0`; measure at `-n 0` for stable numbers. |
 | 46 | pytest-random-order | 2.8M | ✅ Works | V | rstest seeds the `workerinput["random_order_seed"]` its `pytest_configure` reads unconditionally: without it the plugin KeyError'd every `-n ≥ 2` run (a dead controller path, now closed; e2e gate). All workers share the seed; global execution order still follows rstest's duration-first dispatch, so use `-n 0` or native `--shuffle` for a strict end-to-end shuffle. |
 | 47 | pytest-factoryboy | 2.8M | ✅ Works | V | Fixture generation; registered factory fixture resolves on workers (e2e gate). |
-| 48 | pytest-ordering | 2.8M | ⚠️ Caveat | V | Same as pytest-order: `@mark.run(order=N)` honored within a worker / at `-n 0` (e2e gate). |
+| 48 | pytest-ordering | 2.8M | ⚠️ Caveat | V | Same as pytest-order: `@mark.run(order=N)` honored at `-n 0` (e2e gate); not gated under the pool, where order isn't guaranteed. |
 | 49 | pytest-snapshot | 2.6M | ✅ Works | V | Asserts parallel-safe; update at `-n 0`, assert under the pool (e2e gate). |
 | 50 | pytest-retry | 2.6M | ✅ Works | V | Each worker plays controller for itself: with pytest-xdist installed, its controller branch self-provisions a report server (e2e gate); without xdist, rstest seeds the `server_port` its worker branch reads (langgraph corpus). Native reruns also available. |
 | 51 | pytest-docker | 2.4M | ⚠️ Caveat | i | Session docker-compose fixture → one stack **per worker**. Fine if the service is per-worker; for a single shared stack use `--dist loadgroup` or `-n 0`. |
@@ -178,8 +178,8 @@ reporters have native rstest equivalents.
 **Shipped: runtime flag warning.** When a parallel run (`-n ≥ 2`) is invoked
 with a flag whose plugin goes dark under the pool (`--json-report`,
 `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--benchmark*`), or with
-`--csv` (racy rather than dark), rstest prints a heads-up before the run naming the plugin and the parallel-safe
-alternative; see
+`--csv` (racy rather than dark), rstest prints a heads-up before the run
+naming the plugin and the parallel-safe alternative; see
 [the silent-no-op class](../guides/plugins.md#the-silent-no-op-class). This is
 argv-driven: it catches the known-dark flags deterministically, with no false
 positives.

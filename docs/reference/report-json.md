@@ -53,7 +53,7 @@ Per-test fields (absent when not applicable):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `setup` / `call` / `teardown` | `"passed"` / `"failed"` / `"skipped"` | phase outcomes; a skipped test has no `call` |
+| `setup` / `call` / `teardown` | `"passed"` / `"failed"` / `"skipped"` | phase outcomes; a test skipped at setup has no `call`. An xfail test records `"call": "skipped"` with `wasxfail: true` |
 | `duration` | seconds | call-phase wall time, 4 decimal places |
 | `cpu` | seconds | call-phase CPU time (`process_time`), 4 decimals. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). **Only present when measured**: a `--doctor` run or a live-stream run (`--output json` / `--stream-json`); omitted on a plain run so the snapshot stays comparable to the pytest baseline |
 | `lineno` | int | 0-based source line of the test (pytest `report.location`); omitted when pytest reports none. The file is the nodeid's path |

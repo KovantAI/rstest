@@ -285,7 +285,9 @@ can't agree on the test set; a timestamp may bail). If the ids are stable, it
 runs the suite at `-n auto` and sorts every parallel-only failure into one
 of six verdicts (order dependency, isolation leak, wall-clock sensitivity,
 intrinsic flake, inconclusive, or not parallel-specific), names the fix for
-each, and bisects the polluting file for order and isolation failures. The
+each, and bisects the polluting file for order and isolation failures (the
+first 3 such failures only; bisect the rest with
+[`rstest bisect`](../reference/cli-commands.md#bisect-nodeid)). The
 full classification is in the
 [`migrate-check` reference](../reference/cli-commands.md#migrate-check).
 

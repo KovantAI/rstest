@@ -14,8 +14,8 @@ this from its queue, which can misattribute; the explicit signal cannot.)
 1. The in-flight test is reported **failed**, with a "crashed while
    running this test" message. It is **not retried** by default: a
    reliably-segfaulting test would otherwise kill workers in a loop.
-   With [`--reruns`](../reference/cli.md#-reruns-n), it gets retried on
-   the replacement worker within the rerun budget.
+   With [`--reruns`](../reference/cli.md#-reruns-n), it is requeued
+   within the rerun budget and retried on whichever worker takes it next.
 2. The worker's other outstanding tests requeue at the head of the
    dispatch queue and run elsewhere.
 3. A replacement worker spawns under the same identity (`gw3` stays

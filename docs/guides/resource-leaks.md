@@ -23,7 +23,7 @@ $ rstest -n auto --doctor
 ```text
 RESOURCE LEAKS (net threads/fds still open after teardown):
   +1 thread  tests/test_pool.py::test_executor
-  +5 fds     tests/test_io.py::test_reader
+  +5 fds  tests/test_io.py::test_reader
   a test opened a thread/fd it never released; leaked state can flake later
   tests (reset it, or close in teardown).
 ```

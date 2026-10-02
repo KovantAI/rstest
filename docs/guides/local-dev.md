@@ -18,7 +18,7 @@ $ rstest --watch
 
 ```text
 rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
-... [100%]
+...                                                                      [100%]
 
 3 passed in 0.16s
 
@@ -26,7 +26,7 @@ rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
 [watch] test_w.py changed; rerunning changed files
 ============================= test session starts ==============================
 platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
-rootdir: /home/me/proj
+rootdir: /Users/me/proj
 collected 2 items
 
 test_w.py ..                                                             [100%]
@@ -37,7 +37,7 @@ test_w.py ..                                                             [100%]
 [watch] helper.py changed; rerunning affected tests
 ============================= test session starts ==============================
 platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
-rootdir: /home/me/proj
+rootdir: /Users/me/proj
 collected 1 item
 
 test_h.py .                                                              [100%]
@@ -45,9 +45,10 @@ test_h.py .                                                              [100%]
 ============================== 1 passed in 0.00s ===============================
 ```
 
-Under the default `-n auto` the worker count is capped by the number of test
-files, so a rerun that selects one file runs on a single worker and prints
-pytest's own session output; a larger rerun prints rstest's parallel summary.
+Under the default `-n auto` rstest starts about one worker per 2 seconds of
+cached test time, so a quick suite like this one reruns on a single worker and
+prints pytest's own session output; a slower suite reruns in parallel and
+prints rstest's summary.
 
 The rerun-selection policy is import-graph based, so you don't rerun the whole suite on every keystroke:
 
@@ -116,7 +117,7 @@ A test that starts a thread it never joins, or opens an fd it never closes, leav
 ```text
 RESOURCE LEAKS (net threads/fds still open after teardown):
   +3 threads  tests/test_pool.py::test_executor
-  +5 fds      tests/test_io.py::test_reader
+  +5 fds  tests/test_io.py::test_reader
 ```
 
 The count is snapshotted before setup and after teardown, so correct cleanup nets zero. The first test each worker runs is skipped as a warm-up. Session/module-scoped fixtures can show a one-time "leak" that's actually the fixture behaving correctly, so the `--doctor` report is advisory. Full model, false-positive cases, and fixes: [Resource leaks](resource-leaks.md). To make it a gate once your suite is clean, use [`--fail-on-leak`](../reference/cli.md#-fail-on-leak).

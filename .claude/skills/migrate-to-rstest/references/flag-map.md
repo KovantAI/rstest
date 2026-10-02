@@ -44,9 +44,10 @@ installed.
   `addopts`, a parallel run measures coverage in every worker, never combines
   or reports it, and still exits 0. Move `--cov`/`--cov-report` to the command
   line.
-- **pytest-reverse / pytest-ordering**: reordering holds only within one
-  worker; at `-n >= 2` rstest schedules by duration and ignores reordering in
-  `pytest_collection_modifyitems`. If the order matters, use `-n 0`,
+- **pytest-reverse / pytest-ordering**: at `-n >= 2` the reordered list is
+  only where dispatch starts. Cached slow tests (1s or more) move to the
+  front and tests on different workers run concurrently, so a strict order
+  doesn't hold. If the order matters, use `-n 0`,
   `--dist loadfile`, or fix the dependency.
 
 ## `[tool.rstest]` config (pyproject.toml)

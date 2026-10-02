@@ -45,7 +45,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Match this workflow by file name, not display name (two workflows
-          # can share a `name:`); GITHUB_WORKFLOW_REF is owner/repo/.github/workflows/<file>@ref.
+          # can share a `name:`). GITHUB_WORKFLOW_REF is
+          # owner/repo/.github/workflows/<file>@ref.
           wf="${GITHUB_WORKFLOW_REF##*/.github/workflows/}"; wf="${wf%%@*}"
           rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
                   --workflow "$wf" --branch main --event push \
@@ -89,9 +90,9 @@ jobs:
       # coverage slice, and the next run's pull unions them into a full index
       # that --changed consumes. --cov-report= suppresses the textual report (we
       # want only the index side-effect). Drop the --cov flags if you don't use
-      # --changed. Replace <your_package> with your importable package/source dir.
+      # --changed. Replace YOUR_PACKAGE with your importable package/source dir.
       - run: rstest -n 4 --shard ${{ matrix.shard }}/4
-               --cov=<your_package> --cov-context=test --cov-report=
+               --cov=YOUR_PACKAGE --cov-context=test --cov-report=
                --cache-remote ./rcache --cache-pull --cache-push
                --junitxml junit.${{ matrix.shard }}.xml
 
@@ -281,8 +282,9 @@ pull/push bookends beyond the flags.
 
 ## Reliability
 
-Add `--require-baseline` to `--durations-regress` so a cold or failed pull is a
-hard error, never a silent green:
+A failed pull already stops the run (exit 1). Add `--require-baseline` to
+`--durations-regress` so a cold remote, one that leaves no duration baseline,
+is a hard error too, never a silent green:
 
 ```console
 $ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
