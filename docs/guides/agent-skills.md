@@ -66,9 +66,9 @@ claude plugin marketplace add KovantAI/rstest
 claude plugin install rstest@rstest
 ```
 
-The plugin makes the skills available in every project and updates when the
-rstest repository changes, so it tracks the latest rstest rather than the
-version you have installed. If you pin an older rstest, use
+The plugin makes the skills available in every project. Its version follows
+rstest releases, so plugin updates bring the skills for the latest rstest
+rather than the version you have installed. If you pin an older rstest, use
 `rstest install-skills` instead.
 
 To suggest the plugin to everyone who opens your repository in Claude Code,

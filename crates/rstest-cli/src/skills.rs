@@ -197,6 +197,21 @@ mod tests {
     }
 
     #[test]
+    fn plugin_version_matches_package() {
+        // Claude Code only ships a plugin update when `version` changes, so it
+        // must be bumped with every release.
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/rstest/.claude-plugin/plugin.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+        assert_eq!(
+            doc["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "bump `version` in plugins/rstest/.claude-plugin/plugin.json"
+        );
+    }
+
+    #[test]
     fn install_writes_then_reports_up_to_date() {
         let dir = tempdir();
         let (mut sink, _) = Sink::captured();
