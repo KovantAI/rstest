@@ -40,6 +40,36 @@ pub fn resolve(scope: &Path, explicit: Option<&str>) -> Result<PathBuf> {
     Ok(resolved.executable)
 }
 
+/// The project virtualenv the run did NOT use: the nearest `.venv` found
+/// walking up from `scope` (as discovery does) when `used` is some other
+/// interpreter, e.g. pre-commit's or tox's `$VIRTUAL_ENV` won discovery.
+/// Returns the venv directory and whether `used` came from `$VIRTUAL_ENV`.
+/// Venv roots are compared, not interpreter files: two venvs' `bin/python`
+/// usually resolve to the same base interpreter through symlinks.
+pub fn skipped_project_venv(scope: &Path, used: &Path) -> Option<(PathBuf, bool)> {
+    let root_of = |python: &Path| {
+        let root = python.parent()?.parent()?;
+        Some(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+    };
+    let used_root = root_of(used);
+    let from_virtual_env = std::env::var_os("VIRTUAL_ENV")
+        .and_then(|v| venv_python(Path::new(&v)))
+        .is_some_and(|p| p == used);
+    for dir in scope.ancestors() {
+        let venv = dir.join(".venv");
+        if let Some(p) = venv_python(&venv) {
+            if root_of(&p) != used_root {
+                return Some((venv, from_virtual_env));
+            }
+            return None;
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    None
+}
+
 fn resolve_policy(scope: &Path, explicit: Option<&str>) -> Result<Resolved> {
     // Explicit --python: its version request filters the pool with no fallback
     // to a mismatching interpreter, and the user's choice is never second-guessed

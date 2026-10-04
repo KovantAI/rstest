@@ -233,24 +233,30 @@ pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::
 /// Publish the markdown report to the CI's job-summary surface, if any:
 /// GitHub Actions appends to `$GITHUB_STEP_SUMMARY`, Buildkite pipes to
 /// `buildkite-agent annotate`. Others: use `--doctor-md` as an artifact.
-pub fn append_ci_summary(sink: &mut Sink, report: &DoctorReport) -> anyhow::Result<()> {
-    // GitHub Actions: append to the step-summary file (hard error on write
-    // failure - the path came from the runner, so a failure is real).
+pub fn append_ci_summary(sink: &mut Sink, report: &DoctorReport) {
+    // GitHub Actions: append to the step-summary file. Best-effort, like the
+    // Buildkite branch: the summary is cosmetic, and an unwritable path (act,
+    // container jobs that don't mount the runner's file dir) must not turn a
+    // green run red or stop the report files that are written after this.
     if let Some(path) = std::env::var("GITHUB_STEP_SUMMARY")
         .ok()
         .filter(|p| !p.is_empty())
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
+        let res = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(path)?;
-        f.write_all(render_markdown(report).as_bytes())?;
-        return Ok(());
+            .open(&path)
+            .and_then(|mut f| f.write_all(render_markdown(report).as_bytes()));
+        if let Err(e) = res {
+            sink.warn(&format!(
+                "rstest: skipping the GitHub job summary (GITHUB_STEP_SUMMARY={path}: {e})"
+            ));
+        }
+        return;
     }
     // Buildkite: pipe the markdown to the agent as an info annotation.
-    // Best-effort - a missing/failing agent must not fail the test run
-    // (the annotation is cosmetic, unlike GitHub's guaranteed file path).
+    // Best-effort - a missing/failing agent must not fail the test run.
     if std::env::var("BUILDKITE")
         .ok()
         .filter(|v| !v.is_empty())
@@ -258,7 +264,6 @@ pub fn append_ci_summary(sink: &mut Sink, report: &DoctorReport) -> anyhow::Resu
     {
         buildkite_annotate(sink, &render_markdown(report));
     }
-    Ok(())
 }
 
 /// Feed markdown to `buildkite-agent annotate` over stdin. Swallows all

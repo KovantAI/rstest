@@ -757,6 +757,16 @@ impl Worker {
         Ok(())
     }
 
+    /// The worker process's pid: the child's for a spawned worker, the tracked
+    /// one for a forked worker (`None` once it is known to have exited).
+    pub fn pid(&self) -> Option<u32> {
+        match &self.proc {
+            Proc::Owned(child) => Some(child.id()),
+            #[cfg(unix)]
+            Proc::Reparented(t) => t.map(|t| t.pid),
+        }
+    }
+
     /// Detach the event stream (for a dedicated reader thread). Errors if the
     /// reader was already taken (would otherwise be a double-detach bug).
     pub fn take_reader(&mut self) -> Result<EventReader> {

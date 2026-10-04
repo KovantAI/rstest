@@ -66,13 +66,76 @@ pub fn rootdir() -> Option<&'static Path> {
     ROOT.get().map(|(_, root)| root.as_path())
 }
 
+/// The private scratch dir this process uses instead of `.rstest_cache` when
+/// the run disabled pytest's cacheprovider (see [`disable_for_run`]).
+static SCRATCH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Whether pytest's cacheprovider ends up disabled for a session started with
+/// `args` (ini `addopts`, then `PYTEST_ADDOPTS`, then argv, as pytest reads
+/// them): the last `-p no:cacheprovider` / `-p cacheprovider` wins, as in
+/// pytest's own plugin-arg handling.
+pub fn cacheprovider_disabled(args: &[String]) -> bool {
+    let mut disabled = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let value = if a == "-p" {
+            match it.next() {
+                Some(v) => v.as_str(),
+                None => break,
+            }
+        } else if let Some(v) = a.strip_prefix("-p") {
+            v
+        } else {
+            continue;
+        };
+        match value {
+            "no:cacheprovider" => disabled = true,
+            "cacheprovider" => disabled = false,
+            _ => {}
+        }
+    }
+    disabled
+}
+
+/// Keeps the run's cache out of the project, as `-p no:cacheprovider` keeps
+/// `.pytest_cache` out: `.rstest_cache` is never created and an existing one
+/// is neither read nor written. The run uses a private, empty scratch dir that
+/// this guard removes on drop, so everything that needs the cache degrades to
+/// a cold run (durations scheduling, flake history) instead of failing, and
+/// nothing is left for `rstest replay`/`explain` afterwards. An explicit
+/// `RSTEST_CACHE` still wins: that is a request for a cache at that path.
+pub struct ScratchCache(PathBuf);
+
+/// Redirect this process's cache to a scratch dir for a run that disabled
+/// pytest's cacheprovider. `None` (and no effect) when `RSTEST_CACHE` is set
+/// or the cache was already redirected.
+pub fn disable_for_run() -> Option<ScratchCache> {
+    if std::env::var_os("RSTEST_CACHE").is_some() {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "rstest-nocache-{}-{:x}",
+        std::process::id(),
+        crate::time::now_epoch_nanos()
+    ));
+    SCRATCH.set(dir.clone()).ok()?;
+    Some(ScratchCache(dir))
+}
+
+impl Drop for ScratchCache {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// The cache directory for this run.
 pub fn dir() -> PathBuf {
     match std::env::var_os("RSTEST_CACHE") {
         Some(p) => PathBuf::from(p),
-        None => match ROOT.get() {
-            Some((_, root)) => root.join(DIR_NAME),
-            None => PathBuf::from(DIR_NAME),
+        None => match (SCRATCH.get(), ROOT.get()) {
+            (Some(scratch), _) => scratch.clone(),
+            (None, Some((_, root))) => root.join(DIR_NAME),
+            (None, None) => PathBuf::from(DIR_NAME),
         },
     }
 }
@@ -87,6 +150,11 @@ pub fn file(name: &str) -> PathBuf {
 /// scope); for this process's own invocation dir that is the rootdir's
 /// cache, the same directory [`dir`] names.
 pub fn file_in(project: &Path, name: &str) -> PathBuf {
+    if let (Some(scratch), Some((inv, _))) = (SCRATCH.get(), ROOT.get()) {
+        if inv == project {
+            return scratch.join(name);
+        }
+    }
     let root = match ROOT.get() {
         Some((inv, root)) if inv == project => root.as_path(),
         _ => project,
@@ -312,6 +380,30 @@ fn sync_dir(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cacheprovider_disabled_follows_pytest_plugin_args_last_wins() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(cacheprovider_disabled(&args(&["-p", "no:cacheprovider"])));
+        assert!(cacheprovider_disabled(&args(&[
+            "-q",
+            "-pno:cacheprovider",
+            "tests"
+        ])));
+        assert!(!cacheprovider_disabled(&args(&[
+            "-p",
+            "no:randomly",
+            "tests"
+        ])));
+        assert!(!cacheprovider_disabled(&args(&[
+            "-p",
+            "no:cacheprovider",
+            "-p",
+            "cacheprovider"
+        ])));
+        assert!(!cacheprovider_disabled(&args(&["tests/no:cacheprovider"])));
+        assert!(!cacheprovider_disabled(&args(&["-p"])));
+    }
 
     #[test]
     fn a_new_cache_dir_ignores_itself_and_carries_a_cachedir_tag() {

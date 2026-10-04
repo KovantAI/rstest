@@ -562,7 +562,7 @@ pub(super) fn run_post_gates(
         if let Some(path) = &cli.doctor_md {
             doctor::write_markdown(path, &report)?;
         }
-        doctor::append_ci_summary(sink, &report)?;
+        doctor::append_ci_summary(sink, &report);
         if !doctor_gate.is_empty() {
             let gate = doctor::evaluate(&report, doctor_gate);
             for s in &gate.skipped {
@@ -861,8 +861,10 @@ pub(super) fn finalize_output(
     } else if !passthrough && mode == progress::Mode::Tap {
         // Pure TAP: close the stream with the trailing plan. Failure text
         // already rode along as `#` diagnostics; no human summary.
+        // Collection errors close the stream as `not ok` points so a run
+        // that collected nothing never reads as skip-all.
         outcome.prog.finish(sink);
-        outcome.prog.tap_plan(sink);
+        outcome.prog.tap_plan(sink, outcome.run.collect_errors());
     } else if !passthrough {
         outcome.prog.finish(sink);
         let wrap = match mode {
@@ -925,7 +927,13 @@ pub(super) fn finalize_output(
             progress::Mode::Github => print_github_annotations(sink, &outcome.run),
             progress::Mode::Azure => print_azure_annotations(sink, &outcome.run),
             progress::Mode::Buildkite => buildkite_flaky_annotate(sink, &outcome.run),
-            progress::Mode::Teamcity => write_teamcity_flaky(sink.out(), &outcome.run.flaky),
+            progress::Mode::Teamcity => {
+                let msgs = progress::teamcity_collect_error_messages(outcome.run.collect_errors());
+                if !msgs.is_empty() {
+                    sink.out_line(&msgs);
+                }
+                write_teamcity_flaky(sink.out(), &outcome.run.flaky)
+            }
             _ => {}
         }
     }

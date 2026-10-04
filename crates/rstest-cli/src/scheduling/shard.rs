@@ -35,35 +35,62 @@ pub fn parse_shard(spec: &str) -> anyhow::Result<(usize, usize)> {
     Ok((k, n))
 }
 
+/// Floor on a cached test duration, in seconds. Every test costs some
+/// per-test overhead (setup, reporting); without a floor a warm cache full of
+/// `0.0` entries never moves the lightest bucket, so LPT piles every trivial
+/// test into one shard.
+const MIN_TEST_SECS: f64 = 0.005;
+
+/// A cached duration as a balancing weight: at least [`MIN_TEST_SECS`], and
+/// NaN-safe.
+fn floored(secs: f64) -> f64 {
+    if secs.is_nan() {
+        MIN_TEST_SECS
+    } else {
+        secs.max(MIN_TEST_SECS)
+    }
+}
+
 /// LPT assignment: bucket index (0-based) each item lands in. Heaviest first,
-/// each to the currently-lightest bucket; ties break by lowest index, so
-/// equal weights (cold cache) produce a round-robin even split.
+/// each to the currently-lightest bucket; ties break by fewest items, then
+/// lowest index, so equal weights (cold cache, or all-zero weights) produce a
+/// round-robin even split. Pure function of `weights`, so every machine
+/// agrees.
 fn lpt_assign(weights: &[f64], n: usize) -> Vec<usize> {
     let mut order: Vec<usize> = (0..weights.len()).collect();
     order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]).then(a.cmp(&b)));
     let mut loads = vec![0.0f64; n];
+    let mut counts = vec![0usize; n];
     let mut assign = vec![0usize; weights.len()];
     for i in order {
         let b = (0..n)
-            .min_by(|&x, &y| loads[x].total_cmp(&loads[y]).then(x.cmp(&y)))
+            .min_by(|&x, &y| {
+                loads[x]
+                    .total_cmp(&loads[y])
+                    .then(counts[x].cmp(&counts[y]))
+                    .then(x.cmp(&y))
+            })
             .unwrap();
         loads[b] += weights[i].max(0.0);
+        counts[b] += 1;
         assign[i] = b;
     }
     assign
 }
 
 /// Fill untimed tests with the average known weight so they don't all pile
-/// into one bucket; a fully cold cache leaves every weight equal.
+/// into one bucket; a fully cold cache leaves every weight equal. Known
+/// weights are floored at [`MIN_TEST_SECS`].
 fn weights_from(ids: &[String], cache: &HashMap<String, f64>) -> Vec<f64> {
-    let known: Vec<f64> = ids.iter().filter_map(|id| cache.get(id).copied()).collect();
+    let cache_weight = |id: &String| cache.get(id).copied().map(floored);
+    let known: Vec<f64> = ids.iter().filter_map(cache_weight).collect();
     let avg = if known.is_empty() {
         1.0
     } else {
         known.iter().sum::<f64>() / known.len() as f64
     };
     ids.iter()
-        .map(|id| cache.get(id).copied().unwrap_or(avg))
+        .map(|id| cache_weight(id).unwrap_or(avg))
         .collect()
 }
 
@@ -141,10 +168,16 @@ pub fn shard_files(
         return files.to_vec();
     }
     // Cache keys are nodeids relative to the invocation dir; sum per file.
+    // Sum in sorted-id order: HashMap iteration order is random per process
+    // and float addition is not associative, so an unordered sum can differ
+    // in the last bit between CI jobs and flip a near-tie in LPT, putting a
+    // file in two shards or none.
+    let mut entries: Vec<(&String, f64)> = cache.iter().map(|(id, &s)| (id, s)).collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
     let mut totals: HashMap<String, f64> = HashMap::new();
-    for (id, secs) in cache {
+    for (id, secs) in entries {
         let file = id.split("::").next().unwrap_or(id);
-        *totals.entry(file.to_string()).or_insert(0.0) += secs;
+        *totals.entry(file.to_string()).or_insert(0.0) += floored(secs);
     }
     let rel = |f: &Path| -> String {
         f.strip_prefix(cwd)
@@ -250,6 +283,81 @@ mod tests {
             shard_indices(&names, &cache, 2, 5),
             shard_indices(&names, &cache, 2, 5)
         );
+    }
+
+    #[test]
+    fn zero_duration_tests_spread_across_shards() {
+        // 400 trivial tests cached at 0.0 plus one long pole: the trivial
+        // ones must not all pile into one bucket.
+        let mut names: Vec<String> = (0..400).map(|i| format!("t{i}")).collect();
+        names.push("long".to_string());
+        let mut cache: HashMap<String, f64> = names.iter().map(|n| (n.clone(), 0.0)).collect();
+        cache.insert("long".to_string(), 0.5);
+        let n = 4;
+        let buckets: Vec<Vec<u64>> = (1..=n)
+            .map(|k| shard_indices(&names, &cache, k, n))
+            .collect();
+        let sizes: Vec<usize> = buckets.iter().map(Vec::len).collect();
+        let mut seen: Vec<u64> = buckets.iter().flatten().copied().collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..401u64).collect::<Vec<_>>());
+        for b in buckets.iter().filter(|b| !b.contains(&400)) {
+            assert!((50..=200).contains(&b.len()), "sizes {sizes:?}");
+        }
+    }
+
+    #[test]
+    fn equal_loads_tie_break_by_count() {
+        let assign = lpt_assign(&[0.0; 9], 3);
+        let mut sizes = [0usize; 3];
+        for b in assign {
+            sizes[b] += 1;
+        }
+        assert_eq!(sizes, [3, 3, 3]);
+    }
+
+    #[test]
+    fn shard_files_partition_and_spread_zero_files() {
+        let cwd = PathBuf::from("/p");
+        let files: Vec<PathBuf> = (0..8).map(|i| cwd.join(format!("t{i}.py"))).collect();
+        let mut cache = HashMap::new();
+        for i in 0..8 {
+            for t in 0..5 {
+                cache.insert(format!("t{i}.py::test_{t}"), 0.0);
+            }
+        }
+        let n = 4;
+        let mut seen = Vec::new();
+        for k in 1..=n {
+            let got = shard_files(&files, &cache, &cwd, k, n);
+            assert_eq!(got.len(), 2);
+            seen.extend(got);
+        }
+        seen.sort();
+        assert_eq!(seen, files);
+    }
+
+    #[test]
+    fn shard_files_near_tie_is_deterministic() {
+        // b.py = 0.6 vs a.py = 0.1 + 0.2 + 0.3: an unordered float sum could
+        // land either side of 0.6. Every shard must agree across calls.
+        let cwd = PathBuf::from("/p");
+        let files = vec![cwd.join("b.py"), cwd.join("a.py")];
+        let mut cache = HashMap::new();
+        cache.insert("b.py::t".to_string(), 0.6);
+        cache.insert("a.py::x".to_string(), 0.1);
+        cache.insert("a.py::y".to_string(), 0.2);
+        cache.insert("a.py::z".to_string(), 0.3);
+        let first: Vec<Vec<PathBuf>> = (1..=2)
+            .map(|k| shard_files(&files, &cache, &cwd, k, 2))
+            .collect();
+        for _ in 0..50 {
+            let c2: HashMap<String, f64> = cache.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            for k in 1..=2 {
+                assert_eq!(shard_files(&files, &c2, &cwd, k, 2), first[k - 1]);
+            }
+        }
+        assert_eq!(first[0].len() + first[1].len(), 2);
     }
 
     #[test]

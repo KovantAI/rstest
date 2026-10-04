@@ -164,6 +164,11 @@ doesn't name an interpreter directly. It is a soft pin: a usable virtualenv
 the versions differ, so a stale pin never rejects the project's own
 environment.
 
+When `$VIRTUAL_ENV` (or a `PATH` interpreter) wins over a project `.venv` and
+the run then fails on an import (`ModuleNotFoundError`), rstest prints a hint
+naming both environments. It stays quiet otherwise: running in a tox or nox
+environment while a `.venv` also exists is a normal setup.
+
 Install rstest into the same environment as your project's test
 dependencies, exactly as you would pytest. If rstest finds the project's
 virtualenv but rstest isn't installed in it, it stops with an error naming

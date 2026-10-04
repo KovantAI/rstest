@@ -904,11 +904,21 @@ diff:
 ::error file=<path>,title=<nodeid>,line=<n>::<traceback>
 ```
 
-`file` comes from the nodeid path. `line` is 1-based (the annotator adds 1 to
+`file` is the nodeid path made repo-relative: GitHub resolves annotation
+files from the repository root, so when the pytest rootdir sits in a
+subdirectory (a `working-directory:` step, a monorepo project) its path
+below the repo root is prepended (`proj/tests/test_a.py`). The repo root is
+`$GITHUB_WORKSPACE` (or Azure's `$BUILD_SOURCESDIRECTORY`) when it contains
+the rootdir, else the nearest ancestor with a `.git`; with neither, the path
+stays rootdir-relative. `line` is 1-based (the annotator adds 1 to
 pytest's 0-based `report.location`) and is omitted when no location is
 available. (The `lineno` field in the JSON reports stays 0-based, so
 `line` = `lineno + 1`.) The traceback is escaped per the
 workflow-command spec. Use it as your CI `--output`.
+
+A module that fails to import (a collection error) has no tests to
+annotate, so it gets its own `::error file=<path>,title=<path> (collection
+error)::<traceback>` line; the run still exits `2`.
 
 Tests that passed only after reruns (`--reruns` /
 `@pytest.mark.flaky`) additionally emit a `::warning` annotation
@@ -924,10 +934,14 @@ per failing test, surfaced as an inline issue on the file in the PR:
 ##vso[task.logissue type=error;sourcepath=<path>;linenumber=<n>]<nodeid>: <message>
 ```
 
-`sourcepath` comes from the nodeid path; `linenumber` (1-based: the 0-based
+`sourcepath` is the repo-relative nodeid path (same rule as `github`);
+`linenumber` (1-based: the 0-based
 `report.location` plus 1, as in the GitHub annotator) from pytest's report
-location, omitted when none is available. The message is
-collapsed to one line (logissue is single-line). Flaky-passed tests
+location, omitted when none is available. The message is the exception
+line (`AssertionError: x mismatch`, `RuntimeError: setup boom`), the first
+line of the traceback's last `E` block, since logissue is single-line.
+Each collection error emits a `type=error` logissue too (`<path> (collection
+error): <exception>`). Flaky-passed tests
 (`--reruns`) additionally emit a `type=warning` logissue: green run,
 visible flake.
 
@@ -951,7 +965,10 @@ messages](https://www.jetbrains.com/help/teamcity/service-messages.html)
 as each test finishes: a `testStarted`/`testFinished` pair per test,
 plus `testFailed` (with the escaped traceback as `details`) or
 `testIgnored` for skips/xfails. Each test's messages are emitted as one
-group, so parallel results never interleave. Flaky tests emit a
+group, so parallel results never interleave. Each collection error is
+reported as a failed test named after the broken module (`testFailed`
+with `message='collection error'` and the traceback as `details`). Flaky
+tests emit a
 `WARNING`-status build message. The banner and summary stay: TeamCity
 ignores non-service lines.
 
@@ -959,7 +976,10 @@ ignores non-service lines.
 version 13 stream: one `ok N - nodeid` / `not ok N - nodeid` point per
 test as it finishes, failure text as `#` diagnostic lines, skips as
 `# SKIP <reason>`, xfail/xpass as `# TODO`, closed by the trailing
-`1..N` plan. No banner or human summary. For TAP harnesses (`prove`,
+`1..N` plan. Each collection error closes the stream as a
+`not ok N - <path> # collection error` point with its traceback as `#`
+lines, counted in the plan, so a suite that cannot import never reads as
+an empty (green) `1..0` run. No banner or human summary. For TAP harnesses (`prove`,
 Jenkins TAP plugin, etc.).
 
 `json` makes stdout a pure **newline-delimited JSON** stream: one

@@ -271,7 +271,9 @@ Under GitHub Actions, any doctor run appends the report to
 `$GITHUB_STEP_SUMMARY` automatically: `rstest --doctor-json doctor.json`
 in a workflow puts the analysis on the run page with no extra step. On
 Buildkite, the same markdown is piped to `buildkite-agent annotate` as an
-info annotation (best-effort: a missing agent never fails the run).
+info annotation. Both are best-effort: an unwritable summary path or a
+missing agent prints a warning on stderr, and the exit code and every
+requested report file stay as they would be without it.
 
 To also write the markdown to a file of your own (for an artifact, or on a
 CI with no native summary):

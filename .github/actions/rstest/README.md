@@ -224,14 +224,14 @@ covers GCS / Azure / HTTP.
 | `changed` | `false` | `false` / `true` / `strict` |
 | `base-ref` | `""` | base ref for `--changed`; fetched if shallow. Empty on a PR = inferred from `$GITHUB_BASE_REF` (`origin/<base>`) |
 | `reruns` | `""` | `--reruns N` |
-| `rerun-on` | `""` | preset(s) → `--only-rerun` (`http-5xx`, `timeouts`, or raw regex) |
+| `rerun-on` | `""` | comma-separated preset(s) → `--only-rerun` (`http-5xx`, `timeouts`, or raw regex, passed verbatim after trimming surrounding whitespace) |
 | `worker-timeout` | `""` | `--worker-timeout SECS` (hang / container-boot backstop) |
 | `durations-regress` | `""` | `--durations-regress RATIO` (cold cache warns; see `require-baseline`) |
 | `require-baseline` | `false` | strict: fail if no baseline. Default only warns: the first run legitimately has none and seeds it |
 | `doctor` | `false` | add `--doctor` |
 | `doctor-fail-on` | `""` | fail on doctor metrics, e.g. `parallel_efficiency<30, imbalance_pct>60` (each forwarded to native `--doctor-fail-on`; breach fails via exit code, report auto-published to job summary; inapplicable metrics skipped) |
 | `quarantine` | `""` | `--quarantine FILE` |
-| `shard` / `shard-total` | `""` | `--shard K/N` |
+| `shard` / `shard-total` | `""` | `--shard K/N`; set both or neither (one alone fails the step) |
 | `fail-under-ratio` | `""` | max tolerated assertion-failure fraction (0–1); non-test exit codes still fail (see [Security and matrix behavior](#security-and-matrix-behavior)) |
 | `hard-fail-on` | `""` | regex; matching failures fail immediately, bypassing the ratio |
 | `upload-junit` | `false` | upload JUnit as an artifact |

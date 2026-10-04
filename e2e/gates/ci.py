@@ -292,7 +292,7 @@ def gate_ci_exit_codes(g, args, binary):
             "def test_slow_a():\n    time.sleep(30)\n\n"
             "def test_slow_b():\n    time.sleep(30)\n",
         )
-        for mode, bug in (("0", True), ("2", False)):
+        for mode in ("0", "2"):
             rj.unlink(missing_ok=True)
             p = subprocess.Popen(
                 [str(binary), "-n", mode, "sigint", "--report-json", str(rj)],
@@ -318,7 +318,6 @@ def gate_ci_exit_codes(g, args, binary):
                 f"CI-01 -n {mode} SIGINT: exit 2 and report-json meta.exitstatus agrees",
                 p.returncode == 2 and es == 2,
                 f"rc={p.returncode} exitstatus={es} " + (out + err)[-200:].replace("\n", "|"),
-                known_bug=bug,
             )
 
     # CI-07: a matrix variable typo must fail loudly, not run the whole suite.
@@ -465,13 +464,11 @@ def gate_ci_artifacts(g, args, binary):
         "CI-04 --output tap: collect error is not a bare 1..0",
         any(ln.startswith("not ok") or ln.startswith("Bail out!") for ln in lines),
         repr(r.stdout[-200:]),
-        known_bug=True,
     )
     check(
         "CI-04 --output tap: traceback text present in the log",
         "ci_nonexistent_mod" in _out(r),
         _out(r)[-200:],
-        known_bug=True,
     )
     expect = {
         "github": lambda ln: ln.startswith("::error file=tests/test_c.py"),
@@ -491,7 +488,6 @@ def gate_ci_artifacts(g, args, binary):
             f"CI-04 --output {style}: collect error emits a CI annotation",
             any(pred(ln) for ln in r.stdout.splitlines()),
             r.stdout[-300:],
-            known_bug=True,
         )
 
     # CI-05: monorepo layout from ci-quickstart: repo root cw/, the job runs
@@ -526,7 +522,6 @@ def gate_ci_artifacts(g, args, binary):
         "CI-05 github: file= is repo-relative under GITHUB_WORKSPACE",
         len(ann) == 2 and all("file=proj/tests/test_a.py" in a for a in ann),
         "\n".join(a[:80] for a in ann),
-        known_bug=True,
     )
     r = g.run("-n", "2", "--output", "azure", cwd=proj, env_extra={"TF_BUILD": "True"})
     iss = [ln for ln in r.stdout.splitlines() if ln.startswith("##vso[task.logissue type=error")]
@@ -536,7 +531,6 @@ def gate_ci_artifacts(g, args, binary):
         any("RuntimeError: setup boom" in ln for ln in iss)
         and any("AssertionError: x mismatch" in ln for ln in iss),
         "\n".join(iss)[-300:],
-        known_bug=True,
     )
 
 
@@ -573,7 +567,7 @@ def gate_ci_sharding(g, args, binary):
             files.append(rp)
         return sizes, files
 
-    for tag, warm, bug in (("warm", True, True), ("cold", False, False)):
+    for tag, warm in (("warm", True), ("cold", False)):
         sizes, files = run_shards(tag, warm)
         r = g.run("shard-verify", *map(str, files), cwd=cwd)
         check(
@@ -587,7 +581,6 @@ def gate_ci_sharding(g, args, binary):
             f"CI-06 {tag} cache: shard sizes within 2x of the mean (long pole's shard aside)",
             len(others) >= 3 and all(mean / 2 <= n <= mean * 2 for n in others),
             f"sizes={sizes}",
-            known_bug=bug,
         )
 
 
@@ -621,19 +614,16 @@ def gate_ci_side_effects(g, args, binary):
         "CI-08 unwritable GITHUB_STEP_SUMMARY: report-json still written with exitstatus 0",
         _exitstatus(rj) == 0,
         f"exitstatus={_exitstatus(rj)}",
-        known_bug=True,
     )
     check(
         "CI-08 unwritable GITHUB_STEP_SUMMARY: run still exits 0",
         r.returncode == 0,
         f"rc={r.returncode} " + r.stderr[-200:],
-        known_bug=True,
     )
     check(
         "CI-08 unwritable GITHUB_STEP_SUMMARY: stderr names the summary path",
         str(summ) in r.stderr,
         r.stderr[-200:],
-        known_bug=True,
     )
     # The Buildkite branch of the same publish already warns and keeps going.
     bin_empty = g.tmp / "ci_empty_bin"
@@ -733,7 +723,6 @@ def gate_ci_side_effects(g, args, binary):
         "CI-11 -p no:cacheprovider: no .rstest_cache written",
         r.returncode == 0 and not (repo / ".rstest_cache").exists(),
         f"rc={r.returncode} exists={(repo / '.rstest_cache').exists()}",
-        known_bug=True,
     )
 
 
@@ -800,7 +789,6 @@ def gate_ci_snippets(g, args, binary):
             "CI-09 Azure materialize-a-dir: step fails when a test fails",
             r.returncode != 0,
             f"rc={r.returncode}",
-            known_bug=True,
         )
 
     # CI-09 shared-cache "retry without --cache-pull" block, as a GitHub
@@ -912,7 +900,6 @@ def gate_ci_snippets(g, args, binary):
             f"CI-10 shard={a!r} shard-total={b!r}: ::error:: and the step fails",
             r.returncode != 0 and "::error::" in r.stdout + r.stderr,
             f"rc={r.returncode} argv={argv}",
-            known_bug=True,
         )
     r, argv = action(IN_DOCTOR_FAIL_ON=" wait_pct>50 , wall_seconds > 100 ")
     check(
@@ -929,7 +916,6 @@ def gate_ci_snippets(g, args, binary):
             f"CI-10 rerun-on {raw!r}: reaches --only-rerun unmangled",
             r.returncode == 0 and got == raw,
             f"rc={r.returncode} got={got!r} " + r.stderr[-120:],
-            known_bug=True,
         )
 
 
@@ -1097,7 +1083,6 @@ def gate_ci_environment(g, args, binary):
         "CI-13 hook VIRTUAL_ENV: rstest names the env it used or the skipped .venv",
         str(hook) in out or ".venv" in out,
         out[-300:],
-        known_bug=True,
     )
     r = g.run("-n", "2", "--python", str(proj_py), cwd=proj, env_extra={"VIRTUAL_ENV": str(hook)})
     check(

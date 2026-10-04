@@ -59,6 +59,14 @@ pub fn run() -> Result<i32> {
     if let Some(code) = run::dispatch_command(&cli, &args)? {
         return Ok(code);
     }
+    // `-p no:cacheprovider` (argv or addopts) keeps pytest from writing
+    // `.pytest_cache`; keep `.rstest_cache` out of the project too, for the
+    // runs only (the subcommands above exist to read an existing cache).
+    let _scratch_cache = std::env::current_dir()
+        .ok()
+        .map(|cwd| cov_scope::effective_pytest_args(&cwd, &args))
+        .filter(|eff| cache::cacheprovider_disabled(eff))
+        .and_then(|_| cache::disable_for_run());
     if cli.watch {
         watch::watch_loop(&cli, &args)?;
         return Ok(0);

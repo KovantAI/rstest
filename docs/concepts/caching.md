@@ -71,6 +71,14 @@ Like `.pytest_cache/`, the directory ignores itself: rstest writes a
 when it creates the cache, and gives a `.pytest_cache/` it creates itself the
 same two files. No entry in your own `.gitignore` is needed.
 
+With pytest's cacheprovider disabled (`-p no:cacheprovider` on the command
+line, in `addopts` or in `PYTEST_ADDOPTS`), a run leaves no cache behind,
+as pytest does: `.rstest_cache/` is neither read nor created, and neither is
+`.pytest_cache/`. The run uses a private scratch directory that is removed
+when it ends, so it schedules cold (no saved durations), records no flake
+history and leaves no replay journal for `rstest replay` or `rstest explain`.
+An explicit `RSTEST_CACHE` still takes effect.
+
 Writes are atomic (tmp + rename), so a concurrent reader never sees a
 half-written file.
 

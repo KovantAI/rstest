@@ -679,6 +679,11 @@ pub(crate) fn execute_inner(
         start,
         &mut sink,
     );
+    if !passthrough && cli.python.is_none() {
+        if let Some(hint) = interpreter_hint(&outcome.run, &python, &scope) {
+            sink.warn(&hint);
+        }
+    }
 
     let post = PostRun {
         start,
@@ -1412,6 +1417,12 @@ fn dispatch_run(
                 worker::Stdio::Null
             };
             let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
+            // Byte-exact session: survive SIGINT/SIGTERM so the reports are
+            // still written (see `SingleWorkerInterrupts`). Passthrough (`-s`,
+            // `--pdb`) keeps the default action: there the child owns the
+            // console and a debugger uses Ctrl-C itself.
+            let interrupts =
+                (path == RunPath::SingleWorker).then(|| SingleWorkerInterrupts::install(w.pid()));
             w.send(&proto::Command::RunTests {
                 args: args.to_vec(),
             })?;
@@ -1421,9 +1432,29 @@ fn dispatch_run(
             prog.set_mode(mode);
             let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
             let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+            let mut session_died = false;
             let exitstatus = loop {
+                let event = match w.recv() {
+                    Ok(event) => event,
+                    // The session died under the signal (a process-group
+                    // SIGTERM reaches the child too, and Python's default
+                    // action kills it): keep what it reported and wind down
+                    // as INTERRUPTED.
+                    Err(e) => match crate::scheduling::interrupt::requested() {
+                        Some(sig) if interrupts.is_some() => {
+                            sink.warn(&format!(
+                                "rstest: interrupted by {}; the pytest session stopped \
+                                 before its summary",
+                                crate::scheduling::interrupt::name(sig)
+                            ));
+                            session_died = true;
+                            break 2; // pytest INTERRUPTED
+                        }
+                        _ => return Err(e),
+                    },
+                };
                 if let Some(code) = fold_run_event(
-                    w.recv()?,
+                    event,
                     passthrough,
                     &mut run,
                     &mut prog,
@@ -1434,7 +1465,14 @@ fn dispatch_run(
                     break code;
                 }
             };
-            w.shutdown()?;
+            // Stop forwarding before the child is reaped (its pid is then free
+            // for reuse), and restore the default handlers.
+            drop(interrupts);
+            if session_died {
+                w.reap();
+            } else {
+                w.shutdown()?;
+            }
             pool::PoolOutcome {
                 run,
                 prog,
@@ -1518,6 +1556,111 @@ fn dispatch_run(
             )?
         },
     )
+}
+
+/// A pointer at the interpreter when a run failed on missing imports and
+/// discovery passed over the project's `.venv` (pre-commit's `language:
+/// python` hooks set `VIRTUAL_ENV` to the hook env, which has rstest and pytest
+/// but none of the project's deps). Shown only when both hold, never as a
+/// blanket "VIRTUAL_ENV differs from .venv" notice: under tox/nox that
+/// difference is the normal, intended setup, and a warning on every green run
+/// there would be noise. An import error is the symptom of the wrong env, so
+/// that is when naming the two envs pays off.
+fn interpreter_hint(
+    run: &report::Run,
+    python: &std::path::Path,
+    scope: &std::path::Path,
+) -> Option<String> {
+    let import_failure = |text: &str| {
+        text.contains("ModuleNotFoundError") || text.contains("ImportError while importing")
+    };
+    let failed_on_import = run.collect_errors().iter().any(|(_, t)| import_failure(t))
+        || run
+            .history_failed_nodeids()
+            .filter_map(|id| run.failure_text(id))
+            .any(import_failure);
+    if !failed_on_import {
+        return None;
+    }
+    let (venv, from_virtual_env) = discover::skipped_project_venv(scope, python)?;
+    let source = if from_virtual_env {
+        " (from $VIRTUAL_ENV)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "rstest: hint: imports failed under {}{source}, not the project's virtualenv {}. \
+         If the project's dependencies are installed there, pass --python {} \
+         (or unset VIRTUAL_ENV).",
+        python.display(),
+        venv.display(),
+        venv.display()
+    ))
+}
+
+/// SIGINT/SIGTERM during the byte-exact single-worker session. With the
+/// default action the orchestrator died on Ctrl-C while pytest, in the same
+/// process group, was still printing its KeyboardInterrupt summary: exit by
+/// signal, output cut off, no `--report-json`/`--junitxml`.
+///
+/// While installed, the signal is only recorded (see
+/// [`crate::scheduling::interrupt`]); the orchestrator keeps reading the
+/// session, which ends with pytest's own INTERRUPTED (2), then writes the
+/// reports as usual. SIGINT is not forwarded: Ctrl-C and a CI runner's cancel
+/// signal the whole process group, so pytest already has it, and a second
+/// SIGINT would abort pytest's teardown and summary. SIGTERM is forwarded to
+/// the session as SIGINT: `kill PID` and job timeouts often target only our
+/// pid, and Python has no clean SIGTERM unwinding. When the group got SIGTERM
+/// too, the child is already gone and the caller winds down from what it
+/// reported. A second signal still exits at once.
+struct SingleWorkerInterrupts {
+    _guard: crate::scheduling::interrupt::Guard,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    forwarder: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SingleWorkerInterrupts {
+    fn install(child: Option<u32>) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let guard = crate::scheduling::interrupt::Guard::install();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        let forwarder = child.map(|pid| {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if crate::scheduling::interrupt::requested() == Some(libc::SIGTERM) {
+                        // SAFETY: sending a signal touches no memory. The pid
+                        // is our unreaped child (the caller drops this guard,
+                        // joining the thread, before reaping it), so it cannot
+                        // have been recycled.
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+        });
+        #[cfg(not(unix))]
+        let forwarder = {
+            let _ = child;
+            None
+        };
+        Self {
+            _guard: guard,
+            stop,
+            forwarder,
+        }
+    }
+}
+
+impl Drop for SingleWorkerInterrupts {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(t) = self.forwarder.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 /// Resolve dispatch ordering (CLI > [tool.rstest] > auto). Auto picks

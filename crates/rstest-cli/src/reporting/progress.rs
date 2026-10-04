@@ -361,9 +361,22 @@ impl Progress {
         }
     }
 
-    /// Close a TAP stream: the trailing `1..N` plan (valid TAP when the
-    /// plan comes last), N = test points actually emitted.
-    pub fn tap_plan(&self, sink: &mut Sink) {
+    /// Close a TAP stream: a `not ok` point per collection error (its
+    /// traceback as `#` diagnostics), then the trailing `1..N` plan (valid TAP
+    /// when the plan comes last), N = test points actually emitted. Without
+    /// the collect-error points a suite whose only module fails to import
+    /// would close as `1..0`, which TAP consumers read as skip-all (green).
+    pub fn tap_plan(&mut self, sink: &mut Sink, collect_errors: &[(String, String)]) {
+        for (path, longrepr) in collect_errors {
+            self.done += 1;
+            sink.out_line(&format!(
+                "not ok {} - {} # collection error",
+                self.done, path
+            ));
+            for l in longrepr.trim_end().lines() {
+                sink.out_line(&format!("# {l}"));
+            }
+        }
         sink.out_line(&format!("1..{}", self.done));
     }
 
@@ -550,6 +563,26 @@ fn teamcity_messages(r: &Report) -> Option<String> {
     })
 }
 
+/// TeamCity messages for collection errors: a failed pseudo-test per broken
+/// collector (as the teamcity-messages pytest plugin reports them), so a
+/// module that cannot import fails the build's test view instead of only
+/// the exit code. Empty when collection was clean.
+pub fn teamcity_collect_error_messages(errors: &[(String, String)]) -> String {
+    errors
+        .iter()
+        .map(|(path, longrepr)| {
+            let name = tc_escape(path);
+            format!(
+                "##teamcity[testStarted name='{name}']\n\
+                 ##teamcity[testFailed name='{name}' message='collection error' details='{}']\n\
+                 ##teamcity[testFinished name='{name}' duration='0']",
+                tc_escape(longrepr)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// TeamCity WARNING build messages for tests that passed only after reruns.
 /// The run stays green; these surface the flake as build-log warnings.
 /// Empty when nothing flaked.
@@ -710,6 +743,44 @@ mod tests {
         let (mut sink, buf) = Sink::captured();
         p.on_collect_error(&mut sink, "tests/test_x.py", "boom");
         assert_eq!(buf.out(), "");
+    }
+
+    #[test]
+    fn tap_plan_counts_collect_errors_as_failed_points() {
+        let mut p = Progress::default();
+        p.set_mode(Mode::Tap);
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, None, &report("call", "passed"));
+        let errs = vec![(
+            "tests/test_c.py".to_string(),
+            "Traceback:\nE   ModuleNotFoundError: No module named 'nope'\n".to_string(),
+        )];
+        p.tap_plan(&mut sink, &errs);
+        assert_eq!(
+            buf.out(),
+            "ok 1 - tests/test_a.py::test_x\n\
+             not ok 2 - tests/test_c.py # collection error\n\
+             # Traceback:\n\
+             # E   ModuleNotFoundError: No module named 'nope'\n\
+             1..2\n"
+        );
+        // Clean collection: just the plan.
+        let mut p = Progress::default();
+        let (mut sink, buf) = Sink::captured();
+        p.tap_plan(&mut sink, &[]);
+        assert_eq!(buf.out(), "1..0\n");
+    }
+
+    #[test]
+    fn teamcity_collect_errors_fail_a_pseudo_test() {
+        assert_eq!(teamcity_collect_error_messages(&[]), "");
+        let msgs = teamcity_collect_error_messages(&[("t/x.py".into(), "E   boom\n[x]".into())]);
+        assert_eq!(
+            msgs,
+            "##teamcity[testStarted name='t/x.py']\n\
+             ##teamcity[testFailed name='t/x.py' message='collection error' details='E   boom|n|[x|]']\n\
+             ##teamcity[testFinished name='t/x.py' duration='0']"
+        );
     }
 
     #[test]

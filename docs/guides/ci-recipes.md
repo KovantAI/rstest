@@ -357,8 +357,11 @@ dir. Two supported paths:
       az storage blob download-batch -d ./rcache -s ci-cache --pattern 'rstest/*' || true
       mkdir -p ./rcache/rstest/segments
       ls ./rcache/rstest/segments > .warm-segs
+      # Azure runs `script:` without errexit, so the step's exit status is the
+      # LAST command's. Keep rstest's code, upload, then exit with it.
+      code=0
       rstest -n 4 --shard "$(System.JobPositionInPhase)/$(System.TotalJobsInPhase)" \
-        --cache-remote ./rcache/rstest --cache-pull --cache-push --junitxml junit.xml
+        --cache-remote ./rcache/rstest --cache-pull --cache-push --junitxml junit.xml || code=$?
       # Upload only this run's new segment(s), back under rstest/segments/.
       mkdir -p ./push
       for f in ./rcache/rstest/segments/seg-*.json; do
@@ -366,6 +369,7 @@ dir. Two supported paths:
         grep -qxF "$(basename "$f")" .warm-segs || cp "$f" ./push/
       done
       az storage blob upload-batch -d ci-cache --destination-path rstest/segments -s ./push
+      exit $code
     displayName: test (shared cache)
   ```
 
@@ -624,8 +628,9 @@ sets `$VIRTUAL_ENV` to it while the hook runs. That environment has rstest but
 none of your project's dependencies, and `$VIRTUAL_ENV` comes first in
 [interpreter discovery](../getting-started/installation.md#which-python-does-rstest-use),
 so without help the workers would run there and fail with
-`ModuleNotFoundError` for your project's packages. Tell rstest which
-interpreter to use:
+`ModuleNotFoundError` for your project's packages. When that happens rstest
+prints a hint on stderr naming the interpreter it ran and the project `.venv`
+it passed over. Tell rstest which interpreter to use:
 
 ```yaml
       - id: rstest

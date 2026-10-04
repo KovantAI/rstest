@@ -2,6 +2,8 @@
 //! workflow commands, Azure `##vso[task.logissue]` commands, and Buildkite
 //! flaky annotations, emitted from an aggregate Run at end-of-run.
 
+use std::path::{Path, PathBuf};
+
 use super::report;
 use super::sink::Sink;
 
@@ -13,8 +15,60 @@ fn mono_prefix() -> Option<String> {
         .filter(|p| !p.is_empty())
 }
 
+/// The repo root CI resolves annotation paths from: `GITHUB_WORKSPACE`
+/// (GitHub Actions) or `BUILD_SOURCESDIRECTORY` (Azure Pipelines) when it
+/// contains `rootdir`, else the nearest ancestor of `rootdir` holding a `.git`
+/// (the git toplevel), else `None`.
+fn repo_root(rootdir: &Path) -> Option<PathBuf> {
+    for var in ["GITHUB_WORKSPACE", "BUILD_SOURCESDIRECTORY"] {
+        if let Some(ws) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            let ws = PathBuf::from(ws);
+            if crate::cache::relative_to(rootdir, &ws).is_some() {
+                return Some(ws);
+            }
+        }
+    }
+    let canon = rootdir
+        .canonicalize()
+        .unwrap_or_else(|_| rootdir.to_path_buf());
+    canon
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// `rootdir`'s path below `repo` as a `/`-joined prefix; `None` when they are
+/// the same directory or `rootdir` lies outside `repo`.
+fn repo_prefix(rootdir: &Path, repo: &Path) -> Option<String> {
+    let rel = crate::cache::relative_to(rootdir, repo)?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// The prefix that turns a rootdir-relative nodeid path into a repo-relative
+/// one. Nodeids hang off pytest's rootdir, but CI resolves annotation files
+/// from the repo root, so a project in a subdirectory (`working-directory:`,
+/// a monorepo child) needs its path below the repo root prepended. When the
+/// repo root is known, that path is computed directly; it already covers a
+/// monorepo child, so the `RSTEST_MONO_PROJECT` prefix is not added on top.
+/// Otherwise the monorepo prefix (if any) applies, as before.
+fn annotation_prefix() -> Option<String> {
+    let rootdir = crate::cache::rootdir()
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(rootdir) = rootdir {
+        if let Some(repo) = repo_root(&rootdir) {
+            return repo_prefix(&rootdir, &repo);
+        }
+    }
+    mono_prefix()
+}
+
 /// The source file of a nodeid (everything before `::`), prefixed with the
-/// monorepo project path when present.
+/// project's repo-relative path when present.
 fn source_path(nodeid: &str, prefix: &Option<String>) -> String {
     let rel = crate::text::nodeid_file(nodeid);
     match prefix {
@@ -46,13 +100,34 @@ trait Annotator {
     fn warning_line(&self, nodeid: &str, file: &str, lineno: Option<u64>, attempts: u32) -> String;
 }
 
-/// Drive an [`Annotator`] over a finished run: an error line per failed test,
-/// then a warning line per flaky-passed test.
-fn print_annotations(sink: &mut Sink, run: &report::Run, a: &dyn Annotator) {
-    // Under a monorepo the parent runs us with cwd=project, so nodeid paths
-    // are project-relative; CI resolves the annotation file from the repo
-    // root, so prefix the project's root-relative path (set by the parent).
-    let prefix = mono_prefix();
+/// Drive an [`Annotator`] over a finished run: an error line per collection
+/// error, then per failed test, then a warning line per flaky-passed test.
+/// `prefix` (see [`annotation_prefix`]) turns rootdir-relative paths into
+/// repo-relative ones.
+fn print_annotations(
+    sink: &mut Sink,
+    run: &report::Run,
+    a: &dyn Annotator,
+    prefix: &Option<String>,
+) {
+    let prefix = prefix.clone();
+    // A module that failed to import has no test entries, so without its own
+    // line the CI system would never see it (the run exits 2, but nothing
+    // points at the broken file). Synthetic `<...>` paths name no file.
+    for (path, longrepr) in run.collect_errors() {
+        let file = if path.starts_with('<') {
+            String::new()
+        } else {
+            source_path(path, &prefix)
+        };
+        let title = format!("{path} (collection error)");
+        let msg = if longrepr.trim().is_empty() {
+            "collection error"
+        } else {
+            longrepr.as_str()
+        };
+        sink.out_line(&a.error_line(&title, &file, None, msg));
+    }
     for (nodeid, entry) in run.tests() {
         if !entry.any_phase_failed() {
             continue;
@@ -79,7 +154,13 @@ impl Github {
     /// The shared `file=,title=[,line=]` property list for both error and
     /// warning lines.
     fn props(nodeid: &str, file: &str, lineno: Option<u64>) -> String {
-        let mut props = format!("file={},title={}", gh_prop(file), gh_prop(nodeid));
+        // A synthetic collector (`<...>`) names no file: omit `file=` so the
+        // annotation lands on the run summary instead of a bogus path.
+        let mut props = if file.is_empty() {
+            format!("title={}", gh_prop(nodeid))
+        } else {
+            format!("file={},title={}", gh_prop(file), gh_prop(nodeid))
+        };
         if let Some(l) = lineno {
             props.push_str(&format!(",line={}", l + 1));
         }
@@ -107,13 +188,17 @@ impl Annotator for Github {
 
 /// Azure Pipelines logging commands: `##vso[task.logissue type=;sourcepath=;
 /// linenumber=]nodeid: msg`, rendered as inline PR issues (same mapping as
-/// GitHub). Messages collapse to one line.
+/// GitHub). The message is the exception line (see [`exception_line`]), not
+/// the first traceback line.
 struct Azure;
 
 impl Azure {
     /// The `type=<kind>;sourcepath=[;linenumber=]` property list.
     fn props(kind: &str, file: &str, lineno: Option<u64>) -> String {
-        let mut props = format!("type={kind};sourcepath={}", az_prop(file));
+        let mut props = format!("type={kind}");
+        if !file.is_empty() {
+            props.push_str(&format!(";sourcepath={}", az_prop(file)));
+        }
         if let Some(l) = lineno {
             props.push_str(&format!(";linenumber={}", l + 1));
         }
@@ -126,7 +211,7 @@ impl Annotator for Azure {
         format!(
             "##vso[task.logissue {}]{nodeid}: {}",
             Self::props("error", file, lineno),
-            az_line(msg)
+            az_line(&exception_line(msg))
         )
     }
 
@@ -140,11 +225,11 @@ impl Annotator for Azure {
 }
 
 pub(crate) fn print_github_annotations(sink: &mut Sink, run: &report::Run) {
-    print_annotations(sink, run, &Github);
+    print_annotations(sink, run, &Github, &annotation_prefix());
 }
 
 pub(crate) fn print_azure_annotations(sink: &mut Sink, run: &report::Run) {
-    print_annotations(sink, run, &Azure);
+    print_annotations(sink, run, &Azure, &annotation_prefix());
 }
 
 /// Azure logissue property value: `;` and `]` would end the property list /
@@ -156,6 +241,32 @@ fn az_prop(s: &str) -> String {
 /// Collapse to the first line for a single-line Azure log message.
 fn az_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// The exception line of a rendered pytest traceback: the first line of the
+/// last run of `E ` lines (pytest's crash block, e.g. `AssertionError: x
+/// mismatch` above `assert 1 == 2`), with the `E` marker stripped. A repr
+/// without `E ` lines (`--tb=line`, a plain message) falls back to its first
+/// non-empty line, then to "test failed".
+fn exception_line(text: &str) -> String {
+    let is_e = |l: &str| l == "E" || l.starts_with("E ");
+    let lines: Vec<&str> = text.lines().collect();
+    if let Some(last) = lines.iter().rposition(|l| is_e(l)) {
+        let first = lines[..=last]
+            .iter()
+            .rposition(|l| !is_e(l))
+            .map_or(0, |i| i + 1);
+        let line = lines[first][1..].trim();
+        if !line.is_empty() {
+            return line.to_string();
+        }
+    }
+    lines
+        .iter()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("test failed")
+        .to_string()
 }
 
 /// Buildkite: surface flaky-passed tests as a `warning` annotation on the
@@ -243,6 +354,19 @@ mod tests {
     }
 
     #[test]
+    fn exception_line_is_first_line_of_last_e_block() {
+        // Assertion with a message: the exception line heads the E block.
+        let tb = "    def test_fail():\n>       assert x == 2, 'x mismatch'\nE       AssertionError: x mismatch\nE       assert 1 == 2\n\ntests/test_a.py:11: AssertionError";
+        assert_eq!(exception_line(tb), "AssertionError: x mismatch");
+        // Only the LAST block counts (chained exceptions render several).
+        let chained = "E   KeyError: 'a'\n\nDuring handling...\n\nE   ValueError: b\nE    +  where";
+        assert_eq!(exception_line(chained), "ValueError: b");
+        // No E lines: first non-empty line, else the default.
+        assert_eq!(exception_line("\n  short repr \nmore"), "short repr");
+        assert_eq!(exception_line(""), "test failed");
+    }
+
+    #[test]
     fn source_path_strips_nodeid_and_applies_prefix() {
         // The file is everything before `::`; a monorepo prefix is prepended.
         assert_eq!(source_path("a/b.py::test_x", &None), "a/b.py");
@@ -319,7 +443,7 @@ mod tests {
     #[test]
     fn github_annotations_emit_exact_lines() {
         let (mut sink, cap) = Sink::captured();
-        print_github_annotations(&mut sink, &sample_run());
+        print_annotations(&mut sink, &sample_run(), &Github, &None);
         let out = cap.out();
         let lines: Vec<&str> = out.lines().collect();
         // call-failed: file+title+line (0-based 41 -> 1-based 42), repr as data.
@@ -342,10 +466,11 @@ mod tests {
     #[test]
     fn azure_annotations_emit_exact_lines() {
         let (mut sink, cap) = Sink::captured();
-        print_azure_annotations(&mut sink, &sample_run());
+        print_annotations(&mut sink, &sample_run(), &Azure, &None);
         let out = cap.out();
         let lines: Vec<&str> = out.lines().collect();
-        // call-failed: type=error, linenumber 1-based, message on first repr line.
+        // call-failed: type=error, linenumber 1-based; no `E   ` line in this
+        // repr, so the crash message falls back to its first non-empty line.
         assert_eq!(
             lines[0],
             "##vso[task.logissue type=error;sourcepath=a.py;linenumber=42]a.py::test_call: assert x"
@@ -358,6 +483,94 @@ mod tests {
             lines[2],
             "##vso[task.logissue type=warning;sourcepath=c.py;linenumber=10]c.py::test_flk: flaky, passed only after 2 reruns"
         );
+    }
+
+    // A traceback shaped like pytest's: the first line is source context, the
+    // crash line is the last `E   ` line.
+    const SETUP_TB: &str = "    @pytest.fixture\n    def broken():\n>       raise RuntimeError('setup boom')\nE       RuntimeError: setup boom\n\ntests/test_a.py:5: RuntimeError";
+
+    fn collect_error_run() -> report::Run {
+        let mut run = report::Run::default();
+        run.collect_error(
+            "tests/test_c.py".into(),
+            "ImportError while importing test module\nTraceback:\nE   ModuleNotFoundError: No module named 'nope'".into(),
+        );
+        run.collect_error("<orchestrator>".into(), "workers disagreed".into());
+        run.record(
+            Some(0),
+            report_of(
+                "tests/test_a.py::test_err",
+                "setup",
+                "failed",
+                Some(6),
+                Some(SETUP_TB),
+            ),
+        );
+        run
+    }
+
+    #[test]
+    fn azure_issue_text_is_the_crash_line() {
+        let (mut sink, cap) = Sink::captured();
+        print_annotations(&mut sink, &collect_error_run(), &Azure, &None);
+        let out = cap.out();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0],
+            "##vso[task.logissue type=error;sourcepath=tests/test_c.py]tests/test_c.py (collection error): ModuleNotFoundError: No module named 'nope'"
+        );
+        // A synthetic collector names no file: no sourcepath property.
+        assert_eq!(
+            lines[1],
+            "##vso[task.logissue type=error]<orchestrator> (collection error): workers disagreed"
+        );
+        assert_eq!(
+            lines[2],
+            "##vso[task.logissue type=error;sourcepath=tests/test_a.py;linenumber=7]tests/test_a.py::test_err: RuntimeError: setup boom"
+        );
+    }
+
+    #[test]
+    fn github_annotates_collect_errors_with_prefix() {
+        let (mut sink, cap) = Sink::captured();
+        print_annotations(
+            &mut sink,
+            &collect_error_run(),
+            &Github,
+            &Some("proj".into()),
+        );
+        let out = cap.out();
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines[0].starts_with(
+                "::error file=proj/tests/test_c.py,title=tests/test_c.py (collection error)::ImportError"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with("No module named 'nope'"), "{}", lines[0]);
+        assert_eq!(
+            lines[1],
+            "::error title=<orchestrator> (collection error)::workers disagreed"
+        );
+        assert!(lines[2].starts_with("::error file=proj/tests/test_a.py,"));
+    }
+
+    #[test]
+    fn repo_prefix_is_rootdir_below_repo() {
+        let base = std::env::temp_dir().join(format!("rstest-ci-prefix-{}", std::process::id()));
+        let proj = base.join("cw/proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(base.join("cw/.git")).unwrap();
+        let cw = base.join("cw");
+        assert_eq!(repo_prefix(&proj, &cw).as_deref(), Some("proj"));
+        // Same directory: no prefix. Outside the repo: no prefix.
+        assert_eq!(repo_prefix(&cw, &cw), None);
+        assert_eq!(repo_prefix(&base, &cw), None);
+        // The git toplevel is the nearest ancestor holding `.git`.
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        assert_eq!(repo_root(&proj).map(|r| canon(&r)), Some(canon(&cw)));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
