@@ -68,7 +68,8 @@ default](features.md). Force a worker count any time with `-n`, e.g.
 
 ## 4. See a failure
 
-Failures are where a runner earns its keep. Add a broken test:
+Failures are where a runner earns its keep. Append a broken test to the end
+of `test_first.py`:
 
 ```python
 def test_add_wrong():

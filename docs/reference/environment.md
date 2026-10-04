@@ -68,7 +68,7 @@ listening, so a re-imported child process doesn't bind the port twice).
 | `RSTEST_WALL_TTL_DAYS` | How long a project's recorded wall time (`.rstest_cache/wall.json`, used by the monorepo planner to weight projects) stays valid. Default `30`; `0` keeps it forever |
 | `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache **only** (`<dir>/rstest/interp-probes-v1.json`), which speeds up repeated `--python` version resolution. It does **not** relocate `.rstest_cache/` (durations/flakes); use `RSTEST_CACHE` for that. Defaults to `$XDG_CACHE_HOME` (or `~/.cache`) on Unix and `%LOCALAPPDATA%` on Windows; if none resolve, probing just isn't persisted |
 | `RSTEST_FLAKE_RETENTION_DAYS` | how long a test's flake/failure history (`.rstest_cache/flakes.json`) stays relevant. A test with no flake or failure inside this window reads as fixed: its entry is dropped and it stops carrying "flaked _N_x before" annotations. Defaults to `90`; `0` keeps history forever |
-| `COVERAGE_CORE` | coverage.py's measurement core. Under `--cov-context`, rstest sets it to `ctrace` in the workers unless you already set it; your value wins. Don't set `sysmon` (Python 3.14's default core) for a `--cov-context=test` run: it keeps only the first test's context per line, which silently corrupts the coverage index behind `--changed` and `--incremental` |
+| `COVERAGE_CORE` | coverage.py's measurement core. Under `--cov-context`, rstest sets it to `ctrace` in the workers unless you already set it to a non-empty value; your value wins (an empty value is overwritten). Don't set `sysmon` (Python 3.14's default core) for a `--cov-context=test` run: it keeps only the first test's context per line, which silently corrupts the coverage index behind `--changed` and `--incremental` |
 
 ## Also read
 
@@ -82,3 +82,4 @@ Standard variables from CI systems and tools that rstest reads when present:
 | `UV_PYTHON_INSTALL_DIR`, `XDG_DATA_HOME`, `APPDATA` | locating uv-managed interpreters during interpreter discovery (`UV_PYTHON_INSTALL_DIR` first, else uv's default under `XDG_DATA_HOME` or `~/.local/share` on Unix, `%APPDATA%` on Windows) |
 | `COVERAGE_RCFILE` | coverage.py's config file override: read when working out the `--cov` scope (unless `--cov-config` names a file), and by coverage itself when rstest combines and reports parallel coverage |
 | `XDG_CACHE_HOME`, `LOCALAPPDATA` | default base for the interpreter-probe cache (see `RSTEST_CACHE_DIR`) |
+| `COVERAGE_RCFILE` | coverage.py's config-file override. When `--cov-config` names no file, or names pytest-cov's default `.coveragerc`, rstest reads the `[run]` settings from this file (as coverage.py would) to decide what `--cov` measures |

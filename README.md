@@ -29,7 +29,7 @@ aiohttp, 4,469 tests:   pytest 193s  →  rstest 67s warm (150s cold), -n 8
   <img src="https://raw.githubusercontent.com/KovantAI/rstest/main/docs/assets/rstest-demo.gif" alt="Terminal recording: the aiohttp suite under pytest (193s), then rstest --doctor (67s, 14 parallel workers) pinpointing the wait-bound file that gates the suite" width="820">
 </p>
 
-<p align="center"><sub>Same suite: <b>pytest 193s → rstest 67s</b> (warm, <code>-n auto</code> = 14 workers, as recorded); <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
+<p align="center"><sub>Same suite: <b>pytest 193s → rstest 67s</b> (warm, <code>-n auto</code> = 14 workers, as recorded; the line above and the tables use <code>-n 8</code>, and this wait-bound suite gains nothing past 8 workers); <code>--doctor</code> shows <i>where the time goes</i>. Current measured numbers: <a href="https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/">benchmarks</a>.</sub></p>
 
 📚 **[Full documentation → python-rstest.readthedocs.io](https://python-rstest.readthedocs.io/en/stable/)**
 
@@ -59,7 +59,7 @@ that interpreter. (A `pipx` / `uv tool` install also needs rstest in the
 project environment; see
 [Installation](https://python-rstest.readthedocs.io/en/stable/getting-started/installation/).)
 
-Requires Python 3.10+ on macOS, Linux, or Windows. Windows runs the full
+Requires Python 3.10+ on macOS (Apple silicon), Linux, or Windows. Windows runs the full
 test gate in CI, but the 33-suite public corpus runs only on macOS/Linux, so
 Windows is validated at a smaller scale. rstest is alpha (0.x):
 expect breaking changes between minor versions until 1.0.
@@ -113,9 +113,10 @@ environment for this one command.)
 ## Benchmarks
 
 Real open-source suites, end-to-end, with per-test outcome diffing against
-the pytest baseline: 100% parity on pandas, django-allauth and rich, and
-99.91-99.98% on aiohttp, whose socket-leak warning flake hits xdist too (every
-known flake is catalogued in the docs).
+the pytest baseline: 100% parity on pandas, django-allauth and rich in the
+measured run (allauth and rich have tests that flake under plain pytest too, so
+some runs land at ~99.8-99.9%), and 99.91-99.98% on aiohttp, whose socket-leak
+warning flake hits xdist too (every known flake is catalogued in the docs).
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | Suite | Tests | pytest | xdist `-n 8` | rstest `-n 8` |
@@ -129,18 +130,18 @@ Apple M4 Max, CPython 3.13, pytest-xdist 3.8, median of 5 runs at the same
 `-n` for both runners. CPU-bound suites (sympy, scikit-learn) land at parity
 with xdist; see the benchmarks page.
 
-**Monorepo** (langchain-ai/langgraph, 6 `libs/*` packages, 4,284 tests, each
-with its own pytest config; a single pytest can't run from the root at all):
+**Monorepo** (langchain-ai/langgraph, the 5 `libs/*` packages that need no
+live services, 838 tests, each with its own pytest config; a single pytest
+can't run from the root at all):
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | | wall | parity |
 |---|---|---|
-| pytest: 6 serial invocations | 880.4s | baseline |
-| rstest at the root, cold | **245.7s** (3.6×) | 100% |
+| pytest: 5 serial invocations | 187.4s | baseline |
+| rstest at the root | **128.9s** (1.45×) | 100% |
 
-Only the cold run is measured. From its per-project duration caches, a warm
-run is **projected** (not measured) at 121–133s (6.6–7.3×); discount that
-until you measure your own.
+Measured with rstest 0.6.0 (10-run mean) and not yet re-measured on 0.8.0.
+The gain is capped by a few slow wait-bound tests in `libs/checkpoint`.
 
 Full methodology:
 [benchmarks](https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/).
@@ -214,7 +215,7 @@ the runner already owns (per-test wall/CPU time, per-fixture setup):
 WAIT-BOUND: 95% of test time (176.5s) is waiting, not computing (sleeps / IO / timeouts).
     54.20s waiting of   54.25s  tests/test_proxy_functional.py::test_proxy_https_multi_conn_limit
     10.97s waiting of   10.97s  tests/test_proxy_functional.py::test_proxy_https_connect
-  ... and 33 more
+  ... and 27 more
 
 PARALLEL FLOOR: the longest test (54.2s) exceeds the ideal per-worker share (23.2s at -n 8);
 no worker count can finish faster than its longest test. Gate tests:
@@ -246,6 +247,7 @@ recorded call duration, so skipped tests drop out: 4442 here against the
 - [Watch mode](https://python-rstest.readthedocs.io/en/stable/guides/watch-mode/)
 - [CI quickstart](https://python-rstest.readthedocs.io/en/stable/guides/ci-quickstart/)
 - [CLI reference](https://python-rstest.readthedocs.io/en/stable/reference/cli/)
+- [Agent skills](https://python-rstest.readthedocs.io/en/stable/guides/agent-skills/): `rstest install-skills` or the Claude Code plugin
 
 ## License
 

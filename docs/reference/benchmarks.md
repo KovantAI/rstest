@@ -81,8 +81,9 @@ performance + 4 efficiency cores).
 | scikit-learn (`linear_model`) | 3,941 tests, numpy, 1 BLAS thread | 31.9s | 3.0x | 4.5x | 4.6x | rstest ahead at `-n 2` (4%), parity elsewhere |
 <!-- --8<-- [end:cpu-table] -->
 
-Speedups are rstest's, vs serial pytest. 100% per-test outcome parity at
-every measured point of every suite.
+Speedups are rstest's, vs serial pytest. rstest kept 100% per-test outcome
+parity at every measured point of every suite (one xdist point, scikit-learn
+at `-n 10`, measured 99.97%).
 
 **What the data says:**
 
@@ -172,47 +173,36 @@ cap. No test changed outcome in any cell. The memory model and thread guidance a
 
 ## Monorepo
 
-langchain-ai/langgraph: discovery finds all 8 Python `libs/*` packages;
-the measured subset is the six that need no live database services.
-Each has its own pytest config: a repo a single pytest cannot run from the
-root at all. Baseline is the only native workflow: six serial pytest
-invocations. The numbers below are from the corpus runner (4,284 tests,
-commit `97320843`); reproduce with `python3 corpus/run.py --only
-langgraph`.
+langchain-ai/langgraph: discovery finds all 8 Python `libs/*` packages. Each
+has its own pytest config, so a single pytest cannot run from the root at
+all, and the only native workflow is one pytest invocation per package. The
+measured subset is the five packages that need no live services:
+`libs/checkpoint`, `libs/checkpoint-sqlite`, `libs/cli`, `libs/prebuilt` and
+`libs/sdk-py`. The two postgres-backed checkpoint stores need a running
+database under any runner, and `libs/langgraph` itself is left out because
+its live-service tests hang the plain-pytest baseline in a service-less
+environment (see `corpus/suites.toml`). Reproduce with
+`python3 corpus/run.py --only langgraph`.
 
-| | wall | outcome parity |
-|---|---|---|
-| pytest, 6 serial invocations | 880.4s | (baseline) |
-| rstest at the root, cold (first run) | 245.7s (3.6×) | 100% |
+| | tests | wall | outcome parity |
+|---|---|---|---|
+| pytest, 5 serial invocations | 838 | 187.4±4.4s | (baseline) |
+| rstest at the root | 838 | 128.9±3.2s (1.45×) | 100% |
 
-Only the cold run is measured. **Projection, not a measurement:** from the
-cold run's per-project duration caches, a warm run is projected at 121-133s
-(6.6-7.3×). That run hasn't been recorded, so it has no parity number and
-isn't in the table.
+This row predates the 0.8.0 re-measurement: it is a 10-run mean with rstest
+0.6.0 on an idle M-series machine, not the median-of-5 method used for the
+tables above. Every test's setup/call/teardown outcome matched the baseline.
 
-On the measured (cold) run, per-project outcomes matched exactly: every
-one of the 4,284 tests' setup/call/teardown agreed, including the dominant
-package's service-dependent fail/error signature (those tests fail
-identically under vanilla pytest, hence the non-zero exit).
+The 1.45× is lower than the flat suites above because a few slow,
+wait-bound tests in `libs/checkpoint` set the floor, not dispatch.
 
-Why a warm run should be faster: a warm run plans each package's worker share
-from its duration cache, so the dominant package gets the workers and the rest
-ride along on single workers. The cold run has no caches to plan from, so it
-lands at 3.6×.
-
-**Policy.** `checkpoint-sqlite` is a small suite and runs single-worker
-(`-n 1`, the same as `-n 0`). It pulls in pytest-retry, whose worker reporter reads
-`workerinput["server_port"]`. That key once had no source under rstest (no
-central controller to set it) and forced this pin. It is now **resolved**: rstest starts pytest-retry's own
-report server inside each worker and seeds `workerinput["server_port"]`, so
-pytest-retry takes its worker branch and its `@pytest.mark.flaky` TTL test
-(which lives here) runs correctly at `-n ≥ 2` too (verified; see
+**Policy:** none. `checkpoint-sqlite` pulls in pytest-retry, whose worker
+reporter reads `workerinput["server_port"]`. That key once had no source
+under rstest (no central controller to set it) and forced a single-worker
+pin. rstest now starts pytest-retry's own report server inside each worker
+and seeds `workerinput["server_port"]`, so the package runs unmodified at the
+full worker count (see
 [parity divergences §8](parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed)).
-Single-worker remains the natural choice for a suite this small; the numbers
-below are the `-n 0` run. The plugin also sits in the shared venv, so it loads
-in the other five projects too; they don't use the marker, so the corpus disables
-it there (`-p no:pytest-retry`, on both the baseline and rstest runs) to keep
-per-test parity exact.
 
 ## Reading the numbers
 
@@ -235,7 +225,7 @@ per-test parity exact.
   controller (one Python process handling every test report) sat at 100% CPU
   for most of the run, and the workers waited on it. rstest's orchestrator is
   Rust, so the same `-n 8` finishes in 43s against 89s. An earlier single run
-  on this page had the two at parity (61s vs 63s) on an older pandas; that
+  on this page had the two at parity (rstest 63s, xdist 61s) on an older pandas; that
   number is superseded. (The 190s serial baseline is real, not
   estimated.[^pandas])
 - **django-allauth at matched `-n`**: 5.8s against 8.9s. Its corpus policy

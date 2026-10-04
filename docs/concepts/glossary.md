@@ -95,8 +95,8 @@ an installed pytest.
 
 **Long pole**: the slowest single test in the run (`long_pole_seconds` in
 the doctor report). No worker count can finish the run faster than it. When
-it (or any test) is longer than the ideal per-worker share
-(`test time / workers`), it sets the **parallel floor**: adding workers stops
+it (or any test) is longer than both the ideal per-worker share
+(`test time / workers`) and 1 second, it sets the **parallel floor**: adding workers stops
 helping. Slow tests from the duration cache are dispatched first,
 individually, so the long pole starts early. Written "long-pole" only as an
 adjective ("long-pole tests").
@@ -116,9 +116,9 @@ recorded in `.rstest_cache/` by earlier runs, slowest first, so long tests
 start early instead of stacking at the end. It needs one prior (warm) run.
 See [Scheduling](scheduling.md).
 
-**Flaky**: a test that failed and then passed within the
-[`--reruns`](../reference/cli.md#-reruns-n) budget; reported green but
-counted and listed.
+**Flaky**: a test that failed and then passed on a retry, from the
+[`--reruns`](../reference/cli.md#-reruns-n) budget or its own
+`@pytest.mark.flaky(reruns=N)`; reported green but counted and listed.
 
 **Selection**: the set of tests chosen to run; under
 [`--changed`](../reference/cli.md#-changedrev), derived from the
@@ -139,8 +139,8 @@ can fail on it: [`--doctor-fail-on`](../reference/cli.md#-doctor-fail-on-cond),
 [`--changed-strict`](../reference/cli.md#-changed-strict). Its output lines
 are the "gate messages". Not the same as **gate tests**, below.
 
-**Gate tests**: in the doctor report, the tests longer than the ideal
-per-worker share: they set the [parallel floor](#parallel-floor), so
+**Gate tests**: in the doctor report, the tests longer than both the ideal
+per-worker share and 1 second: they set the [parallel floor](#parallel-floor), so
 only splitting or shrinking them makes the run faster.
 
 **Baseline**: whatever a comparison is measured against. It means different
@@ -152,7 +152,8 @@ cache for [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
 mandatory).
 
 **Journal**: the record of which worker ran which test, in what order, that
-every parallel run writes to `.rstest_cache/replay/`.
+a parallel run writes to `.rstest_cache/replay/` (not under `--shard`,
+`--dist each`, `rstest replay` itself, or with `RSTEST_NO_REPLAY_JOURNAL=1`).
 [`rstest replay`](../reference/cli-commands.md#replay) re-runs it to
 reproduce a parallel-only failure.
 
@@ -187,8 +188,9 @@ end explicitly.
 
 **Designate**: the worker chosen to host the serial phase, which is the
 lowest alive worker (promoted to the next one if it crashes). (The full
-collection nodeid list is always shipped by worker `gw0`; the others verify their
-collection against it by count and hash.)
+collection nodeid list is always shipped by worker `gw0`; every worker's
+collection is verified by count and hash against whichever worker reports
+first.)
 
 **Serial phase**{#serial-phase}: `@pytest.mark.serial` tests running exclusively on the
 designate after all other workers finish.

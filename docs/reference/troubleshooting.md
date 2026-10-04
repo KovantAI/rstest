@@ -15,8 +15,10 @@ This usually means rstest was installed somewhere else: with `pipx` or
 `uv tool`, globally, or into a different venv than the one rstest picked.
 Install rstest into the project environment itself (`uv add --dev rstest`,
 `pip install rstest` inside the venv), or point `--python` at an interpreter
-that has it. Each rejected candidate is listed with its reason (too old, not
-runnable, missing the shim, or not matching a `--python` version request).
+that has it. Each rejected candidate is listed with its reason (older than
+3.9, not runnable, missing the shim, or not matching a `--python` version
+request). A 3.9 interpreter is not rejected here; it fails at startup instead
+(next section).
 
 ## `found .venv/bin/python but rstest is not installed in it`
 
@@ -56,7 +58,8 @@ names, install a matching Python, or pass `--python` to override it.
 
 ## `ImportError: cannot import name 'TypeAlias'` (or similar) at startup
 
-Your project's interpreter is older than Python 3.10. The vendored pytest
+Your project's interpreter is older than Python 3.10 (interpreter discovery
+still accepts 3.9, so a 3.9 venv gets this far). The vendored pytest
 core requires 3.10+, which matches the supported CPython line (3.9 is
 end-of-life as of October 2025). Upgrade the environment's Python.
 

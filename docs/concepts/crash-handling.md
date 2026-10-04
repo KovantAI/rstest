@@ -14,8 +14,8 @@ this from its queue, which can misattribute; the explicit signal cannot.)
 1. The in-flight test is reported **failed**, with a "crashed while
    running this test" message. It is **not retried** by default: a
    reliably-segfaulting test would otherwise kill workers in a loop.
-   With [`--reruns`](../reference/cli.md#-reruns-n), it gets retried on
-   the replacement worker within the rerun budget.
+   With [`--reruns`](../reference/cli.md#-reruns-n), it is requeued
+   within the rerun budget and retried on whichever worker takes it next.
 2. The worker's other outstanding tests requeue at the head of the
    dispatch queue and run elsewhere.
 3. A replacement worker spawns under the same identity (`gw3` stays
@@ -52,10 +52,11 @@ during collection are not restarted (an import-time crash would recur).
 ## Cleanup hooks and the serial phase
 
 If the suite uses xdist's controller-side hooks, a crashed worker's
-`pytest_testnodedown` still runs, on a surviving worker, against the
-dead worker's `workerinput` snapshot (details and the ordering caveat
-with deterministic idents: [xdist hook
-emulation](xdist-hooks.md)). If the
+`pytest_testnodedown` still runs under `--collect full`, on a surviving
+worker, against the dead worker's `workerinput` snapshot (details and the
+ordering caveat with deterministic idents: [xdist hook
+emulation](xdist-hooks.md)). Under `--collect lazy` it does not run, and
+the dead worker's per-worker resources are left behind. If the
 crashed worker was the designated serial-phase host, the lowest
 surviving worker is promoted; if none can host it, the run reports the
 serial tests as lost rather than silently dropping them.

@@ -5,6 +5,19 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+### Features
+
+- **`rstest install-skills`: install the bundled agent skills.** The
+  `migrate-to-rstest` and `rstest-triage` skills now ship inside the binary.
+  `rstest install-skills` writes them into `.claude/skills/` (or
+  `~/.claude/skills/` with `--user`, `.agents/skills/` with `--agents`, any
+  directory with `--dir`), matching the installed version's flags and
+  subcommands. Skills you edited are left alone unless `--force`.
+- **The rstest repository is a Claude Code plugin marketplace.**
+  `/plugin marketplace add KovantAI/rstest` then `/plugin install rstest@rstest`
+  makes both skills available in every project. The skills moved from
+  `.claude/skills/` to `plugins/rstest/skills/`.
+
 ### Behavior changes
 
 - **Behavior change: a project `.venv` without rstest stops the run.**
@@ -169,7 +182,7 @@ between 0.x releases and are listed here.
 - **Docs.** The Azure shared-cache recipe now fails the step when tests fail.
   The `--shuffle` docs point to `rstest replay` for an exact reproduction.
 
-## 0.8.0 (2026-09-28)
+## 0.8.0 (2026-09-30)
 
 - **`rstest xdist-removal-check`: a readiness check for uninstalling
   pytest-xdist.** It scans the pytest config and `PYTEST_ADDOPTS` for xdist
@@ -495,7 +508,6 @@ between 0.x releases and are listed here.
 - **Monorepo merged `--report-json` now stamps the current schema.** The merged
   root document hard-coded `"schema": 4` while carrying schema-5 fields
   (`quarantined`); it now shares the single-project writer's version constant.
-
 - **rstest warns about plugins pinned to an older pytest.** When a loaded
   plugin's own metadata excludes the pytest rstest runs (for example it declares
   `pytest<9`), rstest prints one `rstest: warning: ...` line to stderr per run.
@@ -506,9 +518,11 @@ between 0.x releases and are listed here.
   publish a machine-readable [JSON Schema](https://json-schema.org/) (draft-07)
   plus a field-reference table, generated directly from the Rust types
   (`schemars`) and embedded into the docs so they can never drift from what the
-  CLI emits. Covers every stable JSON surface: `--report-json`, `--doctor-json`,
+  CLI emits. Covers `--report-json`, `--doctor-json`,
   `--collect-only --report-json` (discovery), `migrate-check --migrate-check-json`,
-  and the `flakes.json` flake log; see the new *Output schemas* reference page.
+  and the `flakes.json` flake log (the audit, bisect, explain and
+  xdist-removal-check outputs got schemas in separate entries of this
+  release); see the new *Output schemas* reference page.
   The three previously hand-built (`serde_json::json!`) outputs are now emitted
   from typed structs with unchanged bytes. A golden test enforces schema
   freshness (`RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`).

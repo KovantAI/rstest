@@ -184,7 +184,7 @@ rstest_args = ["-n", "4"]
 [sqlalchemy]
 repo = "https://github.com/sqlalchemy/sqlalchemy"
 install = ["-e .", "pytest", "pytest-xdist", "greenlet", "typing-extensions"]
-# Parallel at -n auto (10x: 533s->53s). xdist is installed, so sqlalchemy
+# Parallel at -n auto (4.6x in results.json: 552s->120s). xdist is installed, so sqlalchemy
 # registers its XDistHooks (gated on hasplugin("xdist")); rstest's
 # pytest_plugin_registered fires their pytest_configure_node, so every worker
 # self-assigns follower_ident=uuid4() and provisions its own follower DB.
@@ -201,7 +201,8 @@ install = ["--group dev", "-e .", "hypothesis", "email-validator", "inline-snaps
 args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 # Permanent 1-test diff: a test parametrizes on sys.path, which inside
 # workers contains the vendored-core entry (by design, D7).
-# parametrize IDs derived from now(): collections differ across workers.
+# parametrize IDs embed per-process memory addresses: collections differ
+# across workers.
 # lazy collection errors here (rc=4) -> keep -n 0.
 rstest_args = ["-n", "0"]
 
@@ -258,8 +259,8 @@ projects = [
 # server_port note above): langchain-ai/langchain, PEP 621 libs each with its
 # own pytest config and [dependency-groups] test. Baseline = one serial pytest
 # per lib; candidate = one rstest root pass. Subset pinned to three
-# service-free, fully offline libs — pytest-socket blocks network, so no live
-# APIs or databases are reachable and no per-lib policy is needed. (Other libs
+# service-free, fully offline libs: they need no live APIs or databases
+# and no per-lib policy. (Other libs
 # like text-splitters/langchain need heavy optional NLP deps — nltk, spacy,
 # sentence-transformers — to collect, so they are left out of the subset.)
 # Listed in dependency order so the editable langchain-core install wins for

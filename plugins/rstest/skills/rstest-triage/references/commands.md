@@ -64,15 +64,16 @@ $ rstest bisect "tests/test_report.py::test_totals" --bisect-json out.json
 
 - Runs entirely at `-n 0`: it isolates **ordering**, not concurrency.
 - Steps: (1) run the victim alone; if it fails, it's a plain bug and bisect
-  stops. (2) Run it after all preceding tests in collection order; if it
-  passes, the failure isn't from ordering (likely concurrency; use `audit`).
-  (3) ddmin over the predecessors to a 1-minimal set; handles single polluters
-  and interacting pairs.
-- **Searches collection-order predecessors only.** A polluter that collects
-  after the victim (but ran before it on a CI worker) is never found; bisect
-  then says the failure "does not reproduce from collection order" and
-  suggests concurrency. With a replay journal, use
-  `scripts/journal_bisect.py` to search the worker's recorded order instead.
+  stops. (2) Run it after all preceding tests in collection order. (3) If
+  that passes, run it after every other test, including the ones that collect
+  after it, so a polluter that collects later (but ran first on a CI worker)
+  is still found. If that passes too, bisect says the failure "does not
+  reproduce from test order" (likely concurrency; use `audit`). (4) ddmin
+  over the reproducing set to a 1-minimal set; handles single polluters and
+  interacting pairs.
+- With a replay journal, `scripts/journal_bisect.py` searches only the tests
+  that ran before the victim on its CI worker, in their recorded order: a
+  smaller set, closer to what CI did.
 - Prints the culprit(s) and a minimal repro command
   (`rstest -n 0 <culprit...> <victim>`), relative to the current directory.
 - Bounded to about 80 child runs; at the ceiling it reports the smallest set

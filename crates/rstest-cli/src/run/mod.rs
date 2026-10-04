@@ -714,12 +714,13 @@ pub(crate) fn execute_inner(
 }
 
 /// Dispatch a subcommand (`rstest verify-vendor` / `try` / `migrate-check` /
-/// `cache-compact` / `shard-verify` / `explain` / `replay`). Returns
-/// `Some(exit)` when a subcommand ran, `None` for a normal run (the caller falls
-/// through to watch/`execute`). The interpreter-free ones (`cache-compact`,
-/// `shard-verify`, `explain`) return before Python is resolved; `replay` runs
-/// the full pipeline (resolving its own interpreter through `execute`) with the
-/// recorded schedule pinned; the rest resolve Python here.
+/// `cache-compact` / `shard-verify` / `explain` / `install-skills` / `replay`).
+/// Returns `Some(exit)` when a subcommand ran, `None` for a normal run (the
+/// caller falls through to watch/`execute`). The interpreter-free ones
+/// (`cache-compact`, `shard-verify`, `explain`, `install-skills`) return before
+/// Python is resolved; `replay` runs the full pipeline (resolving its own
+/// interpreter through `execute`) with the recorded schedule pinned; the rest
+/// resolve Python here.
 pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     use crate::cli::Command;
     let Some(command) = &cli.command else {
@@ -739,6 +740,13 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
             crate::shardverify::run_shard_verify(&mut sink, reports)
         }
         Command::Explain { nodeid, json } => crate::explain::run_explain(&mut sink, nodeid, *json),
+        Command::InstallSkills {
+            user,
+            agents,
+            dir,
+            force,
+        } => crate::skills::target_dir(dir.as_deref(), *user, *agents)
+            .and_then(|target| crate::skills::run_install(&mut sink, &target, *force)),
         // Verify the vendored pytest tree against the packaged manifest.
         Command::VerifyVendor => python().and_then(|py| crate::vendor::run_verify(&py)),
         // Zero-config "should I switch?" proof: pytest baseline vs rstest -n auto.
@@ -1933,8 +1941,9 @@ fn requests_doctests<'a>(mut opts: impl Iterator<Item = &'a str>) -> bool {
 /// would never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) is
 /// reported empty by the lazy worker, which replays pytest's ignore checks.
 ///
-/// Auto-lazy never steals, so each file runs whole on one worker: a file whose
-/// cached time exceeds an even per-worker share by more than
+/// Judged as if lazy never steals (stealing needs an explicit `--dist load`,
+/// and this check runs either way), so each file runs whole on one worker: a
+/// file whose cached time exceeds an even per-worker share by more than
 /// [`LAZY_LONG_POLE_SLACK_SECS`] would be the long pole the eager pool avoids
 /// by spreading its tests (this also covers `files < n`).
 fn lazy_layout_fits(

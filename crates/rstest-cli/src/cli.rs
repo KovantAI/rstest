@@ -122,11 +122,36 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Install the rstest agent skills (`migrate-to-rstest`, `rstest-triage`)
+    /// bundled with this binary, so they match its flags and subcommands.
+    /// Writes `.claude/skills/` in the current directory by default (commit it
+    /// to share with the team). A skill already installed with different
+    /// contents is left alone unless `--force`. Needs no interpreter.
+    InstallSkills {
+        /// Install for every project: `~/.claude/skills/` (or
+        /// `~/.agents/skills/` with `--agents`).
+        #[arg(long)]
+        user: bool,
+        /// Write `.agents/skills/` instead of `.claude/skills/`, for Codex and
+        /// other agents that read the Agent Skills layout.
+        #[arg(long)]
+        agents: bool,
+        /// Install into DIR instead (each skill lands in `DIR/<skill>/`).
+        /// Overrides `--user` / `--agents`.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Overwrite installed skills that differ from the bundled copy. Files
+        /// you added to a skill directory are kept.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
-/// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
-/// to the test session verbatim: clap can't mirror pytest's large,
-/// plugin-extensible flag surface, so we pre-scan argv ourselves.
+// Unrecognized flags are split off by our own argv pre-scan: clap can't mirror
+// pytest's large, plugin-extensible flag surface.
+/// rstest: a fast, pytest-compatible test runner. Unrecognized flags are
+/// forwarded to the test session verbatim.
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "rstest",
@@ -765,6 +790,7 @@ const SUBCOMMANDS: &[&str] = &[
     "shard-verify",
     "replay",
     "explain",
+    "install-skills",
 ];
 
 /// The `--output` styles rstest renders. `--output` with any other value is a
@@ -1021,15 +1047,17 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     let sub = argv.pop().expect("subcommand token at `at`");
     route(argv, &mut own, &mut session);
     // `shard-verify` (report-json paths), `replay` (a run-id / `--journal`),
-    // `bisect` (a single nodeid) and `explain` (a nodeid) build no pytest
-    // session from argv: every token after them is a clap positional or a
-    // subcommand-local flag, so route them all to `own` rather than
-    // forwarding non-flag tokens to the (nonexistent argv-built) session.
-    // The nodeids contain `::`, which the flag tables would otherwise route
-    // to the session and hide from clap. `replay` gets its real session
-    // args from the journal, not argv.
-    let consumes_all =
-        sub == "shard-verify" || sub == "replay" || sub == "bisect" || sub == "explain";
+    // `bisect` (a single nodeid), `explain` (a nodeid) and `install-skills`
+    // (its own flags) build no pytest session from argv: every token after
+    // them is a clap positional or a subcommand-local flag, so route them all
+    // to `own` rather than forwarding non-flag tokens to the (nonexistent
+    // argv-built) session. The nodeids contain `::`, which the flag tables
+    // would otherwise route to the session and hide from clap. `replay` gets
+    // its real session args from the journal, not argv.
+    let consumes_all = matches!(
+        sub.as_str(),
+        "shard-verify" | "replay" | "bisect" | "explain" | "install-skills"
+    );
     own.push(sub);
     if consumes_all {
         own.extend(rest);

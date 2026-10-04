@@ -22,7 +22,7 @@ rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 69%]
 ......................................................                   [100%]
 
-956 passed, 25 skipped in 2.5s
+956 passed, 25 skipped in 2.50s
 ```
 
 ## Highlights

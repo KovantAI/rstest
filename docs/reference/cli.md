@@ -28,7 +28,7 @@ rstest <COMMAND> [OPTIONS]
 
 Subcommands (`rstest try`, `rstest migrate-check`, `rstest
 xdist-removal-check`, `rstest audit`, `rstest bisect`, `rstest replay`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
-`rstest verify-vendor`) and their own flags are on [CLI
+`rstest verify-vendor`, `rstest install-skills`) and their own flags are on [CLI
 subcommands](cli-commands.md).
 
 At a [monorepo](../concepts/monorepo.md) root, rstest forwards most of these
@@ -1241,7 +1241,7 @@ unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
 `--ff`, `-W`, `-p`, `--tb`, `--color`, `--basetemp`, plugin flags, ...
 
 Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
-and subcommand list) and `-V` / `--version` (`rstest 0.8.0`). In byte-exact
+and subcommand list) and `-V` / `--version` (prints `rstest <version>`). In byte-exact
 mode with no `--output` set, `rstest -- --help` prints the vendored pytest's
 help; at `-n 2` and above or with an explicit `--output` it does not. To list pytest's and
 your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows

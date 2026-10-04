@@ -49,7 +49,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   the next run re-runs everything and rebuilds it. Rootdir-relative like the
   coverage index; a run of part of the suite keeps the other tests' records.
 - `replay/`: the schedule of each parallel run (`<run-uid>.json`, the last 10
-  kept, plus `latest.json`), read by
+  kept, plus `latest.json`; none for `--shard`, `--dist each`, `rstest replay`
+  or with `RSTEST_NO_REPLAY_JOURNAL=1`), read by
   [`rstest replay`](../reference/cli-commands.md#replay). Local to the
   machine that ran it: keep it **out** of any CI cache and upload
   `latest.json` as a failure artifact instead (see
@@ -144,7 +145,7 @@ the credential to the cache prefix, not the whole bucket. Concretely:
 |---|---|
 | S3 (`s3://bucket/prefix`) | `s3:ListBucket` (on the bucket, condition `prefix`), `s3:GetObject`/`s3:PutObject`/`s3:DeleteObject` on `bucket/prefix/*` |
 | GCS (`gs://bucket/prefix`) | `storage.objects.{list,get,create,delete}`, e.g. `roles/storage.objectAdmin` scoped to the bucket/prefix |
-| Azure Blob (dir-materialize) | `Storage Blob Data Contributor` on the container (the `az` CLI needs read+write+delete) |
+| Azure Blob (dir-materialize) | `Storage Blob Data Contributor` on the container (the `az` CLI needs read+write; delete only if a job compacts) |
 | `http(s)://` | endpoint enforces its own authz; rstest sends `Authorization: Bearer $RSTEST_CACHE_REMOTE_TOKEN` |
 | dir / mount (`/path`, `file://`) | filesystem read+write+delete on the directory |
 | GitHub artifacts (the action's `artifact` backend) | workflow `permissions: { contents: read, actions: read }`; `actions: read` reaches a prior run's segments |

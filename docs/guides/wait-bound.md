@@ -30,8 +30,8 @@ here:
   ([aiohttp]) this was **95% of test time (176.5s) waiting**, almost all
   of it on 10-second proxy timeouts.
 - **PARALLEL FLOOR**: no worker count can finish faster than the longest
-  single test. If your longest test exceeds the ideal per-worker share,
-  doctor names the **gate tests**; splitting or shrinking them is the only
+  single test. If your longest test exceeds both the ideal per-worker share
+  and 1 second, doctor names the **gate tests**; splitting or shrinking them is the only
   way to lower that floor (adding workers won't).
 
 ```console
@@ -61,7 +61,7 @@ Here is the key move for a wait-bound suite, and it is counter-intuitive:
   more waits in flight at once, since a waiting worker isn't using a core.
 
 Doctor's **PARALLEL EFFICIENCY** section shows this as a realized speedup
-above the logical core count (for example `13.0x realized of 32x possible`
+above the logical core count (for example `21.0x realized of 32x possible`
 on a 14-core machine): overlapping sleeps and IO run more tests at once than
 there are cores. The efficiency percentage is relative to the worker count,
 so it stays at or below 100%. (The section is `-n ≥ 2` only.)

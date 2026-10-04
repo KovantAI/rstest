@@ -138,7 +138,9 @@ would. Clear it there before scaling to workers. For the common stack see
 ## Measured at scale
 
 Beyond the four-suite battery, the public-suite corpus runs rstest
-against 33 well-known projects. The one that matters for advanced
+against 33 well-known projects (the parity suites in
+`corpus/suites.toml`; its other two entries, sympy and scikit-learn, are
+benchmark-only). The one that matters for advanced
 xdist users: **SQLAlchemy** (about 25,300 tests) runs at `-n auto` with its
 controller-side hooks exercised end-to-end: `pytest_configure_node`
 filling `follower_ident`, follower databases provisioned per worker,
