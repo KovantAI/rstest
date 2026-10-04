@@ -94,10 +94,10 @@ def check(name, cond, detail="", known_bug=False):
 
 
 class Gate:
-    def __init__(self, binary: Path, venv_dir: Path):
+    def __init__(self, binary: Path, venv_dir: Path, tmp=None):
         self.binary = binary
         self.venv = venv_dir
-        self.tmp = Path(tempfile.mkdtemp(prefix="rstest-gate-"))
+        self.tmp = tmp or Path(tempfile.mkdtemp(prefix="rstest-gate-"))
 
     def run(self, *args, cwd=None, env_extra=None, env_drop=(), timeout=120):
         env = dict(
@@ -106,6 +106,10 @@ class Gate:
             RSTEST_WORKER_PATH=str(REPO / "python"),
         )
         env.pop("PYTEST_ADDOPTS", None)
+        # The persona specs drive this from inside a pytest session, which
+        # exports its own markers; the rstest under test must not see them.
+        env.pop("PYTEST_CURRENT_TEST", None)
+        env.pop("PYTEST_VERSION", None)
         # Doctor runs auto-publish to the CI job summary (GitHub step
         # summary / Buildkite annotation); keep the gate's fixture-suite
         # reports off the real run page.
