@@ -85,7 +85,7 @@ verified/inferred marker), see the
 |---|---|---|
 | pytest-timeout | 🟦 Native | the plugin's ini `timeout =` fires in both modes, but rstest has a built-in [`--timeout`](../reference/cli.md#-timeout-secs) and honors `@pytest.mark.timeout` itself at every worker count, even without `--timeout` (on Windows only through the coarser per-test hang watchdog, since there is no SIGALRM). So with the plugin installed, a marked test gets two SIGALRM timers (rstest's is installed last, so its `Timeout` error is the one you see), and a command-line `--timeout` never reaches the plugin. Pick one: uninstall pytest-timeout, or disable it with `-p no:timeout`. **Before you uninstall it, move the ini setting:** without the plugin, an ini `timeout = N` is dropped (pytest warns `Unknown config option: timeout`) and `addopts = --timeout N` is a usage error (`unrecognized arguments`), because rstest does not read its own flags from `addopts`, and `[tool.rstest]` has no timeout key. The working path is `rstest --timeout N` on the command line (CI script, Makefile). The plugin's `timeout_method`, `timeout_func_only` and `session_timeout` have no rstest equivalent and are dropped the same way: rstest's timeout always covers the call phase only and always uses a signal, and nothing bounds the whole session. On Windows rstest's `--timeout` cannot interrupt the test (no signal); only the auto-armed `--worker-timeout` watchdog applies, which kills the worker instead. See also `--worker-timeout` for C-extension deadlocks |
 | pytest-env | ✅ Works | *not gated*. Env vars are set by its `pytest_load_initial_conftests` hook, which runs in every worker session |
-| pytest-socket | ✅ Works | `--disable-socket` blocks identically in parallel |
+| pytest-socket | ✅ Works | loads under the pool in two corpus suites; `--disable-socket` itself not yet exercised |
 | pytest-repeat | ✅ Works | *not gated*. `@mark.repeat(N)` expands at collection, so the copies are ordinary items that distribute across workers |
 | freezegun | ✅ Works | in-process time freezing is per-worker (the freezegun, aiohttp, itsdangerous, langchain and python-dateutil corpus suites load it in parallel). pytest-freezer, the fixture wrapper, is *not gated* but uses the same model. Keep `now()` out of parametrize IDs unless every worker computes the same string (see [known gaps](../concepts/compatibility.md#known-gaps)) |
 | pytest-benchmark | 🔶 `-n 0` | auto-disables at `-n ≥ 2` (sees the pool as xdist); run benchmarks at `-n 0` and read numbers from `--benchmark-json` (the stats table isn't painted: rstest owns the terminal) |
@@ -165,7 +165,10 @@ doc = json.load(open(sys.argv[1]))
 c = doc["meta"]["counts"]
 rows = []
 for nodeid, t in sorted(doc["tests"].items()):
-    outcome = t.get("call", t.get("setup", "skipped"))  # skipped tests have no call phase
+    if "failed" in (t.get("setup"), t.get("teardown")):
+        outcome = "error"  # counted under meta.counts.errors, as pytest does
+    else:
+        outcome = t.get("call", t.get("setup", "skipped"))  # skipped tests have no call phase
     detail = html.escape(t.get("longrepr", t.get("skip_reason", "")))[:2000]
     rows.append(
         f"<tr class={outcome!r}><td>{html.escape(nodeid)}</td>"
@@ -173,7 +176,8 @@ for nodeid, t in sorted(doc["tests"].items()):
         f"<td><pre>{detail}</pre></td></tr>"
     )
 open(sys.argv[2], "w").write(
-    f"<h1>{c['passed']} passed, {c['failed']} failed, {c['skipped']} skipped "
+    f"<h1>{c['passed']} passed, {c['failed']} failed, {c['errors']} errors, "
+    f"{c['skipped']} skipped "
     f"({doc['meta']['duration_seconds']:.1f}s, {doc['meta']['workers']} workers)</h1>"
     "<table><tr><th>test</th><th>outcome</th><th>time</th><th>detail</th></tr>"
     + "".join(rows)
@@ -279,11 +283,14 @@ use rstest's native --report-json, or run -n 0. See docs/reference/top-100-plugi
 
 Covered flags: `--json-report` (pytest-json-report), `--report-log`
 (pytest-reportlog), `--ctrf` (pytest-json-ctrf), `--nunit-xml` (pytest-nunit),
-`--md` (pytest-md), `--csv` (pytest-csv), and `--benchmark*` (pytest-benchmark,
-which auto-disables). The warning is argv-driven: it fires on the *flag*, so it
-never mistakes rstest's own `--html` / `--junitxml` / `--report-json` (which are
-rendered from merged results and are parallel-safe) for a hazard, and it stays
-silent at `-n 0` where the plugin's own controller branch runs.
+`--md` (pytest-md) and `--benchmark*` (pytest-benchmark, which auto-disables).
+The same warning also covers `--csv` (pytest-csv), which does not go dark but
+writes a racy per-worker CSV under the pool (rated ⚠️ Caveat in the
+[top-100 matrix](../reference/top-100-plugins.md)).
+The warning is argv-driven: it fires on the *flag*, so it never mistakes
+rstest's own `--html` / `--junitxml` / `--report-json` (which are rendered
+from merged results and are parallel-safe) for a hazard, and it stays silent
+at `-n 0` where the plugin's own controller branch runs.
 
 ### Self-audit: catch a silent no-op in your own plugins
 
@@ -303,18 +310,18 @@ slice="${1:-tests}"
 
 audit() {                      # $1 = worker count, $2 = output dir
   rm -rf "$2"; mkdir -p "$2"
-  # -p no:cacheprovider keeps rstest's own .rstest_cache / .pytest_cache
-  # out of the diff; add your plugin's output flags here if it needs one
-  # (e.g. --html "$2/report.html").
+  # -p no:cacheprovider keeps .pytest_cache out of the diff; rstest still
+  # writes .rstest_cache, so find skips it. Add your plugin's output flags
+  # here if it needs one (e.g. --html "$2/report.html").
   ( cd "$2" && rstest -n "$1" -p no:cacheprovider "$OLDPWD/$slice" >stdout.log 2>&1 ) || true
-  ( cd "$2" && find . -type f ! -empty | sort ) >"$2.files"
+  ( cd "$2" && find . -type f ! -empty ! -path './.rstest_cache/*' | sort ) >"$2.files"
 }
 
 audit 0 audit-n0
 audit 2 audit-n2
 
 echo "== files present at -n 0 but MISSING or EMPTY at -n 2 (silent no-op suspects) =="
-comm -23 <(sed 's#^audit-n0/##' audit-n0.files) <(sed 's#^audit-n2/##' audit-n2.files)
+comm -23 audit-n0.files audit-n2.files
 
 echo "== plugin lines in -n 0 stdout absent from -n 2 stdout (terminal-owned output) =="
 diff <(grep -v '^$' audit-n0/stdout.log) <(grep -v '^$' audit-n2/stdout.log) | grep '^<' || true

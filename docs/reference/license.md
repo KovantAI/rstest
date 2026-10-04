@@ -36,4 +36,8 @@ The vendored copy is unmodified (`python/VENDOR.md` in the repository
 documents provenance and the update procedure). rstest's runtime depends
 on [pluggy](https://github.com/pytest-dev/pluggy) (MIT), pytest's own
 plugin framework, as a regular dependency, so plugins keep class identity
-with the real library.
+with the real library. Its other runtime dependencies are `msgpack`
+(Apache-2.0) for the worker protocol and the vendored core's own
+dependencies: `iniconfig` (MIT), `packaging` (Apache-2.0 OR BSD-2-Clause),
+`pygments` (BSD-2-Clause), and, only where needed, `exceptiongroup` and
+`tomli` (MIT, Python 3.10) and `colorama` (BSD-3-Clause, Windows).

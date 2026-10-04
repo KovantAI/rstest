@@ -15,23 +15,6 @@ between 0.x releases and are listed here.
   `/plugin marketplace add KovantAI/rstest` then `/plugin install rstest@rstest`
   makes both skills available in every project. The skills moved from
   `.claude/skills/` to `plugins/rstest/skills/`.
-
-## 0.8.0 (2026-09-28)
-
-- **`rstest xdist-removal-check`: a readiness check for uninstalling
-  pytest-xdist.** It scans the pytest config and `PYTEST_ADDOPTS` for xdist
-  flags that become a usage error once the package is gone (`--tx`,
-  `--rsyncdir`, `-d`, `--maxprocesses`, `--looponfail`, `-p xdist`, ...) and
-  for `-n` / `--dist`, which rstest never read from `addopts` (so a
-  `--dist loadgroup` there already lost its grouping); `pytest-xdist` in
-  `required_plugins`; unguarded `import xdist` sites in the project and in
-  installed plugins; xdist hook implementations not marked
-  `optionalhook=True`; and `hasplugin("xdist")` gates in the project and in
-  installed plugins. Each
-  finding prints its fix. Exits non-zero on any blocking finding;
-  `--migrate-allow` accepts known ones and `--xdist-removal-json` writes a
-  versioned document for CI. `--xdist-trial` also runs the suite with xdist
-  hidden (`-p no:xdist`) and names the tests that only pass with it.
 - **SIGTERM/SIGINT stop a parallel run cleanly.** rstest used to die on the
   spot: no summary, no replay journal, no reports, and its workers kept
   running, reparented to init. Now it stops and reaps every worker, names the
@@ -56,6 +39,22 @@ between 0.x releases and are listed here.
   included, and silently matched nothing. A `#` after whitespace now starts a
   comment; a `#` inside a nodeid (`test_x[#1]`) is still part of it.
 
+## 0.8.0 (2026-09-30)
+
+- **`rstest xdist-removal-check`: a readiness check for uninstalling
+  pytest-xdist.** It scans the pytest config and `PYTEST_ADDOPTS` for xdist
+  flags that become a usage error once the package is gone (`--tx`,
+  `--rsyncdir`, `-d`, `--maxprocesses`, `--looponfail`, `-p xdist`, ...) and
+  for `-n` / `--dist`, which rstest never read from `addopts` (so a
+  `--dist loadgroup` there already lost its grouping); `pytest-xdist` in
+  `required_plugins`; unguarded `import xdist` sites in the project and in
+  installed plugins; xdist hook implementations not marked
+  `optionalhook=True`; and `hasplugin("xdist")` gates in the project and in
+  installed plugins. Each
+  finding prints its fix. Exits non-zero on any blocking finding;
+  `--migrate-allow` accepts known ones and `--xdist-removal-json` writes a
+  versioned document for CI. `--xdist-trial` also runs the suite with xdist
+  hidden (`-p no:xdist`) and names the tests that only pass with it.
 - **`pip install rstest` works on Python 3.10 without pytest.** The vendored
   pytest core imports `exceptiongroup` and `tomli` below Python 3.11 (and
   `colorama` on Windows), but rstest didn't declare them, so a fresh 3.10
@@ -366,7 +365,6 @@ between 0.x releases and are listed here.
 - **Monorepo merged `--report-json` now stamps the current schema.** The merged
   root document hard-coded `"schema": 4` while carrying schema-5 fields
   (`quarantined`); it now shares the single-project writer's version constant.
-
 - **rstest warns about plugins pinned to an older pytest.** When a loaded
   plugin's own metadata excludes the pytest rstest runs (for example it declares
   `pytest<9`), rstest prints one `rstest: warning: ...` line to stderr per run.
@@ -377,9 +375,11 @@ between 0.x releases and are listed here.
   publish a machine-readable [JSON Schema](https://json-schema.org/) (draft-07)
   plus a field-reference table, generated directly from the Rust types
   (`schemars`) and embedded into the docs so they can never drift from what the
-  CLI emits. Covers every stable JSON surface: `--report-json`, `--doctor-json`,
+  CLI emits. Covers `--report-json`, `--doctor-json`,
   `--collect-only --report-json` (discovery), `migrate-check --migrate-check-json`,
-  and the `flakes.json` flake log; see the new *Output schemas* reference page.
+  and the `flakes.json` flake log (the audit, bisect, explain and
+  xdist-removal-check outputs got schemas in separate entries of this
+  release); see the new *Output schemas* reference page.
   The three previously hand-built (`serde_json::json!`) outputs are now emitted
   from typed structs with unchanged bytes. A golden test enforces schema
   freshness (`RSTEST_BLESS_SCHEMAS=1 cargo test -p rstest-cli schema`).

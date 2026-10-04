@@ -44,8 +44,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Match this workflow by file name, not display name (two workflows
+          # can share a `name:`). GITHUB_WORKFLOW_REF is
+          # owner/repo/.github/workflows/<file>@ref.
+          wf="${GITHUB_WORKFLOW_REF##*/.github/workflows/}"; wf="${wf%%@*}"
           rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "${{ github.workflow }}" --branch main --event push \
+                  --workflow "$wf" --branch main --event push \
                   --status success --limit 1 \
                   --json databaseId --jq '.[0].databaseId // ""')
           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
@@ -86,9 +90,9 @@ jobs:
       # coverage slice, and the next run's pull unions them into a full index
       # that --changed consumes. --cov-report= suppresses the textual report (we
       # want only the index side-effect). Drop the --cov flags if you don't use
-      # --changed. Replace <your_package> with your importable package/source dir.
+      # --changed. Replace YOUR_PACKAGE with your importable package/source dir.
       - run: rstest -n 4 --shard ${{ matrix.shard }}/4
-               --cov=<your_package> --cov-context=test --cov-report=
+               --cov=YOUR_PACKAGE --cov-context=test --cov-report=
                --cache-remote ./rcache --cache-pull --cache-push
                --junitxml junit.${{ matrix.shard }}.xml
 
@@ -143,9 +147,12 @@ if you would rather warm from the newest finished run, red or not.
     `gh run list` resolves the latest successful one above (the REST API `GET
     /repos/{owner}/{repo}/actions/artifacts` is the alternative). One complete
     sharded run is enough: its `N` shard segments union into a full index. To
-    fold *many* runs instead, add a scheduled job that `cache-compact`s the
-    segments into a base and uploads that base as its own artifact for PR jobs to
-    pull.
+    fold *many* runs instead, add a scheduled job that runs
+    `rstest cache-compact --cache-remote ./rcache` over the downloaded segments
+    and uploads the resulting `./rcache/base.json` as its own artifact. rstest
+    reads the base only from `<remote>/base.json`, so each PR job needs an extra
+    download step that puts that artifact at `./rcache/base.json` next to
+    `./rcache/segments/`; the segment download above does not fetch it.
 
 ## Object store (S3/GCS/R2), OIDC: no secrets
 
@@ -275,8 +282,9 @@ pull/push bookends beyond the flags.
 
 ## Reliability
 
-Add `--require-baseline` to `--durations-regress` so a cold or failed pull is a
-hard error, never a silent green:
+A failed pull already stops the run (exit 1). Add `--require-baseline` to
+`--durations-regress` so a cold remote, one that leaves no duration baseline,
+is a hard error too, never a silent green:
 
 ```console
 $ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5

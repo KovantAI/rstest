@@ -40,7 +40,9 @@ to run yet.
 - Python **3.10 or newer** in the environment whose tests you run. This
   matches the supported CPython line: 3.9 reached end-of-life in October
   2025 and no longer receives security fixes, so rstest tracks 3.10+.
-- macOS, Linux, or Windows. Windows uses an anonymous-pipe transport
+- macOS on Apple silicon (arm64), Linux, or Windows. There is no Intel
+  (x86_64) macOS wheel and no source distribution, so `pip install rstest`
+  fails on an Intel Mac. Windows uses an anonymous-pipe transport
   (Unix uses POSIX pipes); the full test gate runs on `windows-latest`
   in CI on every commit, and wheels are built and smoke-tested there.
   The broad public-suite corpus is run on macOS/Linux, so Windows is

@@ -62,7 +62,9 @@ flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
 
 Pin the action to a release tag (`v0.8.0` or later) or a full commit SHA,
 and set `version:` to pin the rstest wheel; without it the action installs the
-latest rstest from PyPI.
+latest rstest from PyPI. Under `runner: uv` (the default when the project has a
+`uv.lock` or `[tool.uv]`) `version:` is ignored and rstest comes from your
+lockfile, so pin it there.
 
 The YAML on these pages references third-party actions by major tag
 (`actions/checkout@v7`) for readability. If your security policy requires it,
@@ -292,8 +294,9 @@ jobs:
           # <os>-py<version>-<working-directory>, e.g. Linux-py3.13-libs-core),
           # so packages never warm from each other's segments.
           cache-backend: artifact
-          # uv projects are detected and installed with `uv sync --dev`;
-          # otherwise install the package's own dependencies here.
+          # Non-uv package: install its dependencies here. For a uv package,
+          # delete this line: a set `install:` replaces the `uv sync --dev`
+          # the action would otherwise run, while tests still run under uv.
           install: pip install -r requirements.txt rstest
           args: "-n auto"
           upload-junit: true

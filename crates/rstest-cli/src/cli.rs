@@ -148,9 +148,10 @@ pub(crate) enum Command {
     },
 }
 
-/// rstest: a fast, pytest-compatible test runner. Unrecognized flags forward
-/// to the test session verbatim: clap can't mirror pytest's large,
-/// plugin-extensible flag surface, so we pre-scan argv ourselves.
+// Unrecognized flags are split off by our own argv pre-scan: clap can't mirror
+// pytest's large, plugin-extensible flag surface.
+/// rstest: a fast, pytest-compatible test runner. Unrecognized flags are
+/// forwarded to the test session verbatim.
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "rstest",

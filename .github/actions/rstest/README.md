@@ -31,7 +31,9 @@ already does natively, it just wires it into GitHub Actions:
 
 Pin the action to a release tag (as above) or, for supply-chain hardening,
 to a full commit SHA. Set `version:` to pin the rstest wheel too; without
-it the action installs the latest rstest from PyPI.
+it the action installs the latest rstest from PyPI. With `runner: uv` (the
+default when the project has a `uv.lock` or `[tool.uv]`) the action runs
+`uv sync --dev` and ignores `version:`: pin rstest in your lockfile instead.
 
 ### PR change-based selection (strict gate)
 
@@ -163,8 +165,9 @@ steps:
 
 Setting `cache-remote` selects the `remote` backend automatically. A shared
 mount (`cache-remote: /mnt/ci-cache/rstest`) needs no pull/push bookends beyond
-the flags. Add `durations-regress` + `require-baseline: true` to make a cold or
-failed pull a hard error instead of a silent green.
+the flags. A failed pull is always a hard error (exit 1). Add
+`durations-regress` + `require-baseline: true` so a pull that succeeds but
+brings no baseline (a cold remote) is one too, instead of a silent green.
 
 **Only trusted runs write.** With the default `cache-push: auto`, the
 `remote` backend pushes only on `push`, `schedule` and `workflow_dispatch`
@@ -212,7 +215,7 @@ covers GCS / Azure / HTTP.
 | `cache-backend` | `actions-cache` | `actions-cache` / `artifact` / `remote`: see [Warm cache as a service](#warm-cache-as-a-service) |
 | `cache-remote` | `""` | dir / `file://` / `s3://` / `gs://` / `http(s)://` remote; non-empty ⇒ `remote` backend |
 | `cache-remote-token` | `""` | bearer for an `http(s)://` remote → `RSTEST_CACHE_REMOTE_TOKEN` |
-| `cache-push` | `auto` | whether this job writes the cache: `auto` = `remote` pushes only from `push`/`schedule`/`workflow_dispatch` on `warm-from-branch` and `merge_group`; `actions-cache` skips `pull_request_target`/`issue_comment`/`workflow_run`. `true` always, `false` never |
+| `cache-push` | `auto` | whether this job writes the cache: `auto` = `remote` pushes only from `push`/`schedule`/`workflow_dispatch` on `warm-from-branch` and `merge_group`; `actions-cache` saves only on `push`/`pull_request`/`schedule`/`workflow_dispatch`/`merge_group` (any other event, e.g. `pull_request_target` or `release`, never saves). `true` always, `false` never |
 | `cache-compact-threshold` | `""` | `--cache-compact-threshold N`: fold loose segments inline on push past N (best-effort) |
 | `warm-from-branch` | `main` | your trusted branch. Artifact backend: its latest successful run seeds the warm cache. `remote` backend with `cache-push: auto`: the only branch whose runs push |
 | `warm-from-event` | `push` | Artifact backend: only warm from a run triggered by this event (empty = any); keeps PR runs from becoming the warm source |
@@ -258,8 +261,9 @@ a `${...}-` restore-key. Two deliberate choices:
   shard's baseline. Segmenting keeps each matrix leg's baseline separate.
 
 To seed a shared baseline for PR shards, run the full unsharded suite on your
-default branch (a normal run of this action on `push` writes the cache); PR runs
-restore the newest matching entry read-only.
+default branch (a normal run of this action on `push` writes the cache). PR runs
+restore the newest matching entry; anything a PR run saves is scoped to that PR,
+so it never replaces the default branch's baseline.
 
 ## Security and matrix behavior
 
@@ -311,8 +315,11 @@ Artifact names now carry the leg suffix. Two consequences:
   segments were named `rstest-seg-<run_id>-<shard>` and don't match the new
   pattern. It re-seeds itself.
 - Workflows that download JUnit by exact name (`rstest-junit` or
-  `rstest-junit-shard-K`) need the new names. A `pattern: rstest-junit-*` with
-  `merge-multiple: true` works across all legs and shards.
+  `rstest-junit-shard-K`) need the new names. Download them with
+  `pattern: rstest-junit-*` and **without** `merge-multiple`: every artifact
+  holds one file named after the `junit` input (`junit.xml` by default), so
+  merging them into one directory keeps only one leg's file. Each artifact
+  lands in its own subdirectory instead; read `*/junit.xml`.
 
 ## Notes
 

@@ -108,7 +108,9 @@ published numbers (re-measured 2026-09-30 with rstest 0.8.0) are in
 [docs/reference/benchmarks.md](../docs/reference/benchmarks.md); test counts
 and walls there differ from this table.
 
-25/31 suites at 100% per-test outcome parity; every non-100% suite is
+The table covers 31 of the 33 parity suites: langgraph is measured
+separately [below](#monorepo-mono-mode-rstest-060), and langchain joined the
+corpus after this snapshot. 25/31 suites at 100% per-test outcome parity; every non-100% suite is
 explained below (permanent by-design diffs or upstream flakes that hit
 plain pytest equally).
 
@@ -119,7 +121,7 @@ plain pytest equally).
 | sqlalchemy | 25,300 | 99.97% | 524.5s | 52.6s (`-n auto`, 7 serial-baseline skips) |
 | pydantic | 12,733 | 99.97% | 14.2s | 14.1s (`-n 0`, sys.path param) |
 | jsonschema | 8,337 | 100% | 4.2s | 2.7s |
-| aiohttp | 4,469 | 100% | 199.1s | 67.3s |
+| aiohttp | 4,469 | 100%† | 199.1s | 67.3s (†this run; the 2026-09-30 benchmark runs measured 99.91-99.98%, socket-leak flake) |
 | anyio | 3,814 | 100% | 103.4s | 26.5s |
 | fastapi | 3,179 | 100% | 25.9s | 10.0s |
 | urllib3 | 2,299 | 100% | 54.6s | 39.4s |
@@ -129,7 +131,7 @@ plain pytest equally).
 | click | 1,697 | 100% | 2.6s | 2.6s |
 | httpx | 1,418 | 100% | 3.3s | 3.1s (`-n 0`, fixed port) |
 | attrs | 1,391 | 100% | 4.2s | 2.6s |
-| typer | 1,374 | 99.93% | 8.9s | 2.9s (1 load-sensitive test) |
+| typer | 1,374 | 99.93% | 8.9s | 2.9s (1 isolation-defect test) |
 | marshmallow | 1,178 | 100% | 0.6s | 0.6s |
 | werkzeug | 992 | 99.9% | 5.8s | 2.4s (1 unix-socket test) |
 | rich | 981 | 99.8%* | 3.9s | 2.4s (*upstream flake, hits pytest too) |
@@ -174,7 +176,8 @@ each. The classes:
 | Class | Suites | Policy |
 |---|---|---|
 | Fixed network port in session fixture | httpx | `-n 0` |
-| Run-dependent parametrize IDs (`now()`) | marshmallow, arrow, pydantic | see below |
+| Run-dependent parametrize IDs (`now()`) | marshmallow, arrow | see below |
+| Per-process parametrize IDs (memory addresses) | pydantic | `-n 0` |
 | Load-sensitive timing tests | werkzeug, urllib3, typer, anyio | `-n 4` |
 | Wall-clock-sensitive whole suite | allauth | `-n 4` |
 
@@ -186,10 +189,11 @@ itself: it builds a shim `WorkerController` and runs every plugin's
 for plugins that register mid-`configure`). This covers hooks whose
 injected value is **self-derivable** (a `uuid4`, or a `workerid` suffix):
 
-- **sqlalchemy** (`follower_ident`) runs at full **`-n auto`, 10×**
-  (524.5s→52.6s), 99.97%. xdist installed → its `XDistHooks` registers → the
+- **sqlalchemy** (`follower_ident`) runs at full **`-n auto`**: 4.6×
+  (552.4s→119.8s), 99.96% in the latest `results.json` (the table above,
+  an older snapshot, has 10× and 99.97%). xdist installed → its `XDistHooks` registers → the
   emulation fires `configure_node` → each worker self-assigns
-  `follower_ident=uuid4()` and provisions its own follower DB. The 7-test
+  `follower_ident=uuid4()` and provisions its own follower DB. The 9-test
   gap is serial-baseline-vs-parallel (those IMV/RETURNING tests skip in the
   serial baseline but pass under real xdist *and* rstest), not a follower
   bug.
@@ -261,8 +265,11 @@ remove it) is catalogued in
   affected equally. Installing ipywidgets (unused by the tests) makes
   it worse: its IPython dependency registers a pygments plugin lexer
   with nondeterministic tie-breaking.
-- **typer**: one warning-assertion test is load-sensitive; flakes at
-  high worker counts (hence the `-n 4` policy).
+- **typer**: one warning-assertion test has an isolation defect: it misses
+  its `pytest.warns` when a sibling that touched the warnings state runs
+  first in the same worker (see
+  [parity divergences](../docs/reference/parity-divergences.md)). The `-n 4`
+  policy is for the separate, load-sensitive progressbar timing tests.
 
 ## Corpus-found bugs (fixed)
 

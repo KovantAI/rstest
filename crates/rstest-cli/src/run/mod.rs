@@ -1713,8 +1713,9 @@ fn requests_doctests<'a>(mut opts: impl Iterator<Item = &'a str>) -> bool {
 /// would never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) is
 /// reported empty by the lazy worker, which replays pytest's ignore checks.
 ///
-/// Auto-lazy never steals, so each file runs whole on one worker: a file whose
-/// cached time exceeds an even per-worker share by more than
+/// Judged as if lazy never steals (stealing needs an explicit `--dist load`,
+/// and this check runs either way), so each file runs whole on one worker: a
+/// file whose cached time exceeds an even per-worker share by more than
 /// [`LAZY_LONG_POLE_SLACK_SECS`] would be the long pole the eager pool avoids
 /// by spreading its tests (this also covers `files < n`).
 fn lazy_layout_fits(

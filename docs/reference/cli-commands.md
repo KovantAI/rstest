@@ -13,6 +13,14 @@ subcommand are documented with it; everything else is on
 rstest <COMMAND> [OPTIONS]
 ```
 
+After a subcommand, rstest accepts only that subcommand's own flags plus a
+small shared set: `--python`, `--cache-remote`, `--cache-compact-threshold`
+and the subcommands' JSON and tuning flags (`--migrate-check-json`,
+`--migrate-allow`, `--xdist-removal-json`, `--xdist-trial`, `--audit-json`,
+`--audit-repeat`, `--bisect-json`). Any other run flag there, such as `-n` or
+`--cache-push`, is a usage error (exit `2`). `rstest <COMMAND> --help` lists
+what each one accepts.
+
 - **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`xdist-removal-check`](#xdist-removal-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
 - **CI and the shared cache:** [`shard-verify`](#shard-verify), [`cache-compact`](#cache-compact)
 - **Inspection and integrity:** [`explain`](#explain), [`verify-vendor`](#verify-vendor)
@@ -176,9 +184,9 @@ hook under such a gate, or in a class the same file registers only under
 one, isn't reported either. Hook names the project declares itself (through
 `pytest_addhooks` and `@pytest.hookspec`) don't need pytest-xdist, and
 neither do hook-named functions in test modules, which pytest never
-registers as plugins, so neither is reported. Exits non-zero on any blocking finding that isn't
-allow-listed with [`--migrate-allow`](#-migrate-allow-substring), which here
-matches against the finding's location (`pytest.ini addopts`,
+registers as plugins, so neither is reported. Exits `1` on any blocking
+finding that isn't allow-listed with
+[`--migrate-allow`](#-migrate-allow-substring), which here matches against the finding's location (`pytest.ini addopts`,
 `tests/conftest.py:12`, a plugin's distribution name).
 
 ```console
@@ -512,8 +520,9 @@ Maintenance: fold remote segments into a fresh `base.json` and prune them, then
 exit without running tests. Keeps the segment count (and pull size) down;
 optional: pull/push work without it. Run occasionally (nightly, or on merge to
 main). Needs `--cache-remote`. It is **run-less**: it exits before the run, so
-don't combine it with `--cache-pull`/`--cache-push` (rstest rejects that
-combination rather than silently skipping them).
+`--cache-pull`/`--cache-push` aren't accepted after it: like any run flag
+there, they are a usage error (`unexpected argument`, exit `2`), so they are
+never silently skipped.
 
 With no retention flags it folds **all** segments. To keep a recent window loose
 (so the newest history stays merge-on-read while the tail is compacted):
@@ -526,9 +535,10 @@ With no retention flags it folds **all** segments. To keep a recent window loose
 
 Both flags belong to the subcommand and must come **after** it:
 `rstest cache-compact --cache-remote s3://ci-cache/rstest --keep-last 200`.
-Anywhere else, including before the subcommand (`rstest --keep-last 200
-cache-compact ...`), they are a usage error (`unexpected argument
-'--keep-last' found`, exit `2`). On a normal run, the inline
+rstest reserves both names in every position, so anywhere else they are a
+usage error (`unexpected argument '--keep-last' found`, exit `2`): before the
+subcommand (`rstest --keep-last 200 cache-compact ...`) and on a normal run
+(`rstest --keep-last 200 tests/`) alike. On a normal run, the inline
 [`--cache-compact-threshold`](cli.md#-cache-compact-threshold-n) compaction
 reads the retention window from the env vars instead.
 
