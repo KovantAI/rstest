@@ -101,13 +101,14 @@ header line. Check each item against your suite:
   differently. A banner line says when this happens; pin `--collect full` if
   your suite depends on every module being imported. See
   [Lazy collection](../concepts/lazy-collection.md#the-compatibility-trade).
-- [ ] *Reordering in `pytest_collection_modifyitems` is ignored* at
-  `-n ≥ 2` (deselection is honored). rstest schedules by duration instead.
-  This includes plugins that reorder: pytest-django, for example, moves
-  `TestCase` tests ahead of `TransactionTestCase` in that hook, so expect
-  that ordering not to hold in the pool (inferred from the mechanism, not
-  verified against a Django suite). Use `-n 0` or an affinity `--dist` mode
-  where order matters.
+- [ ] *Reordering in `pytest_collection_modifyitems` does not guarantee run
+  order* at `-n ≥ 2`. Deselection is honored and dispatch starts from your
+  order, but cached slow tests (1s or more) go first and tests on different
+  workers run concurrently. This includes plugins that reorder: pytest-django,
+  for example, moves `TestCase` tests ahead of `TransactionTestCase` in that
+  hook, so expect that ordering not to hold in the pool (inferred from the
+  mechanism, not verified against a Django suite). Use `-n 0` or an affinity
+  `--dist` mode where order matters.
 - [ ] *Custom `pytest_terminal_summary` output is not shown* at `-n ≥ 2`:
   the hook runs in each worker, but rstest renders one merged terminal.
 - [ ] *pytest-rerunfailures is unregistered in pool workers*; rstest's own

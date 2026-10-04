@@ -1656,14 +1656,14 @@ struct SingleWorkerInterrupts {
 
 impl SingleWorkerInterrupts {
     fn install(child: Option<u32>) -> Self {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::AtomicBool;
         let guard = crate::scheduling::interrupt::Guard::install();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         #[cfg(unix)]
         let forwarder = child.map(|pid| {
             let stop = std::sync::Arc::clone(&stop);
             std::thread::spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                     if crate::scheduling::interrupt::requested() == Some(libc::SIGTERM) {
                         // SAFETY: sending a signal touches no memory. The pid
                         // is our unreaped child (the caller drops this guard,

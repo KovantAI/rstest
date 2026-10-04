@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pytest_bdd.scenario import scenario_wrapper_template_registry
 from pytest_bdd.steps import step_function_context_registry
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -54,6 +55,15 @@ def pytest_sessionstart(session):
             raise pytest.UsageError(
                 f"step {ctx.type} {ctx.parser.name!r} is defined twice: {seen[key]} and {where}"
             )
+
+
+def pytest_collection_modifyitems(items):
+    """Tag each scenario with its persona (the feature file's stem) as a junit
+    property, so gate.py can report one result per persona."""
+    for item in items:
+        template = scenario_wrapper_template_registry.get(getattr(item, "function", None))
+        if template is not None:
+            item.user_properties.append(("persona", Path(template.feature.filename).stem))
 
 
 def pytest_bdd_apply_tag(tag, function):
