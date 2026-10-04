@@ -36,7 +36,7 @@
       }
     },
     "will_bail_count": {
-      "description": "Count of per-process-unstable ids that force `-n 0`.",
+      "description": "Count of ids that force `-n 0`: per-process-unstable ids plus ids at\norder-unstable sites (`order` kind).",
       "type": "integer",
       "format": "uint",
       "minimum": 0

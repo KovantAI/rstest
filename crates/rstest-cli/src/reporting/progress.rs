@@ -78,6 +78,11 @@ impl OutcomeKind {
 /// teardown (its own marker after the call already printed).
 fn outcome_kind(r: &Report) -> Option<OutcomeKind> {
     use OutcomeKind::*;
+    // Passing/skipped subtests are not tests of their own (pytest hides them
+    // by default); a failed one shows as a failure.
+    if r.subtest && r.outcome != "failed" {
+        return None;
+    }
     Some(match (r.when.as_str(), r.outcome.as_str()) {
         ("call", "passed") => {
             if r.wasxfail {
@@ -588,7 +593,22 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         }
+    }
+
+    #[test]
+    fn only_failed_subtests_show_in_progress() {
+        let sub = |outcome| Report {
+            subtest: true,
+            ..report("call", outcome)
+        };
+        assert!(outcome_kind(&sub("passed")).is_none());
+        assert!(outcome_kind(&sub("skipped")).is_none());
+        assert!(matches!(
+            outcome_kind(&sub("failed")),
+            Some(OutcomeKind::Fail)
+        ));
     }
 
     #[test]

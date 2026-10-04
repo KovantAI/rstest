@@ -434,7 +434,6 @@ def gate_ci_artifacts(g, args, binary):
             f"CI-02 {name}: exit != 0 iff report-json counts a failure",
             rc_bad == json_bad,
             f"rc={r.returncode} counts={counts}",
-            known_bug=name == "unittest_subtest",
         )
         check(
             f"CI-02 {name}: report-json meta.exitstatus equals the exit code",
@@ -454,7 +453,6 @@ def gate_ci_artifacts(g, args, binary):
                 "CI-02 collect error: report-json counts it once, as JUnit does",
                 counts["collect_errors"] == collect == 1 and len(doc["collect_errors"]) == 1,
                 f"json={counts['collect_errors']} {doc['collect_errors']} junit={collect}",
-                known_bug=True,
             )
 
     # CI-04: one module that cannot import. Every annotation style must make

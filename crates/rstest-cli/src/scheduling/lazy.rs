@@ -284,9 +284,12 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => {
-                prog.on_collect_error(sink, &path, &longrepr);
-                sink.emit_collect_error(&path, &longrepr);
-                run.collect_error(path, longrepr);
+                // A file collected again elsewhere (steal / redistribution)
+                // reports the same error: show it once.
+                if run.collect_error(path.clone(), longrepr.clone()) {
+                    prog.on_collect_error(sink, &path, &longrepr);
+                    sink.emit_collect_error(&path, &longrepr);
+                }
                 if !continue_on_collect_errors && !stopping {
                     // pytest aborts on collection errors; in lazy mode the
                     // error can surface mid-run - stop dispatching and wind
@@ -345,7 +348,9 @@ pub fn run_lazy_pool(
                 ids,
                 serial: ser,
                 flaky,
+                deselected,
             }) => {
+                run.deselected += deselected;
                 total_items += ids.len();
                 prog.set_total(total_items);
                 sources.record(&ids);

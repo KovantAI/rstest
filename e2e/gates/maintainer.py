@@ -721,7 +721,6 @@ def gate_maintainer_pool(g, args, binary):
             f"MT-10 -n {n}: session set-ups == workers that ran parallel tests",
             len(ups) == len(par_workers),
             f"setups={len(ups)} parallel_workers={sorted(par_workers)}",
-            known_bug=n == "2",
         )
 
     # MT-14: warm cache, four 1s tests + one fast test at -n 4. Cached long
@@ -749,13 +748,11 @@ def gate_maintainer_pool(g, args, binary):
         "MT-14 each 1s test runs on a different worker",
         len(set(slow_workers)) == 4,
         f"workers={slow_workers}",
-        known_bug=True,
     )
     check(
         "MT-14 wall < 1.75s (one long pole per worker, not two)",
         wall < 1.75,
         f"wall={wall}",
-        known_bug=True,
     )
     check(
         "MT-14 doctor does not report a PARALLEL FLOOR problem",

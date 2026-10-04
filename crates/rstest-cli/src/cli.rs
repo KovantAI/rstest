@@ -384,8 +384,9 @@ pub struct Cli {
     /// live progress) for terminals; "github", "gitlab", "buildkite",
     /// "teamcity", or "azure" for CI annotations; "tap" or "json" for
     /// machine-readable streams. Config `[tool.rstest] output`. Default "bar"
-    /// on a tty ("verbose" with -v), "dots" off-tty. An unknown style warns and
-    /// falls back to "dots".
+    /// on a tty ("verbose" with -v), "dots" off-tty. Any other value is not
+    /// rstest's: `--output VALUE` goes to the pytest session unchanged (a
+    /// plugin's own `--output`, e.g. pytest-playwright's artifacts dir).
     #[arg(long, value_name = "STYLE")]
     pub(crate) output: Option<String>,
 
@@ -759,6 +760,47 @@ const SUBCOMMANDS: &[&str] = &[
     "explain",
 ];
 
+/// The `--output` styles rstest renders. `--output` with any other value is a
+/// plugin's flag (pytest-playwright's `--output DIR`) and is forwarded to the
+/// pytest session instead (see [`split_args`]).
+pub(crate) const OUTPUT_STYLES: &[&str] = &[
+    "dots",
+    "verbose",
+    "bar",
+    "github",
+    "gitlab",
+    "buildkite",
+    "teamcity",
+    "azure",
+    "tap",
+    "json",
+];
+
+/// `--output VALUE` (or `--output=VALUE`) whose VALUE is not one of
+/// [`OUTPUT_STYLES`]: the plugin's flag, not rstest's.
+fn foreign_output(arg: &str, next: Option<&String>) -> bool {
+    let value = match arg.strip_prefix("--output=") {
+        Some(v) => Some(v),
+        None if arg == "--output" => next.map(String::as_str),
+        None => None,
+    };
+    value.is_some_and(|v| !OUTPUT_STYLES.contains(&v))
+}
+
+/// The value of an `--output` that [`split_args`] forwarded to the session.
+pub(crate) fn forwarded_output(session_args: &[String]) -> Option<&str> {
+    let mut it = session_args.iter();
+    while let Some(a) = it.next() {
+        if a == "--output" {
+            return it.next().map(String::as_str);
+        }
+        if let Some(v) = a.strip_prefix("--output=") {
+            return Some(v);
+        }
+    }
+    None
+}
+
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
 /// the following argv item (that item is a path / pytest flag).
@@ -855,6 +897,14 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     while let Some(arg) = argv.next() {
         if arg == "--" {
             session.extend(argv.by_ref());
+        } else if foreign_output(&arg, argv.peek()) {
+            // Not an rstest style: a plugin's `--output` (pytest-playwright),
+            // forwarded whole so the plugin sees it at every worker count.
+            let joined = arg.contains('=');
+            session.push(arg);
+            if !joined {
+                session.extend(argv.next());
+            }
         } else if owned_without_value(&arg) {
             own.push(arg);
         } else if VALUE_FLAGS.contains(&arg.as_str()) {
@@ -875,6 +925,30 @@ mod tests {
 
     fn v(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn output_routes_by_value() {
+        // One of rstest's styles: owned.
+        for args in [&["--output", "json"][..], &["--output=tap"][..]] {
+            let (own, session) = split_args(v(args));
+            assert!(session.is_empty(), "{args:?} leaked to the session");
+            let cli = Cli::try_parse_from(own).unwrap();
+            assert!(cli.output.is_some());
+        }
+        // Anything else is a plugin's `--output` (pytest-playwright): forwarded.
+        let (own, session) = split_args(v(&["-n", "2", "--output", "artifacts", "t.py"]));
+        assert_eq!(own, v(&["rstest", "-n", "2"]));
+        assert_eq!(session, v(&["--output", "artifacts", "t.py"]));
+        let (own, session) = split_args(v(&["--output=test-results"]));
+        assert_eq!(own, v(&["rstest"]));
+        assert_eq!(session, v(&["--output=test-results"]));
+        // A bare trailing `--output` stays rstest's (clap reports the missing value).
+        let (own, _) = split_args(v(&["--output"]));
+        assert_eq!(own, v(&["rstest", "--output"]));
+        assert_eq!(forwarded_output(&v(&["-x", "--output", "a"])), Some("a"));
+        assert_eq!(forwarded_output(&v(&["--output=b"])), Some("b"));
+        assert_eq!(forwarded_output(&v(&["-x"])), None);
     }
 
     #[test]

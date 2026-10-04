@@ -124,7 +124,6 @@ def gate_onboarding_try(g, args, binary):
         "EV-04 try: failing subtests are not hidden behind a parity verdict",
         "(0 failing)" not in r.stdout and not silent_ok,
         f"rc={r.returncode} " + r.stdout[-400:],
-        known_bug=True,
     )
 
 

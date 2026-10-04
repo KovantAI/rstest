@@ -235,6 +235,7 @@ mod tests {
             fd_delta: None,
             sections: vec![],
             lineno: Some(12),
+            subtest: false,
         }
     }
 

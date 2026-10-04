@@ -953,31 +953,88 @@ fn hook_specs(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The replacement for the xdist helpers a file calls.
-fn import_fix(text: &str) -> String {
-    let mut fixes = Vec::new();
-    if text.contains("get_xdist_worker_id") {
-        fixes.push(
+/// The replacement for the xdist helpers one import line brings in. A
+/// `from xdist[.mod] import a, b` line names its helpers itself; for
+/// `import xdist[.mod] [as x]` the file is searched for `x.<helper>` (the
+/// helpers live in `xdist.plugin` and are re-exported by `xdist`). Without a
+/// helper, the advice depends on the module imported.
+fn import_fix(line: &str, text: &str) -> String {
+    const HELPERS: &[(&[&str], &str)] = &[
+        (
+            &["get_xdist_worker_id"],
             "`get_xdist_worker_id(...)` -> the `worker_id` fixture, or \
              `os.environ.get(\"PYTEST_XDIST_WORKER\", \"master\")`",
-        );
-    }
-    if text.contains("is_xdist_worker") {
-        fixes.push("`is_xdist_worker(request)` -> `hasattr(request.config, \"workerinput\")`");
-    }
-    if text.contains("is_xdist_controller") || text.contains("is_xdist_master") {
-        fixes.push(
+        ),
+        (
+            &["is_xdist_worker"],
+            "`is_xdist_worker(request)` -> `hasattr(request.config, \"workerinput\")`",
+        ),
+        (
+            &["is_xdist_controller", "is_xdist_master"],
             "`is_xdist_controller(...)` -> `not hasattr(config, \"workerinput\")` (rstest has \
              no controller process at -n >= 2)",
-        );
-    }
-    if fixes.is_empty() {
-        "use the native `worker_id` / `testrun_uid` fixtures or the `PYTEST_XDIST_*` env, or \
-         guard the import with `try:` / `except ImportError`"
-            .to_string()
+        ),
+    ];
+    let code = line.split('#').next().unwrap_or("").trim();
+    // The module the line imports, and the names it brings in (a `from`
+    // import) or the name it binds the module to (`import ... [as x]`).
+    let (module, names, bound) = if let Some(rest) = code.strip_prefix("from ") {
+        let (module, names) = rest.split_once(" import ").unwrap_or((rest, ""));
+        let names: Vec<&str> = names
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|n| !n.is_empty())
+            .collect();
+        (module.trim(), names, None)
     } else {
-        fixes.join("; ")
+        let entry = code
+            .strip_prefix("import")
+            .unwrap_or(code)
+            .split(',')
+            .map(str::trim)
+            .find(|e| e.split_whitespace().next().is_some_and(is_xdist_module))
+            .unwrap_or("xdist");
+        let mut parts = entry.split_whitespace();
+        let module = parts.next().unwrap_or("xdist");
+        let bound = match (parts.next(), parts.next()) {
+            (Some("as"), Some(alias)) => alias,
+            _ => "xdist",
+        };
+        (module, Vec::new(), Some(bound))
+    };
+    // A `from ... import (` list continues past this line: fall back to the file.
+    let continued = code.ends_with('(') || code.ends_with('\\');
+    let uses = |h: &str| match bound {
+        None if continued => text.contains(h),
+        None => names.contains(&h),
+        Some(b) => text.contains(&format!("{b}.{h}")) || text.contains(&format!("{b}.plugin.{h}")),
+    };
+    let fixes: Vec<&str> = HELPERS
+        .iter()
+        .filter(|(helpers, _)| helpers.iter().any(|h| uses(h)))
+        .map(|(_, fix)| *fix)
+        .collect();
+    if !fixes.is_empty() {
+        return fixes.join("; ");
     }
+    match module {
+        "xdist" => "use the native `worker_id` / `testrun_uid` fixtures or the `PYTEST_XDIST_*` \
+                    env, or guard the import with `try:` / `except ImportError`"
+            .to_string(),
+        "xdist.plugin" => "`xdist.plugin` is pytest-xdist's own plugin module (its options and \
+                           fixtures): rstest provides `-n`/`--dist` and the `worker_id` / \
+                           `testrun_uid` fixtures natively, so drop the import, or guard it \
+                           with `try:` / `except ImportError`"
+            .to_string(),
+        other => format!(
+            "`{other}` is pytest-xdist internals with no rstest equivalent: drop the code that \
+             uses it, or guard the import with `try:` / `except ImportError`"
+        ),
+    }
+}
+
+/// `xdist` or one of its submodules (`xdist.plugin`), not `xdistlike`.
+fn is_xdist_module(m: &str) -> bool {
+    m == "xdist" || m.starts_with("xdist.")
 }
 
 /// The name of the class whose body line `idx` is in, if any.
@@ -1055,7 +1112,7 @@ fn scan_source(
             out.push(RemovalFinding {
                 allowed: false,
                 blocking: true,
-                fix: import_fix(text),
+                fix: import_fix(line, text),
                 kind: "import".to_string(),
                 location: at,
                 text: snippet,
@@ -1391,6 +1448,33 @@ mod tests {
         ] {
             assert!(scan(line, "c.py").is_empty(), "{line}");
         }
+    }
+
+    #[test]
+    fn import_fix_is_per_line() {
+        let src = "from xdist import is_xdist_worker\nimport xdist.plugin as xp\n";
+        let f = scan(src, "conftest.py");
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f[0].fix.contains("is_xdist_worker"), "{}", f[0].fix);
+        assert!(!f[1].fix.contains("is_xdist_worker"), "{}", f[1].fix);
+        assert!(f[1].fix.contains("xdist.plugin"), "{}", f[1].fix);
+    }
+
+    #[test]
+    fn import_fix_finds_helpers_through_the_bound_name() {
+        let text = "import xdist.plugin as xp\nxp.get_xdist_worker_id(r)\n";
+        assert!(import_fix("import xdist.plugin as xp", text).contains("worker_id"));
+        let text = "import os, xdist\nxdist.is_xdist_controller(c)\n";
+        assert!(import_fix("import os, xdist", text).contains("is_xdist_controller"));
+        // Plain module, no helper: the generic advice.
+        assert!(import_fix("import xdist", "import xdist\n").contains("testrun_uid"));
+        // Other internals name their module.
+        let fix = import_fix(
+            "from xdist.scheduler import LoadScheduling",
+            "from xdist.scheduler import LoadScheduling\n",
+        );
+        assert!(fix.contains("`xdist.scheduler`"), "{fix}");
+        assert!(!fix.contains("is_xdist_worker"));
     }
 
     #[test]

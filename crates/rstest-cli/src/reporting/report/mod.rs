@@ -73,6 +73,18 @@ pub struct TestEntry {
     /// pass was carried forward (`--incremental`). Still counts as passed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cached: bool,
+    /// Failed subtests (unittest `subTest` / the `subtests` fixture). Any
+    /// makes `call` "failed"; each also counts as one `failed`, as in pytest.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub subtests_failed: u64,
+    /// The parent's own call outcome once a subtest failed (`call` then reads
+    /// "failed"): pytest counts the parent by it, apart from its subtests.
+    #[serde(skip)]
+    pub(crate) own_call: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Sharding identity stamped into report-json meta when `--shard K/N` is active,
@@ -193,6 +205,9 @@ pub struct Run {
     failure_by_id: std::collections::HashMap<String, usize>,
     /// Modules/dirs skipped at collection (count into "skipped", as pytest does).
     pub collect_skips: u64,
+    /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks); shown
+    /// in the summary line only, as pytest does.
+    pub deselected: u64,
     /// nodeids that passed only after rerun(s), with attempt counts.
     pub flaky: Vec<(String, u32)>,
     /// Record (duration, phase, nodeid) for every phase report - only when
@@ -230,6 +245,19 @@ impl Run {
         if let Some(w) = worker {
             entry.worker = Some(format!("gw{w}"));
         }
+        if r.subtest {
+            // A subtest shares the parent's nodeid and `when="call"`: only a
+            // failure matters, and it marks the whole test failed. The
+            // parent's own call report (sent after its subtests) keeps it so.
+            if r.outcome == "failed" {
+                entry.subtests_failed += 1;
+                if entry.longrepr.is_none() {
+                    entry.longrepr = capped_longrepr;
+                }
+                entry.call = Some(r.outcome);
+            }
+            return;
+        }
         if r.outcome == "failed" && entry.longrepr.is_none() {
             // Machine consumers need the WHY, not just the phase verdict
             // (the agent-fleet persona's #1 blocker).
@@ -239,7 +267,11 @@ impl Run {
         match r.when.as_str() {
             "setup" => entry.setup = outcome,
             "call" => {
-                entry.call = outcome;
+                if entry.subtests_failed > 0 {
+                    entry.own_call = outcome;
+                } else {
+                    entry.call = outcome;
+                }
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
             }
@@ -264,11 +296,25 @@ impl Run {
         }
     }
 
-    pub fn collect_error(&mut self, path: String, mut longrepr: String) {
+    /// Record a collection error; returns false (and records nothing) for a
+    /// repeat. Every pool worker collects the whole suite, so each reports the
+    /// same broken module: it counts once, as in pytest. Synthetic `<...>`
+    /// paths (internal errors, orchestrator notes) repeat only on identical
+    /// text, since different workers may hit different ones.
+    pub fn collect_error(&mut self, path: String, mut longrepr: String) -> bool {
         // Same bound as failure text: html embeds this verbatim, so a giant
         // collection-error traceback must not land unbounded in the artifact.
         crate::text::truncate_on_boundary(&mut longrepr, FAILURE_TEXT_CAP);
+        let synthetic = path.starts_with('<');
+        if self
+            .collect_errors
+            .iter()
+            .any(|(p, l)| *p == path && (!synthetic || *l == longrepr))
+        {
+            return false;
+        }
         self.collect_errors.push((path, longrepr));
+        true
     }
 
     /// Carry forward a test that was NOT run this session because it is
@@ -405,10 +451,14 @@ impl Run {
     /// pytest-style "N passed, N failed, ..." counts derived from phases:
     /// a test counts by its call outcome; setup/teardown failures count as
     /// errors; setup skips count as skipped (matches pytest accounting).
-    /// Nothing counted reads "no tests ran", like pytest.
+    /// Like pytest's line, collection errors count as errors and deselected
+    /// items are shown. Nothing counted reads "no tests ran", like pytest.
     pub fn summary_line(&self) -> String {
-        let line = self
-            .counts()
+        let mut counts = self.counts();
+        let collect_errors = counts.remove("collect_errors").unwrap_or(0);
+        *counts.entry("errors").or_default() += collect_errors;
+        counts.insert("deselected", self.deselected);
+        let line = counts
             .iter()
             .filter(|(_, v)| **v > 0)
             .map(|(k, v)| format!("{v} {}", k.replace('_', " ")))
@@ -440,7 +490,16 @@ impl Run {
         // A flaky test (passed only after a rerun) counts once, as `flaky`,
         // not also as `passed`: the buckets partition the tests.
         for entry in self.tests.values() {
-            let bucket = match classify(entry) {
+            // pytest counts each failed subtest as a failure and the parent
+            // by its own call outcome (unittest leaves it passed; the
+            // `subtests` fixture fails it too).
+            let bucket = if entry.subtests_failed > 0 && !entry.quarantined {
+                *counts.entry("failed").or_default() += entry.subtests_failed;
+                classify_call(entry, entry.own_call.as_deref())
+            } else {
+                classify(entry)
+            };
+            let bucket = match bucket {
                 "passed" if entry.flaky => "flaky",
                 b => b,
             };
@@ -521,6 +580,11 @@ impl TestEntry {
 /// implement the SAME decision tree and MUST be changed together, or the HTML
 /// report will disagree with the summary/report-json/junit for the same entry.
 fn classify(e: &TestEntry) -> &'static str {
+    classify_call(e, e.call.as_deref())
+}
+
+/// [`classify`] with the call outcome given explicitly.
+fn classify_call(e: &TestEntry, call: Option<&str>) -> &'static str {
     if e.quarantined {
         return "quarantined";
     }
@@ -528,10 +592,10 @@ fn classify(e: &TestEntry) -> &'static str {
     if setup == Some("failed") || e.teardown.as_deref() == Some("failed") {
         return "errors";
     }
-    if setup == Some("skipped") || e.call.as_deref() == Some("skipped") {
+    if setup == Some("skipped") || call == Some("skipped") {
         return if e.wasxfail { "xfailed" } else { "skipped" };
     }
-    match e.call.as_deref() {
+    match call {
         Some("passed") => {
             if e.wasxfail {
                 "xpassed"
@@ -562,6 +626,7 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         }
     }
 
@@ -640,7 +705,121 @@ mod tests {
         full(&mut run, "a.py::ok", "passed");
         run.collect_error("b.py".into(), "ImportError".into());
         assert!(!run.all_passed());
-        assert!(run.summary_line().contains("1 collect errors"));
+        // pytest's summary counts a collection error among its errors.
+        assert_eq!(run.summary_line(), "1 errors, 1 passed");
+        assert_eq!(run.counts()["collect_errors"], 1);
+    }
+
+    #[test]
+    fn collect_error_counts_once_however_many_workers_report_it() {
+        let mut run = Run::default();
+        assert!(run.collect_error("b.py".into(), "ImportError gw0".into()));
+        assert!(!run.collect_error("b.py".into(), "ImportError gw1".into()));
+        assert!(run.collect_error("c.py".into(), "SyntaxError".into()));
+        // Synthetic paths repeat only on identical text.
+        assert!(run.collect_error("<internalerror>".into(), "a".into()));
+        assert!(!run.collect_error("<internalerror>".into(), "a".into()));
+        assert!(run.collect_error("<internalerror>".into(), "b".into()));
+        assert_eq!(run.counts()["collect_errors"], 4);
+        let paths: Vec<&str> = run
+            .collect_errors()
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["b.py", "c.py", "<internalerror>", "<internalerror>"]
+        );
+    }
+
+    #[test]
+    fn summary_shows_deselected_like_pytest() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::ok", "passed");
+        run.deselected = 12;
+        assert_eq!(run.summary_line(), "12 deselected, 1 passed");
+        // Not an outcome bucket: the report-json counts are unchanged.
+        assert!(!run.counts().contains_key("deselected"));
+        let none = Run {
+            deselected: 2,
+            ..Run::default()
+        };
+        assert_eq!(none.summary_line(), "2 deselected");
+    }
+
+    fn subtest(nodeid: &str, outcome: &str) -> proto::Report {
+        proto::Report {
+            subtest: true,
+            ..report(nodeid, "call", outcome)
+        }
+    }
+
+    #[test]
+    fn failed_unittest_subtest_fails_the_test_and_counts_like_pytest() {
+        // unittest subTest: pytest leaves the parent passed and counts the
+        // failed subtest on its own ("1 failed, 2 passed").
+        let mut run = Run::default();
+        run.record(None, report("t.py::T::sub", "setup", "passed"));
+        run.record(None, subtest("t.py::T::sub", "passed"));
+        run.record(None, subtest("t.py::T::sub", "failed"));
+        run.record(None, subtest("t.py::T::sub", "passed"));
+        run.record(None, report("t.py::T::sub", "call", "passed"));
+        run.record(None, report("t.py::T::sub", "teardown", "passed"));
+        full(&mut run, "t.py::ok", "passed");
+
+        let e = &run.tests()["t.py::T::sub"];
+        assert_eq!(e.call.as_deref(), Some("failed"));
+        assert_eq!(e.subtests_failed, 1);
+        assert_eq!(e.longrepr.as_deref(), Some("boom"));
+        assert_eq!(e.outcome(), "failed");
+        assert!(e.any_phase_failed());
+        assert!(!run.all_passed());
+        assert_eq!(run.summary_line(), "1 failed, 2 passed");
+        assert!(!run.green_nodeids().contains("t.py::T::sub"));
+        assert_eq!(run.failed_nodeids().count(), 1);
+    }
+
+    #[test]
+    fn failed_subtests_fixture_counts_parent_and_subtest() {
+        // The `subtests` fixture: pytest fails the parent too ("2 failed").
+        let mut run = Run::default();
+        run.record(None, subtest("t.py::native", "failed"));
+        run.record(None, report("t.py::native", "call", "failed"));
+        full(&mut run, "t.py::ok", "passed");
+        assert_eq!(run.summary_line(), "2 failed, 1 passed");
+    }
+
+    #[test]
+    fn passing_subtests_leave_the_test_alone() {
+        let mut run = Run::default();
+        run.record(None, subtest("t.py::t", "passed"));
+        run.record(None, report("t.py::t", "call", "passed"));
+        let e = &run.tests()["t.py::t"];
+        assert_eq!(e.call.as_deref(), Some("passed"));
+        assert_eq!(e.subtests_failed, 0);
+        assert_eq!(run.summary_line(), "1 passed");
+    }
+
+    #[test]
+    fn subtests_failed_serialized_only_when_nonzero() {
+        let meta = RunMeta {
+            exitstatus: 1,
+            duration_seconds: 0.0,
+            started_at_epoch: 0,
+            workers: 2,
+            argv: vec![],
+            shard: None,
+        };
+        let mut run = Run::default();
+        run.record(None, subtest("t.py::a", "failed"));
+        run.record(None, report("t.py::a", "call", "passed"));
+        full(&mut run, "t.py::b", "passed");
+        let doc = run.snapshot_value(&meta);
+        assert_eq!(doc["tests"]["t.py::a"]["subtests_failed"], 1);
+        assert_eq!(doc["tests"]["t.py::a"]["call"], "failed");
+        assert!(doc["tests"]["t.py::b"].get("subtests_failed").is_none());
+        assert_eq!(doc["meta"]["counts"]["failed"], 1);
+        assert_eq!(doc["meta"]["counts"]["passed"], 2);
     }
 
     #[test]
@@ -815,6 +994,7 @@ mod tests {
                 fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
+                subtest: false,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -834,6 +1014,7 @@ mod tests {
                 fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
+                subtest: false,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

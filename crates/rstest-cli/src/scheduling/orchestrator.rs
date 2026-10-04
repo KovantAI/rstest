@@ -202,6 +202,7 @@ pub(crate) fn fabricate_crash_report(
         fd_delta: None,
         sections: Vec::new(),
         lineno: None,
+        subtest: false,
     }
 }
 
@@ -351,6 +352,7 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         }
     }
 

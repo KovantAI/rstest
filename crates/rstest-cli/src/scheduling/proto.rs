@@ -94,6 +94,11 @@ pub struct Report {
     /// None when pytest reports no location. Used for editor mapping.
     #[serde(default)]
     pub lineno: Option<u64>,
+    /// A subtest's report (unittest `subTest` / the `subtests` fixture): it
+    /// shares the parent's nodeid and `when="call"`, so it must not stand in
+    /// for the parent's own call outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subtest: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -224,6 +229,10 @@ pub enum Event {
         /// ini `addopts` and `PYTEST_ADDOPTS` included), sent only when > 0.
         #[serde(default)]
         maxfail: Option<u64>,
+        /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks).
+        /// Every worker collects and deselects the same items.
+        #[serde(default)]
+        deselected: u64,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.
@@ -248,6 +257,9 @@ pub enum Event {
         serial: Vec<String>,
         #[serde(default)]
         flaky: std::collections::HashMap<String, u32>,
+        /// Items pytest deselected while collecting this file.
+        #[serde(default)]
+        deselected: u64,
     },
     /// Lazy-mode twins of ItemStart/ItemDone, keyed by nodeid (lazy
     /// workers share no index space).
@@ -482,6 +494,7 @@ mod property {
             Report {
                 nodeid, when, outcome, duration, longrepr, wasxfail,
                 skip_reason, cpu, thread_delta, fd_delta, sections, lineno,
+                subtest: false,
             }
         }
     }
@@ -520,7 +533,7 @@ mod property {
             flaky in prop::option::of(prop::collection::hash_map(small_str(), any::<u32>(), 0..4)),
             groups in prop::option::of(prop::collection::hash_map(small_str(), small_str(), 0..4)),
             // Grouped: proptest's tuple strategies stop at 12 elements.
-            (rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail) in (
+            (rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail, deselected) in (
                 prop::option::of(small_str()),
                 prop::option::of(small_str()),
                 prop::option::of(small_strs()),
@@ -528,11 +541,13 @@ mod property {
                 prop::option::of(small_strs()),
                 prop::option::of(small_str()),
                 prop::option::of(any::<u64>()),
+                any::<u64>(),
             ),
         ) -> Event {
             Event::CollectionDone {
                 count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
                 rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail,
+                deselected,
             }
         }
     }
@@ -543,8 +558,9 @@ mod property {
             ids in small_strs(),
             serial in small_strs(),
             flaky in prop::collection::hash_map(small_str(), any::<u32>(), 0..4),
+            deselected in any::<u64>(),
         ) -> Event {
-            Event::FileCollected { path, ids, serial, flaky }
+            Event::FileCollected { path, ids, serial, flaky, deselected }
         }
     }
 

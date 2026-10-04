@@ -357,10 +357,12 @@ fn resolve_run_config(
         Some("gitlab") => progress::Mode::Gitlab,
         Some("buildkite") => progress::Mode::Buildkite,
         Some("azure") => progress::Mode::Azure,
+        // Only `[tool.rstest] output` gets here: an unknown `--output` value on
+        // the command line is a plugin's flag and went to the session.
         Some(other) => {
             sink.warn(&format!(
-                "rstest: unknown --output '{other}' \
-                 (use dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json); using dots"
+                "rstest: unknown [tool.rstest] output '{other}' (use {}); using dots",
+                crate::cli::OUTPUT_STYLES.join("|")
             ));
             progress::Mode::Dots
         }
@@ -433,6 +435,31 @@ fn resolve_run_config(
 /// it can't be opened. FILE may be a regular file or a named pipe the editor
 /// already opened for reading. Open failure is non-fatal — the run continues
 /// without the side channel.
+/// A fresh run uid in xdist's `testrun_uid` format (`uuid.uuid4().hex`): 32
+/// lowercase hex digits with the uuid4 version and variant bits set, so
+/// `uuid.UUID(testrun_uid)` parses. The 122 random bits come from std's
+/// OS-seeded `RandomState` keys, mixed with the clock and pid (no crate).
+fn new_run_uid() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = crate::time::now_epoch_nanos();
+    let half = |salt: u8| {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u32(std::process::id());
+        h.write_u8(salt);
+        h.finish()
+    };
+    let bits = (u128::from(half(0)) << 64) | u128::from(half(1));
+    format_uuid4(bits)
+}
+
+/// Format 128 bits as a uuid4 hex string: version nibble 4, RFC 4122 variant.
+fn format_uuid4(bits: u128) -> String {
+    let bits = (bits & !(0xf << 76) & !(0x3 << 62)) | (0x4 << 76) | (0x2 << 62);
+    format!("{bits:032x}")
+}
+
 fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         let _ = std::fs::create_dir_all(parent);
@@ -482,10 +509,7 @@ pub(crate) fn execute_inner(
     // contract). A monorepo child inherits the root's (passed explicitly on the
     // child's command); a top-level run generates one. Held as a typed value and
     // handed to workers via their environment — never process-global set_var.
-    let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| {
-        let nanos = crate::time::now_epoch_nanos();
-        format!("{nanos:x}{:x}", std::process::id())
-    });
+    let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| new_run_uid());
     // Shared-cache backend: resolve the remote (flag or env) and, if asked,
     // run maintenance / warm the local cache BEFORE anything reads it.
     let cache_remote = cli
@@ -1892,6 +1916,24 @@ fn auto_workers(args: &[String]) -> usize {
     n.max(1)
 }
 
+/// Worker count for a parallel-safety check (`audit`, `migrate-check`): like
+/// `auto`, but never capped by the duration cache and never below 2. A check
+/// pass that resolves to one worker runs serially, so parallel-only failures
+/// can't show and the suite would be called parallel-safe untested.
+pub(crate) fn check_workers() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    let mut n = cores;
+    if let Ok(cwd) = std::env::current_dir() {
+        let project = config::discover(&cwd, &mut std::io::stderr());
+        if let Ok(files) = collect::collect_test_files(&[], &project) {
+            n = cap_workers_by_files(n, files.len());
+        }
+    }
+    n.max(2)
+}
+
 /// Whether the args select something on disk: a path, or a nodeid
 /// (`file.py::test`) whose file exists. Over-matching only keeps the
 /// empty-walk shortcut off, which is the safe direction.
@@ -2138,10 +2180,13 @@ fn fold_run_event(
             warnings.extend(entries);
             None
         }
-        proto::Event::CollectionDone { count, .. } => {
+        proto::Event::CollectionDone {
+            count, deselected, ..
+        } => {
             // The single session reports its collected count so the dots and
             // -v renderers print pytest's `[ NN%]` column.
             prog.set_total(count as usize);
+            run.deselected = deselected;
             None
         }
         proto::Event::NodeInput { .. }
@@ -2192,6 +2237,24 @@ mod tests {
     use crate::scheduling::pool;
     use crate::scheduling::proto;
     use clap::Parser;
+
+    #[test]
+    fn run_uid_is_uuid4_hex() {
+        let a = super::new_run_uid();
+        let b = super::new_run_uid();
+        assert_ne!(a, b, "each run gets its own uid");
+        for u in [&a, &b] {
+            assert_eq!(u.len(), 32, "{u}");
+            assert!(u.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')), "{u}");
+            assert_eq!(&u[12..13], "4", "uuid4 version nibble: {u}");
+            assert!("89ab".contains(&u[16..17]), "RFC 4122 variant: {u}");
+        }
+        assert_eq!(super::format_uuid4(0), "00000000000040008000000000000000");
+        assert_eq!(
+            super::format_uuid4(u128::MAX),
+            "ffffffffffff4fffbfffffffffffffff"
+        );
+    }
 
     #[test]
     fn an_argsfile_counts_as_an_explicit_selection() {
@@ -3203,6 +3266,7 @@ mod tests {
             lineno: None,
             thread_delta: None,
             fd_delta: None,
+            subtest: false,
         }
     }
 

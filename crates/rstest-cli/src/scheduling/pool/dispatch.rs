@@ -37,6 +37,17 @@ pub(super) enum Take {
 }
 
 impl Dispatch {
+    /// The next take is a single long pole (head of `order`, nothing requeued
+    /// ahead of it).
+    pub(super) fn in_slow_zone(&self) -> bool {
+        self.cursor < self.slow_count && self.requeued.is_empty()
+    }
+
+    /// Parallel-phase items not yet handed out (queue remainder + requeued).
+    pub(super) fn pending(&self) -> usize {
+        self.order.len() - self.cursor + self.requeued.len()
+    }
+
     pub(super) fn take(&mut self, want: usize, is_designate: bool) -> Take {
         let mut indices: Vec<u64> = Vec::new();
         while indices.len() < want {

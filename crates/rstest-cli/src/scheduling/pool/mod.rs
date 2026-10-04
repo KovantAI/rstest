@@ -39,7 +39,7 @@ use crate::scheduling::orchestrator;
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
-use io::{dispatch_to, spawn_into, start_into};
+use io::{dispatch_to, release_lookahead, spawn_into, start_into};
 use state::WorkerState;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -407,6 +407,14 @@ pub fn run_pool(
     // worker is told no_more_items (it finishes in-flight work and ends;
     // bounded overshoot, same trade xdist makes).
     let mut stopping = false;
+    // Initial seeding round: a worker whose second (lookahead) dispatch would
+    // take work a not-yet-seeded worker needs (a long pole, an affinity group,
+    // or the last items of a tiny suite) gets ONE dispatch as it collects; its
+    // second goes out once every worker has its first, or after
+    // SEED_ROUND_WAIT so a slow or respawning collector can't stall the rest.
+    // Otherwise, and after the round closes, both go out at once.
+    let mut seed_round_open = true;
+    let mut seed_round_deadline: Option<std::time::Instant> = None;
 
     // Replay journaling: record each worker's ordered item_starts so the
     // schedule can be re-pinned later. Off during a replay (don't re-journal),
@@ -456,7 +464,14 @@ pub fn run_pool(
     // below, so the journal and reports are still written.
     let _interrupt = crate::scheduling::interrupt::Guard::install();
     loop {
-        let received = rx.recv_timeout(std::time::Duration::from_millis(500));
+        let tick = std::time::Duration::from_millis(500);
+        let wait = match seed_round_deadline.filter(|_| seed_round_open) {
+            Some(t) => t
+                .saturating_duration_since(std::time::Instant::now())
+                .min(tick),
+            None => tick,
+        };
+        let received = rx.recv_timeout(wait);
         // Checked before the event is handled: the signal usually reached the
         // workers too, and their dying must not read as crashes to respawn.
         if let Some(sig) = crate::scheduling::interrupt::requested() {
@@ -483,6 +498,19 @@ pub fn run_pool(
         let (idx, event) = match received {
             Ok(pair) => pair,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if seed_round_open
+                    && seed_round_due(
+                        states.iter().map(|s| s.seeded || s.dead),
+                        seed_round_deadline,
+                        std::time::Instant::now(),
+                    )
+                {
+                    if let Some(d) = dispatch.as_mut() {
+                        seed_round_open = false;
+                        let chunk = chunk_size(total_items, states.len());
+                        release_lookahead(&mut states, d, chunk, designate, stopping)?;
+                    }
+                }
                 prog.tick(sink);
                 // Watchdog tick: kill workers stuck on one item too long.
                 orchestrator::watchdog_tick(sink, &mut states);
@@ -524,9 +552,11 @@ pub fn run_pool(
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => {
-                prog.on_collect_error(sink, &path, &longrepr);
-                sink.emit_collect_error(&path, &longrepr);
-                run.collect_error(path, longrepr);
+                // Every worker collects the whole suite: show each error once.
+                if run.collect_error(path.clone(), longrepr.clone()) {
+                    prog.on_collect_error(sink, &path, &longrepr);
+                    sink.emit_collect_error(&path, &longrepr);
+                }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
             Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
@@ -574,7 +604,9 @@ pub fn run_pool(
                 order_flags: _,
                 confcutdir: _,
                 maxfail: reported_maxfail,
+                deselected,
             }) => {
+                run.deselected = run.deselected.max(deselected);
                 // pytest's own resolution (argv + addopts, last wins) is
                 // authoritative; it arrives before any item is dispatched.
                 if reported_maxfail.is_some() {
@@ -623,9 +655,15 @@ pub fn run_pool(
                             bail!(
                                 "workers collected different test sets \
                                  ({ref_count} vs {count} items); cannot dispatch safely. \
-                                 Common causes: pytest-randomly without a fixed seed, or \
-                                 parametrize IDs derived from time/randomness. \
-                                 Workarounds: -p no:randomly, stable parametrize ids, or -n 0"
+                                 Workers must collect the same ids in the same order. \
+                                 Common causes: pytest-randomly without a fixed seed, \
+                                 parametrize IDs derived from time/randomness, or \
+                                 parametrize over a set (set/dict iteration order of \
+                                 strings changes with PYTHONHASHSEED, random per process). \
+                                 Workarounds: -p no:randomly, stable parametrize ids, \
+                                 a list or sorted(...) instead of a set, a fixed \
+                                 PYTHONHASHSEED for the run, or -n 0. \
+                                 `rstest migrate-check` names the unstable sites"
                             );
                         }
                     }
@@ -1233,17 +1271,22 @@ pub fn run_pool(
             continue;
         }
 
-        // Barrier-free seeding: any verified-collected worker starts once the
-        // dispatch queue exists. Two dispatches each: a worker only RUNS an
-        // item once it knows the successor, so a lone pending item never starts.
+        // Seeding: any verified-collected worker is seeded once the dispatch
+        // queue exists. Two dispatches each: a worker only RUNS an item once it
+        // knows the successor, so a lone pending item never starts. During the
+        // initial round the second may wait until every worker has its first
+        // (see `seed_round_open`), so long poles, affinity groups and tiny
+        // suites spread one per worker instead of pairing up on the earliest.
         if let Some(d) = dispatch.as_mut() {
             let chunk = chunk_size(total_items, states.len());
+            let mut unseeded = states.iter().filter(|s| !s.seeded && !s.dead).count();
             for (i, s) in states
                 .iter_mut()
                 .enumerate()
                 .filter(|(_, s)| s.collected && !s.seeded && !s.dead)
             {
                 s.seeded = true;
+                unseeded -= 1;
                 if stopping {
                     // Late collector during a global stop: end it cleanly.
                     let _ = s.worker.send(&proto::Command::EndSession);
@@ -1251,7 +1294,25 @@ pub fn run_pool(
                     continue;
                 }
                 dispatch_to(s, d, chunk, i == designate)?;
-                dispatch_to(s, d, chunk, i == designate)?;
+                if seed_round_open {
+                    seed_round_deadline
+                        .get_or_insert_with(|| std::time::Instant::now() + SEED_ROUND_WAIT);
+                }
+                if seed_round_open && !s.finishing && seed_defers_lookahead(d, chunk, unseeded) {
+                    s.awaiting_lookahead = true;
+                } else {
+                    dispatch_to(s, d, chunk, i == designate)?;
+                }
+            }
+            if seed_round_open
+                && seed_round_due(
+                    states.iter().map(|s| s.seeded || s.dead),
+                    seed_round_deadline,
+                    std::time::Instant::now(),
+                )
+            {
+                seed_round_open = false;
+                release_lookahead(&mut states, d, chunk, designate, stopping)?;
             }
         }
 
@@ -1382,9 +1443,77 @@ fn partition_skip(
     (run_idx, cached, skipped_positions)
 }
 
+/// Longest the initial seeding round holds early workers' lookahead dispatch
+/// waiting for the rest of the pool to finish collecting.
+const SEED_ROUND_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a worker just given its first dispatch must wait for its second
+/// (lookahead): when that second take would be a long pole or an affinity
+/// group, or would leave fewer items than the `unseeded` workers still need
+/// one each. Otherwise it gets the next contiguous chunk at once, as before
+/// (module locality, and it can start right away). An empty queue never
+/// defers: the second dispatch just releases the held item.
+fn seed_defers_lookahead(d: &Dispatch, chunk: usize, unseeded: usize) -> bool {
+    d.pending() > 0
+        && (d.group_ends.is_some() || d.in_slow_zone() || d.pending() < chunk + unseeded)
+}
+
+/// The initial seeding round closes once some worker was seeded (a deadline
+/// is set) and either every slot is seeded or dead, or the deadline passed.
+fn seed_round_due(
+    mut settled: impl Iterator<Item = bool>,
+    deadline: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    match deadline {
+        None => false,
+        Some(t) => now >= t || settled.all(|x| x),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queue(len: u64, cursor: usize, slow_count: usize, groups: bool) -> Dispatch {
+        Dispatch {
+            order: (0..len).collect(),
+            slow_count,
+            cursor,
+            group_ends: groups.then(|| vec![2, len as usize]),
+            requeued: VecDeque::new(),
+            serial: VecDeque::new(),
+            serial_active: false,
+        }
+    }
+
+    #[test]
+    fn seed_defers_lookahead_only_when_it_would_starve_a_worker() {
+        // Ordinary items with plenty left: the contiguous pair goes out at once.
+        assert!(!seed_defers_lookahead(&queue(8, 1, 0, false), 1, 1));
+        // Tiny suite: 2 tests at -n 2, the second belongs to the other worker.
+        assert!(seed_defers_lookahead(&queue(2, 1, 0, false), 1, 1));
+        // Next take is a long pole: spread them one per worker.
+        assert!(seed_defers_lookahead(&queue(5, 1, 4, false), 1, 0));
+        // Affinity groups: one group per worker first.
+        assert!(seed_defers_lookahead(&queue(4, 2, 0, true), 1, 0));
+        // Nothing left: the second dispatch just releases the held item.
+        assert!(!seed_defers_lookahead(&queue(2, 2, 0, true), 1, 3));
+    }
+
+    #[test]
+    fn seed_round_waits_for_every_worker_or_deadline() {
+        let now = std::time::Instant::now();
+        let later = now + SEED_ROUND_WAIT;
+        // Nobody seeded yet: no deadline, never due.
+        assert!(!seed_round_due([false, false].into_iter(), None, now));
+        // One worker still collecting, deadline ahead: hold the lookahead.
+        assert!(!seed_round_due([true, false].into_iter(), Some(later), now));
+        // Every slot seeded (or dead): release.
+        assert!(seed_round_due([true, true].into_iter(), Some(later), now));
+        // A slow collector can't stall the pool past the deadline.
+        assert!(seed_round_due([true, false].into_iter(), Some(now), later));
+    }
 
     #[test]
     fn without_quarantined_drops_only_matching_ids() {

@@ -11,6 +11,9 @@ pub(super) struct WorkerState {
     pub(super) worker: Worker,
     pub(super) collected: bool,
     pub(super) seeded: bool,
+    /// Seeded with one item during the initial seeding round; its second
+    /// (lookahead) dispatch waits until every worker has its first.
+    pub(super) awaiting_lookahead: bool,
     /// Told "queue exhausted for now" (NoMoreItems). Still listening!
     pub(super) finishing: bool,
     /// Told EndSession (no resend).
@@ -73,6 +76,7 @@ impl WorkerState {
             worker,
             collected: false,
             seeded: false,
+            awaiting_lookahead: false,
             finishing: false,
             ended: false,
             dead: false,

@@ -195,5 +195,6 @@ cache writes pass through untouched.
 Each worker gets a disjoint `tmp_path` root under `$TMPDIR/rstest-<pid>/gwN/`
 (one subdirectory per worker id: the same per-worker isolation xdist gets
 from its `popen-gwN` roots), preventing numbered-directory cleanup races
-between sibling workers. A user-provided `--basetemp` is honored and left
-alone.
+between sibling workers. A user-provided `--basetemp` becomes the shared
+parent instead: each worker uses `<basetemp>/gwN`, as under xdist. With
+`-n 0` it is used as given.

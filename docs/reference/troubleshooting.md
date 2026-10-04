@@ -38,9 +38,13 @@ The full error reads:
 
 ```text
 workers collected different test sets (N vs M items); cannot dispatch safely.
-Common causes: pytest-randomly without a fixed seed, or parametrize IDs
-derived from time/randomness. Workarounds: -p no:randomly, stable
-parametrize ids, or -n 0
+Workers must collect the same ids in the same order. Common causes:
+pytest-randomly without a fixed seed, parametrize IDs derived from
+time/randomness, or parametrize over a set (set/dict iteration order of
+strings changes with PYTHONHASHSEED, random per process). Workarounds:
+-p no:randomly, stable parametrize ids, a list or sorted(...) instead of a
+set, a fixed PYTHONHASHSEED for the run, or -n 0. `rstest migrate-check`
+names the unstable sites
 ```
 
 Your collection is nondeterministic. The most common cause is a
@@ -55,7 +59,8 @@ nondeterminism (stable ids, seed it, sort it) or run `-n 0`.
 
 To find the exact sites before a parallel run, run
 [`rstest migrate-check`](cli-commands.md#migrate-check): it names each
-unstable parametrize id.
+unstable parametrize id, and each site whose ids come back in a different
+order between two runs (`UNSTABLE ORDER`).
 
 ## My plugin's terminal output doesn't appear
 
@@ -105,7 +110,8 @@ can still run parallel in a separate step.
 ## Where did my `tmp_path` go?
 
 Each worker uses a disjoint temp root (`$TMPDIR/rstest-<pid>/gwN/...`),
-like pytest-xdist. A user-provided `--basetemp` wins and is left alone.
+like pytest-xdist. With a user-provided `--basetemp`, each worker uses
+`<basetemp>/gwN` (xdist's layout); with `-n 0` it is used as given.
 
 ## `rstest` runs the wrong Python / can't find my venv
 

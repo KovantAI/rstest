@@ -182,6 +182,12 @@
         "skip_reason": {
           "type": "string"
         },
+        "subtests_failed": {
+          "description": "Failed subtests (unittest `subTest` / the `subtests` fixture). Any\nmakes `call` \"failed\"; each also counts as one `failed`, as in pytest.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "teardown": {
           "type": "string"
         },

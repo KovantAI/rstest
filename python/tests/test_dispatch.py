@@ -37,6 +37,8 @@ class FakeItem:
         self._marks = marks or []
         self._closest = closest or {}
         self.config = config
+        # Hook relay; tests that drive per-item hooks set it.
+        self.ihook: SimpleNamespace | None = None
 
     def iter_markers(self):
         return [SimpleNamespace(name=n) for n in self._marks]
@@ -58,6 +60,17 @@ def test_collection_finish_minimal_payload_without_send_ids(monkeypatch):
     session = SimpleNamespace(items=[FakeItem("t.py::a"), FakeItem("t.py::b")])
     ItemDispatchPlugin(conn).pytest_collection_finish(session)
     assert conn.sent == [("collection_done", {"count": 2, "hash": _digest(["t.py::a", "t.py::b"])})]
+
+
+def test_collection_finish_reports_deselected_items(monkeypatch):
+    # -k / -m / a pytest_deselected hook: the orchestrator's summary shows
+    # pytest's "N deselected".
+    monkeypatch.delenv("RSTEST_SEND_IDS", raising=False)
+    conn = FakeConn()
+    plugin = ItemDispatchPlugin(conn)
+    plugin.pytest_deselected([FakeItem("t.py::x"), FakeItem("t.py::y")])
+    plugin.pytest_collection_finish(SimpleNamespace(items=[FakeItem("t.py::a")]))
+    assert conn.sent[0][1]["deselected"] == 2
 
 
 def test_collection_finish_full_payload_with_send_ids(monkeypatch):
@@ -207,16 +220,15 @@ def _eager_session(items, *, collectonly=False, testsfailed=0, continue_on_error
     hook_calls: list[tuple[str, str | None]] = []
 
     def protocol(item, nextitem):
-        hook_calls.append((item.nodeid, nextitem.nodeid if nextitem else None))
+        hook_calls.append((item.nodeid, _next_name(session, nextitem)))
 
     config = SimpleNamespace(
         hook=SimpleNamespace(pytest_runtest_protocol=protocol),
         option=SimpleNamespace(
             collectonly=collectonly, continue_on_collection_errors=continue_on_errors
         ),
+        getoption=lambda name, default=None: default,
     )
-    for it in items:
-        it.config = config
 
     class Interrupted(Exception):
         pass
@@ -228,8 +240,21 @@ def _eager_session(items, *, collectonly=False, testsfailed=0, continue_on_error
         shouldfail=False,
         shouldstop=False,
         Interrupted=Interrupted,
+        torn=[],
     )
+    session._setupstate = SimpleNamespace(teardown_exact=session.torn.append)
+    for it in items:
+        it.config = config
+        it.session = session
     return session, hook_calls
+
+
+def _next_name(session, nextitem):
+    """A protocol call's nextitem as a name: '<session>' for the Session a
+    drained item runs with (session fixtures stay up), else the nodeid."""
+    if nextitem is session:
+        return "<session>"
+    return nextitem.nodeid if nextitem else None
 
 
 def test_eager_runtestloop_runs_all_items_with_nextitem_scoping():
@@ -243,12 +268,62 @@ def test_eager_runtestloop_runs_all_items_with_nextitem_scoping():
         ]
     )
     assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
-    # nextitem is the successor, None for the last drained item.
-    assert calls == [("a", "b"), ("b", "c"), ("c", None)]
+    # nextitem is the successor; the last drained item keeps the session up
+    # until end_session tears it all down.
+    assert calls == [("a", "b"), ("b", "c"), ("c", "<session>")]
+    assert session.torn == [None]
     starts = [p["index"] for k, p in conn.sent if k == "item_start"]
     assert starts == [0, 1, 2]
     # No --timeout and no marker: no per-test timeout, so no watchdog.
     assert [p["timeout"] for k, p in conn.sent if k == "item_start"] == [None] * 3
+
+
+def test_eager_runtestloop_serial_items_after_drain_reuse_the_session():
+    # The serial phase sends the drained designate one item at a time: none
+    # may run as pytest's last item (nextitem=None), which would tear the
+    # session down and set its fixtures up again for the next serial test.
+    items = [FakeItem("a"), FakeItem("s1"), FakeItem("s2")]
+    session, calls = _eager_session(items)
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "run_items", "payload": {"indices": [1]}},
+            {"kind": "run_items", "payload": {"indices": [2]}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("a", "<session>"), ("s1", "<session>"), ("s2", "<session>")]
+    assert session.torn == [None]  # the session is torn down once, at the end
+
+
+def test_eager_runtestloop_session_teardown_error_reported_on_last_item():
+    # A session fixture failing its deferred teardown is an error on the last
+    # item, as pytest reports it.
+    items = [FakeItem("a")]
+    session, _ = _eager_session(items)
+    logged = []
+
+    def boom(nextitem):
+        raise ValueError("teardown boom")
+
+    session._setupstate = SimpleNamespace(teardown_exact=boom)
+    items[0].ihook = SimpleNamespace(
+        pytest_runtest_makereport=lambda item, call: (item.nodeid, call.when, call.excinfo),
+        pytest_runtest_logreport=lambda report: logged.append(report),
+    )
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
+    [(nodeid, when, excinfo)] = logged
+    assert (nodeid, when) == ("a", "teardown")
+    assert excinfo.errisinstance(ValueError)
 
 
 def test_item_start_reports_the_effective_timeout(monkeypatch):
@@ -429,22 +504,39 @@ def test_lazy_collect_file_reports_an_ignored_file_empty(tmp_path):
     assert conn.sent == [("file_collected", {"path": "build/test_copy.py", "ids": []})]
 
 
+def test_lazy_collect_file_reports_its_own_deselected_items(tmp_path):
+    session, _ = _recursion_session(tmp_path, ["."], set())
+    conn = FakeConn()
+    plugin = LazyDispatchPlugin(conn)
+    plugin.pytest_deselected([FakeItem("a.py::old")])  # an earlier file's
+
+    def collect(paths, genitems):
+        plugin.pytest_deselected([FakeItem("t.py::x"), FakeItem("t.py::y")])
+        return [FakeItem("t.py::a")]
+
+    session.perform_collect = collect
+    assert plugin._collect_file(session, "t.py", {}) == 1
+    assert conn.sent == [("file_collected", {"path": "t.py", "ids": ["t.py::a"], "deselected": 2})]
+
+
 def _lazy_session(perform_collect, *, collectonly=False):
     calls: list[tuple[str, str | None]] = []
 
     def protocol(item, nextitem):
-        calls.append((item.nodeid, nextitem.nodeid if nextitem else None))
+        calls.append((item.nodeid, _next_name(session, nextitem)))
 
     config = SimpleNamespace(
         option=SimpleNamespace(collectonly=collectonly),
         cache=None,
         hook=SimpleNamespace(pytest_runtest_protocol=protocol),
+        getoption=lambda name, default=None: default,
     )
 
     def collect(paths, genitems):
         items = perform_collect(paths)
         for it in items:
             it.config = config
+            it.session = session
         return items
 
     session = SimpleNamespace(
@@ -454,7 +546,9 @@ def _lazy_session(perform_collect, *, collectonly=False):
         items=[],
         shouldfail=False,
         shouldstop=False,
+        torn=[],
     )
+    session._setupstate = SimpleNamespace(teardown_exact=session.torn.append)
     return session, calls
 
 
@@ -477,7 +571,8 @@ def test_lazy_runtestloop_collects_file_then_runs_ids():
         ]
     )
     assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
-    assert calls == [("t.py::a", "t.py::b"), ("t.py::b", None)]
+    assert calls == [("t.py::a", "t.py::b"), ("t.py::b", "<session>")]
+    assert session.torn == [None]
     assert ("file_collected", {"path": "t.py", "ids": ["t.py::a", "t.py::b"]}) in conn.sent
     assert session.testscollected == 2
 
@@ -501,7 +596,7 @@ def test_lazy_runtestloop_run_ids_recollects_uncollected_file():
     )
     assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
     assert collected == [["t.py"]]  # collected the id's file
-    assert calls == [("t.py::a", None)]
+    assert calls == [("t.py::a", "<session>")]
 
 
 def test_lazy_runtestloop_run_ids_missing_after_recollect_reports_gap():

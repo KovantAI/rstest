@@ -1016,6 +1016,7 @@ mod tests {
             lineno: None,
             thread_delta: None,
             fd_delta: None,
+            subtest: false,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.

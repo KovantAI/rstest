@@ -65,6 +65,33 @@ def _ignored_by_recursion(session, path: str) -> bool:
     return False
 
 
+# _DRAINED_NEXTITEM: an item that runs with nothing queued behind it gets the
+# Session as its `nextitem`, not pytest's "last item" None. The orchestrator
+# may still send a drained worker more work (the serial phase, reruns), and
+# None would tear the whole session down, so every later item would set up
+# its session fixtures again. The Session keeps session-scoped fixtures alive;
+# everything narrower is torn down, since the successor is unknown.
+# `_teardown_session` finishes the job when the session ends.
+
+
+def _teardown_session(item) -> None:
+    """Tear down what a drained `item` left set up (_DRAINED_NEXTITEM), as
+    its `nextitem=None` teardown would have. A failure is reported as an
+    error on `item`, as pytest attributes a session fixture's teardown error
+    to the last test. Not a second runtest_teardown: plugins' per-item
+    teardown hooks (logging, capture) already ran for this item."""
+    from _pytest.runner import CallInfo, get_reraise_exceptions
+
+    call = CallInfo.from_call(
+        lambda: item.session._setupstate.teardown_exact(None),
+        when="teardown",
+        reraise=get_reraise_exceptions(item.config),
+    )
+    if call.excinfo is not None:
+        report = item.ihook.pytest_runtest_makereport(item=item, call=call)
+        item.ihook.pytest_runtest_logreport(report=report)
+
+
 def _session_roots(config) -> m.SessionRootsPayload:
     """pytest's own view of where this session is rooted, for `rstest bisect`:
     the rootdir nodeids are relative to, where the initial args came from, and
@@ -122,7 +149,7 @@ class ItemDispatchPlugin(StreamPlugin):
     The orchestrator feeds item indices; we keep a pending deque and only run
     an item when its successor is known (`nextitem` drives teardown scoping;
     the wrong nextitem changes fixture finalization order). `no_more_items`
-    drains the queue, last item gets nextitem=None.
+    drains the queue; a drained item gets the Session (_DRAINED_NEXTITEM).
     """
 
     MIN_PENDING = 2
@@ -133,6 +160,8 @@ class ItemDispatchPlugin(StreamPlugin):
         ids = [item.nodeid for item in session.items]
         digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
         payload: m.CollectionDonePayload = {"count": len(ids), "hash": digest}
+        if self._deselected:
+            payload["deselected"] = self._deselected
         # Full id list rides the wire from ONE worker only (orchestrator needs
         # it once, for duration-cache ordering); the rest verify by hash - at
         # pandas scale that's 8x15MB saved on the startup path.
@@ -191,11 +220,14 @@ class ItemDispatchPlugin(StreamPlugin):
             return True
         pending = deque()
         draining = False
+        held = None  # last item run with the session as its nextitem
         while True:
             while len(pending) >= (1 if draining else self.MIN_PENDING):
                 index = pending.popleft()
                 item = session.items[index]
-                nextitem = session.items[pending[0]] if pending else None
+                # Drained (nothing queued behind it): see _DRAINED_NEXTITEM.
+                nextitem = session.items[pending[0]] if pending else session
+                held = None if pending else item
                 # Crash attribution: if this process dies mid-protocol, the
                 # orchestrator knows exactly which item took it down
                 # (research: xdist infers head-of-pending and misattributes).
@@ -221,9 +253,12 @@ class ItemDispatchPlugin(StreamPlugin):
             # worker may be rerun HERE (--reruns). Only end_session (every
             # outcome final) or shutdown closes the session.
             msg = self._conn.recv_one()
-            if msg is None:
-                return True  # orchestrator vanished; finish session cleanly
-            kind = msg["kind"]
+            kind = None if msg is None else msg["kind"]
+            if kind in (None, "end_session", "shutdown"):
+                # None: the orchestrator vanished; finish the session cleanly.
+                if held is not None:
+                    _teardown_session(held)
+                return True
             if kind == "run_items":
                 pending.extend(msg["payload"]["indices"])
             elif kind == "node_down":
@@ -231,8 +266,6 @@ class ItemDispatchPlugin(StreamPlugin):
                 self.run_foreign_node_down(session.config, msg["payload"])
             elif kind == "no_more_items":
                 draining = True
-            elif kind in ("end_session", "shutdown"):
-                return True
 
 
 class LazyDispatchPlugin(StreamPlugin):
@@ -263,6 +296,7 @@ class LazyDispatchPlugin(StreamPlugin):
 
     def _collect_file(self, session, path, items_by_id):
         # Eager recursion would never reach an ignored file: report it empty.
+        deselected_before = self._deselected
         items = (
             []
             if _ignored_by_recursion(session, path)
@@ -280,6 +314,8 @@ class LazyDispatchPlugin(StreamPlugin):
                 flaky[it.nodeid] = int(mark.kwargs.get("reruns", 1))
         if flaky:
             payload["flaky"] = flaky
+        if self._deselected > deselected_before:
+            payload["deselected"] = self._deselected - deselected_before
         for it in items:
             items_by_id[it.nodeid] = it
         # Items are NOT queued here: the orchestrator owns dispatch, chunking
@@ -298,6 +334,7 @@ class LazyDispatchPlugin(StreamPlugin):
         items_by_id = {}  # nodeid -> item, for reruns by id
         total = 0
         draining = False
+        held = None  # last item run with the session as its nextitem
         while True:
             # Collect a queued file ASAP: until collected, its ids are
             # invisible to the orchestrator's dispatch queue.
@@ -311,7 +348,9 @@ class LazyDispatchPlugin(StreamPlugin):
             # (nextitem drives fixture teardown scoping) or on drain.
             if len(pending) >= 2 or (draining and pending):
                 item = pending.popleft()
-                nextitem = pending[0] if pending else None
+                # Drained (nothing queued behind it): see _DRAINED_NEXTITEM.
+                nextitem = pending[0] if pending else session
+                held = None if pending else item
                 self._conn.send(
                     "item_start_id", {"id": item.nodeid, "timeout": self._effective_timeout(item)}
                 )
@@ -326,10 +365,12 @@ class LazyDispatchPlugin(StreamPlugin):
                     return True
                 continue
             msg = self._conn.recv_one()
-            if msg is None:
+            kind = None if msg is None else msg["kind"]
+            if kind in (None, "end_session", "shutdown"):
+                if held is not None:
+                    _teardown_session(held)
                 session.testscollected = total
                 return True
-            kind = msg["kind"]
             if kind == "run_files":
                 files.extend(msg["payload"]["paths"])
                 draining = False
@@ -364,6 +405,3 @@ class LazyDispatchPlugin(StreamPlugin):
                 draining = False
             elif kind == "no_more_items":
                 draining = True
-            elif kind in ("end_session", "shutdown"):
-                session.testscollected = total
-                return True

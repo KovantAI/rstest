@@ -971,6 +971,42 @@ def test_logreport_basic_report_payload():
     assert payload["lineno"] == 1  # from location[1]
 
 
+def test_logreport_marks_subtest_reports():
+    # A subtest report shares the parent's nodeid and phase: the marker keeps
+    # the orchestrator from taking it for the parent's own call outcome.
+    SubtestReport = pytest.importorskip("_pytest.subtests").SubtestReport
+
+    class FakeSubtestReport(SubtestReport):
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    p = _plugin()
+    rep = mk_report("call", "failed", failed=True)
+    p.pytest_runtest_logreport(FakeSubtestReport(**vars(rep)))
+    p.pytest_runtest_logreport(mk_report("call", "passed"))
+    sub, parent = (payload for _, payload in p._conn.sent)
+    assert sub["subtest"] is True
+    assert "subtest" not in parent
+
+
+def test_logreport_fails_a_subtests_fixture_parent_with_failed_subtests():
+    # pytest fails such a parent only while rendering its status line, which
+    # may run after this hook: ship the outcome pytest ends up with.
+    from _pytest.stash import Stash
+
+    failed_subtests_key = pytest.importorskip("_pytest.subtests").failed_subtests_key
+
+    p = _plugin()
+    p._config = SimpleNamespace(stash=Stash())
+    p._config.stash[failed_subtests_key] = {"t.py::a": 2}
+    p.pytest_runtest_logreport(mk_report("call", "passed"))
+    p.pytest_runtest_logreport(mk_report("call", "passed", nodeid="t.py::b"))
+    flipped, other = (payload for _, payload in p._conn.sent)
+    assert flipped["outcome"] == "failed"
+    assert flipped["longrepr"] == "contains 2 failed subtests"
+    assert other["outcome"] == "passed"
+
+
 def test_logreport_attaches_cpu_on_call(monkeypatch):
     monkeypatch.setenv("RSTEST_DOCTOR", "1")
     p = _plugin()

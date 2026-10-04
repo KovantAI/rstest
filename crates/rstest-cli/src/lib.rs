@@ -57,5 +57,18 @@ pub fn run() -> Result<i32> {
         watch::watch_loop(&cli, &args)?;
         return Ok(0);
     }
-    execute(&cli, &args)
+    let code = execute(&cli, &args)?;
+    // A usage error with a forwarded `--output`: most likely a mistyped style
+    // that pytest (with no plugin defining `--output`) rejected.
+    if code == 4 {
+        if let Some(value) = cli::forwarded_output(&args) {
+            eprintln!(
+                "rstest: `--output {value}` is not an rstest output style ({}), so it went to \
+                 pytest as a plugin option (pytest-playwright's --output). If pytest rejected \
+                 it above, use one of the styles.",
+                cli::OUTPUT_STYLES.join("|")
+            );
+        }
+    }
+    Ok(code)
 }

@@ -823,6 +823,14 @@ Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
 to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
 
+A value that is not one of the styles above is not rstest's: `--output
+VALUE` goes to the pytest session unchanged, so a plugin's own `--output`
+(pytest-playwright's artifacts directory) keeps working, for example
+`rstest -n 4 --output test-artifacts`. If no plugin defines `--output`,
+pytest rejects it as an unrecognized argument (exit 4) and rstest names the
+styles. An unknown `output` in [`[tool.rstest]`](#configuration-file) warns
+and falls back to `dots`.
+
 !!! note "pytest's own output in byte-exact mode"
     In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
     or `-n auto` capped to one worker, without `--reruns`) with no `--output`

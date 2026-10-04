@@ -659,7 +659,6 @@ def gate_local_dev_debugging(g, args, binary):
         "DV-05 -n 2 breakpoint(): every collected test is accounted for",
         "tests/test_bp.py::test_after_bp" in tests and len(tests) == 2,
         str(sorted(tests)),
-        known_bug=True,
     )
 
     # DV-06: --pdb in the pool gets a real prompt; 'q' ends the run with

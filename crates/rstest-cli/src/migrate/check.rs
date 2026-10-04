@@ -3,6 +3,11 @@
 //! Collects the suite twice in fresh sessions and diffs the id sets; ids
 //! present in only one are run-to-run unstable. Per-process-unstable ones
 //! (memory address / uuid) force rstest to `-n 0`; we name them and the fix.
+//! The same ids in a different order (parametrize over a set, hash-ordered
+//! iteration) bail too: the pool needs every worker to collect the identical
+//! ordered list. Each session is a fresh interpreter, so an unset
+//! `PYTHONHASHSEED` gives each its own random seed, exactly like the pool's
+//! workers.
 //! Then runs `-n auto` and classifies any parallel-only failures.
 
 use std::collections::{BTreeMap, HashSet};
@@ -34,7 +39,8 @@ pub struct MigrateCheckDoc {
     pub tests_collected: usize,
     /// Unstable-nodeid findings, grouped by test site.
     pub unstable_ids: Vec<UnstableSite>,
-    /// Count of per-process-unstable ids that force `-n 0`.
+    /// Count of ids that force `-n 0`: per-process-unstable ids plus ids at
+    /// order-unstable sites (`order` kind).
     pub will_bail_count: usize,
 }
 
@@ -185,8 +191,12 @@ pub fn run_migrate_check(
     ));
 
     // Group by site (worst Kind + a sample param each) and its structured form.
-    let (by_site, will_bail_total) = accumulate_unstable(&unstable);
-    let json_unstable = unstable_json(&by_site, allowed);
+    let (by_site, id_will_bail) = accumulate_unstable(&unstable);
+    // Same ids, different order: the pool compares ordered lists, so it bails.
+    let order_sites = order_unstable(&run1, &run2);
+    let will_bail_total = id_will_bail + order_sites.iter().map(|o| o.ids).sum::<usize>();
+    let mut json_unstable = unstable_json(&by_site, allowed);
+    json_unstable.extend(order_json(&order_sites, allowed));
     let tests_total = union.len();
     // Writes the JSON doc (if requested) and returns the exit code. `parallel`
     // is null when the parallel phase was skipped (WILL-bail) or didn't run.
@@ -204,9 +214,9 @@ pub fn run_migrate_check(
         Ok(exit)
     };
 
-    if unstable.is_empty() {
+    if unstable.is_empty() && order_sites.is_empty() {
         sink.out_line("  UNSTABLE NODEIDS: none — collection is reproducible.\n");
-    } else {
+    } else if !unstable.is_empty() {
         sink.out_line(&format!(
             "  UNSTABLE NODEIDS: {} across {} sites ({} per-process => WILL bail at -n auto)\n",
             unstable.len(),
@@ -237,6 +247,24 @@ pub fn run_migrate_check(
             }
         }
     }
+    if !order_sites.is_empty() {
+        sink.out_line(&format!(
+            "  UNSTABLE ORDER: {} site(s) collected the same ids in a different order \
+             (=> WILL bail at -n auto)\n",
+            order_sites.len()
+        ));
+        for o in &order_sites {
+            let mut sample = o.sample.to_string();
+            crate::text::truncate_on_boundary(&mut sample, 90);
+            sink.out_line(&format!("  {}", o.site));
+            sink.out_line(&format!("    order:{}   -> WILL bail", o.ids));
+            if !sample.is_empty() {
+                sink.out_line(&format!("    e.g. [{sample}]"));
+            }
+            sink.out_line(&format!("    FIX (upstream): {ORDER_FIX}"));
+            sink.out_line(&format!("    STOPGAP (rstest): {ORDER_STOPGAP}\n"));
+        }
+    }
 
     // A WILL-bail id means -n auto can't even dispatch - fix those first.
     if will_bail_total > 0 {
@@ -245,11 +273,22 @@ pub fn run_migrate_check(
         let blocking = by_site
             .iter()
             .filter(|(site, acc)| acc.will_bail() && !allowed(site))
-            .count();
-        sink.out_line(&format!(
-            "==> {will_bail_total} per-process-unstable id(s) force -n 0. Fix these (stable ids=) \
-             before parallel will run; skipping the parallel check."
-        ));
+            .count()
+            + order_sites.iter().filter(|o| !allowed(o.site)).count();
+        if id_will_bail > 0 {
+            sink.out_line(&format!(
+                "==> {id_will_bail} per-process-unstable id(s) force -n 0. Fix these (stable \
+                 ids=) before parallel will run; skipping the parallel check."
+            ));
+        }
+        if !order_sites.is_empty() {
+            sink.out_line(&format!(
+                "==> {} site(s) collect in a run-to-run order: workers would disagree and the \
+                 pool refuses to dispatch. Fix the order (or pin PYTHONHASHSEED) before \
+                 parallel will run; skipping the parallel check.",
+                order_sites.len()
+            ));
+        }
         if blocking == 0 {
             sink.out_line("    (all allow-listed — gate passes.)");
         }
@@ -264,7 +303,7 @@ pub fn run_migrate_check(
         .cloned()
         .chain([MAXFAIL_LIFT.to_string()])
         .collect();
-    let par = run_session(python, &[], &par_args)?;
+    let par = run_session(python, &["-n", &super::parallel_n()], &par_args)?;
     if par.is_empty() {
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
@@ -422,6 +461,91 @@ fn accumulate_unstable<'a>(unstable: &[&'a str]) -> (BTreeMap<&'a str, Acc>, usi
     (by_site, will_bail_total)
 }
 
+/// Upstream fix for an order-unstable site.
+const ORDER_FIX: &str = "parametrize over an ordered sequence (a list/tuple, or sorted(...)), \
+     not a set or other hash-ordered iteration: set order of str/bytes values changes with \
+     PYTHONHASHSEED, which is random per process";
+/// Stopgap for an order-unstable site.
+const ORDER_STOPGAP: &str = "pin one seed for the whole run (e.g. PYTHONHASHSEED=0), or -n 0";
+
+/// One site whose ids came back in a different order across the two runs.
+struct OrderSite<'a> {
+    site: &'a str,
+    /// Ids at this site (all of them ride the unstable order).
+    ids: usize,
+    /// The param of the first id that moved.
+    sample: &'a str,
+}
+
+/// Sites whose ids (those present in both runs) came back in a different
+/// order. The pool needs the identical ordered list on every worker, so each
+/// of these WILL bail. When only the order across sites changed (whole files
+/// or tests reordered), the site at the first divergence stands in.
+fn order_unstable<'a>(run1: &'a [String], run2: &'a [String]) -> Vec<OrderSite<'a>> {
+    let set1: HashSet<&str> = run1.iter().map(String::as_str).collect();
+    let set2: HashSet<&str> = run2.iter().map(String::as_str).collect();
+    let seq1: Vec<&str> = run1
+        .iter()
+        .map(String::as_str)
+        .filter(|id| set2.contains(id))
+        .collect();
+    let seq2: Vec<&str> = run2
+        .iter()
+        .map(String::as_str)
+        .filter(|id| set1.contains(id))
+        .collect();
+    if seq1 == seq2 {
+        return Vec::new();
+    }
+    fn first_moved<'a>(a: &[&'a str], b: &[&'a str]) -> Option<&'a str> {
+        a.iter().zip(b).find(|(x, y)| x != y).map(|(x, _)| *x)
+    }
+    let mut per_site: BTreeMap<&str, (Vec<&str>, Vec<&str>)> = BTreeMap::new();
+    for id in &seq1 {
+        per_site.entry(split_param(id).0).or_default().0.push(id);
+    }
+    for id in &seq2 {
+        per_site.entry(split_param(id).0).or_default().1.push(id);
+    }
+    let mut out: Vec<OrderSite> = per_site
+        .iter()
+        .filter_map(|(site, (a, b))| {
+            first_moved(a, b).map(|id| OrderSite {
+                site,
+                ids: a.len(),
+                sample: split_param(id).1,
+            })
+        })
+        .collect();
+    if out.is_empty() {
+        if let Some(id) = first_moved(&seq1, &seq2) {
+            let (site, sample) = split_param(id);
+            out.push(OrderSite {
+                site,
+                ids: 1,
+                sample,
+            });
+        }
+    }
+    out
+}
+
+/// The structured form of the order-unstable sites: ordinary unstable-id
+/// entries with the `order` kind (always will-bail).
+fn order_json(sites: &[OrderSite], allowed: impl Fn(&str) -> bool) -> Vec<UnstableSite> {
+    sites
+        .iter()
+        .map(|o| UnstableSite {
+            allowed: allowed(o.site),
+            fix: ORDER_FIX.to_string(),
+            kinds: BTreeMap::from([("order".to_string(), o.ids)]),
+            sample: o.sample.to_string(),
+            site: o.site.to_string(),
+            will_bail: true,
+        })
+        .collect()
+}
+
 /// The structured (`--migrate-check-json`) form of the unstable-id findings.
 fn unstable_json(
     by_site: &BTreeMap<&str, Acc>,
@@ -534,6 +658,43 @@ mod tests {
         let b = &by_site["b.py::u"];
         assert!(b.will_bail());
         assert_eq!(b.counts["uuid"], 1);
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn order_unstable_flags_site_with_same_ids_in_another_order() {
+        let r1 = ids(&["a.py::t[x]", "a.py::t[y]", "a.py::u", "b.py::v[1]"]);
+        let r2 = ids(&["a.py::t[y]", "a.py::t[x]", "a.py::u", "b.py::v[1]"]);
+        let got = order_unstable(&r1, &r2);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].site, "a.py::t");
+        assert_eq!(got[0].ids, 2);
+        assert_eq!(got[0].sample, "x");
+        let doc = serde_json::to_value(order_json(&got, |_| false)).unwrap();
+        assert_eq!(doc[0]["kinds"]["order"], 2);
+        assert_eq!(doc[0]["will_bail"], true);
+        assert!(doc[0]["fix"].as_str().unwrap().contains("PYTHONHASHSEED"));
+    }
+
+    #[test]
+    fn order_unstable_ignores_identical_order_and_set_only_differences() {
+        let r1 = ids(&["a.py::t[x]", "a.py::t[y]"]);
+        assert!(order_unstable(&r1, &r1).is_empty());
+        // An id present in only one run is the id check's job, not order's.
+        let r2 = ids(&["a.py::t[x]", "a.py::t[z]", "a.py::t[y]"]);
+        assert!(order_unstable(&r1, &r2).is_empty());
+    }
+
+    #[test]
+    fn order_unstable_cross_site_reorder_names_first_divergence() {
+        let r1 = ids(&["a.py::t", "b.py::u"]);
+        let r2 = ids(&["b.py::u", "a.py::t"]);
+        let got = order_unstable(&r1, &r2);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].site, "a.py::t");
     }
 
     #[test]

@@ -211,12 +211,7 @@ _SUITES = {
 # Pool-only divergences, all already filed: P2 (subtest results dropped from
 # the merged result), REVIEW_BUGS B8 (one collect error counted once per
 # worker), B9 (`N deselected` missing from the parallel summary).
-_PARITY_BUGS = {
-    ("unittest_subtest", "2"),
-    ("subtests_fixture", "2"),
-    ("cfg_strict_markers", "2"),
-    ("hooks_deselect", "2"),
-}
+_PARITY_BUGS: set[tuple[str, str]] = set()
 
 
 def gate_migration_parity(g, args, binary):
@@ -286,13 +281,11 @@ def gate_migration_tmp_subtests(g, args, binary):
         "MG-02 --basetemp: 40 passed, exit 0 in all 5 runs at -n 4",
         all(rc == 0 and "40 passed" in last for rc, last in results),
         str(results),
-        known_bug=True,
     )
     check(
         "MG-02 --basetemp: per-worker bt/gw0..gw3 directories (xdist layout)",
         dirs_ok,
         str(sorted(p.name for p in (cwd / "bt").iterdir()) if (cwd / "bt").is_dir() else "no bt"),
-        known_bug=True,
     )
 
     # MG-03: a failing unittest subTest must be a failure in every artifact,
@@ -314,7 +307,6 @@ def gate_migration_tmp_subtests(g, args, binary):
         "MG-03 -n 2: summary counts match pytest's (incl. '1 failed')",
         "1 failed" in last and _counts(last) == _counts(oracle),
         f"rstest: {last} | pytest: {oracle}",
-        known_bug=True,
     )
     try:
         failed = json.loads(rj.read_text(encoding="utf-8"))["meta"]["counts"]["failed"]
@@ -324,7 +316,6 @@ def gate_migration_tmp_subtests(g, args, binary):
         "MG-03 -n 2: report-json meta.counts.failed >= 1",
         failed is not None and failed >= 1,
         f"failed={failed}",
-        known_bug=True,
     )
     junit = _junit(jx) or {}
     check(
@@ -349,7 +340,6 @@ def gate_migration_tmp_subtests(g, args, binary):
         "MG-03 -n 0: report-json meta.counts.failed >= 1",
         failed0 is not None and failed0 >= 1,
         f"failed={failed0}",
-        known_bug=True,
     )
 
 
@@ -394,7 +384,6 @@ def gate_migration_readiness(g, args, binary):
         "MG-04 migrate-check: order-unstable collection flagged, exit != 0 (3 tries)",
         all(f for _, f in tries),
         str(tries),
-        known_bug=True,
     )
 
     # MG-05: one file, four tests contending on one fixed path (a
@@ -425,7 +414,6 @@ def gate_migration_readiness(g, args, binary):
         "MG-05 migrate-check: reports the parallel-only failure, exit != 0",
         r.returncode != 0 and "PARALLEL: ready" not in r.stdout,
         f"rc={r.returncode} " + r.stdout[-300:],
-        known_bug=True,
     )
 
     # MG-11: xdist-removal-check, one finding per site, with its own fix.
@@ -460,7 +448,6 @@ def gate_migration_readiness(g, args, binary):
         "MG-11 'import xdist.plugin': fix is not the is_xdist_worker advice",
         bool(plugin.get("fix")) and "is_xdist_worker" not in plugin.get("fix", ""),
         plugin.get("fix", ""),
-        known_bug=True,
     )
     variants = {
         "nauto": ("-nauto", "-n"),
@@ -531,7 +518,6 @@ def gate_migration_flags(g, args, binary):
             f"MG-06 -n {n} --output artifacts: reaches the plugin or exits 4 with the '--' hint",
             ok,
             f"rc={r.returncode} " + out[-300:],
-            known_bug=True,
         )
     r = g.run("-n", "2", "--", "--output", "artifacts", cwd=cwd)
     check(
@@ -560,7 +546,6 @@ def gate_migration_flags(g, args, binary):
             f"MG-07 shadowed-flags.md lists {flag} ({plugin})",
             flag in listed,
             f"listed={sorted(listed)}",
-            known_bug=flag == "--output",
         )
 
     # MG-09: testrun_uid in xdist's format (uuid4().hex) and identical on
@@ -593,7 +578,6 @@ def gate_migration_flags(g, args, binary):
         "MG-09 testrun_uid is a 32-hex uuid like xdist's",
         r.returncode == 0 and "8 passed" in r.stdout,
         _last(r.stdout) + " " + str(uids),
-        known_bug=True,
     )
 
 
@@ -639,13 +623,11 @@ def gate_migration_scheduling(g, args, binary):
         "MG-08 loadgroup -n 4: db and net groups on different workers (x3)",
         all(d != t for _, _, d, t, _ in runs),
         str(runs),
-        known_bug=True,
     )
     check(
         "MG-08 loadgroup -n 4: test-time span < 0.7s (x3)",
         all(span < 0.7 for *_, span in runs),
         str(runs),
-        known_bug=True,
     )
 
     # MG-12: serial tests reuse the designated worker's session (no second
@@ -684,7 +666,6 @@ def gate_migration_scheduling(g, args, binary):
         "MG-12 serial tests reuse the designated worker's session (one sess-up there)",
         not between and len(ups_on_ser_worker) == 1,
         f"sess-up between serials={len(between)} on serial worker={len(ups_on_ser_worker)}",
-        known_bug=True,
     )
 
     # MG-13: docs agree on what a reordering pytest_collection_modifyitems
@@ -779,5 +760,4 @@ def gate_migration_lazy(g, args, binary):
             f"MG-10 {name}: --collect lazy -n 2 matches pytest",
             r.returncode == p.returncode and rc == pc,
             f"pytest {pc} | rstest rc={r.returncode} {rc} " + _out(r)[-200:],
-            known_bug=True,
         )

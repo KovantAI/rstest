@@ -647,6 +647,7 @@ pub(crate) mod testutil {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -673,6 +674,7 @@ mod tests {
             fd_delta: fd,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -958,6 +960,7 @@ mod tests {
                     fd_delta: None,
                     sections: Vec::new(),
                     lineno: None,
+                    subtest: false,
                 },
             );
         }

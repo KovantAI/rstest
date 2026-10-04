@@ -285,6 +285,7 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno,
+            subtest: false,
         }
     }
 

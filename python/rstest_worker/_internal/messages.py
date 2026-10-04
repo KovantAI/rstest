@@ -62,6 +62,7 @@ class ReportPayload(_ReportRequired, total=False):
     fd_delta: int  # leak-check: net open fds after teardown vs before setup
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
+    subtest: bool  # a subtest's report (shares the parent's nodeid/phase)
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------
@@ -83,6 +84,7 @@ class SessionRootsPayload(TypedDict, total=False):
 
 
 class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=False):
+    deselected: int  # items pytest deselected (-k/-m, hooks), only when > 0
     # Only worker 0 (RSTEST_SEND_IDS=1) ships the id-bearing fields.
     ids: list[str]
     locations: list[list[str | int | None]]  # [relpath, lineno] per item
@@ -101,6 +103,7 @@ class _FileCollectedRequired(TypedDict):
 class FileCollectedPayload(_FileCollectedRequired, total=False):
     serial: list[str]  # nodeids with the serial marker
     flaky: dict[str, int]  # nodeid -> rerun budget
+    deselected: int  # items deselected while collecting this file, only when > 0
 
 
 class LazyReadyPayload(TypedDict, total=False):

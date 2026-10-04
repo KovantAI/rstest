@@ -25,12 +25,14 @@ def gate_output_styles(g, args, binary):
     # inline only - the batched "--- FAILED ---" block must NOT also print
     no_dup = r.stdout.count("--- FAILED") == 0
     check("output bar: per-test lines + summary, failures once", bar_ok and no_dup, r.stdout[-400:])
-    # unknown style warns, falls back, still runs
+    # A value that is not an rstest style goes to pytest (a plugin such as
+    # pytest-playwright may own --output); with no such plugin pytest rejects
+    # it (exit 4) and rstest names its own styles.
     r = g.run("basic/test_basic.py", "-n", "0", "--output", "nope")
     check(
-        "output: unknown style falls back to dots",
-        "unknown --output" in r.stderr and "2 passed" in r.stdout,
-        r.stderr[-160:] + " || " + r.stdout[-160:],
+        "output: non-style value reaches pytest, exit 4 with a style hint",
+        r.returncode == 4 and "is not an rstest output style" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
     )
     # --output github: the normal human log PLUS a ::error workflow command
     # per failing test (GitHub renders them as inline PR annotations).

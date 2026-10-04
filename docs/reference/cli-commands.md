@@ -83,8 +83,18 @@ each offending parametrize site, classified by why its id is unstable:
   intermittently, and a sub-second timestamp differs every time. Reported as
   **may bail**.
 
-The fix for both is a stable `ids=` on the `parametrize`. If a WILL-bail id
-is found, it stops here: nothing runs in parallel until the ids are stable.
+The fix for both is a stable `ids=` on the `parametrize`.
+
+It also compares the two collections **in order**. A site whose ids are the
+same but come back in a different order (a `parametrize` over a `set`, whose
+iteration order for strings changes with the per-process `PYTHONHASHSEED`)
+is reported under **UNSTABLE ORDER** as **WILL bail**: every worker must
+collect the identical ordered list. In the JSON it is an `unstable_ids` entry
+with the `order` kind. Fix it with a list or `sorted(...)`; the stopgap is one
+fixed `PYTHONHASHSEED` for the whole run.
+
+If a WILL-bail id or order is found, it stops here: nothing runs in parallel
+until collection is stable.
 
 **2. Parallel classification.** Otherwise it **runs the suite at `-n auto`**
 and classifies every test that fails only under parallelism. The

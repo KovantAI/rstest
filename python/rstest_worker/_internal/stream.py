@@ -24,6 +24,7 @@ from rstest_worker._internal.plugincompat import (
     _seed_pytest_retry,
     _warn_pytest_pins,
 )
+from rstest_worker._internal.subtests import failed_subtests, is_subtest_report
 from rstest_worker._internal.wire import _wire_safe
 from rstest_worker._internal.xdistnode import (
     _call_node_impl,
@@ -242,6 +243,8 @@ class StreamPlugin:
         # the shim node standing in for xdist's WorkerController.
         self._xdist_node: Any = None
         self._node_configured: set[int] = set()  # plugin ids already given configure_node
+        self._config: Any = None  # set at pytest_configure
+        self._deselected = 0  # items pytest deselected (-k/-m, hooks)
 
     # Native worker-identity fixtures. pytest-xdist ships `worker_id` /
     # `testrun_uid` fixtures; a suite migrating off xdist that removes it from
@@ -349,6 +352,7 @@ class StreamPlugin:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_configure(self, config):
+        self._config = config
         self._neutralize_xdist(config)
         self._register_markers(config)
         _warn_pytest_pins(config)
@@ -455,10 +459,12 @@ class StreamPlugin:
 
     @staticmethod
     def _set_basetemp(config, worker_id):
-        # Disjoint per-worker tmp roots (xdist popen-gwN pattern);
-        # user-provided --basetemp wins.
-        basetemp = os.environ.get("RSTEST_BASETEMP")
-        if basetemp and not config.option.basetemp:
+        # Disjoint per-worker tmp roots (xdist popen-gwN pattern). A user
+        # --basetemp is the shared parent, as under xdist (<basetemp>/gwN):
+        # pytest rm_rf's its basetemp at startup, so a shared one would let
+        # each worker delete its siblings' live tmp_path dirs.
+        basetemp = config.option.basetemp or os.environ.get("RSTEST_BASETEMP")
+        if basetemp:
             from pathlib import Path
 
             # pytest mkdirs option.basetemp with parents=False, so the
@@ -790,6 +796,15 @@ class StreamPlugin:
             "longrepr": report.longreprtext or None,
             "wasxfail": hasattr(report, "wasxfail"),
         }
+        if is_subtest_report(report):
+            payload["subtest"] = True
+        elif self._config is not None and report.when == "call" and report.outcome == "passed":
+            # pytest fails a `subtests`-fixture parent with failed subtests
+            # only when rendering its status, possibly after this hook ran.
+            n = failed_subtests(self._config, report.nodeid)
+            if n:
+                payload["outcome"] = "failed"
+                payload["longrepr"] = f"contains {n} failed subtest{'s' if n > 1 else ''}"
         # report.location is (relpath, lineno, domain); lineno is 0-based and
         # may be None. Ship it for editor mapping (file derives from nodeid).
         location = getattr(report, "location", None)
@@ -811,6 +826,9 @@ class StreamPlugin:
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
         self._conn.send("report", payload)
+
+    def pytest_deselected(self, items):
+        self._deselected += len(items)
 
     def pytest_collectreport(self, report):
         if report.failed:
