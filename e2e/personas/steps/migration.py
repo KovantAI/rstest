@@ -471,10 +471,21 @@ def _groups_apart(world, a, b):
     assert all(d != t for _, _, d, t, _ in runs), str(runs)
 
 
-@then(parsers.re(r"in every run the events spanned less than (?P<secs>[\d.]+)s"))
-def _groups_span(world, secs):
-    runs = _group_runs(world)
-    assert all(span < float(secs) for *_, span in runs), str(runs)
+@then(parsers.re(rf"in every run the {q('a')} and {q('b')} groups overlapped in time"))
+def _groups_overlap(world, a, b):
+    """Each group's window runs from its first start to its last end; the two
+    windows must intersect. A wall-clock bound flakes on slow runners."""
+    windows = []
+    for x in world.notes["runs"]:
+        rows = x["events"]
+        win = {
+            g: (min(e["start"] for e in ev), max(e["end"] for e in ev))
+            for g in (a, b)
+            if (ev := [e for e in rows if e["name"] == g])
+        }
+        windows.append(win)
+    overlap = [len(w) == 2 and max(w[a][0], w[b][0]) < min(w[a][1], w[b][1]) for w in windows]
+    assert all(overlap), str(windows)
 
 
 @then(parsers.re(rf"both {q('ev')} events came from one worker"))
