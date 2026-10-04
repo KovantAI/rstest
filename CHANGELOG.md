@@ -5,6 +5,16 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+- **`rstest install-skills`: install the bundled agent skills.** The
+  `migrate-to-rstest` and `rstest-triage` skills now ship inside the binary.
+  `rstest install-skills` writes them into `.claude/skills/` (or
+  `~/.claude/skills/` with `--user`, `.agents/skills/` with `--agents`, any
+  directory with `--dir`), matching the installed version's flags and
+  subcommands. Skills you edited are left alone unless `--force`.
+- **The rstest repository is a Claude Code plugin marketplace.**
+  `/plugin marketplace add KovantAI/rstest` then `/plugin install rstest@rstest`
+  makes both skills available in every project. The skills moved from
+  `.claude/skills/` to `plugins/rstest/skills/`.
 - **SIGTERM/SIGINT stop a parallel run cleanly.** rstest used to die on the
   spot: no summary, no replay journal, no reports, and its workers kept
   running, reparented to init. Now it stops and reaps every worker, names the

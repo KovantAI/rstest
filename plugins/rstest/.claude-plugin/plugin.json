@@ -1,0 +1,13 @@
+{
+  "name": "rstest",
+  "version": "0.8.0",
+  "description": "Skills for adopting rstest (migrate a pytest suite, make it parallel-safe, speed it up) and for triaging failures on a suite that already runs on rstest (replay, bisect, audit, flaky-test policy).",
+  "author": {
+    "name": "Kovant AI",
+    "url": "https://github.com/KovantAI"
+  },
+  "homepage": "https://python-rstest.readthedocs.io/en/stable/",
+  "repository": "https://github.com/KovantAI/rstest",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["pytest", "testing", "parallel", "flaky-tests", "python"]
+}

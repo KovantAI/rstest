@@ -35,3 +35,7 @@ Task-oriented how-tos. Start with the one that matches what you are doing.
 
 - [Plugins](plugins.md): how plugin loading works, what's verified
 - [Coverage](coverage.md): pytest-cov under parallel workers
+
+## Coding agents
+
+- [Agent skills](agent-skills.md): install the `migrate-to-rstest` and `rstest-triage` skills for Claude Code, Codex, and other agents

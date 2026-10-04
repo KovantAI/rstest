@@ -28,7 +28,7 @@ rstest <COMMAND> [OPTIONS]
 
 Subcommands (`rstest try`, `rstest migrate-check`, `rstest
 xdist-removal-check`, `rstest audit`, `rstest bisect`, `rstest replay`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
-`rstest verify-vendor`) and their own flags are on [CLI
+`rstest verify-vendor`, `rstest install-skills`) and their own flags are on [CLI
 subcommands](cli-commands.md).
 
 At a [monorepo](../concepts/monorepo.md) root, rstest forwards most of these
