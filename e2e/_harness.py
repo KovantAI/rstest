@@ -68,8 +68,23 @@ PASS = 0
 FAIL = []
 
 
-def check(name, cond, detail=""):
+XFAIL = []
+
+
+def check(name, cond, detail="", known_bug=False):
+    """Record one assertion. `known_bug=True` marks a check that is expected
+    to fail until a known bug is fixed: a failure is reported as xfail and
+    keeps the gate green, a pass is reported as XPASS and fails the gate so
+    the marker gets removed (strict)."""
     global PASS
+    if known_bug:
+        if cond:
+            FAIL.append(name)
+            print(f"  XPASS {name}  [known bug looks fixed: drop known_bug=True]")
+        else:
+            XFAIL.append(name)
+            print(f"  xfail {name}  {detail}")
+        return
     if cond:
         PASS += 1
         print(f"  ok    {name}")
@@ -84,7 +99,7 @@ class Gate:
         self.venv = venv_dir
         self.tmp = Path(tempfile.mkdtemp(prefix="rstest-gate-"))
 
-    def run(self, *args, cwd=None, env_extra=None, timeout=120):
+    def run(self, *args, cwd=None, env_extra=None, env_drop=(), timeout=120):
         env = dict(
             os.environ,
             VIRTUAL_ENV=str(self.venv),
@@ -108,6 +123,10 @@ class Gate:
             env.pop(k, None)
         if env_extra:
             env.update(env_extra)
+        # Interpreter-discovery scenarios need VIRTUAL_ENV truly unset (an
+        # empty value is still "set" to the discovery code).
+        for k in env_drop:
+            env.pop(k, None)
         return subprocess.run(
             [str(self.binary), *args],
             cwd=cwd or str(self.tmp),

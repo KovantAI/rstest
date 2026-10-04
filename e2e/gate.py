@@ -13,6 +13,14 @@ from pathlib import Path
 
 import _harness
 from _harness import REPO, WINDOWS, Gate, make_venv
+from gates.ci import (
+    gate_ci_artifacts,
+    gate_ci_environment,
+    gate_ci_exit_codes,
+    gate_ci_sharding,
+    gate_ci_side_effects,
+    gate_ci_snippets,
+)
 from gates.coverage import (
     gate_coverage,
     gate_coverage_based_selection_changed_uses_th,
@@ -58,6 +66,32 @@ from gates.incremental import (
     gate_incremental_out_of_scope_source,
     gate_since_green_incremental,
 )
+from gates.local_dev import (
+    gate_local_dev_changed_watch,
+    gate_local_dev_debugging,
+    gate_local_dev_interrupt_stop,
+    gate_local_dev_output,
+    gate_local_dev_rerun_history,
+    gate_local_dev_selection,
+)
+from gates.maintainer import (
+    gate_maintainer_coverage_gate,
+    gate_maintainer_doctor_gates,
+    gate_maintainer_doctor_numbers,
+    gate_maintainer_durations_regress,
+    gate_maintainer_flaky_policy,
+    gate_maintainer_leaks,
+    gate_maintainer_pool,
+    gate_maintainer_repro,
+)
+from gates.migration import (
+    gate_migration_flags,
+    gate_migration_lazy,
+    gate_migration_parity,
+    gate_migration_readiness,
+    gate_migration_scheduling,
+    gate_migration_tmp_subtests,
+)
 from gates.misc import (
     gate_basics,
     gate_collection_error_semantics,
@@ -67,6 +101,14 @@ from gates.monorepo import (
     gate_monorepo,
     gate_shared_cache_backend,
     gate_tool_rstest_config,
+)
+from gates.onboarding import (
+    gate_onboarding_first_run,
+    gate_onboarding_interpreter,
+    gate_onboarding_location,
+    gate_onboarding_mistakes,
+    gate_onboarding_summary,
+    gate_onboarding_try,
 )
 from gates.plugins import (
     gate_crash_handling,
@@ -264,6 +306,38 @@ def main():
         gate_worker_timeout_watchdog,
         gate_native_timeout,
         gate_try,
+        gate_onboarding_try,
+        gate_onboarding_first_run,
+        gate_onboarding_interpreter,
+        gate_onboarding_mistakes,
+        gate_onboarding_location,
+        gate_onboarding_summary,
+        gate_migration_parity,
+        gate_migration_tmp_subtests,
+        gate_migration_readiness,
+        gate_migration_flags,
+        gate_migration_scheduling,
+        gate_migration_lazy,
+        gate_local_dev_selection,
+        gate_local_dev_rerun_history,
+        gate_local_dev_changed_watch,
+        gate_local_dev_debugging,
+        gate_local_dev_output,
+        gate_local_dev_interrupt_stop,
+        gate_ci_exit_codes,
+        gate_ci_artifacts,
+        gate_ci_sharding,
+        gate_ci_side_effects,
+        gate_ci_snippets,
+        gate_ci_environment,
+        gate_maintainer_doctor_numbers,
+        gate_maintainer_doctor_gates,
+        gate_maintainer_durations_regress,
+        gate_maintainer_leaks,
+        gate_maintainer_coverage_gate,
+        gate_maintainer_pool,
+        gate_maintainer_repro,
+        gate_maintainer_flaky_policy,
         gate_migrate_check,
         gate_bisect,
         gate_watch_mode,
@@ -286,7 +360,10 @@ def main():
     for _section in selected:
         _section(g, args, binary)
 
-    print(f"\n{_harness.PASS} ok, {len(_harness.FAIL)} failed")
+    print(
+        f"\n{_harness.PASS} ok, {len(_harness.FAIL)} failed, "
+        f"{len(_harness.XFAIL)} xfail (known bugs)"
+    )
     if _harness.FAIL:
         print("FAILED:", ", ".join(_harness.FAIL))
         sys.exit(1)
