@@ -69,3 +69,36 @@ def gate_worker_identity_fixtures(g, args, binary):
     # single-worker mode, so still "master".
     r = g.run("widfix/test_master.py", "-n", "0", "--reruns", "1")
     check("worker_id is 'master' at -n 0 --reruns", "1 passed" in r.stdout, r.stdout[-300:])
+
+
+def gate_lone_surrogate_in_report(g, args, binary):
+    # R17 (B1): a failure whose text holds a lone surrogate (a non-UTF-8 path
+    # through os.fsdecode) has no UTF-8 encoding. It used to crash the worker's
+    # msgpack encoder: INTERNALERROR, exit 3, and the next test never ran.
+    print("== lone surrogate in a report ==")
+    g.write(
+        "surrogate/test_sur.py",
+        "import os\n"
+        "def test_a(): pass\n"
+        'def test_bad(): raise FileNotFoundError(os.fsdecode(b"bad\\xff.txt"))\n'
+        "def test_c(): pass\n",
+    )
+    for n in ("0", "2"):
+        r = g.run("surrogate", "-n", n, "-p", "no:cacheprovider")
+        out = r.stdout + r.stderr
+        check(
+            f"surrogate -n {n}: every test reported, exit 1",
+            "1 failed, 2 passed" in r.stdout and r.returncode == 1,
+            f"rc={r.returncode} " + out[-300:],
+        )
+        check(
+            f"surrogate -n {n}: no worker crash",
+            "INTERNALERROR" not in out and "surrogates not allowed" not in out,
+            out[-300:],
+        )
+        if n != "0":  # -n 0 prints pytest's own output: the raw bytes
+            check(
+                f"surrogate -n {n}: escaped text shown",
+                "bad\\udcff.txt" in r.stdout,
+                r.stdout[-300:],
+            )

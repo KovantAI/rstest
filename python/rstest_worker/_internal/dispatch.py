@@ -166,6 +166,19 @@ def _no_terminal_set_trace(*args, **kwargs) -> None:
 _RUN_STOPPED = "run stopped by -x/--maxfail"
 
 
+def _run_protocol(conn, item, nextitem) -> None:
+    """Run one item's protocol. A `pytest.exit()` inside it ends the whole run,
+    as under pytest: tell the orchestrator (which stops every worker), then let
+    it end this session the usual way (Exit banner, exit status)."""
+    try:
+        item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+    except pytest.exit.Exception as exc:
+        # pytest's wrap_session: no returncode means INTERRUPTED (2).
+        returncode = 2 if exc.returncode is None else int(exc.returncode)
+        conn.send("session_exit", {"reason": str(exc.msg), "returncode": returncode})
+        raise
+
+
 class PoolDebuggerGuard:
     """Mixin for the pool-worker plugins: route `breakpoint()` and
     `pdb.set_trace()` to `_no_terminal_set_trace` (passthrough runs, where the
@@ -325,7 +338,7 @@ class ItemDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
                 self._conn.send(
                     "item_start", {"index": index, "timeout": self._effective_timeout(item)}
                 )
-                item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+                _run_protocol(self._conn, item, nextitem)
                 self._conn.send("item_done", {"index": index})
                 if session.shouldfail or session.shouldstop:
                     # Session-local -x/--maxfail tripped: stop here, report
@@ -508,7 +521,7 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
                 self._conn.send(
                     "item_start_id", {"id": item.nodeid, "timeout": self._effective_timeout(item)}
                 )
-                item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+                _run_protocol(self._conn, item, nextitem)
                 self._conn.send("item_done_id", {"id": item.nodeid})
                 if session.shouldfail or session.shouldstop:
                     self._conn.send(

@@ -285,6 +285,46 @@ fn known_flaky_ok(
     })
 }
 
+/// The `<not run>` error once every worker has died with work left: `tests`
+/// queued ids, `files` (lazy mode) files never collected.
+pub(crate) fn not_run_message(tests: usize, files: usize) -> String {
+    let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let what = match (tests, files) {
+        (t, 0) => plural(t, "test"),
+        (0, f) => plural(f, "test file"),
+        (t, f) => format!("{} and {}", plural(t, "test"), plural(f, "test file")),
+    };
+    format!("{what} did not run: every worker died (crash restarts spent)")
+}
+
+/// Report the item a dead worker was running as failed (the fabricated "worker
+/// crashed while running this test" report), not retried.
+#[allow(clippy::too_many_arguments)]
+fn record_crash(
+    sink: &mut Sink,
+    run: &mut Run,
+    prog: &mut Progress,
+    ids_store: &Option<Vec<String>>,
+    dist: Dist,
+    idx: usize,
+    index: u64,
+    killed_by: Option<orchestrator::Watchdog>,
+    e: &anyhow::Error,
+) {
+    let mut nodeid = nodeid_at(ids_store, index)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("<collected item #{index}>"));
+    if dist == Dist::Each {
+        nodeid.push_str(&format!(" [gw{idx}]"));
+    }
+    let fab = orchestrator::fabricate_crash_report(nodeid, killed_by, idx, e);
+    let crashed_id = fab.nodeid.clone();
+    prog.on_report(sink, Some(idx), &fab);
+    sink.emit_report(Some(idx), &fab);
+    run.record(Some(idx), fab);
+    run.mark_crashed(&crashed_id);
+}
+
 // The eager pool's knobs (dist/order/shuffle/shard/skip/pinned) are genuinely
 // independent run-shaping inputs; bundling them buys no clarity over the named
 // params, so this one call site keeps them flat.
@@ -382,6 +422,8 @@ pub fn run_pool(
     let mut dispatch: Option<Dispatch> = None;
     let mut done_workers = 0usize;
     let mut restarts_left = n.max(4);
+    // A worker died past the restart budget (not respawned).
+    let mut lost_worker = false;
     // Each-mode: a crash replacement runs only the dead worker's
     // REMAINING items (xdist semantics), stashed here per slot.
     let mut each_remnant: Vec<Option<Vec<u64>>> = vec![None; n];
@@ -886,6 +928,33 @@ pub fn run_pool(
                     }
                 }
             }
+            Ok(Event::SessionExit { reason, returncode }) => {
+                // pytest.exit() in a test ends the whole run, as under pytest:
+                // every worker finishes its test in flight and starts nothing
+                // more. The calling test never finished, so (like pytest) it
+                // has no outcome. The worker's Done follows.
+                let s = &mut states[idx];
+                s.attempt.clear();
+                s.attempt_failed = false;
+                s.running_since = None;
+                s.running_watchdog = None;
+                if let Some(i) = s.running.take() {
+                    if let Some(id) = nodeid_at(&ids_store, i) {
+                        let id = if dist == Dist::Each {
+                            format!("{id} [gw{idx}]")
+                        } else {
+                            id.to_string()
+                        };
+                        run.forget_unfinished(&id);
+                    }
+                }
+                run.session_exit
+                    .get_or_insert(crate::reporting::report::SessionExit { reason, returncode });
+                if !stopping {
+                    stopping = true;
+                    orchestrator::stop_all(&mut states);
+                }
+            }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
                 let s = &mut states[idx];
@@ -958,18 +1027,9 @@ pub fn run_pool(
                         }
                     }
                     if let Some(i) = crashed {
-                        let mut nodeid = nodeid_at(&ids_store, i)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("<collected item #{i}>"));
-                        if dist == Dist::Each {
-                            nodeid.push_str(&format!(" [gw{idx}]"));
-                        }
-                        let fab = orchestrator::fabricate_crash_report(nodeid, killed_by, idx, &e);
-                        let crashed_id = fab.nodeid.clone();
-                        prog.on_report(sink, Some(idx), &fab);
-                        sink.emit_report(Some(idx), &fab);
-                        run.record(Some(idx), fab);
-                        run.mark_crashed(&crashed_id);
+                        record_crash(
+                            sink, &mut run, &mut prog, &ids_store, dist, idx, i, killed_by, &e,
+                        );
                     }
                     if dist == Dist::Each {
                         each_remnant[idx] = Some(
@@ -1013,6 +1073,23 @@ pub fn run_pool(
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
+                    // Not respawned, but nothing it held is lost: the item it
+                    // died on is reported failed, the rest go to the live
+                    // workers. Not under --dist each (every worker runs its
+                    // own copy of the suite) or replay (pinned lists, no
+                    // shared queue).
+                    if let Some(i) = crashed {
+                        record_crash(
+                            sink, &mut run, &mut prog, &ids_store, dist, idx, i, killed_by, &e,
+                        );
+                    }
+                    if dist != Dist::Each && pinned.is_none() {
+                        if let Some(d) = dispatch.as_mut() {
+                            d.requeued
+                                .extend(orphaned.into_iter().filter(|&i| Some(i) != crashed));
+                        }
+                    }
+                    lost_worker = true;
                     run.collect_error(
                         format!("<worker gw{idx}>"),
                         format!("worker terminated unexpectedly: {e:#}"),
@@ -1383,6 +1460,15 @@ pub fn run_pool(
         }
     }
 
+    // Every worker died (crash restarts spent): say what never ran rather
+    // than leave it missing from every report.
+    if let Some(d) = dispatch.as_ref().filter(|_| !stopping) {
+        let left = d.order.len().saturating_sub(d.cursor) + d.requeued.len();
+        if left > 0 && lost_worker && states.iter().all(|s| s.dead) {
+            run.collect_error("<not run>".into(), not_run_message(left, 0));
+        }
+    }
+
     // Parallel wind-down: send every shutdown first, THEN wait. Waiting
     // one-by-one serializes N interpreter teardowns: the visible pause
     // between the last test and the summary on small suites.
@@ -1407,6 +1493,11 @@ pub fn run_pool(
         false,
         run.stopped_after.is_some(),
     );
+    // pytest.exit(): its returncode is the run's exit code, as under pytest.
+    let exitstatus = run
+        .session_exit
+        .as_ref()
+        .map_or(exitstatus, |x| x.returncode);
     let (collection_size, collection_hash) = match reference {
         Some((count, hash)) => (count, Some(hash)),
         None => (0, None),
@@ -1636,5 +1727,17 @@ mod tests {
         assert_eq!(merge_statuses(&[1, 2, 0]), 2);
         assert_eq!(merge_statuses(&[4, 1]), 4);
         assert_eq!(merge_statuses(&[3, 5]), 3);
+    }
+
+    #[test]
+    fn not_run_message_counts_tests_and_files() {
+        let tail = "did not run: every worker died (crash restarts spent)";
+        assert_eq!(not_run_message(1, 0), format!("1 test {tail}"));
+        assert_eq!(not_run_message(3, 0), format!("3 tests {tail}"));
+        assert_eq!(not_run_message(0, 2), format!("2 test files {tail}"));
+        assert_eq!(
+            not_run_message(2, 1),
+            format!("2 tests and 1 test file {tail}")
+        );
     }
 }

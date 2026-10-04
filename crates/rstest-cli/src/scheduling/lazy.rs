@@ -216,6 +216,8 @@ pub fn run_lazy_pool(
     let mut collect_aborted = false;
     let mut done_workers = 0usize;
     let mut restarts_left = n.max(4);
+    // A worker died past the restart budget (not respawned).
+    let mut lost_worker = false;
     let mut designate = 0usize;
     // Replay journaling, as in run_pool: each worker's ordered item starts,
     // keyed by nodeid, so `rstest replay` can re-pin this schedule on the
@@ -438,6 +440,24 @@ pub fn run_lazy_pool(
                     requeued.extend(unrun);
                 }
             }
+            Ok(Event::SessionExit { reason, returncode }) => {
+                // pytest.exit() in a test ends the whole run (see the full
+                // pool): stop every worker; the calling test has no outcome.
+                let s = &mut states[idx];
+                s.attempt.clear();
+                s.attempt_failed = false;
+                s.running_since = None;
+                s.running_watchdog = None;
+                if let Some(id) = s.running.take() {
+                    run.forget_unfinished(&id);
+                }
+                run.session_exit
+                    .get_or_insert(crate::reporting::report::SessionExit { reason, returncode });
+                if !stopping {
+                    stopping = true;
+                    orchestrator::stop_all(&mut states);
+                }
+            }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
                 let s = &mut states[idx];
@@ -531,6 +551,22 @@ pub fn run_lazy_pool(
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
+                    // Not respawned, but nothing it held is lost: the id it
+                    // died on is reported failed, the rest go to the live
+                    // workers (as on the restartable path above).
+                    if let Some(id) = &crashed {
+                        let fab =
+                            orchestrator::fabricate_crash_report(id.clone(), killed_by, idx, &e);
+                        prog.on_report(sink, Some(idx), &fab);
+                        sink.emit_report(Some(idx), &fab);
+                        run.record(Some(idx), fab);
+                    }
+                    requeued.extend(
+                        orphaned
+                            .into_iter()
+                            .filter(|id| Some(id) != crashed.as_ref()),
+                    );
+                    lost_worker = true;
                     run.collect_error(
                         format!("<worker gw{idx}>"),
                         format!("worker terminated unexpectedly: {e:#}"),
@@ -709,6 +745,18 @@ pub fn run_lazy_pool(
     // replay's size-drift check instead of flagging a suite change.
     let fully_collected =
         file_queue.is_empty() && states.iter().all(|s| s.uncollected_files.is_empty());
+    // Every worker died (crash restarts spent): say what never ran rather
+    // than leave it missing from every report.
+    if !stopping && lost_worker && states.iter().all(|s| s.dead) {
+        let tests = requeued.len() + states.iter().map(|s| s.own_queue.len()).sum::<usize>();
+        let files = file_queue.len();
+        if tests + files > 0 {
+            run.collect_error(
+                "<not run>".into(),
+                crate::scheduling::pool::not_run_message(tests, files),
+            );
+        }
+    }
     let mut workers: Vec<_> = states.into_iter().map(|s| s.worker).collect();
     for w in &mut workers {
         let _ = w.send(&proto::Command::Shutdown);
@@ -724,6 +772,11 @@ pub fn run_lazy_pool(
         collect_aborted,
         run.stopped_after.is_some(),
     );
+    // pytest.exit(): its returncode is the run's exit code, as under pytest.
+    let exitstatus = run
+        .session_exit
+        .as_ref()
+        .map_or(exitstatus, |x| x.returncode);
     // Persist the schedule for `rstest replay`. Best-effort, like run_pool. No
     // collection hash: lazy never agrees on one ordered nodeid list, so replay's
     // drift check falls back to the collected count (when it is complete).

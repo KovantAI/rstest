@@ -141,6 +141,9 @@ class Gate:
             # the locale encoding (cp1252 on Windows) does not mangle them
             # and make `"✓" in r.stdout` spuriously False.
             encoding="utf-8",
+            # pytest's own output (-n 0) can carry raw non-UTF-8 bytes, e.g. a
+            # surrogateescape'd filename; show them escaped rather than crash.
+            errors="backslashreplace",
             timeout=timeout,
         )
 

@@ -285,6 +285,26 @@ pub struct Run {
     pub stopped_after: Option<u64>,
     /// Set when SIGINT/SIGTERM stopped the run.
     pub interruption: Option<Interruption>,
+    /// Set when a test called `pytest.exit()`, which stops the whole run.
+    pub session_exit: Option<SessionExit>,
+}
+
+/// A `pytest.exit(reason, returncode)` that stopped the run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionExit {
+    pub reason: String,
+    /// The run's exit code, as under pytest (2 when none was given).
+    pub returncode: i32,
+}
+
+impl SessionExit {
+    /// pytest's `!!! _pytest.outcomes.Exit: <reason> !!!` banner.
+    pub fn banner(&self) -> String {
+        format!(
+            "!!!!!!!!!! _pytest.outcomes.Exit: {} !!!!!!!!!!",
+            self.reason
+        )
+    }
 }
 
 /// How a SIGINT/SIGTERM stopped the run, for the closing summary.
@@ -495,6 +515,19 @@ impl Run {
     pub fn mark_interrupted(&mut self, nodeid: &str) {
         if let Some(e) = self.tests.get_mut(nodeid) {
             e.interrupted = true;
+        }
+    }
+
+    /// Drop the entry of a test that never finished its protocol because it
+    /// called `pytest.exit()` mid-setup or mid-call: pytest reports no outcome
+    /// for it, so it must not count as an error. A test that already has a
+    /// call outcome or a failed phase keeps its entry.
+    pub fn forget_unfinished(&mut self, nodeid: &str) {
+        let unfinished = self.tests.get(nodeid).is_some_and(|e| {
+            e.call.is_none() && e.setup.as_deref() != Some("failed") && e.teardown.is_none()
+        });
+        if unfinished {
+            self.tests.remove(nodeid);
         }
     }
 
@@ -1187,5 +1220,41 @@ mod tests {
         );
         assert_eq!(run.phase_durations.len(), 1);
         assert_eq!(run.phase_durations[0].1, "setup");
+    }
+
+    #[test]
+    fn forget_unfinished_drops_only_a_test_with_no_outcome() {
+        let mut run = Run::default();
+        // pytest.exit() mid-call: setup passed, no call report.
+        run.record(None, report("a.py::exits", "setup", "passed"));
+        // pytest.exit() in teardown: the call outcome stands.
+        run.record(None, report("a.py::exits_late", "setup", "passed"));
+        run.record(None, report("a.py::exits_late", "call", "passed"));
+        // A failed setup is a real error and stays.
+        run.record(None, report("a.py::setup_err", "setup", "failed"));
+        for id in [
+            "a.py::exits",
+            "a.py::exits_late",
+            "a.py::setup_err",
+            "a.py::absent",
+        ] {
+            run.forget_unfinished(id);
+        }
+        assert!(!run.tests().contains_key("a.py::exits"));
+        assert!(run.tests().contains_key("a.py::exits_late"));
+        assert!(run.tests().contains_key("a.py::setup_err"));
+        assert_eq!(run.summary_line(), "1 error, 1 passed");
+    }
+
+    #[test]
+    fn session_exit_banner_is_pytests() {
+        let exit = SessionExit {
+            reason: "bye".into(),
+            returncode: 2,
+        };
+        assert_eq!(
+            exit.banner(),
+            "!!!!!!!!!! _pytest.outcomes.Exit: bye !!!!!!!!!!"
+        );
     }
 }

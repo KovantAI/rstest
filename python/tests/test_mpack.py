@@ -250,3 +250,28 @@ def test_msgpack_unpacker_next_translates_bufferfull():
     up._u = _Boom()
     with pytest.raises(mpack.BufferFull):
         next(up)
+
+
+# ---- lone surrogates ---------------------------------------------------------
+# A str holding a lone surrogate (os.fsdecode of a non-UTF-8 filename, as in
+# `FileNotFoundError(os.fsdecode(b"bad\xff.txt"))`) has no UTF-8 encoding.
+# Packing it must not raise: one such longrepr used to kill the worker
+# (INTERNALERROR, the rest of its queue never ran). Both backends escape it the
+# same way, so the frame stays byte-identical across them.
+
+SURROGATE = "bad\udcff.txt"
+ESCAPED = "bad\\udcff.txt"
+
+
+def test_pure_packb_escapes_lone_surrogates():
+    assert _pure_roundtrip(SURROGATE) == ESCAPED
+    assert _pure_roundtrip({"longrepr": SURROGATE}) == {"longrepr": ESCAPED}
+
+
+@pytest.mark.skipif(_msgpack is None, reason="msgpack not installed")
+def test_msgpack_packb_escapes_lone_surrogates_like_pure():
+    msg = {"longrepr": SURROGATE, "ok": "plain"}
+    assert mpack._msgpack_packb(msg) == mpack._pure_packb(msg)
+    up = mpack._MsgpackUnpacker()
+    up.feed(mpack._msgpack_packb(msg))
+    assert next(iter(up)) == {"longrepr": ESCAPED, "ok": "plain"}

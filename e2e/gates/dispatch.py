@@ -811,3 +811,99 @@ def gate_order_fail_fast(g, args, binary):
         r.returncode == 0 and "monorepo: 2 projects" in r.stdout,
         f"rc={r.returncode} " + r.stdout[-300:],
     )
+
+
+def gate_session_exit_stops_pool(g, args, binary):
+    # R6: pytest.exit() stops the whole run, as under pytest and -n 0: every
+    # worker stops starting tests, pytest's Exit banner names the reason, and
+    # the exit code is pytest's (2, or the returncode passed). It used to end
+    # only that worker's session: the other kept going, the tests the exiting
+    # worker held were lost, and the summary showed a bare "1 error".
+    print("== pytest.exit() in a parallel test ==")
+    g.write(
+        "sessexit/test_exit.py",
+        "import pytest\ndef test_exit(): pytest.exit('bye')\n",
+    )
+    for i in range(6):
+        g.write(
+            f"sessexit/test_p{i}.py",
+            "import time\n" + "".join(f"def test_p{j}(): time.sleep(0.05)\n" for j in range(10)),
+        )
+    g.write(
+        "sessexit_rc/test_exit.py",
+        "import pytest\n"
+        "def test_exit(): pytest.exit('custom', returncode=7)\n"
+        "def test_ok(): pass\n",
+    )
+    for mode in ((), ("--collect", "lazy")):
+        tag = " ".join(("-n 2", *mode))
+        r = g.run("sessexit", "-n", "2", *mode, timeout=90)
+        out = r.stdout + r.stderr
+        summary = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+        check(
+            f"exit {tag}: exit code 2 (interrupted)",
+            r.returncode == 2,
+            f"rc={r.returncode} " + out[-300:],
+        )
+        check(f"exit {tag}: Exit banner names the reason", "Exit: bye" in r.stdout, r.stdout[-300:])
+        check(f"exit {tag}: exiting test not counted as an error", "error" not in summary, summary)
+        m = re.search(r"(\d+) passed", summary)
+        check(
+            f"exit {tag}: other worker stopped early",
+            m is None or int(m.group(1)) < 40,
+            summary,
+        )
+        r = g.run("sessexit_rc", "-n", "2", *mode, timeout=60)
+        check(
+            f"exit {tag}: returncode= is the exit code",
+            r.returncode == 7,
+            f"rc={r.returncode} " + r.stdout[-200:],
+        )
+
+
+def gate_crash_after_restart_budget(g, args, binary):
+    # R8 (B2): a worker that dies after the restart budget is spent is not
+    # respawned. Its crashing test must still be reported failed and the tests
+    # it held handed to the live workers; they used to vanish from every report.
+    print("== crash after restart budget ==")
+    for i in range(6):
+        g.write(
+            f"crashbudget/test_m{i}.py",
+            "import os\n"
+            "def test_crash(): os._exit(1)\n"
+            + "".join(f"def test_p{j}(): pass\n" for j in range(15)),
+        )
+    names = ["test_crash"] + [f"test_p{j}" for j in range(15)]
+    want = {f"crashbudget/test_m{i}.py::{t}" for i in range(6) for t in names}
+    for mode in ((), ("--collect", "lazy")):
+        tag = " ".join(("-n 4", *mode))
+        rp = g.tmp / "crashbudget.json"
+        rp.unlink(missing_ok=True)
+        r = g.run(
+            "crashbudget",
+            "-n",
+            "4",
+            *mode,
+            "--report-json",
+            str(rp),
+            "-p",
+            "no:cacheprovider",
+            timeout=90,
+        )
+        tests = json.loads(rp.read_text(encoding="utf-8"))["tests"] if rp.exists() else {}
+        check(
+            f"crash budget {tag}: every test reported",
+            set(tests) >= want,
+            f"missing {sorted(want - set(tests))[:5]} " + r.stdout[-200:],
+        )
+        crashers = [tests.get(f"crashbudget/test_m{i}.py::test_crash", {}) for i in range(6)]
+        check(
+            f"crash budget {tag}: every crasher reported failed",
+            all(c.get("call") == "failed" for c in crashers),
+            str(crashers),
+        )
+        check(
+            f"crash budget {tag}: 6 failed, 90 passed, exit 3",
+            "6 failed" in r.stdout and "90 passed" in r.stdout and r.returncode == 3,
+            f"rc={r.returncode} " + r.stdout[-200:],
+        )

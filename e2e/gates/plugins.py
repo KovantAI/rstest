@@ -49,7 +49,15 @@ def gate_crash_handling(g, args, binary):
     check("crash exit 1", r.returncode == 1)
     g.write("crashloop/test_loop.py", CRASHLOOP)
     r = g.run("crashloop", "-n", "2", timeout=60)
-    check("crash-loop terminates", r.returncode != 0 and "passed" in r.stdout, r.stdout[-200:])
+    # Every test but one crashes: the restart budget runs out, the requeued
+    # crashers take down the last workers, and the test left over is named
+    # as not run instead of silently missing.
+    check("crash-loop terminates", r.returncode != 0, r.stdout[-200:])
+    check(
+        "crash-loop: nothing silently lost",
+        "passed" in r.stdout or "did not run: every worker died" in r.stdout,
+        r.stdout[-300:],
+    )
 
 
 def gate_pytest_randomly_real_plugin(g, args, binary):

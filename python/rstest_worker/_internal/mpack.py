@@ -45,6 +45,9 @@ _PACK_I32 = struct.Struct(">i")
 _PACK_I64 = struct.Struct(">q")
 _PACK_F64 = struct.Struct(">d")
 
+# How both backends encode a str that is not valid UTF-8 (a lone surrogate).
+_UNICODE_ERRORS = "backslashreplace"
+
 
 def _pack_int(out: bytearray, n: int) -> None:
     # Canonical minimal encoding, matching msgpack's own choices so a frame this
@@ -111,7 +114,12 @@ def _pack(out: bytearray, obj: object) -> None:
         out += b"\xcb"
         out += _PACK_F64.pack(obj)
     elif isinstance(obj, str):
-        data = obj.encode("utf-8")
+        try:
+            data = obj.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate (os.fsdecode of a non-UTF-8 path) has no UTF-8
+            # form; escape it rather than kill the worker mid-report.
+            data = obj.encode("utf-8", _UNICODE_ERRORS)
         n = len(data)
         if n <= 0x1F:  # fixstr
             out.append(0xA0 | n)
@@ -353,7 +361,8 @@ except ImportError:  # pragma: no cover - exercised only in a msgpack-less venv
 
 
 def _msgpack_packb(obj: object) -> bytes:
-    return _msgpack.packb(obj)
+    # Same escaping as the pure encoder, so the two stay byte-identical.
+    return _msgpack.packb(obj, unicode_errors=_UNICODE_ERRORS)
 
 
 class _MsgpackUnpacker:

@@ -202,7 +202,8 @@ both the rerun and restart budgets so a repeatable crash can't loop. Its
 remaining tests are redistributed to other workers automatically. If you see
 `worker terminated unexpectedly` instead, the restart budget was
 exhausted: something is killing workers repeatedly, and the longrepr of
-the first crash is the lead. Each such failure carries the worker's exit
+the first crash is the lead. The crashing test is still reported failed and
+the dead worker's other tests still run on the workers that are left. Each such failure carries the worker's exit
 code (or the signal that killed it) and the last lines it wrote to stderr.
 
 ## `worker terminated unexpectedly: exited during startup`
