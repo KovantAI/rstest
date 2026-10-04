@@ -1882,38 +1882,178 @@ fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
     Ok(value.parse()?)
 }
 
-/// `auto` = logical cores, capped by what the suite can use (worker startup
-/// costs real time). Two best-effort signals: test-file count from an
-/// ini-aware walk, and the duration cache (a few-second suite needs ~2 workers).
+/// `auto` = logical cores, capped by what the selected tests can use (worker
+/// startup costs real time). Sized from the session args' selection (paths and
+/// nodeids, the invocation dir or `testpaths` when none), with config
+/// discovered from the args' common ancestor like pytest. The parallelizable
+/// units are the tests the duration cache times inside the selection, plus one
+/// per selected test file or nodeid it has no timing for: `--dist load` splits
+/// within a file, so a timed file counts its tests, not 1. When the whole
+/// selection is timed (or nothing is selected), the cached time caps it too:
+/// a few-second suite needs ~2 workers.
+///
 /// A walk with no Python file at all (an empty folder) means one worker,
 /// unless `args` name a path the walk didn't cover.
 fn auto_workers(args: &[String]) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
-    let mut n = cores;
-
-    if let Ok(cwd) = std::env::current_dir() {
-        // Worker-sizing has no run Sink; a malformed-config note here is a dup of
-        // the one the real discover emits through the Sink, so send it to stderr.
-        let project = config::discover(&cwd, &mut std::io::stderr());
-        if let Ok(files) = collect::collect_test_files(&[], &project) {
-            n = cap_workers_by_files(n, files.len());
-            if files.is_empty()
-                && !names_existing_path(args)
-                && collect::has_python_files(&[], &project).is_ok_and(|found| !found)
-            {
-                n = 1;
-            }
-        }
+    let Ok(cwd) = std::env::current_dir() else {
+        let cache = durations::load();
+        return cap_workers_by_time(cores, cache.values().sum()).max(1);
+    };
+    let cwd = config::normalize(&cwd);
+    let rootdir = crate::cache::rootdir()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config::rootdir(&cwd, args));
+    let mut sel = Selection::from_args(&cwd, args);
+    let explicit = !sel.is_empty();
+    // No args below the rootdir: pytest collects the invocation dir (it reads
+    // `testpaths` only when run from the rootdir itself).
+    if !explicit && cwd != rootdir && cwd.starts_with(&rootdir) {
+        sel.paths.push(cwd.clone());
     }
-
+    // Worker-sizing has no run Sink; a malformed-config note here is a dup of
+    // the one the real discover emits through the Sink, so send it to stderr.
+    let start = config::common_ancestor(&cwd, &config::selected_paths(&cwd, args));
+    let project = config::discover(&start, &mut std::io::stderr());
+    // Explicit paths walk as given; no selection walks `testpaths` / rootdir;
+    // nodeids alone need no walk.
+    let files = if sel.nodeids.is_empty() || !sel.paths.is_empty() {
+        match collect::collect_test_files(&sel.paths, &project) {
+            Ok(files) => files,
+            Err(_) => return cores,
+        }
+    } else {
+        Vec::new()
+    };
+    if files.is_empty()
+        && sel.nodeids.is_empty()
+        && !names_existing_path(args)
+        && collect::has_python_files(&sel.paths, &project).is_ok_and(|found| !found)
+    {
+        return 1;
+    }
     let cache = durations::load();
-    if !cache.is_empty() {
+    let t = sel.timed(&files, &cache, &rootdir);
+    let mut n = match t.units() {
+        0 => cores,
+        units => cores.min(units),
+    };
+    if t.cold == 0 && t.tests > 0 {
+        n = cap_workers_by_time(n, t.secs);
+    } else if !explicit && !cache.is_empty() {
+        // A partly timed whole suite: the cached time is the best estimate.
         n = cap_workers_by_time(n, cache.values().sum());
     }
-
     n.max(1)
+}
+
+/// What the session args select, for `-n auto` sizing: existing paths (files
+/// or dirs) and nodeids (`file.py::test...`) whose file exists, absolute.
+#[derive(Default)]
+struct Selection {
+    paths: Vec<PathBuf>,
+    /// (absolute file, the `::`-suffix as written).
+    nodeids: Vec<(PathBuf, String)>,
+}
+
+/// The duration cache folded over a selection (see [`Selection::timed`]).
+#[derive(Debug, Default, PartialEq)]
+struct Timed {
+    /// Cached tests inside the selection.
+    tests: usize,
+    /// Their summed cached seconds.
+    secs: f64,
+    /// Selected test files and nodeids with no cached test.
+    cold: usize,
+}
+
+impl Timed {
+    fn units(&self) -> usize {
+        self.tests + self.cold
+    }
+}
+
+impl Selection {
+    fn from_args(cwd: &std::path::Path, args: &[String]) -> Self {
+        let mut sel = Self::default();
+        for (a, pos) in args.iter().zip(crate::cli::positional_mask(args)) {
+            if !pos || a.starts_with('@') {
+                continue;
+            }
+            match a.split_once("::") {
+                Some((file, rest)) => {
+                    let file = config::normalize(&cwd.join(file));
+                    if file.is_file() {
+                        sel.nodeids.push((file, rest.to_string()));
+                    }
+                }
+                None => {
+                    let path = config::normalize(&cwd.join(a));
+                    if path.exists() {
+                        sel.paths.push(path);
+                    }
+                }
+            }
+        }
+        sel
+    }
+
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.nodeids.is_empty()
+    }
+
+    /// Fold the duration cache (nodeids relative to `rootdir`) over the
+    /// selection: `files` (the walked test files) and the nodeids.
+    fn timed(
+        &self,
+        files: &[PathBuf],
+        cache: &std::collections::HashMap<String, f64>,
+        rootdir: &std::path::Path,
+    ) -> Timed {
+        use std::collections::HashMap;
+        let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let mut file_hit: HashMap<PathBuf, bool> =
+            files.iter().map(|f| (canon(f), false)).collect();
+        let nodeids: Vec<(PathBuf, String)> = self
+            .nodeids
+            .iter()
+            .map(|(file, rest)| (canon(file), rest.clone()))
+            .collect();
+        let mut id_hit = vec![false; nodeids.len()];
+        let mut resolved: HashMap<&str, PathBuf> = HashMap::new();
+        let mut t = Timed::default();
+        for (id, secs) in cache {
+            let (file, rest) = id.split_once("::").unwrap_or((id.as_str(), ""));
+            let abs = resolved
+                .entry(file)
+                .or_insert_with(|| canon(&rootdir.join(file)));
+            let mut hit = false;
+            if let Some(h) = file_hit.get_mut(abs.as_path()) {
+                *h = true;
+                hit = true;
+            }
+            for (i, (f, want)) in nodeids.iter().enumerate() {
+                let matches = f == abs
+                    && (rest == want
+                        || rest
+                            .strip_prefix(want.as_str())
+                            .is_some_and(|r| r.starts_with('[') || r.starts_with("::")));
+                if matches {
+                    id_hit[i] = true;
+                    hit = true;
+                }
+            }
+            if hit {
+                t.tests += 1;
+                t.secs += secs;
+            }
+        }
+        t.cold =
+            file_hit.values().filter(|h| !**h).count() + id_hit.iter().filter(|h| !**h).count();
+        t
+    }
 }
 
 /// Worker count for a parallel-safety check (`audit`, `migrate-check`): like
@@ -3250,6 +3390,49 @@ mod tests {
         assert_eq!(cap_workers_by_time(8, 10.0), 5); // ceil(10/2)=5
         assert_eq!(cap_workers_by_time(8, 1.0), 1); // ceil(0.5)=1, max(1)
         assert_eq!(cap_workers_by_time(8, 0.0), 1); // never below 1
+    }
+
+    #[test]
+    fn auto_selection_counts_timed_tests_not_files() {
+        use super::{Selection, Timed};
+        let root = std::env::temp_dir().join(format!("rstest-auto-sel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        for f in ["test_a.py", "test_b.py"] {
+            std::fs::write(root.join("tests").join(f), "").unwrap();
+        }
+        let a = root.join("tests/test_a.py");
+        let b = root.join("tests/test_b.py");
+        let cache: std::collections::HashMap<String, f64> = (0..20)
+            .map(|i| (format!("tests/test_a.py::test_io[{i}]"), 0.25))
+            .collect();
+
+        // One timed file: its 20 tests are the units, not 1 file.
+        let sel = Selection::from_args(&root, &sv(&["tests/test_a.py"]));
+        let t = sel.timed(std::slice::from_ref(&a), &cache, &root);
+        assert_eq!((t.tests, t.cold, t.units()), (20, 0, 20));
+        assert!((t.secs - 5.0).abs() < 1e-9);
+
+        // An untimed file is one cold unit.
+        let t = sel.timed(&[a.clone(), b.clone()], &cache, &root);
+        assert_eq!((t.tests, t.cold), (20, 1));
+
+        // A nodeid matches itself and its parametrizations only.
+        let sel = Selection::from_args(&root, &sv(&["-k", "x", "tests/test_a.py::test_io"]));
+        assert!(sel.paths.is_empty() && sel.nodeids.len() == 1);
+        assert_eq!(sel.timed(&[], &cache, &root).units(), 20);
+        let sel = Selection::from_args(&root, &sv(&["tests/test_a.py::test_io[3]"]));
+        assert_eq!(sel.timed(&[], &cache, &root).units(), 1);
+        let sel = Selection::from_args(&root, &sv(&["tests/test_b.py::test_x"]));
+        assert_eq!(
+            sel.timed(&[], &cache, &root),
+            Timed {
+                tests: 0,
+                secs: 0.0,
+                cold: 1
+            }
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn report(nodeid: &str, outcome: &str) -> proto::Report {

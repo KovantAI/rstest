@@ -758,7 +758,6 @@ def gate_maintainer_pool(g, args, binary):
         "MT-14 doctor does not report a PARALLEL FLOOR problem",
         "PARALLEL FLOOR" not in r.stdout,
         next((ln for ln in r.stdout.splitlines() if "PARALLEL FLOOR" in ln), ""),
-        known_bug=True,
     )
 
 

@@ -122,18 +122,37 @@ def _pool_coverage_args(args: list[str]) -> list[str]:
     return ["--cov-append", *args]
 
 
+def _pytest_main(args: list[str], plugins: list) -> int:
+    """`pytest.main`, but with argparse's prog set to `rstest`.
+
+    `pytest.main()` names itself `pytest.main()` in usage errors
+    (`usage: pytest.main() [options] ...`), which reads as a bug to someone who
+    typed `rstest`. pytest's private `_main` takes the prog explicitly; fall
+    back to the public entry point if a pytest without it is ever in use.
+    """
+    import inspect
+
+    try:
+        from _pytest.config import _main
+    except ImportError:
+        return pytest.main(args, plugins=plugins)
+    if "prog" not in inspect.signature(_main).parameters:
+        return pytest.main(args, plugins=plugins)
+    return _main(args=args, plugins=plugins, prog="rstest")
+
+
 def run_session(args: list[str], conn) -> int:
     """Item-dispatch session (pool mode)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    return _contained(lambda: pytest.main(list(args), plugins=[ItemDispatchPlugin(conn)]), conn)
+    return _contained(lambda: _pytest_main(list(args), plugins=[ItemDispatchPlugin(conn)]), conn)
 
 
 def run_lazy_session(args: list[str], conn) -> int:
     """Lazy-collection session (pool mode, --collect lazy)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    return _contained(lambda: pytest.main(list(args), plugins=[LazyDispatchPlugin(conn)]), conn)
+    return _contained(lambda: _pytest_main(list(args), plugins=[LazyDispatchPlugin(conn)]), conn)
 
 
 def _maybe_start_debugpy() -> None:
@@ -208,7 +227,7 @@ def run(args: list[str], conn) -> int:
     # `rstest --debug` routes here (single-worker passthrough): wait for the
     # editor to attach before pytest collects, so early breakpoints hold.
     _maybe_start_debugpy()
-    return _contained(lambda: pytest.main(list(args), plugins=[SessionStreamPlugin(conn)]), conn)
+    return _contained(lambda: _pytest_main(list(args), plugins=[SessionStreamPlugin(conn)]), conn)
 
 
 class SessionStreamPlugin(StreamPlugin):

@@ -461,7 +461,11 @@ impl Run {
         let line = counts
             .iter()
             .filter(|(_, v)| **v > 0)
-            .map(|(k, v)| format!("{v} {}", k.replace('_', " ")))
+            .map(|(k, v)| match (*k, *v) {
+                // pytest's own plural rule: only "error(s)" changes with the count.
+                ("errors", 1) => "1 error".to_string(),
+                (k, v) => format!("{v} {}", k.replace('_', " ")),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         if line.is_empty() {
@@ -682,10 +686,7 @@ mod tests {
         full(&mut run, "a.py::skip", "skipped");
         // setup failure counts as error, not failure
         run.record(None, report("a.py::err", "setup", "failed"));
-        assert_eq!(
-            run.summary_line(),
-            "1 errors, 1 failed, 2 passed, 1 skipped"
-        );
+        assert_eq!(run.summary_line(), "1 error, 1 failed, 2 passed, 1 skipped");
         assert!(!run.all_passed());
     }
 
@@ -706,8 +707,11 @@ mod tests {
         run.collect_error("b.py".into(), "ImportError".into());
         assert!(!run.all_passed());
         // pytest's summary counts a collection error among its errors.
-        assert_eq!(run.summary_line(), "1 errors, 1 passed");
+        assert_eq!(run.summary_line(), "1 error, 1 passed");
         assert_eq!(run.counts()["collect_errors"], 1);
+        // Plural from two on, as pytest words it.
+        run.collect_error("c.py".into(), "ImportError".into());
+        assert_eq!(run.summary_line(), "2 errors, 1 passed");
     }
 
     #[test]

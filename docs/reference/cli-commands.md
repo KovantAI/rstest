@@ -2,7 +2,11 @@
 
 These commands don't run your suite as a normal test run. Each is given as
 the first argument (`rstest try`); a path literally named after one is
-disambiguated with `rstest ./try` or `rstest -- try`. `try`,
+disambiguated with `rstest ./try` or `rstest -- try`. rstest's own options
+and value-less pytest switches may also come before it (`rstest -q try`,
+`rstest --python 3.12 migrate-check`). A subcommand name after a test path
+or a pytest option's value (`rstest -k foo try`) is a usage error that says
+to put the subcommand first, unless a file or directory of that name exists. `try`,
 `migrate-check`, `audit`, `bisect` and `replay` (and `xdist-removal-check`
 with `--xdist-trial`) do run pytest sessions, but as their
 own analysis, not as a normal test run. The flags that only apply to a
@@ -31,19 +35,31 @@ rough CI-time saving. No flags, no config.
 $ rstest try
 ================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
-  ⚡ speed:   pytest 1m36s  →  rstest 21.0s   (4.6× at -n auto)
+  ⚡ speed:   pytest 1m36s  →  rstest 21.0s   (4.6× at -n auto = -n 8)
   💸 saves   1m15s per run
 ================================================
   → drop-in ready: `rstest` is `pytest`, in parallel. Switch with confidence.
 ```
 
-The `saves` line appears only when rstest saved at least one second. In a git
-checkout it also projects the saving over the last 30 days, counting each
-commit in that window as one CI run.
+The speed line names the worker count `-n auto` resolved to for this suite
+(`-n 1` when it ran single-worker). The `saves` line appears only when rstest
+saved at least one second. In a git checkout it also projects the saving over
+the last 30 days, counting each commit in that window as one CI run.
+
+Parity needs something to compare. If either run hit a collection error, or
+ran no tests at all (an empty directory, everything deselected), `try` gives
+no verdict:
+
+```console
+================= rstest try =================
+  ✗ could not compare: pytest hit 1 collection error (tests/test_bad.py)
+================================================
+```
 
 Exit 0 when outcomes are identical, 1 when they differ (it then points you at
 `migrate-check` to classify the differences, usually an unstable parametrize
-id or a parallel-only failure), 2 when it couldn't run pytest, rstest refused
+id or a parallel-only failure), 2 when there was nothing to compare
+(collection errors or no tests), it couldn't run pytest, rstest refused
 to dispatch, or rstest hit an error (no usable interpreter, a failed spawn;
 an `Error:` line on stderr says which). A pre-existing red pytest run is reported as such, not blamed on
 rstest.

@@ -30,6 +30,10 @@ const SCHEMA_VERSION: u32 = 3;
 /// a fast redundant test frees no meaningful time.
 const WASTE_MIN_SECONDS: f64 = 0.5;
 
+/// A test is a parallel floor only when it outlasts a worker's ideal share by
+/// more than this factor (10%), so a balanced pool is not flagged on jitter.
+const FLOOR_SLACK: f64 = 1.1;
+
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DoctorReport {
@@ -248,13 +252,17 @@ pub fn analyze(
     durations.sort_by(|a, b| b.1.total_cmp(&a.1));
     let parallel_floor = durations.first().and_then(|&(_, longest, _)| {
         let ideal = test_time / workers.max(1) as f64;
-        (longest > ideal.max(1.0)).then(|| ParallelFloor {
+        // A test only gates the wall when it clearly outlasts a worker's even
+        // share: N equal tests on N workers sit exactly at the share, and
+        // timing jitter alone must not flag that perfectly balanced pool.
+        let floor = ideal.max(1.0) * FLOOR_SLACK;
+        (longest > floor).then(|| ParallelFloor {
             longest_seconds: longest,
             ideal_share_seconds: ideal,
             gate_tests: durations
                 .iter()
                 .take(10)
-                .filter(|(_, d, _)| *d > ideal.max(1.0))
+                .filter(|(_, d, _)| *d > floor)
                 .map(|(id, d, _)| GateTest {
                     nodeid: (*id).clone(),
                     duration: *d,
@@ -723,6 +731,27 @@ mod tests {
         assert_eq!(pe.ideal_speedup, 8);
         assert!((pe.efficiency_pct - 12.5).abs() < 1e-6);
         assert!((pe.long_pole_seconds - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn balanced_pool_is_not_a_parallel_floor() {
+        // Four ~1s tests on four workers: the longest sits at the ideal share
+        // plus jitter, which is not a floor.
+        let mut run = Run::default();
+        for (i, d) in [1.0047, 1.0012, 1.0031, 1.0008].into_iter().enumerate() {
+            record_test(&mut run, &format!("t.py::t{i}"), i, d);
+        }
+        assert!(analyze(&run, &[], 1.1, 0.0, false, 4, None)
+            .parallel_floor
+            .is_none());
+        // One test clearly longer than the share still is.
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::long", 0, 4.0);
+        record_test(&mut run, "t.py::short", 1, 0.5);
+        let floor = analyze(&run, &[], 4.0, 0.0, false, 2, None)
+            .parallel_floor
+            .expect("4s test over a 2.25s share is a floor");
+        assert_eq!(floor.gate_tests.len(), 1);
     }
 
     #[test]

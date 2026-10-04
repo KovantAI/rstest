@@ -345,7 +345,8 @@ def gate_warnings(g, args, binary):
     g.write("warn/test_warn.py", WARN)
     r = g.run("warn", "-n", "2")
     check("warnings summary section", "warnings summary" in r.stdout and "UserWarning" in r.stdout)
-    check("warnings in counts", "warnings in" in r.stdout, r.stdout[-120:])
+    # pytest's noun: "1 warning", "2 warnings".
+    check("warnings in counts", "1 warning in" in r.stdout, r.stdout[-120:])
 
 
 def gate_doctor(g, args, binary):

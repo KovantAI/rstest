@@ -18,6 +18,42 @@ Install rstest into the project environment itself (`uv add --dev rstest`,
 that has it. Each rejected candidate is listed with its reason (too old, not
 runnable, missing the shim, or not matching a `--python` version request).
 
+## `found .venv/bin/python but rstest is not installed in it`
+
+```text
+Error: found /path/to/project/.venv/bin/python but rstest is not installed in it (it cannot import the rstest worker shim).
+That environment holds your project's dependencies, so rstest will not silently run your tests with /usr/bin/python3 instead.
+```
+
+rstest found your project's virtualenv (a `.venv` up from the working
+directory, or the active `$VIRTUAL_ENV`) and it runs, but rstest isn't
+installed in it, while some other interpreter (on `PATH`, or uv-managed) has
+rstest. rstest stops here instead of quietly using that other interpreter,
+because your project's dependencies live in the venv: a run anywhere else
+would fail every test that imports them with a `ModuleNotFoundError` that
+never mentions the venv. Install rstest into the venv:
+
+```console
+$ uv pip install --python .venv/bin/python rstest
+$ .venv/bin/python -m pip install rstest     # or with pip
+```
+
+If you really do want a different interpreter (say, a global rstest for a
+project whose tests need no dependencies), pass it with `--python`, for
+example `--python python3`. A venv that is broken (its interpreter no longer
+runs) or too old is skipped with a `rstest: warning:` line naming it, and so
+is an active `$VIRTUAL_ENV` without rstest when the project's own `.venv`
+has it.
+
+## `No interpreter satisfied '3.13' (pinned by .../.python-version)`
+
+A `.python-version` file sets the Python version rstest looks for, but only
+as a soft pin: a usable virtualenv (the active `$VIRTUAL_ENV` or the project's
+`.venv`) wins over it, with a `rstest: warning:` line when the versions
+differ. This error therefore means no venv was usable and no other
+interpreter with rstest matches the pin. Update or delete the file the error
+names, install a matching Python, or pass `--python` to override it.
+
 ## `ImportError: cannot import name 'TypeAlias'` (or similar) at startup
 
 Your project's interpreter is older than Python 3.10. The vendored pytest
@@ -119,7 +155,10 @@ Worker interpreter discovery order: `--python` flag, `$VIRTUAL_ENV`, a
 `.venv` walking up from the working directory, versioned `python`/`pythonX.Y`
 on PATH, then uv-managed interpreters (full list:
 [Which Python does rstest use?](../getting-started/installation.md#which-python-does-rstest-use)).
-Activate your environment or pass `--python` explicitly.
+Activate your environment or pass `--python` explicitly. `--python` takes an
+interpreter path, a venv directory (`--python .venv`), a command on `PATH`
+(`python3.12`), or a version request (`3.12`). Under pre-commit, see
+[Point the hook at your project's interpreter](../guides/ci-recipes.md#point-the-hook-at-your-projects-interpreter).
 
 ## `rstest: command not found` after `pip install rstest`
 

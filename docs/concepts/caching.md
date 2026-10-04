@@ -50,18 +50,26 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   [Replaying a CI-only failure](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)).
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
-duration-aware scheduling from the second run onward, minus `replay/`. In the repository,
-add it to `.gitignore` alongside `.pytest_cache/`:
+duration-aware scheduling from the second run onward, minus `replay/`.
 
-```gitignore
-.pytest_cache/
-.rstest_cache/
-```
-
-The location is CWD-relative by default; set `RSTEST_CACHE` to relocate it
+The cache lives at the pytest rootdir, the same directory `.pytest_cache/`
+goes to: the directory of the pytest config file (`pytest.ini`,
+`pyproject.toml`, `tox.ini`, `setup.cfg`, ...) found from the common ancestor
+of the path arguments upward, else that common ancestor. Running from a
+subdirectory (`cd tests/unit && rstest`) or passing paths therefore reads and
+writes the project's one cache, so durations, flake history, replay journals
+and `rstest explain` see every run. `--rootdir` and `-c` move it the way they
+move pytest's rootdir. Set `RSTEST_CACHE` to relocate it explicitly
 (distinct from `RSTEST_CACHE_DIR`, which steers the machine-global
-interpreter-probe cache). Writes are atomic (tmp + rename), so a concurrent
-reader never sees a half-written file.
+interpreter-probe cache).
+
+Like `.pytest_cache/`, the directory ignores itself: rstest writes a
+`.gitignore` containing `*` and a `CACHEDIR.TAG` (so backup tools skip it)
+when it creates the cache, and gives a `.pytest_cache/` it creates itself the
+same two files. No entry in your own `.gitignore` is needed.
+
+Writes are atomic (tmp + rename), so a concurrent reader never sees a
+half-written file.
 
 ## Shared cache backend
 

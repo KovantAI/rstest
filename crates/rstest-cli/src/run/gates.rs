@@ -549,6 +549,9 @@ pub(super) fn run_post_gates(
         // Only write when serialization succeeds: a serialize error must not
         // clobber pytest's lastfailed cache with an empty `{}`.
         if let (Ok(()), Ok(bytes)) = (std::fs::create_dir_all(&dir), serde_json::to_vec(&failed)) {
+            // pytest's own cache setup makes the dir ignore itself; when the
+            // pool's workers never wrote it, rstest is the one creating it.
+            cache::write_supporting_files(std::path::Path::new(cache_dir));
             let _ = std::fs::write(dir.join("lastfailed"), bytes);
         }
     }
@@ -800,11 +803,7 @@ pub(super) fn finalize_output(
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
-        let warn_part = if warn_total > 0 {
-            format!(", {warn_total} warnings")
-        } else {
-            String::new()
-        };
+        let warn_part = warnings_part(warn_total);
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
         // the stable summary line (which tooling/CI greps, so keep it intact).
@@ -883,6 +882,16 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
 /// pytest-style warnings summary: grouped by location, deduped, counted.
 /// Writes to `w` (stdout at the call site) so the merge/plural formatting is
 /// unit-testable.
+/// The summary line's warnings segment, worded as pytest does
+/// (`1 warning`, `2 warnings`); empty without warnings.
+fn warnings_part(total: u64) -> String {
+    match total {
+        0 => String::new(),
+        1 => ", 1 warning".to_string(),
+        n => format!(", {n} warnings"),
+    }
+}
+
 fn print_warnings_summary(
     w: &mut dyn Write,
     warnings: &[proto::WarningEntry],
@@ -922,7 +931,7 @@ fn print_warnings_summary(
     let _ = writeln!(
         w,
         "{}",
-        palette.yellow("-- use -W error::... to turn warnings into errors --")
+        palette.yellow("-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html")
     );
 }
 
@@ -1729,6 +1738,13 @@ mod tests {
     }
 
     #[test]
+    fn warnings_part_is_worded_like_pytest() {
+        assert_eq!(super::warnings_part(0), "");
+        assert_eq!(super::warnings_part(1), ", 1 warning");
+        assert_eq!(super::warnings_part(2), ", 2 warnings");
+    }
+
+    #[test]
     fn print_warnings_summary_merges_and_pluralizes() {
         let warn = |message: &str, count| WarningEntry {
             when: "runtest".into(),
@@ -1757,7 +1773,10 @@ mod tests {
             out.lines().any(|l| l == "t.py:12: DeprecationWarning"),
             "got {out}"
         );
-        assert!(out.contains("-- use -W error::"), "got {out}");
+        assert!(
+            out.contains("-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html"),
+            "got {out}"
+        );
 
         // Empty input => nothing at all.
         let mut buf = Vec::new();

@@ -48,6 +48,12 @@ pub use scheduling::proto;
 pub fn run() -> Result<i32> {
     let (own_args, args) = cli::split_argv();
     let cli = Cli::parse_from(&own_args);
+    // Anchor `.rstest_cache` at pytest's rootdir before anything reads it, so
+    // a run from a subdirectory shares the project's cache (as `.pytest_cache`).
+    if let Ok(cwd) = std::env::current_dir() {
+        let rootdir = config::rootdir(&cwd, &args);
+        cache::init(cwd, rootdir);
+    }
     // Run-less subcommands (verify-vendor / try / migrate-check / cache-compact)
     // do their own thing and exit before the run pipeline is built.
     if let Some(code) = run::dispatch_command(&cli, &args)? {

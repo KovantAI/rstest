@@ -74,7 +74,6 @@ def gate_onboarding_try(g, args, binary):
         "EV-01 try: speed line names the worker count used",
         re.search(r"-n \d+", speed) is not None,
         speed,
-        known_bug=True,
     )
 
     # EV-02: a syntax error in one file. pytest exits 2 and nothing was
@@ -86,13 +85,11 @@ def gate_onboarding_try(g, args, binary):
         "EV-02 try: collection error is not 'drop-in ready'",
         "drop-in ready" not in r.stdout,
         r.stdout[-400:],
-        known_bug=True,
     )
     check(
         "EV-02 try: collection error exits non-zero",
         r.returncode != 0,
         f"rc={r.returncode}",
-        known_bug=True,
     )
 
     # EV-03: an empty project: zero tests compared is not parity.
@@ -102,7 +99,6 @@ def gate_onboarding_try(g, args, binary):
         "EV-03 try: empty suite is not 'drop-in ready' and exits non-zero",
         "drop-in ready" not in r.stdout and r.returncode != 0,
         f"rc={r.returncode} " + r.stdout[-400:],
-        known_bug=True,
     )
 
     # EV-04: a failing unittest subTest. Several files so -n auto really
@@ -160,7 +156,6 @@ def gate_onboarding_first_run(g, args, binary):
         "EV-06 -n auto: warm one-file wait-bound suite runs on >= 2 workers",
         r.returncode == 0 and n is not None and n >= 2,
         f"rc={r.returncode} workers={n} " + r.stdout[:120],
-        known_bug=True,
     )
 
     # EV-07: selecting one test out of many files must not start a full pool.
@@ -171,7 +166,6 @@ def gate_onboarding_first_run(g, args, binary):
         "EV-07 -n auto: one selected test runs in single-worker mode",
         r.returncode == 0 and n == 1,
         f"rc={r.returncode} workers={n} " + r.stdout[:120],
-        known_bug=True,
     )
 
 
@@ -184,8 +178,8 @@ def gate_onboarding_interpreter(g, args, binary):
 
     # EV-08: the project .venv has the project's deps but rstest was never
     # installed into it; another interpreter with rstest is on PATH. rstest
-    # must say it skipped .venv (or which interpreter it used), not just fail
-    # with the project's ImportError.
+    # must name the .venv (it stops and says to install rstest there), not
+    # just fail with the project's ImportError.
     proj = g.tmp / "ob_venv_missing"
     (proj / ".git").mkdir(parents=True, exist_ok=True)  # bound the .venv walk
     g.write("ob_venv_missing/deps/onb_dep.py", "VALUE = 1\n")
@@ -197,15 +191,14 @@ def gate_onboarding_interpreter(g, args, binary):
     r = g.run("-n", "2", cwd=proj, env_extra={"PATH": path}, env_drop=("VIRTUAL_ENV",))
     out = _out(r)
     check(
-        "EV-08 setup: rstest fell back past the shim-less project .venv",
-        "onb_dep" in out and r.returncode != 0,
+        "EV-08 setup: rstest stopped at (or fell back past) the shim-less project .venv",
+        r.returncode != 0 and ("onb_dep" in out or "rstest is not installed in it" in out),
         f"rc={r.returncode} " + out[-300:],
     )
     check(
         "EV-08 skipped project .venv is named in the output",
         ".venv" in out,
         out[-300:],
-        known_bug=True,
     )
 
     # EV-09: the project .venv is usable, but a stale .python-version pins a
@@ -231,7 +224,6 @@ def gate_onboarding_interpreter(g, args, binary):
         "EV-09 stale .python-version: project .venv used, or the pin's file is named",
         r.returncode == 0 or ".python-version" in out,
         f"rc={r.returncode} pin={stale} " + out[-300:],
-        known_bug=True,
     )
 
 
@@ -249,7 +241,6 @@ def gate_onboarding_mistakes(g, args, binary):
         "EV-10 bad nodeid: 'not found' printed once",
         out.count("not found:") == 1,
         f"count={out.count('not found:')}",
-        known_bug=True,
     )
     r = g.run("-n", "4", "tests/missing.py", cwd=cwd)
     out = _out(r)
@@ -258,7 +249,6 @@ def gate_onboarding_mistakes(g, args, binary):
         "EV-10 missing path: error printed once",
         out.count("file or directory not found") == 1,
         f"count={out.count('file or directory not found')}",
-        known_bug=True,
     )
 
     # EV-11: a typo'd flag (pytest has --lf / --last-failed, not --lastfailed).
@@ -269,13 +259,11 @@ def gate_onboarding_mistakes(g, args, binary):
         "EV-11 unknown flag: error printed once",
         out.count("unrecognized arguments") == 1,
         f"count={out.count('unrecognized arguments')}",
-        known_bug=True,
     )
     check(
         "EV-11 unknown flag: usage line does not say pytest.main()",
         "pytest.main()" not in out,
         out[-300:],
-        known_bug=True,
     )
 
     # EV-12: a conftest that cannot import. One traceback, not one per worker.
@@ -289,7 +277,6 @@ def gate_onboarding_mistakes(g, args, binary):
         "EV-12 broken conftest: ImportError header printed once",
         out.count("ImportError while loading conftest") == 1,
         f"count={out.count('ImportError while loading conftest')}",
-        known_bug=True,
     )
 
     # EV-14: a global option before the subcommand must not turn the
@@ -299,7 +286,6 @@ def gate_onboarding_mistakes(g, args, binary):
         "EV-14 'rstest -q try' runs try or explains the argument order",
         "file or directory not found: try" not in _out(r),
         f"rc={r.returncode} " + _out(r)[-300:],
-        known_bug=True,
     )
 
 
@@ -322,7 +308,6 @@ def gate_onboarding_location(g, args, binary):
         "EV-13 subdirectory run does not create a second .rstest_cache",
         r.returncode == 0 and not (root / "tests" / "unit" / ".rstest_cache").exists(),
         f"rc={r.returncode} " + r.stdout[-200:],
-        known_bug=True,
     )
 
 
@@ -341,7 +326,7 @@ def gate_onboarding_summary(g, args, binary):
         "ob_summary/test_b.py",
         "import warnings\n\ndef test_warn():\n    warnings.warn('old', DeprecationWarning)\n",
     )
-    for mode, bug in (("0", False), ("2", True)):
+    for mode in ("0", "2"):
         r = g.run("-n", mode, cwd=g.tmp / "ob_summary")
         last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
         ok = (
@@ -352,5 +337,4 @@ def gate_onboarding_summary(g, args, binary):
             f"EV-15 -n {mode}: summary says '1 error' and '1 warning'",
             ok,
             last,
-            known_bug=bug,
         )

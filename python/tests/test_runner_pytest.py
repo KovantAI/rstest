@@ -20,11 +20,42 @@ class FakeConn:
 def _capture_main(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
-        runner_pytest.pytest,
-        "main",
+        runner_pytest,
+        "_pytest_main",
         lambda args, plugins: captured.update(args=args, plugins=plugins) or 0,
     )
     return captured
+
+
+def test_pytest_main_names_the_program_rstest(monkeypatch):
+    # pytest.main() would print `usage: pytest.main() [options]` on a usage
+    # error; the worker passes prog="rstest" through pytest's _main instead.
+    import _pytest.config
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        _pytest.config,
+        "_main",
+        lambda *, args, plugins, prog: seen.update(args=args, plugins=plugins, prog=prog) or 3,
+    )
+    assert runner_pytest._pytest_main(["t.py"], plugins=["p"]) == 3
+    assert seen == {"args": ["t.py"], "plugins": ["p"], "prog": "rstest"}
+
+
+def test_pytest_main_falls_back_without_a_prog_parameter(monkeypatch):
+    import _pytest.config
+
+    monkeypatch.setattr(_pytest.config, "_main", lambda *, args, plugins: 9)
+    monkeypatch.setattr(runner_pytest.pytest, "main", lambda args, plugins: 5)
+    assert runner_pytest._pytest_main(["t.py"], plugins=[]) == 5
+
+
+def test_usage_error_names_rstest_not_pytest_main(capsys):
+    # Real vendored pytest: an unknown flag is a usage error naming rstest.
+    assert runner_pytest._pytest_main(["--no-such-flag-xyz"], plugins=[]) == 4
+    err = capsys.readouterr().err
+    assert "usage: rstest [options]" in err
+    assert "pytest.main()" not in err
 
 
 def test_run_uses_stream_plugin(monkeypatch):

@@ -168,9 +168,11 @@ $ rstest -n 0      # byte-exact pytest session (same as -n 1)
 $ rstest -n 1      # identical to -n 0
 ```
 
-`-n auto` never starts more workers than you have test files, and once
-timings are cached it also caps by total suite time, so a tiny suite runs
-on one or two workers. Pass an explicit `-n` to override.
+On a first run `-n auto` never starts more workers than the test files you
+select (one selected test runs one session). Once timings are cached it caps
+by the cached test count and total time instead, so a tiny suite runs on one
+or two workers while a slow single file still spreads across workers. Pass an
+explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
 in a single worker process, pytest's own behavior in every detail. With no

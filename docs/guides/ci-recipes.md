@@ -617,6 +617,44 @@ Pass extra flags with `args`:
         args: ["-q", "--maxfail=1"]
 ```
 
+### Point the hook at your project's interpreter
+
+pre-commit installs these hooks into an isolated environment of their own and
+sets `$VIRTUAL_ENV` to it while the hook runs. That environment has rstest but
+none of your project's dependencies, and `$VIRTUAL_ENV` comes first in
+[interpreter discovery](../getting-started/installation.md#which-python-does-rstest-use),
+so without help the workers would run there and fail with
+`ModuleNotFoundError` for your project's packages. Tell rstest which
+interpreter to use:
+
+```yaml
+      - id: rstest
+        args: ["--python", ".venv/bin/python"]   # Windows: .venv/Scripts/python.exe
+```
+
+`--python .venv` (the venv directory) works too. Or skip the hook environment
+entirely with a local hook that runs the rstest already installed in your
+project (rstest must be in that venv, which it already is if you followed
+[Installation](../getting-started/installation.md)):
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: rstest
+        name: rstest
+        entry: rstest
+        language: system
+        pass_filenames: false
+        types: [python]
+        require_serial: true
+        stages: [pre-push]
+```
+
+With `language: system` pre-commit doesn't set `$VIRTUAL_ENV`, so rstest
+finds your `.venv` on its own (run `git push` from an activated venv, or
+use `entry: .venv/bin/rstest`).
+
 ## Go deeper
 
 - [CI quickstart](ci-quickstart.md): GitHub Actions, the Django and monorepo

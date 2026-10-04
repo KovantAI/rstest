@@ -725,7 +725,6 @@ def gate_ci_side_effects(g, args, binary):
                 "CI-11 CI=true rstest -n 2 leaves a clean tree",
                 r.returncode == 0 and st == "",
                 f"rc={r.returncode} porcelain={st[:200]!r}",
-                known_bug=True,
             )
     repo = g.tmp / "ci_clean_nocache"
     g.write("ci_clean_nocache/tests/test_a.py", "def test_a():\n    pass\n")
@@ -1116,5 +1115,4 @@ def gate_ci_environment(g, args, binary):
         "CI-13 docs: pre-commit section shows a hook that uses the project interpreter",
         "language: system" in sec or "--python" in sec,
         sec[:200],
-        known_bug=True,
     )

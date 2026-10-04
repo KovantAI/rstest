@@ -407,7 +407,6 @@ def gate_local_dev_rerun_history(g, args, binary):
         "DV-11 root run: git status --porcelain stays empty",
         porcelain(rt) == "",
         porcelain(rt)[:300],
-        known_bug=True,
     )
     (rt / ".pytest_cache" / "v" / "cache" / "lastfailed").unlink(missing_ok=True)
     g.run("-n", "2", cwd=rt / "tests")

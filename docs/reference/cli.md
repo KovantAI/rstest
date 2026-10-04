@@ -43,9 +43,13 @@ few that need one project's session. The per-flag table is in
 Worker count. Default `auto` (logical cores, capped as described below).
 
 - `-n auto`: one worker per available logical core, then capped by what the
-  suite can use: never more workers than test files (counted over the whole
-  project, not just the paths you pass), and, once the duration cache is
-  warm, at most one worker per ~2 s of cached suite time. On Linux the core
+  selected tests can use. The selection is the paths and nodeids you pass
+  (else the invocation directory, or `testpaths` from the rootdir). With no
+  cached timings, never more workers than selected test files plus nodeids,
+  so one selected test runs in byte-exact mode. Once the duration cache times
+  the selection, the cap is its cached test count instead (`--dist load`
+  splits a file across workers, so a one-file suite can still fan out), and
+  at most one worker per ~2 s of cached time. On Linux the core
   count honors the process CPU affinity mask and cgroup CPU quota, so a
   CPU-limited container (`docker run --cpus=2`, a constrained CI runner) sees
   its allocation, not the host's core count (no oversubscription). Pin `-n
@@ -1024,7 +1028,9 @@ produced.
 
 ### `--python <path-or-version>`
 
-Interpreter for the workers. Accepts either a path to an interpreter or a
+Interpreter for the workers. Accepts either a path to an interpreter, a
+virtualenv directory (`--python .venv` uses its `bin/python`, or
+`Scripts\python.exe` on Windows), a command on `PATH` (`python3.12`), or a
 version request: `3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t` (free-threaded).
 Without it, rstest searches, in order: the active virtualenv (`$VIRTUAL_ENV`),
 a `.venv` found walking up from the working directory (the walk stops at the
@@ -1032,7 +1038,12 @@ repository root, the first directory containing `.git`), versioned `python` /
 `pythonX.Y` names on `PATH`, on Windows the python.org installs reachable
 through the `py` launcher, and finally uv-managed interpreters as a fallback.
 A `.python-version` file (or a `--python` version request) does not pick an
-interpreter directly: it sets the version that filters those candidates.
+interpreter directly: it sets the version that filters those candidates. A
+`.python-version` pin is soft (a usable `$VIRTUAL_ENV` or project `.venv` wins
+over it, with a warning); a `--python` request is not. Without `--python`, a
+virtualenv that runs but doesn't have rstest installed is an error rather than
+a silent fall-through to a `PATH` or uv-managed interpreter (see
+[Troubleshooting](troubleshooting.md#found-venvbinpython-but-rstest-is-not-installed-in-it)).
 
 ### `--watch`
 

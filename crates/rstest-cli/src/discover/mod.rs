@@ -21,7 +21,7 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-use candidates::{discovery_candidates, python_version_arg, venv_python};
+use candidates::{discovery_candidates, python_version_arg, venv_candidates, venv_python};
 use probe::{cached_probe, Probe};
 use request::{matches, parse_pyarg, PyArg, Request};
 
@@ -31,102 +31,299 @@ const MIN_VERSION: (u8, u8) = (3, 9);
 /// Resolve the interpreter to run workers with. `scope` anchors the upward
 /// `.venv` / `.python-version` walk. An explicit `--python` is authoritative:
 /// still probed, but never silently replaced by a different interpreter.
+/// Non-fatal discovery notes (a skipped venv, an overridden pin) go to stderr.
 pub fn resolve(scope: &Path, explicit: Option<&str>) -> Result<PathBuf> {
+    let resolved = resolve_policy(scope, explicit)?;
+    for w in &resolved.warnings {
+        eprintln!("rstest: warning: {w}");
+    }
+    Ok(resolved.executable)
+}
+
+fn resolve_policy(scope: &Path, explicit: Option<&str>) -> Result<Resolved> {
     // Explicit --python: its version request filters the pool with no fallback
-    // to a mismatching interpreter.
+    // to a mismatching interpreter, and the user's choice is never second-guessed
+    // by the venv guard below.
     if let Some(s) = explicit {
         return match parse_pyarg(s) {
-            PyArg::Path(p) => resolve_with(&[p], None, cached_probe),
-            PyArg::Request(r) => resolve_with(&discovery_candidates(scope), Some(&r), cached_probe),
+            PyArg::Path(p) => resolve_with(
+                &[interpreter_path(p)],
+                &Policy::explicit(None),
+                cached_probe,
+            ),
+            PyArg::Request(r) => resolve_with(
+                &discovery_candidates(scope),
+                &Policy::explicit(Some(&r)),
+                cached_probe,
+            ),
         };
     }
-    // A `.python-version` found up-tree sets the request, but only as a soft
-    // pin: an active virtualenv wins over it (see resolve_versioned).
+    let venvs = venv_candidates(scope);
     match python_version_arg(scope) {
-        // Concrete path: the one candidate, authoritative.
-        Some(PyArg::Path(p)) => resolve_with(&[p], None, cached_probe),
-        Some(PyArg::Request(r)) => {
-            let active = std::env::var_os("VIRTUAL_ENV").and_then(|v| venv_python(Path::new(&v)));
-            resolve_versioned(active, &discovery_candidates(scope), &r, cached_probe)
-        }
+        // Concrete path in `.python-version`: the one candidate, authoritative.
+        Some((PyArg::Path(p), file)) => resolve_with(
+            &[interpreter_path(p)],
+            &Policy {
+                origin: Origin::PinFile(&file),
+                ..Policy::explicit(None)
+            },
+            cached_probe,
+        ),
+        // A version in `.python-version` is a *soft* pin: it filters system
+        // interpreters, but a usable virtualenv (active `$VIRTUAL_ENV` or the
+        // project's `.venv`) wins over it. The venv holds the project's deps,
+        // and a stale pin (the venv was rebuilt on a newer Python, the file
+        // wasn't touched) must not reject the environment the project uses.
+        Some((PyArg::Request(r), file)) => resolve_with(
+            &discovery_candidates(scope),
+            &Policy {
+                request: Some(&r),
+                venvs: &venvs,
+                soft_pin: true,
+                guard_venv: true,
+                origin: Origin::PinFile(&file),
+            },
+            cached_probe,
+        ),
         // Nothing requested: first usable interpreter in discovery order.
-        None => resolve_with(&discovery_candidates(scope), None, cached_probe),
+        None => resolve_with(
+            &discovery_candidates(scope),
+            &Policy {
+                venvs: &venvs,
+                guard_venv: true,
+                origin: Origin::Discovery,
+                ..Policy::explicit(None)
+            },
+            cached_probe,
+        ),
     }
 }
 
-/// Resolve an implicit `.python-version` request. The pin is *soft*: a usable
-/// active virtualenv wins over it, since a stale pin must not reject the env
-/// the user is running in. Only with no usable active venv is the pin a filter.
-fn resolve_versioned<F>(
-    active_venv: Option<PathBuf>,
-    candidates: &[PathBuf],
-    req: &Request,
-    probe_fn: F,
-) -> Result<PathBuf>
-where
-    F: FnMut(&Path) -> Option<Probe> + Copy,
-{
-    if let Some(py) = active_venv {
-        if let Ok(p) = resolve_with(&[py], None, probe_fn) {
-            return Ok(p);
+/// A `--python` / `.python-version` path naming a virtualenv directory (as uv
+/// accepts, e.g. `--python .venv`) means that venv's interpreter.
+fn interpreter_path(p: PathBuf) -> PathBuf {
+    if p.is_dir() {
+        venv_python(&p).unwrap_or(p)
+    } else {
+        p
+    }
+}
+
+/// Where the interpreter request came from; shapes the error text.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    /// `--python` on the command line.
+    Explicit,
+    /// A `.python-version` file (the path, so errors can name it).
+    PinFile(&'a Path),
+    /// Plain discovery, nothing requested.
+    Discovery,
+}
+
+/// How [`resolve_with`] treats the candidate list.
+struct Policy<'a> {
+    request: Option<&'a Request>,
+    /// The candidates that are virtualenv interpreters (`$VIRTUAL_ENV`, an
+    /// up-tree `.venv`).
+    venvs: &'a [PathBuf],
+    /// `request` is a soft `.python-version` pin: venv candidates are exempt.
+    soft_pin: bool,
+    /// Refuse to fall past a venv that lacks rstest to a non-venv interpreter
+    /// (see [`resolve_with`]). Off for an explicit `--python`.
+    guard_venv: bool,
+    origin: Origin<'a>,
+}
+
+impl<'a> Policy<'a> {
+    fn explicit(request: Option<&'a Request>) -> Self {
+        Policy {
+            request,
+            venvs: &[],
+            soft_pin: false,
+            guard_venv: false,
+            origin: Origin::Explicit,
         }
     }
-    resolve_with(candidates, Some(req), probe_fn)
+}
+
+/// The chosen interpreter plus stderr notes about how it was chosen.
+#[derive(Debug)]
+struct Resolved {
+    executable: PathBuf,
+    warnings: Vec<String>,
 }
 
 /// Walk the candidate list, probing each; return the first usable interpreter's
-/// canonical executable that also satisfies `request` when one is given (uv's
+/// canonical executable that also satisfies the request when one is given (uv's
 /// "first-compatible among system interpreters"). `probe_fn` is injected for tests.
-fn resolve_with<F>(
-    candidates: &[PathBuf],
-    request: Option<&Request>,
-    mut probe_fn: F,
-) -> Result<PathBuf>
+///
+/// The venv guard (E1): when a virtualenv candidate runs but can't import the
+/// worker shim (rstest was never installed into it) and the next usable
+/// interpreter is *not* a venv (a PATH or uv-managed Python), stop with an error
+/// naming the venv instead of falling through. The project's dependencies live
+/// in that venv, so the fall-through run would fail every test that imports
+/// them with a bare `ModuleNotFoundError` that never mentions the venv. The
+/// cost is the rare user who deliberately runs a global rstest against a
+/// project whose `.venv` doesn't need it; the error tells them to pass
+/// `--python` for that, which is one flag. Falling from one venv to another
+/// (an unrelated `$VIRTUAL_ENV` without rstest, then the project's `.venv`) is
+/// allowed with a warning, since the second venv is where the deps live.
+fn resolve_with<F>(candidates: &[PathBuf], policy: &Policy, mut probe_fn: F) -> Result<Resolved>
 where
     F: FnMut(&Path) -> Option<Probe>,
 {
     let mut rejected: Vec<String> = Vec::new();
+    // Venv candidates skipped so far, with the reason, and the first one that
+    // was skipped only for lacking rstest (the guard's trigger).
+    let mut skipped_venvs: Vec<(PathBuf, String)> = Vec::new();
+    let mut shimless_venv: Option<&PathBuf> = None;
     for cand in candidates {
-        match probe_fn(cand) {
-            None => rejected.push(format!(
-                "  {}: not runnable as a Python interpreter",
-                cand.display()
-            )),
-            Some(p) if (p.version.0, p.version.1) < MIN_VERSION => rejected.push(format!(
-                "  {}: Python {}.{}.{} is older than the required {}.{}",
+        let is_venv = policy.venvs.contains(cand);
+        let reason = match probe_fn(cand) {
+            None => unrunnable_reason(cand).to_string(),
+            Some(p) if (p.version.0, p.version.1) < MIN_VERSION => format!(
+                "Python {}.{}.{} is older than the required {}.{}",
+                p.version.0, p.version.1, p.version.2, MIN_VERSION.0, MIN_VERSION.1,
+            ),
+            Some(p) if !p.worker_importable => {
+                if is_venv && shimless_venv.is_none() {
+                    shimless_venv = Some(cand);
+                }
+                "cannot import the rstest worker shim (is rstest installed in it?)".to_string()
+            }
+            Some(p) => match policy.request {
+                Some(r) if !matches(&p, r) && !(policy.soft_pin && is_venv) => format!(
+                    "Python {}.{}.{} ({}) does not satisfy '{}'",
+                    p.version.0, p.version.1, p.version.2, p.implementation, r,
+                ),
+                _ => return accept(cand, p, is_venv, policy, shimless_venv, skipped_venvs),
+            },
+        };
+        if is_venv {
+            skipped_venvs.push((cand.clone(), reason.clone()));
+        }
+        rejected.push(format!("  {}: {reason}", cand.display()));
+    }
+    let (hint, trailer) = match (policy.origin, policy.request) {
+        (Origin::PinFile(f), Some(r)) => (
+            format!(
+                "No interpreter satisfied '{r}' (pinned by {}). Tried:",
+                f.display()
+            ),
+            format!(
+                "\n\nUpdate or remove {}, or pass --python PATH-OR-VERSION.",
+                f.display()
+            ),
+        ),
+        (Origin::PinFile(f), None) => (
+            format!(
+                "no usable Python interpreter at the path named in {}:",
+                f.display()
+            ),
+            format!(
+                "\n\nUpdate or remove {}, or pass --python PATH-OR-VERSION.",
+                f.display()
+            ),
+        ),
+        // The user already passed --python: don't tell them to pass it.
+        (Origin::Explicit, Some(r)) => (
+            format!("No interpreter satisfied '{r}'. Tried:"),
+            String::new(),
+        ),
+        (Origin::Explicit, None) => (
+            "no usable Python interpreter at the --python path:".to_string(),
+            String::new(),
+        ),
+        (Origin::Discovery, _) => (
+            "no usable Python interpreter found. Tried:".to_string(),
+            "\n\nPass one explicitly with --python PATH-OR-VERSION.".to_string(),
+        ),
+    };
+    bail!("{hint}\n{}{trailer}", rejected.join("\n"));
+}
+
+/// Commit to a usable candidate, or refuse per the venv guard.
+fn accept(
+    cand: &Path,
+    p: Probe,
+    is_venv: bool,
+    policy: &Policy,
+    shimless_venv: Option<&PathBuf>,
+    skipped_venvs: Vec<(PathBuf, String)>,
+) -> Result<Resolved> {
+    if let (true, false, Some(venv)) = (policy.guard_venv, is_venv, shimless_venv) {
+        let py = venv.display();
+        bail!(
+            "found {py} but rstest is not installed in it (it cannot import the rstest worker \
+             shim).\nThat environment holds your project's dependencies, so rstest will not \
+             silently run your tests with {} instead.\n\nInstall rstest into it:\n    \
+             uv pip install --python {py} rstest\n    \
+             {py} -m pip install rstest\n\nTo use a different interpreter on purpose, pass \
+             --python (e.g. --python {}).",
+            p.executable.display(),
+            p.executable.display(),
+        );
+    }
+    let mut warnings: Vec<String> = skipped_venvs
+        .iter()
+        .map(|(v, why)| {
+            format!(
+                "skipped {}: {why}; using {}",
+                v.display(),
+                p.executable.display()
+            )
+        })
+        .collect();
+    if let (true, Some(r), Origin::PinFile(f)) =
+        (is_venv && policy.soft_pin, policy.request, policy.origin)
+    {
+        if !matches(&p, r) {
+            warnings.push(format!(
+                "{} pins '{r}' but {} is Python {}.{}.{}; using the virtualenv \
+                 (update the pin, or pass --python {r} to enforce it)",
+                f.display(),
                 cand.display(),
                 p.version.0,
                 p.version.1,
                 p.version.2,
-                MIN_VERSION.0,
-                MIN_VERSION.1,
-            )),
-            Some(p) if !p.worker_importable => rejected.push(format!(
-                "  {}: cannot import the rstest worker shim (is rstest installed in it?)",
-                cand.display()
-            )),
-            Some(p) => match request {
-                Some(r) if !matches(&p, r) => rejected.push(format!(
-                    "  {}: Python {}.{}.{} ({}) does not satisfy '{}'",
-                    cand.display(),
-                    p.version.0,
-                    p.version.1,
-                    p.version.2,
-                    p.implementation,
-                    r,
-                )),
-                _ => return Ok(p.executable),
-            },
+            ));
         }
     }
-    let hint = match request {
-        Some(r) => format!("No interpreter satisfied '{r}'. Tried:"),
-        None => "no usable Python interpreter found. Tried:".to_string(),
+    Ok(Resolved {
+        executable: p.executable,
+        warnings,
+    })
+}
+
+/// Why a candidate the probe couldn't run was rejected: missing vs present
+/// but not a working Python.
+fn unrunnable_reason(cand: &Path) -> &'static str {
+    if cand.is_dir() {
+        return "a directory with no bin/python or Scripts/python.exe in it";
+    }
+    let bare_name = cand.components().count() == 1 && !cand.exists();
+    if bare_name {
+        if on_path(cand) {
+            "not runnable as a Python interpreter"
+        } else {
+            "not found on PATH"
+        }
+    } else if !cand.exists() {
+        "no such file"
+    } else {
+        "not runnable as a Python interpreter"
+    }
+}
+
+/// Whether a bare command name resolves to a file on PATH.
+fn on_path(name: &Path) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
     };
-    bail!(
-        "{hint}\n{}\n\nPass one explicitly with --python PATH-OR-VERSION.",
-        rejected.join("\n")
-    );
+    std::env::split_paths(&path).any(|dir| {
+        let p = dir.join(name);
+        p.is_file() || (cfg!(windows) && dir.join(format!("{}.exe", name.display())).is_file())
+    })
 }
 
 #[cfg(test)]
@@ -137,7 +334,7 @@ mod tests {
     use super::candidates::{parse_dir_version, parse_py_list_paths, path_python_names};
     use super::probe::{probe, Probe};
     use super::request::{matches, parse_pyarg, PyArg, Request};
-    use super::{resolve_versioned, resolve_with};
+    use super::{resolve_with, Origin, Policy, Resolved};
     use std::path::{Path, PathBuf};
 
     fn probe_at(executable: &str, version: (u8, u8, u8), worker_importable: bool) -> Probe {
@@ -160,6 +357,23 @@ mod tests {
         }
     }
 
+    /// Plain discovery with no venvs (the guard has nothing to trigger on).
+    fn discovery() -> Policy<'static> {
+        Policy {
+            origin: Origin::Discovery,
+            ..Policy::explicit(None)
+        }
+    }
+
+    /// [`resolve_with`], keeping just the chosen executable.
+    fn run(
+        cands: &[PathBuf],
+        policy: &Policy,
+        f: impl FnMut(&Path) -> Option<Probe>,
+    ) -> anyhow::Result<PathBuf> {
+        resolve_with(cands, policy, f).map(|r: Resolved| r.executable)
+    }
+
     fn req(s: &str) -> Request {
         match parse_pyarg(s) {
             PyArg::Request(r) => r,
@@ -170,7 +384,7 @@ mod tests {
     #[test]
     fn first_usable_candidate_wins() {
         let cands = [PathBuf::from("bad"), PathBuf::from("good")];
-        let chosen = resolve_with(&cands, None, |c| {
+        let chosen = run(&cands, &discovery(), |c| {
             (c == Path::new("good")).then(|| probe_at("/usr/bin/good", (3, 12, 0), true))
         })
         .unwrap();
@@ -180,7 +394,7 @@ mod tests {
     #[test]
     fn returns_canonical_executable_not_candidate_name() {
         let cands = [PathBuf::from("python3")];
-        let chosen = resolve_with(&cands, None, |_| {
+        let chosen = run(&cands, &discovery(), |_| {
             Some(probe_at("/opt/py/bin/python3.12", (3, 12, 4), true))
         })
         .unwrap();
@@ -190,8 +404,10 @@ mod tests {
     #[test]
     fn too_old_is_rejected_with_reason() {
         let cands = [PathBuf::from("python3")];
-        let err =
-            resolve_with(&cands, None, |_| Some(probe_at("/x", (3, 7, 0), true))).unwrap_err();
+        let err = run(&cands, &discovery(), |_| {
+            Some(probe_at("/x", (3, 7, 0), true))
+        })
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("3.7.0"), "{msg}");
         assert!(msg.contains("3.9"), "{msg}");
@@ -200,15 +416,17 @@ mod tests {
     #[test]
     fn missing_shim_is_rejected_with_reason() {
         let cands = [PathBuf::from("python3")];
-        let err =
-            resolve_with(&cands, None, |_| Some(probe_at("/x", (3, 12, 0), false))).unwrap_err();
+        let err = run(&cands, &discovery(), |_| {
+            Some(probe_at("/x", (3, 12, 0), false))
+        })
+        .unwrap_err();
         assert!(err.to_string().contains("worker shim"), "{err}");
     }
 
     #[test]
     fn no_candidates_lists_everything_tried() {
         let cands = [PathBuf::from("python3.12"), PathBuf::from("python3")];
-        let err = resolve_with(&cands, None, |_| None).unwrap_err();
+        let err = run(&cands, &discovery(), |_| None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("python3.12"), "{msg}");
         assert!(msg.contains("python3"), "{msg}");
@@ -222,7 +440,7 @@ mod tests {
             PathBuf::from("noshim"),
             PathBuf::from("ok"),
         ];
-        let chosen = resolve_with(&cands, None, |c| match c.to_str().unwrap() {
+        let chosen = run(&cands, &discovery(), |c| match c.to_str().unwrap() {
             "old" => Some(probe_at("/old", (3, 8, 0), true)),
             "noshim" => Some(probe_at("/noshim", (3, 12, 0), false)),
             "ok" => Some(probe_at("/ok", (3, 11, 0), true)),
@@ -353,11 +571,13 @@ mod tests {
     fn request_selects_first_compatible_in_order() {
         let cands = [PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
         let want = req(">=3.12");
-        let chosen = resolve_with(&cands, Some(&want), |c| match c.to_str().unwrap() {
-            "a" => Some(probe_at("/a", (3, 11, 0), true)), // too old for request
-            "b" => Some(probe_at("/b", (3, 12, 5), true)), // first match
-            "c" => Some(probe_at("/c", (3, 13, 0), true)),
-            _ => None,
+        let chosen = run(&cands, &Policy::explicit(Some(&want)), |c| {
+            match c.to_str().unwrap() {
+                "a" => Some(probe_at("/a", (3, 11, 0), true)), // too old for request
+                "b" => Some(probe_at("/b", (3, 12, 5), true)), // first match
+                "c" => Some(probe_at("/c", (3, 13, 0), true)),
+                _ => None,
+            }
         })
         .unwrap();
         assert_eq!(chosen, PathBuf::from("/b"));
@@ -367,7 +587,7 @@ mod tests {
     fn unsatisfiable_request_reports_spec_and_mismatches() {
         let cands = [PathBuf::from("a")];
         let want = req(">=3.13");
-        let err = resolve_with(&cands, Some(&want), |_| {
+        let err = run(&cands, &Policy::explicit(Some(&want)), |_| {
             Some(probe_at("/a", (3, 11, 0), true))
         })
         .unwrap_err();
@@ -480,6 +700,28 @@ mod tests {
         assert!(read_cache(b"not json at all").is_none());
     }
 
+    /// Soft `.python-version` pin policy, as `resolve` builds it.
+    fn pinned<'a>(venvs: &'a [PathBuf], r: &'a Request, file: &'a Path) -> Policy<'a> {
+        Policy {
+            request: Some(r),
+            venvs,
+            soft_pin: true,
+            guard_venv: true,
+            origin: Origin::PinFile(file),
+        }
+    }
+
+    /// Plain discovery over `venvs` + system interpreters, as `resolve` builds it.
+    fn discovering(venvs: &[PathBuf]) -> Policy<'_> {
+        Policy {
+            venvs,
+            guard_venv: true,
+            ..discovery()
+        }
+    }
+
+    const PIN: &str = "/proj/.python-version";
+
     #[test]
     fn active_venv_wins_over_python_version_pin() {
         // `.python-version` pins 3.10 but the active venv is 3.13: the venv
@@ -487,7 +729,9 @@ mod tests {
         // reject the venv for not satisfying the pin.
         let venv = PathBuf::from("/venv/bin/python");
         let cands = [venv.clone(), PathBuf::from("python3.10")];
-        let chosen = resolve_versioned(Some(venv), &cands, &req("3.10"), |c| {
+        let venvs = [venv];
+        let r = req("3.10");
+        let got = resolve_with(&cands, &pinned(&venvs, &r, Path::new(PIN)), |c| {
             match c.to_str().unwrap() {
                 "/venv/bin/python" => Some(probe_at("/venv/bin/python", (3, 13, 13), true)),
                 "python3.10" => Some(probe_at("/usr/bin/python3.10", (3, 10, 0), true)),
@@ -495,37 +739,215 @@ mod tests {
             }
         })
         .unwrap();
-        assert_eq!(chosen, PathBuf::from("/venv/bin/python"));
+        assert_eq!(got.executable, PathBuf::from("/venv/bin/python"));
+        // The overridden pin is reported, naming its file.
+        assert!(
+            got.warnings.iter().any(|w| w.contains(PIN)),
+            "{:?}",
+            got.warnings
+        );
     }
 
     #[test]
-    fn unusable_active_venv_falls_back_to_pin() {
-        // Active venv lacks the worker shim → not usable → honor the pin and
-        // pick the discovered interpreter that satisfies it.
-        let venv = PathBuf::from("/venv/bin/python");
-        let cands = [venv.clone(), PathBuf::from("python3.10")];
-        let chosen = resolve_versioned(Some(venv), &cands, &req("3.10"), |c| {
+    fn project_dotvenv_wins_over_stale_pin() {
+        // E2: no active venv, the discovered project `.venv` is 3.14 with
+        // rstest, `.python-version` says 3.13. The project's own env wins.
+        let venv = PathBuf::from("/proj/.venv/bin/python");
+        let cands = [venv.clone(), PathBuf::from("python3.13")];
+        let venvs = [venv];
+        let r = req("3.13");
+        let got = resolve_with(&cands, &pinned(&venvs, &r, Path::new(PIN)), |c| {
             match c.to_str().unwrap() {
-                "/venv/bin/python" => Some(probe_at("/venv/bin/python", (3, 13, 13), false)),
+                "/proj/.venv/bin/python" => {
+                    Some(probe_at("/proj/.venv/bin/python", (3, 14, 0), true))
+                }
+                "python3.13" => Some(probe_at("/usr/bin/python3.13", (3, 13, 0), true)),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(got.executable, PathBuf::from("/proj/.venv/bin/python"));
+    }
+
+    #[test]
+    fn matching_pin_on_venv_is_silent() {
+        let venv = PathBuf::from("/proj/.venv/bin/python");
+        let cands = [venv.clone()];
+        let venvs = [venv];
+        let r = req("3.13");
+        let got = resolve_with(&cands, &pinned(&venvs, &r, Path::new(PIN)), |_| {
+            Some(probe_at("/proj/.venv/bin/python", (3, 13, 2), true))
+        })
+        .unwrap();
+        assert!(got.warnings.is_empty(), "{:?}", got.warnings);
+    }
+
+    #[test]
+    fn unsatisfiable_pin_names_its_file() {
+        // E2: with no venv to exempt, an unsatisfiable pin's error says where
+        // the pin came from.
+        let cands = [PathBuf::from("python3.12")];
+        let r = req("3.11");
+        let err = resolve_with(&cands, &pinned(&[], &r, Path::new(PIN)), |_| {
+            Some(probe_at("/usr/bin/python3.12", (3, 12, 0), true))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(PIN), "{err}");
+        assert!(err.contains("'3.11'"), "{err}");
+    }
+
+    #[test]
+    fn shimless_venv_stops_instead_of_falling_to_system_python() {
+        // E1: the project `.venv` runs but lacks rstest; a PATH interpreter
+        // has it. Refuse, naming the venv and how to fix it.
+        let venv = PathBuf::from("/proj/.venv/bin/python");
+        let cands = [venv.clone(), PathBuf::from("python3")];
+        let venvs = [venv];
+        let err = resolve_with(&cands, &discovering(&venvs), |c| {
+            match c.to_str().unwrap() {
+                "/proj/.venv/bin/python" => {
+                    Some(probe_at("/proj/.venv/bin/python", (3, 12, 0), false))
+                }
+                "python3" => Some(probe_at("/usr/bin/python3", (3, 12, 0), true)),
+                _ => None,
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("/proj/.venv/bin/python"), "{err}");
+        assert!(err.contains("pip install"), "{err}");
+        assert!(err.contains("--python"), "{err}");
+    }
+
+    #[test]
+    fn shimless_venv_guard_also_applies_under_a_pin() {
+        let venv = PathBuf::from("/proj/.venv/bin/python");
+        let cands = [venv.clone(), PathBuf::from("python3.10")];
+        let venvs = [venv];
+        let r = req("3.10");
+        let err = resolve_with(&cands, &pinned(&venvs, &r, Path::new(PIN)), |c| {
+            match c.to_str().unwrap() {
+                "/proj/.venv/bin/python" => {
+                    Some(probe_at("/proj/.venv/bin/python", (3, 13, 13), false))
+                }
+                "python3.10" => Some(probe_at("/usr/bin/python3.10", (3, 10, 0), true)),
+                _ => None,
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("/proj/.venv/bin/python"), "{err}");
+    }
+
+    #[test]
+    fn shimless_active_venv_falls_to_project_venv_with_warning() {
+        // An unrelated `$VIRTUAL_ENV` without rstest, then the project's
+        // `.venv` with it: venv-to-venv fall-through is fine, but say so.
+        let active = PathBuf::from("/other/bin/python");
+        let proj = PathBuf::from("/proj/.venv/bin/python");
+        let cands = [active.clone(), proj.clone(), PathBuf::from("python3")];
+        let venvs = [active, proj];
+        let got = resolve_with(&cands, &discovering(&venvs), |c| {
+            match c.to_str().unwrap() {
+                "/other/bin/python" => Some(probe_at("/other/bin/python", (3, 12, 0), false)),
+                "/proj/.venv/bin/python" => {
+                    Some(probe_at("/proj/.venv/bin/python", (3, 12, 0), true))
+                }
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(got.executable, PathBuf::from("/proj/.venv/bin/python"));
+        assert!(
+            got.warnings.iter().any(|w| w.contains("/other/bin/python")),
+            "{:?}",
+            got.warnings
+        );
+    }
+
+    #[test]
+    fn broken_venv_falls_through_with_warning() {
+        // A venv whose interpreter no longer runs (e.g. its base Python was
+        // upgraded away) is not a "rstest missing" case: fall through, but
+        // name the skipped venv.
+        let venv = PathBuf::from("/proj/.venv/bin/python");
+        let cands = [venv.clone(), PathBuf::from("python3")];
+        let venvs = [venv];
+        let got = resolve_with(&cands, &discovering(&venvs), |c| {
+            match c.to_str().unwrap() {
+                "python3" => Some(probe_at("/usr/bin/python3", (3, 12, 0), true)),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(got.executable, PathBuf::from("/usr/bin/python3"));
+        assert!(
+            got.warnings
+                .iter()
+                .any(|w| w.contains("/proj/.venv/bin/python")),
+            "{:?}",
+            got.warnings
+        );
+    }
+
+    #[test]
+    fn explicit_python_skips_the_venv_guard_and_the_hint() {
+        // An explicit `--python 3.12` is the user's choice: no guard, and the
+        // error doesn't tell them to pass --python again.
+        let venv = PathBuf::from("/proj/.venv/bin/python");
+        let cands = [venv.clone(), PathBuf::from("python3.12")];
+        let r = req("3.12");
+        let got = run(&cands, &Policy::explicit(Some(&r)), |c| {
+            match c.to_str().unwrap() {
+                "/proj/.venv/bin/python" => {
+                    Some(probe_at("/proj/.venv/bin/python", (3, 12, 0), false))
+                }
+                "python3.12" => Some(probe_at("/usr/bin/python3.12", (3, 12, 0), true)),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(got, PathBuf::from("/usr/bin/python3.12"));
+        let err = run(
+            &[PathBuf::from("rstest-no-such-python")],
+            &Policy::explicit(None),
+            |_| None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("Pass one explicitly"), "{err}");
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn venv_dir_maps_to_its_interpreter() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("rstest-venvdir-{}", std::process::id()));
+        fs::create_dir_all(tmp.join("bin")).unwrap();
+        fs::write(tmp.join("bin/python"), "").unwrap();
+        assert_eq!(super::interpreter_path(tmp.clone()), tmp.join("bin/python"));
+        // A file passes through untouched.
+        let file = tmp.join("bin/python");
+        assert_eq!(super::interpreter_path(file.clone()), file);
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn no_venvs_honors_pin() {
+        // Without a venv the pin filters the pool as before.
+        let cands = [PathBuf::from("python3.13"), PathBuf::from("python3.10")];
+        let r = req("3.10");
+        let got = resolve_with(&cands, &pinned(&[], &r, Path::new(PIN)), |c| {
+            match c.to_str().unwrap() {
+                "python3.13" => Some(probe_at("/usr/bin/python3.13", (3, 13, 0), true)),
                 "python3.10" => Some(probe_at("/usr/bin/python3.10", (3, 10, 0), true)),
                 _ => None,
             }
         })
         .unwrap();
-        assert_eq!(chosen, PathBuf::from("/usr/bin/python3.10"));
-    }
-
-    #[test]
-    fn no_active_venv_honors_pin() {
-        // Without an active venv the pin filters the pool as before.
-        let cands = [PathBuf::from("python3.13"), PathBuf::from("python3.10")];
-        let chosen = resolve_versioned(None, &cands, &req("3.10"), |c| match c.to_str().unwrap() {
-            "python3.13" => Some(probe_at("/usr/bin/python3.13", (3, 13, 0), true)),
-            "python3.10" => Some(probe_at("/usr/bin/python3.10", (3, 10, 0), true)),
-            _ => None,
-        })
-        .unwrap();
-        assert_eq!(chosen, PathBuf::from("/usr/bin/python3.10"));
+        assert_eq!(got.executable, PathBuf::from("/usr/bin/python3.10"));
     }
 
     // ---- py launcher (`py --list-paths`) ----
