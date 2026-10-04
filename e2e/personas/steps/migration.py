@@ -63,6 +63,8 @@ def _pytest(world, *args, env_extra=None):
     env = dict(os.environ)
     for k in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST", "PYTEST_VERSION"):
         env.pop(k, None)
+    # pytest writes a pipe in the locale encoding (cp1252 on Windows).
+    env["PYTHONIOENCODING"] = "utf-8"
     env.update(env_extra or {})
     return subprocess.run(
         [str(venv_bin(world.gate.venv, "python")), "-m", "pytest", "-p", "no:cacheprovider", *args],

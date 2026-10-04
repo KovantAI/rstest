@@ -116,7 +116,8 @@ def _oracle(world, command, cwd):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        env=_env(world),
+        # pytest writes a pipe in the locale encoding (cp1252 on Windows).
+        env=_env(world, {"PYTHONIOENCODING": "utf-8"}),
         timeout=60,
     )
 
