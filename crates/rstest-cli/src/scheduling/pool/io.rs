@@ -95,7 +95,7 @@ pub(super) fn dispatch_to(
 /// separate from the first so every worker gets one item (or affinity group)
 /// before any gets two: back-to-back pairs stacked long poles and groups on
 /// the first workers seeded and left later ones idle. No-op when stopping:
-/// `stop_all` already released the held items.
+/// `stop_all` told every worker to drop its held items.
 pub(super) fn release_lookahead(
     states: &mut [WorkerState],
     d: &mut Dispatch,

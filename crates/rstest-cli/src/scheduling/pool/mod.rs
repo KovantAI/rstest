@@ -368,7 +368,7 @@ pub fn run_pool(
     // Json mode keeps stdout pure NDJSON: the footer's ANSI repaint would
     // corrupt the stream on a TTY, so skip it.
     if mode != crate::reporting::progress::Mode::Json {
-        prog.enable_footer(n);
+        prog.enable_footer(n, sink.palette().live());
     }
     prog.set_mode(mode);
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
@@ -404,8 +404,8 @@ pub fn run_pool(
     // injected as cached passes once the run finishes.
     let mut cached_ids: Vec<String> = Vec::new();
     // Global -x/--maxfail: once tripped, dispatch halts and every alive
-    // worker is told no_more_items (it finishes in-flight work and ends;
-    // bounded overshoot, same trade xdist makes).
+    // worker is told stop_run: it finishes the test in flight and starts
+    // nothing more, its queued items (held lookahead included) unrun.
     let mut stopping = false;
     // Initial seeding round: a worker whose second (lookahead) dispatch would
     // take work a not-yet-seeded worker needs (a long pole, an affinity group,
@@ -548,6 +548,7 @@ pub fn run_pool(
                 run.record(Some(idx), r);
                 if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                     stopping = true;
+                    run.stopped_after = Some(fail_count);
                     orchestrator::stop_all(&mut states);
                 }
             }
@@ -864,6 +865,7 @@ pub fn run_pool(
                         );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
+                            run.stopped_after = Some(fail_count);
                             orchestrator::stop_all(&mut states);
                         }
                     }

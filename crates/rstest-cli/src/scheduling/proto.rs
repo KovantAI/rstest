@@ -49,6 +49,11 @@ pub enum Command {
     /// nextitem=None, releasing fixture finalizers), then keep listening -
     /// failed items elsewhere may rerun here (--reruns).
     NoMoreItems,
+    /// Run-wide `-x`/`--maxfail` tripped (or lazy collection aborted): start
+    /// nothing more. The worker drops its queued items, held lookahead
+    /// included, reports them via `Stopped`/`StoppedIds`, and waits for
+    /// EndSession. Checked between tests, so only the in-flight one finishes.
+    StopRun,
     /// Run pytest_testnodedown for a CRASHED worker: `workerinput` is
     /// the dead worker's snapshot (shipped via NodeInput while it was
     /// alive), so cleanup hooks see the exact idents it provisioned.
@@ -353,6 +358,7 @@ mod tests {
             "run_items"
         );
         assert_eq!(kind_of(&Command::NoMoreItems), "no_more_items");
+        assert_eq!(kind_of(&Command::StopRun), "stop_run");
         assert_eq!(kind_of(&Command::EndSession), "end_session");
         assert_eq!(kind_of(&Command::Shutdown), "shutdown");
     }
@@ -630,6 +636,7 @@ mod property {
         "run_files",
         "run_ids",
         "no_more_items",
+        "stop_run",
         "node_down",
         "end_session",
         "shutdown",
@@ -645,6 +652,7 @@ mod property {
             small_strs().prop_map(|paths| Command::RunFiles { paths }),
             small_strs().prop_map(|ids| Command::RunIds { ids }),
             Just(Command::NoMoreItems),
+            Just(Command::StopRun),
             small_str().prop_map(|error| Command::NodeDown {
                 workerinput: serde_json::Value::Null,
                 error,

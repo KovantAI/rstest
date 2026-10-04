@@ -40,6 +40,27 @@ pub fn base_dir() -> PathBuf {
     }
 }
 
+/// `dir`'s path below `root` (empty when they are the same directory), or
+/// `None` when `dir` lies outside `root`. Both sides are canonicalized when
+/// they exist, so a symlinked temp dir (`/var` vs `/private/var`) or a
+/// Windows short name still matches.
+pub fn relative_to(dir: &Path, root: &Path) -> Option<PathBuf> {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    if let Ok(rel) = dir.strip_prefix(root) {
+        return Some(rel.to_path_buf());
+    }
+    canon(dir)
+        .strip_prefix(canon(root))
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+/// A path recorded in the cache, relative to [`base_dir`], resolved to the
+/// file it names (independent of the cwd).
+pub fn resolve(rel: &str) -> PathBuf {
+    base_dir().join(rel)
+}
+
 /// The resolved rootdir, when [`init`] ran.
 pub fn rootdir() -> Option<&'static Path> {
     ROOT.get().map(|(_, root)| root.as_path())

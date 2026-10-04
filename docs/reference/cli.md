@@ -291,7 +291,9 @@ changes, so it never nags a suite that doesn't use coverage.
 
 Conservative by construction: ambiguous module names select every match,
 function-local imports count, a changed `conftest.py` selects its whole
-subtree, and any config or non-Python change falls back to a full run.
+subtree (as does a change to any module a `conftest.py` imports, directly or
+through other modules), and any config or non-Python change falls back to a
+full run.
 Known gap: dynamic imports (`importlib.import_module`) produce no graph
 edges; for correctness-critical runs, use `--changed-strict` below.
 With nothing affected, the run prints
@@ -376,6 +378,11 @@ tests are carried forward as cached passes: they count as passed and carry
   rstest warns and runs everything.
 - A config-file change (conftest, pytest config) disables skipping for that
   run.
+- Runs from the root and from a subdirectory share the rootdir's records (paths
+  in them are rootdir-relative), and a run of part of the suite (a path, `-k`,
+  a subdirectory) keeps what the rest of the suite recorded. With `--cov=.`, a
+  subdirectory run measures only that subdirectory, so prefer a package name
+  (`--cov=app`) when you run `--incremental` from more than one place.
 - Mutually exclusive with `--changed` (which owns selection) and
   `--since-green`.
 
@@ -825,7 +832,11 @@ report without gating the exit code.
 
 Terminal output style. The default is **automatic**: on an interactive
 terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
-to `dots`, so logs stay byte-stable. Pass `--output` to pin a style.
+to `dots`, so logs stay byte-stable. A TTY counts as interactive only with
+color on and outside CI: `NO_COLOR`, `--color=no`, `TERM=dumb` or a `CI`
+variable also give `dots` and no live footer (see
+[environment](environment.md#honored-from-the-environment)). Pass
+`--output` to pin a style.
 
 A value that is not one of the styles above is not rstest's: `--output
 VALUE` goes to the pytest session unchanged, so a plugin's own `--output`
@@ -874,7 +885,9 @@ terminal: the same reason pytest-sugar is disabled under pytest-xdist); rstest
 renders it orchestrator-side from the streamed results.
 
 When stdout is not a TTY (CI, pipes) the live footer, progress bar, and
-closing results bar self-disable; the per-test lines plus the stable
+closing results bar self-disable; the live footer is also off on a TTY
+under `NO_COLOR`, `--color=no`, `TERM=dumb` or `CI`, and its lines are cut
+to the terminal width; the per-test lines plus the stable
 `N passed … in Xs` summary remain, so logs stay greppable. `-v` selects
 `verbose` unless `--output` says otherwise (in byte-exact mode with no
 `--output`, `-v` is pytest's own). Pin any style explicitly with
@@ -1205,8 +1218,10 @@ Three of them get extra orchestration on top of their per-session meaning:
 
 - **`-x` / `--maxfail=N`**: coordinated globally, whether given on the
   command line, in ini `addopts`, or in `PYTEST_ADDOPTS`. When the threshold
-  is reached across all workers, dispatch halts and every worker winds down.
-  In-flight tests finish (bounded overshoot, as with pytest-xdist).
+  is reached across all workers, dispatch halts and every worker winds down:
+  tests already running finish, and no other test starts, including the
+  ones a worker had queued. The summary then shows pytest's banner,
+  `!!!!!!!!!! stopping after 1 failures !!!!!!!!!!`.
 - **`--lf` / `--ff`**: the last-failed cache is written by rstest from
   merged results (workers each see only their own failures), so a
   follow-up `--lf` behaves exactly as after a serial run.
@@ -1232,6 +1247,12 @@ stderr, naming the flag:
 ```text
 rstest: -s runs the session in a single process with pytest's own output, so -n 8 is ignored (no parallel workers); drop -s to run in parallel
 ```
+
+A `breakpoint()` (or `pdb.set_trace()`) left in a test needs this mode too:
+pool workers have no terminal, so in a parallel run the call fails that test
+with `breakpoint() / pdb.set_trace() needs a terminal, and parallel workers
+have none: rerun with -n 0 (or -s) to get the (Pdb) prompt`, and the rest of
+the run carries on.
 
 The default `-n auto` stays quiet (plain `rstest -s` is an ordinary request
 for pytest's `-s`), and so does `--co`, which runs no tests. `--reruns` is

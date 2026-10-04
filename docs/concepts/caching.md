@@ -33,6 +33,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   graph without it; rebuild by rerunning coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
   union into a full index (see [Shared cache backend](#shared-cache-backend)).
+  Paths in it are relative to the rootdir, so a run from a subdirectory writes
+  the same keys as a run from the root.
 - `last_green.json`: the commit of the last fully green run, stamped with an
   environment fingerprint (interpreter and dependency manifests). Read by
   [`--since-green`](../reference/cli.md#-since-green); an environment change
@@ -41,7 +43,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   hashes from the last [`--incremental`](../reference/cli.md#-incremental)
   run, so an unchanged green test can be skipped. Also read by
   [`rstest explain`](../reference/cli-commands.md#explain). Safe to delete:
-  the next run re-runs everything and rebuilds it.
+  the next run re-runs everything and rebuilds it. Rootdir-relative like the
+  coverage index; a run of part of the suite keeps the other tests' records.
 - `replay/`: the schedule of each parallel run (`<run-uid>.json`, the last 10
   kept, plus `latest.json`), read by
   [`rstest replay`](../reference/cli-commands.md#replay). Local to the
@@ -195,7 +198,12 @@ Recipes: [Shared cache across CI jobs](../guides/ci-shared-cache.md).
 Workers read it normally (`--lf`/`--ff` deselection happens inside the
 vendored core). Writes to the run-level keys (`lastfailed`, `nodeids`,
 `stepwise`) are blocked in workers (each worker sees only its own slice)
-and the orchestrator writes the merged truth after the run. Other plugins'
+and the orchestrator writes the merged truth after the run. `lastfailed` is
+updated the way pytest updates it: this run's failures are added, tests that
+passed or were skipped are removed, and the failures of tests the run did not
+execute stay, so a passing subset run keeps the rest. A test that was running
+when Ctrl-C (or SIGTERM) stopped the run has no real outcome and is not
+recorded there, nor in `flakes.json` or `durations.json`. Other plugins'
 cache writes pass through untouched.
 
 ## Worker temp directories

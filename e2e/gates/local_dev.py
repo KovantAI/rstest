@@ -340,11 +340,16 @@ def gate_local_dev_rerun_history(g, args, binary):
     g.write("dv_lf_rs/tests/test_new.py", new_test)
     g.write("dv_lf_py/tests/test_new.py", new_test)
     r, lf_rs, lf_py = step("--nf")
-    rows = _log_rows(rs, "order")
+    # Dispatch order, not start time: both workers' first items start within
+    # microseconds of each other. The replay journal records each worker's
+    # exact assignment order; the head of the --nf order is the first item of
+    # the first chunk handed out, so it leads its worker's list.
+    journal = _read_json(rs / ".rstest_cache" / "replay" / "latest.json") or {}
+    assignment = journal.get("assignment") or []
     check(
         "DV-02 --nf: the new test file is dispatched first",
-        bool(rows) and rows[0][2] == "tests/test_new.py::test_new",
-        str(rows[:3]),
+        any(w and w[0] == "tests/test_new.py::test_new" for w in assignment),
+        str([w[:2] for w in assignment]),
     )
     check(
         "DV-02 --nf: lastfailed matches pytest",
@@ -363,7 +368,6 @@ def gate_local_dev_rerun_history(g, args, binary):
         "DV-02 subset run: lastfailed keeps unrelated failures (matches pytest)",
         lf_rs == lf_py,
         f"rstest={lf_rs} pytest={lf_py}",
-        known_bug=True,
     )
 
     # DV-11: a committed repo stays clean (porcelain empty) after a run from
@@ -415,6 +419,68 @@ def gate_local_dev_rerun_history(g, args, binary):
         (rt / ".pytest_cache" / "v" / "cache" / "lastfailed").is_file()
         and not (rt / "tests" / ".pytest_cache").exists(),
         str(sorted(p.name for p in (rt / "tests").iterdir())),
+    )
+
+    # DV-13: --incremental from the root and from tests/unit/ share the
+    # rootdir's .rstest_cache. Its records must be rootdir-relative, so the
+    # subdirectory run neither poisons nor erases what the root run recorded.
+    g.write(
+        "dv_incr/pyproject.toml",
+        "[tool.pytest.ini_options]\ntestpaths = ['tests']\npythonpath = ['.']\n",
+    )
+    g.write("dv_incr/app/__init__.py", "")
+    g.write("dv_incr/app/core.py", "def one():\n    return 1\n")
+    g.write("dv_incr/app/util.py", "def two():\n    return 2\n")
+    g.write(
+        "dv_incr/tests/test_top.py",
+        "from app import core\n\ndef test_t1():\n    assert core.one() == 1\n\n"
+        "def test_t2():\n    assert core.one() + 1 == 2\n",
+    )
+    g.write(
+        "dv_incr/tests/unit/test_u.py",
+        "from app import util\n\ndef test_u1():\n    assert util.two() == 2\n\n"
+        "def test_u2():\n    assert util.two() * 2 == 4\n",
+    )
+    ir = g.tmp / "dv_incr"
+    incr = ["-n", "2", "--cov=app", "--cov-context=test", "--cov-report=", "--incremental"]
+
+    def incr_run(cwd):
+        for stale in [*ir.glob(".coverage*"), *(ir / "tests" / "unit").glob(".coverage*")]:
+            stale.unlink()
+        return g.run(*incr, cwd=cwd)
+
+    r1 = incr_run(ir)
+    outcomes = _read_json(ir / ".rstest_cache" / "incremental_outcomes.json") or {}
+    recorded = sorted(outcomes.get("green") or [])
+    check(
+        "DV-13 setup: root --incremental run is green and records all 4 tests",
+        r1.returncode == 0 and "4 passed" in r1.stdout and len(recorded) == 4,
+        f"rc={r1.returncode} green={recorded} " + r1.stdout[-200:] + r1.stderr[-300:],
+    )
+    # Touch the unit tests' dependency so the subdir run really executes them
+    # and rewrites the coverage index from tests/unit/.
+    g.write("dv_incr/app/util.py", "def two():\n    return 2  # touched\n")
+    r2 = incr_run(ir / "tests" / "unit")
+    check(
+        "DV-13 setup: the tests/unit/ run re-runs its 2 tests, green",
+        r2.returncode == 0 and "2 passed" in r2.stdout and "cached" not in r2.stdout,
+        f"rc={r2.returncode} " + r2.stdout[-200:] + r2.stderr[-300:],
+    )
+    index = _read_json(ir / ".rstest_cache" / "coverage_index.json") or {}
+    keys = sorted(index.get("files") or {})
+    check(
+        "DV-13 coverage index keys stay rootdir-relative after the subdir run",
+        bool(keys) and all((ir / k).is_file() for k in keys),
+        str(keys),
+    )
+    r3 = incr_run(ir)
+    n = len(recorded)
+    check(
+        "DV-13 --incremental root, tests/unit/, root: last run skips what the first recorded",
+        r3.returncode == 0
+        and f"{n} of {n} test(s) unchanged" in r3.stderr
+        and f"({n} cached)" in r3.stdout,
+        f"rc={r3.returncode} " + r3.stderr[-300:] + r3.stdout[-200:],
     )
 
 
@@ -525,14 +591,12 @@ def gate_local_dev_changed_watch(g, args, binary):
         "DV-03 --changed: conftest importer's subtree runs (2 failed)",
         "test_calc.py::test_calc FAILED" in r.stdout and "2 failed" in r.stdout,
         r.stdout[-300:] + r.stderr[-200:],
-        known_bug=True,
     )
     r = g.run("--changed-strict", "-n", "2", cwd=cwd)
     check(
         "DV-03 --changed-strict: conftest importer's subtree runs (2 failed)",
         "2 failed" in r.stdout,
         r.stdout[-200:],
-        known_bug=True,
     )
     git(cwd, "checkout", "-q", "--", "app/other.py")
 
@@ -556,7 +620,6 @@ def gate_local_dev_changed_watch(g, args, binary):
             "DV-04 (b) source edit: conftest importer's subtree reruns (2 failed)",
             ok and "test_calc.py::test_calc FAILED" in out and "2 failed" in out,
             out[-300:],
-            known_bug=True,
         )
         ok, out = w.cycle(
             lambda: g.write("dv_watch/app/other.py", "def mul(a, b):\n    return a * b\n")
@@ -651,7 +714,6 @@ def gate_local_dev_debugging(g, args, binary):
         "DV-05 -n 2 breakpoint(): (Pdb) prompt, or a hint naming -s / -n 0",
         "(Pdb)" in body or "-n 0" in body or " -s" in body,
         f"rc={rc} " + plain[-300:],
-        known_bug=True,
     )
     tests = _report_tests(rj) or {}
     check(
@@ -733,7 +795,6 @@ def gate_local_dev_output(g, args, binary):
             f"DV-07 --tb={style}: first source line keeps its 4-space indent",
             bool(got) and got[0] == exp[0] == "    def test_multi():",
             f"got={got[:1]} exp={exp[:1]}",
-            known_bug=True,
         )
     exp = _failure_body(pytest_tb("short"), py_hdr)
     got = _failure_body(rstest_tb("short"), rs_hdr)
@@ -754,7 +815,6 @@ def gate_local_dev_output(g, args, binary):
         "DV-07 --tb=line: one 'path:line: msg' line per failure",
         re.search(r"test_tb\.py:3: AssertionError: helper says no", out) is not None,
         out[-300:],
-        known_bug=True,
     )
     out = rstest_tb("no")
     check(
@@ -766,7 +826,6 @@ def gate_local_dev_output(g, args, binary):
         "DV-07 --tb=no: no failure block and no captured output",
         "--- FAILED" not in out and "dv-captured-marker" not in out,
         out[-300:],
-        known_bug=True,
     )
 
     # DV-10: terminals. pty runs are POSIX-only; the piped FORCE_COLOR case
@@ -793,7 +852,6 @@ def gate_local_dev_output(g, args, binary):
         "DV-10 (d) piped FORCE_COLOR=1: colored consistently (all or nothing)",
         "\x1b" not in r.stdout or "\x1b" in last,
         f"esc={r.stdout.count(chr(27))} summary={last!r}",
-        known_bug=True,
     )
     if WINDOWS:
         print("  (pty parts of DV-10 skipped on Windows)")
@@ -816,7 +874,6 @@ def gate_local_dev_output(g, args, binary):
         "DV-10 (a) 40-column pty: live footer lines fit in 40 columns",
         not wide,
         f"{len(wide)} wide, e.g. {wide[:1]}",
-        known_bug=True,
     )
     for label, extra, flags in (
         ("(b) TERM=dumb", {"TERM": "dumb"}, []),
@@ -828,7 +885,6 @@ def gate_local_dev_output(g, args, binary):
             f"DV-10 {label} on a pty: zero escape sequences",
             rc == 1 and "\x1b" not in out,
             f"rc={rc} esc={out.count(chr(27))}",
-            known_bug=True,
         )
 
 
@@ -868,13 +924,11 @@ def gate_local_dev_interrupt_stop(g, args, binary):
         "DV-09 -n 2 -x: no test starts after the failure is reported",
         not late,
         f"started after fail (+s, id): {late}",
-        known_bug=True,
     )
     check(
         "DV-09 -n 2 -x: prints 'stopping after 1 failures'",
         "stopping after 1 failures" in _out(r),
         r.stdout[-200:],
-        known_bug=True,
     )
 
     # DV-08: Ctrl-C (SIGINT to the foreground process group) mid-run.
@@ -928,21 +982,18 @@ def gate_local_dev_interrupt_stop(g, args, binary):
         "DV-08 SIGINT: output says how many tests did not run",
         re.search(r"\b\d+ (tests? )?(not run|did not run|not started|unrun)", out) is not None,
         out[-300:],
-        known_bug=True,
     )
     lf = _read_json(idir / ".pytest_cache/v/cache/lastfailed") or {}
     check(
         "DV-08 SIGINT: lastfailed does not list the in-flight tests",
         not (inflight & set(lf)),
         f"in lastfailed: {sorted(inflight & set(lf))}",
-        known_bug=True,
     )
     flakes = _read_json(idir / ".rstest_cache/flakes.json") or {}
     check(
         "DV-08 SIGINT: flakes.json has no entries for the in-flight tests",
         not (inflight & set(flakes)),
         f"in flakes.json: {sorted(inflight & set(flakes))}",
-        known_bug=True,
     )
     durs = _read_json(idir / ".rstest_cache/durations.json") or {}
     zero = sorted(n for n in inflight if n in durs and durs[n].get("secs") == 0.0)
@@ -950,5 +1001,4 @@ def gate_local_dev_interrupt_stop(g, args, binary):
         "DV-08 SIGINT: durations.json has no 0.0 entries for the in-flight tests",
         not zero,
         f"zero durations: {zero}",
-        known_bug=True,
     )

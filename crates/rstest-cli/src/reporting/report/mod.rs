@@ -60,6 +60,12 @@ pub struct TestEntry {
     /// (crash or --worker-timeout kill), not produced by pytest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,
+    /// The run was interrupted (SIGINT/SIGTERM) while this test was running:
+    /// its failure is the fabricated `crashed` one, not a real outcome, so the
+    /// run history (lastfailed, flakes, durations) leaves it out. Not
+    /// serialized: report-json shows it as `crashed`.
+    #[serde(skip)]
+    pub interrupted: bool,
     /// Source line of the test (0-based, from pytest's report.location),
     /// for editor mapping. Absent when pytest reports no location.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,6 +200,43 @@ pub enum FailureWrap {
     BuildkiteGroup,
 }
 
+/// pytest's `--tb` style, as far as the failures block cares. The worker
+/// already renders each failure's text in the chosen style; `line` and `no`
+/// also change the block around it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TbStyle {
+    /// auto / long / short / native: a headed block per failure.
+    #[default]
+    Full,
+    /// `--tb=line`: no header; the text (whose last line is the worker's
+    /// `path:line: message` crash line), captured output before that line.
+    Line,
+    /// `--tb=no`: no failures or errors block at all.
+    No,
+}
+
+impl TbStyle {
+    /// The last `--tb` among `opts` (`--tb=X` or `--tb X`), in pytest's
+    /// precedence order: ini `addopts`, then `PYTEST_ADDOPTS`, then argv.
+    pub fn from_opts<'a>(opts: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut style = Self::Full;
+        let mut opts = opts.into_iter();
+        while let Some(a) = opts.next() {
+            let value = match a {
+                "--tb" => opts.next(),
+                _ => a.strip_prefix("--tb="),
+            };
+            match value {
+                Some("line") => style = Self::Line,
+                Some("no") => style = Self::No,
+                Some(_) => style = Self::Full,
+                None => {}
+            }
+        }
+        style
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Run {
     tests: BTreeMap<String, TestEntry>,
@@ -217,6 +260,34 @@ pub struct Run {
     phase_durations: Vec<(f64, String, String)>,
     /// `--junitxml`: pytest's testcase elements as the workers streamed them.
     pub junit: crate::reporting::junit::JunitParts,
+    /// `-x`/`--maxfail` stopped the pool after this many failures: the
+    /// closing summary prints pytest's `stopping after N failures` banner.
+    pub stopped_after: Option<u64>,
+    /// Set when SIGINT/SIGTERM stopped the run.
+    pub interruption: Option<Interruption>,
+}
+
+/// How a SIGINT/SIGTERM stopped the run, for the closing summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interruption {
+    /// The signal's name (`SIGINT`).
+    pub signal: String,
+    /// Selected tests that never started; `None` when the total is unknown
+    /// (a lazy run stopped before collection finished).
+    pub not_run: Option<u64>,
+}
+
+impl Interruption {
+    /// pytest's `!!! Interrupted: ... !!!` banner, with how many tests did not
+    /// run when that is known.
+    pub fn banner(&self) -> String {
+        let what = match self.not_run {
+            Some(1) => format!("Interrupted by {}: 1 test did not run", self.signal),
+            Some(n) => format!("Interrupted by {}: {n} tests did not run", self.signal),
+            None => format!("Interrupted by {}", self.signal),
+        };
+        format!("!!!!!!!!!!!!!!!!!!!! {what} !!!!!!!!!!!!!!!!!!!!")
+    }
 }
 
 impl Run {
@@ -393,6 +464,14 @@ impl Run {
         }
     }
 
+    /// Flag an entry that was running when SIGINT/SIGTERM stopped the run (see
+    /// [`TestEntry::interrupted`]).
+    pub fn mark_interrupted(&mut self, nodeid: &str) {
+        if let Some(e) = self.tests.get_mut(nodeid) {
+            e.interrupted = true;
+        }
+    }
+
     /// Record that a test passed only after `attempts` reruns.
     pub fn mark_flaky(&mut self, nodeid: String, attempts: u32) {
         if let Some(e) = self.tests.get_mut(&nodeid) {
@@ -406,14 +485,25 @@ impl Run {
         &self.tests
     }
 
-    /// nodeid -> call duration, for the duration cache (LPT scheduling).
+    /// nodeid -> call duration, for the duration cache (LPT scheduling). A test
+    /// an interrupt stopped mid-run has no real duration and is left out.
     pub fn durations(&self) -> impl Iterator<Item = (&String, f64)> {
         self.tests
             .iter()
+            .filter(|(_, e)| !e.interrupted)
             .filter_map(|(id, e)| e.duration.map(|d| (id, d)))
     }
 
-    /// nodeids with any failed phase - the merged `lastfailed` truth.
+    /// [`Run::failed_nodeids`] minus the tests an interrupt stopped mid-run:
+    /// the failures the run history (lastfailed, flakes) records.
+    pub fn history_failed_nodeids(&self) -> impl Iterator<Item = &String> {
+        self.tests
+            .iter()
+            .filter_map(|(id, e)| (e.any_phase_failed() && !e.interrupted).then_some(id))
+    }
+
+    /// nodeids with any failed phase, interrupted ones included.
+    #[cfg(test)]
     pub fn failed_nodeids(&self) -> impl Iterator<Item = &String> {
         self.tests
             .iter()
@@ -615,6 +705,16 @@ fn classify_call(e: &TestEntry, call: Option<&str>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tb_style_last_flag_wins_in_both_forms() {
+        assert_eq!(TbStyle::from_opts([]), TbStyle::Full);
+        assert_eq!(TbStyle::from_opts(["--tb=line"]), TbStyle::Line);
+        assert_eq!(TbStyle::from_opts(["--tb", "no", "-q"]), TbStyle::No);
+        assert_eq!(TbStyle::from_opts(["--tb=no", "--tb=short"]), TbStyle::Full);
+        // A trailing bare --tb (pytest rejects it) changes nothing.
+        assert_eq!(TbStyle::from_opts(["--tb=line", "--tb"]), TbStyle::Line);
+    }
 
     fn report(nodeid: &str, when: &str, outcome: &str) -> proto::Report {
         proto::Report {

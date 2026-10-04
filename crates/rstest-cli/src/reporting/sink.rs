@@ -19,6 +19,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use crate::reporting::color::Palette;
+use crate::reporting::report::TbStyle;
 
 /// Owns the two output streams and the output policy. Threaded as
 /// `&mut Sink` through the run pipeline.
@@ -26,6 +27,9 @@ pub struct Sink {
     out: Box<dyn Write + Send>,
     err: Box<dyn Write + Send>,
     palette: Palette,
+    /// pytest's `--tb` style: shapes the failures block and bar mode's
+    /// inline failures.
+    tb: TbStyle,
     /// Optional `--stream-json` sink: a side channel that receives one NDJSON
     /// object per test-phase report as the run progresses, independent of the
     /// human stdout/stderr. `None` unless `--stream-json` was given.
@@ -39,6 +43,7 @@ impl Sink {
             out: Box::new(io::stdout()),
             err: Box::new(io::stderr()),
             palette,
+            tb: TbStyle::Full,
             stream: None,
         }
     }
@@ -58,6 +63,7 @@ impl Sink {
             out: Box::new(out),
             err: Box::new(err),
             palette: Palette::default(),
+            tb: TbStyle::Full,
             stream: None,
         };
         (sink, captured)
@@ -67,6 +73,16 @@ impl Sink {
     /// hand the finished text to [`Sink::out_line`].
     pub fn palette(&self) -> Palette {
         self.palette
+    }
+
+    /// The run's `--tb` style (default: a full block per failure).
+    pub fn tb_style(&self) -> TbStyle {
+        self.tb
+    }
+
+    /// Set the run's `--tb` style, resolved once from the session options.
+    pub fn set_tb_style(&mut self, tb: TbStyle) {
+        self.tb = tb;
     }
 
     /// A full stdout line (newline appended).

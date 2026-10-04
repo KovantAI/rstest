@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import io
 import logging
 import os
 import sys
@@ -195,6 +196,51 @@ def _count_fds() -> int | None:
         except OSError:
             continue
     return None
+
+
+def _crashline(report: Any) -> str:
+    """pytest's `--tb=line` line for a failure (TerminalReporter._getcrashline):
+    `/abs/path.py:LINE: message`."""
+    try:
+        return str(report.longrepr.reprcrash)
+    except AttributeError:
+        try:
+            return str(report.longrepr)[:50]
+        except AttributeError:
+            return ""
+
+
+def longrepr_text(report: Any, tbstyle: str = "auto") -> str | None:
+    """A report's failure text exactly as pytest's terminal prints it.
+
+    `report.longreprtext` strips the text on both ends, which drops the first
+    source line's indentation (`    def test_x():`); only trailing whitespace
+    and leading blank lines go here. Under `--tb=line` a call-phase failure
+    gets pytest's `path:line: message` crash line appended as its last line
+    (pytest prints it after the failure's captured output; the orchestrator
+    splits it off again)."""
+    if not report.longrepr:
+        return None
+    toterminal = getattr(report, "toterminal", None)
+    if toterminal is None:  # not a pytest BaseReport: its own text, as-is
+        raw = getattr(report, "longreprtext", "") or ""
+    else:
+        from _pytest._io import TerminalWriter
+
+        buf = io.StringIO()
+        tw = TerminalWriter(buf)
+        tw.hasmarkup = False
+        toterminal(tw)
+        raw = buf.getvalue()
+    lines = raw.rstrip().split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    text = "\n".join(lines)
+    if tbstyle == "line" and report.when == "call" and report.failed:
+        crash = _crashline(report).strip()
+        if crash:
+            text = f"{text}\n{crash}" if text else crash
+    return text or None
 
 
 class StreamPlugin:
@@ -787,13 +833,17 @@ class StreamPlugin:
             ]
             self._conn.send("doctor_fixtures", {"fixtures": fixtures})
 
+    def _tbstyle(self) -> str:
+        option = getattr(self._config, "option", None)
+        return str(getattr(option, "tbstyle", "auto") or "auto")
+
     def pytest_runtest_logreport(self, report):
         payload: m.ReportPayload = {
             "nodeid": report.nodeid,
             "when": report.when,
             "outcome": report.outcome,
             "duration": report.duration,
-            "longrepr": report.longreprtext or None,
+            "longrepr": longrepr_text(report, self._tbstyle()),
             "wasxfail": hasattr(report, "wasxfail"),
         }
         if is_subtest_report(report):

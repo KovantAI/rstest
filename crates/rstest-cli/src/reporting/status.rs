@@ -1,8 +1,11 @@
 //! Live per-worker status footer (nextest-style): a sticky line per worker
-//! plus progress/ETA header. TTY-only (no-op elsewhere). RELATIVE cursor
-//! moves survive scroll; all output must flow through print_line/print_inline.
+//! plus progress/ETA header. Interactive terminals only (see
+//! [`Palette::live`]); a no-op elsewhere. RELATIVE cursor moves survive
+//! scroll; all output must flow through print_line/print_inline. Every
+//! footer line is cut to the terminal width, so none wraps and the
+//! cursor-up count stays exact.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::time::Instant;
 
 use crate::reporting::color::Palette;
@@ -33,11 +36,11 @@ pub struct StatusFooter {
 const BAR_WIDTH: usize = 30;
 
 impl StatusFooter {
-    /// Create a footer for `workers` slots. Disabled automatically when
-    /// stdout is not a terminal.
-    pub fn new(workers: usize) -> Self {
+    /// Create a footer for `workers` slots. `live` is the palette's
+    /// interactive-terminal decision; without it every call is a no-op.
+    pub fn new(workers: usize, live: bool) -> Self {
         Self {
-            enabled: std::io::stdout().is_terminal(),
+            enabled: live,
             running: vec![None; workers],
             done: 0,
             total: None,
@@ -129,6 +132,10 @@ impl StatusFooter {
             let _ = w.flush();
             return;
         }
+        let width = terminal_width();
+        // Footer lines stop one column short of the edge: a line that fills
+        // the row leaves some terminals in a pending-wrap state.
+        let room = width.saturating_sub(1).max(1);
         // Footer body is built into `out`, each line newline-terminated, with
         // a leading blank line separating it from the run output above.
         let mut out = String::from("\n");
@@ -142,7 +149,10 @@ impl StatusFooter {
                     String::new()
                 };
                 if self.bar {
-                    format!("{}{eta}", bar_header(self.done, t, BAR_WIDTH))
+                    // Narrow terminal: shrink the bar, keep the numbers.
+                    let numbers = bar_header(self.done, t, 0).chars().count() + eta.len();
+                    let bar = room.saturating_sub(numbers).min(BAR_WIDTH);
+                    format!("{}{eta}", bar_header(self.done, t, bar))
                 } else {
                     format!("[{}/{t}{eta}]", self.done)
                 }
@@ -150,24 +160,37 @@ impl StatusFooter {
             // total unknown: a bar has no denominator, fall back to a counter
             _ => format!("[{} done]", self.done),
         };
+        let progress = head(progress.trim_start(), room);
         out.push_str(&format!("\x1b[2m{progress}\x1b[0m\n"));
         for (i, slot) in self.running.iter().enumerate() {
-            match slot {
+            let line = match slot {
                 Some((nodeid, since)) => {
                     let secs = since.elapsed().as_secs_f64();
-                    let id = tail(nodeid, 90);
-                    out.push_str(&format!("\x1b[2mgw{i:<2} {secs:>5.1}s\x1b[0m {id}\n"));
+                    let label = format!("gw{i:<2} {secs:>5.1}s");
+                    let label = head(&label, room);
+                    let left = room.saturating_sub(label.chars().count() + 1);
+                    if left == 0 {
+                        format!("\x1b[2m{label}\x1b[0m")
+                    } else {
+                        format!("\x1b[2m{label}\x1b[0m {}", tail(nodeid, left))
+                    }
                 }
-                None => out.push_str(&format!("\x1b[2mgw{i:<2}   idle\x1b[0m\n")),
-            }
+                None => format!("\x1b[2m{}\x1b[0m", head(&format!("gw{i:<2}   idle"), room)),
+            };
+            out.push_str(&line);
+            out.push('\n');
         }
         // Lines printed below the rest cursor: the leading blank, the
         // progress header, and one per worker.
         let lines = 1 + 1 + self.running.len();
         // Move the cursor back UP to the rest line (relative - survives any
         // scroll the paint triggered), return to column 0, and reprint the
-        // pending real-output line so the cursor lands at its true end.
-        out.push_str(&format!("\x1b[{lines}A\r{}", self.tail_line));
+        // part of the pending real-output line on that row so the cursor
+        // lands at its true end.
+        out.push_str(&format!(
+            "\x1b[{lines}A\r{}",
+            last_row(&self.tail_line, width)
+        ));
         let _ = write!(w, "{out}");
         self.painted_lines = lines;
         let _ = w.flush();
@@ -214,23 +237,85 @@ pub fn summary_bar(green: usize, red: usize, yellow: usize, palette: &Palette) -
     )
 }
 
-/// Last `max` bytes of a nodeid (char-boundary safe enough for ascii ids;
-/// falls back to full string on non-ascii boundaries).
+/// The last `max` chars of a nodeid (one column per char), never longer.
 fn tail(s: &str, max: usize) -> &str {
-    if s.len() <= max {
+    let n = s.chars().count();
+    if n <= max {
         return s;
     }
-    let cut = s.len() - max;
-    if s.is_char_boundary(cut) {
-        &s[cut..]
-    } else {
-        s
+    let cut = s.char_indices().nth(n - max).map_or(s.len(), |(i, _)| i);
+    &s[cut..]
+}
+
+/// The first `max` chars of `s` (plain text, one column per char).
+fn head(s: &str, max: usize) -> &str {
+    let cut = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
+    &s[..cut]
+}
+
+/// The part of a pending output line (progress chars, possibly wrapped by
+/// the terminal) that sits on its last screen row: what to reprint after a
+/// `\r` to put the cursor back at the line's true end. ANSI color escapes
+/// take no column and stay attached to the char they precede.
+fn last_row(line: &str, width: usize) -> &str {
+    // Byte offset where each visible char's unit starts (its leading
+    // escapes included).
+    let mut starts = Vec::new();
+    let mut unit_start = 0;
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\x1b' {
+            // CSI: ESC [ params final-byte
+            if chars.peek().is_some_and(|&(_, c)| c == '[') {
+                chars.next();
+                for (_, c) in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        starts.push(unit_start);
+        unit_start = i + c.len_utf8();
     }
+    let n = starts.len();
+    if width == 0 || n <= width {
+        return line;
+    }
+    // A row-filling line ends on its last full row (pending wrap).
+    let first = (n - 1) / width * width;
+    &line[starts[first]..]
+}
+
+/// Columns of the terminal on stdout: the tty's own size, else `COLUMNS`,
+/// else 80. Re-read on every repaint so a resize takes effect.
+fn terminal_width() -> usize {
+    #[cfg(unix)]
+    {
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: TIOCGWINSZ only writes into the winsize we own and pass by
+        // pointer; on failure it stays zeroed, which falls through below.
+        let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+        if rc == 0 && ws.ws_col > 0 {
+            return ws.ws_col as usize;
+        }
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.trim().parse().ok())
+        .filter(|&c: &usize| c > 0)
+        .unwrap_or(80)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bar_header, summary_bar, tail, BAR_WIDTH};
+    use super::{bar_header, head, last_row, summary_bar, tail, BAR_WIDTH};
     use crate::reporting::color::Palette;
 
     #[test]
@@ -276,13 +361,56 @@ mod tests {
     }
 
     #[test]
-    fn tail_refuses_to_split_multibyte() {
-        // cut lands mid-é: documented fallback is the FULL string (never
-        // a panic, never a broken codepoint)
+    fn tail_counts_chars_not_bytes() {
+        // A multibyte char near the cut: never longer than asked, never a
+        // broken codepoint, never a panic.
         let s = format!("{}é{}", "a".repeat(8), "b".repeat(3));
-        assert_eq!(tail(&s, 4), s);
-        // boundary-clean cut still truncates
+        assert_eq!(tail(&s, 4), "ébbb");
+        assert_eq!(tail(&s, 3), "bbb");
         let t = format!("{}écho", "a".repeat(8));
-        assert_eq!(tail(&t, 5), "écho");
+        assert_eq!(tail(&t, 5), "aécho");
+        assert_eq!(tail("ééé", 0), "");
+    }
+
+    #[test]
+    fn head_cuts_on_chars() {
+        assert_eq!(head("████ 50%", 3), "███");
+        assert_eq!(head("short", 90), "short");
+    }
+
+    #[test]
+    fn last_row_reprints_only_the_wrapped_remainder() {
+        // Fits: the whole line.
+        assert_eq!(last_row("....", 10), "....");
+        // 12 chars at width 5: rows of 5, 5, 2; the cursor's row holds 2.
+        assert_eq!(last_row("abcdefghijkl", 5), "kl");
+        // Exactly two rows: the second full row (pending wrap).
+        assert_eq!(last_row("abcdefghij", 5), "fghij");
+        // Color escapes take no column and stay with their char.
+        let dots = "\x1b[32m.\x1b[0m".repeat(7);
+        assert_eq!(
+            last_row(&dots, 5),
+            "\x1b[0m\x1b[32m.\x1b[0m\x1b[32m.\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn narrow_footer_lines_fit_the_width() {
+        use super::StatusFooter;
+        let mut f = StatusFooter::new(2, true);
+        f.set_total(29);
+        f.set_bar(true);
+        let mut buf: Vec<u8> = Vec::new();
+        f.item_started(&mut buf, 0, format!("tests/{}::test_x", "y".repeat(80)));
+        let text = String::from_utf8(buf).unwrap();
+        let plain = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")
+            .unwrap()
+            .replace_all(&text, "");
+        // The width comes from the tty, else COLUMNS, else 80: any of
+        // them is at most this generous bound once the 90-col cut is gone.
+        let width = super::terminal_width();
+        for line in plain.split(['\n', '\r']) {
+            assert!(line.chars().count() < width, "{line:?} wider than {width}");
+        }
     }
 }

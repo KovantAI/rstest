@@ -266,6 +266,10 @@ class CmdNoMoreItems(TypedDict):
     kind: Literal["no_more_items"]
 
 
+class CmdStopRun(TypedDict):
+    kind: Literal["stop_run"]
+
+
 class CmdEndSession(TypedDict):
     kind: Literal["end_session"]
 
@@ -283,6 +287,7 @@ Command = (
     | CmdRunIds
     | CmdNodeDown
     | CmdNoMoreItems
+    | CmdStopRun
     | CmdEndSession
     | CmdShutdown
 )
@@ -296,6 +301,7 @@ CommandKind = Literal[
     "run_ids",
     "node_down",
     "no_more_items",
+    "stop_run",
     "end_session",
     "shutdown",
 ]

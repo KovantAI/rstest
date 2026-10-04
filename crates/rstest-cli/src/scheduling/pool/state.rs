@@ -40,9 +40,6 @@ impl crate::scheduling::orchestrator::Slot for WorkerState {
     fn dead(&self) -> bool {
         self.dead
     }
-    fn finishing(&self) -> bool {
-        self.finishing
-    }
     fn set_finishing(&mut self, v: bool) {
         self.finishing = v;
     }
@@ -61,8 +58,8 @@ impl crate::scheduling::orchestrator::Slot for WorkerState {
     fn kill_worker(&mut self) {
         self.worker.kill();
     }
-    fn send_no_more_items(&mut self) {
-        let _ = self.worker.send(&proto::Command::NoMoreItems);
+    fn send_stop_run(&mut self) {
+        let _ = self.worker.send(&proto::Command::StopRun);
     }
     fn reap_dead(&mut self) {
         self.worker.reap();

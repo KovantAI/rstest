@@ -2,6 +2,7 @@
 //! in, wrapped with a running percentage when the total is known.
 
 use crate::reporting::color::Palette;
+use crate::reporting::report::TbStyle;
 use crate::reporting::sink::Sink;
 use crate::reporting::status::StatusFooter;
 use crate::scheduling::proto::Report;
@@ -169,9 +170,16 @@ impl Progress {
         }
     }
 
-    /// Enable the live per-worker status footer (pool mode, tty only).
-    pub fn enable_footer(&mut self, workers: usize) {
-        let mut footer = StatusFooter::new(workers);
+    /// The total test count, once known.
+    pub fn total(&self) -> Option<usize> {
+        self.total
+    }
+
+    /// Enable the live per-worker status footer (pool mode). `live` is the
+    /// palette's interactive-terminal decision; the footer is a no-op
+    /// without it.
+    pub fn enable_footer(&mut self, workers: usize, live: bool) {
+        let mut footer = StatusFooter::new(workers, live);
         footer.set_bar(self.mode == Mode::Bar);
         self.footer = Some(footer);
     }
@@ -323,7 +331,8 @@ impl Progress {
         };
         self.out_line(sink, &format!("{prefix}{painted_sym} {}{tail}", r.nodeid));
         // Sugar shows failures the moment they happen - inline the repr.
-        if r.outcome == "failed" {
+        // `--tb=no` shows no failure text at all (as pytest).
+        if r.outcome == "failed" && sink.tb_style() != TbStyle::No {
             if let Some(repr) = &r.longrepr {
                 let header = palette.bold_red(&format!("  ── {} ──", r.nodeid));
                 self.out_line(sink, &header);

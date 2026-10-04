@@ -143,7 +143,50 @@ def _session_roots(config) -> m.SessionRootsPayload:
     return roots
 
 
-class ItemDispatchPlugin(StreamPlugin):
+BREAKPOINT_HINT = (
+    "breakpoint() / pdb.set_trace() needs a terminal, and parallel workers have "
+    "none: rerun with -n 0 (or -s) to get the (Pdb) prompt"
+)
+
+
+def _no_terminal_set_trace(*args, **kwargs) -> None:
+    """`pdb.set_trace` (and so `breakpoint()`) in a pool worker.
+
+    A pool worker's stdin is /dev/null: a real Pdb would read EOF, quit, and
+    pytest would turn that into `Exit: Quitting debugger`, ending the worker's
+    whole session (the test fails with a bare `bdb.BdbQuit`, and the items the
+    worker still held are never run). Fail just this test instead, saying how
+    to get the prompt."""
+    __tracebackhide__ = True
+    pytest.fail(BREAKPOINT_HINT)
+
+
+# `stopped` reason for items dropped by a run-wide stop (stop_run).
+_RUN_STOPPED = "run stopped by -x/--maxfail"
+
+
+class PoolDebuggerGuard:
+    """Mixin for the pool-worker plugins: route `breakpoint()` and
+    `pdb.set_trace()` to `_no_terminal_set_trace` (passthrough runs, where the
+    worker owns the terminal, never load these plugins)."""
+
+    @pytest.hookimpl(specname="pytest_configure", trylast=True)
+    def pytest_configure_debugger_guard(self, config):
+        import pdb
+
+        # trylast: after pytest's debugging plugin swapped in its own
+        # set_trace. Config cleanups run last-in-first-out, so ours restores
+        # pytest's before pytest restores the original.
+        saved = pdb.set_trace
+        pdb.set_trace = _no_terminal_set_trace  # ty: ignore[invalid-assignment]
+
+        def restore() -> None:
+            pdb.set_trace = saved
+
+        config.add_cleanup(restore)
+
+
+class ItemDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
     """xdist remote.py model: collect everything, run items on command.
 
     The orchestrator feeds item indices; we keep a pending deque and only run
@@ -220,14 +263,59 @@ class ItemDispatchPlugin(StreamPlugin):
             return True
         pending = deque()
         draining = False
-        held = None  # last item run with the session as its nextitem
+        stopped = False  # run-wide stop (stop_run): start nothing more
+        last = None  # the last item run; its teardown may await a successor
+
+        def handle(msg) -> bool:
+            """Apply one command; True when the session should end."""
+            nonlocal draining, stopped
+            kind = None if msg is None else msg["kind"]
+            if kind in (None, "end_session", "shutdown"):
+                # None: the orchestrator vanished; finish the session cleanly.
+                return True
+            if kind == "run_items":
+                indices = msg["payload"]["indices"]
+                if stopped:
+                    self._conn.send("stopped", {"unrun": list(indices), "reason": _RUN_STOPPED})
+                else:
+                    pending.extend(indices)
+            elif kind == "node_down":
+                # Crash cleanup on behalf of a dead sibling.
+                self.run_foreign_node_down(session.config, msg["payload"])
+            elif kind == "no_more_items":
+                draining = True
+            elif kind == "stop_run":
+                # -x/--maxfail tripped elsewhere: queued items (the held
+                # lookahead included) never start; report them unrun.
+                stopped = True
+                if pending:
+                    self._conn.send("stopped", {"unrun": list(pending), "reason": _RUN_STOPPED})
+                    pending.clear()
+            return False
+
+        def finish() -> bool:
+            # The last item ran with the session (drained) or a successor
+            # that never ran (stop_run) as its nextitem: tear down what it
+            # left set up.
+            if last is not None:
+                _teardown_session(last)
+            return True
+
         while True:
             while len(pending) >= (1 if draining else self.MIN_PENDING):
+                # A run-wide stop may be waiting: check before every start.
+                msg = self._conn.poll_one()
+                while msg is not None:
+                    if handle(msg):
+                        return finish()
+                    msg = self._conn.poll_one()
+                if len(pending) < (1 if draining else self.MIN_PENDING):
+                    break
                 index = pending.popleft()
                 item = session.items[index]
                 # Drained (nothing queued behind it): see _DRAINED_NEXTITEM.
                 nextitem = session.items[pending[0]] if pending else session
-                held = None if pending else item
+                last = item
                 # Crash attribution: if this process dies mid-protocol, the
                 # orchestrator knows exactly which item took it down
                 # (research: xdist infers head-of-pending and misattributes).
@@ -252,23 +340,11 @@ class ItemDispatchPlugin(StreamPlugin):
             # Even after draining, keep listening: a failed item from any
             # worker may be rerun HERE (--reruns). Only end_session (every
             # outcome final) or shutdown closes the session.
-            msg = self._conn.recv_one()
-            kind = None if msg is None else msg["kind"]
-            if kind in (None, "end_session", "shutdown"):
-                # None: the orchestrator vanished; finish the session cleanly.
-                if held is not None:
-                    _teardown_session(held)
-                return True
-            if kind == "run_items":
-                pending.extend(msg["payload"]["indices"])
-            elif kind == "node_down":
-                # Crash cleanup on behalf of a dead sibling.
-                self.run_foreign_node_down(session.config, msg["payload"])
-            elif kind == "no_more_items":
-                draining = True
+            if handle(self._conn.recv_one()):
+                return finish()
 
 
-class LazyDispatchPlugin(StreamPlugin):
+class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
     """D5 lazy collection: no initial collection pass at all.
 
     The orchestrator assigns FILES, each collected on demand via repeated
@@ -334,8 +410,83 @@ class LazyDispatchPlugin(StreamPlugin):
         items_by_id = {}  # nodeid -> item, for reruns by id
         total = 0
         draining = False
-        held = None  # last item run with the session as its nextitem
+        stopped = False  # run-wide stop (stop_run): start nothing more
+        last = None  # the last item run; its teardown may await a successor
+
+        def queue_ids(ids) -> None:
+            nonlocal total
+            for nid in ids:
+                it = items_by_id.get(nid)
+                if it is None:
+                    # Not collected here (steal / crash redistribution /
+                    # serial phase): collect the id's whole FILE once, since
+                    # a stolen chunk is usually from one file and per-id
+                    # collection would re-parse the module for every id.
+                    fpath = nid.split("::", 1)[0]
+                    n_before = len(items_by_id)
+                    fresh = session.perform_collect([fpath], genitems=True)
+                    for f in fresh:
+                        items_by_id.setdefault(f.nodeid, f)
+                    total += len(items_by_id) - n_before
+                    it = items_by_id.get(nid)
+                if it is not None:
+                    pending.append(it)
+                else:
+                    # The id no longer exists in the file (e.g. a
+                    # different parametrize evaluation). Report the gap
+                    # rather than running silently short.
+                    self._conn.send(
+                        "collect_error",
+                        {
+                            "path": nid,
+                            "longrepr": "lazy dispatch: nodeid not found on re-collection",
+                        },
+                    )
+
+        def handle(msg) -> bool:
+            """Apply one command; True when the session should end."""
+            nonlocal draining, stopped
+            kind = None if msg is None else msg["kind"]
+            if kind in (None, "end_session", "shutdown"):
+                return True
+            if kind == "run_files":
+                if not stopped:
+                    files.extend(msg["payload"]["paths"])
+                    draining = False
+            elif kind == "run_ids":
+                if stopped:
+                    self._conn.send("stopped_ids", {"unrun": list(msg["payload"]["ids"])})
+                else:
+                    queue_ids(msg["payload"]["ids"])
+                    draining = False
+            elif kind == "no_more_items":
+                draining = True
+            elif kind == "stop_run":
+                # -x/--maxfail tripped elsewhere (or a collection error
+                # aborted the run): nothing more is collected or started.
+                stopped = True
+                files.clear()
+                if pending:
+                    self._conn.send("stopped_ids", {"unrun": [it.nodeid for it in pending]})
+                    pending.clear()
+            return False
+
+        def finish() -> bool:
+            # See ItemDispatchPlugin: tear down what the last item left set up.
+            if last is not None:
+                _teardown_session(last)
+            session.testscollected = total
+            return True
+
         while True:
+            if files or len(pending) >= 2 or (draining and pending):
+                # A run-wide stop may be waiting: check before every
+                # collection and every start.
+                msg = self._conn.poll_one()
+                while msg is not None:
+                    if handle(msg):
+                        return finish()
+                    msg = self._conn.poll_one()
             # Collect a queued file ASAP: until collected, its ids are
             # invisible to the orchestrator's dispatch queue.
             if files:
@@ -350,7 +501,7 @@ class LazyDispatchPlugin(StreamPlugin):
                 item = pending.popleft()
                 # Drained (nothing queued behind it): see _DRAINED_NEXTITEM.
                 nextitem = pending[0] if pending else session
-                held = None if pending else item
+                last = item
                 self._conn.send(
                     "item_start_id", {"id": item.nodeid, "timeout": self._effective_timeout(item)}
                 )
@@ -364,44 +515,5 @@ class LazyDispatchPlugin(StreamPlugin):
                     session.testscollected = total
                     return True
                 continue
-            msg = self._conn.recv_one()
-            kind = None if msg is None else msg["kind"]
-            if kind in (None, "end_session", "shutdown"):
-                if held is not None:
-                    _teardown_session(held)
-                session.testscollected = total
-                return True
-            if kind == "run_files":
-                files.extend(msg["payload"]["paths"])
-                draining = False
-            elif kind == "run_ids":
-                for nid in msg["payload"]["ids"]:
-                    it = items_by_id.get(nid)
-                    if it is None:
-                        # Not collected here (steal / crash redistribution /
-                        # serial phase): collect the id's whole FILE once, since
-                        # a stolen chunk is usually from one file and per-id
-                        # collection would re-parse the module for every id.
-                        fpath = nid.split("::", 1)[0]
-                        n_before = len(items_by_id)
-                        fresh = session.perform_collect([fpath], genitems=True)
-                        for f in fresh:
-                            items_by_id.setdefault(f.nodeid, f)
-                        total += len(items_by_id) - n_before
-                        it = items_by_id.get(nid)
-                    if it is not None:
-                        pending.append(it)
-                    else:
-                        # The id no longer exists in the file (e.g. a
-                        # different parametrize evaluation). Report the gap
-                        # rather than running silently short.
-                        self._conn.send(
-                            "collect_error",
-                            {
-                                "path": nid,
-                                "longrepr": "lazy dispatch: nodeid not found on re-collection",
-                            },
-                        )
-                draining = False
-            elif kind == "no_more_items":
-                draining = True
+            if handle(self._conn.recv_one()):
+                return finish()

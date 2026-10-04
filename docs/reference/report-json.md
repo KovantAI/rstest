@@ -62,7 +62,7 @@ Per-test fields (absent when not applicable):
 | `skip_reason` | string | first 200 chars |
 | `flaky` | `true` | passed only after [`--reruns`](cli.md#-reruns-n) or `@pytest.mark.flaky` retries. Counted in `meta.counts.flaky`, not also in `passed` |
 | `quarantined` | `true` | failed, but matched the [`--quarantine`](cli.md#-quarantine-file) list: non-fatal |
-| `longrepr` | string | failure text (assertion repr / traceback), failures only, capped at 20,000 bytes (cut on a UTF-8 character boundary) |
+| `longrepr` | string | failure text (assertion repr / traceback) as pytest prints it in the `--tb` style in effect (under `--tb=line` its last line is the `path:line: message` crash line), failures only, capped at 20,000 bytes (cut on a UTF-8 character boundary) |
 | `crashed` | `true` | the failure was fabricated by the orchestrator: worker crash, `--worker-timeout` kill, or the test that was running when SIGINT/SIGTERM stopped the run; pytest never reported it. `longrepr` says which |
 | `worker` | `"gw2"` | worker that produced the final outcome (pool runs only) |
 | `cached` | `true` | not executed this run: skipped by [`--incremental`](cli.md#-incremental) because it passed last run and its covered source is unchanged. Counts as passed. A cached entry carries only `"call": "passed"`, `"cached": true` and, when the prior run recorded it, `lineno` (no `setup`, `teardown` or `duration`) |

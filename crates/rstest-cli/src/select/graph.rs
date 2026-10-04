@@ -62,14 +62,8 @@ fn select_from_index(
         let abs = rootdir.join(c);
         let canon = abs.canonicalize().unwrap_or(abs);
         // Rule 2: conftest.py affects every test below its directory.
-        if canon.file_name().and_then(|n| n.to_str()) == Some("conftest.py") {
-            if let Some(dir) = canon.parent() {
-                for f in &index.files {
-                    if f.starts_with(dir) {
-                        affected.insert(f.clone());
-                    }
-                }
-            }
+        if is_conftest(&canon) {
+            add_conftest_subtree(&canon, index, &mut affected);
             continue;
         }
         queue.push_back(canon);
@@ -86,7 +80,10 @@ fn select_from_index(
             let mut seen: HashSet<&PathBuf> = HashSet::from([file]);
             let mut covered = false;
             while let Some(f) = reach.pop_front() {
-                if crate::collect::is_test_file(f, project) {
+                // A conftest.py importer covers the tests below it (rule 2).
+                if crate::collect::is_test_file(f, project)
+                    || (is_conftest(f) && conftest_subtree_has_tests(f, index, project))
+                {
                     covered = true;
                     break;
                 }
@@ -112,6 +109,11 @@ fn select_from_index(
     // Reverse BFS over the import graph.
     let mut seen: HashSet<PathBuf> = queue.iter().cloned().collect();
     while let Some(file) = queue.pop_front() {
+        // A conftest.py that (transitively) imports a changed module runs for
+        // every test below its directory, so rule 2 applies to it too.
+        if is_conftest(&file) {
+            add_conftest_subtree(&file, index, &mut affected);
+        }
         affected.insert(file.clone());
         if let Some(importers) = index.reverse.get(&file) {
             for imp in importers {
@@ -135,6 +137,35 @@ fn select_from_index(
         .collect();
     tests.sort();
     Ok(Selection::Tests(tests))
+}
+
+fn is_conftest(file: &Path) -> bool {
+    file.file_name().and_then(|n| n.to_str()) == Some("conftest.py")
+}
+
+/// Rule 2: every project file below `conftest`'s directory is affected (the
+/// test-file filter at the end keeps just the tests).
+fn add_conftest_subtree(conftest: &Path, index: &ProjectIndex, affected: &mut HashSet<PathBuf>) {
+    if let Some(dir) = conftest.parent() {
+        for f in &index.files {
+            if f.starts_with(dir) {
+                affected.insert(f.clone());
+            }
+        }
+    }
+}
+
+fn conftest_subtree_has_tests(
+    conftest: &Path,
+    index: &ProjectIndex,
+    project: &ProjectConfig,
+) -> bool {
+    conftest.parent().is_some_and(|dir| {
+        index
+            .files
+            .iter()
+            .any(|f| f.starts_with(dir) && crate::collect::is_test_file(f, project))
+    })
 }
 
 struct ProjectIndex {
@@ -755,6 +786,50 @@ mod tests {
                 );
             }
             Selection::FullRun(r) => panic!("unexpected full run: {r}"),
+        }
+    }
+
+    #[test]
+    fn source_imported_by_a_conftest_selects_the_conftest_subtree() {
+        // conftest.py imports app.other (transitively, via app.helper) for a
+        // fixture: an edit to app/other.py affects every test below the
+        // conftest, not just the tests that import app.other themselves.
+        let root = tmp("conftest-importer");
+        write(&root, "app/__init__.py", "");
+        write(&root, "app/other.py", "def mul(a, b):\n    return a * b\n");
+        write(&root, "app/helper.py", "from app.other import mul\n");
+        write(&root, "tests/conftest.py", "from app.helper import mul\n");
+        write(
+            &root,
+            "tests/test_calc.py",
+            "def test_calc(doubled):\n    pass\n",
+        );
+        write(
+            &root,
+            "tests/sub/test_deep.py",
+            "def test_deep():\n    pass\n",
+        );
+        write(&root, "other/test_c.py", "def test_c():\n    pass\n");
+
+        for strict in [false, true] {
+            let sel = affected_tests(
+                &root,
+                &ProjectConfig::default(),
+                &[PathBuf::from("app/other.py")],
+                strict,
+            )
+            .unwrap();
+            match sel {
+                Selection::Tests(tests) => assert_eq!(
+                    tests,
+                    vec![
+                        PathBuf::from("tests/sub/test_deep.py"),
+                        PathBuf::from("tests/test_calc.py"),
+                    ],
+                    "strict={strict}"
+                ),
+                Selection::FullRun(r) => panic!("unexpected full run (strict={strict}): {r}"),
+            }
         }
     }
 

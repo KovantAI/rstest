@@ -24,7 +24,7 @@ The coverage footprint of one test: the source files it covered and the total nu
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `file_count` | integer | yes | Number of source files the test covered. |
-| `files` | array of string | yes | Covered source files, sorted, cwd-relative (the coverage-index keys). |
+| `files` | array of string | yes | Covered source files, sorted, rootdir-relative (the coverage-index keys). |
 | `line_count` | integer | yes | Covered lines, summed across those files. |
 
 ### FlakeStats (Explain)

@@ -1153,3 +1153,44 @@ def test_internalerror_ships_collect_error():
     p = _plugin()
     p.pytest_internalerror("kaboom")
     assert p._conn.sent == [("collect_error", {"path": "<internalerror>", "longrepr": "kaboom"})]
+
+
+# ── longrepr_text: failure text as pytest's terminal prints it ─────────────
+
+
+def _failing_call_report() -> pytest.TestReport:
+    def helper(v):
+        assert v == 0, "helper says no"
+
+    with pytest.raises(AssertionError) as excinfo:
+        helper(3)
+    longrepr = excinfo.getrepr(style="long")
+    return pytest.TestReport("t.py::a", ("t.py", 0, "a"), {}, "failed", longrepr, "call")
+
+
+def test_longrepr_text_keeps_first_line_indent():
+    report = _failing_call_report()
+    text = stream.longrepr_text(report)
+    assert text is not None
+    # longreprtext strips this indent; pytest's terminal does not.
+    assert report.longreprtext.startswith("def ")
+    assert text.startswith("    def ")
+    assert text.strip() == report.longreprtext
+
+
+def test_longrepr_text_line_style_appends_crash_line():
+    report = _failing_call_report()
+    text = stream.longrepr_text(report, "line")
+    assert text is not None
+    *_, last = text.split("\n")
+    assert last.endswith(": AssertionError: helper says no")
+    assert ".py:" in last
+    # Only the call phase of a failure gets it.
+    report.when = "setup"
+    assert stream.longrepr_text(report, "line") == stream.longrepr_text(report)
+
+
+def test_longrepr_text_absent_and_non_pytest_reports():
+    assert stream.longrepr_text(mk_report("call", "passed")) is None
+    fake = mk_report("call", "failed", failed=True, longrepr="x", longreprtext="\n  boom  \n")
+    assert stream.longrepr_text(fake) == "  boom"

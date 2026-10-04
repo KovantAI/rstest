@@ -20,6 +20,33 @@ def test_recv_one_decodes_a_framed_message():
         os.close(r)
 
 
+def test_poll_one_never_blocks():
+    # Nothing written: None at once. Then queued frames come out in order,
+    # a partial frame waits for the rest, and EOF reads as None.
+    r, w = os.pipe()
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        assert conn.poll_one() is None
+        frame = msgpack.packb({"kind": "stop_run"})
+        os.write(w, frame + frame[:1])
+        assert conn.poll_one() == {"kind": "stop_run"}
+        assert conn.poll_one() is None
+        os.write(w, frame[1:])
+        assert conn.poll_one() == {"kind": "stop_run"}
+        os.close(w)
+        w = -1
+        assert conn.poll_one() is None
+        assert conn.recv_one() is None
+    finally:
+        if w != -1:
+            os.close(w)
+        os.close(r)
+
+
+def test_readable_degrades_to_false_on_a_bad_fd():
+    assert protocol._readable(-1) is False
+
+
 def test_recv_one_returns_none_on_eof():
     r, w = os.pipe()
     os.close(w)  # writer gone -> os.read yields b"" -> EOF

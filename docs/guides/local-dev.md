@@ -66,7 +66,7 @@ Changes come from git: working tree + untracked vs `HEAD`. Two selection engines
 
 --8<-- "docs/_snippets/changed-engines.md"
 
-Out of the box you get the import graph, conservative by construction (over-selection is safe, under-selection is not): ambiguous module names select every match, function-local imports count as edges, a changed `conftest.py` selects its whole subtree, and any config or non-Python change falls back to a full run. The one documented gap is dynamic imports (`importlib.import_module`), which produce no edges. Use [`--changed-strict`](../reference/cli.md#-changed-strict) for correctness-critical runs.
+Out of the box you get the import graph, conservative by construction (over-selection is safe, under-selection is not): ambiguous module names select every match, function-local imports count as edges, a changed `conftest.py` selects its whole subtree (so does a change to any module a `conftest.py` imports, directly or through other modules), and any config or non-Python change falls back to a full run. The one documented gap is dynamic imports (`importlib.import_module`), which produce no edges. Use [`--changed-strict`](../reference/cli.md#-changed-strict) for correctness-critical runs.
 
 If you want tighter selection locally, warm the coverage index once with a coverage run (`rstest --cov=src --cov-context=test`); from then on `--changed` maps *changed lines* to only the tests that executed them. Full mechanics, drift handling, and how to keep the index warm: [Selecting changed tests](changed.md).
 
@@ -79,6 +79,20 @@ $ rstest --lf
 ```
 
 `--lf`/`--ff` are forwarded to pytest, but the last-failed cache is written by rstest from **merged results** across workers, so a follow-up `--lf` behaves exactly as after a serial run (see [CLI reference](../reference/cli.md)). It composes with watch mode, where the last-failed state refreshes every cycle. Note that `--lf` still reruns [quarantined](flaky-tests.md) failures. Locally they behave like the failures they are.
+
+## Debugging: `breakpoint()` and `--pdb`
+
+Pool workers have no terminal, so a `breakpoint()` (or `pdb.set_trace()`) hit
+during a parallel run fails that test with a hint instead of hanging or
+quitting the worker:
+
+```text
+E       Failed: breakpoint() / pdb.set_trace() needs a terminal, and parallel workers have none: rerun with -n 0 (or -s) to get the (Pdb) prompt
+```
+
+Rerun that test with `-n 0` or `-s` (`rstest -s tests/test_x.py::test_bp`) to
+get the `(Pdb)` prompt. `--pdb` and `--trace` switch to that single-session
+mode by themselves (see [Passthrough-IO flags](../reference/cli.md#passthrough-io-flags)).
 
 ## What `--doctor` gives a fast suite
 

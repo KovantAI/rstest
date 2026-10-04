@@ -1013,21 +1013,18 @@ def gate_ci_environment(g, args, binary):
             "CI-12 CI=true on a pty: no cursor-movement sequences",
             rc == 1 and CURSOR_RE.search(o) is None,
             f"rc={rc} cursor={sorted(set(CURSOR_RE.findall(o)))}",
-            known_bug=True,
         )
         rc, o = on_pty(NO_COLOR="1")
         check(
             "CI-12 NO_COLOR=1 on a pty: no SGR color codes",
             rc == 1 and SGR_RE.search(o) is None,
             f"rc={rc} sgr={sorted(set(SGR_RE.findall(o)))}",
-            known_bug=True,
         )
         rc, o = on_pty(["--color=no"])
         check(
             "CI-12 --color=no on a pty: no SGR color codes",
             rc == 1 and SGR_RE.search(o) is None,
             f"rc={rc} sgr={sorted(set(SGR_RE.findall(o)))}",
-            known_bug=True,
         )
 
     # Piped (GitHub Actions, GitLab, Jenkins).
@@ -1063,7 +1060,6 @@ def gate_ci_environment(g, args, binary):
         "CI-12 FORCE_COLOR=1 piped: output is colored, as with pytest",
         SGR_RE.search(r.stdout) is not None,
         repr(r.stdout[-200:]),
-        known_bug=True,
     )
 
     # CI-13: pre-commit runs `language: python` hooks with VIRTUAL_ENV set

@@ -271,7 +271,7 @@ pub fn segment_from_run(
             kind: FlakeKind::Flaky,
         })
         .collect();
-    for nodeid in run.failed_nodeids() {
+    for nodeid in run.history_failed_nodeids() {
         flake_events.push(FlakeEvent {
             nodeid: nodeid.clone(),
             kind: FlakeKind::Failed,

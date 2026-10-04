@@ -14,12 +14,11 @@ use crate::scheduling::proto;
 /// The per-worker behavior the shared loop mechanics touch. Each loop's own
 /// `WorkerState` implements it, so `watchdog_tick` / `stop_all` operate on
 /// either without knowing the item-id type or the dispatch bookkeeping. The two
-/// worker-process pokes (`kill_worker`, `send_no_more_items`) are trait methods
+/// worker-process pokes (`kill_worker`, `send_stop_run`) are trait methods
 /// rather than a raw `&mut Worker` so a mock can stand in — the loop mechanics
 /// are testable without spawning a child.
 pub(crate) trait Slot {
     fn dead(&self) -> bool;
-    fn finishing(&self) -> bool;
     fn set_finishing(&mut self, v: bool);
     fn timeout_killed(&self) -> bool;
     fn set_timeout_killed(&mut self);
@@ -28,8 +27,9 @@ pub(crate) trait Slot {
     fn running_watchdog(&self) -> Option<Watchdog>;
     /// Hard-kill the worker process (hang watchdog).
     fn kill_worker(&mut self);
-    /// Tell the worker its queue is closed (`NoMoreItems`); it drains and ends.
-    fn send_no_more_items(&mut self);
+    /// Tell the worker the run is stopping (`StopRun`): it starts nothing
+    /// more, reports its queued items unrun, and awaits EndSession.
+    fn send_stop_run(&mut self);
     /// Kill (if running) and reap the worker process, marking the slot dead.
     fn reap_dead(&mut self);
 }
@@ -103,13 +103,14 @@ pub(crate) fn watchdog_tick(sink: &mut Sink, states: &mut [impl Slot]) {
     }
 }
 
-/// Tell every still-listening worker the queue is closed (maxfail trip or a
-/// lazy collection abort): each finishes its in-flight work and ends. Bounded
-/// overshoot, the trade xdist makes.
+/// Stop the run (maxfail trip or a lazy collection abort): every live worker
+/// finishes the test it is running and starts nothing more, its queued items
+/// (the held lookahead included) reported unrun. Workers already draining
+/// (`finishing`) are told too: a drain still runs everything queued.
 pub(crate) fn stop_all(states: &mut [impl Slot]) {
-    for s in states.iter_mut().filter(|s| !s.dead() && !s.finishing()) {
+    for s in states.iter_mut().filter(|s| !s.dead()) {
         s.set_finishing(true);
-        s.send_no_more_items();
+        s.send_stop_run();
     }
 }
 
@@ -162,7 +163,16 @@ pub(crate) fn interrupt_all<S: Slot>(
         sink.emit_report(Some(i), &r);
         run.record(Some(i), r);
         run.mark_crashed(&nodeid);
+        run.mark_interrupted(&nodeid);
     }
+    // Everything selected that has no entry yet never started.
+    let not_run = prog
+        .total()
+        .map(|total| total.saturating_sub(run.tests().len()) as u64);
+    run.interruption = Some(crate::reporting::report::Interruption {
+        signal: sig,
+        not_run,
+    });
     for s in states.iter_mut().filter(|s| !s.dead()) {
         s.reap_dead();
     }
@@ -297,7 +307,7 @@ mod tests {
         running_since: Option<Instant>,
         watchdog: Option<Watchdog>,
         killed: u32,
-        no_more_sent: u32,
+        stop_sent: u32,
         reaped: u32,
         // Only read by the unix-only interrupt_all test.
         #[cfg(unix)]
@@ -307,9 +317,6 @@ mod tests {
     impl Slot for MockSlot {
         fn dead(&self) -> bool {
             self.dead
-        }
-        fn finishing(&self) -> bool {
-            self.finishing
         }
         fn set_finishing(&mut self, v: bool) {
             self.finishing = v;
@@ -329,8 +336,8 @@ mod tests {
         fn kill_worker(&mut self) {
             self.killed += 1;
         }
-        fn send_no_more_items(&mut self) {
-            self.no_more_sent += 1;
+        fn send_stop_run(&mut self) {
+            self.stop_sent += 1;
         }
         fn reap_dead(&mut self) {
             self.reaped += 1;
@@ -357,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_all_finishes_only_live_unfinishing_workers() {
+    fn stop_all_stops_every_live_worker() {
         let mut states = vec![
             MockSlot::default(), // live -> stopped
             MockSlot {
@@ -367,16 +374,16 @@ mod tests {
             MockSlot {
                 finishing: true,
                 ..Default::default()
-            }, // finishing -> skipped
+            }, // draining -> stopped too (its queue would still run)
             MockSlot::default(), // live -> stopped
         ];
         stop_all(&mut states);
-        assert!(states[0].finishing && states[0].no_more_sent == 1);
+        assert!(states[0].finishing && states[0].stop_sent == 1);
         // A dead worker is never told and never marked finishing.
-        assert!(!states[1].finishing && states[1].no_more_sent == 0);
-        // An already-finishing worker is not re-sent (bounded overshoot).
-        assert_eq!(states[2].no_more_sent, 0);
-        assert!(states[3].finishing && states[3].no_more_sent == 1);
+        assert!(!states[1].finishing && states[1].stop_sent == 0);
+        // A draining worker still has queued items to drop.
+        assert!(states[2].finishing && states[2].stop_sent == 1);
+        assert!(states[3].finishing && states[3].stop_sent == 1);
     }
 
     fn wd(secs: u64) -> Option<Watchdog> {

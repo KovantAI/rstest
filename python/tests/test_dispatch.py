@@ -17,17 +17,30 @@ from rstest_worker._internal.dispatch import (
 
 
 class FakeConn:
-    """Records send()s and replays queued recv_one() messages."""
+    """Records send()s and replays queued recv_one() messages. `polled` holds
+    (starts, message) pairs: `poll_one` hands a message out once that many
+    tests have started, modelling a command that arrives mid-test."""
 
-    def __init__(self, incoming: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        incoming: list[dict[str, Any]] | None = None,
+        polled: list[tuple[int, dict[str, Any]]] | None = None,
+    ) -> None:
         self.sent: list[tuple[str, Any]] = []
         self._incoming = list(incoming or [])
+        self._polled = list(polled or [])
 
     def send(self, kind: str, payload: Any) -> None:
         self.sent.append((kind, payload))
 
     def recv_one(self) -> dict[str, Any] | None:
         return self._incoming.pop(0) if self._incoming else None
+
+    def poll_one(self) -> dict[str, Any] | None:
+        starts = sum(k in ("item_start", "item_start_id") for k, _ in self.sent)
+        if self._polled and self._polled[0][0] <= starts:
+            return self._polled.pop(0)[1]
+        return None
 
 
 class FakeItem:
@@ -390,6 +403,60 @@ def test_eager_runtestloop_orchestrator_vanish_finishes_cleanly():
     assert calls == [("a", "b")]  # only the head ran before the queue drained
 
 
+STOP_RUN = {"kind": "stop_run"}
+
+
+def test_eager_runtestloop_stop_run_mid_test_starts_nothing_more():
+    # -x tripped on another worker while `a` ran: b and c never start, are
+    # reported unrun, and a's fixtures are torn down at end_session.
+    items = [FakeItem("a"), FakeItem("b"), FakeItem("c")]
+    session, calls = _eager_session(items)
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0, 1, 2]}},
+            {"kind": "end_session", "payload": {}},
+        ],
+        polled=[(1, STOP_RUN)],
+    )
+    assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("a", "b")]
+    assert [p["unrun"] for k, p in conn.sent if k == "stopped"] == [[1, 2]]
+    assert session.torn == [None]
+
+
+def test_eager_runtestloop_stop_run_drops_the_held_lookahead():
+    # The worker holds `b` (a's successor) waiting for more work; stop_run
+    # must drop it rather than release it like no_more_items does. Work sent
+    # after the stop is reported unrun too.
+    items = [FakeItem("a"), FakeItem("b"), FakeItem("c")]
+    session, calls = _eager_session(items)
+    conn = FakeConn(
+        [
+            {"kind": "run_items", "payload": {"indices": [0, 1]}},
+            STOP_RUN,
+            {"kind": "run_items", "payload": {"indices": [2]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("a", "b")]
+    assert [p["unrun"] for k, p in conn.sent if k == "stopped"] == [[1], [2]]
+    assert session.torn == [None]
+
+
+def test_eager_runtestloop_end_session_seen_by_poll_finishes():
+    items = [FakeItem("a"), FakeItem("b"), FakeItem("c")]
+    session, calls = _eager_session(items)
+    conn = FakeConn(
+        [{"kind": "run_items", "payload": {"indices": [0, 1, 2]}}],
+        polled=[(1, {"kind": "end_session", "payload": {}})],
+    )
+    assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("a", "b")]
+    assert session.torn == [None]
+
+
 def test_eager_runtestloop_node_down_triggers_foreign_cleanup(monkeypatch):
     session, _ = _eager_session([FakeItem("a")])
     seen: list[Any] = []
@@ -636,7 +703,56 @@ def test_lazy_runtestloop_stops_on_shouldfail():
     assert stopped == [{"unrun": ["t.py::b"]}]
 
 
+def test_lazy_runtestloop_stop_run_starts_and_collects_nothing_more():
+    items = {"t.py": ["t.py::a", "t.py::b", "t.py::c"], "u.py": ["u.py::x"]}
+    collected: list[list[str]] = []
+
+    def perform_collect(paths):
+        collected.append(paths)
+        return [FakeItem(i) for i in items[paths[0]]]
+
+    session, calls = _lazy_session(perform_collect)
+    conn = FakeConn(
+        [
+            {"kind": "run_files", "payload": {"paths": ["t.py"]}},
+            {"kind": "run_ids", "payload": {"ids": ["t.py::a", "t.py::b", "t.py::c"]}},
+            {"kind": "run_files", "payload": {"paths": ["u.py"]}},
+            {"kind": "run_ids", "payload": {"ids": ["u.py::x"]}},
+            {"kind": "end_session", "payload": {}},
+        ],
+        polled=[(1, STOP_RUN)],
+    )
+    assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("t.py::a", "t.py::b")]
+    assert collected == [["t.py"]]  # u.py, assigned after the stop, never collected
+    stopped = [p["unrun"] for k, p in conn.sent if k == "stopped_ids"]
+    assert stopped == [["t.py::b", "t.py::c"], ["u.py::x"]]
+    assert session.torn == [None]
+    assert session.testscollected == 3
+
+
 def test_lazy_runtestloop_orchestrator_vanish_finishes_cleanly():
     session, _ = _lazy_session(lambda paths: [])
     assert LazyDispatchPlugin(FakeConn([])).pytest_runtestloop(session) is True
     assert session.testscollected == 0
+
+
+def test_pool_debugger_guard_fails_breakpoint_with_a_hint():
+    # A pool worker has no terminal: breakpoint() / pdb.set_trace() fail the
+    # test with a hint instead of quitting the worker's whole session.
+    import pdb
+
+    from rstest_worker._internal.dispatch import BREAKPOINT_HINT
+
+    cleanups: list[Any] = []
+    original = pdb.set_trace
+    plugin = ItemDispatchPlugin(FakeConn())
+    plugin.pytest_configure_debugger_guard(SimpleNamespace(add_cleanup=cleanups.append))
+    try:
+        with pytest.raises(pytest.fail.Exception, match="rerun with -n 0 \\(or -s\\)"):
+            pdb.set_trace()
+        assert "-n 0" in BREAKPOINT_HINT
+    finally:
+        for fn in reversed(cleanups):
+            fn()
+    assert pdb.set_trace is original

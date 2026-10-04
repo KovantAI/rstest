@@ -147,12 +147,20 @@ def _file_sha256(path: str) -> str | None:
     return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
+def _index_base() -> str:
+    """The directory index keys are relative to: the project rootdir rstest
+    passes in `RSTEST_ROOTDIR`, else the cwd."""
+    return os.environ.get("RSTEST_ROOTDIR") or os.getcwd()
+
+
 def build_index(cov: Any) -> None:
     """Invert the combined per-test contexts into a line->test index:
     { "schema": 2, "files": { "<rel-path>": { "hash": "<sha256>",
       "lines": { "<line>": ["<nodeid>", ...] } } } }.
 
-    Keys are cwd-relative POSIX paths (matching git diff --relative), so files
+    Keys are POSIX paths relative to the project root (`RSTEST_ROOTDIR`, the
+    rootdir the cache belongs to; the cwd when unset), like the nodeids, so a
+    run from a subdirectory writes the same keys as a run from the root. Files
     outside the tree are skipped. Best-effort: any error leaves the previous
     index untouched rather than failing the run.
     """
@@ -162,11 +170,11 @@ def build_index(cov: Any) -> None:
     # realpath both sides so a Windows 8.3 short name or junction doesn't make
     # an in-tree file look external and get skipped (coverage records
     # canonicalized paths; getcwd() may still carry the short form).
-    cwd = os.path.realpath(os.getcwd())
+    base = os.path.realpath(_index_base())
     files: dict[str, dict[str, Any]] = {}
     for path in data.measured_files():
         try:
-            rel = os.path.relpath(os.path.realpath(path), cwd)
+            rel = os.path.relpath(os.path.realpath(path), base)
         except ValueError:
             continue  # different drive on Windows -> not in the project tree
         if rel.startswith(".."):  # outside the project tree

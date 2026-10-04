@@ -7,7 +7,7 @@ pub(crate) mod discovery;
 mod gates;
 mod monorepo;
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -344,8 +344,9 @@ fn resolve_run_config(
     let very_verbose = verbosity >= 2;
     // Output style: --output > [tool.rstest] output > (byte-exact mode ?
     // pytest's own terminal : -v ? verbose : tty ? bar : dots). Auto-promote
-    // to the sugar bar on a tty, stay on plain dots off-tty so logs stay
-    // byte-stable (the live footer self-disables there).
+    // to the sugar bar on an interactive terminal (`Palette::live`: a color
+    // tty outside CI, not TERM=dumb), stay on plain dots elsewhere so logs
+    // stay byte-stable (the live footer self-disables there).
     let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
         Some("bar") => progress::Mode::Bar,
         Some("verbose") => progress::Mode::Verbose,
@@ -368,7 +369,7 @@ fn resolve_run_config(
         }
         None if n <= 1 && !single_worker_reruns && !passthrough => progress::Mode::Pytest,
         None if verbose => progress::Mode::Verbose,
-        None if std::io::stdout().is_terminal() => progress::Mode::Bar,
+        None if sink.palette().live() => progress::Mode::Bar,
         None => progress::Mode::Dots,
     };
     let durations = parse_durations(args);
@@ -484,6 +485,22 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     execute_inner(cli, args, None)
 }
 
+/// pytest's effective `--tb` style: ini `addopts`, then `PYTEST_ADDOPTS`,
+/// then the command line, the last one winning (pytest's own order).
+fn tb_style(args: &[String]) -> report::TbStyle {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project = config::discover(&cwd, &mut std::io::sink());
+    let env_addopts = std::env::var("PYTEST_ADDOPTS").unwrap_or_default();
+    report::TbStyle::from_opts(
+        project
+            .addopts
+            .iter()
+            .map(String::as_str)
+            .chain(env_addopts.split_whitespace())
+            .chain(args.iter().map(String::as_str)),
+    )
+}
+
 /// The run pipeline. `pinned` is `Some` only under `rstest replay`, carrying the
 /// recorded per-worker schedule to re-pin; a normal run passes `None`.
 pub(crate) fn execute_inner(
@@ -497,6 +514,7 @@ pub(crate) fn execute_inner(
     // selection, banner) flows through it. `--color` resolution matches
     // `resolve_run_config`'s (both call `Palette::detect`).
     let mut sink = Sink::stdio(color::Palette::detect(&args));
+    sink.set_tb_style(tb_style(&args));
     // `--stream-json FILE`: attach the live per-test NDJSON side channel. FILE
     // may be a regular file or a named pipe the editor already opened for
     // reading (opening a fifo for write blocks until that reader is present).
@@ -1082,25 +1100,41 @@ struct Incremental {
 /// unit-testable without standing up a full `RunConfig`: dropping the scope
 /// here (a default [`cov_scope::CovScope`]) is a silent-false-green regression
 /// the seam test catches.
+///
+/// `root` is the project rootdir the cache belongs to and `scope` the
+/// invocation dir. Everything recorded (the fingerprint walk, file keys, the
+/// measured set) is relative to `root`, so a run from a subdirectory computes
+/// the same state as one from the root and both share one baseline.
 fn incremental_config(
+    root: &std::path::Path,
     scope: &std::path::Path,
     args: &[String],
 ) -> (cov_scope::CovScope, coverage_skip::ConfigState) {
     let effective = cov_scope::effective_pytest_args(scope, args);
     // The index skipping trusts was written by the last COVERAGE run: without
-    // --cov now, rebuild that run's scope from its recorded args, so files it
-    // never measured still fold (see ConfigState::index_cov_args).
-    let index_cov_args = if coverage_skip::coverage_requested(&effective) {
-        Some(cov_scope::coverage_args(&effective))
+    // --cov now, rebuild that run's scope from its recorded args and start
+    // dir, so files it never measured still fold (see
+    // ConfigState::index_cov_args).
+    let (index_cov_args, index_cov_cwd) = if coverage_skip::coverage_requested(&effective) {
+        let here =
+            crate::cache::relative_to(scope, root).map(|p| p.to_string_lossy().replace('\\', "/"));
+        (Some(cov_scope::coverage_args(&effective)), here)
     } else {
-        coverage_skip::stored_index_cov_args(scope)
+        match coverage_skip::stored_index_cov(scope) {
+            Some((a, cwd)) => (Some(a), cwd),
+            None => (None, None),
+        }
     };
+    let cov_cwd = index_cov_cwd
+        .as_deref()
+        .map_or_else(|| scope.to_path_buf(), |c| root.join(c));
     let cov = index_cov_args
         .as_ref()
-        .map(|a| cov_scope::CovScope::resolve(scope, a))
+        .map(|a| cov_scope::CovScope::resolve_in(root, &cov_cwd, a))
         .unwrap_or_default();
-    let mut state = coverage_skip::config_state(scope, &cov);
+    let mut state = coverage_skip::config_state(root, &cov);
     state.index_cov_args = index_cov_args;
+    state.index_cov_cwd = index_cov_cwd;
     (cov, state)
 }
 
@@ -1168,7 +1202,7 @@ fn resolve_incremental(
     // The config state is only consumed under `active`; computing it
     // unconditionally would walk the whole project tree for conftests.
     let (cov, config) = if active {
-        incremental_config(scope, args)
+        incremental_config(&crate::cache::base_dir(), scope, args)
     } else {
         Default::default()
     };
@@ -2469,7 +2503,7 @@ mod tests {
         std::fs::create_dir_all(scope.join("other")).unwrap();
         std::fs::write(scope.join("pkg/mod.py"), b"x = 1\n").unwrap();
         std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
-        let fp = |args: &[&str]| incremental_config(&scope, &sv(args)).1.fp;
+        let fp = |args: &[&str]| incremental_config(&scope, &scope, &sv(args)).1.fp;
 
         // Under --cov=pkg, editing out-of-scope other/mod.py MUST move the fp.
         let before = fp(&["--cov=pkg"]);
@@ -2488,7 +2522,7 @@ mod tests {
 
         // --cov=pkg only in the ini addopts narrows just the same.
         std::fs::write(scope.join("pytest.ini"), b"[pytest]\naddopts = --cov=pkg\n").unwrap();
-        let (cov, _) = incremental_config(&scope, &sv(&[]));
+        let (cov, _) = incremental_config(&scope, &scope, &sv(&[]));
         assert_eq!(cov.sources, vec!["pkg"], "addopts --cov must be seen");
         let before = fp(&[]);
         std::fs::write(scope.join("other/mod.py"), b"y = 4\n").unwrap();
@@ -2498,11 +2532,17 @@ mod tests {
         // wrote the index: other/ still folds. With nothing recorded, the
         // index's scope is unknown and the state says so.
         std::fs::remove_file(scope.join("pytest.ini")).unwrap();
-        let (_, state) = incremental_config(&scope, &sv(&[]));
+        let (_, state) = incremental_config(&scope, &scope, &sv(&[]));
         assert_eq!(state.index_cov_args, None, "nothing recorded yet");
-        let (_, cov_run) = incremental_config(&scope, &sv(&["--cov=pkg"]));
-        crate::coverage_skip::record(&scope, &cov_run, Default::default(), Default::default());
-        let (cov, plain) = incremental_config(&scope, &sv(&[]));
+        let (_, cov_run) = incremental_config(&scope, &scope, &sv(&["--cov=pkg"]));
+        crate::coverage_skip::record(
+            &scope,
+            &cov_run,
+            Default::default(),
+            Default::default(),
+            &Default::default(),
+        );
+        let (cov, plain) = incremental_config(&scope, &scope, &sv(&[]));
         assert_eq!(plain.index_cov_args, Some(sv(&["--cov=pkg"])));
         assert_eq!(cov.sources, vec!["pkg"]);
         std::fs::write(scope.join("other/mod.py"), b"y = 5\n").unwrap();

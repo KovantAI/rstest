@@ -203,6 +203,30 @@ def test_build_index_writes_line_to_test_map(tmp_path, monkeypatch):
     assert entry["lines"] == {"1": ["mod.py::test_a"], "2": ["mod.py::test_b"]}
 
 
+def test_build_index_keys_are_relative_to_the_rootdir(tmp_path, monkeypatch):
+    # A run from tests/unit/ shares the rootdir's cache: its keys must be
+    # rootdir-relative (like the nodeids), not relative to the cwd.
+    sub = tmp_path / "tests" / "unit"
+    sub.mkdir(parents=True)
+    monkeypatch.chdir(sub)
+    monkeypatch.setenv("RSTEST_ROOTDIR", str(tmp_path))
+    index = _index_cache(monkeypatch, tmp_path)
+    src = tmp_path / "app" / "core.py"
+    src.parent.mkdir()
+    src.write_text("a = 1\n")
+    nodeid = "tests/unit/test_u.py::test_u"
+    data = _FakeData(
+        contexts=[f"{nodeid}|run"],
+        files=[str(src)],
+        per_file={str(src): {1: [f"{nodeid}|run"]}},
+    )
+    covtool.build_index(_FakeCov(data))
+
+    doc = json.loads(index.read_text())
+    assert list(doc["files"]) == ["app/core.py"]
+    assert doc["files"]["app/core.py"]["lines"] == {"1": [nodeid]}
+
+
 def test_build_index_noop_when_no_contexts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     index = _index_cache(monkeypatch, tmp_path)

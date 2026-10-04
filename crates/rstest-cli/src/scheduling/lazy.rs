@@ -54,9 +54,6 @@ impl orchestrator::Slot for WorkerState {
     fn dead(&self) -> bool {
         self.dead
     }
-    fn finishing(&self) -> bool {
-        self.finishing
-    }
     fn set_finishing(&mut self, v: bool) {
         self.finishing = v;
     }
@@ -75,8 +72,8 @@ impl orchestrator::Slot for WorkerState {
     fn kill_worker(&mut self) {
         self.worker.kill();
     }
-    fn send_no_more_items(&mut self) {
-        let _ = self.worker.send(&proto::Command::NoMoreItems);
+    fn send_stop_run(&mut self) {
+        let _ = self.worker.send(&proto::Command::StopRun);
     }
     fn reap_dead(&mut self) {
         self.worker.reap();
@@ -196,7 +193,7 @@ pub fn run_lazy_pool(
     let mut prog = Progress::default();
     // Json mode keeps stdout pure NDJSON; the footer would corrupt it.
     if mode != crate::reporting::progress::Mode::Json {
-        prog.enable_footer(n);
+        prog.enable_footer(n, sink.palette().live());
     }
     prog.set_mode(mode);
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
@@ -279,6 +276,7 @@ pub fn run_lazy_pool(
                 if let Some(limit) = maxfail {
                     if !stopping && fail_count >= limit {
                         stopping = true;
+                        run.stopped_after = Some(fail_count);
                         orchestrator::stop_all(&mut states);
                     }
                 }
@@ -416,6 +414,7 @@ pub fn run_lazy_pool(
                         );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
+                            run.stopped_after = Some(fail_count);
                             orchestrator::stop_all(&mut states);
                         }
                     }

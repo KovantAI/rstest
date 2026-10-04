@@ -49,7 +49,12 @@ listening, so a re-imported child process doesn't bind the port twice).
 |---|---|
 | `RSTEST_RUN_UID` | the run id to use instead of generating one. Every worker sees it as `RSTEST_RUN_UID` and `workerinput["testrun_uid"]`. Set the same value on every CI shard to give them one shared run id (for example `RSTEST_RUN_UID=${{ github.run_id }}-${{ github.run_attempt }}`). A monorepo run passes its own to each project's rstest this way |
 | `VIRTUAL_ENV` | worker interpreter discovery (first after `--python`) |
-| `NO_COLOR` | disables rstest's colored output when set, even to an empty value. Only `--color=yes` or `--color=no`, written with `=`, overrides it (the flag is also forwarded to pytest) |
+| `NO_COLOR` | a non-empty value turns color off, and with it the live footer, so a terminal gets no escape sequences at all. Decided as pytest does: `--color=yes` / `--color=no` (also forwarded to pytest) beats every variable, then `PY_COLORS`, then `NO_COLOR`, then `FORCE_COLOR`, then whether stdout is a terminal |
+| `FORCE_COLOR` | a non-empty value colors the output even when piped, matching the workers' colored assertion diffs (pytest reads it too). `NO_COLOR` wins over it. Color alone never brings back the live footer off a terminal |
+| `PY_COLORS` | `1` forces color on, `0` forces it off; beats `NO_COLOR` and `FORCE_COLOR`, as in pytest |
+| `TERM` | `dumb` means no color and no live footer on a terminal, as pytest does (Emacs compile buffers) |
+| `CI` | any value other than empty, `0` or `false` turns the live footer and the `bar` default off even on a pty (Buildkite, `docker -t`): the run prints `dots` and no cursor movement. Color stays as decided above |
+| `COLUMNS` | the terminal width for the live footer when the terminal can't report its size (default 80); footer lines are cut to fit so they never wrap |
 | `PYTEST_ADDOPTS` | read by the vendored core, exactly as under pytest. rstest-owned flags placed here (`--reruns`, `--junitxml`, `--timeout`, ...) are **not** seen by rstest; see [CLI](cli.md) |
 | `RSTEST_CACHE` | relocates the project cache directory (default `.rstest_cache` in the invocation directory): durations, flakes, coverage index, last-green baseline, and [replay journals](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally) (`replay/`). At a [monorepo](../concepts/monorepo.md#caches-per-project) root each project gets `<RSTEST_CACHE>/<slug>` (a relative value resolves against the monorepo root); unset, each project keeps its own `<project>/.rstest_cache` |
 | `RSTEST_CACHE_REMOTE` | default for [`--cache-remote`](cli.md#-cache-remote-urldir-cache-pull-cache-push) (the flag wins) |
