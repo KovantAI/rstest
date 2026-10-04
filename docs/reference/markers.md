@@ -42,24 +42,30 @@ Per-test rerun budget: the mark overrides a global
 flaky exactly like global reruns. The plugin itself is neutralized inside
 rstest workers to prevent double reruns. Registered automatically.
 
-The marker name matches pytest-rerunfailures, but rstest reads **only the
-`reruns=` keyword**, defaulting to 1. The positional form (`flaky(3)`) and
-the plugin's other options (`reruns_delay`, `condition`, `only_rerun`) are
-ignored by rstest's own retry, so `@pytest.mark.flaky(3)` retries once. Write
-`@pytest.mark.flaky(reruns=3)`, and use the global
-[`--only-rerun`](cli.md#-only-rerun-regex) to filter by error.
+The marker name matches pytest-rerunfailures, and rstest reads the budget
+the same way: the `reruns=` keyword, else the first positional argument
+(`flaky(3)`), else 1. `condition=` is honored too: a false condition (a bool,
+or a string evaluated like the plugin does) means no reruns. A string
+condition that fails to evaluate keeps the reruns. The plugin's other options
+(`reruns_delay`, `only_rerun`, `rerun_except`) are ignored by rstest's own
+retry; use the global [`--only-rerun`](cli.md#-only-rerun-regex) to filter by
+error.
 
-Reruns are coordinated by the orchestrator:
+The mark works **with or without** a global `--reruns`, at any worker count:
 
-- **At `-n ≥ 2`** the mark takes effect **with or without** a global
-  `--reruns`.
-- **At `-n 0/1`** the orchestrated retry runs only when a global `--reruns`
-  is set: that flag promotes the single-worker run to a one-worker rerun
-  pool (see [`--reruns`](cli.md#-reruns-n)). A flaky mark **on its own**, with
-  no global `--reruns`, does **not** trigger the pool at `-n 0/1`, so the
-  orchestrated retry is off; an installed pytest-rerunfailures then handles
-  the mark natively (its normal single-process behavior). Pass a global
-  `--reruns` to get rstest's own retry for marked tests in single-worker runs.
+- **At `-n ≥ 2`** (and in the one-worker rerun pool that `--reruns` starts at
+  `-n 0/1`, see [`--reruns`](cli.md#-reruns-n)) the orchestrator retries the
+  test, possibly on another worker.
+- **At `-n 0/1` without `--reruns`** the run stays the byte-exact single
+  session, and the session retries a marked test in place, the way
+  pytest-rerunfailures does: a failed attempt shows as `R` (`RERUN` with
+  `-v`) and counts as `N rerun` in pytest's summary line, and a test that
+  then passes is reported flaky. An installed pytest-rerunfailures handles
+  the mark itself there instead, as under plain pytest. Tests without the
+  mark run exactly as before.
+
+A failed attempt that a rerun may still rescue never counts toward `-x` /
+`--maxfail`; only a test that fails its last attempt does.
 
 ## `@pytest.mark.xdist_group`
 

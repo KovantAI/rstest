@@ -618,7 +618,8 @@ not show up at all.
   to `lastfailed`, flake history or the duration cache. A second signal exits
   at once.
 - **Reproducing order-dependent failures**: `--shuffle` prints its seed;
-  rerun with `--shuffle=SEED` to replay the same order. `rstest bisect
+  rerun with `--shuffle=SEED` to replay the same order (`rstest replay`
+  re-runs the exact per-worker schedule of the failed run). `rstest bisect
   <nodeid>` narrows a test that fails only after others down to the
   polluting test(s).
 - **Colors** are disabled automatically when output is not a terminal;

@@ -168,8 +168,11 @@ the orchestrator's dispatch queue). Order dependence is the central
 parallel-readiness hazard; a shuffled run flushes it out on demand
 (in CI or before enabling more workers) instead of waiting for a
 scheduling change to bite. Without a value the seed is chosen per run
-and printed; reproduce a failing order with `--shuffle=SEED` (add
-`-n 2 --dist loadfile` to keep the repro stable). The seed must be attached
+and printed. `--shuffle=SEED` reproduces the shuffled dispatch order, but
+which worker runs which test still depends on timing, so the same seed can
+pair a polluter with its victim on one run and split them on the next. For
+an exact repro of a failed run, use [`rstest replay`](cli-commands.md#replay):
+its journal pins every worker's test order. The seed must be attached
 with `=`: `--shuffle 42` is a bare `--shuffle` plus a test path `42` (see
 [Optional-value flags](#argument-splitting)).
 
@@ -396,7 +399,7 @@ the summary (`N flaky`), listed in its own section, and flagged in
 `--report-json`. Only the final attempt's outcome and output are recorded.
 
 Per-test budgets are available via `@pytest.mark.flaky(reruns=N)`, which
-works with or without the global flag (see
+works with or without the global flag, at any worker count (see
 [Markers](markers.md#pytestmarkflaky)).
 
 **Works at any worker count, including `-n 0`/`-n 1`.** The retry machinery
@@ -495,6 +498,8 @@ traceback in its own section, flagged as a `quarantined` testcase
 property in junit (no `<failure>` element, so junit-gating CI stays green) and in `--report-json`, and never fatal: a run whose
 only failures are quarantined exits 0. **Failures outside the list
 still fail the run**, and a listed test that passes is a plain pass.
+A quarantined failure never counts toward `-x` / `--maxfail`, so it
+can't stop the run before a real failure surfaces.
 
 Candidates come from the **flake history** every run records to
 `.rstest_cache/flakes.json`: per-test counts of flaky passes
@@ -594,6 +599,14 @@ absolute growth under 0.5s never count, and tests absent from the
 baseline (new or renamed) are skipped. A missing baseline file skips
 the comparison entirely (first run / cold cache). The comparison runs
 before the cache is refreshed with this run's times.
+
+The baseline is not overwritten by the regression it caught: a flagged test's
+time is kept out of `durations.json` (and out of a `--cache-push` segment), so
+the same regression fails the next run too, until the test is back under the
+threshold. A failed test's duration is never recorded either, so a fail-fast
+run cannot shrink the baseline to a few milliseconds and hide a later
+regression. When a slowdown is intended, accept it with one run without
+`--durations-regress` (it records the new time).
 
 ### `--require-baseline`
 
@@ -717,22 +730,30 @@ Operators: `<`, `<=`, `>`, `>=`, `==`, `!=`. Metrics (from the
 | metric | meaning |
 |---|---|
 | `wall_seconds` | total wall-clock time |
-| `test_time_seconds` | summed test durations |
-| `cpu_time_seconds` | summed call-phase CPU time |
+| `test_time_seconds` | summed test durations (setup + call + teardown) |
+| `cpu_time_seconds` | summed CPU time over the same span, child processes included |
 | `tests` | tests with timing data |
-| `workers` | worker count (`-n`) |
+| `workers` | worker count (`-n`; 1 for `-n 0`) |
 | `wait_pct` | % of test time spent waiting, not computing |
-| `wait_seconds` | seconds spent waiting |
+| `wait_seconds` | seconds spent waiting (test time minus CPU time) |
 | `parallel_efficiency` / `efficiency_pct` | realized-vs-possible speedup, % |
 | `realized_speedup` | test time ÷ wall time |
 | `imbalance_pct` | busiest-vs-idlest worker load gap, % |
-| `long_pole_seconds` | slowest single test |
+| `long_pole_seconds` | slowest single test (setup + call + teardown) |
 
-A metric whose section did not apply to the run is **skipped, not failed**,
-e.g. `parallel_efficiency` at `-n 1` (no parallelism to measure) prints a
-`not measured` note and never fails the gate. An unknown metric or malformed
-condition aborts up front, before the run, so a typo can never become a gate
-that silently never fires. `==`/`!=` are reliable only on the integer-valued
+`wait_pct` and `wait_seconds` are gated on the measured values, even when the
+doctor report hides its WAIT-BOUND section (below 20% or 1s of waiting).
+`long_pole_seconds` is measured at any worker count.
+
+A pool-only metric (`parallel_efficiency`, `efficiency_pct`,
+`realized_speedup`, `imbalance_pct`) at `-n 0` / `-n 1` is **skipped, not
+failed**: there is no parallelism to measure, so it prints a `not measured`
+note and never fails the gate. When no condition fires, the closing line is
+`all N condition(s) passed`, or `M condition(s) passed, K skipped (not
+measured for this run)` when some were skipped. An unknown metric, a malformed
+condition, or a threshold that is not a finite number (`NaN`, `inf`) aborts up
+front, before the run, so a typo can never become a gate that silently never
+fires (or always fires). `==`/`!=` are reliable only on the integer-valued
 metrics (`tests`, `workers`); on a floating-point metric they almost never
 match, so rstest warns and you should use a `<`/`>` threshold instead.
 
@@ -749,9 +770,10 @@ for a file copy, or run in a CI with no summary surface if you want gate-only.
 
 ### `--fail-on-leak`
 
-Fail the run if any test **leaked a resource**: ended with more live threads
-or open file descriptors than it started, its own teardown included. Turns the
-leak signal (see [`--doctor`](#-doctor)) into a CI gate.
+Fail the run if any test **leaked a resource**: started a thread or opened a
+file descriptor during its setup, call or teardown that is still alive after
+its teardown. Turns the leak signal (see [`--doctor`](#-doctor)) into a CI
+gate.
 
 ```console
 $ rstest -n auto --fail-on-leak
@@ -769,8 +791,9 @@ imports are not a per-test leak), so under `-n auto` one test per worker is not
 gated; a clean exit does not prove those tests are leak-free.
 
 A leaked thread or fd is shared state that can flake a *later* test; the guide
-covers what is measured, the false-positive cases (session-scoped fixtures),
-and how to fix a leak: [Resource leaks](../guides/resource-leaks.md).
+covers what is measured, how a leak is attributed (resources a class, module or
+session fixture creates are not charged to the test that triggered it), and how
+to fix a leak: [Resource leaks](../guides/resource-leaks.md).
 
 Exit-code note for machine consumers: the gate affects the **process exit
 code** (1 on breach), which is authoritative. It does **not** rewrite the
@@ -1241,7 +1264,13 @@ Three of them get extra orchestration on top of their per-session meaning:
   is reached across all workers, dispatch halts and every worker winds down:
   tests already running finish, and no other test starts, including the
   ones a worker had queued. The summary then shows pytest's banner,
-  `!!!!!!!!!! stopping after 1 failures !!!!!!!!!!`.
+  `!!!!!!!!!! stopping after 1 failures !!!!!!!!!!`. Only failures that
+  fail the run count: a failed attempt that a rerun may still rescue
+  ([`--reruns`](#-reruns-n), `@pytest.mark.flaky`) counts only once its
+  reruns are used up, and a [`--quarantine`](#-quarantine-file) match never
+  counts, at any worker count. A test whose rerun was still queued when the
+  run stopped is not run, like any other test the stop cut off. A run that
+  `-x`/`--maxfail` stopped always exits 1.
 - **`--lf` / `--ff`**: the last-failed cache is written by rstest from
   merged results (workers each see only their own failures), so a
   follow-up `--lf` behaves exactly as after a serial run.

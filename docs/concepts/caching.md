@@ -5,7 +5,10 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
 ## `.rstest_cache/` (rstest's own)
 
 - `durations.json`: per-test call durations, merged over runs (a filtered
-  run updates only the tests it ran). Drives
+  run updates only the tests it ran). Only passing tests are recorded: a
+  failed test keeps its previous timing, and so does a test
+  [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
+  flagged, so the baseline it regressed from stays in place. Drives
   [long-pole-first scheduling](scheduling.md#dispatch-order) and the
   suite-size heuristic behind `-n auto`. Each entry records its test file's
   path and a sha256 of its contents, so the cache self-heals: an edited test

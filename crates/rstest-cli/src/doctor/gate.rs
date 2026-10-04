@@ -56,9 +56,12 @@ impl Op {
     }
 }
 
-/// The metrics a gate condition can name. A metric backed by an optional
-/// section (`wait_bound`, `parallel_efficiency`) resolves to `None` when that
-/// section didn't apply, so its condition is skipped, not false-failed.
+/// The metrics a gate condition can name. `wait_*` resolve whenever CPU time
+/// was measured (whether or not the WAIT-BOUND section was shown), and
+/// `long_pole_seconds` at any worker count. The pool-only metrics
+/// (`parallel_efficiency`, `realized_speedup`, `imbalance_pct`) resolve to
+/// `None` without a multi-worker pool, so their condition is skipped, not
+/// false-failed.
 const METRICS: &[&str] = &[
     "wall_seconds",
     "test_time_seconds",
@@ -109,6 +112,11 @@ fn parse_condition(spec: &str, sink: &mut Sink) -> anyhow::Result<GateCondition>
     let threshold: f64 = rhs.parse().map_err(|_| {
         anyhow::anyhow!("--doctor-fail-on '{spec}': threshold '{rhs}' is not a number")
     })?;
+    // `NaN` / `inf` parse as f64 but make a gate that never (`>NaN`) or always
+    // (`!=nan`) fires: reject them like any other non-number.
+    if !threshold.is_finite() {
+        anyhow::bail!("--doctor-fail-on '{spec}': threshold '{rhs}' is not a finite number");
+    }
     // Exact == / != is reliable only on integer-valued metrics; on a float
     // metric it almost never matches and would silently never fire. Warn
     // rather than reject - someone may still want it on `tests`/`workers`.
@@ -136,8 +144,10 @@ fn metric_value(report: &DoctorReport, metric: &str) -> Option<f64> {
         "cpu_time_seconds" => Some(report.cpu_time_seconds),
         "tests" => Some(report.tests as f64),
         "workers" => Some(report.workers as f64),
-        "wait_pct" => report.wait_bound.as_ref().map(|w| w.wait_pct),
-        "wait_seconds" => report.wait_bound.as_ref().map(|w| w.wait_seconds),
+        // The measured wait, not the WAIT-BOUND section: that one is hidden
+        // below its display threshold, and a gate must still see the value.
+        "wait_pct" => report.measured_wait.map(|(_, pct)| pct),
+        "wait_seconds" => report.measured_wait.map(|(secs, _)| secs),
         "parallel_efficiency" | "efficiency_pct" => report
             .parallel_efficiency
             .as_ref()
@@ -147,10 +157,7 @@ fn metric_value(report: &DoctorReport, metric: &str) -> Option<f64> {
             .as_ref()
             .map(|p| p.realized_speedup),
         "imbalance_pct" => report.parallel_efficiency.as_ref().map(|p| p.imbalance_pct),
-        "long_pole_seconds" => report
-            .parallel_efficiency
-            .as_ref()
-            .map(|p| p.long_pole_seconds),
+        "long_pole_seconds" => report.long_pole_seconds,
         _ => None,
     }
 }
@@ -161,6 +168,22 @@ fn metric_value(report: &DoctorReport, metric: &str) -> Option<f64> {
 pub struct GateOutcome {
     pub breaches: Vec<String>,
     pub skipped: Vec<String>,
+}
+
+impl GateOutcome {
+    /// The closing line for a gate run with no breach: never claims "all
+    /// passed" when some condition could not be evaluated.
+    pub fn pass_summary(&self, total: usize) -> String {
+        let skipped = self.skipped.len();
+        if skipped == 0 {
+            format!("all {total} condition(s) passed")
+        } else {
+            format!(
+                "{} condition(s) passed, {skipped} skipped (not measured for this run)",
+                total.saturating_sub(skipped)
+            )
+        }
+    }
 }
 
 pub fn evaluate(report: &DoctorReport, conditions: &[GateCondition]) -> GateOutcome {
@@ -211,6 +234,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("not a number"), "{e}");
+        // non-finite thresholds parse as f64 but are rejected
+        for spec in [
+            "wait_pct>NaN",
+            "tests!=inf",
+            "wall_seconds<-inf",
+            "tests>infinity",
+        ] {
+            let e = parse_conditions(&[spec.into()], &mut Sink::captured().0)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("not a finite number"), "{spec}: {e}");
+        }
     }
 
     #[test]
@@ -257,18 +292,52 @@ mod tests {
 
     #[test]
     fn gate_skips_absent_section_never_fails() {
-        // A run with no parallel_efficiency / wait_bound sections: gating those
-        // metrics must skip, not fail.
+        // A run with no parallel_efficiency section and no CPU measurement:
+        // gating those metrics must skip, not fail.
         let mut r = report(4);
         r.parallel_efficiency = None;
         r.wait_bound = None;
+        r.measured_wait = None;
         let conds = parse_conditions(
-            &["parallel_efficiency<30".into(), "wait_pct>1".into()],
+            &[
+                "parallel_efficiency<30".into(),
+                "wait_pct>1".into(),
+                "tests>100".into(),
+            ],
             &mut Sink::captured().0,
         )
         .unwrap();
         let out = evaluate(&r, &conds);
         assert!(out.breaches.is_empty(), "{:?}", out.breaches);
         assert_eq!(out.skipped.len(), 2);
+        assert_eq!(
+            out.pass_summary(conds.len()),
+            "1 condition(s) passed, 2 skipped (not measured for this run)"
+        );
+    }
+
+    #[test]
+    fn wait_and_long_pole_gate_without_their_sections() {
+        // Wait below the WAIT-BOUND display threshold (no section) and a
+        // single-worker run (no parallel_efficiency): the measured values
+        // still gate.
+        let mut r = report(4);
+        r.parallel_efficiency = None;
+        r.wait_bound = None;
+        r.measured_wait = Some((0.8, 44.0));
+        r.long_pole_seconds = Some(0.8);
+        let conds = parse_conditions(
+            &[
+                "wait_seconds>0.5".into(),
+                "wait_pct>10".into(),
+                "long_pole_seconds>0.5".into(),
+            ],
+            &mut Sink::captured().0,
+        )
+        .unwrap();
+        let out = evaluate(&r, &conds);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        assert_eq!(out.breaches.len(), 3, "{:?}", out.breaches);
+        assert_eq!(out.pass_summary(3), "all 3 condition(s) passed");
     }
 }

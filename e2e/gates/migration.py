@@ -208,11 +208,6 @@ _SUITES = {
     # failure is timing-dependent, so it runs 5 times there instead of once.
 }
 
-# Pool-only divergences, all already filed: P2 (subtest results dropped from
-# the merged result), REVIEW_BUGS B8 (one collect error counted once per
-# worker), B9 (`N deselected` missing from the parallel summary).
-_PARITY_BUGS: set[tuple[str, str]] = set()
-
 
 def gate_migration_parity(g, args, binary):
     print("== migration: pytest parity matrix (MG-01) ==")
@@ -236,7 +231,6 @@ def gate_migration_parity(g, args, binary):
                 f"MG-01 {name}: rstest -n {n} matches pytest (exit, counts, per-test)",
                 same,
                 f"pytest rc={p.returncode} {pc} | rstest rc={r.returncode} {rc} | diff={diff}",
-                known_bug=(name, n) in _PARITY_BUGS,
             )
         if name in ("cfg_required", "cfg_minversion"):
             check(

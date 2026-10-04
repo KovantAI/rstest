@@ -402,6 +402,9 @@ fn resolve_run_config(
         // live JSON consumer is attached, so editors get per-passing-test output.
         stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
         junitxml: cli.junitxml.as_ref().map(|p| p.display().to_string()),
+        reruns: reruns > 0,
+        // Filled in once the --quarantine list is loaded (before dispatch).
+        quarantine: None,
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -552,7 +555,7 @@ pub(crate) fn execute_inner(
     // monorepo guard so a monorepo run is rejected rather than pulling into the
     // wrong (root) cache and printing a misleading success line first.
     pull_shared_cache(cli, &cache_remote, &mut sink)?;
-    let cfg = resolve_run_config(cli, &settings, &args, &run_uid, &mut sink)?;
+    let mut cfg = resolve_run_config(cli, &settings, &args, &run_uid, &mut sink)?;
     // Lift the resolved config into the local names the rest of the pipeline
     // reads. Copy fields copy; the few owned fields clone once (cheap) so their
     // types match the original locals exactly, leaving `cfg` intact to hand to
@@ -646,6 +649,12 @@ pub(crate) fn execute_inner(
         Some(p) if !passthrough => Some(gates::quarantine_matcher(p, &mut sink)?),
         _ => None,
     };
+    // Sessions keep quarantined failures out of their own -x / --maxfail count
+    // (the pool's count skips them too), so a quarantined test can't stop the run.
+    cfg.worker_env.quarantine = quarantine
+        .as_ref()
+        .filter(|q| !q.is_empty())
+        .map(|q| q.patterns().join("\n"));
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -1306,7 +1315,13 @@ fn apply_quarantine(
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
     // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
-    if !demoted.is_empty() && outcome.exitstatus == 1 && outcome.run.all_passed() {
+    // A run -x / --maxfail cut short stays failed: quarantined failures never
+    // count toward the limit, so a real failure tripped it.
+    if !demoted.is_empty()
+        && outcome.exitstatus == 1
+        && outcome.run.all_passed()
+        && outcome.run.stopped_after.is_none()
+    {
         outcome.exitstatus = 0;
     }
     Ok(())
@@ -1433,6 +1448,9 @@ fn dispatch_run(
             let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
             let mut warnings: Vec<proto::WarningEntry> = Vec::new();
             let mut session_died = false;
+            // Failed attempts of flaky-marked tests the session retried
+            // (outcome `rerun`), per nodeid: see `mark_session_flaky`.
+            let mut reruns_seen: Vec<String> = Vec::new();
             let exitstatus = loop {
                 let event = match w.recv() {
                     Ok(event) => event,
@@ -1453,6 +1471,14 @@ fn dispatch_run(
                         _ => return Err(e),
                     },
                 };
+                if let proto::Event::Report(r) = &event {
+                    if r.outcome == "rerun" {
+                        // A retried attempt: pytest's own terminal shows it
+                        // (`R`, `N rerun`); the run record keeps the final one.
+                        reruns_seen.push(r.nodeid.clone());
+                        continue;
+                    }
+                }
                 if let Some(code) = fold_run_event(
                     event,
                     passthrough,
@@ -1468,6 +1494,7 @@ fn dispatch_run(
             // Stop forwarding before the child is reaped (its pid is then free
             // for reuse), and restore the default handlers.
             drop(interrupts);
+            mark_session_flaky(&mut run, reruns_seen);
             if session_died {
                 w.reap();
             } else {
@@ -2454,6 +2481,23 @@ fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> boo
     cli_dist == Some("load") || settings_dist == Some("load")
 }
 
+/// Mark the tests a single session retried flaky when their final attempt
+/// passed, as the pool does. The session retries `@pytest.mark.flaky` tests
+/// itself (rstest's own reruns, or pytest-rerunfailures when installed) and
+/// reports each retried attempt with outcome `rerun`; `reruns` holds one
+/// nodeid per such attempt.
+fn mark_session_flaky(run: &mut report::Run, reruns: Vec<String>) {
+    let mut counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for id in reruns {
+        *counts.entry(id).or_default() += 1;
+    }
+    for (id, attempts) in counts {
+        if run.tests().get(&id).is_some_and(|e| !e.any_phase_failed()) {
+            run.mark_flaky(id, attempts);
+        }
+    }
+}
+
 /// Fold one worker event into the single-session accumulators (the byte-exact /
 /// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
 /// Reports drive progress (suppressed under passthrough, whose IO is inherited)
@@ -2539,12 +2583,13 @@ mod tests {
     use super::{
         attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
         check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
-        incremental_config, lazy_layout_fits, lazy_should_steal, names_a_selection,
-        names_existing_path, order_ignored_warning, parse_duration_secs, parse_numprocesses,
-        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
-        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
+        incremental_config, lazy_layout_fits, lazy_should_steal, mark_session_flaky,
+        names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
+        parse_numprocesses, requests_doctests, resolve_changed_base, resolve_order,
+        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
+        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
+        AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -3634,6 +3679,26 @@ mod tests {
             fd_delta: None,
             subtest: false,
         }
+    }
+
+    #[test]
+    fn mark_session_flaky_marks_only_tests_that_recovered() {
+        let mut run = report::Run::default();
+        run.record(None, report("t.py::recovered", "passed"));
+        run.record(None, report("t.py::exhausted", "failed"));
+        mark_session_flaky(
+            &mut run,
+            vec![
+                "t.py::recovered".into(),
+                "t.py::exhausted".into(),
+                "t.py::recovered".into(),
+            ],
+        );
+        assert_eq!(run.flaky, vec![("t.py::recovered".to_string(), 2)]);
+        let counts = run.counts();
+        assert_eq!(counts["flaky"], 1);
+        assert_eq!(counts["failed"], 1);
+        assert_eq!(counts.get("passed").copied().unwrap_or(0), 0);
     }
 
     #[test]

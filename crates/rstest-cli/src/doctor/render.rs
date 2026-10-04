@@ -55,8 +55,11 @@ pub fn render_markdown(r: &DoctorReport) -> String {
     }
     let _ = writeln!(
         md,
-        "**{} tests** — test time {:.1}s (wall {:.1}s, {} workers)\n",
-        r.tests, r.test_time_seconds, r.wall_seconds, r.workers
+        "**{} tests** — test time {:.1}s (wall {:.1}s, {})\n",
+        r.tests,
+        r.test_time_seconds,
+        r.wall_seconds,
+        workers_label(r.workers)
     );
     if let Some(line) = startup_line(r) {
         let _ = writeln!(md, "{line}\n");
@@ -137,7 +140,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         .take(8)
         .collect();
     if !interesting.is_empty() {
-        md.push_str("### Fixture hotspots (setup time across all workers)\n\n");
+        let _ = writeln!(md, "### Fixture hotspots ({})\n", fixture_time_label(r));
         md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
         for f in interesting {
             let advice = match fixture_advice(f) {
@@ -217,7 +220,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push('\n');
     }
     if !r.leaks.is_empty() {
-        md.push_str("### Resource leaks\n\n> Net threads/fds still open after teardown.\n\n");
+        md.push_str("### Resource leaks\n\n> Threads/fds a test created that are still open after its teardown.\n\n");
         md.push_str("| Leaked | Test |\n|---|---|\n");
         for l in r.leaks.iter().take(10) {
             let _ = writeln!(md, "| {} | `{}` |", leak_delta(l), l.nodeid);
@@ -322,8 +325,11 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
     }
     sink.out_line("\n================== rstest doctor ==================");
     sink.out_line(&format!(
-        "{} tests, {:.1}s test time (wall {:.1}s, {} workers)",
-        r.tests, r.test_time_seconds, r.wall_seconds, r.workers
+        "{} tests, {:.1}s test time (wall {:.1}s, {})",
+        r.tests,
+        r.test_time_seconds,
+        r.wall_seconds,
+        workers_label(r.workers)
     ));
 
     if let Some(line) = startup_line(r) {
@@ -397,7 +403,7 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         .take(8)
         .collect();
     if !interesting.is_empty() {
-        sink.out_line("\nFIXTURE HOTSPOTS (setup time across all workers):");
+        sink.out_line(&format!("\nFIXTURE HOTSPOTS ({}):", fixture_time_label(r)));
         for f in interesting {
             let advice = match fixture_advice(f) {
                 FixtureAdvice::PromoteScope => format!(
@@ -472,7 +478,9 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
     }
 
     if !r.leaks.is_empty() {
-        sink.out_line("\nRESOURCE LEAKS (net threads/fds still open after teardown):");
+        sink.out_line(
+            "\nRESOURCE LEAKS (threads/fds a test created, still open after its teardown):",
+        );
         for l in r.leaks.iter().take(10) {
             sink.out_line(&format!("  {}  {}", leak_delta(l), l.nodeid));
         }
@@ -500,6 +508,25 @@ pub(crate) fn leak_delta(l: &super::Leak) -> String {
     parts.join(" ")
 }
 
+/// "1 worker" for a single-worker run (`-n 0` / `-n 1`), else "N workers".
+fn workers_label(n: usize) -> String {
+    if n <= 1 {
+        "1 worker".to_string()
+    } else {
+        format!("{n} workers")
+    }
+}
+
+/// What the fixture-hotspot totals sum over: one worker's setup time on a
+/// single-worker run, every worker's on a pool run.
+fn fixture_time_label(r: &DoctorReport) -> &'static str {
+    if r.workers > 1 {
+        "setup time across all workers"
+    } else {
+        "setup time"
+    }
+}
+
 fn plural(n: i64) -> &'static str {
     if n == 1 {
         ""
@@ -512,6 +539,23 @@ fn plural(n: i64) -> &'static str {
 mod tests {
     use super::super::testutil::report;
     use super::*;
+
+    #[test]
+    fn single_worker_wording() {
+        let mut r = report(12);
+        r.workers = 1;
+        r.parallel_efficiency = None;
+        let md = render_markdown(&r);
+        assert!(md.contains("(wall 9.0s, 1 worker)"), "{md}");
+        assert!(md.contains("### Fixture hotspots (setup time)\n"), "{md}");
+        assert!(!md.contains("across all workers"));
+        let (mut sink, buf) = Sink::captured();
+        render(&mut sink, &r);
+        let out = buf.out();
+        assert!(out.contains("(wall 9.0s, 1 worker)"), "{out}");
+        assert!(out.contains("FIXTURE HOTSPOTS (setup time):"), "{out}");
+        assert!(!out.contains("across all workers"));
+    }
 
     #[test]
     fn markdown_renders_all_sections() {

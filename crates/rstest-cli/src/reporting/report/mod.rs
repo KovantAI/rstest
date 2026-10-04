@@ -36,19 +36,33 @@ pub struct TestEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub skip_reason: Option<String>,
-    /// Call-phase CPU time (process_time), present only when measured
-    /// (`--doctor` or a live-stream run). Serialized when present so a
-    /// report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on
-    /// a plain run so the snapshot stays byte-comparable to the pytest baseline.
+    /// Call-phase CPU time (process_time plus reaped child processes), present
+    /// only when measured (`--doctor` or a live-stream run). Serialized when
+    /// present so a report-json consumer can spot wait-bound tests (wall ≫
+    /// cpu); omitted on a plain run so the snapshot stays byte-comparable to
+    /// the pytest baseline.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "f64"))]
     pub cpu: Option<f64>,
-    /// Leak check: net threads / open fds after teardown (from the teardown
-    /// report). Doctor-internal; not serialized to report-json.
+    /// Leak check: threads / open fds the test created that are still open
+    /// after its teardown (from the teardown report). Doctor-internal; not serialized to report-json.
     #[serde(skip)]
     pub thread_delta: Option<i64>,
     #[serde(skip)]
     pub fd_delta: Option<i64>,
+    /// Setup / teardown phase wall time (latest attempt). Doctor-internal: the
+    /// doctor counts a test's whole protocol (fixtures included), not only its
+    /// call phase. Not serialized to report-json.
+    #[serde(skip)]
+    pub setup_seconds: f64,
+    #[serde(skip)]
+    pub teardown_seconds: f64,
+    /// Setup / teardown phase CPU time, present only when measured (the same
+    /// runs that measure `cpu`). Doctor-internal; not serialized.
+    #[serde(skip)]
+    pub setup_cpu: Option<f64>,
+    #[serde(skip)]
+    pub teardown_cpu: Option<f64>,
     /// Passed only after one or more reruns (--reruns).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -66,6 +80,11 @@ pub struct TestEntry {
     /// serialized: report-json shows it as `crashed`.
     #[serde(skip)]
     pub interrupted: bool,
+    /// `--durations-regress` flagged this test: its duration is kept out of
+    /// the duration cache so the baseline it regressed from stays in place
+    /// (the gate keeps firing until the test is back under the threshold).
+    #[serde(skip)]
+    pub duration_regressed: bool,
     /// Source line of the test (0-based, from pytest's report.location),
     /// for editor mapping. Absent when pytest reports no location.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -336,7 +355,11 @@ impl Run {
         }
         let outcome = Some(r.outcome);
         match r.when.as_str() {
-            "setup" => entry.setup = outcome,
+            "setup" => {
+                entry.setup = outcome;
+                entry.setup_seconds = r.duration;
+                entry.setup_cpu = r.cpu;
+            }
             "call" => {
                 if entry.subtests_failed > 0 {
                     entry.own_call = outcome;
@@ -348,6 +371,8 @@ impl Run {
             }
             "teardown" => {
                 entry.teardown = outcome;
+                entry.teardown_seconds = r.duration;
+                entry.teardown_cpu = r.cpu;
                 // Leak deltas ride the teardown report (measured after teardown).
                 if r.thread_delta.is_some() {
                     entry.thread_delta = r.thread_delta;
@@ -485,13 +510,36 @@ impl Run {
         &self.tests
     }
 
-    /// nodeid -> call duration, for the duration cache (LPT scheduling). A test
-    /// an interrupt stopped mid-run has no real duration and is left out.
+    /// nodeid -> call duration as measured this run (the `--durations-regress`
+    /// comparison). A test an interrupt stopped mid-run has no real duration
+    /// and is left out.
     pub fn durations(&self) -> impl Iterator<Item = (&String, f64)> {
         self.tests
             .iter()
             .filter(|(_, e)| !e.interrupted)
             .filter_map(|(id, e)| e.duration.map(|d| (id, d)))
+    }
+
+    /// The durations worth learning, for the duration cache (LPT scheduling,
+    /// `explain`, the `--durations-regress` baseline) and `--cache-push`:
+    /// [`Run::durations`] minus failed tests (a fail-fast call's 0.0002s is
+    /// not the test's cost) and tests `--durations-regress` flagged (adopting
+    /// the regressed time would silence the gate on the next run). Their
+    /// previous cached timing stays.
+    pub fn learned_durations(&self) -> impl Iterator<Item = (&String, f64)> {
+        self.durations().filter(|(id, _)| {
+            self.tests
+                .get(*id)
+                .is_some_and(|e| !e.any_phase_failed() && !e.duration_regressed)
+        })
+    }
+
+    /// Flag a test `--durations-regress` reported (see
+    /// [`TestEntry::duration_regressed`]).
+    pub fn mark_duration_regressed(&mut self, nodeid: &str) {
+        if let Some(e) = self.tests.get_mut(nodeid) {
+            e.duration_regressed = true;
+        }
     }
 
     /// [`Run::failed_nodeids`] minus the tests an interrupt stopped mid-run:
@@ -666,6 +714,21 @@ impl TestEntry {
         [&self.setup, &self.call, &self.teardown]
             .iter()
             .any(|p| p.as_deref() == Some("failed"))
+    }
+
+    /// Wall time of the whole test protocol (setup + call + teardown), the
+    /// time the test actually occupied its worker. `None` when the call phase
+    /// never reported (same population as `duration`).
+    pub fn protocol_seconds(&self) -> Option<f64> {
+        self.duration
+            .map(|d| d + self.setup_seconds + self.teardown_seconds)
+    }
+
+    /// CPU time of the whole protocol, when the call phase's CPU was measured.
+    /// A phase whose CPU was not reported counts as 0.
+    pub fn protocol_cpu(&self) -> Option<f64> {
+        self.cpu
+            .map(|c| c + self.setup_cpu.unwrap_or(0.0) + self.teardown_cpu.unwrap_or(0.0))
     }
 }
 

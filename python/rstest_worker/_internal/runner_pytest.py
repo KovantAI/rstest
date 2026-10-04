@@ -26,6 +26,7 @@ from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
 )
+from rstest_worker._internal.retry import FlakyReruns, MaxfailExemptions
 from rstest_worker._internal.stream import StreamPlugin
 
 fixturecompat.install()
@@ -145,14 +146,16 @@ def run_session(args: list[str], conn) -> int:
     """Item-dispatch session (pool mode)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    return _contained(lambda: _pytest_main(list(args), plugins=[ItemDispatchPlugin(conn)]), conn)
+    plugins = [ItemDispatchPlugin(conn), MaxfailExemptions(pool=True)]
+    return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
 
 def run_lazy_session(args: list[str], conn) -> int:
     """Lazy-collection session (pool mode, --collect lazy)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    return _contained(lambda: _pytest_main(list(args), plugins=[LazyDispatchPlugin(conn)]), conn)
+    plugins = [LazyDispatchPlugin(conn), MaxfailExemptions(pool=True)]
+    return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
 
 def _maybe_start_debugpy() -> None:
@@ -227,7 +230,14 @@ def run(args: list[str], conn) -> int:
     # `rstest --debug` routes here (single-worker passthrough): wait for the
     # editor to attach before pytest collects, so early breakpoints hold.
     _maybe_start_debugpy()
-    return _contained(lambda: _pytest_main(list(args), plugins=[SessionStreamPlugin(conn)]), conn)
+    # No orchestrator retry loop here: the session reruns flaky-marked tests
+    # itself, and keeps quarantined failures out of -x / --maxfail. Both are
+    # inert for a suite without flaky marks or a quarantine list.
+    plugins = [SessionStreamPlugin(conn), FlakyReruns()]
+    exemptions = MaxfailExemptions(pool=False)
+    if exemptions.active():
+        plugins.append(exemptions)
+    return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
 
 class SessionStreamPlugin(StreamPlugin):

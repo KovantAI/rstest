@@ -49,7 +49,7 @@ class FixtureStat(TypedDict):
 class _ReportRequired(TypedDict):
     nodeid: str
     when: str  # "setup" | "call" | "teardown"
-    outcome: str  # "passed" | "failed" | "skipped"
+    outcome: str  # "passed" | "failed" | "skipped" | "rerun" (a retried attempt, -n 0)
     duration: float
     longrepr: str | None  # present but nullable
     wasxfail: bool  # the worker always sends this
@@ -57,9 +57,9 @@ class _ReportRequired(TypedDict):
 
 class ReportPayload(_ReportRequired, total=False):
     lineno: int  # 0-based source line
-    cpu: float  # doctor mode: call-phase CPU time
-    thread_delta: int  # leak-check: net threads after teardown vs before setup
-    fd_delta: int  # leak-check: net open fds after teardown vs before setup
+    cpu: float  # doctor/stream mode: phase CPU time (self + reaped children)
+    thread_delta: int  # leak-check: threads the test created, alive after teardown
+    fd_delta: int  # leak-check: fds the test opened, still open after teardown
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
     subtest: bool  # a subtest's report (shares the parent's nodeid/phase)

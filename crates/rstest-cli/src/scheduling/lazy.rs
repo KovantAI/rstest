@@ -155,8 +155,9 @@ pub fn run_lazy_pool(
         known_flaky,
         worker_env,
         fork_prewarm,
-        // Lazy never reorders by flake history, so quarantine is post-run only.
-        quarantine: _,
+        // Lazy never reorders by flake history; quarantine only keeps its
+        // failures out of the -x / --maxfail count.
+        quarantine,
     } = cfg;
     // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
     let mut maxfail = maxfail;
@@ -267,7 +268,7 @@ pub fn run_lazy_pool(
                         continue;
                     }
                 }
-                if r.outcome == "failed" {
+                if orchestrator::counts_toward_maxfail(quarantine, &r) {
                     fail_count += 1;
                 }
                 prog.on_report(sink, Some(idx), &r);
@@ -404,6 +405,7 @@ pub fn run_lazy_pool(
                             &mut run,
                             &mut prog,
                             &mut fail_count,
+                            quarantine,
                             idx,
                             orchestrator::FinishedAttempt {
                                 attempts_used: attempts,
@@ -429,12 +431,30 @@ pub fn run_lazy_pool(
                     }
                 }
                 if !stopping {
+                    // The worker's own session stopped (not a global stop):
+                    // it left its run loop and takes no more ids or files.
+                    // What it still had comes back at its Done.
+                    s.ended = true;
                     requeued.extend(unrun);
                 }
             }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
-                states[idx].dead = true;
+                let s = &mut states[idx];
+                s.dead = true;
+                // A session that ended on its own never ran what reached it
+                // after it left its loop. Hand it to the live workers, unless
+                // the run is stopping (as the crash path does).
+                let left = std::mem::take(&mut s.outstanding);
+                let own: Vec<String> = s.own_queue.drain(..).collect();
+                let files = std::mem::take(&mut s.uncollected_files);
+                if !stopping {
+                    requeued.extend(left);
+                    requeued.extend(own);
+                    for f in files.into_iter().rev() {
+                        file_queue.push_front(f);
+                    }
+                }
                 done_workers += 1;
                 if done_workers == states.len() {
                     break;
@@ -697,8 +717,13 @@ pub fn run_lazy_pool(
         let _ = w.wait();
     }
     let retried = reruns > 0 || !run.flaky.is_empty();
-    let exitstatus =
-        orchestrator::finalize_exit(&statuses, run.all_passed(), retried, collect_aborted);
+    let exitstatus = orchestrator::finalize_exit(
+        &statuses,
+        run.all_passed(),
+        retried,
+        collect_aborted,
+        run.stopped_after.is_some(),
+    );
     // Persist the schedule for `rstest replay`. Best-effort, like run_pool. No
     // collection hash: lazy never agrees on one ordered nodeid list, so replay's
     // drift check falls back to the collected count (when it is complete).

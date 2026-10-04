@@ -309,7 +309,9 @@ to a fix:
 
 - [`--shuffle`](../reference/cli.md#-shuffleseed) runs the suite in a seeded
   random order to flush order dependence out on demand; the seed is printed,
-  and `--shuffle=SEED` replays a failing order.
+  and `--shuffle=SEED` replays the shuffled order. Worker assignment still
+  depends on timing, so for an exact repro of a failed run use
+  [`rstest replay`](../reference/cli-commands.md#replay).
 - [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) finds
   the test that pollutes a victim and prints a minimal repro command.
 - [`rstest audit`](../reference/cli-commands.md#audit) runs the suite in

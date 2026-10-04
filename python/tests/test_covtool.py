@@ -2,7 +2,7 @@
 
 import json
 import os
-import types
+import runpy
 
 from rstest_worker import covtool
 
@@ -301,186 +301,207 @@ def test_build_index_skips_lines_with_only_empty_contexts(tmp_path, monkeypatch)
     assert not index.exists()
 
 
-class _FakeCoverageModule(types.ModuleType):
-    """A fake `coverage` module injected into sys.modules for main()."""
+def _measure(project, *, suffix=True, config_file=True, call_add=True):
+    """Record real coverage data for `project` the way a pool worker does: a
+    suffixed data file (or, with `suffix=False`, the plain file an in-process
+    pytest-cov session leaves). calc.py ends up at 4/6 statements, full.py at
+    3/3: 7/9 = 77.78% in total."""
+    import coverage
 
-    class CoverageException(Exception):
-        pass
-
-    def __init__(self, report_pct=100.0, raise_on_report=False, raise_on_combine=False):
-        super().__init__("coverage")
-        self._report_pct = report_pct
-        self._raise_on_report = raise_on_report
-        self._raise_on_combine = raise_on_combine
-        self.calls = []
-        module = self
-
-        class Coverage:
-            def combine(self, keep=False):
-                module.calls.append(("combine", keep))
-                if module._raise_on_combine:
-                    # Mirrors coverage.exceptions.NoDataError (a CoverageException
-                    # subclass) when every test was skipped/deselected.
-                    raise module.CoverageException("No data to combine")
-
-            def save(self):
-                module.calls.append(("save",))
-
-            def load(self):
-                module.calls.append(("load",))
-
-            def get_data(self):
-                return _FakeData([], [], {})
-
-            def report(self, show_missing=False):
-                module.calls.append(("report", show_missing))
-                if module._raise_on_report:
-                    raise module.CoverageException("boom")
-                return module._report_pct
-
-            def xml_report(self, outfile=None):
-                module.calls.append(("xml", outfile))
-                return module._report_pct
-
-            def html_report(self, directory=None, show_contexts=False):
-                module.calls.append(("html", directory, show_contexts))
-                return module._report_pct
-
-            def json_report(self, outfile=None, show_contexts=False):
-                module.calls.append(("json", outfile, show_contexts))
-                return module._report_pct
-
-            def lcov_report(self, outfile=None):
-                module.calls.append(("lcov", outfile))
-                return module._report_pct
-
-            def annotate(self, directory=None):
-                module.calls.append(("annotate", directory))
-
-        self.Coverage = Coverage
+    cov = coverage.Coverage(
+        source=[str(project / "pkg")], data_suffix=suffix or None, config_file=config_file
+    )
+    cov.start()
+    try:
+        ns = runpy.run_path(str(project / "pkg" / "calc.py"))
+        runpy.run_path(str(project / "pkg" / "full.py"))
+        if call_add:
+            ns["add"](1, 2)
+    finally:
+        cov.stop()
+    cov.save()
 
 
-def _install_fake_coverage(monkeypatch, **kwargs):
-    fake = _FakeCoverageModule(**kwargs)
-    monkeypatch.setitem(__import__("sys").modules, "coverage", fake)
-    return fake
-
-
-def test_main_combines_saves_loads_and_reports(monkeypatch):
-    fake = _install_fake_coverage(monkeypatch)
-    status = covtool.main(["--cov-report=term"])
-    assert status == 0
-    assert ("combine", False) in fake.calls
-    assert ("save",) in fake.calls
-    assert ("load",) in fake.calls
-    assert ("report", False) in fake.calls
-
-
-def test_main_term_missing_sets_show_missing(monkeypatch):
-    fake = _install_fake_coverage(monkeypatch)
-    covtool.main(["--cov-report=term-missing"])
-    assert ("report", True) in fake.calls
-
-
-def test_main_fail_under_returns_1(monkeypatch, capsys):
-    _install_fake_coverage(monkeypatch, report_pct=50.0)
-    status = covtool.main(["--cov-fail-under=80"])
-    assert status == 1
-    assert "not reached" in capsys.readouterr().out
-
-
-def test_main_fail_under_met_returns_0(monkeypatch):
-    _install_fake_coverage(monkeypatch, report_pct=95.0)
-    assert covtool.main(["--cov-fail-under=80"]) == 0
-
-
-def test_main_coverage_exception_returns_1(monkeypatch):
-    _install_fake_coverage(monkeypatch, raise_on_report=True)
-    assert covtool.main(["--cov-report=term"]) == 1
-
-
-def test_main_no_data_to_combine_reports_zero(monkeypatch, capsys):
-    # Every test skipped/deselected -> combine() raises NoDataError. The run
-    # must report 0% and exit 0, not crash with a traceback.
-    fake = _install_fake_coverage(monkeypatch, raise_on_combine=True)
-    status = covtool.main(["--cov-report=term"])
-    assert status == 0
-    assert "0.00%" in capsys.readouterr().out
-    # bailed before ever loading/reporting
-    assert not any(c[0] in ("load", "report") for c in fake.calls)
-
-
-def test_main_no_data_to_combine_trips_fail_under(monkeypatch, capsys):
-    # 0% coverage with a fail-under threshold is a legit failure, not a crash.
-    _install_fake_coverage(monkeypatch, raise_on_combine=True)
-    status = covtool.main(["--cov-report=term", "--cov-fail-under=80"])
-    assert status == 1
-    assert "not reached" in capsys.readouterr().out
-
-
-def test_main_unknown_report_kind_is_skipped(monkeypatch, caplog):
-    fake = _install_fake_coverage(monkeypatch)
-    status = covtool.main(["--cov-report=bogus"])
-    assert status == 0
-    # no report method invoked for an unknown kind
-    assert not any(c[0] in ("report", "xml", "html", "json") for c in fake.calls)
-
-
-def test_main_html_uses_context_mode(monkeypatch, capsys):
-    fake = _install_fake_coverage(monkeypatch)
-    covtool.main(["--cov-report=html:cov", "--cov-context=test"])
-    assert ("html", "cov", True) in fake.calls
-    assert "Coverage HTML written" in capsys.readouterr().out
-
-
-def test_main_xml_report_prints_path(monkeypatch, capsys):
-    fake = _install_fake_coverage(monkeypatch)
-    covtool.main(["--cov-report=xml:cov.xml"])
-    assert ("xml", "cov.xml") in fake.calls
-    assert "Coverage XML written" in capsys.readouterr().out
-
-
-def test_main_json_report_passes_context_flag(monkeypatch):
-    fake = _install_fake_coverage(monkeypatch)
-    covtool.main(["--cov-report=json", "--cov-context=test"])
-    assert ("json", None, True) in fake.calls
-
-
-def test_main_lcov_report(monkeypatch):
-    fake = _install_fake_coverage(monkeypatch)
-    covtool.main(["--cov-report=lcov:cov.info"])
-    assert ("lcov", "cov.info") in fake.calls
-
-
-def test_main_annotate_report(monkeypatch):
-    fake = _install_fake_coverage(monkeypatch)
-    status = covtool.main(["--cov-report=annotate"])
-    assert status == 0  # annotate yields no pct, never trips fail-under
-    assert ("annotate", None) in fake.calls
-
-
-def test_main_context_mode_builds_index(monkeypatch, tmp_path):
+def _project(tmp_path, monkeypatch, rc=None):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    # Three defs + three returns; only add() runs -> 4 of 6 statements.
+    (tmp_path / "pkg" / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n\n\n"
+        "def sub(a, b):\n    return a - b\n\n\n"
+        "def mul(a, b):\n    return a * b\n"
+    )
+    (tmp_path / "pkg" / "full.py").write_text("X = 1\nY = 2\nZ = 3\n")
+    if rc is not None:
+        (tmp_path / ".coveragerc").write_text(rc)
     monkeypatch.chdir(tmp_path)
-    _install_fake_coverage(monkeypatch)
-    called = {}
-    monkeypatch.setattr(covtool, "build_index", lambda cov: called.setdefault("hit", True))
-    covtool.main(["--cov-report=term", "--cov-context=test"])
-    assert called.get("hit") is True
+    return tmp_path
 
 
-def test_main_index_build_failure_does_not_fail_run(monkeypatch):
-    _install_fake_coverage(monkeypatch)
+def _fail_lines(out):
+    return out.count("FAIL Required test coverage")
+
+
+def test_main_combines_worker_files_and_reports(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    assert covtool.main(["--cov-report=term"]) == 0
+    out = capsys.readouterr().out
+    assert "TOTAL" in out and "78%" in out
+    # combined into the plain data file; the worker files are gone
+    assert (p / ".coverage").exists()
+    assert not list(p.glob(".coverage.*"))
+
+
+def test_main_fail_under_gates_once_with_two_reports(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    status = covtool.main(["--cov-report=term", "--cov-report=xml", "--cov-fail-under=95"])
+    out = capsys.readouterr().out
+    assert status == 1
+    assert _fail_lines(out) == 1
+    assert "Coverage XML written to file coverage.xml" in out
+
+
+def test_main_fail_under_gated_without_a_percentage_report(tmp_path, monkeypatch, capsys):
+    # P5: no report (`--cov-report=`) or only annotate must still gate.
+    for i, reports in enumerate((["--cov-report="], ["--cov-report=annotate"])):
+        p = tmp_path / f"case{i}"
+        p.mkdir()
+        _project(p, monkeypatch)
+        _measure(p)
+        status = covtool.main([*reports, "--cov-fail-under=95"])
+        out = capsys.readouterr().out
+        assert status == 1, reports
+        assert _fail_lines(out) == 1, reports
+        assert "TOTAL" not in out
+
+
+def test_main_met_threshold_reports_reached(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    assert covtool.main(["--cov-report=", "--cov-fail-under=50"]) == 0
+    assert "Required test coverage of 50% reached" in capsys.readouterr().out
+
+
+def test_main_fail_under_from_coveragerc(tmp_path, monkeypatch, capsys):
+    # A11: `[report] fail_under` applies when no flag is passed.
+    p = _project(tmp_path, monkeypatch, rc="[report]\nfail_under = 95\nshow_missing = True\n")
+    _measure(p)
+    status = covtool.main(["--cov-report=term"])
+    out = capsys.readouterr().out
+    assert status == 1
+    assert _fail_lines(out) == 1
+    # show_missing from the config is honoured for plain `term`
+    assert "Missing" in out
+
+
+def test_main_fail_under_uses_report_precision(tmp_path, monkeypatch, capsys):
+    # A11: pytest-cov gates on the total rounded to the report precision
+    # (coverage's should_fail_under): 77.78% passes 78 at precision 0 ...
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    assert covtool.main(["--cov-report=", "--cov-fail-under=78"]) == 0
+    capsys.readouterr()
+    # ... but not at precision 2, where 77.78 < 78.
+    _measure(p)
+    assert covtool.main(["--cov-report=", "--cov-fail-under=78", "--cov-precision=2"]) == 1
+    assert "total of 77.78 is less than fail-under=78.00" in capsys.readouterr().out
+
+
+def test_main_cov_config_data_file(tmp_path, monkeypatch, capsys):
+    # B3: --cov-config decides where the data lives.
+    p = _project(tmp_path, monkeypatch)
+    (p / "cov.cfg").write_text("[run]\ndata_file = covdata/.coverage\n")
+    (p / "covdata").mkdir()
+    _measure(p, config_file=str(p / "cov.cfg"))
+    status = covtool.main(["--cov-config=cov.cfg", "--cov-report=term", "--cov-fail-under=95"])
+    out = capsys.readouterr().out
+    assert status == 1
+    assert "No data to report" not in out
+    assert "TOTAL" in out
+    assert not list((p / "covdata").glob(".coverage.*"))
+
+
+def test_main_skip_covered_modifier(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    covtool.main(["--cov-report=term-missing:skip-covered"])
+    out = capsys.readouterr().out
+    assert "pkg/calc.py" in out
+    assert "pkg/full.py" not in out
+
+
+def test_main_no_data_reports_zero_and_gates(tmp_path, monkeypatch, capsys):
+    # Every test skipped/deselected: no data files. Report 0% (no traceback)
+    # and gate like pytest-cov.
+    _project(tmp_path, monkeypatch)
+    assert covtool.main(["--cov-report=term"]) == 0
+    capsys.readouterr()
+    assert covtool.main(["--cov-report=term", "--cov-fail-under=80"]) == 1
+    out = capsys.readouterr().out
+    assert "Failed to generate report" in out
+    assert "Total coverage: 0.00%" in out
+
+
+def test_main_already_reported_prints_nothing(tmp_path, monkeypatch, capsys):
+    # S5: in-process pytest-cov already reported and gated the session.
+    p = _project(tmp_path, monkeypatch)
+    _measure(p, suffix=False)
+    status = covtool.main(["--cov-report=term", "--cov-fail-under=95", "--rstest-cov-reported"])
+    assert status == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_main_already_reported_still_builds_index(tmp_path, monkeypatch):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p, suffix=False)
+    seen = {}
+    monkeypatch.setattr(covtool, "build_index", lambda cov: seen.setdefault("index", cov))
+    covtool.main(["--cov-context=test", "--cov-report=", "--rstest-cov-reported"])
+    assert "index" in seen
+
+
+def test_main_html_and_json_written(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    covtool.main(["--cov-report=html:cov", "--cov-report=json", "--cov-context=test"])
+    out = capsys.readouterr().out
+    assert "Coverage HTML written to dir cov" in out
+    assert "Coverage JSON written to file coverage.json" in out
+    assert (p / "cov" / "index.html").exists()
+    assert (p / "coverage.json").exists()
+
+
+def test_main_lcov_report(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    covtool.main(["--cov-report=lcov:cov.info"])
+    assert (p / "cov.info").exists()
+    assert "Coverage LCOV written to file cov.info" in capsys.readouterr().out
+
+
+def test_main_unknown_report_kind_is_skipped(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    assert covtool.main(["--cov-report=bogus"]) == 0
+    assert "TOTAL" not in capsys.readouterr().out
+
+
+def test_main_index_build_failure_does_not_fail_run(tmp_path, monkeypatch):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
 
     def boom(cov):
         raise RuntimeError("index broke")
 
     monkeypatch.setattr(covtool, "build_index", boom)
-    # build_index blows up but the run still returns its report status
     assert covtool.main(["--cov-report=term", "--cov-context=test"]) == 0
 
 
-def test_main_runs_diff_coverage_when_flags_present(monkeypatch):
-    _install_fake_coverage(monkeypatch)
+def test_main_runs_diff_coverage_when_flags_present(tmp_path, monkeypatch):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
     seen = {}
 
     def fake_diff(cov, diff_lines, diff_out):
@@ -494,17 +515,25 @@ def test_main_runs_diff_coverage_when_flags_present(monkeypatch):
     assert seen["args"] == ("lines.json", "out.json")
 
 
-def test_main_diff_coverage_failure_does_not_fail_run(monkeypatch):
-    _install_fake_coverage(monkeypatch)
+def test_main_diff_coverage_failure_does_not_fail_run(tmp_path, monkeypatch):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
 
     def boom(cov, diff_lines, diff_out):
         raise RuntimeError("diff broke")
 
     monkeypatch.setattr(covtool, "diff_coverage", boom)
-    # diff_coverage blows up but the run still returns its report status
     assert (
         covtool.main(
             ["--cov-report=term", "--rstest-diff-lines=lines.json", "--rstest-diff-out=out.json"]
         )
         == 0
     )
+
+
+def test_main_no_cov_does_nothing(tmp_path, monkeypatch, capsys):
+    # --no-cov disables pytest-cov: no report, no gate, no "No data" warning.
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    assert covtool.main(["--no-cov", "--cov-report=term", "--cov-fail-under=95"]) == 0
+    assert capsys.readouterr().out == ""

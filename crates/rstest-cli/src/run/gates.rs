@@ -415,6 +415,7 @@ pub(super) fn run_post_gates(
     let RunConfig {
         n,
         passthrough,
+        single_worker_reruns,
         mode,
         doctor,
         ref doctor_gate,
@@ -504,6 +505,13 @@ pub(super) fn run_post_gates(
             // Never reads stdin; inheriting it hangs on Windows under
             // `--watch`, whose `q` listener holds a blocking read on it.
             .stdin(std::process::Stdio::null());
+        // The in-process session (-n 0/1, pytest's own terminal) ran pytest-cov
+        // in its normal mode, which already combined, reported and gated
+        // --cov-fail-under; covtool then only builds the index and scores the
+        // diff instead of printing the table and FAIL line a second time.
+        if n <= 1 && !single_worker_reruns && mode == progress::Mode::Pytest {
+            cmd.arg("--rstest-cov-reported");
+        }
         if let Some((lp, op)) = &diff_paths {
             cmd.arg("--rstest-diff-lines")
                 .arg(lp)
@@ -570,8 +578,8 @@ pub(super) fn run_post_gates(
             }
             if gate.breaches.is_empty() {
                 sink.warn(&format!(
-                    "rstest: --doctor-fail-on: all {} condition(s) passed",
-                    doctor_gate.len()
+                    "rstest: --doctor-fail-on: {}",
+                    gate.pass_summary(doctor_gate.len())
                 ));
             } else {
                 // stderr, not stdout: --output json/tap keep stdout a pure
@@ -623,8 +631,10 @@ pub(super) fn run_post_gates(
             }
         }
     }
-    // Duration regression gate: must compare BEFORE durations::save
-    // overwrites the baseline with this run's times.
+    // Duration regression gate: must compare BEFORE durations::save merges
+    // this run's times. Flagged tests are kept out of that save (and out of a
+    // --cache-push segment), so the baseline they regressed from survives and
+    // the gate fires again on the next identical run.
     let mut duration_regressions = 0usize;
     if let Some(ratio) = cli.durations_regress {
         validate_regress_ratio(ratio)?;
@@ -649,6 +659,7 @@ pub(super) fn run_post_gates(
                 ));
                 for (nodeid, old, new) in &rows {
                     sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
+                    outcome.run.mark_duration_regressed(nodeid);
                 }
                 duration_regressions = rows.len();
             }

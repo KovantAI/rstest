@@ -186,8 +186,8 @@ pub struct Cli {
     #[arg(long = "doctor-fail-on", value_name = "COND")]
     pub(crate) doctor_fail_on: Vec<String>,
 
-    /// Fail the run if any test leaks a thread or file descriptor (net still
-    /// open after its teardown). Turns the leak signal into a CI gate; enables
+    /// Fail the run if any test leaks a thread or file descriptor (one it
+    /// created that is still open after its teardown). Turns the leak signal into a CI gate; enables
     /// the leak-check instrumentation on its own (no --doctor needed).
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,

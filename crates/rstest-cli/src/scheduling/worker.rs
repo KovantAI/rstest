@@ -86,6 +86,13 @@ pub struct WorkerEnv {
     /// `--junitxml` was given (the user's path, verbatim): the worker runs
     /// pytest's LogXML and streams its testcase elements back. None = off.
     pub junitxml: Option<String>,
+    /// A global `--reruns` budget is in play: a pool worker's own `-x` /
+    /// `--maxfail` count skips every failed attempt (the orchestrator may
+    /// retry it and counts the final outcome).
+    pub reruns: bool,
+    /// `--quarantine` patterns (anchored regexes, one per line): failures of
+    /// matching tests never count toward a session's `-x` / `--maxfail`.
+    pub quarantine: Option<String>,
 }
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
@@ -1019,6 +1026,8 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_DEBUGPY_PORT",
     "RSTEST_STREAM_OUTPUT",
     "RSTEST_JUNITXML",
+    "RSTEST_RERUNS",
+    "RSTEST_QUARANTINE",
 ];
 
 /// Credentials rstest itself consumes and test code never needs. Stripped from
@@ -1121,6 +1130,7 @@ fn build_worker_command(
     if let Some(path) = &env.junitxml {
         command.env("RSTEST_JUNITXML", path);
     }
+    apply_maxfail_env(&mut command, env);
     // Exactly one worker ships the full id list (D5); the rest verify their
     // collection by count+hash. Worker 0 in a pool; the lone worker only
     // when the caller asks (collect-only discovery / migrate-check).
@@ -1390,6 +1400,24 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
     if let Some(path) = &env.junitxml {
         command.env("RSTEST_JUNITXML", path);
     }
+    apply_maxfail_env(command, env);
+}
+
+/// What a session's own `-x` / `--maxfail` count must skip (see
+/// `rstest_worker._internal.retry.MaxfailExemptions`): every failed attempt
+/// when a global `--reruns` budget may retry it, and quarantined tests.
+/// Unset ones are removed, so an outer rstest's values never leak in (the
+/// fork-pool zygote does not clear [`INTERNAL_ENV`]).
+fn apply_maxfail_env(command: &mut Command, env: &WorkerEnv) {
+    if env.reruns {
+        command.env("RSTEST_RERUNS", "1");
+    } else {
+        command.env_remove("RSTEST_RERUNS");
+    }
+    match &env.quarantine {
+        Some(patterns) => command.env("RSTEST_QUARANTINE", patterns),
+        None => command.env_remove("RSTEST_QUARANTINE"),
+    };
 }
 
 /// RAII owner for one raw pipe endpoint (a file descriptor on unix, a HANDLE
@@ -1854,6 +1882,8 @@ mod tests {
             debug_port: None,
             stream_output: false,
             junitxml: None,
+            reruns: false,
+            quarantine: None,
         }
     }
 
@@ -1931,6 +1961,22 @@ mod tests {
         assert_eq!(envs["RSTEST_DOCTOR"], "1");
         assert_eq!(envs["RSTEST_TIMEOUT"], "1.5");
         assert_eq!(envs["RSTEST_LEAKCHECK"], "1");
+    }
+
+    #[test]
+    fn build_command_maxfail_exemption_envs() {
+        // Off by default: a plain run sets neither.
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &base_env(), 3, 4);
+        let envs = envs_of(&cmd);
+        assert!(!envs.contains_key("RSTEST_RERUNS"));
+        assert!(!envs.contains_key("RSTEST_QUARANTINE"));
+        let mut env = base_env();
+        env.reruns = true;
+        env.quarantine = Some("^a\\.py::t$\n^b\\.py::.*$".into());
+        let cmd = build_worker_command(Path::new("python3"), Some((0, 2)), Stdio::Null, &env, 3, 4);
+        let envs = envs_of(&cmd);
+        assert_eq!(envs["RSTEST_RERUNS"], "1");
+        assert_eq!(envs["RSTEST_QUARANTINE"], "^a\\.py::t$\n^b\\.py::.*$");
     }
 
     #[test]
@@ -2174,6 +2220,8 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                reruns: false,
+                quarantine: None,
             };
             // A freshly spawned worker blocks on its first command: alive, and never
             // sent anything — the decode-error/respawn precondition (child still
@@ -2217,6 +2265,8 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                reruns: false,
+                quarantine: None,
             };
             let n = 3;
             let workers = Worker::spawn_pool(python, n, &env, true).expect("fork-prewarm pool");
@@ -2265,6 +2315,8 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                reruns: false,
+                quarantine: None,
             };
             let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
             let mut worker = workers.pop().expect("one forked worker");

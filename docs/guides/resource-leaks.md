@@ -21,7 +21,7 @@ $ rstest -n auto --doctor
 ```
 
 ```text
-RESOURCE LEAKS (net threads/fds still open after teardown):
+RESOURCE LEAKS (threads/fds a test created, still open after its teardown):
   +1 thread  tests/test_pool.py::test_executor
   +5 fds     tests/test_io.py::test_reader
   a test opened a thread/fd it never released; leaked state can flake later
@@ -46,59 +46,66 @@ doctor report. Ideal as a CI step that keeps new leaks out.
 
 Per test, in the worker that ran it:
 
-- **Threads**: `threading.active_count()`. Portable, but counts only Python
-  threads; a native C-extension thread that bypasses the `threading` module is
-  invisible.
-- **File descriptors**: the open-fd count, from `/proc/self/fd` on Linux and
-  `/dev/fd` on macOS/BSD. On platforms with neither, fd tracking is silently
-  off (threads still work).
+- **Threads**: the live `threading.Thread` objects (`threading.enumerate()`).
+  Portable, but sees only Python threads; a native C-extension thread that
+  bypasses the `threading` module is invisible.
+- **File descriptors**: the open fds, from `/proc/self/fd` on Linux and
+  `/dev/fd` on macOS/BSD, each identified by its number plus the device and
+  inode it points at (so a reused fd number that now names a different file
+  counts as a new fd). On platforms with neither, fd tracking is silently off
+  (threads still work).
 
-## How the delta is computed
+## How a leak is attributed
 
-The count is snapshotted **before setup** and again **after teardown**, and the
-report carries the *net* difference:
+rstest tracks **which** threads and fds exist, not how many. The set is
+snapshotted **before setup** and again **after teardown**; a test is charged
+with what it created in that window (setup, call and teardown) and is still
+alive at the end:
 
 - A test that opens something and closes it (in the test or a fixture teardown)
-  nets **zero**, not a leak.
-- A test that opens something and never releases it nets **positive**: flagged.
+  is clean.
+- A test that opens something and never releases it is flagged.
+- Another test's cleanup can't hide a leak. If a module fixture's teardown runs
+  in the last test of the module and joins the fixture's thread, the last test
+  is still charged with the thread *it* started. A thread one test starts and a
+  later test happens to end is still charged to the test that started it.
 
-Because the whole protocol (setup → call → teardown) is bracketed, correct
+Because the whole protocol (setup, call, teardown) is bracketed, correct
 cleanup in a teardown fixture is credited; only what survives it counts.
 
-The worker also **skips its first test** as a warm-up: importing a test module
-can lazily spin up a persistent thread or open a cache fd *once*, which is not a
-per-test leak. Measurement starts from the second test each worker runs.
+**Fixtures wider than a test.** Threads and fds created while a class, module,
+package or session fixture is being set up belong to that fixture, not to the
+test that happened to trigger the setup, and are never charged to a test. A
+session-scoped server that is shut down at session end is therefore not a leak,
+and neither is the first test that used it. Such a fixture is set up once per
+scope, so it can't pile up resources per test; the flip side is that a wide
+fixture that never releases what it opened is not reported either. Function
+fixtures are part of the test and are charged like the test body.
+
+The worker also **skips its first test** as a warm-up: a library can lazily
+spin up a persistent thread or open a cache fd *once*, on first use, which is
+not a per-test leak. Measurement starts from the second test each worker runs.
 
 ## False positives to know about
 
-- **Session / module-scoped fixtures.** A fixture that opens a connection pool
-  is set up on the *first test that uses it* and torn down at the end of its
-  scope, not per test. That first test therefore shows the fixture's
-  threads/fds as a "leak", even though the fixture is behaving correctly. Treat a
-  fixture-shaped leak as informational; move the resource into a properly
-  teardown-scoped fixture if you want it to net zero.
-- **Interpreter internals.** Some libraries start a shared background thread on
-  first use (loggers, async loops). The warm-up skip absorbs the common case,
-  but a lazily-imported one can still attribute to whichever test first touched
-  it.
+- **Lazily started internals.** Some libraries start a shared background
+  thread or open a cached fd on first use (loggers, async loops, a resolver
+  socket). The warm-up skip absorbs the common case, but one first touched
+  inside a later test's body is charged to that test.
+- **Threads a wide fixture's resource starts later.** A session fixture that
+  hands out a thread pool or a threaded server whose worker threads start only
+  when a test uses it: the threads start in the test's window, so a worker
+  thread still alive after the test is charged to the test.
 
 Because of these, the report is **advisory under `--doctor`**. Reach for
-`--fail-on-leak` once your suite is clean, so the gate flags *new* leaks rather
-than a pre-existing fixture pattern.
+`--fail-on-leak` once your suite is clean, so the gate flags *new* leaks.
 
-In parallel the attribution also **moves between runs**. A session- or
-module-scoped fixture's resources land on whichever test first uses the
-fixture *on each worker*, and which test that is depends on how the
-scheduler distributed the tests this time (duration cache, worker count). So
-the same suite can pass `--fail-on-leak` on one run and fail it on the next,
-with a different test named. For a gated leak job, pin the order:
-
-- `rstest -n 0 --fail-on-leak`: one worker, fixed test order, so the same
-  test is charged every run.
-- `rstest --dist loadfile --fail-on-leak`: keeps each file's tests on one
-  worker in file order, which pins module-scoped fixtures to the file's first
-  user. A session fixture used across files can still land on a different
-  test, because which file a worker runs first can change.
+Attribution follows what each test did, so it does not depend on which worker
+ran it or in what order: the same leaking test is named whatever the scheduler
+did. The one exception is the unchecked warm-up test, which is the first test
+each worker runs and so can change between parallel runs. To gate every test
+in a fixed order, use `rstest -n 0 --fail-on-leak` or
+`rstest --dist loadfile --fail-on-leak`.
 
 ## Fixing a leak
 

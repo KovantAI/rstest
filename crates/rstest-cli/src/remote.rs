@@ -262,7 +262,10 @@ pub fn segment_from_run(
     run: &Run,
     cov_index: CoverageIndex,
 ) -> Segment {
-    let durations = run.durations().map(|(k, v)| (k.clone(), v)).collect();
+    let durations = run
+        .learned_durations()
+        .map(|(k, v)| (k.clone(), v))
+        .collect();
     let mut flake_events: Vec<FlakeEvent> = run
         .flaky
         .iter()

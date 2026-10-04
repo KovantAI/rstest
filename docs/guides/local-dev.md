@@ -104,10 +104,10 @@ $ rstest --doctor
 
 ### Resource leaks: the correctness one
 
-A test that starts a thread it never joins, or opens an fd it never closes, leaves that resource live for the rest of the session. It rarely fails the test that caused it. Instead it becomes **shared state that flakes a later test**. On a small suite this is easy to miss precisely because everything's fast and green. Doctor prints a `RESOURCE LEAKS` section naming the culprit (net threads/fds still open after teardown):
+A test that starts a thread it never joins, or opens an fd it never closes, leaves that resource live for the rest of the session. It rarely fails the test that caused it. Instead it becomes **shared state that flakes a later test**. On a small suite this is easy to miss precisely because everything's fast and green. Doctor prints a `RESOURCE LEAKS` section naming the culprit (threads/fds a test created that are still open after its teardown):
 
 ```text
-RESOURCE LEAKS (net threads/fds still open after teardown):
+RESOURCE LEAKS (threads/fds a test created, still open after its teardown):
   +3 threads  tests/test_pool.py::test_executor
   +5 fds      tests/test_io.py::test_reader
 ```

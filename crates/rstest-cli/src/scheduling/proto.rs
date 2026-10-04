@@ -80,15 +80,17 @@ pub struct Report {
     pub wasxfail: bool,
     #[serde(default)]
     pub skip_reason: Option<String>,
-    /// Doctor mode: call-phase CPU time (process_time). wall >> cpu means
-    /// the test was waiting, not computing.
+    /// Doctor mode: this phase's CPU time (the worker's process_time plus
+    /// reaped child processes). wall >> cpu means the test was waiting, not
+    /// computing.
     #[serde(default)]
     pub cpu: Option<f64>,
-    /// Leak check: net Python threads after teardown vs before setup (on the
-    /// teardown report; positive = a thread the test never joined).
+    /// Leak check: Python threads the test created that are still alive after
+    /// its teardown (on the teardown report).
     #[serde(default)]
     pub thread_delta: Option<i64>,
-    /// Leak check: net open file descriptors after teardown vs before setup.
+    /// Leak check: file descriptors the test opened that are still open after
+    /// its teardown.
     #[serde(default)]
     pub fd_delta: Option<i64>,
     /// Captured stdout/stderr/log sections (any outcome that produced output);

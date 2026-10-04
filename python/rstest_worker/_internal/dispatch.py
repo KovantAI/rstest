@@ -9,6 +9,7 @@ import os
 import pytest
 
 from rstest_worker._internal import messages as m
+from rstest_worker._internal.retry import flaky_reruns
 from rstest_worker._internal.stream import StreamPlugin
 
 # (option dest, CLI spelling) of the options that reorder or cut short a session
@@ -235,9 +236,10 @@ class ItemDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
             flaky = {}
             groups = {}
             for i, item in enumerate(session.items):
-                mark = item.get_closest_marker("flaky")
-                if mark is not None:
-                    flaky[str(i)] = int(mark.kwargs.get("reruns", 1))
+                if item.get_closest_marker("flaky") is not None:
+                    # A mark whose budget is 0 (condition=False) is still sent:
+                    # it overrides a global --reruns for that test.
+                    flaky[str(i)] = flaky_reruns(item)
                 gmark = item.get_closest_marker("xdist_group")
                 if gmark is not None:
                     name = gmark.args[0] if gmark.args else gmark.kwargs.get("name", "default")
@@ -387,9 +389,8 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
             payload["serial"] = serial
         flaky = {}
         for it in items:
-            mark = it.get_closest_marker("flaky")
-            if mark is not None:
-                flaky[it.nodeid] = int(mark.kwargs.get("reruns", 1))
+            if it.get_closest_marker("flaky") is not None:
+                flaky[it.nodeid] = flaky_reruns(it)
         if flaky:
             payload["flaky"] = flaky
         if self._deselected > deselected_before:

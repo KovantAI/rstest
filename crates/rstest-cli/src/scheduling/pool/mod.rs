@@ -540,7 +540,7 @@ pub fn run_pool(
                         continue;
                     }
                 }
-                if r.outcome == "failed" {
+                if orchestrator::counts_toward_maxfail(quarantine, &r) {
                     fail_count += 1;
                 }
                 prog.on_report(sink, Some(idx), &r);
@@ -796,7 +796,9 @@ pub fn run_pool(
                 prog.item_started(sink, idx, nodeid);
             }
             Ok(Event::Stopped { unrun }) => {
-                // Session-local -x tripped: those items never ran there.
+                // Either the reply to stop_run (the run is stopping), or the
+                // worker's own session stopped (`session.shouldstop`, e.g.
+                // --sw): those items never ran there.
                 let s = &mut states[idx];
                 s.finishing = true;
                 for i in &unrun {
@@ -805,7 +807,10 @@ pub fn run_pool(
                     }
                 }
                 if !stopping {
-                    // Not a global stop: redistribute to other workers.
+                    // Not a global stop: the worker left its run loop, so it
+                    // takes no more items (anything already sent comes back
+                    // at its Done). Redistribute to the other workers.
+                    s.ended = true;
                     if let Some(d) = dispatch.as_mut() {
                         d.requeued.extend(unrun);
                     }
@@ -855,6 +860,7 @@ pub fn run_pool(
                             &mut run,
                             &mut prog,
                             &mut fail_count,
+                            quarantine,
                             idx,
                             orchestrator::FinishedAttempt {
                                 attempts_used: attempts,
@@ -882,7 +888,17 @@ pub fn run_pool(
             }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
-                states[idx].dead = true;
+                let s = &mut states[idx];
+                s.dead = true;
+                // A session that ended on its own (see Stopped) never ran what
+                // reached it after it left its loop: a refill or a rerun.
+                // Requeue it for the live workers, unless the run is stopping.
+                let left: Vec<u64> = s.outstanding.drain(..).collect();
+                if !stopping {
+                    if let Some(d) = dispatch.as_mut() {
+                        d.requeued.extend(left);
+                    }
+                }
                 done_workers += 1;
                 if done_workers == states.len() {
                     break;
@@ -1318,6 +1334,29 @@ pub fn run_pool(
             }
         }
 
+        // Requeued items (a rerun, or a stopped worker's leftovers) must also
+        // reach idle workers: a worker with nothing outstanding sends no
+        // ItemDone to refill on, so the queue would never drain and the run
+        // would hang. Two dispatches, as for the serial phase: the first item
+        // needs a successor or a NoMoreItems to start.
+        if let Some(d) = dispatch.as_mut().filter(|_| !stopping) {
+            let chunk = chunk_size(total_items, states.len());
+            for (i, s) in states.iter_mut().enumerate() {
+                if d.requeued.is_empty() {
+                    break;
+                }
+                if s.seeded
+                    && !s.dead
+                    && !s.ended
+                    && !s.awaiting_lookahead
+                    && s.outstanding.is_empty()
+                {
+                    dispatch_to(s, d, chunk, i == designate)?;
+                    dispatch_to(s, d, chunk, i == designate)?;
+                }
+            }
+        }
+
         // Session lifecycle: workers stay alive after draining so failed items
         // can rerun anywhere. EndSession goes out only when every outcome is
         // final (or the parallel portion is, for the serial phase wind-down).
@@ -1361,7 +1400,13 @@ pub fn run_pool(
         run.record_cached(id.clone());
     }
     let retried = reruns > 0 || !run.flaky.is_empty();
-    let exitstatus = orchestrator::finalize_exit(&statuses, run.all_passed(), retried, false);
+    let exitstatus = orchestrator::finalize_exit(
+        &statuses,
+        run.all_passed(),
+        retried,
+        false,
+        run.stopped_after.is_some(),
+    );
     let (collection_size, collection_hash) = match reference {
         Some((count, hash)) => (count, Some(hash)),
         None => (0, None),

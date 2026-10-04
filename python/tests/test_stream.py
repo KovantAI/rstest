@@ -1194,3 +1194,36 @@ def test_longrepr_text_absent_and_non_pytest_reports():
     assert stream.longrepr_text(mk_report("call", "passed")) is None
     fake = mk_report("call", "failed", failed=True, longrepr="x", longreprtext="\n  boom  \n")
     assert stream.longrepr_text(fake) == "  boom"
+
+
+# ── doctor CPU timing: setup/teardown phases and child processes ───────────
+
+
+def test_cpu_now_counts_reaped_child_processes(monkeypatch):
+    times = SimpleNamespace(children_user=1.5, children_system=0.5)
+    monkeypatch.setattr(stream.os, "times", lambda: times)
+    monkeypatch.setattr("time.process_time", lambda: 2.0)
+    assert stream._cpu_now() == pytest.approx(4.0)
+
+
+def test_setup_and_teardown_reports_carry_phase_cpu(monkeypatch):
+    clock = iter([10.0, 10.25, 10.3, 10.3, 10.4, 10.45])
+    monkeypatch.setattr(stream, "_cpu_now", lambda: next(clock))
+    p = _plugin()
+    p._measure_cpu = True
+    p.pytest_runtest_logstart("t.py::a", ("t.py", 1, "a"))  # mark 10.0
+    p.pytest_runtest_logreport(mk_report("setup", "passed"))  # 0.25, mark 10.3
+    p._cpu["t.py::a"] = 0.01
+    p.pytest_runtest_logreport(mk_report("call", "passed"))  # call keeps its own, mark 10.3
+    p.pytest_runtest_logreport(mk_report("teardown", "passed"))  # 0.1, mark 10.45
+    cpus = [(pl["when"], pl.get("cpu")) for kind, pl in p._conn.sent if kind == "report"]
+    assert cpus == [("setup", 0.25), ("call", 0.01), ("teardown", 0.1)]
+
+
+def test_no_phase_cpu_when_not_measured():
+    p = _plugin()
+    p._measure_cpu = False
+    p.pytest_runtest_logstart("t.py::a", ("t.py", 1, "a"))
+    p.pytest_runtest_logreport(mk_report("setup", "passed"))
+    p.pytest_runtest_logreport(mk_report("teardown", "passed"))
+    assert all("cpu" not in pl for kind, pl in p._conn.sent if kind == "report")

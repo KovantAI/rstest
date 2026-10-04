@@ -242,20 +242,32 @@ pub(crate) struct FinishedAttempt {
     pub flaky_key: Option<String>,
 }
 
+/// Whether a recorded report counts toward `-x` / `--maxfail`: a failure of a
+/// test outside the `--quarantine` list. A quarantined failure is demoted
+/// after the run and never fails it, so it must not stop the run either.
+pub(crate) fn counts_toward_maxfail(
+    quarantine: Option<&regex::RegexSet>,
+    report: &proto::Report,
+) -> bool {
+    report.outcome == "failed" && !quarantine.is_some_and(|q| q.is_match(&report.nodeid))
+}
+
 /// Commit a finished item's buffered attempt reports as final: record each
-/// (counting failures toward `fail_count`) and, if the item ultimately passed
-/// after >0 retries, mark it flaky under `flaky_key`. Called on the terminal
-/// (non-requeued) branch of the ItemDone rerun logic in both loops.
+/// (counting failures toward `fail_count`, quarantined ones excepted) and, if
+/// the item ultimately passed after >0 retries, mark it flaky under
+/// `flaky_key`. Called on the terminal (non-requeued) branch of the ItemDone
+/// rerun logic in both loops.
 pub(crate) fn finalize_attempt(
     sink: &mut Sink,
     run: &mut Run,
     prog: &mut Progress,
     fail_count: &mut u64,
+    quarantine: Option<&regex::RegexSet>,
     worker_idx: usize,
     attempt: FinishedAttempt,
 ) {
     for r in attempt.reports {
-        if r.outcome == "failed" {
+        if counts_toward_maxfail(quarantine, &r) {
             *fail_count += 1;
         }
         prog.on_report(sink, Some(worker_idx), &r);
@@ -276,20 +288,23 @@ pub(crate) fn finalize_attempt(
 /// passed. `retried` says retries were in play (a global `--reruns` budget,
 /// or any test marked flaky, which covers `@pytest.mark.flaky` retrying on
 /// its own). `collect_aborted` (lazy only) forces at least "interrupted" (2).
+/// `stopped`: `-x` / `--maxfail` cut the run short. Only a counted failure
+/// trips it, so the run never reads as passed, whatever was recorded.
 pub(crate) fn finalize_exit(
     statuses: &[i32],
     all_passed: bool,
     retried: bool,
     collect_aborted: bool,
+    stopped: bool,
 ) -> i32 {
     let mut exitstatus = crate::scheduling::pool::merge_statuses(statuses);
     if collect_aborted {
         exitstatus = exitstatus.max(2);
     }
-    if exitstatus == 0 && !all_passed {
+    if exitstatus == 0 && (!all_passed || stopped) {
         exitstatus = 1;
     }
-    if retried && exitstatus == 1 && all_passed {
+    if retried && exitstatus == 1 && all_passed && !stopped {
         exitstatus = 0;
     }
     exitstatus
@@ -611,22 +626,69 @@ mod tests {
     #[test]
     fn finalize_exit_recorded_outcomes_win() {
         // Clean sessions but a recorded failure (fabricated crash) -> 1.
-        assert_eq!(finalize_exit(&[0, 0], false, false, false), 1);
+        assert_eq!(finalize_exit(&[0, 0], false, false, false, false), 1);
         // Session says failed (1) but everything ultimately passed after a
         // retry (--reruns or a lone @mark.flaky) -> flaky pass, downgrade to 0.
-        assert_eq!(finalize_exit(&[1], true, true, false), 0);
+        assert_eq!(finalize_exit(&[1], true, true, false, false), 0);
         // Same with no retry in play stays failed.
-        assert_eq!(finalize_exit(&[1], true, false, false), 1);
+        assert_eq!(finalize_exit(&[1], true, false, false, false), 1);
         // All green -> 0.
-        assert_eq!(finalize_exit(&[0, 0], true, false, false), 0);
+        assert_eq!(finalize_exit(&[0, 0], true, false, false, false), 0);
+    }
+
+    #[test]
+    fn finalize_exit_never_passes_a_run_maxfail_stopped() {
+        // -x / --maxfail tripped: a retried run is not demoted to 0 even when
+        // every recorded outcome passed...
+        assert_eq!(finalize_exit(&[1, 0], true, true, false, true), 1);
+        // ...and clean session codes still read failed.
+        assert_eq!(finalize_exit(&[0, 0], true, true, false, true), 1);
+        // Severe codes are kept.
+        assert_eq!(finalize_exit(&[2], true, true, false, true), 2);
+    }
+
+    #[test]
+    fn quarantined_failures_do_not_count_toward_maxfail() {
+        let q = regex::RegexSet::new([r"^t\.py::x$"]).unwrap();
+        let failed = rep("failed", Some("assert"));
+        assert!(!counts_toward_maxfail(Some(&q), &failed));
+        assert!(counts_toward_maxfail(None, &failed));
+        let other = proto::Report {
+            nodeid: "t.py::y".into(),
+            ..rep("failed", Some("assert"))
+        };
+        assert!(counts_toward_maxfail(Some(&q), &other));
+        assert!(!counts_toward_maxfail(None, &rep("passed", None)));
+
+        let mut run = Run::default();
+        let mut prog = Progress::default();
+        let mut fail_count = 0u64;
+        let (mut sink, _cap) = Sink::captured();
+        finalize_attempt(
+            &mut sink,
+            &mut run,
+            &mut prog,
+            &mut fail_count,
+            Some(&q),
+            0,
+            FinishedAttempt {
+                attempts_used: 1,
+                reports: vec![failed],
+                failed: true,
+                flaky_key: None,
+            },
+        );
+        // Recorded (the quarantine demotes it after the run), not counted.
+        assert_eq!(fail_count, 0);
+        assert!(!run.all_passed());
     }
 
     #[test]
     fn finalize_exit_collect_abort_forces_interrupted() {
         // collect_aborted floors at 2 even when sessions were clean...
-        assert_eq!(finalize_exit(&[0], true, false, true), 2);
+        assert_eq!(finalize_exit(&[0], true, false, true, false), 2);
         // ...and never downgrades a more severe code.
-        assert_eq!(finalize_exit(&[3], false, false, true), 3);
+        assert_eq!(finalize_exit(&[3], false, false, true, false), 3);
     }
 
     #[test]
@@ -642,6 +704,7 @@ mod tests {
             &mut run,
             &mut prog,
             &mut fail_count,
+            None,
             0,
             FinishedAttempt {
                 attempts_used: 2,
@@ -665,6 +728,7 @@ mod tests {
             &mut run,
             &mut prog,
             &mut fail_count,
+            None,
             0,
             FinishedAttempt {
                 attempts_used: 0,

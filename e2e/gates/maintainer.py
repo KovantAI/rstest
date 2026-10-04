@@ -106,32 +106,27 @@ def gate_maintainer_doctor_numbers(g, args, binary):
         "MT-01 doctor realized speedup within 40% of wall(-n 0)/wall(-n 4)",
         actual > 0 and abs(realized / actual - 1) <= 0.4,
         f"realized={realized:.2f} actual={actual:.2f}",
-        known_bug=True,
     )
     check(
         "MT-01 doctor parallel_efficiency > 50 on a ~3.5x run",
         pe.get("efficiency_pct", 0.0) > 50,
         f"efficiency_pct={pe.get('efficiency_pct')}",
-        known_bug=True,
     )
     files = doc.get("slowest_files") or [{}]
     check(
         "MT-01 SLOWEST FILES counts fixture time (>= 2s of the ~4.4s)",
         files[0].get("total_seconds", 0.0) >= 2.0,
         str(files[0]),
-        known_bug=True,
     )
     check(
         "MT-01 WAIT-BOUND section present for a sleep-bound fixture suite",
         "WAIT-BOUND" in r4.stdout,
         r4.stdout[-300:],
-        known_bug=True,
     )
     check(
         "MT-01 'parallel_efficiency<30' does not fire on a ~3.5x run",
         r4.returncode == 0,
         f"rc={r4.returncode} " + r4.stderr[-200:],
-        known_bug=True,
     )
 
     # MT-13: the -n 0 run above is single-worker: it must not say 0 workers
@@ -140,19 +135,16 @@ def gate_maintainer_doctor_numbers(g, args, binary):
         "MT-13 -n 0 doctor says 1 worker / single-worker, not 0 workers",
         "0 workers" not in r0.stdout and ("1 worker" in r0.stdout or "single-worker" in r0.stdout),
         next((ln for ln in r0.stdout.splitlines() if "test time" in ln), ""),
-        known_bug=True,
     )
     check(
         "MT-13 -n 0 doctor-json workers >= 1",
         _json(d0).get("workers", 0) >= 1,
         f"workers={_json(d0).get('workers')}",
-        known_bug=True,
     )
     check(
         "MT-13 -n 0 doctor headings do not say 'across all workers'",
         "across all workers" not in r0.stdout,
         next((ln for ln in r0.stdout.splitlines() if "across all workers" in ln), ""),
-        known_bug=True,
     )
 
     # MT-08: CPU-bound work in a child process is computing, not waiting.
@@ -178,7 +170,6 @@ def gate_maintainer_doctor_numbers(g, args, binary):
         "MT-08 subprocess CPU is not reported as waiting (wait_pct < 70)",
         wb.get("wait_pct", 0.0) < 70 and "test_cli_cpu" not in r.stdout.split("WAIT-BOUND")[-1],
         f"wait_pct={wb.get('wait_pct')}",
-        known_bug=True,
     )
 
 
@@ -202,22 +193,22 @@ _WAIT_SUITE = (
 # The -n 0 table leaves out the pool-only metrics (efficiency, speedup,
 # imbalance): cli.md documents them as not measured without a pool.
 _GATES_ANY = [
-    ("wall_seconds>0.5", None),
-    ("test_time_seconds>1.0", None),
-    ("cpu_time_seconds>0.5", None),
-    ("tests>2", None),
-    ("wait_seconds>0.5", "P6"),
-    ("wait_pct>10", "P6"),
+    "wall_seconds>0.5",
+    "test_time_seconds>1.0",
+    "cpu_time_seconds>0.5",
+    "tests>2",
+    "wait_seconds>0.5",
+    "wait_pct>10",
 ]
-_GATES_N0 = [*_GATES_ANY, ("long_pole_seconds>0.5", "P6")]
+_GATES_N0 = [*_GATES_ANY, "long_pole_seconds>0.5"]
 _GATES_N2 = [
     *_GATES_ANY,
-    ("workers>1", None),
-    ("long_pole_seconds>0.5", None),
-    ("parallel_efficiency<101", None),
-    ("efficiency_pct<101", None),
-    ("realized_speedup>0", None),
-    ("imbalance_pct>=0", None),
+    "workers>1",
+    "long_pole_seconds>0.5",
+    "parallel_efficiency<101",
+    "efficiency_pct<101",
+    "realized_speedup>0",
+    "imbalance_pct>=0",
 ]
 
 
@@ -229,20 +220,19 @@ def gate_maintainer_doctor_gates(g, args, binary):
     # MT-02: every metric whose condition is true fires a breach line. One
     # run per mode with all conditions; each breach line is checked on its own.
     for n, table in (("0", _GATES_N0), ("2", _GATES_N2)):
-        fail_on = [a for cond, _ in table for a in ("--doctor-fail-on", cond)]
+        fail_on = [a for cond in table for a in ("--doctor-fail-on", cond)]
         r = _run(g, cwd, "-n", n, "-q", *fail_on)
         check(
             f"MT-02 -n {n}: a breached gate exits 1",
             r.returncode == 1 and "doctor gate failures" in r.stderr,
             f"rc={r.returncode} " + r.stderr[-300:],
         )
-        for cond, bug in table:
+        for cond in table:
             metric = re.split(r"[<>=!]", cond, maxsplit=1)[0]
             check(
                 f"MT-02 -n {n}: '{cond}' fires (breach line, never 'condition skipped')",
                 _breached(r.stderr, metric) and f"'{cond}' not measured" not in r.stderr,
                 next((ln for ln in r.stderr.splitlines() if cond in ln), "")[:160],
-                known_bug=bug is not None,
             )
 
     # MT-04: a skipped condition is not a passed one.
@@ -266,7 +256,6 @@ def gate_maintainer_doctor_gates(g, args, binary):
         "MT-04 summary does not say 'all 2 condition(s) passed' when one was skipped",
         "all 2 condition(s) passed" not in r.stderr and "skipped" in r.stderr.splitlines()[-1],
         r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "",
-        known_bug=True,
     )
 
     # MT-03: grammar validation. Bad conditions abort before any test runs
@@ -275,13 +264,13 @@ def gate_maintainer_doctor_gates(g, args, binary):
     g.write("mt_gate_grammar/test_a.py", "def test_a():\n    pass\n")
     cwd = g.tmp / "mt_gate_grammar"
     cases = [
-        ("unknown_metric>1", "unknown_metric", False),
-        ("tests>>1", ">1", False),
-        ("", "no comparison operator", False),
-        ("wait_pct>NaN", "NaN", True),
-        ("tests!=inf", "inf", True),
+        ("unknown_metric>1", "unknown_metric"),
+        ("tests>>1", ">1"),
+        ("", "no comparison operator"),
+        ("wait_pct>NaN", "NaN"),
+        ("tests!=inf", "inf"),
     ]
-    for cond, named, bug in cases:
+    for cond, named in cases:
         r = _run(g, cwd, "-n", "2", "--doctor-fail-on", cond)
         check(
             f"MT-03 '{cond}' rejected before the run, naming '{named}'",
@@ -290,7 +279,6 @@ def gate_maintainer_doctor_gates(g, args, binary):
             and "Error" in r.stderr
             and named in r.stderr,
             f"rc={r.returncode} " + _out(r)[-200:],
-            known_bug=bug,
         )
 
 
@@ -334,7 +322,6 @@ def gate_maintainer_durations_regress(g, args, binary):
         "MT-05 second identical regressed run still exits 1 and names test_poll",
         r2.returncode == 1 and "test_poll" in _out(r2),
         f"rc={r2.returncode} " + r2.stderr[-200:],
-        known_bug=True,
     )
 
     # B: baseline 0.3s, then a run where test_poll fails fast. A failed run's
@@ -355,14 +342,12 @@ def gate_maintainer_durations_regress(g, args, binary):
         "MT-05 failed run does not overwrite the baseline (explain still ~0.3s)",
         after is not None and after >= 0.25,
         f"explain duration={after}",
-        known_bug=True,
     )
     r = _run(g, cwd, *regress, env={"MT_D": "1.0"})
     check(
         "MT-05 after a failed run, a 0.3s -> 1.0s regression still fires",
         r.returncode == 1 and "test_poll" in _out(r),
         f"rc={r.returncode} " + r.stderr[-200:],
-        known_bug=True,
     )
 
 
@@ -418,14 +403,12 @@ def gate_maintainer_leaks(g, args, binary):
             f"MT-06a -n {n}: test_last_leaks is blamed, not test_uses_server",
             "test_last_leaks" in r.stderr and "test_uses_server" not in r.stderr,
             r.stderr[-300:],
-            known_bug=True,
         )
         r = _run(g, g.tmp / "mt_leak_late", "-n", n, "-q", "--fail-on-leak", *dist)
         check(
             f"MT-06b -n {n}: test_c_permanent's permanent thread is reported",
             r.returncode == 1 and "test_c_permanent" in r.stderr,
             f"rc={r.returncode} " + r.stderr[-300:],
-            known_bug=True,
         )
 
     # MT-07: common clean patterns never trip the gate. Two files so -n 2
@@ -470,9 +453,9 @@ def gate_maintainer_leaks(g, args, binary):
             f"rc={r.returncode} " + r.stderr[-300:],
         )
 
-    # MT-07: a session-scoped server that is shut down at session end. The
-    # spec expects no leak; resource-leaks.md documents it as a known false
-    # positive charged to the first test that uses the fixture.
+    # MT-07: a session-scoped server that is shut down at session end. What a
+    # wider-than-function fixture's setup creates is never charged to a test
+    # (resource-leaks.md), so this is not a leak.
     g.write(
         "mt_leak_session/conftest.py",
         "import threading, pytest\n"
@@ -500,7 +483,6 @@ def gate_maintainer_leaks(g, args, binary):
         "MT-07 -n 0: shut-down session-scoped server is not a leak",
         r.returncode == 0 and "no thread/fd leaks detected" in r.stderr,
         f"rc={r.returncode} " + r.stderr[-200:],
-        known_bug=True,
     )
 
 
@@ -522,12 +504,12 @@ _COV_CALC = (
 # Report modes of MT-09 and the bug that breaks "exit 1 + exactly one
 # `FAIL Required test coverage` line" in that mode today.
 _COV_MODES = [
-    ("empty", ["--cov-report="], {"2": "P5"}),
-    ("term", ["--cov-report=term"], {"0": "S5"}),
-    ("term-missing:skip-covered", ["--cov-report=term-missing:skip-covered"], {"0": "S5"}),
-    ("annotate", ["--cov-report=annotate"], {"2": "P5"}),
-    ("xml", ["--cov-report=xml"], {"0": "S5"}),
-    ("term+xml", ["--cov-report=term", "--cov-report=xml"], {"0": "S5", "2": "S5"}),
+    ("empty", ["--cov-report="]),
+    ("term", ["--cov-report=term"]),
+    ("term-missing:skip-covered", ["--cov-report=term-missing:skip-covered"]),
+    ("annotate", ["--cov-report=annotate"]),
+    ("xml", ["--cov-report=xml"]),
+    ("term+xml", ["--cov-report=term", "--cov-report=xml"]),
 ]
 
 
@@ -597,7 +579,7 @@ def gate_maintainer_coverage_gate(g, args, binary):
 
     for n in ("0", "2"):
         totals_seen = []
-        for label, reports, bugs in _COV_MODES:
+        for label, reports in _COV_MODES:
             r = _run(g, cwd, "-n", n, "--cov=pkg", *reports, "--cov-fail-under=95")
             out = _out(r)
             totals_seen += _totals(out)
@@ -605,14 +587,12 @@ def gate_maintainer_coverage_gate(g, args, binary):
                 f"MT-09 -n {n} --cov-report {label}: exit 1, exactly one FAIL line",
                 r.returncode == 1 and _fail_lines(out) == 1,
                 f"rc={r.returncode} fail_lines={_fail_lines(out)}",
-                known_bug=n in bugs,
             )
             if label == "term-missing:skip-covered":
                 check(
                     f"MT-09 -n {n} skip-covered: fully covered pkg/full.py not listed",
                     "pkg/full.py" not in out and "pkg/calc.py" in out,
                     str(_table_rows(out, "full.py")),
-                    known_bug=True,
                 )
         check(
             f"MT-09 -n {n}: every TOTAL line equals pytest-cov's",
@@ -630,13 +610,11 @@ def gate_maintainer_coverage_gate(g, args, binary):
             f"MT-09 -n {n} .coveragerc fail_under=95: exit 1, one FAIL line",
             r.returncode == 1 and _fail_lines(out) == 1,
             f"rc={r.returncode} fail_lines={_fail_lines(out)}",
-            known_bug=n == "2",
         )
         check(
             f"MT-09 -n {n} .coveragerc show_missing honoured (Missing column)",
             "18-19, 23" in out,
             str(_table_rows(out, "calc.py")),
-            known_bug=n == "2",
         )
 
     # --cov-config pointing at a config with a non-default data_file.
@@ -661,7 +639,6 @@ def gate_maintainer_coverage_gate(g, args, binary):
             and _totals(out) == oracle
             and "No data to report" not in out,
             f"rc={r.returncode} fail_lines={_fail_lines(out)} totals={_totals(out)}",
-            known_bug=True,
         )
 
 
@@ -816,7 +793,6 @@ def gate_maintainer_repro(g, args, binary):
         "MT-11 docs: --shuffle points to `rstest replay` for an exact repro",
         "replay" in section and "--dist loadfile` to keep the repro stable" not in section,
         section[:200].replace("\n", " "),
-        known_bug=True,
     )
 
 
@@ -871,13 +847,12 @@ def gate_maintainer_flaky_policy(g, args, binary):
         )
 
     # @flaky mark without --reruns (KNOWN_BUGS #1), real failure deselected.
-    for n, bug in (("2", False), ("0", True)):
+    for n in ("2", "0"):
         r, c = run(n, *q, "-k", "not always", mark=True)
         check(
             f"MT-12 -n {n} @flaky without --reruns: exit 0, counted once as 1 flaky",
             r.returncode == 0 and (c.get("flaky"), c.get("passed"), c.get("failed")) == (1, 30, 0),
             f"rc={r.returncode} counts={c}",
-            known_bug=bug,
         )
 
     # -x / --maxfail with reruns (A1): the flaky first attempt must not stop
@@ -888,7 +863,6 @@ def gate_maintainer_flaky_policy(g, args, binary):
             f"MT-12 -n 2 {' '.join(extra)}: always-failing test still exits 1",
             r.returncode == 1 and c.get("failed", 0) >= 1,
             f"rc={r.returncode} counts={c} " + r.stdout[-120:],
-            known_bug=True,
         )
 
     # -x with a quarantined failure first (A2): it must not count toward -x;
@@ -899,5 +873,4 @@ def gate_maintainer_flaky_policy(g, args, binary):
             f"MT-12 -n {n} -x --quarantine: quarantined failure does not trip -x, exit 1",
             r.returncode == 1 and c.get("failed") == 1,
             f"rc={r.returncode} counts={c}",
-            known_bug=True,
         )

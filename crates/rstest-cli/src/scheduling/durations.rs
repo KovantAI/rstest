@@ -360,7 +360,9 @@ fn secs_only(map: HashMap<String, Timing>) -> HashMap<String, f64> {
 }
 
 /// Record this run's call durations, tagged with the sources and hashes
-/// `collected` took at collection time (see `Collected`).
+/// `collected` took at collection time (see `Collected`). Only
+/// [`Run::learned_durations`]: a failed or `--durations-regress`-flagged test
+/// keeps its previous timing.
 pub fn save(run: &Run, collected: &Collected) {
     // Merge over the previous cache: tests not in this run keep old timings
     // (-k/-m filtered runs must not wipe the rest of the suite's data). `fresh`
@@ -371,7 +373,7 @@ pub fn save(run: &Run, collected: &Collected) {
     cache::with_lock(|| {
         persist_to(
             &cache::file(FILE),
-            run.durations().map(|(id, d)| (id.clone(), d)),
+            run.learned_durations().map(|(id, d)| (id.clone(), d)),
             collected,
             &project_base(),
         );
@@ -549,6 +551,45 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "t/a.py::slow");
         assert_eq!(rows[0].1, 0.5);
+    }
+
+    fn call_report(id: &str, outcome: &str, d: f64) -> crate::scheduling::proto::Report {
+        crate::scheduling::proto::Report {
+            nodeid: id.into(),
+            when: "call".into(),
+            outcome: outcome.into(),
+            duration: d,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            thread_delta: None,
+            fd_delta: None,
+            sections: Vec::new(),
+            lineno: None,
+            subtest: false,
+        }
+    }
+
+    #[test]
+    fn learned_durations_skip_failed_and_regressed() {
+        let mut run = Run::default();
+        run.record(None, call_report("t/a.py::ok", "passed", 0.3));
+        run.record(None, call_report("t/a.py::red", "failed", 0.0002));
+        run.record(None, call_report("t/a.py::slow", "passed", 1.0));
+        let mut base = HashMap::new();
+        base.insert("t/a.py::slow".to_string(), 0.1);
+        base.insert("t/a.py::red".to_string(), 0.3);
+        // The gate still sees every measured duration...
+        assert_eq!(run.durations().count(), 3);
+        let rows = regressions(&run, &base, 2.0);
+        assert_eq!(rows.len(), 1);
+        for (id, _, _) in &rows {
+            run.mark_duration_regressed(id);
+        }
+        // ...but only the passing, non-regressed one is learned.
+        let learned: Vec<(&String, f64)> = run.learned_durations().collect();
+        assert_eq!(learned, vec![(&"t/a.py::ok".to_string(), 0.3)]);
     }
 
     #[test]

@@ -16,6 +16,7 @@ from _pytest.fixtures import is_visibility_more_specific
 
 from rstest_worker._internal import junit
 from rstest_worker._internal import messages as m
+from rstest_worker._internal.leakcheck import LeakTracker
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
@@ -168,6 +169,20 @@ class Timeout(BaseException):
     pytest's call-phase protocol still reports it as a failure with traceback."""
 
 
+def _cpu_now() -> float:
+    """CPU seconds used so far by this process AND its reaped children.
+
+    `time.process_time()` alone misses work a test hands to a subprocess (a
+    CLI under test, a compiler), which the doctor would then call "waiting".
+    `os.times()` children counters cover every child the test waited for
+    (`subprocess.run`, `check_output`); they stay 0 on Windows.
+    """
+    import time
+
+    t = os.times()
+    return time.process_time() + t.children_user + t.children_system
+
+
 def _parse_timeout(raw: str | float | None) -> float | None:
     """Positive float seconds, or None (disabled / unparseable / non-positive)."""
     if raw is None:
@@ -177,25 +192,6 @@ def _parse_timeout(raw: str | float | None) -> float | None:
     except (TypeError, ValueError):
         return None
     return v if v > 0 else None
-
-
-def _count_threads() -> int:
-    """Live Python thread count (portable). Native C-extension threads that
-    bypass the `threading` module are not counted."""
-    import threading
-
-    return threading.active_count()
-
-
-def _count_fds() -> int | None:
-    """Open file-descriptor count, or None where it can't be read. `/proc/self/fd`
-    on Linux, `/dev/fd` on macOS/BSD; other platforms disable fd tracking."""
-    for d in ("/proc/self/fd", "/dev/fd"):
-        try:
-            return len(os.listdir(d))
-        except OSError:
-            continue
-    return None
 
 
 def _crashline(report: Any) -> str:
@@ -252,10 +248,11 @@ class StreamPlugin:
         # Per-test timeout (--timeout): interrupt the call phase in-process at
         # the deadline. @pytest.mark.timeout(N) overrides per test.
         self._timeout = _parse_timeout(os.environ.get("RSTEST_TIMEOUT"))
-        # Resource-leak check (--doctor or --fail-on-leak): snapshot threads/fds
-        # before setup and after teardown, ship the net delta on the teardown
-        # report.
+        # Resource-leak check (--doctor or --fail-on-leak): a LeakTracker plugin
+        # charges each test with the threads/fds it created and didn't release;
+        # the counts ride the teardown report.
         self._leakcheck = os.environ.get("RSTEST_LEAKCHECK") == "1"
+        self._leaks = LeakTracker() if self._leakcheck else None
         # A live JSON consumer (--output json / --stream-json) is attached, so
         # ship captured stdout/stderr/log sections on every report, not only
         # failures (editors show per-passing-test output).
@@ -266,13 +263,10 @@ class StreamPlugin:
         # default so plain --report-json stays byte-comparable to the pytest
         # baseline (`rstest try`), whose recorder emits no cpu.
         self._measure_cpu = self._doctor or self._stream_output
-        self._res_base: dict[str, tuple[int, int | None]] = {}
-        self._res: dict[str, tuple[int, int | None]] = {}
-        # Skip the worker's FIRST test: importing a test module can lazily spin
-        # up a persistent thread / open a cache fd once, which is not a per-test
-        # leak. Measuring from the 2nd test on drops that first-touch noise.
-        self._leak_warmed = False
-        self._cpu: dict[str, float] = {}  # nodeid -> call-phase process_time delta
+        self._cpu: dict[str, float] = {}  # nodeid -> call-phase CPU delta (self + children)
+        # Setup/teardown CPU: _cpu_now() at the last phase boundary (None until
+        # the first test starts, or when CPU is not measured).
+        self._cpu_mark: float | None = None
         # (argname, scope) -> [count, secs, all_constant, first_fingerprint].
         # all_constant/first_fingerprint track the scope-promotion advisor:
         # only function-scoped fixtures whose value fingerprints identically on
@@ -403,6 +397,8 @@ class StreamPlugin:
         self._register_markers(config)
         _warn_pytest_pins(config)
         junit.maybe_register(config, self._conn)
+        if self._leaks is not None and not config.pluginmanager.is_registered(self._leaks):
+            config.pluginmanager.register(self._leaks, "rstest-leakcheck")
         worker_id = os.environ.get("RSTEST_WORKER_ID")
         if worker_id is None:
             return  # standalone run: nothing pool-specific to set up
@@ -689,31 +685,6 @@ class StreamPlugin:
         return cancel
 
     @pytest.hookimpl(wrapper=True)
-    def pytest_runtest_setup(self, item):
-        # Leak check: baseline thread/fd counts BEFORE any setup fixture runs.
-        if self._leakcheck:
-            self._res_base[item.nodeid] = (_count_threads(), _count_fds())
-        return (yield)
-
-    @pytest.hookimpl(wrapper=True)
-    def pytest_runtest_teardown(self, item, nextitem):
-        # Leak check: net delta AFTER teardown (a test that opens+closes is 0;
-        # one that never releases shows a positive delta). Stashed for the
-        # teardown report to carry.
-        try:
-            return (yield)
-        finally:
-            if self._leakcheck and item.nodeid in self._res_base:
-                bt, bf = self._res_base.pop(item.nodeid)
-                if not self._leak_warmed:
-                    # First test: warm-up, don't attribute first-touch to it.
-                    self._leak_warmed = True
-                else:
-                    at, af = _count_threads(), _count_fds()
-                    fd_delta = (af - bf) if (af is not None and bf is not None) else None
-                    self._res[item.nodeid] = (at - bt, fd_delta)
-
-    @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item):
         # Layers two per-call-phase concerns: the --timeout interrupt (outer)
         # and doctor's cpu-vs-wall measurement (inner). wall >> cpu = the test
@@ -722,17 +693,22 @@ class StreamPlugin:
         secs = self._effective_timeout(item)
         if secs is None and not self._measure_cpu:
             return (yield)
-        import time
-
         cancel = self._arm_timeout(secs) if secs else None
-        t0 = time.process_time() if self._measure_cpu else 0.0
+        t0 = _cpu_now() if self._measure_cpu else 0.0
         try:
             return (yield)
         finally:
             if cancel is not None:
                 cancel()
             if self._measure_cpu:
-                self._cpu[item.nodeid] = time.process_time() - t0
+                self._cpu[item.nodeid] = _cpu_now() - t0
+
+    def pytest_runtest_logstart(self, nodeid, location):
+        # Doctor CPU for the setup / teardown phases: a phase's CPU is the delta
+        # since the previous mark (this one, then after each sent report), so
+        # fixture work is counted as computing, not waiting.
+        if self._measure_cpu:
+            self._cpu_mark = _cpu_now()
 
     @pytest.hookimpl(wrapper=True)
     def pytest_fixture_setup(self, fixturedef, request):
@@ -862,8 +838,13 @@ class StreamPlugin:
             payload["lineno"] = location[1]
         if report.when == "call" and report.nodeid in self._cpu:
             payload["cpu"] = round(self._cpu.pop(report.nodeid), 4)
-        if report.when == "teardown" and report.nodeid in self._res:
-            dt, df = self._res.pop(report.nodeid)
+        elif report.when in ("setup", "teardown") and self._cpu_mark is not None:
+            payload["cpu"] = round(max(_cpu_now() - self._cpu_mark, 0.0), 4)
+        leaked = None
+        if self._leaks is not None and report.when == "teardown":
+            leaked = self._leaks.pop(report.nodeid)
+        if leaked is not None:
+            dt, df = leaked
             if dt:
                 payload["thread_delta"] = dt
             if df:
@@ -876,6 +857,8 @@ class StreamPlugin:
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
         self._conn.send("report", payload)
+        if self._cpu_mark is not None:
+            self._cpu_mark = _cpu_now()
 
     def pytest_deselected(self, items):
         self._deselected += len(items)

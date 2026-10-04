@@ -146,7 +146,7 @@
           "type": "string"
         },
         "cpu": {
-          "description": "Call-phase CPU time (process_time), present only when measured\n(`--doctor` or a live-stream run). Serialized when present so a\nreport-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on\na plain run so the snapshot stays byte-comparable to the pytest baseline.",
+          "description": "Call-phase CPU time (process_time plus reaped child processes), present\nonly when measured (`--doctor` or a live-stream run). Serialized when\npresent so a report-json consumer can spot wait-bound tests (wall ≫\ncpu); omitted on a plain run so the snapshot stays byte-comparable to\nthe pytest baseline.",
           "type": "number",
           "format": "double"
         },

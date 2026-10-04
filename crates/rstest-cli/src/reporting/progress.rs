@@ -452,8 +452,10 @@ pub(crate) fn testreport_json(worker: Option<usize>, r: &Report) -> serde_json::
     }
     // Call-phase CPU time (process_time), present when measured (`--doctor` or a
     // stream consumer). wall (`duration`) ≫ `cpu` ⇒ the test waited (sleep/IO)
-    // rather than computed — the inline wait-bound signal for editors.
-    if let Some(c) = r.cpu {
+    // rather than computed — the inline wait-bound signal for editors. Setup /
+    // teardown reports also carry CPU for the doctor; the stream keeps its
+    // documented call-phase-only shape.
+    if let Some(c) = r.cpu.filter(|_| r.when == "call") {
         obj["cpu"] = c.into();
     }
     if r.outcome == "failed" {

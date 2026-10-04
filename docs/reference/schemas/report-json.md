@@ -47,7 +47,7 @@ Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-re
 |---|---|---|---|
 | `cached` | boolean | no | Not executed this run: unchanged since the last green run, so its prior pass was carried forward (`--incremental`). Still counts as passed. |
 | `call` | string | no |  |
-| `cpu` | number | no | Call-phase CPU time (process_time), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline. |
+| `cpu` | number | no | Call-phase CPU time (process_time plus reaped child processes), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline. |
 | `crashed` | boolean | no | The outcome was fabricated because the worker died on this test (crash or --worker-timeout kill), not produced by pytest. |
 | `duration` | number | no |  |
 | `flaky` | boolean | no | Passed only after one or more reruns (--reruns). |
