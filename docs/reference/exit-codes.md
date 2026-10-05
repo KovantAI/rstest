@@ -21,7 +21,8 @@ includes:
 
 - a bad value or combination for an rstest flag: a non-integer `-n`,
   `--dist no`, `--order bogus`, `--shard 1/2` with `-n 0` (or an `-n auto`
-  that resolves to one worker), `--collect lazy` with `--dist loadscope`;
+  that resolves to one worker), `--collect lazy` with `--dist loadscope`,
+  and pytest-xdist's `--looponfail` / `-f` (use `--watch`);
 - `--cache-pull`/`--cache-push` without `--cache-remote`, `cache-compact`
   without a remote, or a failed cache pull;
 - no usable Python interpreter found;

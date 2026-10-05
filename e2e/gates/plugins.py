@@ -112,6 +112,50 @@ def gate_pytest_randomly_real_plugin(g, args, binary):
         "4 passed" in r.stdout,
         r.stdout[-400:] + r.stderr[-400:],
     )
+    # An explicit --randomly-seed=N resolves to an int before configure_node
+    # copies it, so it must win over the broadcast seed (what a master sends).
+    gx.write(
+        "rnd_seed/test_seed.py",
+        "def test_explicit_seed_wins(request):\n"
+        "    assert request.config.getoption('randomly_seed') == 1234\n"
+        "    assert request.config.workerinput['randomly_seed'] == 1234\n",
+    )
+    r = gx.run("rnd_seed", "-n", "2", "-p", "randomly", "--randomly-seed=1234")
+    check(
+        "randomly + xdist installed: an explicit --randomly-seed=N wins at -n 2",
+        r.returncode == 0 and "1 passed" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-400:] + r.stderr[-400:],
+    )
+
+
+def gate_looponfail_with_xdist(g, args, binary):
+    print("== --looponfail refused / switched off (xdist installed) ==")
+    # xdist's loop-on-fail mode takes each worker session over and the run
+    # never finishes. rstest refuses it on its command line and switches it off
+    # in the worker when it comes from ini addopts.
+    lf_venv = Path(args.venv + "-looponfail-xdist").resolve()
+    make_venv(lf_venv, extra_deps=["pytest-xdist"])
+    gx = Gate(binary, lf_venv)
+    gx.write("lf/test_lf.py", "def test_a():\n    assert True\ndef test_b():\n    assert True\n")
+    lf = str(gx.tmp / "lf")
+    # On rstest's command line: refused up front, pointing at --watch.
+    for flag in ("--looponfail", "-fv"):
+        r = gx.run("-n", "2", flag, cwd=lf)
+        check(
+            f"{flag}: refused with a pointer to --watch",
+            r.returncode == 1 and "--watch" in r.stderr,
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+        )
+    # From ini addopts (rstest can't see it): switched off in the worker, so the
+    # run completes instead of xdist's loop-on-fail taking the session over.
+    gx.write("lf/pytest.ini", "[pytest]\naddopts = --looponfail\n")
+    for n in ("2", "0"):
+        r = gx.run("-n", n, cwd=lf, timeout=60)
+        check(
+            f"addopts --looponfail at -n {n}: run completes",
+            r.returncode == 0 and "2 passed" in (r.stdout + r.stderr),
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+        )
 
 
 def gate_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):

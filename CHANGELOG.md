@@ -57,6 +57,12 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`--looponfail` no longer hangs the run.** pytest-xdist's loop-on-fail
+  flag was forwarded to every worker session, where xdist's loop took the
+  session over and the run never finished. On rstest's command line
+  `--looponfail` / `-f` (also clustered, such as `-fv`) is now refused with
+  exit 1 and a pointer to `--watch`; from ini `addopts` it is switched off
+  inside the workers.
 - **unittest `subTest` and `subtests` failures count as failures.** In
   parallel runs a failing subtest was reported passed, and report-json said
   `failed: 0` even at `-n 0`, so a CI gate reading it went green. Counts now
