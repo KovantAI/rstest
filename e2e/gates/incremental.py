@@ -127,6 +127,75 @@ def gate_since_green_incremental(g, args, binary):
     )
 
 
+def gate_since_green_dirty_tree(g, args, binary):
+    """A green run over uncommitted edits proves the working tree green, not
+    HEAD. Recording HEAD there let a later revert of the edit diff as "0
+    changed" against a red commit: a false green."""
+    print("== since-green dirty tree ==")
+    sp = g.tmp / "sgdirty"
+    g.write("sgdirty/mod.py", "def f():\n    return 1\n")
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 2\n")
+    g.write("sgdirty/pyproject.toml", "[tool.pytest.ini_options]\n")
+    g.write("sgdirty/.gitignore", ".rstest_cache/\n.pytest_cache/\n__pycache__/\n")
+    git_init_commit(sp, "red")
+    env = {"PYTHONPATH": str(sp)}
+
+    # Fix HEAD's failure in the working tree only: green, but HEAD is red.
+    # (Edits change file size so a same-second revert cannot reuse a stale .pyc.)
+    g.write("sgdirty/mod.py", "def f():\n    return 1 + 1\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: green run on a dirty tree does not record HEAD",
+        r.returncode == 0
+        and _since_green_baseline(sp) is None
+        and "working tree has uncommitted changes" in r.stderr,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} {r.stderr[-300:]}",
+    )
+
+    # Revert the fix: the tree now IS the red HEAD, which must be re-run.
+    git(sp, "checkout", "-q", "mod.py")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: reverting to a red HEAD still runs and fails",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # Commit the fix: green on a clean tree now records HEAD.
+    g.write("sgdirty/mod.py", "def f():\n    return 1 + 1\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "fix")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: green run on a clean tree records HEAD",
+        r.returncode == 0 and _since_green_baseline(sp) == _head_sha(sp),
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # "Nothing affected" also records only on a clean tree: commit a break, undo
+    # it in the working tree, and the baseline..worktree diff is empty, so no
+    # test runs. That must not advance the baseline to the red commit.
+    base = _since_green_baseline(sp)
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 333\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "break-test")
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 2\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: a masked red commit does not advance the baseline",
+        r.returncode == 0 and _since_green_baseline(sp) == base,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} base={base} "
+        f"{r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    git(sp, "checkout", "-q", "test_mod.py")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: the red HEAD is still selected after the revert",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+
 def gate_incremental_dispatch_skip(g, args, binary):
     print("== incremental dispatch skip (--incremental) ==")
     sp = g.tmp / "incrdisp"
@@ -205,6 +274,103 @@ def gate_incremental_dispatch_skip(g, args, binary):
         "incremental: a failing test is rerun, not skipped",
         r.returncode == 1 and "1 failed" in r.stdout and "test_a" in r.stdout,
         r.stderr[-200:] + r.stdout[-300:],
+    )
+
+
+def gate_incremental_import_time_and_data(g, args, binary):
+    """Changes per-test coverage cannot see: import-time lines run under the
+    empty coverage context (no test owns them), and a data file read by a test
+    is never measured. Either must re-run the test, not cache a stale pass."""
+    print("== incremental import-time + data files ==")
+    sp = g.tmp / "incrimp"
+    # Transitive: test_const -> wrap -> consts (LIMIT is set at import time).
+    g.write("incrimp/consts.py", "LIMIT = 5\n")
+    g.write("incrimp/wrap.py", "from consts import LIMIT\ndef limit():\n    return LIMIT\n")
+    g.write(
+        "incrimp/test_const.py", "import wrap\ndef test_const():\n    assert wrap.limit() == 5\n"
+    )
+    # Implicit package init: `import pkg.calc` also runs pkg/__init__.py.
+    g.write("incrimp/pkg/__init__.py", "FACTOR = 2\n")
+    g.write("incrimp/pkg/calc.py", "def calc(x):\n    return x\n")
+    g.write(
+        "incrimp/test_pkg.py",
+        "import pkg.calc\ndef test_pkg():\n    assert pkg.calc.calc(1) * pkg.FACTOR == 2\n",
+    )
+    # A data file only the test reads (never measured by coverage).
+    g.write("incrimp/data.json", '{"n": 1}\n')
+    g.write(
+        "incrimp/test_data.py",
+        "import json, pathlib\n"
+        "def test_data():\n"
+        "    p = pathlib.Path(__file__).with_name('data.json')\n"
+        "    assert json.loads(p.read_text())['n'] == 1\n",
+    )
+    g.write("incrimp/test_other.py", "def test_other():\n    assert True\n")
+    g.write("incrimp/.gitignore", ".rstest_cache/\n.pytest_cache/\n__pycache__/\n.coverage*\n")
+    git_init_commit(sp, "base")
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run("-n", "2", *cov, "--incremental", cwd=sp, env_extra=env)
+
+    r = run()
+    check(
+        "incremental import-time: warm run passes",
+        r.returncode == 0 and "4 passed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    r = run()
+    check(
+        "incremental import-time: unchanged suite is all cached",
+        r.returncode == 0 and "4 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # Edits change file size so a same-second rewrite cannot reuse a stale .pyc.
+    g.write("incrimp/consts.py", "LIMIT = 50\n")
+    r = run()
+    check(
+        "incremental import-time: a transitively imported constant reruns its test",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "test_const" in r.stdout
+        and "3 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    g.write("incrimp/consts.py", "LIMIT = 5\n")
+    g.write("incrimp/pkg/__init__.py", "FACTOR = 20\n")
+    r = run()
+    check(
+        "incremental import-time: a package __init__ constant reruns its test",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "test_pkg" in r.stdout
+        and "2 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    g.write("incrimp/pkg/__init__.py", "FACTOR = 2\n")
+    r = run()
+    check(
+        "incremental import-time: reverting both goes green",
+        r.returncode == 0 and "4 passed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # A tracked data file edit busts skipping wholesale.
+    g.write("incrimp/data.json", '{"n": 22}\n')
+    r = run()
+    check(
+        "incremental data file: editing a tracked data file reruns the suite",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "test_data" in r.stdout
+        and "unchanged" not in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
     )
 
 

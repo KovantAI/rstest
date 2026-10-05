@@ -56,18 +56,36 @@ fn select_from_index(
     strict: bool,
     index: &ProjectIndex,
 ) -> Result<Selection> {
+    let rootdir_canon = rootdir
+        .canonicalize()
+        .unwrap_or_else(|_| rootdir.to_path_buf());
     let mut affected: HashSet<PathBuf> = HashSet::new();
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    // A changed file that is gone (deleted, or the old side of a rename) is in
+    // no reverse edge: those come from files on disk. Its importers still name
+    // its dotted module, now unresolved, so link them by name instead.
+    let mut ghosts: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for c in changed {
-        let abs = rootdir.join(c);
-        let canon = abs.canonicalize().unwrap_or(abs);
+        let canon = canonical_lossy(&rootdir.join(c));
         // Rule 2: conftest.py affects every test below its directory.
         if is_conftest(&canon) {
             add_conftest_subtree(&canon, index, &mut affected);
             continue;
         }
+        if !canon.exists() {
+            let importers = index.importers_of_missing(&dotted_of(&rootdir_canon, &canon));
+            ghosts.insert(canon.clone(), importers);
+        }
         queue.push_back(canon);
     }
+    let importers_of = |f: &PathBuf| {
+        index
+            .reverse
+            .get(f)
+            .into_iter()
+            .chain(ghosts.get(f))
+            .flatten()
+    };
 
     // Strict: every changed SOURCE file must provably reach a test.
     // (Tests select themselves; conftest covers its subtree by rule 2.)
@@ -87,11 +105,9 @@ fn select_from_index(
                     covered = true;
                     break;
                 }
-                if let Some(importers) = index.reverse.get(f) {
-                    for imp in importers {
-                        if seen.insert(imp) {
-                            reach.push_back(imp);
-                        }
+                for imp in importers_of(f) {
+                    if seen.insert(imp) {
+                        reach.push_back(imp);
                     }
                 }
             }
@@ -115,11 +131,9 @@ fn select_from_index(
             add_conftest_subtree(&file, index, &mut affected);
         }
         affected.insert(file.clone());
-        if let Some(importers) = index.reverse.get(&file) {
-            for imp in importers {
-                if seen.insert(imp.clone()) {
-                    queue.push_back(imp.clone());
-                }
+        for imp in importers_of(&file) {
+            if seen.insert(imp.clone()) {
+                queue.push_back(imp.clone());
             }
         }
     }
@@ -172,6 +186,29 @@ struct ProjectIndex {
     files: Vec<PathBuf>,
     /// imported file -> files importing it
     reverse: HashMap<PathBuf, Vec<PathBuf>>,
+    /// imported module name that resolves to no project file -> files
+    /// importing it (a deleted module's importers are only reachable here)
+    unresolved: HashMap<String, Vec<PathBuf>>,
+}
+
+impl ProjectIndex {
+    /// The files importing `dotted`, a module no longer on disk: every
+    /// unresolved name that would have resolved to it, i.e. `dotted` itself or
+    /// any dotted suffix of it (the [`Resolver`]'s suffix rule, inverted).
+    fn importers_of_missing(&self, dotted: &str) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut name = dotted;
+        loop {
+            if let Some(importers) = self.unresolved.get(name) {
+                out.extend(importers.iter().cloned());
+            }
+            match name.split_once('.') {
+                Some((_, rest)) => name = rest,
+                None => break,
+            }
+        }
+        out
+    }
 }
 
 /// All project `.py` files (canonical), pruning the same dirs as the test-file
@@ -258,7 +295,8 @@ impl Resolver {
 /// Read + scan `file`'s imports. `None` when unreadable (no edges, as before).
 fn parse_imports(file: &Path, dotted: &str) -> Option<Vec<String>> {
     let src = std::fs::read_to_string(file).ok()?;
-    Some(imports_of(&src, dotted))
+    let is_package = file.file_name().and_then(|n| n.to_str()) == Some("__init__.py");
+    Some(imports_of(&src, dotted, is_package))
 }
 
 impl ProjectIndex {
@@ -275,19 +313,24 @@ impl ProjectIndex {
             .collect();
         let resolver = Resolver::build(dotted.iter().map(|(d, f)| (d, f)));
         let mut reverse: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        let mut unresolved: HashMap<String, Vec<PathBuf>> = HashMap::new();
         for (importer_dotted, f) in &dotted {
             let Some(modules) = parse_imports(f, importer_dotted) else {
                 continue;
             };
-            for module in modules {
-                for target in resolver.resolve(&module) {
-                    if &target != f {
-                        reverse.entry(target).or_default().push(f.clone());
-                    }
-                }
+            let (out, missing) = resolve_out(&resolver, &modules, f);
+            for target in out {
+                reverse.entry(target).or_default().push(f.clone());
+            }
+            for module in missing {
+                unresolved.entry(module).or_default().push(f.clone());
             }
         }
-        Ok(Self { files, reverse })
+        Ok(Self {
+            files,
+            reverse,
+            unresolved,
+        })
     }
 }
 
@@ -311,7 +354,8 @@ fn stamp_of(file: &Path) -> Option<Stamp> {
 }
 
 /// One cached file: its stamp, the module names it imports (the costly read +
-/// scan), and those names resolved to target files (the forward edges). The raw
+/// scan), those names resolved to target files (the forward edges), and the
+/// names that resolved to nothing (a deleted module's importers). The raw
 /// names are what a rebuild reuses: resolution depends on the current file set,
 /// so it is redone whenever that set moves. The resolved targets let an edit
 /// patch the reverse index by removing the file's old out-edges and adding its
@@ -321,6 +365,7 @@ struct CachedFile {
     stamp: Option<Stamp>,
     modules: Vec<String>,
     out: Vec<PathBuf>,
+    unresolved: Vec<String>,
 }
 
 /// A stateful import-graph index that survives across `--watch` reselections.
@@ -497,13 +542,14 @@ impl CollectionCache {
                     parse_imports(f, &dotted).unwrap_or_default()
                 }
             };
-            let out = resolve_out(&resolver, &modules, f);
+            let (out, unresolved) = resolve_out(&resolver, &modules, f);
             fresh.insert(
                 f.clone(),
                 CachedFile {
                     stamp: now,
                     modules,
                     out,
+                    unresolved,
                 },
             );
         }
@@ -539,7 +585,7 @@ impl CollectionCache {
             .or_insert_with(|| dotted_of(rootdir_canon, file))
             .clone();
         let modules = parse_imports(file, &dotted).unwrap_or_default();
-        let out = resolve_out(resolver, &modules, file);
+        let (out, unresolved) = resolve_out(resolver, &modules, file);
         for target in &out {
             self.reverse
                 .entry(target.clone())
@@ -552,6 +598,7 @@ impl CollectionCache {
                 stamp,
                 modules,
                 out,
+                unresolved,
             },
         );
     }
@@ -574,9 +621,19 @@ impl CollectionCache {
             .iter()
             .map(|(t, importers)| (t.clone(), importers.iter().cloned().collect()))
             .collect();
+        let mut unresolved: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for (f, cached) in &self.files {
+            for module in &cached.unresolved {
+                unresolved
+                    .entry(module.clone())
+                    .or_default()
+                    .push(f.clone());
+            }
+        }
         ProjectIndex {
             files: self.files.keys().cloned().collect(),
             reverse,
+            unresolved,
         }
     }
 }
@@ -631,29 +688,101 @@ fn walk_would_index(rootdir_canon: &Path, path: &Path) -> bool {
     true
 }
 
-/// `file`'s imported `modules` resolved to project files, minus self-edges.
-fn resolve_out(resolver: &Resolver, modules: &[String], file: &Path) -> Vec<PathBuf> {
-    modules
+/// The forward import closure of each of `roots` (test files, paths relative to
+/// the CWD or absolute): every project `.py` under `rootdir` it transitively
+/// imports, plus the `__init__.py` of every package on the way (Python runs a
+/// package's `__init__` before any submodule, so `import pkg.sub` executes
+/// `pkg/__init__.py` with no edge naming it). Keyed by the root as given;
+/// values are canonical paths, sorted, the root itself excluded. Suffix
+/// resolution over-approximates, which only ever adds files: callers use the
+/// closure to decide what can invalidate a cached result.
+pub fn import_closures(rootdir: &Path, roots: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
+    let Ok(index) = ProjectIndex::build(rootdir) else {
+        return HashMap::new();
+    };
+    let mut forward: HashMap<&Path, Vec<&Path>> = HashMap::new();
+    for (target, importers) in &index.reverse {
+        for imp in importers {
+            forward
+                .entry(imp.as_path())
+                .or_default()
+                .push(target.as_path());
+        }
+    }
+    let root_canon = canonical_lossy(rootdir);
+    roots
         .iter()
-        .flat_map(|m| resolver.resolve(m))
-        .filter(|t| t != file)
+        .map(|root| {
+            let start = canonical_lossy(root);
+            let mut seen: HashSet<PathBuf> = HashSet::from([start.clone()]);
+            let mut queue: VecDeque<PathBuf> = VecDeque::from([start.clone()]);
+            while let Some(file) = queue.pop_front() {
+                let edges = forward.get(file.as_path()).into_iter().flatten();
+                let inits = file
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|d| d.starts_with(&root_canon))
+                    .map(|d| d.join("__init__.py"))
+                    .filter(|p| p.is_file());
+                let next: Vec<PathBuf> = edges.map(|p| p.to_path_buf()).chain(inits).collect();
+                for n in next {
+                    if seen.insert(n.clone()) {
+                        queue.push_back(n);
+                    }
+                }
+            }
+            seen.remove(&start);
+            let mut deps: Vec<PathBuf> = seen.into_iter().collect();
+            deps.sort();
+            (root.clone(), deps)
+        })
         .collect()
+}
+
+/// `file`'s imported `modules` resolved to project files, minus self-edges,
+/// plus the modules that resolved to no file at all (stdlib, third-party, or
+/// a project module that has since been deleted).
+fn resolve_out(
+    resolver: &Resolver,
+    modules: &[String],
+    file: &Path,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut unresolved = Vec::new();
+    for m in modules {
+        let targets = resolver.resolve(m);
+        if targets.is_empty() {
+            unresolved.push(m.clone());
+        }
+        out.extend(targets.into_iter().filter(|t| t != file));
+    }
+    (out, unresolved)
 }
 
 /// Modules imported by `src`. Includes indented (function-local /
 /// conditional) imports - extra edges only ever widen the selection.
-pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
+/// `importer_dotted` is the importing file's module name and `is_package`
+/// whether it is a package `__init__.py` (its dotted name is the package
+/// itself, so a relative import resolves one level lower than a module's).
+/// Every parent package of an imported module is a candidate too:
+/// `import q.mod` also executes `q/__init__.py`.
+pub(crate) fn imports_of(src: &str, importer_dotted: &str, is_package: bool) -> Vec<String> {
     let mut modules = Vec::new();
-    for line in src.lines() {
+    let mut lines = src.lines();
+    while let Some(line) = lines.next() {
         let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("import ") {
+        if !(t.starts_with("import ") || t.starts_with("from ")) {
+            continue;
+        }
+        let stmt = logical_import(t, &mut lines);
+        if let Some(rest) = stmt.strip_prefix("import ") {
             for part in rest.split(',') {
                 let m = part.split_whitespace().next().unwrap_or("");
                 if !m.is_empty() {
-                    modules.push(m.to_string());
+                    push_with_parents(&mut modules, m);
                 }
             }
-        } else if let Some(rest) = t.strip_prefix("from ") {
+        } else if let Some(rest) = stmt.strip_prefix("from ") {
             let Some((module_part, names)) = rest.split_once(" import ") else {
                 continue;
             };
@@ -661,9 +790,10 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
             let level = module_part.chars().take_while(|&c| c == '.').count();
             let named = &module_part[level..];
             let base = if level > 0 {
-                // Relative: resolve against the importer's package.
+                // Relative: resolve against the importer's package, which for
+                // an `__init__.py` is its own dotted name.
                 let mut pkg: Vec<&str> = importer_dotted.split('.').collect();
-                for _ in 0..level {
+                for _ in 0..level - usize::from(is_package) {
                     pkg.pop();
                 }
                 let mut base = pkg.join(".");
@@ -677,24 +807,59 @@ pub(crate) fn imports_of(src: &str, importer_dotted: &str) -> Vec<String> {
             } else {
                 named.to_string()
             };
-            if !base.is_empty() {
-                modules.push(base.clone());
+            if base.is_empty() {
+                continue;
             }
+            push_with_parents(&mut modules, &base);
             // `from pkg import x` may import the submodule pkg.x: add a
             // candidate per imported name (misses just don't resolve).
-            for name in names.trim_start_matches('(').split(',') {
+            for name in names.trim().trim_start_matches('(').split(',') {
                 let n = name
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
                     .trim_end_matches(')');
-                if !n.is_empty() && n != "*" && !base.is_empty() {
+                if !n.is_empty() && n != "*" {
                     modules.push(format!("{base}.{n}"));
                 }
             }
         }
     }
+    let mut seen = HashSet::new();
+    modules.retain(|m| seen.insert(m.clone()));
     modules
+}
+
+/// The import statement starting at `first`, with its comment dropped and any
+/// continuation joined on: backslash-continued lines, and a parenthesized
+/// `from x import (` name list up to its closing paren. Import statements
+/// hold no string literals, so `#` always starts a comment.
+fn logical_import<'a>(first: &str, rest: &mut impl Iterator<Item = &'a str>) -> String {
+    fn code(line: &str) -> &str {
+        line.split('#').next().unwrap_or("").trim_end()
+    }
+    let mut stmt = code(first).to_string();
+    loop {
+        if let Some(head) = stmt.strip_suffix('\\') {
+            stmt = head.to_string();
+        } else if !(stmt.starts_with("from ") && stmt.contains('(') && !stmt.contains(')')) {
+            return stmt;
+        }
+        let Some(next) = rest.next() else {
+            return stmt;
+        };
+        stmt.push(' ');
+        stmt.push_str(code(next).trim_start());
+    }
+}
+
+/// Push `module` and each of its parent packages (`a.b.c` -> `a`, `a.b`,
+/// `a.b.c`): importing a submodule runs every enclosing `__init__.py`.
+fn push_with_parents(modules: &mut Vec<String>, module: &str) {
+    for (i, _) in module.match_indices('.') {
+        modules.push(module[..i].to_string());
+    }
+    modules.push(module.to_string());
 }
 
 #[cfg(test)]
@@ -719,8 +884,42 @@ mod tests {
     }
 
     #[test]
+    fn import_closures_follow_transitive_imports_and_package_inits() {
+        let root = tmp("closure");
+        write(&root, "consts.py", "LIMIT = 5\n");
+        write(&root, "wrap.py", "from consts import LIMIT\n");
+        write(&root, "unrelated.py", "X = 1\n");
+        write(&root, "pkg/__init__.py", "FACTOR = 2\n");
+        write(&root, "pkg/sub/__init__.py", "");
+        write(&root, "pkg/sub/calc.py", "def calc():\n    return 1\n");
+        write(&root, "tests/test_a.py", "import wrap\n");
+        write(&root, "tests/test_b.py", "import pkg.sub.calc\n");
+        let a = root.join("tests/test_a.py");
+        let b = root.join("tests/test_b.py");
+        let closures = super::import_closures(&root, &[a.clone(), b.clone()]);
+        assert_eq!(
+            closures[&a],
+            vec![root.join("consts.py"), root.join("wrap.py")]
+        );
+        // `import pkg.sub.calc` names only calc.py; both package inits run too.
+        assert_eq!(
+            closures[&b],
+            vec![
+                root.join("pkg/__init__.py"),
+                root.join("pkg/sub/__init__.py"),
+                root.join("pkg/sub/calc.py"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn plain_and_comma_imports() {
-        let mods = imports_of("import os, mypkg.utils\nimport json as j\n", "tests.test_x");
+        let mods = imports_of(
+            "import os, mypkg.utils\nimport json as j\n",
+            "tests.test_x",
+            false,
+        );
         assert!(mods.contains(&"os".to_string()));
         assert!(mods.contains(&"mypkg.utils".to_string()));
         assert!(mods.contains(&"json".to_string()));
@@ -728,7 +927,7 @@ mod tests {
 
     #[test]
     fn from_imports_add_submodule_candidates() {
-        let mods = imports_of("from mypkg import utils, helpers\n", "tests.test_x");
+        let mods = imports_of("from mypkg import utils, helpers\n", "tests.test_x", false);
         // the package itself AND each name as a possible submodule
         assert!(mods.contains(&"mypkg".to_string()));
         assert!(mods.contains(&"mypkg.utils".to_string()));
@@ -738,11 +937,11 @@ mod tests {
     #[test]
     fn relative_imports_resolve_against_importer_package() {
         // tests/sub/test_a.py doing `from ..core import thing`
-        let mods = imports_of("from ..core import thing\n", "tests.sub.test_a");
+        let mods = imports_of("from ..core import thing\n", "tests.sub.test_a", false);
         assert!(mods.contains(&"tests.core".to_string()), "{mods:?}");
         assert!(mods.contains(&"tests.core.thing".to_string()));
         // `from . import sibling`
-        let mods = imports_of("from . import sibling\n", "tests.sub.test_a");
+        let mods = imports_of("from . import sibling\n", "tests.sub.test_a", false);
         assert!(mods.contains(&"tests.sub.sibling".to_string()), "{mods:?}");
     }
 
@@ -750,7 +949,7 @@ mod tests {
     fn from_without_import_keyword_is_skipped() {
         // `from x` with no ` import ` clause is incomplete: it contributes no
         // module and must not panic (the split_once returns None -> continue).
-        let mods = imports_of("from x\nfrom y import z\n", "tests.test_x");
+        let mods = imports_of("from x\nfrom y import z\n", "tests.test_x", false);
         assert!(!mods.iter().any(|m| m == "x"), "{mods:?}");
         assert!(mods.contains(&"y".to_string()), "{mods:?}");
     }
@@ -865,14 +1064,88 @@ mod tests {
 
     #[test]
     fn star_imports_keep_base_only() {
-        let mods = imports_of("from mypkg.core import *\n", "tests.test_x");
-        assert_eq!(mods, vec!["mypkg.core".to_string()]);
+        let mods = imports_of("from mypkg.core import *\n", "tests.test_x", false);
+        assert_eq!(mods, vec!["mypkg".to_string(), "mypkg.core".to_string()]);
+    }
+
+    #[test]
+    fn relative_import_in_a_package_init_resolves_against_that_package() {
+        // pkg/__init__.py's dotted name is already `pkg`, so `from . import x`
+        // there means pkg.x, not a top-level x.
+        let mods = imports_of("from . import helper\n", "pkg", true);
+        assert!(mods.contains(&"pkg.helper".to_string()), "{mods:?}");
+        let mods = imports_of("from .. import up\nfrom .sub import y\n", "pkg.inner", true);
+        assert!(mods.contains(&"pkg.up".to_string()), "{mods:?}");
+        assert!(mods.contains(&"pkg.inner.sub.y".to_string()), "{mods:?}");
+    }
+
+    #[test]
+    fn multi_line_from_imports_record_every_name() {
+        let src = "from pkg import (\n    a,  # first\n    b as bee,\n)\n\
+                   from other import x, \\\n    y\nimport after\n";
+        let mods = imports_of(src, "tests.test_x", false);
+        for want in ["pkg", "pkg.a", "pkg.b", "other.x", "other.y", "after"] {
+            assert!(mods.contains(&want.to_string()), "{want}: {mods:?}");
+        }
+        assert!(!mods.iter().any(|m| m.contains('#')), "{mods:?}");
+    }
+
+    #[test]
+    fn dotted_imports_add_every_parent_package() {
+        let mods = imports_of(
+            "import q.sub.mod\nfrom r.s import t\n",
+            "tests.test_x",
+            false,
+        );
+        for want in ["q", "q.sub", "q.sub.mod", "r", "r.s", "r.s.t"] {
+            assert!(mods.contains(&want.to_string()), "{want}: {mods:?}");
+        }
+    }
+
+    #[test]
+    fn import_forms_reach_the_modules_they_execute() {
+        // pkg/__init__.py re-exports helper; test_pkg only imports pkg.
+        // q/__init__.py runs on `import q.mod`. Multi-line names are edges too.
+        let root = tmp("import-forms");
+        write(&root, "pkg/__init__.py", "from . import helper\n");
+        write(&root, "pkg/helper.py", "");
+        write(&root, "pkg/multi.py", "");
+        write(&root, "q/__init__.py", "");
+        write(&root, "q/mod.py", "");
+        write(&root, "tests/test_pkg.py", "import pkg\n");
+        write(&root, "tests/test_q.py", "import q.mod\n");
+        write(
+            &root,
+            "tests/test_multi.py",
+            "from pkg import (\n    multi,\n)\n",
+        );
+        let proj = ProjectConfig::default();
+        let sel =
+            |f: &str| tests_of(affected_tests(&root, &proj, &[PathBuf::from(f)], false).unwrap());
+        // helper <- pkg/__init__ <- every test importing pkg (or under it).
+        assert_eq!(
+            sel("pkg/helper.py"),
+            vec![
+                PathBuf::from("tests/test_multi.py"),
+                PathBuf::from("tests/test_pkg.py")
+            ]
+        );
+        assert_eq!(sel("q/__init__.py"), vec![PathBuf::from("tests/test_q.py")]);
+        assert_eq!(
+            sel("pkg/multi.py"),
+            vec![PathBuf::from("tests/test_multi.py")]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn indented_imports_inside_functions_count() {
         // over-selection by design: function-local imports still create edges
-        let mods = imports_of("def test_x():\n    import lazy_dep\n", "tests.test_x");
+        let mods = imports_of(
+            "def test_x():\n    import lazy_dep\n",
+            "tests.test_x",
+            false,
+        );
         assert!(mods.contains(&"lazy_dep".to_string()));
     }
 
@@ -970,6 +1243,64 @@ mod tests {
             }
             Selection::FullRun(r) => panic!("unexpected full run: {r}"),
         }
+    }
+
+    #[test]
+    fn a_deleted_module_selects_its_importers() {
+        // pkg/gone.py is gone from disk, so it is in no reverse edge; its
+        // importers still name it and must be selected (they now fail to
+        // import). An unrelated test stays out.
+        let root = tmp("del-module");
+        write(&root, "pkg/__init__.py", "");
+        write(&root, "pkg/other.py", "");
+        write(&root, "tests/test_gone.py", "from pkg.gone import h\n");
+        write(&root, "tests/test_pkg.py", "from pkg import gone\n");
+        write(&root, "tests/test_plain.py", "import pkg.gone as g\n");
+        write(&root, "tests/test_other.py", "from pkg import other\n");
+        let proj = ProjectConfig::default();
+        let changed = [PathBuf::from("pkg/gone.py")];
+        let want = vec![
+            PathBuf::from("tests/test_gone.py"),
+            PathBuf::from("tests/test_pkg.py"),
+            PathBuf::from("tests/test_plain.py"),
+        ];
+        assert_eq!(
+            tests_of(affected_tests(&root, &proj, &changed, false).unwrap()),
+            want
+        );
+        // --changed-strict: the importers prove the deleted file reaches tests.
+        assert_eq!(
+            tests_of(affected_tests(&root, &proj, &changed, true).unwrap()),
+            want
+        );
+        // The watch cache agrees, cold and after the delete is reported.
+        write(&root, "pkg/gone.py", "def h():\n    return 1\n");
+        let mut cache = CollectionCache::new();
+        let _ = cache.index(&root, &[]);
+        std::fs::remove_file(root.join("pkg/gone.py")).unwrap();
+        assert_eq!(
+            tests_of(affected_tests_cached(&root, &proj, &changed, false, &mut cache).unwrap()),
+            want
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_deleted_module_reaches_tests_through_a_surviving_importer() {
+        // gone.py <- mid.py <- test_mid.py: mid.py survives the delete and is
+        // linked by name, then the BFS continues through the normal edges.
+        let root = tmp("del-transitive");
+        write(&root, "mid.py", "import gone\n");
+        write(&root, "test_mid.py", "import mid\n");
+        let sel = affected_tests(
+            &root,
+            &ProjectConfig::default(),
+            &[PathBuf::from("gone.py")],
+            true,
+        )
+        .unwrap();
+        assert_eq!(tests_of(sel), vec![PathBuf::from("test_mid.py")]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn tests_of(sel: Selection) -> Vec<PathBuf> {

@@ -245,7 +245,7 @@ covers GCS / Azure / HTTP.
 |---|---|
 | `exit-code` | rstest exit code (before the fail-ratio gate) |
 | `junit-path` | JUnit path written (empty if none) |
-| `passed` / `failed` | test counts parsed from JUnit (when the gate ran) |
+| `passed` / `failed` | test counts parsed from JUnit; set only when the fail-ratio gate ran (`fail-under-ratio` set) |
 
 ## Cache design
 

@@ -63,7 +63,7 @@ fn read_json(path: &Path) -> serde_json::Value {
 
 #[test]
 fn clean_suite_is_parallel_safe() {
-    // Two files so -n auto really fans out; repeat 2 drives the merge loop.
+    // Two files, so two workers; repeat 2 drives the merge loop.
     let Some(venv) = pytest_env() else { return };
     let dir = fresh_dir("clean");
     for i in 0..2 {
@@ -88,7 +88,7 @@ fn clean_suite_is_parallel_safe() {
     let doc = read_json(&jpath);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(code, 0, "clean suite should pass the audit\n{out}");
-    assert!(out.contains("running -n auto 2×"), "{out}");
+    assert!(out.contains("running -n 2 2×"), "{out}");
     assert!(out.contains("parallel-safe: all 4 tests"), "{out}");
     assert!(!out.contains("pre-existing"), "{out}");
     assert_eq!(doc["meta"]["kind"], "audit");
@@ -133,7 +133,7 @@ def test_needs_serial():
 
 #[test]
 fn parallel_only_failure_gets_a_serial_fix_list() {
-    // Several failing files: -n auto and the scoped loadfile run both use a
+    // Several failing files: the parallel pass and the scoped loadfile run use a
     // multi-worker pool, so every test passes serially and fails otherwise.
     // Plus one deterministic failure to drive the trailing pre-existing note.
     let Some(venv) = pytest_env() else { return };
@@ -156,7 +156,7 @@ fn parallel_only_failure_gets_a_serial_fix_list() {
     let _ = std::fs::remove_dir_all(&dir);
     // A box that can't run two workers never exposes the failure; only assert
     // the report when it surfaced.
-    if !out.contains("fail under -n auto") {
+    if !out.contains("fail in parallel") {
         return;
     }
     assert_eq!(code, 1, "parallel-only failures should fail audit\n{out}");
@@ -185,6 +185,34 @@ fn parallel_only_failure_gets_a_serial_fix_list() {
         .as_str()
         .unwrap()
         .contains("test_iso_2.py::test_needs_serial"));
+}
+
+#[test]
+fn warm_duration_cache_still_audits_on_two_workers() {
+    // A9: audit used `-n auto`, which caps by the duration cache (~1 worker
+    // per 2s of test time). Once one run had warmed the cache, this tiny
+    // suite resolved to a single worker, where WORKER_ONLY passes, and the
+    // audit reported it parallel-safe (exit 0).
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("warm");
+    for i in 0..2 {
+        std::fs::write(dir.join(format!("test_iso_{i}.py")), WORKER_ONLY).unwrap();
+    }
+    let (warm_code, warm) = run(&venv, &dir, &["-n", "0"]);
+    assert_eq!(warm_code, 0, "the serial warm-up run should pass\n{warm}");
+    let (code, out) = run(&venv, &dir, &["audit"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.contains("running -n 2 1×"), "{out}");
+    assert_eq!(code, 1, "a warm cache must not hide the failures\n{out}");
+    assert!(
+        out.contains("2 test(s) pass serially but fail in parallel"),
+        "{out}"
+    );
+    // Two files can't run two at once under loadfile; the report says so.
+    assert!(
+        out.contains("too few test files to run two at once"),
+        "{out}"
+    );
 }
 
 /// A deterministic "flake": each test keeps a per-test run counter next to

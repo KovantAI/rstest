@@ -81,12 +81,14 @@ fn normalize(name: &str) -> String {
 /// Why each project runs (or doesn't) under `--changed`.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ChangeImpact {
-    /// Files changed inside the project: run with --changed (the child
-    /// narrows further via its own import graph).
+    /// Files changed inside the project and in none of its dependencies:
+    /// run with --changed (the child narrows further via its own import
+    /// graph).
     Direct,
     /// A sibling it depends on (transitively) changed: run the FULL suite,
-    /// since its own files didn't change and child-local selection would
-    /// find nothing.
+    /// whether or not its own files changed, since child-local selection
+    /// only sees the project's own subtree and would skip its tests of the
+    /// sibling's changed code.
     Dependent,
     Unaffected,
 }
@@ -149,11 +151,15 @@ pub fn classify_changes(
             }
         }
     }
+    // A Direct project whose dependency is affected is promoted too: its own
+    // import graph only sees its own subtree, so `--changed` would skip its
+    // tests of the sibling's changed code. Promotion keeps it affected, so
+    // the closure over "affected" is unchanged.
     let mut grew = true;
     while grew {
         grew = false;
         for i in 0..n {
-            if impact[i] != ChangeImpact::Unaffected {
+            if impact[i] == ChangeImpact::Dependent {
                 continue;
             }
             if (0..n).any(|j| edges[i][j] && impact[j] != ChangeImpact::Unaffected) {
@@ -248,7 +254,7 @@ pub fn scanned_sibling_edges(projects: &[PathBuf]) -> Vec<Vec<usize>> {
             let Ok(src) = std::fs::read_to_string(path) else {
                 continue;
             };
-            for module in crate::select::imports_of(&src, "") {
+            for module in crate::select::imports_of(&src, "", false) {
                 let first = module.split('.').next().unwrap_or(&module);
                 first_segments.insert(first.to_string());
             }
@@ -315,6 +321,30 @@ mod change_tests {
                 ChangeImpact::Direct,
                 ChangeImpact::Dependent,
                 ChangeImpact::Unaffected,
+                ChangeImpact::Dependent,
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_project_with_changed_dependency_runs_full() {
+        let root = tmp("dirdep");
+        let a = proj(&root, "libs/a", "pkg-a", &[]);
+        let b = proj(&root, "libs/b", "pkg-b", &["pkg-a"]);
+        let c = proj(&root, "libs/c", "pkg-c", &["pkg-b"]);
+        let changed = vec![
+            PathBuf::from("libs/a/x.py"),
+            PathBuf::from("libs/b/y.py"),
+            PathBuf::from("libs/c/z.py"),
+        ];
+        let impacts = classify_changes(&root, &[a, b, c], &changed, false, &mut Sink::captured().0);
+        // a has no affected deps and narrows; b and c test a changed
+        // dependency's code and must not narrow to their own subtree
+        assert_eq!(
+            impacts,
+            vec![
+                ChangeImpact::Direct,
+                ChangeImpact::Dependent,
                 ChangeImpact::Dependent,
             ]
         );

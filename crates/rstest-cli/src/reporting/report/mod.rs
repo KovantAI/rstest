@@ -587,24 +587,37 @@ impl Run {
         demoted
     }
 
-    /// pytest-style "N passed, N failed, ..." counts derived from phases:
-    /// a test counts by its call outcome; setup/teardown failures count as
-    /// errors; setup skips count as skipped (matches pytest accounting).
-    /// Like pytest's line, collection errors count as errors and deselected
-    /// items are shown. Nothing counted reads "no tests ran", like pytest.
+    /// pytest-style "N failed, N passed, ..." line from [`Run::counts`], with no
+    /// warnings part. See [`Run::summary_line_with`].
     pub fn summary_line(&self) -> String {
-        let mut counts = self.counts();
-        let collect_errors = counts.remove("collect_errors").unwrap_or(0);
-        *counts.entry("errors").or_default() += collect_errors;
-        counts.insert("deselected", self.deselected);
-        let line = counts
+        self.summary_line_with(0)
+    }
+
+    /// pytest's terminal summary line from [`Run::counts`] (per-report
+    /// accounting) plus `warnings`: pytest's order and wording (`1 error`,
+    /// `2 errors`, `1 warning`), then rstest's own buckets (flaky,
+    /// quarantined), which pytest would append as unknown categories. Like
+    /// pytest's line, collection errors count as errors and deselected items
+    /// are shown. Nothing counted reads "no tests ran", like pytest.
+    pub fn summary_line_with(&self, warnings: u64) -> String {
+        let counts = self.counts();
+        let n = |key: &str| counts.get(key).copied().unwrap_or(0);
+        let parts = [
+            (n("failed"), "failed", "failed"),
+            (n("passed"), "passed", "passed"),
+            (n("skipped"), "skipped", "skipped"),
+            (self.deselected, "deselected", "deselected"),
+            (n("xfailed"), "xfailed", "xfailed"),
+            (n("xpassed"), "xpassed", "xpassed"),
+            (warnings, "warning", "warnings"),
+            (n("errors") + n("collect_errors"), "error", "errors"),
+            (n("flaky"), "flaky", "flaky"),
+            (n("quarantined"), "quarantined", "quarantined"),
+        ];
+        let line = parts
             .iter()
-            .filter(|(_, v)| **v > 0)
-            .map(|(k, v)| match (*k, *v) {
-                // pytest's own plural rule: only "error(s)" changes with the count.
-                ("errors", 1) => "1 error".to_string(),
-                (k, v) => format!("{v} {}", k.replace('_', " ")),
-            })
+            .filter(|(v, _, _)| *v > 0)
+            .map(|(v, one, many)| format!("{v} {}", if *v == 1 { one } else { many }))
             .collect::<Vec<_>>()
             .join(", ");
         if line.is_empty() {
@@ -617,6 +630,10 @@ impl Run {
     /// Outcome counts with pytest accounting: the single source of truth for
     /// the summary line AND the report-json envelope (never re-derive by
     /// walking `tests`). All keys always present (zeros) for a stable shape.
+    /// Like pytest's terminal summary these count phase reports, not tests
+    /// (see [`report_categories`]): a test that passes and then errors in
+    /// teardown adds to both `passed` and `errors`. For one bucket per test
+    /// use [`TestEntry::outcome`].
     pub fn counts(&self) -> BTreeMap<&'static str, u64> {
         let mut counts: BTreeMap<&'static str, u64> = [
             ("passed", 0),
@@ -636,17 +653,19 @@ impl Run {
             // pytest counts each failed subtest as a failure and the parent
             // by its own call outcome (unittest leaves it passed; the
             // `subtests` fixture fails it too).
-            let bucket = if entry.subtests_failed > 0 && !entry.quarantined {
+            let call = if entry.subtests_failed > 0 && !entry.quarantined {
                 *counts.entry("failed").or_default() += entry.subtests_failed;
-                classify_call(entry, entry.own_call.as_deref())
+                entry.own_call.as_deref()
             } else {
-                classify(entry)
+                entry.call.as_deref()
             };
-            let bucket = match bucket {
-                "passed" if entry.flaky => "flaky",
-                b => b,
-            };
-            *counts.entry(bucket).or_default() += 1;
+            for category in report_categories(entry, call) {
+                let category = match category {
+                    "passed" if entry.flaky => "flaky",
+                    c => c,
+                };
+                *counts.entry(category).or_default() += 1;
+            }
         }
         *counts.entry("skipped").or_default() += self.collect_skips;
         *counts.entry("collect_errors").or_default() += self.collect_errors.len() as u64;
@@ -730,6 +749,45 @@ impl TestEntry {
     pub fn protocol_cpu(&self) -> Option<f64> {
         self.cpu
             .map(|c| c + self.setup_cpu.unwrap_or(0.0) + self.teardown_cpu.unwrap_or(0.0))
+    }
+}
+
+/// pytest's terminal accounting for one test (`pytest_report_teststatus` per
+/// phase report), with `call` as its call outcome: every setup/call/teardown
+/// report lands in its own category, so a test can count more than once. A
+/// passed setup/teardown counts nowhere; a failed one is an error and a
+/// skipped one is skipped (xfailed when the test is an expected failure: an
+/// xfail test's teardown error is reported as xfailed). The call counts by its
+/// own outcome. A quarantined test counts once, as `quarantined` (rstest's
+/// bucket, no pytest twin). An entry with no countable report (a worker lost
+/// it mid-test) falls back to [`classify_call`].
+fn report_categories(e: &TestEntry, call: Option<&str>) -> Vec<&'static str> {
+    if e.quarantined {
+        return vec!["quarantined"];
+    }
+    let phases = [
+        (false, e.setup.as_deref()),
+        (true, call),
+        (false, e.teardown.as_deref()),
+    ];
+    let categories: Vec<&'static str> = phases
+        .into_iter()
+        .filter_map(|(is_call, outcome)| {
+            Some(match outcome? {
+                "skipped" if e.wasxfail => "xfailed",
+                "skipped" => "skipped",
+                "passed" if is_call && e.wasxfail => "xpassed",
+                "passed" if is_call => "passed",
+                "failed" if is_call => "failed",
+                "failed" => "errors",
+                _ => return None,
+            })
+        })
+        .collect();
+    if categories.is_empty() {
+        vec![classify_call(e, call)]
+    } else {
+        categories
     }
 }
 
@@ -850,7 +908,7 @@ mod tests {
         full(&mut run, "a.py::skip", "skipped");
         // setup failure counts as error, not failure
         run.record(None, report("a.py::err", "setup", "failed"));
-        assert_eq!(run.summary_line(), "1 error, 1 failed, 2 passed, 1 skipped");
+        assert_eq!(run.summary_line(), "1 failed, 2 passed, 1 skipped, 1 error");
         assert!(!run.all_passed());
     }
 
@@ -865,17 +923,90 @@ mod tests {
     }
 
     #[test]
+    fn teardown_error_counts_alongside_call_outcome() {
+        // pytest counts reports, not tests: a passing (or failing) call plus a
+        // teardown error is one passed (failed) AND one error.
+        let mut run = Run::default();
+        full(&mut run, "a.py::ok", "passed");
+        for (id, call) in [("a.py::pass_td", "passed"), ("a.py::fail_td", "failed")] {
+            run.record(None, report(id, "setup", "passed"));
+            run.record(None, report(id, "call", call));
+            run.record(None, report(id, "teardown", "failed"));
+        }
+        // setup + teardown both erroring is two errors, as in pytest.
+        run.record(None, report("a.py::both", "setup", "failed"));
+        run.record(None, report("a.py::both", "teardown", "failed"));
+        let counts = run.counts();
+        assert_eq!(counts["passed"], 2);
+        assert_eq!(counts["failed"], 1);
+        assert_eq!(counts["errors"], 4);
+        assert_eq!(run.summary_line(), "1 failed, 2 passed, 4 errors");
+        // One display bucket per test is unchanged: teardown error wins.
+        assert_eq!(run.tests()["a.py::pass_td"].outcome(), "errors");
+        assert!(!run.green_nodeids().contains("a.py::pass_td"));
+    }
+
+    #[test]
+    fn xfail_teardown_error_counts_as_xfailed() {
+        // pytest's skipping plugin turns an xfail test's teardown exception
+        // into an xfailed report, so xfail+td error is 2 xfailed and
+        // xpass+td error is 1 xpassed + 1 xfailed.
+        let mut run = Run::default();
+        for (id, call) in [("a.py::xf", "skipped"), ("a.py::xp", "passed")] {
+            run.record(None, report(id, "setup", "passed"));
+            let mut c = report(id, "call", call);
+            c.wasxfail = true;
+            run.record(None, c);
+            let mut td = report(id, "teardown", "skipped");
+            td.wasxfail = true;
+            run.record(None, td);
+        }
+        assert_eq!(run.summary_line(), "3 xfailed, 1 xpassed");
+        assert!(run.all_passed());
+    }
+
+    #[test]
+    fn quarantined_and_orphan_entries_count_once() {
+        let mut run = Run::default();
+        run.record(None, report("a.py::q", "call", "failed"));
+        run.record(None, report("a.py::q", "teardown", "failed"));
+        run.quarantine(|id| id == "a.py::q");
+        // Only a passed setup arrived (worker lost the test): still counted.
+        run.record(None, report("a.py::lost", "setup", "passed"));
+        let counts = run.counts();
+        assert_eq!(counts["quarantined"], 1);
+        assert_eq!(counts["errors"], 1);
+        assert_eq!(counts["failed"], 0);
+    }
+
+    #[test]
+    fn summary_line_uses_pytest_order_and_wording() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::ok", "passed");
+        full(&mut run, "a.py::bad", "failed");
+        full(&mut run, "a.py::bad2", "failed");
+        run.record(None, report("a.py::err", "setup", "failed"));
+        run.deselected = 3;
+        run.collect_error("b.py".into(), "ImportError".into());
+        assert_eq!(
+            run.summary_line_with(1),
+            "2 failed, 1 passed, 3 deselected, 1 warning, 2 errors"
+        );
+        assert!(run.summary_line_with(2).contains("2 warnings, 2 errors"));
+    }
+
+    #[test]
     fn collect_errors_block_all_passed() {
         let mut run = Run::default();
         full(&mut run, "a.py::ok", "passed");
         run.collect_error("b.py".into(), "ImportError".into());
         assert!(!run.all_passed());
         // pytest's summary counts a collection error among its errors.
-        assert_eq!(run.summary_line(), "1 error, 1 passed");
+        assert_eq!(run.summary_line(), "1 passed, 1 error");
         assert_eq!(run.counts()["collect_errors"], 1);
         // Plural from two on, as pytest words it.
         run.collect_error("c.py".into(), "ImportError".into());
-        assert_eq!(run.summary_line(), "2 errors, 1 passed");
+        assert_eq!(run.summary_line(), "1 passed, 2 errors");
     }
 
     #[test]
@@ -905,7 +1036,7 @@ mod tests {
         let mut run = Run::default();
         full(&mut run, "a.py::ok", "passed");
         run.deselected = 12;
-        assert_eq!(run.summary_line(), "12 deselected, 1 passed");
+        assert_eq!(run.summary_line(), "1 passed, 12 deselected");
         // Not an outcome bucket: the report-json counts are unchanged.
         assert!(!run.counts().contains_key("deselected"));
         let none = Run {
@@ -1083,7 +1214,7 @@ mod tests {
         let counts = run.counts();
         assert_eq!(counts["flaky"], 1);
         assert_eq!(counts["passed"], 1);
-        assert_eq!(run.summary_line(), "1 flaky, 1 passed");
+        assert_eq!(run.summary_line(), "1 passed, 1 flaky");
     }
 
     #[test]

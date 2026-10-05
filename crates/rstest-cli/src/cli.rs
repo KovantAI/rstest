@@ -25,7 +25,7 @@ pub(crate) enum Command {
     Try,
 
     /// Parallel-readiness preflight: collect twice and report tests with
-    /// unstable ids, then run -n auto and classify any parallel-only failure
+    /// unstable ids, then run in parallel and classify any parallel-only failure
     /// (polluter bisected). Exits non-zero on any such finding. Combine with
     /// `--migrate-check-json` / `--migrate-allow`.
     MigrateCheck,
@@ -39,7 +39,7 @@ pub(crate) enum Command {
     /// hidden; `--xdist-removal-json` writes the findings for CI.
     XdistRemovalCheck,
 
-    /// Auto parallel-safety audit: run the suite under -n auto (repeat with
+    /// Auto parallel-safety audit: run the suite in parallel (repeat with
     /// `--audit-repeat` to catch probabilistic flakes), diff against the -n 0
     /// oracle, and print the tests that fail ONLY in parallel with a
     /// ready-to-paste `@pytest.mark.serial` fix-list. Exits non-zero on any
@@ -253,7 +253,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub(crate) audit_json: Option<PathBuf>,
 
-    /// How many times `audit` repeats the `-n auto` run; a parallel flake is
+    /// How many times `audit` repeats the parallel run; a parallel flake is
     /// probabilistic, so more repeats catch more of them. [default: 1]
     #[arg(long, global = true, value_name = "N")]
     pub(crate) audit_repeat: Option<u32>,
@@ -370,18 +370,21 @@ pub struct Cli {
     /// Incremental testing: run only what changed since the last GREEN run,
     /// re-using --changed's coverage-aware selection with an auto-managed
     /// baseline (the commit of the last all-passing run, stored in the cache).
-    /// The baseline advances only when a run is fully green, so a failing test
-    /// keeps being selected until it passes. First run (no baseline) runs
+    /// The baseline advances only when a run is fully green on a clean working
+    /// tree (no uncommitted or untracked changes), so a failing test keeps being
+    /// selected until it passes at a commit. First run (no baseline) runs
     /// everything. Ignored when --changed is given explicitly.
     #[arg(long = "since-green")]
     pub(crate) since_green: bool,
 
     /// Dispatch-level incremental testing: collect the whole suite, then SKIP
-    /// running any test that was green last run and whose covered source is
-    /// byte-identical now (content-addressed via the coverage index — no git).
-    /// Skipped tests are carried forward as cached passes. Needs a warm coverage
-    /// index (a prior `--cov-context=test` run); full collection + `--dist load`
-    /// only. A config-file change disables skipping for that run.
+    /// running any test that was green last run and whose covered source and
+    /// transitively imported modules are byte-identical now (content-addressed
+    /// via the coverage index; git not required). Skipped tests are carried
+    /// forward as cached passes. Needs a warm coverage index (a prior
+    /// `--cov-context=test` run); full collection + `--dist load` only. A
+    /// config-file or git-tracked non-Python file change disables skipping for
+    /// that run.
     #[arg(long)]
     pub(crate) incremental: bool,
 

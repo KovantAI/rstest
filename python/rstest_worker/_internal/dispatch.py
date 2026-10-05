@@ -346,6 +346,43 @@ class ItemDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
                 return finish()
 
 
+def _share_directory_nodes(session) -> None:
+    """Make repeated `perform_collect` calls on `session` reuse one node per
+    directory (`Dir` / `Package`, keyed by nodeid) instead of building a fresh
+    tree each time.
+
+    pytest keys package scope, conftest autouse fixtures and `SetupState` on
+    node IDENTITY, so with a fresh tree per file the second file under a
+    package tears the old `Package` down and sets it up again (package
+    fixtures and `setup_module` in `__init__.py` rerun), and a conftest's
+    autouse fixtures (bound to the first tree's directory node) silently stop
+    applying. Directory listings are still collected fresh (they depend on
+    the current initial paths); only the directory nodes in them are swapped
+    for the first-seen instance, so modules hang off the shared chain.
+    """
+    shared: dict[str, pytest.Directory] = {}
+
+    def canonical(cols):
+        return [
+            shared.setdefault(c.nodeid, c) if isinstance(c, pytest.Directory) else c for c in cols
+        ]
+
+    collect_path = session._collect_path
+    collect_one_node = session._collect_one_node
+
+    def _collect_path(path, path_cache):
+        return canonical(collect_path(path, path_cache))
+
+    def _collect_one_node(node, handle_dupes=True):
+        rep, duplicate = collect_one_node(node, handle_dupes)
+        if rep.passed:
+            rep.result = canonical(rep.result)
+        return rep, duplicate
+
+    session._collect_path = _collect_path
+    session._collect_one_node = _collect_one_node
+
+
 class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
     """D5 lazy collection: no initial collection pass at all.
 
@@ -360,6 +397,7 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
         # Replace the initial full collection: work arrives as files.
         session.testscollected = 0
         session.items = []
+        _share_directory_nodes(session)
         payload = {}
         # No `cache` attribute at all with `-p no:cacheprovider`.
         cache = getattr(session.config, "cache", None)

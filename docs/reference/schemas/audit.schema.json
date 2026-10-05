@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "inconclusive": {
-      "description": "Tests that failed under `-n auto` but did not run in the follow-up\nruns, so could not be classified. They still fail the gate.",
+      "description": "Tests that failed in the parallel pass but did not run in the follow-up\nruns, so could not be classified. They still fail the gate.",
       "type": "array",
       "items": {
         "type": "string"
@@ -39,7 +39,7 @@
       "minimum": 0
     },
     "ran": {
-      "description": "Whether the `-n auto` pass produced a run to audit.",
+      "description": "Whether the parallel pass produced a run to audit.",
       "type": "boolean"
     },
     "serial_candidates": {

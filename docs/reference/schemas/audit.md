@@ -8,13 +8,13 @@ The `--audit-json` document (schema 1). Every field but `meta`, `ran` and `paral
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `inconclusive` | array of string | no | Tests that failed under `-n auto` but did not run in the follow-up runs, so could not be classified. They still fail the gate. |
+| `inconclusive` | array of string | no | Tests that failed in the parallel pass but did not run in the follow-up runs, so could not be classified. They still fail the gate. |
 | `intrinsic_flakes` | array of string | no | Tests that fail intermittently whatever the scheduling (intrinsic flakes). |
 | `meta` | AuditMeta | yes |  |
 | `order_dependent` | array of string | no | Tests that pass under `--dist loadfile`: they depend on a sibling in their file running first, so keep the file together rather than serial. |
 | `parallel_safe` | boolean | yes | Whether the suite is parallel-safe (no parallel-only failures). Always `false` when the audit did not run. |
 | `preexisting_failures` | integer | no | Tests that already fail at `-n 0`: pre-existing, not a parallelism issue, and not counted against the gate. |
-| `ran` | boolean | yes | Whether the `-n auto` pass produced a run to audit. |
+| `ran` | boolean | yes | Whether the parallel pass produced a run to audit. |
 | `serial_candidates` | array of SerialCandidate | no | Tests fixable by pinning them to `@pytest.mark.serial`. |
 | `serial_conftest` | string | no | A paste-able `conftest.py` block that marks every serial candidate. |
 | `tests` | integer | no | Tests audited (0 when the selection matched nothing). |

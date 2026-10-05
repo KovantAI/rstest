@@ -14,6 +14,9 @@ from pathlib import Path
 import _harness
 from _harness import REPO, WINDOWS, Gate, make_venv
 from gates.coverage import (
+    gate_changed_deleted_module,
+    gate_changed_from_subdir,
+    gate_changed_import_forms,
     gate_coverage,
     gate_coverage_based_selection_changed_uses_th,
     gate_coverage_contexts_line_test_index_cov_co,
@@ -55,12 +58,15 @@ from gates.incremental import (
     gate_explain,
     gate_incremental_dispatch_skip,
     gate_incremental_guards,
+    gate_incremental_import_time_and_data,
     gate_incremental_out_of_scope_source,
+    gate_since_green_dirty_tree,
     gate_since_green_incremental,
 )
 from gates.misc import (
     gate_basics,
     gate_collection_error_semantics,
+    gate_lone_surrogate_in_report,
     gate_worker_identity_fixtures,
 )
 from gates.monorepo import (
@@ -162,6 +168,7 @@ def main():
     sections = (
         gate_basics,
         gate_collection_error_semantics,
+        gate_lone_surrogate_in_report,
         gate_worker_identity_fixtures,
         gate_output_styles,
         gate_multiprocessing_spawn_children,
@@ -244,9 +251,14 @@ def main():
         gate_coverage_contexts_line_test_index_cov_co,
         gate_diff_coverage_gate,
         gate_smart_selection,
+        gate_changed_deleted_module,
+        gate_changed_import_forms,
+        gate_changed_from_subdir,
         gate_since_green_incremental,
+        gate_since_green_dirty_tree,
         gate_incremental_dispatch_skip,
         gate_incremental_guards,
+        gate_incremental_import_time_and_data,
         gate_incremental_out_of_scope_source,
         gate_explain,
         gate_coverage_based_selection_changed_uses_th,

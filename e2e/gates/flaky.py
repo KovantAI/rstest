@@ -282,7 +282,7 @@ def gate_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
     check(
         "crashed test retried within budget",
         # 2 tests: the recovered one counts as flaky only, not also passed.
-        r.returncode == 0 and "1 flaky, 1 passed" in r.stdout,
+        r.returncode == 0 and "1 passed, 1 flaky" in r.stdout,
         r.stdout[-200:],
     )
     marker.unlink(missing_ok=True)
@@ -373,6 +373,26 @@ def gate_quarantine(g, args, binary):
         "quarantine: history annotation in section",
         "failed 2x before" in r.stdout or "failed 3x before" in r.stdout,
         r.stdout[-400:],
+    )
+    # CI annotations must agree with the green exit: quarantined failures are
+    # surfaced as warnings, never as ::error / logissue type=error.
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", "--output", "github", cwd=qdir)
+    gh = r.stdout.splitlines()
+    check(
+        "quarantine: github annotates as ::warning, not ::error",
+        r.returncode == 0
+        and not any(ln.startswith("::error ") for ln in gh)
+        and sum(ln.startswith("::warning ") and "quarantined" in ln for ln in gh) == 2,
+        f"rc={r.returncode} " + r.stdout[-400:],
+    )
+    r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", "--output", "azure", cwd=qdir)
+    az = [ln for ln in r.stdout.splitlines() if ln.startswith("##vso[task.logissue ")]
+    check(
+        "quarantine: azure logissue is type=warning, not type=error",
+        r.returncode == 0
+        and not any("type=error" in ln for ln in az)
+        and sum("type=warning" in ln and "quarantined" in ln for ln in az) == 2,
+        f"rc={r.returncode} " + r.stdout[-400:],
     )
     # Passthrough mode (-s) hands stdio to pytest and skips the quarantine
     # matcher entirely; the flag must warn it is being ignored, not silently

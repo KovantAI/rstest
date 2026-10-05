@@ -30,7 +30,9 @@ const SLOWEST_PASSED: usize = 10;
 #[allow(clippy::write_with_newline)]
 pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
     let counts = run.counts();
-    let total: u64 = counts.values().sum::<u64>() - counts["collect_errors"];
+    // Tests, not reports: `counts` follows pytest's per-report accounting, so a
+    // test with a teardown error appears in two buckets there.
+    let total = run.tests().len() as u64 + run.collect_skips;
 
     let mut html = String::new();
     html.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
