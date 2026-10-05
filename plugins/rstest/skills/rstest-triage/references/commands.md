@@ -189,12 +189,15 @@ $ rstest --shuffle=1234 -n 2 --dist loadfile   # reproduce a failing order
 
 - `--reruns N`: retries a failure up to N times; fail-then-pass is `flaky`
   (green run, counted, listed, flagged in JUnit and report-json).
-  `@pytest.mark.flaky(reruns=3)` sets a per-test budget; positional
-  `flaky(3)` retries only once. `--only-rerun REGEX` (repeatable) limits
-  retries to failures whose error text matches.
-- The marker's `only_rerun`, `condition` and `reruns_delay` keywords are
-  ignored: a `flaky(only_rerun=["ConnectionError"])` test still retries an
+  `@pytest.mark.flaky(reruns=3)` (or positional `flaky(3)`) sets a per-test
+  budget, honored at every `-n`, `-n 0` included; `condition=False` turns it
+  off. `--only-rerun REGEX` (repeatable) limits retries to failures whose
+  error text matches.
+- The marker's `only_rerun` and `reruns_delay` keywords are ignored: a
+  `flaky(only_rerun=["ConnectionError"])` test still retries an
   `AssertionError`. Use the `--only-rerun` flag instead.
+- `-x` / `--maxfail` count a test only once its reruns are used up, and never
+  count a `--quarantine` match.
 - Pass `--reruns` whenever the suite relies on `@pytest.mark.flaky`: with the
   marker alone, a parallel run retries and reports `1 flaky`, yet exits 1.
 - History: every run (except `--dist each` and `replay`) merges into

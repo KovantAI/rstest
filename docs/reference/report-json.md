@@ -53,15 +53,16 @@ Per-test fields (absent when not applicable):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `setup` / `call` / `teardown` | `"passed"` / `"failed"` / `"skipped"` | phase outcomes; a test skipped at setup has no `call`. An xfail test records `"call": "skipped"` with `wasxfail: true` |
+| `setup` / `call` / `teardown` | `"passed"` / `"failed"` / `"skipped"` | phase outcomes; a test skipped at setup has no `call`. An xfail test records `"call": "skipped"` with `wasxfail: true`. A test with a failed subtest has `call: "failed"` |
+| `subtests_failed` | int | failed subtests (unittest `subTest`, the `subtests` fixture). Each counts once in `meta.counts.failed`, as in pytest's summary; the test itself counts by its own outcome (pytest leaves a unittest test passed and fails a `subtests` fixture test). Omitted when 0 |
 | `duration` | seconds | call-phase wall time, 4 decimal places |
-| `cpu` | seconds | call-phase CPU time (`process_time`), 4 decimals. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). **Only present when measured**: a `--doctor` run or a live-stream run (`--output json` / `--stream-json`); omitted on a plain run so the snapshot stays comparable to the pytest baseline |
+| `cpu` | seconds | call-phase CPU time (`process_time` plus child processes the test waited for), 4 decimals. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). **Only present when measured**: a `--doctor` run or a live-stream run (`--output json` / `--stream-json`); omitted on a plain run so the snapshot stays comparable to the pytest baseline |
 | `lineno` | int | 0-based source line of the test (pytest `report.location`); omitted when pytest reports none. The file is the nodeid's path |
 | `wasxfail` | `true` | the test was an expected failure (xfail/xpass) |
 | `skip_reason` | string | pytest's skip message, first 200 chars; it keeps pytest's `Skipped: ` prefix (`@pytest.mark.skip(reason="needs postgres")` gives `"Skipped: needs postgres"`) |
 | `flaky` | `true` | passed only after [`--reruns`](cli.md#-reruns-n) or `@pytest.mark.flaky` retries. Counted in `meta.counts.flaky`, not also in `passed` |
 | `quarantined` | `true` | failed, but matched the [`--quarantine`](cli.md#-quarantine-file) list: non-fatal |
-| `longrepr` | string | failure text (assertion repr / traceback), failures only, capped at 20,000 bytes (cut on a UTF-8 character boundary) |
+| `longrepr` | string | failure text (assertion repr / traceback) as pytest prints it in the `--tb` style in effect (under `--tb=line` its last line is the `path:line: message` crash line), failures only, capped at 20,000 bytes (cut on a UTF-8 character boundary) |
 | `crashed` | `true` | the failure was fabricated by the orchestrator: worker crash, `--worker-timeout` kill, or the test that was running when SIGINT/SIGTERM stopped the run; pytest never reported it. `longrepr` says which |
 | `worker` | `"gw2"` | worker that produced the final outcome (pool runs only) |
 | `cached` | `true` | not executed this run: skipped by [`--incremental`](cli.md#-incremental) because it passed last run and its covered source is unchanged. Counts as passed. A cached entry carries only `"call": "passed"`, `"cached": true` and, when the prior run recorded it, `lineno` (no `setup`, `teardown` or `duration`) |
@@ -70,9 +71,10 @@ Per-test fields (absent when not applicable):
 the unversioned original (phases, `duration`, `wasxfail`,
 `skip_reason`, `flaky`, `worker`); `2` added `longrepr` and `crashed`
 plus the version field itself; `3` added the envelope, `counts`
-(pytest-accounting outcome totals, all keys always present, identical
-to the terminal summary line's numbers: never re-derive them by
-walking `tests`), `duration_seconds`, `started_at_epoch`, `workers`,
+(pytest-accounting outcome totals, all keys always present, the same
+numbers as the terminal summary line, which like pytest's adds
+`collect_errors` into its errors and also shows the `deselected` count:
+never re-derive them by walking `tests`), `duration_seconds`, `started_at_epoch`, `workers`,
 and `argv`; `4` added per-test `lineno`; `5` added per-test
 `quarantined` and the `quarantined` counts key. Parse it:
 incompatible changes will bump it.
@@ -81,7 +83,8 @@ The per-test `cpu` field arrived **without** a schema bump: it is
 conditional (present only on `--doctor` / live-stream runs), so a plain
 run's document shape is unchanged. Treat it as an added optional field.
 The per-test `cached` field is the same kind of addition: present only on
-`--incremental` runs, no bump.
+`--incremental` runs, no bump. So is `subtests_failed`: present only on a
+test with a failed subtest.
 
 Boolean fields (`wasxfail`, `flaky`, `quarantined`, `crashed`, `cached`) are
 **omitted when false**, never written as `false`. Read a missing key as
@@ -219,7 +222,7 @@ granularity. Fields:
 | `duration` | float | phase duration in seconds (rounded to 1e-4) |
 | `wasxfail` | bool | the outcome was an expected failure / unexpected pass |
 | `lineno` | int | 0-based source line; **omitted** when pytest reports none |
-| `cpu` | float | call-phase CPU seconds (`process_time`); on the `call` report only. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). Present whenever a stream is active, including at `-n 0` |
+| `cpu` | float | call-phase CPU seconds (`process_time` plus child processes the test waited for); on the `call` report only. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). Present whenever a stream is active, including at `-n 0` |
 | `worker` | string | `gwN`: **pool runs only**; absent under `-n 0` |
 | `longrepr` | string | failure traceback; **present only on `failed`** |
 | `sections` | array | captured output: `[{name, text}]` (e.g. `Captured stdout call`), each tail-capped at 20 000 chars. Present on failures, and on **every** report when this stream is active (so passing-test output shows too); **omitted** when a report captured nothing |
@@ -234,10 +237,9 @@ run, so a tree can mark the file red live rather than waiting for
 | `path` | string | the failing collector: rootdir-relative file or nodeid |
 | `longrepr` | string | the collection traceback |
 
-Under full collection every worker collects the whole suite, so
-the same file's `collecterror` is emitted **once per worker**: dedupe by
-`path` if you need one entry per file (the human summary's `N collect errors`
-counts the same way).
+Under full collection every worker collects the whole suite, but the
+same file's `collecterror` is emitted **once**, like its entry in
+`collect_errors` and `meta.counts.collect_errors`.
 
 The stream closes with exactly one `sessionfinish`:
 
@@ -335,10 +337,15 @@ reference doesn't spell out:
 
 - **`schema`** is the document version, currently `3`.
 - **`wall_seconds` depends on the worker count**: compare it across runs only
-  at equal `-n`. **`test_time_seconds`** (summed per-test call durations) is
-  worker-count-independent and is the stable metric to trend.
-  `cpu_time_seconds` sums call-phase CPU time over the tests where it was
-  measured; `tests` counts tests with a recorded duration.
+  at equal `-n`. **`test_time_seconds`** (summed per-test durations) is
+  worker-count-independent and is the stable metric to trend. Every per-test
+  time in the document (`test_time_seconds`, worker load, long pole, slowest
+  files, wait-bound and coverage-waste durations) is the whole protocol:
+  setup + call + teardown, so fixture time counts.
+  `cpu_time_seconds` sums CPU time over the same span (including child
+  processes the test waited for) over the tests where it was measured;
+  `tests` counts tests with a recorded call duration.
+- **`workers`** is the worker count, `1` for a single-worker run (`-n 0`).
 - **`startup_seconds`** is the wall time from pool spawn to every worker's
   first event (import + collect start), part of `wall_seconds`, and `0.0` on
   single-worker runs. [`--fork-pool`](cli.md#-fork-pool) cuts it;
@@ -459,7 +466,7 @@ Top-level fields:
 | `meta` | object | `{runner, kind, schema}`; `schema` is the document version, currently `1` |
 | `ready` | bool | `true` only when no id forces `-n 0` (WILL-bail) and the parallel phase ran with no parallel-only failures. Unstable ids that don't bail, and tests already failing at `-n 0`, don't clear it; allow-listing doesn't set it (an all-allow-listed run exits `0` with `ready: false`) |
 | `tests_collected` | int | tests seen across the two collection passes (their union) |
-| `will_bail_count` | int | count of unstable ids that are per-process (address / uuid): these force `-n 0` |
+| `will_bail_count` | int | count of ids that force `-n 0`: per-process unstable ids (address / uuid) plus the ids at order-unstable sites |
 | `unstable_ids` | array | the unstable-id findings, grouped by parametrize site (see below) |
 | `parallel` | object / `null` | the parallel-classification phase; **`null`** when it was skipped (a WILL-bail id stopped the run before it) |
 
@@ -468,8 +475,8 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `site` | string | the nodeid up to the `[…]` parametrize segment |
-| `kinds` | object | count of each instability class at this site: `address`, `uuid`, `time`, `other` |
-| `will_bail` | bool | `true` if any id here is per-process (`address`/`uuid`), i.e. forces `-n 0` |
+| `kinds` | object | count of each instability class at this site: `address`, `uuid`, `time`, `other`, or `order` (same ids, different order between the two collections) |
+| `will_bail` | bool | `true` if any id here is per-process (`address`/`uuid`) or the site is order-unstable (`order`), i.e. forces `-n 0` |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |
 | `sample` | string | a sample unstable param value from this site |
 | `fix` | string | the upstream fix (give the parametrize a stable `ids=`) |

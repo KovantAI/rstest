@@ -30,11 +30,16 @@ const SCHEMA_VERSION: u32 = 3;
 /// a fast redundant test frees no meaningful time.
 const WASTE_MIN_SECONDS: f64 = 0.5;
 
+/// A test is a parallel floor only when it outlasts a worker's ideal share by
+/// more than this factor (10%), so a balanced pool is not flagged on jitter.
+const FLOOR_SLACK: f64 = 1.1;
+
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DoctorReport {
     schema: u32,
     rstest_version: &'static str,
+    /// Workers that ran tests: 1 for a single-worker (`-n 0` / `-n 1`) run.
     workers: usize,
     wall_seconds: f64,
     /// Wall from pool spawn to every worker's first event (imported core +
@@ -46,10 +51,24 @@ pub struct DoctorReport {
     /// the "try --fork-pool" hint so it isn't suggested when already on.
     fork_prewarm: bool,
     tests: usize,
+    /// Sum of each test's whole protocol (setup + call + teardown), so time
+    /// spent in function fixtures counts.
     test_time_seconds: f64,
-    /// Sum of call-phase CPU time, over tests where it was measured.
+    /// Sum of whole-protocol CPU time (the worker process plus child processes
+    /// it waited for), over tests where it was measured.
     cpu_time_seconds: f64,
+    /// Present only when waiting is a notable share (>= 20% and >= 1s);
+    /// `--doctor-fail-on` gates `wait_*` on the measured values regardless.
     wait_bound: Option<WaitBound>,
+    /// `test_time - cpu_time` and its share of test time, whenever CPU was
+    /// measured for at least one test. Gate-only (not serialized): the JSON
+    /// `wait_bound` section keeps its display threshold.
+    #[serde(skip)]
+    measured_wait: Option<(f64, f64)>,
+    /// Slowest single test (whole protocol), at any worker count. Gate-only;
+    /// the JSON carries it under `parallel_efficiency` on pool runs.
+    #[serde(skip)]
+    long_pole_seconds: Option<f64>,
     parallel_floor: Option<ParallelFloor>,
     parallel_efficiency: Option<ParallelEfficiency>,
     fixtures: Vec<FixtureEntry>,
@@ -58,7 +77,8 @@ pub struct DoctorReport {
     /// delete/merge candidates. `None` unless a per-test coverage index was
     /// warm (`--cov --cov-context=test`) and at least one test qualified.
     coverage_waste: Option<CoverageWaste>,
-    /// Tests that leaked threads / fds (net positive after teardown). Empty
+    /// Tests that leaked threads / fds (created by the test, still open after
+    /// its teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leaks: Vec<Leak>,
@@ -96,9 +116,11 @@ struct WasteTest {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Leak {
     pub nodeid: String,
-    /// Net threads leaked (0 if only fds leaked).
+    /// Threads the test created that outlived its teardown (0 if only fds
+    /// leaked).
     pub threads: i64,
-    /// Net open fds leaked (0 if only threads leaked).
+    /// Fds the test opened that are still open after its teardown (0 if only
+    /// threads leaked).
     pub fds: i64,
 }
 
@@ -151,7 +173,8 @@ struct ParallelEfficiency {
     workers_busy: Vec<WorkerLoad>,
     /// 100 * (busiest - idlest) / busiest. High = uneven distribution.
     imbalance_pct: f64,
-    /// Slowest single test: the hard floor no worker count beats.
+    /// Slowest single test (setup + call + teardown): the hard floor no
+    /// worker count beats.
     long_pole_seconds: f64,
 }
 
@@ -205,19 +228,27 @@ pub fn analyze(
     workers: usize,
     coverage: Option<(&CoverageIndex, &ProjectConfig)>,
 ) -> DoctorReport {
+    // A single-worker run (`-n 0` runs in one worker process) still has one
+    // worker doing the work.
+    let workers = workers.max(1);
     let tests = run.tests();
+    // Each test's time is its whole protocol (setup + call + teardown): the
+    // span it held its worker. Call-phase-only time would hide a suite whose
+    // cost lives in function fixtures and misread its parallel speedup.
     let mut durations: Vec<(&String, f64, Option<f64>)> = tests
         .iter()
-        .filter_map(|(id, e)| e.duration.map(|d| (id, d, e.cpu)))
+        .filter_map(|(id, e)| e.protocol_seconds().map(|d| (id, d, e.protocol_cpu())))
         .collect();
     let test_time: f64 = durations.iter().map(|(_, d, _)| d).sum();
     let cpu_time: f64 = durations.iter().filter_map(|(_, _, c)| *c).sum();
     let n_cpu = durations.iter().filter(|(_, _, c)| c.is_some()).count();
 
     // -- Wait-bound: wall vs cpu ---------------------------------------
-    let wait_bound = if n_cpu > 0 {
+    let measured_wait = (n_cpu > 0).then(|| {
         let wait = (test_time - cpu_time).max(0.0);
-        let pct = 100.0 * wait / test_time.max(f64::EPSILON);
+        (wait, 100.0 * wait / test_time.max(f64::EPSILON))
+    });
+    let wait_bound = if let Some((wait, pct)) = measured_wait {
         if pct >= 20.0 && wait >= 1.0 {
             let mut waiters: Vec<WaitTest> = durations
                 .iter()
@@ -246,15 +277,20 @@ pub fn analyze(
 
     // -- Parallel floor --------------------------------------------------
     durations.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let long_pole = durations.first().map(|(_, d, _)| *d);
     let parallel_floor = durations.first().and_then(|&(_, longest, _)| {
         let ideal = test_time / workers.max(1) as f64;
-        (longest > ideal.max(1.0)).then(|| ParallelFloor {
+        // A test only gates the wall when it clearly outlasts a worker's even
+        // share: N equal tests on N workers sit exactly at the share, and
+        // timing jitter alone must not flag that perfectly balanced pool.
+        let floor = ideal.max(1.0) * FLOOR_SLACK;
+        (longest > floor).then(|| ParallelFloor {
             longest_seconds: longest,
             ideal_share_seconds: ideal,
             gate_tests: durations
                 .iter()
                 .take(10)
-                .filter(|(_, d, _)| *d > ideal.max(1.0))
+                .filter(|(_, d, _)| *d > floor)
                 .map(|(id, d, _)| GateTest {
                     nodeid: (*id).clone(),
                     duration: *d,
@@ -269,7 +305,7 @@ pub fn analyze(
     let parallel_efficiency = (workers > 1 && test_time > 0.0).then(|| {
         let mut by_worker: BTreeMap<&str, (f64, usize)> = BTreeMap::new();
         for e in tests.values() {
-            if let Some(d) = e.duration {
+            if let Some(d) = e.protocol_seconds() {
                 let w = e.worker.as_deref().unwrap_or("serial");
                 let slot = by_worker.entry(w).or_default();
                 slot.0 += d;
@@ -306,8 +342,7 @@ pub fn analyze(
             efficiency_pct: 100.0 * realized / workers as f64,
             workers_busy,
             imbalance_pct,
-            // durations was sorted descending by the parallel-floor block.
-            long_pole_seconds: durations.first().map_or(0.0, |(_, d, _)| *d),
+            long_pole_seconds: long_pole.unwrap_or(0.0),
         }
     });
 
@@ -383,6 +418,8 @@ pub fn analyze(
         test_time_seconds: test_time,
         cpu_time_seconds: cpu_time,
         wait_bound,
+        measured_wait,
+        long_pole_seconds: long_pole,
         parallel_floor,
         parallel_efficiency,
         fixtures: fx,
@@ -393,7 +430,7 @@ pub fn analyze(
 }
 
 /// Slow tests that can be deleted TOGETHER without losing any covered line -
-/// pure redundant suite cost. `duration_of` maps nodeid -> call duration of the
+/// pure redundant suite cost. `duration_of` maps nodeid -> protocol time of the
 /// tests eligible to count (passed this run); only tests at least `min_seconds`
 /// slow qualify, and a nodeid absent from it is not counted as a coverer.
 /// `is_test_file` tells test code (excluded) from product code. `None` when the
@@ -507,7 +544,8 @@ fn coverage_waste(
     })
 }
 
-/// Tests that leaked threads/fds (net positive after teardown), worst first.
+/// Tests that leaked threads/fds (created by the test, still open after its
+/// teardown), worst first.
 /// A resource the test opened and never released — its own teardown included.
 /// Empty unless leak-check instrumentation ran. Shared by the doctor report and
 /// the `--fail-on-leak` gate.
@@ -558,6 +596,8 @@ pub(crate) mod testutil {
             tests,
             test_time_seconds: 30.0,
             cpu_time_seconds: 6.0,
+            measured_wait: Some((24.0, 80.0)),
+            long_pole_seconds: Some(8.4),
             wait_bound: Some(WaitBound {
                 wait_seconds: 24.0,
                 wait_pct: 80.0,
@@ -647,6 +687,7 @@ pub(crate) mod testutil {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -673,6 +714,7 @@ mod tests {
             fd_delta: fd,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -698,6 +740,108 @@ mod tests {
         assert_eq!((leaks[0].threads, leaks[0].fds), (3, 2));
     }
 
+    /// One test whose time is mostly fixture setup/teardown, with per-phase
+    /// wall and CPU as the worker reports them.
+    fn record_phases(run: &mut Run, nodeid: &str, worker: usize, phases: [(f64, f64); 3]) {
+        for (when, (duration, cpu)) in ["setup", "call", "teardown"].into_iter().zip(phases) {
+            run.record(
+                Some(worker),
+                crate::scheduling::proto::Report {
+                    nodeid: nodeid.into(),
+                    when: when.into(),
+                    outcome: "passed".into(),
+                    duration,
+                    longrepr: None,
+                    wasxfail: false,
+                    skip_reason: None,
+                    cpu: Some(cpu),
+                    thread_delta: None,
+                    fd_delta: None,
+                    sections: Vec::new(),
+                    lineno: None,
+                    subtest: false,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_time_counts_toward_every_number() {
+        // 8 tests on 4 workers, each 0.25s setup + 0.02s call + 0.1s teardown,
+        // all sleeping: the work is 2.96s, not the 0.16s of call phases.
+        let mut run = Run::default();
+        for i in 0..8 {
+            record_phases(
+                &mut run,
+                &format!("t.py::t{i}"),
+                i % 4,
+                [(0.25, 0.0), (0.02, 0.0), (0.1, 0.0)],
+            );
+        }
+        let r = analyze(&run, &[], 0.8, 0.0, false, 4, None);
+        assert!(
+            (r.test_time_seconds - 2.96).abs() < 1e-6,
+            "{}",
+            r.test_time_seconds
+        );
+        assert!((r.slowest_files[0].total_seconds - 2.96).abs() < 1e-6);
+        let pe = r.parallel_efficiency.as_ref().unwrap();
+        assert!((pe.long_pole_seconds - 0.37).abs() < 1e-6);
+        assert!((pe.workers_busy[0].busy_seconds - 0.74).abs() < 1e-6);
+        assert!((pe.realized_speedup - 3.7).abs() < 1e-6);
+        // Fixture sleeps are waiting: shown and gateable.
+        let wb = r.wait_bound.as_ref().expect("wait-bound section");
+        assert!((wb.wait_pct - 100.0).abs() < 1e-6);
+        assert_eq!(wb.tests.len(), 8);
+        assert_eq!(r.long_pole_seconds, Some(0.37));
+    }
+
+    #[test]
+    fn fixture_cpu_is_computing_not_waiting() {
+        // A CPU-heavy fixture: setup/teardown CPU equals their wall, so the
+        // test is not waiting.
+        let mut run = Run::default();
+        record_phases(
+            &mut run,
+            "t.py::hot",
+            0,
+            [(0.6, 0.6), (0.01, 0.01), (0.4, 0.4)],
+        );
+        let r = analyze(&run, &[], 1.1, 0.0, false, 1, None);
+        assert!(r.wait_bound.is_none());
+        let (wait, pct) = r.measured_wait.expect("cpu measured");
+        assert!(wait.abs() < 1e-6 && pct.abs() < 1e-6, "{wait} {pct}");
+    }
+
+    #[test]
+    fn single_worker_run_reports_one_worker_and_gateable_numbers() {
+        // `-n 0` passes 0 workers: the report still says 1, keeps the long
+        // pole, and measures wait below the WAIT-BOUND display threshold.
+        let mut run = Run::default();
+        record_phases(
+            &mut run,
+            "t.py::sleep",
+            0,
+            [(0.0, 0.0), (0.8, 0.0), (0.0, 0.0)],
+        );
+        record_phases(
+            &mut run,
+            "t.py::cpu",
+            0,
+            [(0.0, 0.0), (1.0, 1.0), (0.0, 0.0)],
+        );
+        let r = analyze(&run, &[], 1.9, 0.0, false, 0, None);
+        assert_eq!(r.workers, 1);
+        assert!(r.parallel_efficiency.is_none());
+        assert!(
+            r.wait_bound.is_none(),
+            "0.8s wait is below the 1s display floor"
+        );
+        let (wait, pct) = r.measured_wait.unwrap();
+        assert!((wait - 0.8).abs() < 1e-6 && (pct - 44.444).abs() < 0.01);
+        assert_eq!(r.long_pole_seconds, Some(1.0));
+    }
+
     #[test]
     fn all_work_on_one_worker_reports_max_imbalance() {
         // -n 8 but every test lands on gw0: the seven idle workers are
@@ -721,6 +865,27 @@ mod tests {
         assert_eq!(pe.ideal_speedup, 8);
         assert!((pe.efficiency_pct - 12.5).abs() < 1e-6);
         assert!((pe.long_pole_seconds - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn balanced_pool_is_not_a_parallel_floor() {
+        // Four ~1s tests on four workers: the longest sits at the ideal share
+        // plus jitter, which is not a floor.
+        let mut run = Run::default();
+        for (i, d) in [1.0047, 1.0012, 1.0031, 1.0008].into_iter().enumerate() {
+            record_test(&mut run, &format!("t.py::t{i}"), i, d);
+        }
+        assert!(analyze(&run, &[], 1.1, 0.0, false, 4, None)
+            .parallel_floor
+            .is_none());
+        // One test clearly longer than the share still is.
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::long", 0, 4.0);
+        record_test(&mut run, "t.py::short", 1, 0.5);
+        let floor = analyze(&run, &[], 4.0, 0.0, false, 2, None)
+            .parallel_floor
+            .expect("4s test over a 2.25s share is a floor");
+        assert_eq!(floor.gate_tests.len(), 1);
     }
 
     #[test]
@@ -958,6 +1123,7 @@ mod tests {
                     fd_delta: None,
                     sections: Vec::new(),
                     lineno: None,
+                    subtest: false,
                 },
             );
         }

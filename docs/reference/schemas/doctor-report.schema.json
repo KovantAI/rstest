@@ -15,7 +15,7 @@
       ]
     },
     "cpu_time_seconds": {
-      "description": "Sum of call-phase CPU time, over tests where it was measured.",
+      "description": "Sum of whole-protocol CPU time (the worker process plus child processes\nit waited for), over tests where it was measured.",
       "type": "number",
       "format": "double"
     },
@@ -30,7 +30,7 @@
       "type": "boolean"
     },
     "leaks": {
-      "description": "Tests that leaked threads / fds (net positive after teardown). Empty\nunless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).",
+      "description": "Tests that leaked threads / fds (created by the test, still open after\nits teardown). Empty\nunless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).",
       "type": "array",
       "items": {
         "$ref": "#/definitions/Leak"
@@ -76,6 +76,7 @@
       "format": "double"
     },
     "test_time_seconds": {
+      "description": "Sum of each test's whole protocol (setup + call + teardown), so time\nspent in function fixtures counts.",
       "type": "number",
       "format": "double"
     },
@@ -85,6 +86,7 @@
       "minimum": 0
     },
     "wait_bound": {
+      "description": "Present only when waiting is a notable share (>= 20% and >= 1s);\n`--doctor-fail-on` gates `wait_*` on the measured values regardless.",
       "anyOf": [
         {
           "$ref": "#/definitions/WaitBound"
@@ -99,6 +101,7 @@
       "format": "double"
     },
     "workers": {
+      "description": "Workers that ran tests: 1 for a single-worker (`-n 0` / `-n 1`) run.",
       "type": "integer",
       "format": "uint",
       "minimum": 0
@@ -228,7 +231,7 @@
       "type": "object",
       "properties": {
         "fds": {
-          "description": "Net open fds leaked (0 if only threads leaked).",
+          "description": "Fds the test opened that are still open after its teardown (0 if only\nthreads leaked).",
           "type": "integer",
           "format": "int64"
         },
@@ -236,7 +239,7 @@
           "type": "string"
         },
         "threads": {
-          "description": "Net threads leaked (0 if only fds leaked).",
+          "description": "Threads the test created that outlived its teardown (0 if only fds\nleaked).",
           "type": "integer",
           "format": "int64"
         }
@@ -268,7 +271,7 @@
           "format": "double"
         },
         "long_pole_seconds": {
-          "description": "Slowest single test: the hard floor no worker count beats.",
+          "description": "Slowest single test (setup + call + teardown): the hard floor no\nworker count beats.",
           "type": "number",
           "format": "double"
         },

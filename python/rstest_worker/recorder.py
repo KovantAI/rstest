@@ -17,6 +17,8 @@ import sys
 import time
 from typing import Any
 
+from rstest_worker._internal.subtests import is_subtest_report
+
 # pytest hook params are left unannotated (as elsewhere in this package: see
 # _internal/dispatch.py, _internal/stream.py) so the unit tests can drive the
 # hooks with lightweight SimpleNamespace fakes.
@@ -31,6 +33,16 @@ class _Recorder:
 
     def pytest_runtest_logreport(self, report) -> None:
         t = self.tests.setdefault(report.nodeid, {})
+        if is_subtest_report(report):
+            # Same nodeid and phase as the parent: a failure fails the test
+            # (rstest's report-json does the same); passes add nothing.
+            if report.outcome == "failed":
+                t["subtests_failed"] = t.get("subtests_failed", 0) + 1
+                t["call"] = "failed"
+            return
+        if report.when == "call" and t.get("subtests_failed"):
+            t["duration"] = round(report.duration, 4)
+            return  # keep "failed" from the subtests
         t[report.when] = report.outcome  # "setup" | "call" | "teardown"
         if report.when == "call":
             t["duration"] = round(report.duration, 4)

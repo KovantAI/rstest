@@ -521,9 +521,11 @@ def gate_pytest_subtests(g, args, binary):
         "            assert i != 1\n",
     )
     r = gs.run("st", "-n", "2")
+    # pytest's accounting: the failing subtest and its parent each count as
+    # failed (pytest prints "2 failed, 1 passed" for this file).
     check(
         "subtests: clean + failing test both reported",
-        "1 failed, 1 passed" in r.stdout,
+        "2 failed, 1 passed" in r.stdout,
         r.stdout[-300:],
     )
     check(

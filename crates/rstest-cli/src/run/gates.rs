@@ -60,13 +60,69 @@ fn write_run_reports(
 /// Each mode keys outcomes "nodeid [gwN]"; lastfailed needs the plain nodeids
 /// (deduped, since a test may fail on several workers). BTreeMap => stable,
 /// deduped keys with no extra pass.
-fn merged_lastfailed(run: &report::Run) -> std::collections::BTreeMap<String, bool> {
-    run.failed_nodeids()
-        .map(|id| {
-            let plain = id.rsplit_once(" [gw").map(|(p, _)| p).unwrap_or(id);
-            (plain.to_string(), true)
-        })
-        .collect()
+///
+/// Merged over `prev` (the file as it was) the way pytest's LFPlugin updates
+/// it: a test that failed in any phase is added, one whose call passed or that
+/// was skipped is removed, and every other entry is kept, so a subset run
+/// leaves the failures of tests it did not run alone. A collection error adds
+/// its collector id; a previously failing collector that now produced tests is
+/// removed. A test an interrupt stopped mid-run has no real outcome and
+/// changes nothing.
+fn merged_lastfailed(
+    mut prev: std::collections::BTreeMap<String, serde_json::Value>,
+    run: &report::Run,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let plain = |id: &str| {
+        id.rsplit_once(" [gw")
+            .map(|(p, _)| p)
+            .unwrap_or(id)
+            .to_string()
+    };
+    let mut failed = std::collections::BTreeSet::new();
+    let mut cleared = std::collections::BTreeSet::new();
+    for (id, e) in run.tests() {
+        if e.interrupted {
+            continue;
+        }
+        let phases = [&e.setup, &e.call, &e.teardown];
+        if e.any_phase_failed() {
+            failed.insert(plain(id));
+        } else if e.call.as_deref() == Some("passed")
+            || phases.iter().any(|p| p.as_deref() == Some("skipped"))
+        {
+            cleared.insert(plain(id));
+        }
+    }
+    // A collector that failed last time and yielded tests now collected fine.
+    let collected_files: std::collections::BTreeSet<&str> = run
+        .tests()
+        .keys()
+        .filter_map(|id| id.split_once("::").map(|(f, _)| f))
+        .collect();
+    prev.retain(|k, _| k.contains("::") || !collected_files.contains(k.as_str()));
+    for id in cleared {
+        prev.remove(&id);
+    }
+    for id in failed {
+        prev.insert(id, serde_json::Value::Bool(true));
+    }
+    for (path, _) in run.collect_errors() {
+        if !path.starts_with('<') {
+            prev.insert(path.clone(), serde_json::Value::Bool(true));
+        }
+    }
+    prev
+}
+
+/// Read pytest's `lastfailed` (an object of nodeid -> true); absent or
+/// unreadable reads as empty, as pytest's `cache.get(key, {})` does.
+fn read_lastfailed(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 /// Warn (to `w`) that `--doctor-fail-on` can't evaluate under passthrough IO
@@ -359,6 +415,7 @@ pub(super) fn run_post_gates(
     let RunConfig {
         n,
         passthrough,
+        single_worker_reruns,
         mode,
         doctor,
         ref doctor_gate,
@@ -441,9 +498,20 @@ pub(super) fn run_post_gates(
             // Same cache dir the Rust side reads (cache::dir()) so the index
             // lands where load_coverage_index / --cache-push look for it.
             .env("RSTEST_CACHE", cache::dir())
+            // Index keys are relative to the rootdir the cache belongs to (as
+            // the nodeids are), so a run from a subdirectory writes the same
+            // keys as one from the root.
+            .env("RSTEST_ROOTDIR", cache::base_dir())
             // Never reads stdin; inheriting it hangs on Windows under
             // `--watch`, whose `q` listener holds a blocking read on it.
             .stdin(std::process::Stdio::null());
+        // The in-process session (-n 0/1, pytest's own terminal) ran pytest-cov
+        // in its normal mode, which already combined, reported and gated
+        // --cov-fail-under; covtool then only builds the index and scores the
+        // diff instead of printing the table and FAIL line a second time.
+        if n <= 1 && !single_worker_reruns && mode == progress::Mode::Pytest {
+            cmd.arg("--rstest-cov-reported");
+        }
         if let Some((lp, op)) = &diff_paths {
             cmd.arg("--rstest-diff-lines")
                 .arg(lp)
@@ -502,7 +570,7 @@ pub(super) fn run_post_gates(
         if let Some(path) = &cli.doctor_md {
             doctor::write_markdown(path, &report)?;
         }
-        doctor::append_ci_summary(sink, &report)?;
+        doctor::append_ci_summary(sink, &report);
         if !doctor_gate.is_empty() {
             let gate = doctor::evaluate(&report, doctor_gate);
             for s in &gate.skipped {
@@ -510,8 +578,8 @@ pub(super) fn run_post_gates(
             }
             if gate.breaches.is_empty() {
                 sink.warn(&format!(
-                    "rstest: --doctor-fail-on: all {} condition(s) passed",
-                    doctor_gate.len()
+                    "rstest: --doctor-fail-on: {}",
+                    gate.pass_summary(doctor_gate.len())
                 ));
             } else {
                 // stderr, not stdout: --output json/tap keep stdout a pure
@@ -541,19 +609,32 @@ pub(super) fn run_post_gates(
         &report_meta,
     )?;
     // Merged lastfailed: workers' own writes are blocked in pool mode
-    // (each knows only its failures); write the union into pytest's cache
-    // so a follow-up `--lf` behaves exactly as after a serial run.
+    // (each knows only its failures); merge this run's outcomes into
+    // pytest's cache so a follow-up `--lf` behaves exactly as after a serial
+    // run. Like pytest, the file is written only when its content changes.
     if let Some(cache_dir) = &outcome.cache_dir {
-        let failed = merged_lastfailed(&outcome.run);
         let dir = std::path::Path::new(cache_dir).join("v/cache");
+        let path = dir.join("lastfailed");
+        let prev = read_lastfailed(&path);
+        let merged = merged_lastfailed(prev.clone(), &outcome.run);
         // Only write when serialization succeeds: a serialize error must not
         // clobber pytest's lastfailed cache with an empty `{}`.
-        if let (Ok(()), Ok(bytes)) = (std::fs::create_dir_all(&dir), serde_json::to_vec(&failed)) {
-            let _ = std::fs::write(dir.join("lastfailed"), bytes);
+        if merged != prev {
+            if let (Ok(()), Ok(bytes)) = (
+                std::fs::create_dir_all(&dir),
+                serde_json::to_vec_pretty(&merged),
+            ) {
+                // pytest's own cache setup makes the dir ignore itself; when
+                // the pool's workers never wrote it, rstest is the one creating it.
+                cache::write_supporting_files(std::path::Path::new(cache_dir));
+                let _ = cache::write_atomic(&path, &bytes);
+            }
         }
     }
-    // Duration regression gate: must compare BEFORE durations::save
-    // overwrites the baseline with this run's times.
+    // Duration regression gate: must compare BEFORE durations::save merges
+    // this run's times. Flagged tests are kept out of that save (and out of a
+    // --cache-push segment), so the baseline they regressed from survives and
+    // the gate fires again on the next identical run.
     let mut duration_regressions = 0usize;
     if let Some(ratio) = cli.durations_regress {
         validate_regress_ratio(ratio)?;
@@ -578,6 +659,7 @@ pub(super) fn run_post_gates(
                 ));
                 for (nodeid, old, new) in &rows {
                     sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
+                    outcome.run.mark_duration_regressed(nodeid);
                 }
                 duration_regressions = rows.len();
             }
@@ -668,13 +750,23 @@ pub(super) fn run_post_gates(
     // Recorded regardless of exit status — failures simply aren't in the green
     // set, so they re-run next time. Best-effort.
     if incremental_active {
-        // Fold cached tests' prior coverage back into the index covtool just
-        // rewrote (skipped tests produced none), so they stay skippable.
+        // Fold the prior coverage of every test this run did not execute
+        // (cached ones, and the rest of the suite on a subset run) back into
+        // the index covtool just rewrote, so they stay skippable.
         let cached = outcome.run.cached_nodeids();
-        if !cached.is_empty() {
+        let ran: std::collections::HashSet<String> = outcome
+            .run
+            .tests()
+            .keys()
+            .filter(|id| !cached.contains(*id))
+            .cloned()
+            .collect();
+        if fresh_index || !cached.is_empty() {
             let mut new_index = remote::load_local_cov_index();
-            coverage_skip::carry_forward(prev_index, &mut new_index, &cached);
-            coverage_skip::write_index(&new_index);
+            coverage_skip::carry_forward_unrun(prev_index, &mut new_index, &ran);
+            if new_index != *prev_index || fresh_index {
+                coverage_skip::write_index(&new_index);
+            }
         }
         // Restore cached (not-run) entries' def line from the baseline before
         // reading it back — so it persists into this run's recorded lines and
@@ -685,6 +777,7 @@ pub(super) fn run_post_gates(
             config,
             outcome.run.green_nodeids(),
             outcome.run.green_linenos(),
+            &ran,
         );
     }
     // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
@@ -779,8 +872,10 @@ pub(super) fn finalize_output(
     } else if !passthrough && mode == progress::Mode::Tap {
         // Pure TAP: close the stream with the trailing plan. Failure text
         // already rode along as `#` diagnostics; no human summary.
+        // Collection errors close the stream as `not ok` points so a run
+        // that collected nothing never reads as skip-all.
         outcome.prog.finish(sink);
-        outcome.prog.tap_plan(sink);
+        outcome.prog.tap_plan(sink, outcome.run.collect_errors());
     } else if !passthrough {
         outcome.prog.finish(sink);
         let wrap = match mode {
@@ -800,11 +895,7 @@ pub(super) fn finalize_output(
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
-        let warn_part = if warn_total > 0 {
-            format!(", {warn_total} warnings")
-        } else {
-            String::new()
-        };
+        let warn_part = warnings_part(warn_total);
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
         // the stable summary line (which tooling/CI greps, so keep it intact).
@@ -814,6 +905,10 @@ pub(super) fn finalize_output(
             sink.out_line(&line);
         } else {
             sink.out_line("");
+        }
+        // pytest's -x/--maxfail banner, so a cut-short run says why.
+        if let Some(n) = outcome.run.stopped_after {
+            sink.out_line(&palette.red(&stopping_banner(n)));
         }
         let cached = outcome.run.cached_count();
         let cached_note = if cached > 0 {
@@ -830,6 +925,11 @@ pub(super) fn finalize_output(
         } else {
             palette.red(&summary)
         };
+        // An interrupted run says so above its summary, as pytest does, and
+        // how many selected tests never started.
+        if let Some(interruption) = &outcome.run.interruption {
+            sink.out_line(&palette.red(&interruption.banner()));
+        }
         sink.out_line(&summary);
         // CI-native surfaces emitted from the aggregate at end-of-run. Failures
         // already rode along above, so these add each platform's flake signal
@@ -838,10 +938,21 @@ pub(super) fn finalize_output(
             progress::Mode::Github => print_github_annotations(sink, &outcome.run),
             progress::Mode::Azure => print_azure_annotations(sink, &outcome.run),
             progress::Mode::Buildkite => buildkite_flaky_annotate(sink, &outcome.run),
-            progress::Mode::Teamcity => write_teamcity_flaky(sink.out(), &outcome.run.flaky),
+            progress::Mode::Teamcity => {
+                let msgs = progress::teamcity_collect_error_messages(outcome.run.collect_errors());
+                if !msgs.is_empty() {
+                    sink.out_line(&msgs);
+                }
+                write_teamcity_flaky(sink.out(), &outcome.run.flaky)
+            }
             _ => {}
         }
     }
+}
+
+/// pytest's `-x`/`--maxfail` stop banner (`session.shouldfail`), word for word.
+fn stopping_banner(failures: u64) -> String {
+    format!("!!!!!!!!!! stopping after {failures} failures !!!!!!!!!!")
 }
 
 /// Under pytest's own terminal output, the one line that reconciles pytest's
@@ -883,6 +994,16 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
 /// pytest-style warnings summary: grouped by location, deduped, counted.
 /// Writes to `w` (stdout at the call site) so the merge/plural formatting is
 /// unit-testable.
+/// The summary line's warnings segment, worded as pytest does
+/// (`1 warning`, `2 warnings`); empty without warnings.
+fn warnings_part(total: u64) -> String {
+    match total {
+        0 => String::new(),
+        1 => ", 1 warning".to_string(),
+        n => format!(", {n} warnings"),
+    }
+}
+
 fn print_warnings_summary(
     w: &mut dyn Write,
     warnings: &[proto::WarningEntry],
@@ -922,7 +1043,7 @@ fn print_warnings_summary(
     let _ = writeln!(
         w,
         "{}",
-        palette.yellow("-- use -W error::... to turn warnings into errors --")
+        palette.yellow("-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html")
     );
 }
 
@@ -979,8 +1100,9 @@ mod tests {
         apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, diff_cov_gate,
         finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
         print_warnings_summary, quarantine_matcher, quarantine_note, reconcile_cov_status,
-        report_push_result, resolve_compact_threshold, results_bar_line, validate_regress_ratio,
-        warn_doctor_gate_passthrough, write_report_json, write_run_reports, write_teamcity_flaky,
+        report_push_result, resolve_compact_threshold, results_bar_line, stopping_banner,
+        validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
+        write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
     use crate::reporting::progress;
@@ -1016,6 +1138,7 @@ mod tests {
             lineno: None,
             thread_delta: None,
             fd_delta: None,
+            subtest: false,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1025,10 +1148,65 @@ mod tests {
         // A nodeid with no worker suffix passes through untouched.
         run.record(None, fail("t.py::c"));
 
-        let merged = merged_lastfailed(&run);
+        let merged = merged_lastfailed(Default::default(), &run);
         let keys: Vec<&String> = merged.keys().collect();
         assert_eq!(keys, vec!["t.py::a", "t.py::b", "t.py::c"]);
-        assert!(merged.values().all(|&v| v));
+        assert!(merged.values().all(|v| *v == serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn merged_lastfailed_updates_the_previous_file_like_pytest() {
+        use crate::scheduling::proto::Report;
+        let rep = |nodeid: &str, when: &str, outcome: &str| Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: outcome.into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+            subtest: false,
+        };
+        let prev: std::collections::BTreeMap<String, serde_json::Value> = [
+            "other.py::old_failure", // not run this time: kept
+            "t.py::fixed",           // passes now: removed
+            "t.py::skipped_now",     // skipped now: removed
+            "t.py::stopped",         // interrupted mid-run: kept
+            "broken.py",             // collects fine now: removed
+            "gone.py",               // collector not seen this run: kept
+        ]
+        .into_iter()
+        .map(|k| (k.to_string(), serde_json::Value::Bool(true)))
+        .collect();
+        let mut run = Run::default();
+        run.record(Some(0), rep("t.py::fixed", "call", "passed"));
+        run.record(Some(0), rep("t.py::skipped_now", "setup", "skipped"));
+        run.record(Some(0), rep("t.py::new_failure", "call", "failed"));
+        run.record(Some(1), rep("broken.py::test_x", "call", "passed"));
+        run.record(Some(1), rep("t.py::stopped", "call", "failed"));
+        run.mark_interrupted("t.py::stopped");
+        run.record(Some(1), rep("t.py::running", "call", "failed"));
+        run.mark_interrupted("t.py::running");
+        run.collect_error("bad.py".into(), "ImportError".into());
+        run.collect_error("<internal>".into(), "boom".into());
+
+        let merged = merged_lastfailed(prev, &run);
+        let keys: Vec<&str> = merged.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "bad.py",
+                "gone.py",
+                "other.py::old_failure",
+                "t.py::new_failure",
+                "t.py::stopped",
+            ]
+        );
     }
 
     #[test]
@@ -1203,6 +1381,15 @@ mod tests {
         assert_eq!(quarantine_note(0), None);
         assert!(quarantine_note(1).unwrap().contains("1 failure above is"));
         assert!(quarantine_note(3).unwrap().contains("3 failures above are"));
+    }
+
+    #[test]
+    fn stopping_banner_matches_pytest_wording() {
+        assert_eq!(
+            stopping_banner(1),
+            "!!!!!!!!!! stopping after 1 failures !!!!!!!!!!"
+        );
+        assert!(stopping_banner(3).contains("stopping after 3 failures"));
     }
 
     #[test]
@@ -1728,6 +1915,13 @@ mod tests {
     }
 
     #[test]
+    fn warnings_part_is_worded_like_pytest() {
+        assert_eq!(super::warnings_part(0), "");
+        assert_eq!(super::warnings_part(1), ", 1 warning");
+        assert_eq!(super::warnings_part(2), ", 2 warnings");
+    }
+
+    #[test]
     fn print_warnings_summary_merges_and_pluralizes() {
         let warn = |message: &str, count| WarningEntry {
             when: "runtest".into(),
@@ -1756,7 +1950,10 @@ mod tests {
             out.lines().any(|l| l == "t.py:12: DeprecationWarning"),
             "got {out}"
         );
-        assert!(out.contains("-- use -W error::"), "got {out}");
+        assert!(
+            out.contains("-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html"),
+            "got {out}"
+        );
 
         // Empty input => nothing at all.
         let mut buf = Vec::new();

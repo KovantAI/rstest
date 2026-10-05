@@ -161,7 +161,20 @@ this order:
    can't satisfy
 
 A `.python-version` file sets the *version* that filters those candidates; it
-doesn't name an interpreter directly.
+doesn't name an interpreter directly. It is a soft pin: a usable virtualenv
+(`$VIRTUAL_ENV` or the project's `.venv`) wins over it, with a warning when
+the versions differ, so a stale pin never rejects the project's own
+environment.
+
+When `$VIRTUAL_ENV` (or a `PATH` interpreter) wins over a project `.venv` and
+the run then fails on an import (`ModuleNotFoundError`), rstest prints a hint
+naming both environments. It stays quiet otherwise: running in a tox or nox
+environment while a `.venv` also exists is a normal setup.
 
 Install rstest into the same environment as your project's test
-dependencies, exactly as you would pytest.
+dependencies, exactly as you would pytest. If rstest finds the project's
+virtualenv but rstest isn't installed in it, it stops with an error naming
+that venv rather than running your tests with some other interpreter that
+lacks your dependencies (see
+[Troubleshooting](../reference/troubleshooting.md#found-venvbinpython-but-rstest-is-not-installed-in-it)).
+Pass `--python` to choose a different interpreter on purpose.

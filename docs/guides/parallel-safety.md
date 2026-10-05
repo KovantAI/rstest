@@ -26,9 +26,10 @@ Use it for: tests binding fixed ports, tests asserting on global process
 state, tests measuring wall-clock timing tightly.
 
 Serial tests run in the **designated worker's own session**, not a fresh one:
-they reuse whatever session/module-scoped fixtures that worker already built
-during its parallel phase (one instance, on that worker, not a merge of all
-workers' fixtures). So a serial test depending on a session fixture gets a
+they reuse the session-scoped fixtures that worker already built during its
+parallel phase (one instance, on that worker, not a merge of all workers'
+fixtures). Narrower scopes (package, module, class) may be set up again,
+even between two serial tests of one module. So a serial test depending on a session fixture gets a
 normally-constructed one; just don't expect it to see state another worker's
 copy of that fixture accumulated.
 
@@ -311,7 +312,9 @@ to a fix:
 
 - [`--shuffle`](../reference/cli.md#-shuffleseed) runs the suite in a seeded
   random order to flush order dependence out on demand; the seed is printed,
-  and `--shuffle=SEED` replays a failing order.
+  and `--shuffle=SEED` replays the shuffled order. Worker assignment still
+  depends on timing, so for an exact repro of a failed run use
+  [`rstest replay`](../reference/cli-commands.md#replay).
 - [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) finds
   the test that pollutes a victim and prints a minimal repro command.
 - [`rstest audit`](../reference/cli-commands.md#audit) runs the suite in

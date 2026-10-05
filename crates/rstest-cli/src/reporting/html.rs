@@ -371,6 +371,7 @@ mod tests {
             lineno: None,
             thread_delta: None,
             fd_delta: None,
+            subtest: false,
         }
     }
 

@@ -17,21 +17,9 @@ pub(super) fn discovery_candidates(scope: &Path) -> Vec<PathBuf> {
         }
     };
 
-    // 1. The active virtualenv.
-    if let Some(venv) = std::env::var_os("VIRTUAL_ENV") {
-        if let Some(p) = venv_python(Path::new(&venv)) {
-            push(p);
-        }
-    }
-
-    // 2. A `.venv` found walking up from the scope dir (stop at a repo root).
-    for dir in scope.ancestors() {
-        if let Some(p) = venv_python(&dir.join(".venv")) {
-            push(p);
-        }
-        if dir.join(".git").exists() {
-            break;
-        }
+    // 1-2. The active virtualenv, then `.venv`s walking up from the scope dir.
+    for p in venv_candidates(scope) {
+        push(p);
     }
 
     // 3. Versioned interpreter names on PATH.
@@ -53,6 +41,31 @@ pub(super) fn discovery_candidates(scope: &Path) -> Vec<PathBuf> {
         push(p);
     }
 
+    out
+}
+
+/// The virtualenv interpreters among the discovery candidates, in order: the
+/// active `$VIRTUAL_ENV`, then each `.venv` found walking up from the scope dir
+/// (stopping at a repo root). These are where a project's dependencies live,
+/// which is why discovery treats them specially (a soft `.python-version` pin,
+/// no silent fall-through past a venv that lacks rstest).
+pub(super) fn venv_candidates(scope: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(venv) = std::env::var_os("VIRTUAL_ENV") {
+        if let Some(p) = venv_python(Path::new(&venv)) {
+            out.push(p);
+        }
+    }
+    for dir in scope.ancestors() {
+        if let Some(p) = venv_python(&dir.join(".venv")) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
     out
 }
 
@@ -125,13 +138,15 @@ pub(super) fn parse_dir_version(name: &str) -> (u8, u8, u8) {
 }
 
 /// The interpreter request implied by the nearest up-tree `.python-version`,
-/// if any. A path entry resolves to [`PyArg::Path`]; a version name (`3.12`,
-/// `pypy@3.10`) to a [`PyArg::Request`].
-pub(super) fn python_version_arg(scope: &Path) -> Option<PyArg> {
+/// if any, with the file it came from (so errors can name it). A path entry
+/// resolves to [`PyArg::Path`]; a version name (`3.12`, `pypy@3.10`) to a
+/// [`PyArg::Request`].
+pub(super) fn python_version_arg(scope: &Path) -> Option<(PyArg, PathBuf)> {
     for dir in scope.ancestors() {
-        if let Ok(raw) = std::fs::read_to_string(dir.join(".python-version")) {
+        let file = dir.join(".python-version");
+        if let Ok(raw) = std::fs::read_to_string(&file) {
             if let Some(line) = raw.lines().map(str::trim).find(|l| !l.is_empty()) {
-                return Some(parse_pyarg(line));
+                return Some((parse_pyarg(line), file));
             }
         }
         if dir.join(".git").exists() {
@@ -300,7 +315,9 @@ mod tests {
         let d = tmpdir("pyver");
         // Blank lines skipped; first real entry parsed as a version request.
         std::fs::write(d.join(".python-version"), "\n  \n3.12\n3.11\n").unwrap();
-        assert!(matches!(python_version_arg(&d), Some(PyArg::Request(_))));
+        let (arg, file) = python_version_arg(&d).unwrap();
+        assert!(matches!(arg, PyArg::Request(_)));
+        assert_eq!(file, d.join(".python-version"));
 
         // No file up-tree (and a .git boundary) => None.
         let none = tmpdir("pyver-none");

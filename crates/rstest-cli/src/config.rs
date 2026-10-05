@@ -77,6 +77,170 @@ pub fn discover(start: &Path, err: &mut dyn Write) -> ProjectConfig {
     ProjectConfig::default()
 }
 
+/// `path` with `.` dropped and `..` folded lexically (no symlink resolution,
+/// like pytest's `absolutepath`), so `cwd/./tests/../x` compares equal to
+/// `cwd/x`.
+pub fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The paths the session args select, as pytest's `get_dirs_from_args` sees
+/// them: each positional arg (a nodeid contributes its file part) made
+/// absolute against `invocation_dir`, kept only when it exists. Options and
+/// their separate values are skipped (`-k api` names no path), and so is an
+/// `@argsfile`.
+pub fn selected_paths(invocation_dir: &Path, args: &[String]) -> Vec<PathBuf> {
+    args.iter()
+        .zip(crate::cli::positional_mask(args))
+        .filter(|(a, pos)| *pos && !a.starts_with('@'))
+        .map(|(a, _)| normalize(&invocation_dir.join(a.split("::").next().unwrap_or(a))))
+        .filter(|p| p.exists())
+        .collect()
+}
+
+/// pytest's `get_common_ancestor` over the selected paths' directories:
+/// the deepest directory containing all of them, or `invocation_dir` when
+/// nothing is selected.
+pub fn common_ancestor(invocation_dir: &Path, paths: &[PathBuf]) -> PathBuf {
+    let mut ancestor: Option<PathBuf> = None;
+    for p in paths {
+        let dir = if p.is_dir() {
+            p.clone()
+        } else {
+            p.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| p.clone())
+        };
+        ancestor = Some(match ancestor {
+            None => dir,
+            Some(a) => a
+                .components()
+                .zip(dir.components())
+                .take_while(|(x, y)| x == y)
+                .map(|(x, _)| x)
+                .collect(),
+        });
+    }
+    ancestor.unwrap_or_else(|| invocation_dir.to_path_buf())
+}
+
+/// The directory pytest picks as rootdir for these session args, by the same
+/// rule as the vendored `determine_setup`: `--rootdir` wins; `-c FILE` anchors
+/// at FILE's directory; else the first directory from the args' common
+/// ancestor upward holding a pytest config file (a bare `pyproject.toml`
+/// counts when nothing else is found, as in pytest 8.1+); else the nearest
+/// `setup.py`; else the common ancestor of the invocation dir and the args.
+/// Absolute and not symlink-resolved, so it nests under `invocation_dir`
+/// whenever the selection does.
+pub fn rootdir(invocation_dir: &Path, args: &[String]) -> PathBuf {
+    let invocation_dir = normalize(invocation_dir);
+    if let Some(dir) = option_value(args, &["--rootdir"]) {
+        return normalize(&invocation_dir.join(dir));
+    }
+    if let Some(ini) = option_value(args, &["-c", "--config-file", "--inifile"]) {
+        if let Some(parent) = normalize(&invocation_dir.join(ini)).parent() {
+            return parent.to_path_buf();
+        }
+    }
+    let selected = selected_paths(&invocation_dir, args);
+    let ancestor = common_ancestor(&invocation_dir, &selected);
+    if let Some(dir) = locate_config_dir(&ancestor) {
+        return dir;
+    }
+    if let Some(dir) = ancestor.ancestors().find(|d| d.join("setup.py").is_file()) {
+        return dir.to_path_buf();
+    }
+    // pytest retries each selected dir separately when they differ from the
+    // ancestor (args spread over several projects).
+    let mut dirs: Vec<PathBuf> = selected
+        .iter()
+        .map(|p| {
+            if p.is_dir() {
+                p.clone()
+            } else {
+                p.parent().map(Path::to_path_buf).unwrap_or_default()
+            }
+        })
+        .collect();
+    dirs.dedup();
+    if dirs != [ancestor.clone()] {
+        if let Some(dir) = dirs.iter().find_map(|d| locate_config_dir(d)) {
+            return dir;
+        }
+    }
+    let common = common_ancestor(&invocation_dir, &[invocation_dir.clone(), ancestor.clone()]);
+    if common.parent().is_none() {
+        ancestor
+    } else {
+        common
+    }
+}
+
+/// pytest's `locate_config` reduced to the directory: the first ancestor of
+/// `start` with a config file pytest accepts, else the directory of the
+/// first `pyproject.toml` seen on the way up (pytest 8.1+ anchors rootdir
+/// there even without a `[tool.pytest]` table).
+fn locate_config_dir(start: &Path) -> Option<PathBuf> {
+    let mut first_pyproject: Option<PathBuf> = None;
+    for dir in start.ancestors() {
+        for probe in CONFIG_NAMES {
+            let path = dir.join(probe);
+            if !path.is_file() {
+                continue;
+            }
+            if probe == "pyproject.toml" && first_pyproject.is_none() {
+                first_pyproject = Some(dir.to_path_buf());
+            }
+            // Malformed files are reported by the real `discover`; stay quiet.
+            if parse_config_file(&path, &mut std::io::sink()).is_some() {
+                return Some(dir.to_path_buf());
+            }
+        }
+    }
+    first_pyproject
+}
+
+/// The value of the first of `names` in the session args (`--opt V`,
+/// `--opt=V`, or a short `-cV`), the last occurrence winning like argparse.
+fn option_value<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
+    let mut found = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            break;
+        }
+        for name in names {
+            if a == name {
+                if let Some(v) = it.clone().next() {
+                    found = Some(v.as_str());
+                }
+            } else if let Some(v) = a.strip_prefix(name) {
+                if name.starts_with("--") {
+                    if let Some(v) = v.strip_prefix('=') {
+                        found = Some(v);
+                    }
+                } else if !v.is_empty() {
+                    found = Some(v.strip_prefix('=').unwrap_or(v));
+                }
+            }
+        }
+    }
+    found
+}
+
 /// Does this directory carry its own pytest configuration? (Any of the
 /// [`CONFIG_NAMES`] files that pytest would accept - the monorepo discovery
 /// predicate.)
@@ -101,11 +265,28 @@ fn parse_config_file(path: &Path, err: &mut dyn Write) -> Option<ProjectConfig> 
     }
 }
 
+/// Write the "ignoring malformed <file>" note, once per process: one run reads
+/// the same pyproject several times (settings, config discovery, worker
+/// sizing), and the same parse error each time is noise.
+fn note_malformed(err: &mut dyn Write, path: &Path, e: &dyn std::fmt::Display) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static NOTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let msg = format!("rstest: ignoring malformed {}: {e}", path.display());
+    let mut noted = NOTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if noted.insert(msg.clone()) {
+        let _ = writeln!(err, "{msg}");
+    }
+}
+
 fn parse_toml(text: &str, path: &Path, err: &mut dyn Write) -> Option<toml::Value> {
     match toml::from_str(text) {
         Ok(d) => Some(d),
         Err(e) => {
-            let _ = writeln!(err, "rstest: ignoring malformed {}: {e}", path.display());
+            note_malformed(err, path, &e);
             None
         }
     }
@@ -440,7 +621,7 @@ pub fn rstest_settings(start: &Path, err: &mut dyn Write) -> RstestSettings {
         let doc = match toml::from_str::<toml::Value>(&text) {
             Ok(doc) => doc,
             Err(e) => {
-                let _ = writeln!(err, "rstest: ignoring malformed {}: {e}", path.display());
+                note_malformed(err, &path, &e);
                 continue;
             }
         };
@@ -980,5 +1161,61 @@ worker-timeout = 120
         let empty = tmpdir("ini-options-empty");
         std::fs::write(empty.join("pyproject.toml"), "[tool.pytest.ini_options]\n").unwrap();
         assert!(has_pytest_config(&empty, &mut std::io::sink()));
+    }
+
+    fn sv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn rootdir_is_the_config_dir_from_the_args_common_ancestor() {
+        let root = tmpdir("rootdir-ini");
+        std::fs::create_dir_all(root.join("tests/unit")).unwrap();
+        std::fs::write(root.join("tests/unit/test_a.py"), "").unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[tool.pytest.ini_options]\n").unwrap();
+        let unit = root.join("tests/unit");
+        // From a subdirectory with no args, and from the root with a path arg.
+        assert_eq!(rootdir(&unit, &[]), root);
+        assert_eq!(rootdir(&root, &sv(&["tests/unit/test_a.py::test_a"])), root);
+        assert_eq!(rootdir(&root, &sv(&["-k", "tests"])), root);
+        // --rootdir and -c win, as in pytest.
+        assert_eq!(
+            rootdir(&root, &sv(&["--rootdir=tests"])),
+            root.join("tests")
+        );
+        assert_eq!(
+            rootdir(&root, &sv(&["--rootdir", "tests"])),
+            root.join("tests")
+        );
+        assert_eq!(rootdir(&root, &sv(&["-c", "tests/unit/x.ini"])), unit);
+    }
+
+    #[test]
+    fn rootdir_falls_back_like_pytest() {
+        // A bare pyproject.toml (no [tool.pytest]) anchors rootdir (pytest 8.1+).
+        let bare = tmpdir("rootdir-bare");
+        std::fs::create_dir_all(bare.join("sub")).unwrap();
+        std::fs::write(bare.join("pyproject.toml"), "[project]\nname = 'x'\n").unwrap();
+        assert_eq!(rootdir(&bare.join("sub"), &[]), bare);
+        // setup.py next.
+        let setup = tmpdir("rootdir-setup");
+        std::fs::create_dir_all(setup.join("sub")).unwrap();
+        std::fs::write(setup.join("setup.py"), "").unwrap();
+        assert_eq!(rootdir(&setup.join("sub"), &[]), setup);
+        // Nothing: the common ancestor of the invocation dir and the args.
+        let none = tmpdir("rootdir-none");
+        std::fs::create_dir_all(none.join("a/b")).unwrap();
+        assert_eq!(rootdir(&none, &sv(&["a/b"])), none);
+        assert_eq!(rootdir(&none.join("a"), &[]), none.join("a"));
+    }
+
+    #[test]
+    fn common_ancestor_and_normalize() {
+        let base = Path::new("/r");
+        let paths = [PathBuf::from("/r/a/b"), PathBuf::from("/r/a/c")];
+        // Non-existent paths count as files: their parent is the dir.
+        assert_eq!(common_ancestor(base, &paths), PathBuf::from("/r/a"));
+        assert_eq!(common_ancestor(base, &[]), PathBuf::from("/r"));
+        assert_eq!(normalize(Path::new("/r/./a/../b")), PathBuf::from("/r/b"));
     }
 }

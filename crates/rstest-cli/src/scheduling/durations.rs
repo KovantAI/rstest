@@ -1,4 +1,4 @@
-//! Per-test duration cache: `.rstest_cache/durations.json` in the cwd.
+//! Per-test duration cache: `.rstest_cache/durations.json` at the rootdir.
 //! Drives long-pole-first scheduling; absent or stale entries are harmless,
 //! unknown tests just keep collection order.
 //!
@@ -17,7 +17,7 @@
 //! `src` is stored per entry because nodeids are relative to pytest's rootdir,
 //! which only the run that timed a test knows (it varies with `--rootdir`,
 //! `-c` and the path arguments); a later load never has to guess it. It is kept
-//! relative to the cwd (the project the cache belongs to) so a cache restored
+//! relative to the rootdir (the project the cache belongs to) so a cache restored
 //! into a checkout at another path still resolves. An entry whose source the
 //! run could not locate is stored untagged and kept as-is, like the pre-#18
 //! bare timings.
@@ -41,7 +41,7 @@ pub const FILE: &str = "durations.json";
 #[derive(Clone, Serialize, Deserialize)]
 struct Timing {
     secs: f64,
-    /// Source path, relative to the cwd when it lies under the same root
+    /// Source path, relative to the rootdir when it lies under the same root
     /// (possibly with `..`), else absolute.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     src: String,
@@ -186,13 +186,15 @@ impl Collected {
     }
 }
 
-fn cwd() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+/// The directory relative `src` paths in the cache hang off: the project
+/// rootdir the cache belongs to (the cwd when none was resolved).
+fn project_base() -> PathBuf {
+    cache::base_dir()
 }
 
 /// Keep untagged entries and tagged ones whose source still hashes as
 /// recorded; drop edited bodies and vanished files. `base` resolves a relative
-/// `src` (the cwd).
+/// `src` (the rootdir).
 fn fresh(map: HashMap<String, Timing>, base: &Path) -> HashMap<String, Timing> {
     map.into_iter()
         .filter(|(_, t)| {
@@ -204,7 +206,7 @@ fn fresh(map: HashMap<String, Timing>, base: &Path) -> HashMap<String, Timing> {
 /// Load→prune→fold `add` (id -> seconds)→write the cache at `path`. Each added
 /// entry is tagged with its source: from `collected` when the run reported its
 /// rootdir (hash as collected), else the source a previous run recorded for the
-/// same id (hash as it is now), else left untagged. `base` is the cwd that
+/// same id (hash as it is now), else left untagged. `base` is the rootdir that
 /// relative `src` paths hang off. The caller holds the cache lock. Shared by
 /// `save` and `overlay_remote_in`.
 fn persist_to(
@@ -280,7 +282,7 @@ enum StoredWall {
     Bare(f64),
 }
 
-/// Record this run's total wall time for the cwd project.
+/// Record this run's total wall time for the project.
 pub fn save_wall(secs: f64) {
     let w = Wall {
         secs,
@@ -342,7 +344,7 @@ pub fn load() -> HashMap<String, f64> {
 
 /// `load` against an explicit `durations.json` path (missing/corrupt = empty).
 pub fn load_from(path: &Path) -> HashMap<String, f64> {
-    secs_only(fresh(load_raw_from(path), &cwd()))
+    secs_only(fresh(load_raw_from(path), &project_base()))
 }
 
 /// The cache as recorded, without fingerprint validation. The
@@ -358,7 +360,9 @@ fn secs_only(map: HashMap<String, Timing>) -> HashMap<String, f64> {
 }
 
 /// Record this run's call durations, tagged with the sources and hashes
-/// `collected` took at collection time (see `Collected`).
+/// `collected` took at collection time (see `Collected`). Only
+/// [`Run::learned_durations`]: a failed or `--durations-regress`-flagged test
+/// keeps its previous timing.
 pub fn save(run: &Run, collected: &Collected) {
     // Merge over the previous cache: tests not in this run keep old timings
     // (-k/-m filtered runs must not wipe the rest of the suite's data). `fresh`
@@ -369,9 +373,9 @@ pub fn save(run: &Run, collected: &Collected) {
     cache::with_lock(|| {
         persist_to(
             &cache::file(FILE),
-            run.durations().map(|(id, d)| (id.clone(), d)),
+            run.learned_durations().map(|(id, d)| (id.clone(), d)),
             collected,
-            &cwd(),
+            &project_base(),
         );
     });
 }
@@ -388,7 +392,7 @@ pub fn overlay_remote_in(path: &Path, remote: &HashMap<String, f64>) {
         path,
         remote.iter().map(|(k, v)| (k.clone(), *v)),
         &Collected::default(),
-        &cwd(),
+        &project_base(),
     );
 }
 
@@ -535,6 +539,7 @@ mod tests {
                     fd_delta: None,
                     sections: Vec::new(),
                     lineno: None,
+                    subtest: false,
                 },
             );
         }
@@ -546,6 +551,45 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "t/a.py::slow");
         assert_eq!(rows[0].1, 0.5);
+    }
+
+    fn call_report(id: &str, outcome: &str, d: f64) -> crate::scheduling::proto::Report {
+        crate::scheduling::proto::Report {
+            nodeid: id.into(),
+            when: "call".into(),
+            outcome: outcome.into(),
+            duration: d,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            thread_delta: None,
+            fd_delta: None,
+            sections: Vec::new(),
+            lineno: None,
+            subtest: false,
+        }
+    }
+
+    #[test]
+    fn learned_durations_skip_failed_and_regressed() {
+        let mut run = Run::default();
+        run.record(None, call_report("t/a.py::ok", "passed", 0.3));
+        run.record(None, call_report("t/a.py::red", "failed", 0.0002));
+        run.record(None, call_report("t/a.py::slow", "passed", 1.0));
+        let mut base = HashMap::new();
+        base.insert("t/a.py::slow".to_string(), 0.1);
+        base.insert("t/a.py::red".to_string(), 0.3);
+        // The gate still sees every measured duration...
+        assert_eq!(run.durations().count(), 3);
+        let rows = regressions(&run, &base, 2.0);
+        assert_eq!(rows.len(), 1);
+        for (id, _, _) in &rows {
+            run.mark_duration_regressed(id);
+        }
+        // ...but only the passing, non-regressed one is learned.
+        let learned: Vec<(&String, f64)> = run.learned_durations().collect();
+        assert_eq!(learned, vec![(&"t/a.py::ok".to_string(), 0.3)]);
     }
 
     #[test]

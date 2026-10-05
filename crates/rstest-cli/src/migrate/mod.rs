@@ -94,6 +94,12 @@ pub(super) fn file_of(nodeid: &str) -> &str {
     crate::text::nodeid_file(nodeid)
 }
 
+/// `-n` for a check's parallel pass: a real pool of at least 2 workers, never
+/// `auto` (which a single-file or short cached suite resolves to 1).
+pub(super) fn parallel_n() -> String {
+    crate::run::check_workers().to_string()
+}
+
 /// Run one full session in a child rstest process with the given config flags
 /// (e.g. `["-n","0"]`), capture per-test pass/fail from its `--report-json`.
 /// `python` is pinned with `--python`: the child would otherwise re-resolve an
@@ -216,6 +222,8 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
         debug_port: None,
         stream_output: false,
         junitxml: None,
+        reruns: false,
+        quarantine: None,
     };
     let mut collect_args = args.to_vec();
     if !collect_args

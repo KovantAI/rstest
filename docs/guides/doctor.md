@@ -48,6 +48,19 @@ brevity; it appears in any `-n ≥ 2` run.
 
 [aiohttp]: https://github.com/aio-libs/aiohttp
 
+## What "test time" means
+
+Every number in the report counts a test's **whole protocol**: fixture setup,
+the test call, and fixture teardown. That is the time the test held its
+worker, so a suite whose cost lives in function fixtures reads correctly:
+its test time, worker load, long pole, slowest files and realized speedup
+all include the fixture work. CPU time is measured over the same span and
+includes CPU used by child processes the test waited for (a CLI run with
+`subprocess.run`), so a test that shells out to a CPU-heavy tool reads as
+computing, not waiting.
+
+A single-worker run (`-n 0` or `-n 1`) reports `1 worker`.
+
 ## Reading each section
 
 ### WAIT-BOUND
@@ -58,6 +71,11 @@ socket, or waiting out a timeout. These tests waste wall-clock no matter
 how fast the runner is; fixing them (mock the clock, shrink the timeout,
 use event-driven waits) is usually the single biggest speedup available in
 a suite.
+
+The section appears when waiting is at least 20% of test time and at least
+1s, and lists tests that spent 60% or more of at least 0.2s waiting. Waiting
+in a fixture (a `time.sleep` before `yield`, a server that takes a while to
+come up) counts like waiting in the test body.
 
 In profiling of popular open-source suites, this is the dominant pattern:
 rich spends 74% of its test time in three `sleep()`-based tests; aiohttp
@@ -94,7 +112,9 @@ speedup climbs past the core count (see
 
 ### FIXTURE HOTSPOTS
 
-Total setup time per fixture, with two pieces of advice:
+Total setup time per fixture, summed over every worker (the heading reads
+`setup time across all workers` on a pool run and `setup time` on a
+single-worker run), with two pieces of advice:
 
 - A *function-scoped* fixture that ran 20 or more times and cost at least
   1s in total is a candidate for a wider scope: one real-world suite re-parsed
@@ -204,7 +224,7 @@ Tests that ended with more live threads or open file descriptors than they
 started: a resource opened and never released, its own teardown included.
 
 ```text
-RESOURCE LEAKS (net threads/fds still open after teardown):
+RESOURCE LEAKS (threads/fds a test created, still open after its teardown):
   +3 threads  tests/test_pool.py::test_executor
   +5 fds  tests/test_io.py::test_reader
   a test opened a thread/fd it never released; leaked state can flake later
@@ -273,7 +293,9 @@ Under GitHub Actions, any doctor run appends the report to
 `$GITHUB_STEP_SUMMARY` automatically: `rstest --doctor-json doctor.json`
 in a workflow puts the analysis on the run page with no extra step. On
 Buildkite, the same markdown is piped to `buildkite-agent annotate` as an
-info annotation (best-effort: a missing agent never fails the run).
+info annotation. Both are best-effort: an unwritable summary path or a
+missing agent prints a warning on stderr, and the exit code and every
+requested report file stay as they would be without it.
 
 To also write the markdown to a file of your own (for an artifact, or on a
 CI with no native summary):
@@ -297,7 +319,14 @@ $ rstest -n auto --doctor-fail-on 'parallel_efficiency<30' \
 
 The run exits non-zero if any condition fires (here: efficiency below 30%,
 or more than half of test time spent waiting). Repeatable; the gate is the
-union of all conditions. A metric that didn't apply to the run (e.g.
-`parallel_efficiency` at `-n 1`) is skipped, never failed, and a typo'd
-metric aborts before the run rather than silently passing. Full metric and
+union of all conditions. `wait_pct` and `wait_seconds` are gated on the
+measured values even when the WAIT-BOUND section is below its display
+threshold, and `long_pole_seconds` works at any worker count. A pool-only
+metric (`parallel_efficiency`, `efficiency_pct`, `realized_speedup`,
+`imbalance_pct`) at `-n 0` / `-n 1` is skipped, never failed, and the
+closing line then says how many conditions passed and how many were
+skipped (`1 condition(s) passed, 1 skipped (not measured for this run)`)
+instead of `all N condition(s) passed`. A typo'd metric or a threshold that
+is not a finite number (`NaN`, `inf`) aborts before the run rather than
+silently passing. Full metric and
 operator list: [`--doctor-fail-on`](../reference/cli.md#-doctor-fail-on-cond).

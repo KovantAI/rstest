@@ -1,16 +1,19 @@
-"""Unit tests for the resource-leak instrumentation in StreamPlugin.
+"""Unit tests for the resource-leak instrumentation (`--doctor` / `--fail-on-leak`).
 
-Covers the per-test thread/fd delta path (`--doctor` / `--fail-on-leak`): the
-setup/teardown snapshot hooks, the first-test warm-up skip, and the teardown
-report payload that carries the net deltas. The worker subprocess that runs this
-code under the e2e gate isn't seen by pytest-cov, so these direct tests are what
-give the leak path Python coverage.
+Covers `LeakTracker` (identity-based attribution: the setup/teardown window,
+the first-test warm-up skip, wider-scoped fixture exclusion) and the teardown
+report payload StreamPlugin builds from it. The worker subprocess that runs
+this code under the e2e gate isn't seen by pytest-cov, so these direct tests
+are what give the leak path Python coverage.
 """
 
+import os
+import threading
 from types import SimpleNamespace
 
-from rstest_worker._internal import stream
-from rstest_worker._internal.stream import StreamPlugin, _count_fds, _count_threads
+from rstest_worker._internal import leakcheck
+from rstest_worker._internal.leakcheck import LeakTracker, live_threads, open_fds
+from rstest_worker._internal.stream import StreamPlugin
 
 
 class FakeConn:
@@ -42,14 +45,276 @@ def _report(nodeid, when):
     )
 
 
-def _run_wrapper(gen):
-    """Drive a wrapper=True hook generator to completion, returning its value."""
-    next(gen)  # run up to the yield (baseline / pre-teardown work)
+def _wrap(gen, body=None):
+    """Drive a wrapper=True hook generator: run up to the yield, run `body`
+    (the hooked phase), then resume to completion and return its value."""
+    next(gen)
+    if body is not None:
+        body()
     try:
-        gen.send(None)  # resume; runs the finally / post-teardown work
+        gen.send(None)
     except StopIteration as e:
         return e.value
     raise AssertionError("wrapper hook did not stop")
+
+
+def _fixture(scope):
+    return SimpleNamespace(scope=scope, argname="fx")
+
+
+class World:
+    """Scripted resources: `threads` / `fds` are the live sets the tracker sees."""
+
+    def __init__(self, monkeypatch, fds=True):
+        self.threads = {"main"}
+        self.fds = {(0, 1, 1), (1, 1, 2)}
+        self.fds_readable = fds
+        monkeypatch.setattr(leakcheck, "live_threads", lambda: frozenset(self.threads))
+        monkeypatch.setattr(
+            leakcheck, "open_fds", lambda: frozenset(self.fds) if self.fds_readable else None
+        )
+
+
+def _test(tr, nodeid, setup=None, call=None, teardown=None):
+    """One test protocol through the tracker: setup / call / teardown bodies."""
+    _wrap(tr.pytest_runtest_setup(_item(nodeid)), setup)
+    if call is not None:
+        call()
+    _wrap(tr.pytest_runtest_teardown(_item(nodeid), None), teardown)
+
+
+def _warm(tr):
+    _test(tr, "t.py::warmup")
+
+
+# --- the raw snapshots -----------------------------------------------------
+
+
+def test_live_threads_has_current_thread():
+    assert threading.current_thread() in live_threads()
+
+
+def test_open_fds_identity_or_none():
+    v = open_fds()
+    assert v is None or all(isinstance(fd, tuple) and len(fd) == 3 for fd in v)
+
+
+def test_open_fds_sees_a_new_fd():
+    before = open_fds()
+    if before is None:
+        return  # no fd listing on this platform
+    r, w = os.pipe()
+    try:
+        assert len((open_fds() or frozenset()) - before) == 2
+    finally:
+        os.close(r)
+        os.close(w)
+    assert not ((open_fds() or frozenset()) - before)
+
+
+def test_open_fds_none_when_no_fd_dir(monkeypatch):
+    def boom(_):
+        raise OSError("no such dir")
+
+    monkeypatch.setattr(leakcheck.os, "listdir", boom)
+    assert open_fds() is None
+
+
+def test_open_fds_skips_unstatable_entries(monkeypatch):
+    monkeypatch.setattr(leakcheck.os, "listdir", lambda _: ["x", "999999"])
+    assert open_fds() == frozenset()
+
+
+# --- warm-up skip ----------------------------------------------------------
+
+
+def test_first_test_is_warmup_and_not_recorded(monkeypatch):
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _test(tr, "t.py::warmup", call=lambda: w.threads.add("leak"))
+    assert tr._warmed is True
+    assert tr.pop("t.py::warmup") is None
+
+
+# --- attribution -----------------------------------------------------------
+
+
+def test_thread_and_fd_leak_charged_to_creator(monkeypatch):
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+
+    def leak():
+        w.threads |= {"t1", "t2"}
+        w.fds.add((7, 1, 70))
+
+    _test(tr, "t.py::leaker", call=leak)
+    assert tr.pop("t.py::leaker") == (2, 1)
+    assert tr.pop("t.py::leaker") is None  # consumed
+
+
+def test_open_and_close_is_clean(monkeypatch):
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    _test(
+        tr,
+        "t.py::clean",
+        call=lambda: w.threads.add("t"),
+        teardown=lambda: w.threads.discard("t"),
+    )
+    assert tr.pop("t.py::clean") == (0, 0)
+
+
+def test_release_of_older_resource_does_not_cancel_a_leak(monkeypatch):
+    # MT-06a: a module fixture's teardown in this test's window joins an older
+    # thread; the count is net 0 but this test still leaked its own thread.
+    w = World(monkeypatch)
+    w.threads.add("module_server")
+    tr = LeakTracker()
+    _warm(tr)
+    _test(
+        tr,
+        "t.py::last_leaks",
+        call=lambda: w.threads.add("permanent"),
+        teardown=lambda: w.threads.discard("module_server"),
+    )
+    assert tr.pop("t.py::last_leaks") == (1, 0)
+
+
+def test_thread_ending_in_a_later_test_stays_charged_to_its_creator(monkeypatch):
+    # MT-06b: test_b's thread ends during test_c, which starts a permanent one.
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    _test(tr, "t.py::b", call=lambda: w.threads.add("short"))
+
+    def c():
+        w.threads.discard("short")
+        w.threads.add("permanent")
+
+    _test(tr, "t.py::c", call=c)
+    assert tr.pop("t.py::b") == (1, 0)
+    assert tr.pop("t.py::c") == (1, 0)
+
+
+def test_reused_fd_number_with_new_file_is_a_new_resource(monkeypatch):
+    w = World(monkeypatch)
+    w.fds.add((5, 1, 50))
+    tr = LeakTracker()
+    _warm(tr)
+
+    def swap():
+        w.fds.discard((5, 1, 50))
+        w.fds.add((5, 1, 51))
+
+    _test(tr, "t.py::swap", call=swap)
+    assert tr.pop("t.py::swap") == (0, 1)
+
+
+def test_fd_delta_none_when_fds_unreadable(monkeypatch):
+    w = World(monkeypatch, fds=False)
+    tr = LeakTracker()
+    _warm(tr)
+    _test(tr, "t.py::no_fds", call=lambda: w.threads.add("t"))
+    assert tr.pop("t.py::no_fds") == (1, None)
+
+
+# --- wider-scoped fixtures --------------------------------------------------
+
+
+def _setup_fixture(tr, w, scope, thread, fd=None):
+    def body():
+        w.threads.add(thread)
+        if fd is not None:
+            w.fds.add(fd)
+
+    _wrap(tr.pytest_fixture_setup(_fixture(scope), None), body)
+
+
+def test_session_fixture_resources_are_not_the_test_leak(monkeypatch):
+    # MT-07: the first user of a session server isn't charged with it, and its
+    # shutdown in a later test's window changes nothing for that test either.
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    _test(
+        tr,
+        "t.py::first_user",
+        setup=lambda: _setup_fixture(tr, w, "session", "server", (9, 1, 90)),
+    )
+    assert tr.pop("t.py::first_user") == (0, 0)
+
+    def shutdown():
+        w.threads.discard("server")
+        w.fds.discard((9, 1, 90))
+
+    _test(tr, "t.py::last_user", teardown=shutdown)
+    assert tr.pop("t.py::last_user") == (0, 0)
+
+
+def test_module_fixture_set_up_and_torn_down_in_one_window(monkeypatch):
+    # A process-lifetime resource a module fixture's setup created (libc's
+    # cached resolver socket) outlives the fixture: still not the test's.
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+
+    def teardown():
+        w.threads.discard("srv")
+
+    _test(
+        tr,
+        "t.py::only_user",
+        setup=lambda: _setup_fixture(tr, w, "module", "srv", (11, 1, 110)),
+        teardown=teardown,
+    )
+    assert tr.pop("t.py::only_user") == (0, 0)
+
+
+def test_function_fixture_leak_is_the_test_leak(monkeypatch):
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    _test(
+        tr,
+        "t.py::fn_fixture",
+        setup=lambda: _setup_fixture(tr, w, "function", "worker", (12, 1, 120)),
+    )
+    assert tr.pop("t.py::fn_fixture") == (1, 1)
+
+
+def test_fixture_setup_outside_a_test_window_is_ignored(monkeypatch):
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _setup_fixture(tr, w, "session", "early")
+    assert tr._current is None
+
+
+def test_wider_fixture_with_unreadable_fds(monkeypatch):
+    w = World(monkeypatch, fds=False)
+    tr = LeakTracker()
+    _warm(tr)
+    _test(tr, "t.py::x", setup=lambda: _setup_fixture(tr, w, "class", "srv"))
+    assert tr.pop("t.py::x") == (0, None)
+
+
+def test_real_threads_end_to_end():
+    # The real snapshots, no scripting: a permanent thread is charged.
+    tr = LeakTracker()
+    _warm(tr)
+    stop = threading.Event()
+    t = threading.Thread(target=stop.wait, daemon=True)
+    try:
+        _test(tr, "t.py::real", call=t.start)
+        res = tr.pop("t.py::real")
+        assert res is not None and res[0] == 1
+    finally:
+        stop.set()
+        t.join()
+
+
+# --- StreamPlugin wiring -----------------------------------------------------
 
 
 def _plugin(monkeypatch, *, leakcheck=True):
@@ -60,134 +325,48 @@ def _plugin(monkeypatch, *, leakcheck=True):
     return StreamPlugin(FakeConn())
 
 
-def _script_counts(monkeypatch, threads, fds):
-    """Feed scripted return values to _count_threads / _count_fds in call order."""
-    t = iter(threads)
-    f = iter(fds)
-    monkeypatch.setattr(stream, "_count_threads", lambda: next(t))
-    monkeypatch.setattr(stream, "_count_fds", lambda: next(f))
-
-
-def _measure(plugin, nodeid):
-    """Run one test's setup+teardown through the leak hooks."""
-    _run_wrapper(plugin.pytest_runtest_setup(_item(nodeid)))
-    _run_wrapper(plugin.pytest_runtest_teardown(_item(nodeid), None))
-
-
-# --- the raw counters ------------------------------------------------------
-
-
-def test_count_threads_is_positive():
-    # Always at least the main thread.
-    assert _count_threads() >= 1
-
-
-def test_count_fds_int_or_none():
-    v = _count_fds()
-    assert v is None or (isinstance(v, int) and v >= 0)
-
-
-def test_count_fds_none_when_no_fd_dir(monkeypatch):
-    # No /proc/self/fd and no /dev/fd (e.g. Windows): fd tracking disabled.
-    def boom(_):
-        raise OSError("no such dir")
-
-    monkeypatch.setattr(stream.os, "listdir", boom)
-    assert _count_fds() is None
-
-
-# --- warm-up skip ----------------------------------------------------------
-
-
-def test_first_test_is_warmup_and_not_recorded(monkeypatch):
-    p = _plugin(monkeypatch)
-    # Only the warm-up's setup reads counts; its teardown skips the delta.
-    _script_counts(monkeypatch, threads=[5, 99], fds=[10, 99])
-    _measure(p, "t.py::warmup")
-    assert p._leak_warmed is True
-    assert "t.py::warmup" not in p._res  # first test never attributed a delta
-
-
-# --- delta measurement -----------------------------------------------------
-
-
-def test_thread_and_fd_leak_recorded_after_warmup(monkeypatch):
-    p = _plugin(monkeypatch)
-    p._leak_warmed = True  # pretend the warm-up already ran
-    # setup: (5,10); teardown: (8,12) -> delta (3,2).
-    _script_counts(monkeypatch, threads=[5, 8], fds=[10, 12])
-    _measure(p, "t.py::leaker")
-    assert p._res["t.py::leaker"] == (3, 2)
-
-
-def test_clean_test_records_zero_delta(monkeypatch):
-    p = _plugin(monkeypatch)
-    p._leak_warmed = True
-    _script_counts(monkeypatch, threads=[5, 5], fds=[10, 10])
-    _measure(p, "t.py::clean")
-    assert p._res["t.py::clean"] == (0, 0)
-
-
-def test_fd_delta_none_when_fds_unreadable(monkeypatch):
-    p = _plugin(monkeypatch)
-    p._leak_warmed = True
-    # fds unreadable on this platform -> None both snapshots -> fd_delta None.
-    monkeypatch.setattr(stream, "_count_fds", lambda: None)
-    threads = iter([5, 7])
-    monkeypatch.setattr(stream, "_count_threads", lambda: next(threads))
-    _measure(p, "t.py::no_fds")
-    assert p._res["t.py::no_fds"] == (2, None)
-
-
-# --- teardown report payload ----------------------------------------------
-
-
 def test_teardown_report_carries_deltas(monkeypatch):
     p = _plugin(monkeypatch)
-    p._res["t.py::leaker"] = (3, 2)
+    p._leaks._res["t.py::leaker"] = (3, 2)
     p.pytest_runtest_logreport(_report("t.py::leaker", "teardown"))
     kind, payload = p._conn.sent[-1]
     assert kind == "report"
     assert payload["thread_delta"] == 3
     assert payload["fd_delta"] == 2
-    assert "t.py::leaker" not in p._res  # consumed
+    assert p._leaks.pop("t.py::leaker") is None  # consumed
 
 
 def test_teardown_report_omits_zero_deltas(monkeypatch):
     p = _plugin(monkeypatch)
-    p._res["t.py::clean"] = (0, 0)
+    p._leaks._res["t.py::clean"] = (0, 0)
     p.pytest_runtest_logreport(_report("t.py::clean", "teardown"))
     _, payload = p._conn.sent[-1]
-    assert "thread_delta" not in payload  # 0 is falsy -> omitted
+    assert "thread_delta" not in payload
     assert "fd_delta" not in payload
 
 
 def test_teardown_report_omits_none_fd_delta(monkeypatch):
     p = _plugin(monkeypatch)
-    p._res["t.py::t"] = (2, None)
+    p._leaks._res["t.py::t"] = (2, None)
     p.pytest_runtest_logreport(_report("t.py::t", "teardown"))
     _, payload = p._conn.sent[-1]
     assert payload["thread_delta"] == 2
-    assert "fd_delta" not in payload  # None fd delta not shipped
+    assert "fd_delta" not in payload
 
 
 def test_non_teardown_report_ignores_deltas(monkeypatch):
     p = _plugin(monkeypatch)
-    p._res["t.py::t"] = (3, 2)
+    p._leaks._res["t.py::t"] = (3, 2)
     p.pytest_runtest_logreport(_report("t.py::t", "call"))
     _, payload = p._conn.sent[-1]
     assert "thread_delta" not in payload
-    assert "t.py::t" in p._res  # not consumed on the call report
+    assert "t.py::t" in p._leaks._res  # not consumed on the call report
 
 
-# --- disabled ---------------------------------------------------------------
-
-
-def test_leakcheck_disabled_is_noop(monkeypatch):
+def test_leakcheck_disabled_has_no_tracker(monkeypatch):
     p = _plugin(monkeypatch, leakcheck=False)
     assert p._leakcheck is False
-    # Even with scripted counts, no baseline is taken and nothing is recorded.
-    _script_counts(monkeypatch, threads=[5, 8], fds=[10, 12])
-    _measure(p, "t.py::x")
-    assert p._res == {}
-    assert p._res_base == {}
+    assert p._leaks is None
+    p.pytest_runtest_logreport(_report("t.py::t", "teardown"))
+    _, payload = p._conn.sent[-1]
+    assert "thread_delta" not in payload

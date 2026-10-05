@@ -49,7 +49,7 @@ class FixtureStat(TypedDict):
 class _ReportRequired(TypedDict):
     nodeid: str
     when: str  # "setup" | "call" | "teardown"
-    outcome: str  # "passed" | "failed" | "skipped"
+    outcome: str  # "passed" | "failed" | "skipped" | "rerun" (a retried attempt, -n 0)
     duration: float
     longrepr: str | None  # present but nullable
     wasxfail: bool  # the worker always sends this
@@ -57,11 +57,12 @@ class _ReportRequired(TypedDict):
 
 class ReportPayload(_ReportRequired, total=False):
     lineno: int  # 0-based source line
-    cpu: float  # doctor mode: call-phase CPU time
-    thread_delta: int  # leak-check: net threads after teardown vs before setup
-    fd_delta: int  # leak-check: net open fds after teardown vs before setup
+    cpu: float  # doctor/stream mode: phase CPU time (self + reaped children)
+    thread_delta: int  # leak-check: threads the test created, alive after teardown
+    fd_delta: int  # leak-check: fds the test opened, still open after teardown
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
+    subtest: bool  # a subtest's report (shares the parent's nodeid/phase)
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------
@@ -83,6 +84,7 @@ class SessionRootsPayload(TypedDict, total=False):
 
 
 class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=False):
+    deselected: int  # items pytest deselected (-k/-m, hooks), only when > 0
     # Only worker 0 (RSTEST_SEND_IDS=1) ships the id-bearing fields.
     ids: list[str]
     locations: list[list[str | int | None]]  # [relpath, lineno] per item
@@ -101,6 +103,7 @@ class _FileCollectedRequired(TypedDict):
 class FileCollectedPayload(_FileCollectedRequired, total=False):
     serial: list[str]  # nodeids with the serial marker
     flaky: dict[str, int]  # nodeid -> rerun budget
+    deselected: int  # items deselected while collecting this file, only when > 0
 
 
 class LazyReadyPayload(TypedDict, total=False):
@@ -263,6 +266,10 @@ class CmdNoMoreItems(TypedDict):
     kind: Literal["no_more_items"]
 
 
+class CmdStopRun(TypedDict):
+    kind: Literal["stop_run"]
+
+
 class CmdEndSession(TypedDict):
     kind: Literal["end_session"]
 
@@ -280,6 +287,7 @@ Command = (
     | CmdRunIds
     | CmdNodeDown
     | CmdNoMoreItems
+    | CmdStopRun
     | CmdEndSession
     | CmdShutdown
 )
@@ -293,6 +301,7 @@ CommandKind = Literal[
     "run_ids",
     "node_down",
     "no_more_items",
+    "stop_run",
     "end_session",
     "shutdown",
 ]

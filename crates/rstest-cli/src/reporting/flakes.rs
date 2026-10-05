@@ -109,7 +109,7 @@ pub fn record(run: &Run) {
     for (nodeid, _) in &run.flaky {
         events.push((nodeid, true));
     }
-    for nodeid in run.failed_nodeids() {
+    for nodeid in run.history_failed_nodeids() {
         events.push((nodeid, false));
     }
     if events.is_empty() {

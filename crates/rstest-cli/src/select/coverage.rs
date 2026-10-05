@@ -144,6 +144,17 @@ fn diff_old_side(rev: Option<&str>) -> String {
     rev.to_string()
 }
 
+/// The coverage-index key of `file`, a path relative to the cwd: `/`-separated
+/// and relative to the rootdir (`cwd_in_root` is the cwd's path under it; `None`
+/// when the cwd lies outside it, keeping the path as given).
+fn index_key(cwd_in_root: Option<&Path>, file: &Path) -> String {
+    let rel = match cwd_in_root {
+        Some(prefix) => prefix.join(file),
+        None => file.to_path_buf(),
+    };
+    rel.to_string_lossy().replace('\\', "/")
+}
+
 /// Coverage-aware selection: consult the line->test index to pick the exact tests
 /// whose coverage hit the changed lines, falling back to the import graph for what
 /// it can't vouch for (new code, unmeasured/drifted files) and full run for config.
@@ -189,6 +200,10 @@ fn select_from_index(
     // fallback results are ROOTDIR-relative. Resolve each against its own base so
     // existence checks and the dedup compare real paths when rootdir != cwd.
     let cwd = std::env::current_dir().unwrap_or_else(|_| rootdir.to_path_buf());
+    // The index is keyed rootdir-relative (covtool writes it that way, so runs
+    // from any subdirectory share it): the cwd's place under the rootdir turns
+    // a cwd-relative changed file into its key.
+    let cwd_in_root = crate::cache::relative_to(&cwd, rootdir);
 
     let mut nodeids: BTreeSet<String> = BTreeSet::new();
     let mut fallback: Vec<PathBuf> = Vec::new();
@@ -212,7 +227,7 @@ fn select_from_index(
             continue;
         }
         // Look up the OLD-side changed lines (index is keyed pre-change).
-        let key = file.to_string_lossy().replace('\\', "/");
+        let key = index_key(cwd_in_root.as_deref(), file);
         // Drift guard: the index's line numbers are valid only if the base
         // content still hashes to what the index was built from; on mismatch (or
         // unreadable base) treat the entry as absent and fall back to the graph.

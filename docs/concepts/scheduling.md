@@ -57,7 +57,10 @@ learns what comes next, or learns the queue is exhausted *for now*
 (`no_more_items`, which runs the held item with `nextitem=None`). Workers
 then keep listening: a failed test from any worker can be rerun on them
 until an explicit end-of-session signal confirms every outcome is final.
-Every dispatch path must keep at least one successor in flight or
+When `-x`/`--maxfail` trips, every worker is told `stop_run` instead: it
+checks for that signal before starting each test, so it finishes only the
+test already running and reports its queued items, the held one included,
+as never run. Every dispatch path must keep at least one successor in flight or
 explicitly release the queue; this invariant shaped most of the
 scheduler's edge cases (three deadlocks' worth).
 

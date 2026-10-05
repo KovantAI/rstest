@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -86,6 +86,13 @@ pub struct WorkerEnv {
     /// `--junitxml` was given (the user's path, verbatim): the worker runs
     /// pytest's LogXML and streams its testcase elements back. None = off.
     pub junitxml: Option<String>,
+    /// A global `--reruns` budget is in play: a pool worker's own `-x` /
+    /// `--maxfail` count skips every failed attempt (the orchestrator may
+    /// retry it and counts the final outcome).
+    pub reruns: bool,
+    /// `--quarantine` patterns (anchored regexes, one per line): failures of
+    /// matching tests never count toward a session's `-x` / `--maxfail`.
+    pub quarantine: Option<String>,
 }
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
@@ -308,6 +315,9 @@ pub struct EventReader {
     /// Whether any event arrived yet: an EOF before the first one means the
     /// worker died during startup (a broken interpreter, a missing import).
     received: bool,
+    /// The worker's held-back startup stderr (pool workers only), released as
+    /// soon as an event shows the worker got past startup into running tests.
+    startup: Option<Arc<StartupStderr>>,
 }
 
 impl EventReader {
@@ -323,6 +333,7 @@ impl EventReader {
             budget,
             cap,
             received: false,
+            startup: None,
         }
     }
 
@@ -334,6 +345,11 @@ impl EventReader {
         match proto::Event::deserialize(&mut self.events) {
             Ok(ev) => {
                 self.received = true;
+                if let Some(startup) = &self.startup {
+                    if StartupStderr::ends_startup(&ev) {
+                        startup.release(&mut io::stderr());
+                    }
+                }
                 Ok(ev)
             }
             // A clean EOF at a message boundary is the worker going away, not a
@@ -373,17 +389,26 @@ struct StderrTail {
     /// Set once the pipe hits EOF (the worker and anything that inherited its
     /// stderr are gone).
     done: Arc<(Mutex<bool>, Condvar)>,
+    /// Pool workers only: stderr held back until the worker starts running
+    /// tests (see [`StartupStderr`]).
+    startup: Option<Arc<StartupStderr>>,
 }
 
 impl StderrTail {
-    fn capture(stderr: ChildStderr) -> Self {
+    fn capture(stderr: ChildStderr, startup: Option<Arc<StartupStderr>>) -> Self {
         let lines = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let (t_lines, t_done) = (Arc::clone(&lines), Arc::clone(&done));
+        let t_startup = startup.clone();
         let spawned = std::thread::Builder::new()
             .name("rstest-worker-stderr".into())
             .spawn(move || {
-                forward_stderr(BufReader::new(stderr), &mut io::stderr(), &t_lines);
+                forward_stderr(
+                    BufReader::new(stderr),
+                    &mut io::stderr(),
+                    &t_lines,
+                    t_startup.as_deref(),
+                );
                 let (flag, cv) = &*t_done;
                 *flag.lock().unwrap_or_else(|p| p.into_inner()) = true;
                 cv.notify_all();
@@ -394,7 +419,11 @@ impl StderrTail {
             // it once the pipe buffer fills.
             *done.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
         }
-        StderrTail { lines, done }
+        StderrTail {
+            lines,
+            done,
+            startup,
+        }
     }
 
     /// The kept lines, after waiting up to `wait` for the pipe to reach EOF.
@@ -409,18 +438,148 @@ impl StderrTail {
     }
 }
 
+impl Drop for StderrTail {
+    /// A worker that never got past startup (a usage error, a conftest that
+    /// fails to import, a nodeid that matches nothing) still holds its stderr:
+    /// let the pipe drain, then print it, once per distinct text across the
+    /// pool, before the run's summary.
+    fn drop(&mut self) {
+        let Some(startup) = &self.startup else { return };
+        if !startup.holding() {
+            return;
+        }
+        let _ = self.snapshot(DEATH_GRACE);
+        startup.finish(&mut io::stderr());
+    }
+}
+
+/// The stderr pipes of one pool's workers share one of these: the startup
+/// texts already printed.
+pub(crate) type SeenStartupStderr = Arc<Mutex<HashSet<Vec<u8>>>>;
+
+/// Most stderr bytes held back per worker during startup; past this it is
+/// printed and forwarding goes live.
+const STARTUP_HOLD_BYTES: usize = 1 << 20;
+
+/// A pool worker's stderr from spawn until it starts running tests. Every
+/// worker of a pool runs the same session, so a startup failure (a usage
+/// error, an unknown flag, a missing path or nodeid, a conftest ImportError)
+/// prints the same text from each of them. Held back, the identical copies
+/// are printed once when the workers exit, while a worker whose text differs
+/// still prints its own. Once an event shows the worker running tests
+/// ([`StartupStderr::ends_startup`]), the held bytes are printed verbatim and
+/// everything after is forwarded live and never deduplicated, so test output
+/// is untouched.
+pub(crate) struct StartupStderr {
+    /// `Some` while startup output is being held back.
+    held: Mutex<Option<Vec<u8>>>,
+    seen: SeenStartupStderr,
+}
+
+impl StartupStderr {
+    fn new(seen: SeenStartupStderr) -> Self {
+        StartupStderr {
+            held: Mutex::new(Some(Vec::new())),
+            seen,
+        }
+    }
+
+    /// Whether `ev` shows the worker past startup: it collected a file (lazy)
+    /// or is running items.
+    fn ends_startup(ev: &proto::Event) -> bool {
+        matches!(
+            ev,
+            proto::Event::Report(_)
+                | proto::Event::ItemStart { .. }
+                | proto::Event::ItemDone { .. }
+                | proto::Event::ItemStartId { .. }
+                | proto::Event::ItemDoneId { .. }
+                | proto::Event::FileCollected { .. }
+        )
+    }
+
+    fn lock_held(&self) -> std::sync::MutexGuard<'_, Option<Vec<u8>>> {
+        self.held.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn holding(&self) -> bool {
+        self.lock_held().is_some()
+    }
+
+    /// Forward one line: held while starting up (until the cap), else written.
+    fn forward(&self, line: &[u8], to: &mut impl Write) {
+        let mut held = self.lock_held();
+        let Some(buf) = held.as_mut() else {
+            let _ = to.write_all(line);
+            let _ = to.flush();
+            return;
+        };
+        buf.extend_from_slice(line);
+        if buf.len() > STARTUP_HOLD_BYTES {
+            let buf = held.take().unwrap_or_default();
+            let _ = to.write_all(&buf);
+            let _ = to.flush();
+        }
+    }
+
+    /// The worker is running tests: print what was held, verbatim, and go
+    /// live.
+    fn release(&self, to: &mut impl Write) {
+        let mut held = self.lock_held();
+        if let Some(buf) = held.take() {
+            if !buf.is_empty() {
+                let _ = to.write_all(&buf);
+                let _ = to.flush();
+            }
+        }
+    }
+
+    /// The worker is gone without running tests: print what it held unless
+    /// another worker of the pool already printed the same text.
+    fn finish(&self, to: &mut impl Write) {
+        let mut held = self.lock_held();
+        let Some(buf) = held.take() else { return };
+        if buf.is_empty() {
+            return;
+        }
+        let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        if seen.contains(&buf) {
+            return;
+        }
+        let _ = to.write_all(&buf);
+        let _ = to.flush();
+        seen.insert(buf);
+    }
+}
+
 /// Copy `from` to `to` line by line (bytes untouched), keeping the last
-/// non-blank lines in `tail`. Returns at EOF or a read error.
-fn forward_stderr(mut from: impl BufRead, to: &mut impl Write, tail: &Mutex<VecDeque<String>>) {
+/// non-blank lines in `tail`. Returns at EOF or a read error. With `startup`,
+/// lines go through it instead (held back while the worker starts up).
+fn forward_stderr(
+    mut from: impl BufRead,
+    to: &mut impl Write,
+    tail: &Mutex<VecDeque<String>>,
+    startup: Option<&StartupStderr>,
+) {
     let mut buf = Vec::new();
     loop {
         buf.clear();
         match from.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => {
+                if let Some(startup) = startup {
+                    startup.finish(to);
+                }
+                return;
+            }
             Ok(_) => {}
         }
-        let _ = to.write_all(&buf);
-        let _ = to.flush();
+        match startup {
+            Some(startup) => startup.forward(&buf, to),
+            None => {
+                let _ = to.write_all(&buf);
+                let _ = to.flush();
+            }
+        }
         let mut line = String::from_utf8_lossy(&buf).trim_end().to_string();
         if line.trim().is_empty() {
             continue;
@@ -492,6 +651,18 @@ impl Worker {
         io: Stdio,
         env: &WorkerEnv,
     ) -> Result<Self> {
+        Self::spawn_inner(python, worker, io, env, None)
+    }
+
+    /// [`Worker::spawn_with_io`], optionally holding back startup stderr
+    /// against the pool's shared `seen` set (see [`StartupStderr`]).
+    fn spawn_inner(
+        python: &Path,
+        worker: Option<(usize, usize)>,
+        io: Stdio,
+        env: &WorkerEnv,
+        seen: Option<&SeenStartupStderr>,
+    ) -> Result<Self> {
         // cmd: parent writes -> child reads; evt: child writes -> parent reads.
         let cmd = transport::pipe()?;
         let evt = transport::pipe()?;
@@ -505,7 +676,8 @@ impl Worker {
         let mut child = command
             .spawn()
             .with_context(|| format!("spawning worker: {}", python.display()))?;
-        let stderr = child.stderr.take().map(StderrTail::capture);
+        let startup = seen.map(|seen| Arc::new(StartupStderr::new(Arc::clone(seen))));
+        let stderr = child.stderr.take().map(|e| StderrTail::capture(e, startup));
 
         // Close the child's ends in the parent or EOF detection breaks
         // (Endpoint::drop calls transport::close). The parent ends become
@@ -514,10 +686,12 @@ impl Worker {
         drop(evt.write);
         let cmd_w = transport::into_file(cmd.write.into_raw());
         let evt_r = transport::into_file(evt.read.into_raw());
+        let mut reader = EventReader::new(evt_r);
+        reader.startup = stderr.as_ref().and_then(|t| t.startup.clone());
         Ok(Self {
             proc: Proc::Owned(child),
             cmd_w,
-            reader: Some(EventReader::new(evt_r)),
+            reader: Some(reader),
             stderr,
             shutdown_sent: None,
         })
@@ -554,8 +728,11 @@ impl Worker {
         // under the zygote's ~4n, so the same headroom covers them.
         #[cfg(unix)]
         ensure_fd_headroom(n);
+        // One startup-stderr set per pool: a startup error every worker hits
+        // the same way prints once, not n times.
+        let seen = SeenStartupStderr::default();
         (0..n)
-            .map(|idx| Self::spawn(python, Some((idx, n)), env))
+            .map(|idx| Self::spawn_inner(python, Some((idx, n)), Stdio::Null, env, Some(&seen)))
             .collect()
     }
 
@@ -585,6 +762,16 @@ impl Worker {
         self.cmd_w.write_all(&buf)?;
         self.cmd_w.flush()?;
         Ok(())
+    }
+
+    /// The worker process's pid: the child's for a spawned worker, the tracked
+    /// one for a forked worker (`None` once it is known to have exited).
+    pub fn pid(&self) -> Option<u32> {
+        match &self.proc {
+            Proc::Owned(child) => Some(child.id()),
+            #[cfg(unix)]
+            Proc::Reparented(t) => t.map(|t| t.pid),
+        }
     }
 
     /// Detach the event stream (for a dedicated reader thread). Errors if the
@@ -839,6 +1026,8 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_DEBUGPY_PORT",
     "RSTEST_STREAM_OUTPUT",
     "RSTEST_JUNITXML",
+    "RSTEST_RERUNS",
+    "RSTEST_QUARANTINE",
 ];
 
 /// Credentials rstest itself consumes and test code never needs. Stripped from
@@ -941,6 +1130,7 @@ fn build_worker_command(
     if let Some(path) = &env.junitxml {
         command.env("RSTEST_JUNITXML", path);
     }
+    apply_maxfail_env(&mut command, env);
     // Exactly one worker ships the full id list (D5); the rest verify their
     // collection by count+hash. Worker 0 in a pool; the lone worker only
     // when the caller asks (collect-only discovery / migrate-check).
@@ -1210,6 +1400,24 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
     if let Some(path) = &env.junitxml {
         command.env("RSTEST_JUNITXML", path);
     }
+    apply_maxfail_env(command, env);
+}
+
+/// What a session's own `-x` / `--maxfail` count must skip (see
+/// `rstest_worker._internal.retry.MaxfailExemptions`): every failed attempt
+/// when a global `--reruns` budget may retry it, and quarantined tests.
+/// Unset ones are removed, so an outer rstest's values never leak in (the
+/// fork-pool zygote does not clear [`INTERNAL_ENV`]).
+fn apply_maxfail_env(command: &mut Command, env: &WorkerEnv) {
+    if env.reruns {
+        command.env("RSTEST_RERUNS", "1");
+    } else {
+        command.env_remove("RSTEST_RERUNS");
+    }
+    match &env.quarantine {
+        Some(patterns) => command.env("RSTEST_QUARANTINE", patterns),
+        None => command.env_remove("RSTEST_QUARANTINE"),
+    };
 }
 
 /// RAII owner for one raw pipe endpoint (a file descriptor on unix, a HANDLE
@@ -1436,8 +1644,8 @@ fn build_pythonpath(explicit: Option<&str>, existing_pythonpath: Option<&str>) -
 mod tests {
     use super::{build_worker_command, Endpoint, LimitedReader, Stdio, WorkerEnv};
     use super::{
-        format_death_detail, forward_stderr, transport, EventReader, STDERR_TAIL_LINES,
-        STDERR_TAIL_LINE_BYTES,
+        format_death_detail, forward_stderr, transport, EventReader, StartupStderr,
+        STDERR_TAIL_LINES, STDERR_TAIL_LINE_BYTES,
     };
     use crate::scheduling::proto;
     use serde::Deserialize;
@@ -1510,7 +1718,7 @@ mod tests {
         input.push_str("\nno trailing newline");
         let tail = Mutex::new(VecDeque::new());
         let mut out = Vec::new();
-        forward_stderr(io::Cursor::new(input.clone()), &mut out, &tail);
+        forward_stderr(io::Cursor::new(input.clone()), &mut out, &tail, None);
         // Everything is forwarded verbatim, blank lines included.
         assert_eq!(out, input.as_bytes());
         let tail: Vec<String> = tail.into_inner().unwrap().into();
@@ -1520,6 +1728,79 @@ mod tests {
         assert_eq!(tail.last().unwrap(), "no trailing newline");
         assert_eq!(tail[tail.len() - 2].len(), STDERR_TAIL_LINE_BYTES);
         assert!(!tail.iter().any(|l| l == "line 0"));
+    }
+
+    #[test]
+    fn identical_startup_stderr_from_a_pool_prints_once() {
+        let seen = super::SeenStartupStderr::default();
+        let err = "ERROR: usage: rstest [options]\nrstest: error: unrecognized arguments: --x\n";
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let startup = StartupStderr::new(Arc::clone(&seen));
+            let tail = Mutex::new(VecDeque::new());
+            forward_stderr(io::Cursor::new(err), &mut out, &tail, Some(&startup));
+            // The tail still sees every line, for death_detail.
+            assert_eq!(tail.into_inner().unwrap().len(), 2);
+        }
+        assert_eq!(String::from_utf8(out).unwrap(), err);
+
+        // A worker whose startup text differs still prints its own.
+        let startup = StartupStderr::new(Arc::clone(&seen));
+        let mut out = Vec::new();
+        let tail = Mutex::new(VecDeque::new());
+        forward_stderr(
+            io::Cursor::new("other error\n"),
+            &mut out,
+            &tail,
+            Some(&startup),
+        );
+        assert_eq!(out, b"other error\n");
+    }
+
+    #[test]
+    fn startup_stderr_goes_live_once_tests_run_and_is_never_deduped_after() {
+        let seen = super::SeenStartupStderr::default();
+        let mut out = Vec::new();
+        for _ in 0..2 {
+            let startup = StartupStderr::new(Arc::clone(&seen));
+            startup.forward(b"held\n", &mut out);
+            assert!(out.is_empty() || out.ends_with(b"live\n"));
+            // Running tests: what was held prints verbatim, then lines go
+            // straight through, and nothing is left for EOF to dedupe.
+            startup.release(&mut out);
+            startup.forward(b"live\n", &mut out);
+            startup.finish(&mut out);
+            assert!(!startup.holding());
+        }
+        assert_eq!(String::from_utf8(out).unwrap(), "held\nlive\nheld\nlive\n");
+    }
+
+    #[test]
+    fn startup_stderr_past_the_hold_cap_is_printed_and_goes_live() {
+        let startup = StartupStderr::new(super::SeenStartupStderr::default());
+        let mut out = Vec::new();
+        let big = vec![b'x'; super::STARTUP_HOLD_BYTES + 1];
+        startup.forward(&big, &mut out);
+        assert_eq!(out.len(), big.len());
+        assert!(!startup.holding());
+        startup.forward(b"next\n", &mut out);
+        assert!(out.ends_with(b"next\n"));
+    }
+
+    #[test]
+    fn only_test_activity_ends_startup() {
+        assert!(StartupStderr::ends_startup(&proto::Event::ItemStart {
+            index: 0,
+            timeout: None,
+        }));
+        assert!(StartupStderr::ends_startup(&proto::Event::ItemDone {
+            index: 0
+        }));
+        // A collection_done rides even a "not found" usage error (pytest sends
+        // it from a finally), and done ends every failed startup.
+        assert!(!StartupStderr::ends_startup(&proto::Event::Done {
+            exitstatus: 4
+        }));
     }
 
     #[test]
@@ -1601,6 +1882,8 @@ mod tests {
             debug_port: None,
             stream_output: false,
             junitxml: None,
+            reruns: false,
+            quarantine: None,
         }
     }
 
@@ -1678,6 +1961,22 @@ mod tests {
         assert_eq!(envs["RSTEST_DOCTOR"], "1");
         assert_eq!(envs["RSTEST_TIMEOUT"], "1.5");
         assert_eq!(envs["RSTEST_LEAKCHECK"], "1");
+    }
+
+    #[test]
+    fn build_command_maxfail_exemption_envs() {
+        // Off by default: a plain run sets neither.
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &base_env(), 3, 4);
+        let envs = envs_of(&cmd);
+        assert!(!envs.contains_key("RSTEST_RERUNS"));
+        assert!(!envs.contains_key("RSTEST_QUARANTINE"));
+        let mut env = base_env();
+        env.reruns = true;
+        env.quarantine = Some("^a\\.py::t$\n^b\\.py::.*$".into());
+        let cmd = build_worker_command(Path::new("python3"), Some((0, 2)), Stdio::Null, &env, 3, 4);
+        let envs = envs_of(&cmd);
+        assert_eq!(envs["RSTEST_RERUNS"], "1");
+        assert_eq!(envs["RSTEST_QUARANTINE"], "^a\\.py::t$\n^b\\.py::.*$");
     }
 
     #[test]
@@ -1921,6 +2220,8 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                reruns: false,
+                quarantine: None,
             };
             // A freshly spawned worker blocks on its first command: alive, and never
             // sent anything — the decode-error/respawn precondition (child still
@@ -1964,6 +2265,8 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                reruns: false,
+                quarantine: None,
             };
             let n = 3;
             let workers = Worker::spawn_pool(python, n, &env, true).expect("fork-prewarm pool");
@@ -2012,6 +2315,8 @@ mod tests {
                 debug_port: None,
                 stream_output: false,
                 junitxml: None,
+                reruns: false,
+                quarantine: None,
             };
             let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
             let mut worker = workers.pop().expect("one forked worker");

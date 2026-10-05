@@ -3,6 +3,7 @@
 import json
 import types
 
+import pytest
 from rstest_worker import recorder
 
 
@@ -24,6 +25,43 @@ def test_logreport_records_phase_outcomes():
         "teardown": "passed",
         "duration": 1.2346,  # call duration rounded to 4 places
     }
+
+
+def test_logreport_failed_subtest_fails_the_test():
+    # Subtest reports share the parent's nodeid and `when="call"`; the
+    # parent's own (passing) call report comes last and must not hide them.
+    SubtestReport = pytest.importorskip("_pytest.subtests").SubtestReport
+
+    class FakeSubtestReport(SubtestReport):
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    rec = recorder._Recorder()
+    rec.pytest_runtest_logreport(_report("t.py::a", "setup", "passed"))
+    for outcome in ("passed", "failed", "passed"):
+        rec.pytest_runtest_logreport(FakeSubtestReport(**vars(_report("t.py::a", "call", outcome))))
+    rec.pytest_runtest_logreport(_report("t.py::a", "call", "passed", duration=0.5))
+    rec.pytest_runtest_logreport(_report("t.py::a", "teardown", "passed"))
+    assert rec.tests["t.py::a"] == {
+        "setup": "passed",
+        "call": "failed",
+        "teardown": "passed",
+        "duration": 0.5,
+        "subtests_failed": 1,
+    }
+
+
+def test_logreport_passing_subtests_leave_the_test_passed():
+    SubtestReport = pytest.importorskip("_pytest.subtests").SubtestReport
+
+    class FakeSubtestReport(SubtestReport):
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    rec = recorder._Recorder()
+    rec.pytest_runtest_logreport(FakeSubtestReport(**vars(_report("t.py::a", "call", "passed"))))
+    rec.pytest_runtest_logreport(_report("t.py::a", "call", "passed"))
+    assert rec.tests["t.py::a"] == {"call": "passed", "duration": 0.0}
 
 
 def test_logreport_duration_only_on_call_phase():

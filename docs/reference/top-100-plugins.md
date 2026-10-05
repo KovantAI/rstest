@@ -51,7 +51,7 @@ plugin's category, not yet runtime-verified.
 | 21 | pytest-base-url | 10.2M | ✅ Works | V | Config/fixture only; `--base-url` reaches the fixture under the pool (e2e gate with one test, so one worker). |
 | 22 | pytest-randomly | 10.0M | ✅ Works | V | rstest synthesizes the `randomly_seed` the controller would inject (one run-level seed, all workers agree); vetted. Native `--shuffle` also available. |
 | 23 | pytest-icdiff | 9.7M | ➖ N/A | V | Assertion-diff repr; side-by-side diff reaches worker failure output (e2e gate). |
-| 24 | pytest-playwright | 9.6M | ✅ Works | V | Per-worker browser context; `page` fixture works under the pool (e2e `plugin-services` gate). |
+| 24 | pytest-playwright | 9.6M | ✅ Works | V | Per-worker browser context; `page` fixture works under the pool (e2e `plugin-services` gate). Its `--output DIR` reaches the plugin unless DIR is one of rstest's `--output` style names (then use `-- --output DIR`; see [shadowed flags](cli.md#shadowed-flags)). |
 | 25 | pytest-homeassistant-custom-component | 9.4M | ✅ Works | V | Fixture bundle; per-worker `hass` fixture works under the pool (e2e `plugin-services` gate). |
 | 26 | pytest-dependency | 8.9M | ⚠️ Caveat | V | Cross-test deps may span workers at `-n ≥ 2`; honored at `-n 0` (dependent skipped when dep fails: e2e gate), or use `--dist loadscope`. |
 | 27 | pytest-sugar | 8.2M | 🔶 `-n 0` | V | Terminal-rendering; not painted at `-n ≥ 2` (rstest owns the terminal). Corpus-flagged as a benign silent/terminal case. |

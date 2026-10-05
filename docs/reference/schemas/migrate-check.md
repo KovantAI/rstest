@@ -13,7 +13,7 @@ The `--migrate-check-json` document (schema 1). Field order is alphabetical to m
 | `ready` | boolean | yes | Whether the suite is parallel-ready (no blocking findings). |
 | `tests_collected` | integer | yes | Tests collected (union across the two collection runs). |
 | `unstable_ids` | array of UnstableSite | yes | Unstable-nodeid findings, grouped by test site. |
-| `will_bail_count` | integer | yes | Count of per-process-unstable ids that force `-n 0`. |
+| `will_bail_count` | integer | yes | Count of ids that force `-n 0`: per-process-unstable ids plus ids at order-unstable sites (`order` kind). |
 
 ### Finding
 

@@ -68,6 +68,7 @@ from gates.monorepo import (
     gate_shared_cache_backend,
     gate_tool_rstest_config,
 )
+from gates.personas import gate_personas
 from gates.plugins import (
     gate_crash_handling,
     gate_doctest_modules,
@@ -264,6 +265,7 @@ def main():
         gate_worker_timeout_watchdog,
         gate_native_timeout,
         gate_try,
+        gate_personas,
         gate_migrate_check,
         gate_bisect,
         gate_watch_mode,
@@ -286,7 +288,10 @@ def main():
     for _section in selected:
         _section(g, args, binary)
 
-    print(f"\n{_harness.PASS} ok, {len(_harness.FAIL)} failed")
+    print(
+        f"\n{_harness.PASS} ok, {len(_harness.FAIL)} failed, "
+        f"{len(_harness.XFAIL)} xfail (known bugs)"
+    )
     if _harness.FAIL:
         print("FAILED:", ", ".join(_harness.FAIL))
         sys.exit(1)

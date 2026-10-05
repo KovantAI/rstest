@@ -26,13 +26,14 @@ use regex::Regex;
 pub struct CovScope {
     /// Normalized source values (`./pkg/` -> `pkg`); empty = no source limit.
     pub sources: Vec<String>,
-    /// Cwd-relative path prefixes the sources measure ([`scope_prefixes`]).
+    /// Path prefixes the sources measure, relative to the project root
+    /// ([`scope_prefixes`]).
     prefixes: Vec<PathBuf>,
     /// `[run] include` (honored only without a source, as in coverage.py).
     include: Vec<Regex>,
     /// `[run] omit`.
     omit: Vec<Regex>,
-    /// `scope` as a string, for matching absolute-path patterns.
+    /// The project root as a string, for matching absolute-path patterns.
     abs_scope: String,
 }
 
@@ -40,12 +41,35 @@ impl CovScope {
     /// The measured set for pytest `args` (already [`effective_pytest_args`])
     /// run from `scope`. No coverage requested -> [`CovScope::default`]
     /// (nothing is partial: there is no coverage to be blind).
+    #[cfg(test)]
     pub fn resolve(scope: &Path, args: &[String]) -> Self {
+        Self::resolve_in(scope, scope, args)
+    }
+
+    /// [`CovScope::resolve`] for a run started from `cwd`, with the measured
+    /// set expressed relative to `root` (the project rootdir the cache belongs
+    /// to), so runs from the root and from a subdirectory agree on paths.
+    /// Coverage reads its config and resolves path sources (`.`, a directory,
+    /// relative include/omit patterns) from the cwd; a package-name source
+    /// measures that package wherever it is imported from, so it is also
+    /// looked up under `root`. A cwd outside `root` measures nothing there.
+    pub fn resolve_in(root: &Path, cwd: &Path, args: &[String]) -> Self {
         let values = cov_values(args);
         if values.is_empty() {
             return Self::default();
         }
-        let cfg = coverage_config(scope, args);
+        let abs_root = slashed(&root.to_string_lossy())
+            .trim_end_matches('/')
+            .to_string();
+        let Some(here) = crate::cache::relative_to(cwd, root) else {
+            // Nothing under `root` is known to be measured: everything folds.
+            return Self {
+                sources: vec![String::from(".")],
+                abs_scope: abs_root,
+                ..Self::default()
+            };
+        };
+        let cfg = coverage_config(cwd, args);
         // pytest-cov: ANY bare --cov makes the CLI source None, so coverage
         // falls back to the config's source.
         let raw: Vec<String> = if values.iter().any(Option::is_none) {
@@ -53,31 +77,55 @@ impl CovScope {
         } else {
             values.into_iter().flatten().map(String::from).collect()
         };
-        // A whole-tree source measures the cwd: unions in everything.
-        let sources = if raw.iter().any(|v| is_whole_tree(v)) {
-            Vec::new()
+        // A whole-tree source measures the cwd: unions in everything (all of
+        // `root` when the run starts there, else just the cwd's subtree).
+        let whole_tree = raw.iter().any(|v| is_whole_tree(v));
+        let (sources, prefixes) = if whole_tree {
+            if here.as_os_str().is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                (vec![String::from(".")], vec![here.clone()])
+            }
         } else {
-            raw.iter().map(|v| normalize_scope(v)).collect()
+            let sources: Vec<String> = raw.iter().map(|v| normalize_scope(v)).collect();
+            let mut prefixes: Vec<PathBuf> = Vec::new();
+            for s in &sources {
+                let found = if Path::new(s).is_absolute() {
+                    scope_prefixes(root, s)
+                } else if cwd.join(s).is_dir() {
+                    vec![here.join(s)]
+                } else {
+                    let mut v: Vec<PathBuf> = scope_prefixes(cwd, s)
+                        .into_iter()
+                        .map(|p| here.join(p))
+                        .collect();
+                    v.extend(scope_prefixes(root, s));
+                    v
+                };
+                for p in found {
+                    if !prefixes.contains(&p) {
+                        prefixes.push(p);
+                    }
+                }
+            }
+            (sources, prefixes)
         };
-        let abs_scope = slashed(&scope.to_string_lossy())
+        // Relative patterns anchor at the cwd, as coverage.py makes them.
+        let abs_cwd = slashed(&cwd.to_string_lossy())
             .trim_end_matches('/')
             .to_string();
-        let include = if sources.is_empty() {
-            compile_globs(&abs_scope, &cfg.include, false)
+        let include = if sources.is_empty() || whole_tree {
+            compile_globs(&abs_cwd, &cfg.include, false)
         } else {
             Vec::new()
         };
-        let omit = compile_globs(&abs_scope, &cfg.omit, true);
-        let prefixes = sources
-            .iter()
-            .flat_map(|s| scope_prefixes(scope, s))
-            .collect();
+        let omit = compile_globs(&abs_cwd, &cfg.omit, true);
         Self {
             sources,
             prefixes,
             include,
             omit,
-            abs_scope,
+            abs_scope: abs_root,
         }
     }
 
@@ -104,7 +152,7 @@ impl CovScope {
         !self.sources.is_empty() || !self.include.is_empty() || !self.omit.is_empty()
     }
 
-    /// Whether coverage measures the cwd-relative `rel`. Separators are
+    /// Whether coverage measures `rel` (relative to the project root). Separators are
     /// normalized to `/` first: a Windows walk yields `scripts\\util.py`, and
     /// coverage.py matches its patterns against either separator.
     pub fn measures(&self, rel: &Path) -> bool {
@@ -114,8 +162,10 @@ impl CovScope {
         if self.omit.iter().any(|re| re.is_match(&abs)) {
             return false;
         }
-        if !self.sources.is_empty() {
-            return in_prefixes(rel, &self.prefixes);
+        // `include` is compiled only without a source (or for a whole-tree
+        // source from a subdirectory, kept as a prefix), so both may apply.
+        if !self.sources.is_empty() && !in_prefixes(rel, &self.prefixes) {
+            return false;
         }
         self.include.is_empty() || self.include.iter().any(|re| re.is_match(&abs))
     }
@@ -538,6 +588,39 @@ mod tests {
             std::fs::write(d.join(rel), body).unwrap();
         }
         d
+    }
+
+    #[test]
+    fn resolve_in_a_subdirectory_is_rootdir_relative() {
+        let root = cfg_proj("subdir", &[]);
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::create_dir_all(root.join("tests/unit")).unwrap();
+        let cwd = root.join("tests/unit");
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // A package-name source measures the package wherever it lives, so a
+        // run from the subdirectory agrees with one from the root.
+        let pkg = CovScope::resolve_in(&root, &cwd, &args(&["--cov=app"]));
+        let at_root = CovScope::resolve_in(&root, &root, &args(&["--cov=app"]));
+        for rel in ["app/core.py", "tests/unit/test_u.py", "other.py"] {
+            assert_eq!(
+                pkg.measures(Path::new(rel)),
+                at_root.measures(Path::new(rel)),
+                "{rel}"
+            );
+        }
+        assert!(pkg.measures(Path::new("app/core.py")));
+        // `--cov=.` measures the cwd: from the subdirectory that is only its
+        // subtree, so the rest of the project counts as unmeasured.
+        let dot = CovScope::resolve_in(&root, &cwd, &args(&["--cov=."]));
+        assert!(dot.is_partial());
+        assert!(dot.measures(Path::new("tests/unit/test_u.py")));
+        assert!(!dot.measures(Path::new("app/core.py")));
+        // From the root it is the whole tree, as before.
+        assert!(!CovScope::resolve_in(&root, &root, &args(&["--cov=."])).is_partial());
+        // A cwd outside the root: nothing there is known to be measured.
+        let outside = CovScope::resolve_in(&root.join("app"), &cwd, &args(&["--cov"]));
+        assert!(outside.is_partial() && !outside.measures(Path::new("core.py")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

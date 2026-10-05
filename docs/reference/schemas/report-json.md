@@ -47,7 +47,7 @@ Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-re
 |---|---|---|---|
 | `cached` | boolean | no | Not executed this run: unchanged since the last green run, so its prior pass was carried forward (`--incremental`). Still counts as passed. |
 | `call` | string | no |  |
-| `cpu` | number | no | Call-phase CPU time (process_time), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline. |
+| `cpu` | number | no | Call-phase CPU time (process_time plus reaped child processes), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline. |
 | `crashed` | boolean | no | The outcome was fabricated because the worker died on this test (crash or --worker-timeout kill), or the test was running when SIGINT/SIGTERM stopped the run; not produced by pytest. |
 | `duration` | number | no |  |
 | `flaky` | boolean | no | Passed only after one or more reruns (--reruns or @pytest.mark.flaky). |
@@ -56,6 +56,7 @@ Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-re
 | `quarantined` | boolean | no | Failed, but matched the --quarantine list: reported distinctly, never fatal to the run. |
 | `setup` | string | no |  |
 | `skip_reason` | string | no |  |
+| `subtests_failed` | integer | no | Failed subtests (unittest `subTest` / the `subtests` fixture). Any makes `call` "failed"; each also counts as one `failed`, as in pytest. |
 | `teardown` | string | no |  |
 | `wasxfail` | boolean | no |  |
 | `worker` | string | no | Worker that produced the final outcome (pool runs only). |

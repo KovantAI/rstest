@@ -7,7 +7,7 @@ pub(crate) mod discovery;
 mod gates;
 mod monorepo;
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -344,8 +344,9 @@ fn resolve_run_config(
     let very_verbose = verbosity >= 2;
     // Output style: --output > [tool.rstest] output > (byte-exact mode ?
     // pytest's own terminal : -v ? verbose : tty ? bar : dots). Auto-promote
-    // to the sugar bar on a tty, stay on plain dots off-tty so logs stay
-    // byte-stable (the live footer self-disables there).
+    // to the sugar bar on an interactive terminal (`Palette::live`: a color
+    // tty outside CI, not TERM=dumb), stay on plain dots elsewhere so logs
+    // stay byte-stable (the live footer self-disables there).
     let mode = match cli.output.as_deref().or(settings.output.as_deref()) {
         Some("bar") => progress::Mode::Bar,
         Some("verbose") => progress::Mode::Verbose,
@@ -357,16 +358,18 @@ fn resolve_run_config(
         Some("gitlab") => progress::Mode::Gitlab,
         Some("buildkite") => progress::Mode::Buildkite,
         Some("azure") => progress::Mode::Azure,
+        // Only `[tool.rstest] output` gets here: an unknown `--output` value on
+        // the command line is a plugin's flag and went to the session.
         Some(other) => {
             sink.warn(&format!(
-                "rstest: unknown --output '{other}' \
-                 (use dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json); using dots"
+                "rstest: unknown [tool.rstest] output '{other}' (use {}); using dots",
+                crate::cli::OUTPUT_STYLES.join("|")
             ));
             progress::Mode::Dots
         }
         None if n <= 1 && !single_worker_reruns && !passthrough => progress::Mode::Pytest,
         None if verbose => progress::Mode::Verbose,
-        None if std::io::stdout().is_terminal() => progress::Mode::Bar,
+        None if sink.palette().live() => progress::Mode::Bar,
         None => progress::Mode::Dots,
     };
     let durations = parse_durations(args);
@@ -399,6 +402,9 @@ fn resolve_run_config(
         // live JSON consumer is attached, so editors get per-passing-test output.
         stream_output: mode == progress::Mode::Json || cli.stream_json.is_some(),
         junitxml: cli.junitxml.as_ref().map(|p| p.display().to_string()),
+        reruns: reruns > 0,
+        // Filled in once the --quarantine list is loaded (before dispatch).
+        quarantine: None,
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -433,6 +439,31 @@ fn resolve_run_config(
 /// it can't be opened. FILE may be a regular file or a named pipe the editor
 /// already opened for reading. Open failure is non-fatal — the run continues
 /// without the side channel.
+/// A fresh run uid in xdist's `testrun_uid` format (`uuid.uuid4().hex`): 32
+/// lowercase hex digits with the uuid4 version and variant bits set, so
+/// `uuid.UUID(testrun_uid)` parses. The 122 random bits come from std's
+/// OS-seeded `RandomState` keys, mixed with the clock and pid (no crate).
+fn new_run_uid() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = crate::time::now_epoch_nanos();
+    let half = |salt: u8| {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u32(std::process::id());
+        h.write_u8(salt);
+        h.finish()
+    };
+    let bits = (u128::from(half(0)) << 64) | u128::from(half(1));
+    format_uuid4(bits)
+}
+
+/// Format 128 bits as a uuid4 hex string: version nibble 4, RFC 4122 variant.
+fn format_uuid4(bits: u128) -> String {
+    let bits = (bits & !(0xf << 76) & !(0x3 << 62)) | (0x4 << 76) | (0x2 << 62);
+    format!("{bits:032x}")
+}
+
 fn attach_stream_json(sink: &mut Sink, path: &std::path::Path) {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         let _ = std::fs::create_dir_all(parent);
@@ -457,6 +488,22 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     execute_inner(cli, args, None)
 }
 
+/// pytest's effective `--tb` style: ini `addopts`, then `PYTEST_ADDOPTS`,
+/// then the command line, the last one winning (pytest's own order).
+fn tb_style(args: &[String]) -> report::TbStyle {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project = config::discover(&cwd, &mut std::io::sink());
+    let env_addopts = std::env::var("PYTEST_ADDOPTS").unwrap_or_default();
+    report::TbStyle::from_opts(
+        project
+            .addopts
+            .iter()
+            .map(String::as_str)
+            .chain(env_addopts.split_whitespace())
+            .chain(args.iter().map(String::as_str)),
+    )
+}
+
 /// The run pipeline. `pinned` is `Some` only under `rstest replay`, carrying the
 /// recorded per-worker schedule to re-pin; a normal run passes `None`.
 pub(crate) fn execute_inner(
@@ -470,6 +517,7 @@ pub(crate) fn execute_inner(
     // selection, banner) flows through it. `--color` resolution matches
     // `resolve_run_config`'s (both call `Palette::detect`).
     let mut sink = Sink::stdio(color::Palette::detect(&args));
+    sink.set_tb_style(tb_style(&args));
     // `--stream-json FILE`: attach the live per-test NDJSON side channel. FILE
     // may be a regular file or a named pipe the editor already opened for
     // reading (opening a fifo for write blocks until that reader is present).
@@ -482,10 +530,7 @@ pub(crate) fn execute_inner(
     // contract). A monorepo child inherits the root's (passed explicitly on the
     // child's command); a top-level run generates one. Held as a typed value and
     // handed to workers via their environment — never process-global set_var.
-    let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| {
-        let nanos = crate::time::now_epoch_nanos();
-        format!("{nanos:x}{:x}", std::process::id())
-    });
+    let run_uid = std::env::var("RSTEST_RUN_UID").unwrap_or_else(|_| new_run_uid());
     // Shared-cache backend: resolve the remote (flag or env) and, if asked,
     // run maintenance / warm the local cache BEFORE anything reads it.
     let cache_remote = cli
@@ -510,7 +555,7 @@ pub(crate) fn execute_inner(
     // monorepo guard so a monorepo run is rejected rather than pulling into the
     // wrong (root) cache and printing a misleading success line first.
     pull_shared_cache(cli, &cache_remote, &mut sink)?;
-    let cfg = resolve_run_config(cli, &settings, &args, &run_uid, &mut sink)?;
+    let mut cfg = resolve_run_config(cli, &settings, &args, &run_uid, &mut sink)?;
     // Lift the resolved config into the local names the rest of the pipeline
     // reads. Copy fields copy; the few owned fields clone once (cheap) so their
     // types match the original locals exactly, leaving `cfg` intact to hand to
@@ -604,6 +649,12 @@ pub(crate) fn execute_inner(
         Some(p) if !passthrough => Some(gates::quarantine_matcher(p, &mut sink)?),
         _ => None,
     };
+    // Sessions keep quarantined failures out of their own -x / --maxfail count
+    // (the pool's count skips them too), so a quarantined test can't stop the run.
+    cfg.worker_env.quarantine = quarantine
+        .as_ref()
+        .filter(|q| !q.is_empty())
+        .map(|q| q.patterns().join("\n"));
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -637,6 +688,11 @@ pub(crate) fn execute_inner(
         start,
         &mut sink,
     );
+    if !passthrough && cli.python.is_none() {
+        if let Some(hint) = interpreter_hint(&outcome.run, &python, &scope) {
+            sink.warn(&hint);
+        }
+    }
 
     let post = PostRun {
         start,
@@ -1066,25 +1122,41 @@ struct Incremental {
 /// unit-testable without standing up a full `RunConfig`: dropping the scope
 /// here (a default [`cov_scope::CovScope`]) is a silent-false-green regression
 /// the seam test catches.
+///
+/// `root` is the project rootdir the cache belongs to and `scope` the
+/// invocation dir. Everything recorded (the fingerprint walk, file keys, the
+/// measured set) is relative to `root`, so a run from a subdirectory computes
+/// the same state as one from the root and both share one baseline.
 fn incremental_config(
+    root: &std::path::Path,
     scope: &std::path::Path,
     args: &[String],
 ) -> (cov_scope::CovScope, coverage_skip::ConfigState) {
     let effective = cov_scope::effective_pytest_args(scope, args);
     // The index skipping trusts was written by the last COVERAGE run: without
-    // --cov now, rebuild that run's scope from its recorded args, so files it
-    // never measured still fold (see ConfigState::index_cov_args).
-    let index_cov_args = if coverage_skip::coverage_requested(&effective) {
-        Some(cov_scope::coverage_args(&effective))
+    // --cov now, rebuild that run's scope from its recorded args and start
+    // dir, so files it never measured still fold (see
+    // ConfigState::index_cov_args).
+    let (index_cov_args, index_cov_cwd) = if coverage_skip::coverage_requested(&effective) {
+        let here =
+            crate::cache::relative_to(scope, root).map(|p| p.to_string_lossy().replace('\\', "/"));
+        (Some(cov_scope::coverage_args(&effective)), here)
     } else {
-        coverage_skip::stored_index_cov_args(scope)
+        match coverage_skip::stored_index_cov(scope) {
+            Some((a, cwd)) => (Some(a), cwd),
+            None => (None, None),
+        }
     };
+    let cov_cwd = index_cov_cwd
+        .as_deref()
+        .map_or_else(|| scope.to_path_buf(), |c| root.join(c));
     let cov = index_cov_args
         .as_ref()
-        .map(|a| cov_scope::CovScope::resolve(scope, a))
+        .map(|a| cov_scope::CovScope::resolve_in(root, &cov_cwd, a))
         .unwrap_or_default();
-    let mut state = coverage_skip::config_state(scope, &cov);
+    let mut state = coverage_skip::config_state(root, &cov);
     state.index_cov_args = index_cov_args;
+    state.index_cov_cwd = index_cov_cwd;
     (cov, state)
 }
 
@@ -1152,7 +1224,7 @@ fn resolve_incremental(
     // The config state is only consumed under `active`; computing it
     // unconditionally would walk the whole project tree for conftests.
     let (cov, config) = if active {
-        incremental_config(scope, args)
+        incremental_config(&crate::cache::base_dir(), scope, args)
     } else {
         Default::default()
     };
@@ -1251,7 +1323,13 @@ fn apply_quarantine(
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
     // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
-    if !demoted.is_empty() && outcome.exitstatus == 1 && outcome.run.all_passed() {
+    // A run -x / --maxfail cut short stays failed: quarantined failures never
+    // count toward the limit, so a real failure tripped it.
+    if !demoted.is_empty()
+        && outcome.exitstatus == 1
+        && outcome.run.all_passed()
+        && outcome.run.stopped_after.is_none()
+    {
         outcome.exitstatus = 0;
     }
     Ok(())
@@ -1362,6 +1440,12 @@ fn dispatch_run(
                 worker::Stdio::Null
             };
             let mut w = worker::Worker::spawn_with_io(python, None, io, worker_env)?;
+            // Byte-exact session: survive SIGINT/SIGTERM so the reports are
+            // still written (see `SingleWorkerInterrupts`). Passthrough (`-s`,
+            // `--pdb`) keeps the default action: there the child owns the
+            // console and a debugger uses Ctrl-C itself.
+            let interrupts =
+                (path == RunPath::SingleWorker).then(|| SingleWorkerInterrupts::install(w.pid()));
             w.send(&proto::Command::RunTests {
                 args: args.to_vec(),
             })?;
@@ -1371,9 +1455,40 @@ fn dispatch_run(
             prog.set_mode(mode);
             let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
             let mut warnings: Vec<proto::WarningEntry> = Vec::new();
+            let mut session_died = false;
+            // Failed attempts of flaky-marked tests the session retried
+            // (outcome `rerun`), per nodeid: see `mark_session_flaky`.
+            let mut reruns_seen: Vec<String> = Vec::new();
             let exitstatus = loop {
+                let event = match w.recv() {
+                    Ok(event) => event,
+                    // The session died under the signal (a process-group
+                    // SIGTERM reaches the child too, and Python's default
+                    // action kills it): keep what it reported and wind down
+                    // as INTERRUPTED.
+                    Err(e) => match crate::scheduling::interrupt::requested() {
+                        Some(sig) if interrupts.is_some() => {
+                            sink.warn(&format!(
+                                "rstest: interrupted by {}; the pytest session stopped \
+                                 before its summary",
+                                crate::scheduling::interrupt::name(sig)
+                            ));
+                            session_died = true;
+                            break 2; // pytest INTERRUPTED
+                        }
+                        _ => return Err(e),
+                    },
+                };
+                if let proto::Event::Report(r) = &event {
+                    if r.outcome == "rerun" {
+                        // A retried attempt: pytest's own terminal shows it
+                        // (`R`, `N rerun`); the run record keeps the final one.
+                        reruns_seen.push(r.nodeid.clone());
+                        continue;
+                    }
+                }
                 if let Some(code) = fold_run_event(
-                    w.recv()?,
+                    event,
                     passthrough,
                     &mut run,
                     &mut prog,
@@ -1384,7 +1499,15 @@ fn dispatch_run(
                     break code;
                 }
             };
-            w.shutdown()?;
+            // Stop forwarding before the child is reaped (its pid is then free
+            // for reuse), and restore the default handlers.
+            drop(interrupts);
+            mark_session_flaky(&mut run, reruns_seen);
+            if session_died {
+                w.reap();
+            } else {
+                w.shutdown()?;
+            }
             pool::PoolOutcome {
                 run,
                 prog,
@@ -1468,6 +1591,111 @@ fn dispatch_run(
             )?
         },
     )
+}
+
+/// A pointer at the interpreter when a run failed on missing imports and
+/// discovery passed over the project's `.venv` (pre-commit's `language:
+/// python` hooks set `VIRTUAL_ENV` to the hook env, which has rstest and pytest
+/// but none of the project's deps). Shown only when both hold, never as a
+/// blanket "VIRTUAL_ENV differs from .venv" notice: under tox/nox that
+/// difference is the normal, intended setup, and a warning on every green run
+/// there would be noise. An import error is the symptom of the wrong env, so
+/// that is when naming the two envs pays off.
+fn interpreter_hint(
+    run: &report::Run,
+    python: &std::path::Path,
+    scope: &std::path::Path,
+) -> Option<String> {
+    let import_failure = |text: &str| {
+        text.contains("ModuleNotFoundError") || text.contains("ImportError while importing")
+    };
+    let failed_on_import = run.collect_errors().iter().any(|(_, t)| import_failure(t))
+        || run
+            .history_failed_nodeids()
+            .filter_map(|id| run.failure_text(id))
+            .any(import_failure);
+    if !failed_on_import {
+        return None;
+    }
+    let (venv, from_virtual_env) = discover::skipped_project_venv(scope, python)?;
+    let source = if from_virtual_env {
+        " (from $VIRTUAL_ENV)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "rstest: hint: imports failed under {}{source}, not the project's virtualenv {}. \
+         If the project's dependencies are installed there, pass --python {} \
+         (or unset VIRTUAL_ENV).",
+        python.display(),
+        venv.display(),
+        venv.display()
+    ))
+}
+
+/// SIGINT/SIGTERM during the byte-exact single-worker session. With the
+/// default action the orchestrator died on Ctrl-C while pytest, in the same
+/// process group, was still printing its KeyboardInterrupt summary: exit by
+/// signal, output cut off, no `--report-json`/`--junitxml`.
+///
+/// While installed, the signal is only recorded (see
+/// [`crate::scheduling::interrupt`]); the orchestrator keeps reading the
+/// session, which ends with pytest's own INTERRUPTED (2), then writes the
+/// reports as usual. SIGINT is not forwarded: Ctrl-C and a CI runner's cancel
+/// signal the whole process group, so pytest already has it, and a second
+/// SIGINT would abort pytest's teardown and summary. SIGTERM is forwarded to
+/// the session as SIGINT: `kill PID` and job timeouts often target only our
+/// pid, and Python has no clean SIGTERM unwinding. When the group got SIGTERM
+/// too, the child is already gone and the caller winds down from what it
+/// reported. A second signal still exits at once.
+struct SingleWorkerInterrupts {
+    _guard: crate::scheduling::interrupt::Guard,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    forwarder: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SingleWorkerInterrupts {
+    fn install(child: Option<u32>) -> Self {
+        use std::sync::atomic::AtomicBool;
+        let guard = crate::scheduling::interrupt::Guard::install();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        let forwarder = child.map(|pid| {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    if crate::scheduling::interrupt::requested() == Some(libc::SIGTERM) {
+                        // SAFETY: sending a signal touches no memory. The pid
+                        // is our unreaped child (the caller drops this guard,
+                        // joining the thread, before reaping it), so it cannot
+                        // have been recycled.
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+        });
+        #[cfg(not(unix))]
+        let forwarder = {
+            let _ = child;
+            None
+        };
+        Self {
+            _guard: guard,
+            stop,
+            forwarder,
+        }
+    }
+}
+
+impl Drop for SingleWorkerInterrupts {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(t) = self.forwarder.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 /// Resolve dispatch ordering (CLI > [tool.rstest] > auto). Auto picks
@@ -1867,38 +2095,196 @@ fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
     Ok(value.parse()?)
 }
 
-/// `auto` = logical cores, capped by what the suite can use (worker startup
-/// costs real time). Two best-effort signals: test-file count from an
-/// ini-aware walk, and the duration cache (a few-second suite needs ~2 workers).
+/// `auto` = logical cores, capped by what the selected tests can use (worker
+/// startup costs real time). Sized from the session args' selection (paths and
+/// nodeids, the invocation dir or `testpaths` when none), with config
+/// discovered from the args' common ancestor like pytest. The parallelizable
+/// units are the tests the duration cache times inside the selection, plus one
+/// per selected test file or nodeid it has no timing for: `--dist load` splits
+/// within a file, so a timed file counts its tests, not 1. When the whole
+/// selection is timed (or nothing is selected), the cached time caps it too:
+/// a few-second suite needs ~2 workers.
+///
 /// A walk with no Python file at all (an empty folder) means one worker,
 /// unless `args` name a path the walk didn't cover.
 fn auto_workers(args: &[String]) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
-    let mut n = cores;
+    let Ok(cwd) = std::env::current_dir() else {
+        let cache = durations::load();
+        return cap_workers_by_time(cores, cache.values().sum()).max(1);
+    };
+    let cwd = config::normalize(&cwd);
+    let rootdir = crate::cache::rootdir()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config::rootdir(&cwd, args));
+    let mut sel = Selection::from_args(&cwd, args);
+    let explicit = !sel.is_empty();
+    // No args below the rootdir: pytest collects the invocation dir (it reads
+    // `testpaths` only when run from the rootdir itself).
+    if !explicit && cwd != rootdir && cwd.starts_with(&rootdir) {
+        sel.paths.push(cwd.clone());
+    }
+    // Worker-sizing has no run Sink; a malformed-config note here is a dup of
+    // the one the real discover emits through the Sink, so send it to stderr.
+    let start = config::common_ancestor(&cwd, &config::selected_paths(&cwd, args));
+    let project = config::discover(&start, &mut std::io::stderr());
+    // Explicit paths walk as given; no selection walks `testpaths` / rootdir;
+    // nodeids alone need no walk.
+    let files = if sel.nodeids.is_empty() || !sel.paths.is_empty() {
+        match collect::collect_test_files(&sel.paths, &project) {
+            Ok(files) => files,
+            Err(_) => return cores,
+        }
+    } else {
+        Vec::new()
+    };
+    if files.is_empty()
+        && sel.nodeids.is_empty()
+        && !names_existing_path(args)
+        && collect::has_python_files(&sel.paths, &project).is_ok_and(|found| !found)
+    {
+        return 1;
+    }
+    let cache = durations::load();
+    let t = sel.timed(&files, &cache, &rootdir);
+    let mut n = match t.units() {
+        0 => cores,
+        units => cores.min(units),
+    };
+    if t.cold == 0 && t.tests > 0 {
+        n = cap_workers_by_time(n, t.secs);
+    } else if !explicit && !cache.is_empty() {
+        // A partly timed whole suite: the cached time is the best estimate.
+        n = cap_workers_by_time(n, cache.values().sum());
+    }
+    n.max(1)
+}
 
+/// What the session args select, for `-n auto` sizing: existing paths (files
+/// or dirs) and nodeids (`file.py::test...`) whose file exists, absolute.
+#[derive(Default)]
+struct Selection {
+    paths: Vec<PathBuf>,
+    /// (absolute file, the `::`-suffix as written).
+    nodeids: Vec<(PathBuf, String)>,
+}
+
+/// The duration cache folded over a selection (see [`Selection::timed`]).
+#[derive(Debug, Default, PartialEq)]
+struct Timed {
+    /// Cached tests inside the selection.
+    tests: usize,
+    /// Their summed cached seconds.
+    secs: f64,
+    /// Selected test files and nodeids with no cached test.
+    cold: usize,
+}
+
+impl Timed {
+    fn units(&self) -> usize {
+        self.tests + self.cold
+    }
+}
+
+impl Selection {
+    fn from_args(cwd: &std::path::Path, args: &[String]) -> Self {
+        let mut sel = Self::default();
+        for (a, pos) in args.iter().zip(crate::cli::positional_mask(args)) {
+            if !pos || a.starts_with('@') {
+                continue;
+            }
+            match a.split_once("::") {
+                Some((file, rest)) => {
+                    let file = config::normalize(&cwd.join(file));
+                    if file.is_file() {
+                        sel.nodeids.push((file, rest.to_string()));
+                    }
+                }
+                None => {
+                    let path = config::normalize(&cwd.join(a));
+                    if path.exists() {
+                        sel.paths.push(path);
+                    }
+                }
+            }
+        }
+        sel
+    }
+
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.nodeids.is_empty()
+    }
+
+    /// Fold the duration cache (nodeids relative to `rootdir`) over the
+    /// selection: `files` (the walked test files) and the nodeids.
+    fn timed(
+        &self,
+        files: &[PathBuf],
+        cache: &std::collections::HashMap<String, f64>,
+        rootdir: &std::path::Path,
+    ) -> Timed {
+        use std::collections::HashMap;
+        let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let mut file_hit: HashMap<PathBuf, bool> =
+            files.iter().map(|f| (canon(f), false)).collect();
+        let nodeids: Vec<(PathBuf, String)> = self
+            .nodeids
+            .iter()
+            .map(|(file, rest)| (canon(file), rest.clone()))
+            .collect();
+        let mut id_hit = vec![false; nodeids.len()];
+        let mut resolved: HashMap<&str, PathBuf> = HashMap::new();
+        let mut t = Timed::default();
+        for (id, secs) in cache {
+            let (file, rest) = id.split_once("::").unwrap_or((id.as_str(), ""));
+            let abs = resolved
+                .entry(file)
+                .or_insert_with(|| canon(&rootdir.join(file)));
+            let mut hit = false;
+            if let Some(h) = file_hit.get_mut(abs.as_path()) {
+                *h = true;
+                hit = true;
+            }
+            for (i, (f, want)) in nodeids.iter().enumerate() {
+                let matches = f == abs
+                    && (rest == want
+                        || rest
+                            .strip_prefix(want.as_str())
+                            .is_some_and(|r| r.starts_with('[') || r.starts_with("::")));
+                if matches {
+                    id_hit[i] = true;
+                    hit = true;
+                }
+            }
+            if hit {
+                t.tests += 1;
+                t.secs += secs;
+            }
+        }
+        t.cold =
+            file_hit.values().filter(|h| !**h).count() + id_hit.iter().filter(|h| !**h).count();
+        t
+    }
+}
+
+/// Worker count for a parallel-safety check (`audit`, `migrate-check`): like
+/// `auto`, but never capped by the duration cache and never below 2. A check
+/// pass that resolves to one worker runs serially, so parallel-only failures
+/// can't show and the suite would be called parallel-safe untested.
+pub(crate) fn check_workers() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    let mut n = cores;
     if let Ok(cwd) = std::env::current_dir() {
-        // Worker-sizing has no run Sink; a malformed-config note here is a dup of
-        // the one the real discover emits through the Sink, so send it to stderr.
         let project = config::discover(&cwd, &mut std::io::stderr());
         if let Ok(files) = collect::collect_test_files(&[], &project) {
             n = cap_workers_by_files(n, files.len());
-            if files.is_empty()
-                && !names_existing_path(args)
-                && collect::has_python_files(&[], &project).is_ok_and(|found| !found)
-            {
-                n = 1;
-            }
         }
     }
-
-    let cache = durations::load();
-    if !cache.is_empty() {
-        n = cap_workers_by_time(n, cache.values().sum());
-    }
-
-    n.max(1)
+    n.max(2)
 }
 
 /// Whether the args select something on disk: a path, or a nodeid
@@ -2104,6 +2490,23 @@ fn lazy_should_steal(cli_dist: Option<&str>, settings_dist: Option<&str>) -> boo
     cli_dist == Some("load") || settings_dist == Some("load")
 }
 
+/// Mark the tests a single session retried flaky when their final attempt
+/// passed, as the pool does. The session retries `@pytest.mark.flaky` tests
+/// itself (rstest's own reruns, or pytest-rerunfailures when installed) and
+/// reports each retried attempt with outcome `rerun`; `reruns` holds one
+/// nodeid per such attempt.
+fn mark_session_flaky(run: &mut report::Run, reruns: Vec<String>) {
+    let mut counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for id in reruns {
+        *counts.entry(id).or_default() += 1;
+    }
+    for (id, attempts) in counts {
+        if run.tests().get(&id).is_some_and(|e| !e.any_phase_failed()) {
+            run.mark_flaky(id, attempts);
+        }
+    }
+}
+
 /// Fold one worker event into the single-session accumulators (the byte-exact /
 /// passthrough / one-worker-rerun path). Returns `Some(exitstatus)` on `Done`.
 /// Reports drive progress (suppressed under passthrough, whose IO is inherited)
@@ -2147,10 +2550,13 @@ fn fold_run_event(
             warnings.extend(entries);
             None
         }
-        proto::Event::CollectionDone { count, .. } => {
+        proto::Event::CollectionDone {
+            count, deselected, ..
+        } => {
             // The single session reports its collected count so the dots and
             // -v renderers print pytest's `[ NN%]` column.
             prog.set_total(count as usize);
+            run.deselected = deselected;
             None
         }
         proto::Event::NodeInput { .. }
@@ -2186,12 +2592,13 @@ mod tests {
     use super::{
         attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
         check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
-        incremental_config, lazy_layout_fits, lazy_should_steal, names_a_selection,
-        names_existing_path, order_ignored_warning, parse_duration_secs, parse_numprocesses,
-        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
-        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
+        incremental_config, lazy_layout_fits, lazy_should_steal, mark_session_flaky,
+        names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
+        parse_numprocesses, requests_doctests, resolve_changed_base, resolve_order,
+        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
+        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
+        AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -2201,6 +2608,24 @@ mod tests {
     use crate::scheduling::pool;
     use crate::scheduling::proto;
     use clap::Parser;
+
+    #[test]
+    fn run_uid_is_uuid4_hex() {
+        let a = super::new_run_uid();
+        let b = super::new_run_uid();
+        assert_ne!(a, b, "each run gets its own uid");
+        for u in [&a, &b] {
+            assert_eq!(u.len(), 32, "{u}");
+            assert!(u.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')), "{u}");
+            assert_eq!(&u[12..13], "4", "uuid4 version nibble: {u}");
+            assert!("89ab".contains(&u[16..17]), "RFC 4122 variant: {u}");
+        }
+        assert_eq!(super::format_uuid4(0), "00000000000040008000000000000000");
+        assert_eq!(
+            super::format_uuid4(u128::MAX),
+            "ffffffffffff4fffbfffffffffffffff"
+        );
+    }
 
     #[test]
     fn an_argsfile_counts_as_an_explicit_selection() {
@@ -2275,7 +2700,7 @@ mod tests {
         std::fs::create_dir_all(scope.join("other")).unwrap();
         std::fs::write(scope.join("pkg/mod.py"), b"x = 1\n").unwrap();
         std::fs::write(scope.join("other/mod.py"), b"y = 1\n").unwrap();
-        let fp = |args: &[&str]| incremental_config(&scope, &sv(args)).1.fp;
+        let fp = |args: &[&str]| incremental_config(&scope, &scope, &sv(args)).1.fp;
 
         // Under --cov=pkg, editing out-of-scope other/mod.py MUST move the fp.
         let before = fp(&["--cov=pkg"]);
@@ -2294,7 +2719,7 @@ mod tests {
 
         // --cov=pkg only in the ini addopts narrows just the same.
         std::fs::write(scope.join("pytest.ini"), b"[pytest]\naddopts = --cov=pkg\n").unwrap();
-        let (cov, _) = incremental_config(&scope, &sv(&[]));
+        let (cov, _) = incremental_config(&scope, &scope, &sv(&[]));
         assert_eq!(cov.sources, vec!["pkg"], "addopts --cov must be seen");
         let before = fp(&[]);
         std::fs::write(scope.join("other/mod.py"), b"y = 4\n").unwrap();
@@ -2304,11 +2729,17 @@ mod tests {
         // wrote the index: other/ still folds. With nothing recorded, the
         // index's scope is unknown and the state says so.
         std::fs::remove_file(scope.join("pytest.ini")).unwrap();
-        let (_, state) = incremental_config(&scope, &sv(&[]));
+        let (_, state) = incremental_config(&scope, &scope, &sv(&[]));
         assert_eq!(state.index_cov_args, None, "nothing recorded yet");
-        let (_, cov_run) = incremental_config(&scope, &sv(&["--cov=pkg"]));
-        crate::coverage_skip::record(&scope, &cov_run, Default::default(), Default::default());
-        let (cov, plain) = incremental_config(&scope, &sv(&[]));
+        let (_, cov_run) = incremental_config(&scope, &scope, &sv(&["--cov=pkg"]));
+        crate::coverage_skip::record(
+            &scope,
+            &cov_run,
+            Default::default(),
+            Default::default(),
+            &Default::default(),
+        );
+        let (cov, plain) = incremental_config(&scope, &scope, &sv(&[]));
         assert_eq!(plain.index_cov_args, Some(sv(&["--cov=pkg"])));
         assert_eq!(cov.sources, vec!["pkg"]);
         std::fs::write(scope.join("other/mod.py"), b"y = 5\n").unwrap();
@@ -3198,6 +3629,49 @@ mod tests {
         assert_eq!(cap_workers_by_time(8, 0.0), 1); // never below 1
     }
 
+    #[test]
+    fn auto_selection_counts_timed_tests_not_files() {
+        use super::{Selection, Timed};
+        let root = std::env::temp_dir().join(format!("rstest-auto-sel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        for f in ["test_a.py", "test_b.py"] {
+            std::fs::write(root.join("tests").join(f), "").unwrap();
+        }
+        let a = root.join("tests/test_a.py");
+        let b = root.join("tests/test_b.py");
+        let cache: std::collections::HashMap<String, f64> = (0..20)
+            .map(|i| (format!("tests/test_a.py::test_io[{i}]"), 0.25))
+            .collect();
+
+        // One timed file: its 20 tests are the units, not 1 file.
+        let sel = Selection::from_args(&root, &sv(&["tests/test_a.py"]));
+        let t = sel.timed(std::slice::from_ref(&a), &cache, &root);
+        assert_eq!((t.tests, t.cold, t.units()), (20, 0, 20));
+        assert!((t.secs - 5.0).abs() < 1e-9);
+
+        // An untimed file is one cold unit.
+        let t = sel.timed(&[a.clone(), b.clone()], &cache, &root);
+        assert_eq!((t.tests, t.cold), (20, 1));
+
+        // A nodeid matches itself and its parametrizations only.
+        let sel = Selection::from_args(&root, &sv(&["-k", "x", "tests/test_a.py::test_io"]));
+        assert!(sel.paths.is_empty() && sel.nodeids.len() == 1);
+        assert_eq!(sel.timed(&[], &cache, &root).units(), 20);
+        let sel = Selection::from_args(&root, &sv(&["tests/test_a.py::test_io[3]"]));
+        assert_eq!(sel.timed(&[], &cache, &root).units(), 1);
+        let sel = Selection::from_args(&root, &sv(&["tests/test_b.py::test_x"]));
+        assert_eq!(
+            sel.timed(&[], &cache, &root),
+            Timed {
+                tests: 0,
+                secs: 0.0,
+                cold: 1
+            }
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn report(nodeid: &str, outcome: &str) -> proto::Report {
         proto::Report {
             nodeid: nodeid.into(),
@@ -3212,7 +3686,28 @@ mod tests {
             lineno: None,
             thread_delta: None,
             fd_delta: None,
+            subtest: false,
         }
+    }
+
+    #[test]
+    fn mark_session_flaky_marks_only_tests_that_recovered() {
+        let mut run = report::Run::default();
+        run.record(None, report("t.py::recovered", "passed"));
+        run.record(None, report("t.py::exhausted", "failed"));
+        mark_session_flaky(
+            &mut run,
+            vec![
+                "t.py::recovered".into(),
+                "t.py::exhausted".into(),
+                "t.py::recovered".into(),
+            ],
+        );
+        assert_eq!(run.flaky, vec![("t.py::recovered".to_string(), 2)]);
+        let counts = run.counts();
+        assert_eq!(counts["flaky"], 1);
+        assert_eq!(counts["failed"], 1);
+        assert_eq!(counts.get("passed").copied().unwrap_or(0), 0);
     }
 
     #[test]

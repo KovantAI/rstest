@@ -110,6 +110,9 @@ struct Outcomes {
     /// [`ConfigState::index_cov_args`] of the recorded run.
     #[serde(default)]
     index_cov_args: Option<Vec<String>>,
+    /// [`ConfigState::index_cov_cwd`] of the recorded run.
+    #[serde(default)]
+    index_cov_cwd: Option<String>,
 }
 
 /// The recorded green baseline: which tests passed and the content hashes of
@@ -142,6 +145,11 @@ pub struct ConfigState {
     /// remote cache), so which files it measured is unknown too and
     /// [`skippable_now`] skips nothing.
     pub index_cov_args: Option<Vec<String>>,
+    /// The directory (relative to the project root, `/`-separated) the run
+    /// that wrote the index started from: coverage resolves path sources
+    /// such as `--cov=.` from there. `None` = unknown (an older record): the
+    /// current run's cwd stands in.
+    pub index_cov_cwd: Option<String>,
 }
 
 /// Hash the current content of the project's config files (order-stable), so a
@@ -201,6 +209,7 @@ pub fn config_state(scope: &Path, cov: &CovScope) -> ConfigState {
         fp: crate::incremental::hex_encode(&h.finalize()),
         test_named,
         index_cov_args: None,
+        index_cov_cwd: None,
     }
 }
 
@@ -474,12 +483,24 @@ pub fn load(scope: &Path, config_fp: &str) -> Baseline {
 /// The coverage-shaping args recorded with the last baseline (see
 /// [`ConfigState::index_cov_args`]), ungated by the config fingerprint: a run
 /// without `--cov` needs them to know what the index it reuses measured.
+#[cfg(test)]
 pub fn stored_index_cov_args(scope: &Path) -> Option<Vec<String>> {
+    stored_index_cov(scope).map(|(args, _)| args)
+}
+
+/// [`stored_index_cov_args`] plus the directory that run started from (see
+/// [`ConfigState::index_cov_cwd`]).
+pub fn stored_index_cov(scope: &Path) -> Option<(Vec<String>, Option<String>)> {
+    let o = read_outcomes(scope)?;
+    Some((o.index_cov_args?, o.index_cov_cwd))
+}
+
+/// The stored record, when present and of the current schema.
+fn read_outcomes(scope: &Path) -> Option<Outcomes> {
     std::fs::read(cache::file_in(scope, FILE))
         .ok()
         .and_then(|b| serde_json::from_slice::<Outcomes>(&b).ok())
         .filter(|o| o.schema == SCHEMA)
-        .and_then(|o| o.index_cov_args)
 }
 
 /// The last run's green set and per-nodeid def line, ungated by the config
@@ -499,13 +520,46 @@ pub fn load_raw(scope: &Path) -> (HashSet<String>, HashMap<String, u64>) {
 /// fingerprint after a run. Best-effort: a cache-write failure never fails the
 /// run. `lines` maps green nodeids to their source def line (restores a cached
 /// entry's line next run); nodeids without a known line are simply absent.
+///
+/// `ran` holds the nodeids this run executed. A green test from the previous
+/// record that this run did not execute (a subset run: a path, `-k`, a run
+/// from a subdirectory) stays recorded, with the hash its test file was
+/// recorded under, provided the config fingerprint is unchanged and that file
+/// was not seen with different content this run. The store is shared by every
+/// run in the rootdir, so a subset run must not erase the rest of the suite.
 pub fn record(
     scope: &Path,
     config: &ConfigState,
-    green: HashSet<String>,
-    lines: HashMap<String, u64>,
+    mut green: HashSet<String>,
+    mut lines: HashMap<String, u64>,
+    ran: &HashSet<String>,
 ) {
-    let test_file_hashes = test_file_hashes(&green);
+    let mut test_file_hashes = test_file_hashes(&green);
+    if let Some(prev) = read_outcomes(scope).filter(|o| o.config_fp == config.fp) {
+        for id in prev.green {
+            if ran.contains(&id) || green.contains(&id) {
+                continue;
+            }
+            let tf = test_file_of(&id);
+            let Some(old) = prev.test_file_hashes.get(tf) else {
+                continue;
+            };
+            if !cache::resolve(tf).exists() {
+                continue; // the test file is gone
+            }
+            match test_file_hashes.get(tf) {
+                Some(now) if now != old => continue, // its file changed
+                Some(_) => {}
+                None => {
+                    test_file_hashes.insert(tf.to_string(), old.clone());
+                }
+            }
+            if let Some(l) = prev.test_lines.get(&id) {
+                lines.entry(id.clone()).or_insert(*l);
+            }
+            green.insert(id);
+        }
+    }
     let doc = Outcomes {
         schema: SCHEMA,
         config_fp: config.fp.clone(),
@@ -514,21 +568,23 @@ pub fn record(
         test_lines: lines,
         test_named_hashes: config.test_named.clone(),
         index_cov_args: config.index_cov_args.clone(),
+        index_cov_cwd: config.index_cov_cwd.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec(&doc) {
         let _ = cache::write_atomic(&cache::file_in(scope, FILE), &bytes);
     }
 }
 
-/// Hash the (cwd-relative) source file of every green nodeid's test file, once
-/// per distinct file. Unreadable files are simply omitted (a test whose file
-/// can't be hashed won't be skippable next run).
+/// Hash the source file of every green nodeid's test file, once per distinct
+/// file. The nodeid's path is relative to the rootdir (as pytest makes it), so
+/// it resolves there, not against the cwd. Unreadable files are simply omitted
+/// (a test whose file can't be hashed won't be skippable next run).
 fn test_file_hashes(green: &HashSet<String>) -> HashMap<String, String> {
     let mut files: HashMap<String, String> = HashMap::new();
     for id in green {
         let tf = test_file_of(id);
         if !files.contains_key(tf) {
-            if let Some(h) = current_sha256(Path::new(tf)) {
+            if let Some(h) = current_sha256(&cache::resolve(tf)) {
                 files.insert(tf.to_string(), h);
             }
         }
@@ -571,6 +627,33 @@ pub fn carry_forward(old: &CoverageIndex, new: &mut CoverageIndex, cached: &Hash
             }
         }
     }
+}
+
+/// Fold back into the freshly-written index (`new`) the coverage of every test
+/// in the pre-run index (`old`) that this run did not execute (`ran`): cached
+/// tests, and the rest of the suite when this was a subset run (a path, `-k`, a
+/// run from a subdirectory). covtool rewrites the index from only the tests
+/// that ran, and the index is shared by every run in the rootdir. A test is
+/// carried only when every file it covered is either unmeasured this run or
+/// measured with the content the old index recorded: under a changed file its
+/// old line map is stale, so it is dropped (and so re-runs) instead.
+pub fn carry_forward_unrun(old: &CoverageIndex, new: &mut CoverageIndex, ran: &HashSet<String>) {
+    let mut stale: HashSet<&str> = HashSet::new();
+    for (file, ofile) in &old.files {
+        if new.files.get(file).is_some_and(|nf| nf.hash != ofile.hash) {
+            for ids in ofile.lines.values() {
+                stale.extend(ids.iter().map(String::as_str));
+            }
+        }
+    }
+    let keep: HashSet<String> = old
+        .files
+        .values()
+        .flat_map(|f| f.lines.values().flatten())
+        .filter(|id| !ran.contains(*id) && !stale.contains(id.as_str()))
+        .cloned()
+        .collect();
+    carry_forward(old, new, &keep);
 }
 
 /// Write the coverage index back to the local cache (same path covtool uses),
@@ -646,7 +729,7 @@ pub fn skippable(
 }
 
 /// [`skippable`] wired to the live working tree: hashes each file's current
-/// content (`rel` is cwd-relative, matching the index keys). First, two
+/// content (`rel` is rootdir-relative, like the index keys and nodeids). First, two
 /// wholesale guards: an index of unknown coverage scope
 /// ([`ConfigState::index_cov_args`]) and a changed shared helper
 /// ([`helper_changed`]).
@@ -658,7 +741,7 @@ pub fn skippable_now(
     if config.index_cov_args.is_none() || helper_changed(baseline, &config.test_named) {
         return HashSet::new();
     }
-    skippable(index, baseline, |rel| current_sha256(Path::new(rel)))
+    skippable(index, baseline, |rel| current_sha256(&cache::resolve(rel)))
 }
 
 /// Whether an unmeasured test-NAMED file recorded last run has changed (edited
@@ -800,6 +883,110 @@ mod tests {
             )
         });
         assert!(skip.is_empty(), "one changed dependency must force a run");
+    }
+
+    #[test]
+    fn carry_forward_unrun_keeps_unrun_tests_unless_a_covered_file_changed() {
+        // A subset run executed only test_b. test_a (not run) covered a.py,
+        // unmeasured this run: carried. test_c (not run) covered b.py, which
+        // this run measured with NEW content: its old lines are stale, so it is
+        // dropped everywhere. test_b ran, so only its fresh coverage counts.
+        let old = index(&[
+            ("a.py", "HA", &[(1, &["t.py::test_a"])]),
+            ("b.py", "HB", &[(2, &["t.py::test_b", "t.py::test_c"])]),
+            ("c.py", "HC", &[(3, &["t.py::test_b", "t.py::test_c"])]),
+        ]);
+        let mut new = index(&[("b.py", "HB2", &[(5, &["t.py::test_b"])])]);
+        let ran: HashSet<String> = ["t.py::test_b".to_string()].into_iter().collect();
+        carry_forward_unrun(&old, &mut new, &ran);
+        assert_eq!(new.files["a.py"].hash, "HA");
+        assert_eq!(
+            new.files["a.py"].lines[&1],
+            vec!["t.py::test_a".to_string()]
+        );
+        assert_eq!(new.files["b.py"].hash, "HB2");
+        assert_eq!(new.files["b.py"].lines.len(), 1);
+        assert_eq!(
+            new.files["b.py"].lines[&5],
+            vec!["t.py::test_b".to_string()]
+        );
+        assert!(!new.files.contains_key("c.py"), "{:?}", new.files.keys());
+    }
+
+    #[test]
+    fn record_keeps_unrun_green_tests_of_a_subset_run() {
+        let scope =
+            std::env::temp_dir().join(format!("rstest-covskip-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scope);
+        std::fs::create_dir_all(&scope).unwrap();
+        let file = |name: &str, body: &str| {
+            let p = scope.join(name);
+            std::fs::write(&p, body).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let a = file("t_a.py", "def test_a(): pass\n");
+        let b = file("t_b.py", "def test_b(): pass\n");
+        let c = file("t_c.py", "def test_c(): pass\n");
+        let ids =
+            |names: &[&str]| -> HashSet<String> { names.iter().map(|s| s.to_string()).collect() };
+        let (ta, tb, tc) = (
+            format!("{a}::test_a"),
+            format!("{b}::test_b"),
+            format!("{c}::test_c"),
+        );
+        let cfg = |fp: &str| ConfigState {
+            fp: fp.to_string(),
+            ..ConfigState::default()
+        };
+        record(
+            &scope,
+            &cfg("A"),
+            ids(&[&ta, &tb, &tc]),
+            HashMap::new(),
+            &ids(&[&ta, &tb, &tc]),
+        );
+        // A subset run executes only test_b (green). test_a and test_c were not
+        // run: kept. test_c's file was edited meanwhile, so it keeps the hash
+        // it was recorded under (never the new content's), which busts its skip.
+        let c_old = current_sha256(Path::new(&c)).unwrap();
+        std::fs::write(&c, "def test_c(): assert 1\n").unwrap();
+        record(&scope, &cfg("A"), ids(&[&tb]), HashMap::new(), &ids(&[&tb]));
+        let b1 = load(&scope, "A");
+        assert_eq!(b1.green, ids(&[&ta, &tb, &tc]));
+        assert_eq!(b1.test_file_hashes.get(&c), Some(&c_old));
+        // A test file this run hashed with new content drops the unrun tests
+        // recorded under its old content.
+        let tb2 = format!("{b}::test_b2");
+        std::fs::write(&b, "def test_b(): pass\ndef test_b2(): pass\n").unwrap();
+        record(
+            &scope,
+            &cfg("A"),
+            ids(&[&tb2]),
+            HashMap::new(),
+            &ids(&[&tb2]),
+        );
+        let b2 = load(&scope, "A").green;
+        assert!(b2.contains(&tb2) && !b2.contains(&tb), "{b2:?}");
+        // A test this run executed and that is not green now is dropped.
+        record(
+            &scope,
+            &cfg("A"),
+            ids(&[&tb]),
+            HashMap::new(),
+            &ids(&[&ta, &tb]),
+        );
+        assert!(!load(&scope, "A").green.contains(&ta));
+        // A different config fingerprint carries nothing over.
+        record(
+            &scope,
+            &cfg("A"),
+            ids(&[&ta, &tb]),
+            HashMap::new(),
+            &ids(&[&ta, &tb]),
+        );
+        record(&scope, &cfg("B"), ids(&[&tb]), HashMap::new(), &ids(&[&tb]));
+        assert_eq!(load(&scope, "B").green, ids(&[&tb]));
+        let _ = std::fs::remove_dir_all(&scope);
     }
 
     #[test]
@@ -957,6 +1144,7 @@ mod tests {
             fp: String::new(),
             test_named: now("A1", Some("U2")),
             index_cov_args: Some(Vec::new()),
+            index_cov_cwd: None,
         };
         assert!(skippable_now(&idx, &b, &state).is_empty());
     }
@@ -1312,8 +1500,9 @@ mod tests {
             fp: fp.to_string(),
             test_named: HashMap::new(),
             index_cov_args: Some(vec!["--cov=pkg".to_string()]),
+            index_cov_cwd: None,
         };
-        record(&scope, &cfg("cfg-A"), green, lines);
+        record(&scope, &cfg("cfg-A"), green, lines, &HashSet::new());
         let b = load(&scope, "cfg-A");
         assert!(b.green.contains("t.py::test_a"));
         // The def line round-trips for restoring a cached entry next run.

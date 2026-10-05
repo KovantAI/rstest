@@ -49,7 +49,7 @@ struct Coverage {
     file_count: usize,
     /// Covered lines, summed across those files.
     line_count: usize,
-    /// Covered source files, sorted, cwd-relative (the coverage-index keys).
+    /// Covered source files, sorted, rootdir-relative (the coverage-index keys).
     files: Vec<String>,
 }
 

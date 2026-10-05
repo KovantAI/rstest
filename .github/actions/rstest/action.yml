@@ -173,7 +173,7 @@ inputs:
     required: false
     default: ""
   shard:
-    description: "1-based shard index K for --shard K/N (with shard-total)."
+    description: "1-based shard index K for --shard K/N. Set together with shard-total; one without the other fails the step."
     required: false
     default: ""
   shard-total:
@@ -526,9 +526,13 @@ runs:
         # reruns + rerun-on presets
         [ -n "$IN_RERUNS" ] && cmd+=(--reruns "$IN_RERUNS")
         preset_regex=""
-        IFS=',' read -ra presets <<< "$IN_RERUN_ON"
+        # Split on commas (and newlines), then trim surrounding whitespace with
+        # parameter expansion only: each entry reaches rstest verbatim, so
+        # backslashes and quotes in a raw regex survive.
+        IFS=',' read -ra presets <<< "${IN_RERUN_ON//$'\n'/,}"
         for p in ${presets[@]+"${presets[@]}"}; do
-          p="$(echo "$p" | xargs)"
+          p="${p#"${p%%[![:space:]]*}"}"
+          p="${p%"${p##*[![:space:]]}"}"
           case "$p" in
             http-5xx) r='429|500|502|503|504|Too Many Requests|ServerBusy' ;;
             timeouts) r='Timeout|TimeoutError|APITimeoutError|APIConnectionError' ;;
@@ -547,15 +551,21 @@ runs:
         # run's exit code. It also auto-publishes the doctor report to the job
         # summary, so no separate --doctor / --doctor-json is required.
         if [ -n "$IN_DOCTOR_FAIL_ON" ]; then
-          IFS=',' read -ra dconds <<< "$IN_DOCTOR_FAIL_ON"
+          IFS=',' read -ra dconds <<< "${IN_DOCTOR_FAIL_ON//$'\n'/,}"
           for c in ${dconds[@]+"${dconds[@]}"}; do
-            c="$(echo "$c" | xargs)"
+            c="${c#"${c%%[![:space:]]*}"}"
+            c="${c%"${c##*[![:space:]]}"}"
             [ -n "$c" ] && cmd+=(--doctor-fail-on "$c")
           done
         fi
         [ -n "$IN_QUARANTINE" ] && cmd+=(--quarantine "$IN_QUARANTINE")
         if [ -n "$IN_SHARD" ] && [ -n "$IN_SHARD_TOTAL" ]; then
           cmd+=(--shard "$IN_SHARD/$IN_SHARD_TOTAL")
+        elif [ -n "$IN_SHARD" ] || [ -n "$IN_SHARD_TOTAL" ]; then
+          # One without the other would silently run the full suite on every
+          # matrix leg; refuse instead.
+          echo "::error::shard and shard-total must be set together (got shard='$IN_SHARD', shard-total='$IN_SHARD_TOTAL')" >&2
+          exit 2
         fi
 
         # Shared-cache backend (artifact / remote): pull the authoritative

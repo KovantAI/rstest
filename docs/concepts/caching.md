@@ -5,7 +5,10 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
 ## `.rstest_cache/` (rstest's own)
 
 - `durations.json`: per-test call durations, merged over runs (a filtered
-  run updates only the tests it ran). Drives
+  run updates only the tests it ran). Only passing tests are recorded: a
+  failed test keeps its previous timing, and so does a test
+  [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
+  flagged, so the baseline it regressed from stays in place. Drives
   [long-pole-first scheduling](scheduling.md#dispatch-order) and the
   suite-size heuristic behind `-n auto`. Each entry records its test file's
   path and a sha256 of its contents, so the cache self-heals: an edited test
@@ -33,6 +36,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   graph without it; rebuild by rerunning coverage with `--cov-context=test`.
   Merges through the shared cache like the others, so sharded coverage runs
   union into a full index (see [Shared cache backend](#shared-cache-backend)).
+  Paths in it are relative to the rootdir, so a run from a subdirectory writes
+  the same keys as a run from the root.
 - `last_green.json`: the commit of the last fully green run, stamped with an
   environment fingerprint (interpreter and dependency manifests). Read by
   [`--since-green`](../reference/cli.md#-since-green); an environment change
@@ -41,7 +46,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   hashes from the last [`--incremental`](../reference/cli.md#-incremental)
   run, so an unchanged green test can be skipped. Also read by
   [`rstest explain`](../reference/cli-commands.md#explain). Safe to delete:
-  the next run re-runs everything and rebuilds it.
+  the next run re-runs everything and rebuilds it. Rootdir-relative like the
+  coverage index; a run of part of the suite keeps the other tests' records.
 - `replay/`: the schedule of each parallel run (`<run-uid>.json`, the last 10
   kept, plus `latest.json`; none for `--shard`, `--dist each`, `rstest replay`
   or with `RSTEST_NO_REPLAY_JOURNAL=1`), read by
@@ -51,18 +57,34 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   [Replaying a CI-only failure](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)).
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
-duration-aware scheduling from the second run onward, minus `replay/`. In the repository,
-add it to `.gitignore` alongside `.pytest_cache/`:
+duration-aware scheduling from the second run onward, minus `replay/`.
 
-```gitignore
-.pytest_cache/
-.rstest_cache/
-```
-
-The location is CWD-relative by default; set `RSTEST_CACHE` to relocate it
+The cache lives at the pytest rootdir, the same directory `.pytest_cache/`
+goes to: the directory of the pytest config file (`pytest.ini`,
+`pyproject.toml`, `tox.ini`, `setup.cfg`, ...) found from the common ancestor
+of the path arguments upward, else that common ancestor. Running from a
+subdirectory (`cd tests/unit && rstest`) or passing paths therefore reads and
+writes the project's one cache, so durations, flake history, replay journals
+and `rstest explain` see every run. `--rootdir` and `-c` move it the way they
+move pytest's rootdir. Set `RSTEST_CACHE` to relocate it explicitly
 (distinct from `RSTEST_CACHE_DIR`, which steers the machine-global
-interpreter-probe cache). Writes are atomic (tmp + rename), so a concurrent
-reader never sees a half-written file.
+interpreter-probe cache).
+
+Like `.pytest_cache/`, the directory ignores itself: rstest writes a
+`.gitignore` containing `*` and a `CACHEDIR.TAG` (so backup tools skip it)
+when it creates the cache, and gives a `.pytest_cache/` it creates itself the
+same two files. No entry in your own `.gitignore` is needed.
+
+With pytest's cacheprovider disabled (`-p no:cacheprovider` on the command
+line, in `addopts` or in `PYTEST_ADDOPTS`), a run leaves no cache behind,
+as pytest does: `.rstest_cache/` is neither read nor created, and neither is
+`.pytest_cache/`. The run uses a private scratch directory that is removed
+when it ends, so it schedules cold (no saved durations), records no flake
+history and leaves no replay journal for `rstest replay` or `rstest explain`.
+An explicit `RSTEST_CACHE` still takes effect.
+
+Writes are atomic (tmp + rename), so a concurrent reader never sees a
+half-written file.
 
 ## Shared cache backend
 
@@ -188,7 +210,12 @@ Recipes: [Shared cache across CI jobs](../guides/ci-shared-cache.md).
 Workers read it normally (`--lf`/`--ff` deselection happens inside the
 vendored core). Writes to the run-level keys (`lastfailed`, `nodeids`,
 `stepwise`) are blocked in workers (each worker sees only its own slice)
-and the orchestrator writes the merged truth after the run. Other plugins'
+and the orchestrator writes the merged truth after the run. `lastfailed` is
+updated the way pytest updates it: this run's failures are added, tests that
+passed or were skipped are removed, and the failures of tests the run did not
+execute stay, so a passing subset run keeps the rest. A test that was running
+when Ctrl-C (or SIGTERM) stopped the run has no real outcome and is not
+recorded there, nor in `flakes.json` or `durations.json`. Other plugins'
 cache writes pass through untouched.
 
 ## Worker temp directories
@@ -196,5 +223,6 @@ cache writes pass through untouched.
 Each worker gets a disjoint `tmp_path` root under `$TMPDIR/rstest-<pid>/gwN/`
 (one subdirectory per worker id: the same per-worker isolation xdist gets
 from its `popen-gwN` roots), preventing numbered-directory cleanup races
-between sibling workers. A user-provided `--basetemp` is honored and left
-alone.
+between sibling workers. A user-provided `--basetemp` becomes the shared
+parent instead: each worker uses `<basetemp>/gwN`, as under xdist. With
+`-n 0` it is used as given.

@@ -3,7 +3,7 @@
 //! data model in [`super`] so recording/accounting stays free of presentation.
 //! A child module, so it still reaches `Run`'s private fields.
 
-use super::{FailureWrap, Run, TestEntry};
+use super::{FailureWrap, Run, TbStyle, TestEntry};
 use crate::reporting::sink::Sink;
 
 impl Run {
@@ -78,7 +78,11 @@ impl Run {
                 "\n{}{past}",
                 palette.yellow(&format!("--- QUARANTINED {nodeid} ---"))
             ));
-            if let Some(repr) = &entry.longrepr {
+            if let Some(repr) = entry
+                .longrepr
+                .as_ref()
+                .filter(|_| sink.tb_style() != TbStyle::No)
+            {
                 sink.out_line(repr);
             }
         }
@@ -120,8 +124,16 @@ impl Run {
 
     /// The failures block, with each failure optionally wrapped in a CI
     /// log-folding construct so the job UI collapses tracebacks per test.
+    /// `--tb=no` prints nothing (pytest drops its FAILURES and ERRORS
+    /// sections); `--tb=line` prints pytest's headerless form: the failure
+    /// text, its captured output, then the `path:line: message` crash line
+    /// the worker appended to the text.
     pub fn print_failures(&self, sink: &mut Sink, wrap: FailureWrap) {
         let palette = sink.palette();
+        let tb = sink.tb_style();
+        if tb == TbStyle::No {
+            return;
+        }
         let open = |header: &str, idx: usize| -> String {
             match wrap {
                 FailureWrap::Plain => {
@@ -164,14 +176,40 @@ impl Run {
                 continue;
             }
             let attribution = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
-            sink.out_line(&open(&format!("{attribution}{nodeid}"), idx));
-            sink.out_line(longrepr);
+            // Only a call-phase failure carries the crash line (pytest's
+            // FAILURES section); setup/teardown errors keep their header,
+            // as in pytest's ERRORS section.
+            let line_form = tb == TbStyle::Line
+                && self
+                    .tests
+                    .get(nodeid)
+                    .is_some_and(|e| e.call.as_deref() == Some("failed"));
+            let (body, crash) = if line_form {
+                match longrepr.rsplit_once('\n') {
+                    Some((body, crash)) => (body, Some(crash)),
+                    None => ("", Some(longrepr.as_str())),
+                }
+            } else {
+                (longrepr.as_str(), None)
+            };
+            if !line_form || wrap != FailureWrap::Plain {
+                sink.out_line(&open(&format!("{attribution}{nodeid}"), idx));
+            } else if idx == 0 {
+                // The blank line a header would have opened with.
+                sink.out_line("");
+            }
+            if !body.is_empty() || crash.is_none() {
+                sink.out_line(body);
+            }
             for (name, content) in sections {
                 sink.out_line(&format!(
                     "{}\n{}",
                     palette.yellow(&format!("--------- {name} ---------")),
                     content.trim_end()
                 ));
+            }
+            if let Some(crash) = crash {
+                sink.out_line(crash);
             }
             if let Some(c) = close(idx) {
                 sink.out_line(&c);
@@ -212,6 +250,7 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         }
     }
 
@@ -426,5 +465,41 @@ mod tests {
         );
         assert!(out.contains("c.py"), "collect error shown:\n{out}");
         assert!(out.contains("ImportError"), "collect repr shown:\n{out}");
+    }
+
+    #[test]
+    fn print_failures_tb_no_prints_nothing() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::bad", "failed");
+        run.collect_error("c.py".into(), "ImportError: boom".into());
+        let (mut sink, cap) = Sink::captured();
+        sink.set_tb_style(TbStyle::No);
+        run.print_failures(&mut sink, FailureWrap::Plain);
+        assert!(cap.out().is_empty(), "--tb=no: {}", cap.out());
+    }
+
+    #[test]
+    fn print_failures_tb_line_is_headerless_with_crash_line_last() {
+        let mut run = Run::default();
+        let mut r = report("a.py::bad", "call", "failed");
+        r.longrepr = Some("E   AssertionError: no\n/abs/a.py:3: AssertionError: no".into());
+        r.sections = vec![("Captured stdout call".into(), "hello\n".into())];
+        run.record(None, report("a.py::bad", "setup", "passed"));
+        run.record(None, r);
+        // A setup error keeps pytest's headed ERRORS form.
+        run.record(None, report("a.py::err", "setup", "failed"));
+        let (mut sink, cap) = Sink::captured();
+        sink.set_tb_style(TbStyle::Line);
+        run.print_failures(&mut sink, FailureWrap::Plain);
+        let out = cap.out();
+        assert!(!out.contains("FAILED a.py::bad"), "no header:\n{out}");
+        let e = out.find("E   AssertionError").unwrap();
+        let captured = out.find("hello").unwrap();
+        let crash = out.find("/abs/a.py:3: AssertionError: no").unwrap();
+        assert!(e < captured && captured < crash, "pytest's order:\n{out}");
+        assert!(
+            out.contains("--- FAILED a.py::err ---"),
+            "error keeps header:\n{out}"
+        );
     }
 }

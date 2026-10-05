@@ -36,19 +36,33 @@ pub struct TestEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub skip_reason: Option<String>,
-    /// Call-phase CPU time (process_time), present only when measured
-    /// (`--doctor` or a live-stream run). Serialized when present so a
-    /// report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on
-    /// a plain run so the snapshot stays byte-comparable to the pytest baseline.
+    /// Call-phase CPU time (process_time plus reaped child processes), present
+    /// only when measured (`--doctor` or a live-stream run). Serialized when
+    /// present so a report-json consumer can spot wait-bound tests (wall ≫
+    /// cpu); omitted on a plain run so the snapshot stays byte-comparable to
+    /// the pytest baseline.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "f64"))]
     pub cpu: Option<f64>,
-    /// Leak check: net threads / open fds after teardown (from the teardown
-    /// report). Doctor-internal; not serialized to report-json.
+    /// Leak check: threads / open fds the test created that are still open
+    /// after its teardown (from the teardown report). Doctor-internal; not serialized to report-json.
     #[serde(skip)]
     pub thread_delta: Option<i64>,
     #[serde(skip)]
     pub fd_delta: Option<i64>,
+    /// Setup / teardown phase wall time (latest attempt). Doctor-internal: the
+    /// doctor counts a test's whole protocol (fixtures included), not only its
+    /// call phase. Not serialized to report-json.
+    #[serde(skip)]
+    pub setup_seconds: f64,
+    #[serde(skip)]
+    pub teardown_seconds: f64,
+    /// Setup / teardown phase CPU time, present only when measured (the same
+    /// runs that measure `cpu`). Doctor-internal; not serialized.
+    #[serde(skip)]
+    pub setup_cpu: Option<f64>,
+    #[serde(skip)]
+    pub teardown_cpu: Option<f64>,
     /// Passed only after one or more reruns (--reruns or @pytest.mark.flaky).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -61,6 +75,17 @@ pub struct TestEntry {
     /// SIGINT/SIGTERM stopped the run; not produced by pytest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,
+    /// The run was interrupted (SIGINT/SIGTERM) while this test was running:
+    /// its failure is the fabricated `crashed` one, not a real outcome, so the
+    /// run history (lastfailed, flakes, durations) leaves it out. Not
+    /// serialized: report-json shows it as `crashed`.
+    #[serde(skip)]
+    pub interrupted: bool,
+    /// `--durations-regress` flagged this test: its duration is kept out of
+    /// the duration cache so the baseline it regressed from stays in place
+    /// (the gate keeps firing until the test is back under the threshold).
+    #[serde(skip)]
+    pub duration_regressed: bool,
     /// Source line of the test (0-based, from pytest's report.location),
     /// for editor mapping. Absent when pytest reports no location.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,6 +99,18 @@ pub struct TestEntry {
     /// pass was carried forward (`--incremental`). Still counts as passed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cached: bool,
+    /// Failed subtests (unittest `subTest` / the `subtests` fixture). Any
+    /// makes `call` "failed"; each also counts as one `failed`, as in pytest.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub subtests_failed: u64,
+    /// The parent's own call outcome once a subtest failed (`call` then reads
+    /// "failed"): pytest counts the parent by it, apart from its subtests.
+    #[serde(skip)]
+    pub(crate) own_call: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Sharding identity stamped into report-json meta when `--shard K/N` is active,
@@ -183,6 +220,43 @@ pub enum FailureWrap {
     BuildkiteGroup,
 }
 
+/// pytest's `--tb` style, as far as the failures block cares. The worker
+/// already renders each failure's text in the chosen style; `line` and `no`
+/// also change the block around it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TbStyle {
+    /// auto / long / short / native: a headed block per failure.
+    #[default]
+    Full,
+    /// `--tb=line`: no header; the text (whose last line is the worker's
+    /// `path:line: message` crash line), captured output before that line.
+    Line,
+    /// `--tb=no`: no failures or errors block at all.
+    No,
+}
+
+impl TbStyle {
+    /// The last `--tb` among `opts` (`--tb=X` or `--tb X`), in pytest's
+    /// precedence order: ini `addopts`, then `PYTEST_ADDOPTS`, then argv.
+    pub fn from_opts<'a>(opts: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut style = Self::Full;
+        let mut opts = opts.into_iter();
+        while let Some(a) = opts.next() {
+            let value = match a {
+                "--tb" => opts.next(),
+                _ => a.strip_prefix("--tb="),
+            };
+            match value {
+                Some("line") => style = Self::Line,
+                Some("no") => style = Self::No,
+                Some(_) => style = Self::Full,
+                None => {}
+            }
+        }
+        style
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Run {
     tests: BTreeMap<String, TestEntry>,
@@ -194,6 +268,9 @@ pub struct Run {
     failure_by_id: std::collections::HashMap<String, usize>,
     /// Modules/dirs skipped at collection (count into "skipped", as pytest does).
     pub collect_skips: u64,
+    /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks); shown
+    /// in the summary line only, as pytest does.
+    pub deselected: u64,
     /// nodeids that passed only after rerun(s), with attempt counts.
     pub flaky: Vec<(String, u32)>,
     /// Record (duration, phase, nodeid) for every phase report - only when
@@ -203,6 +280,34 @@ pub struct Run {
     phase_durations: Vec<(f64, String, String)>,
     /// `--junitxml`: pytest's testcase elements as the workers streamed them.
     pub junit: crate::reporting::junit::JunitParts,
+    /// `-x`/`--maxfail` stopped the pool after this many failures: the
+    /// closing summary prints pytest's `stopping after N failures` banner.
+    pub stopped_after: Option<u64>,
+    /// Set when SIGINT/SIGTERM stopped the run.
+    pub interruption: Option<Interruption>,
+}
+
+/// How a SIGINT/SIGTERM stopped the run, for the closing summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interruption {
+    /// The signal's name (`SIGINT`).
+    pub signal: String,
+    /// Selected tests that never started; `None` when the total is unknown
+    /// (a lazy run stopped before collection finished).
+    pub not_run: Option<u64>,
+}
+
+impl Interruption {
+    /// pytest's `!!! Interrupted: ... !!!` banner, with how many tests did not
+    /// run when that is known.
+    pub fn banner(&self) -> String {
+        let what = match self.not_run {
+            Some(1) => format!("Interrupted by {}: 1 test did not run", self.signal),
+            Some(n) => format!("Interrupted by {}: {n} tests did not run", self.signal),
+            None => format!("Interrupted by {}", self.signal),
+        };
+        format!("!!!!!!!!!!!!!!!!!!!! {what} !!!!!!!!!!!!!!!!!!!!")
+    }
 }
 
 impl Run {
@@ -231,6 +336,19 @@ impl Run {
         if let Some(w) = worker {
             entry.worker = Some(format!("gw{w}"));
         }
+        if r.subtest {
+            // A subtest shares the parent's nodeid and `when="call"`: only a
+            // failure matters, and it marks the whole test failed. The
+            // parent's own call report (sent after its subtests) keeps it so.
+            if r.outcome == "failed" {
+                entry.subtests_failed += 1;
+                if entry.longrepr.is_none() {
+                    entry.longrepr = capped_longrepr;
+                }
+                entry.call = Some(r.outcome);
+            }
+            return;
+        }
         if r.outcome == "failed" && entry.longrepr.is_none() {
             // Machine consumers need the WHY, not just the phase verdict
             // (the agent-fleet persona's #1 blocker).
@@ -238,14 +356,24 @@ impl Run {
         }
         let outcome = Some(r.outcome);
         match r.when.as_str() {
-            "setup" => entry.setup = outcome,
+            "setup" => {
+                entry.setup = outcome;
+                entry.setup_seconds = r.duration;
+                entry.setup_cpu = r.cpu;
+            }
             "call" => {
-                entry.call = outcome;
+                if entry.subtests_failed > 0 {
+                    entry.own_call = outcome;
+                } else {
+                    entry.call = outcome;
+                }
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
             }
             "teardown" => {
                 entry.teardown = outcome;
+                entry.teardown_seconds = r.duration;
+                entry.teardown_cpu = r.cpu;
                 // Leak deltas ride the teardown report (measured after teardown).
                 if r.thread_delta.is_some() {
                     entry.thread_delta = r.thread_delta;
@@ -265,11 +393,25 @@ impl Run {
         }
     }
 
-    pub fn collect_error(&mut self, path: String, mut longrepr: String) {
+    /// Record a collection error; returns false (and records nothing) for a
+    /// repeat. Every pool worker collects the whole suite, so each reports the
+    /// same broken module: it counts once, as in pytest. Synthetic `<...>`
+    /// paths (internal errors, orchestrator notes) repeat only on identical
+    /// text, since different workers may hit different ones.
+    pub fn collect_error(&mut self, path: String, mut longrepr: String) -> bool {
         // Same bound as failure text: html embeds this verbatim, so a giant
         // collection-error traceback must not land unbounded in the artifact.
         crate::text::truncate_on_boundary(&mut longrepr, FAILURE_TEXT_CAP);
+        let synthetic = path.starts_with('<');
+        if self
+            .collect_errors
+            .iter()
+            .any(|(p, l)| *p == path && (!synthetic || *l == longrepr))
+        {
+            return false;
+        }
         self.collect_errors.push((path, longrepr));
+        true
     }
 
     /// Carry forward a test that was NOT run this session because it is
@@ -348,6 +490,14 @@ impl Run {
         }
     }
 
+    /// Flag an entry that was running when SIGINT/SIGTERM stopped the run (see
+    /// [`TestEntry::interrupted`]).
+    pub fn mark_interrupted(&mut self, nodeid: &str) {
+        if let Some(e) = self.tests.get_mut(nodeid) {
+            e.interrupted = true;
+        }
+    }
+
     /// Record that a test passed only after `attempts` reruns.
     pub fn mark_flaky(&mut self, nodeid: String, attempts: u32) {
         if let Some(e) = self.tests.get_mut(&nodeid) {
@@ -361,14 +511,48 @@ impl Run {
         &self.tests
     }
 
-    /// nodeid -> call duration, for the duration cache (LPT scheduling).
+    /// nodeid -> call duration as measured this run (the `--durations-regress`
+    /// comparison). A test an interrupt stopped mid-run has no real duration
+    /// and is left out.
     pub fn durations(&self) -> impl Iterator<Item = (&String, f64)> {
         self.tests
             .iter()
+            .filter(|(_, e)| !e.interrupted)
             .filter_map(|(id, e)| e.duration.map(|d| (id, d)))
     }
 
-    /// nodeids with any failed phase - the merged `lastfailed` truth.
+    /// The durations worth learning, for the duration cache (LPT scheduling,
+    /// `explain`, the `--durations-regress` baseline) and `--cache-push`:
+    /// [`Run::durations`] minus failed tests (a fail-fast call's 0.0002s is
+    /// not the test's cost) and tests `--durations-regress` flagged (adopting
+    /// the regressed time would silence the gate on the next run). Their
+    /// previous cached timing stays.
+    pub fn learned_durations(&self) -> impl Iterator<Item = (&String, f64)> {
+        self.durations().filter(|(id, _)| {
+            self.tests
+                .get(*id)
+                .is_some_and(|e| !e.any_phase_failed() && !e.duration_regressed)
+        })
+    }
+
+    /// Flag a test `--durations-regress` reported (see
+    /// [`TestEntry::duration_regressed`]).
+    pub fn mark_duration_regressed(&mut self, nodeid: &str) {
+        if let Some(e) = self.tests.get_mut(nodeid) {
+            e.duration_regressed = true;
+        }
+    }
+
+    /// [`Run::failed_nodeids`] minus the tests an interrupt stopped mid-run:
+    /// the failures the run history (lastfailed, flakes) records.
+    pub fn history_failed_nodeids(&self) -> impl Iterator<Item = &String> {
+        self.tests
+            .iter()
+            .filter_map(|(id, e)| (e.any_phase_failed() && !e.interrupted).then_some(id))
+    }
+
+    /// nodeids with any failed phase, interrupted ones included.
+    #[cfg(test)]
     pub fn failed_nodeids(&self) -> impl Iterator<Item = &String> {
         self.tests
             .iter()
@@ -406,13 +590,21 @@ impl Run {
     /// pytest-style "N passed, N failed, ..." counts derived from phases:
     /// a test counts by its call outcome; setup/teardown failures count as
     /// errors; setup skips count as skipped (matches pytest accounting).
-    /// Nothing counted reads "no tests ran", like pytest.
+    /// Like pytest's line, collection errors count as errors and deselected
+    /// items are shown. Nothing counted reads "no tests ran", like pytest.
     pub fn summary_line(&self) -> String {
-        let line = self
-            .counts()
+        let mut counts = self.counts();
+        let collect_errors = counts.remove("collect_errors").unwrap_or(0);
+        *counts.entry("errors").or_default() += collect_errors;
+        counts.insert("deselected", self.deselected);
+        let line = counts
             .iter()
             .filter(|(_, v)| **v > 0)
-            .map(|(k, v)| format!("{v} {}", k.replace('_', " ")))
+            .map(|(k, v)| match (*k, *v) {
+                // pytest's own plural rule: only "error(s)" changes with the count.
+                ("errors", 1) => "1 error".to_string(),
+                (k, v) => format!("{v} {}", k.replace('_', " ")),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         if line.is_empty() {
@@ -441,7 +633,16 @@ impl Run {
         // A flaky test (passed only after a rerun) counts once, as `flaky`,
         // not also as `passed`: the buckets partition the tests.
         for entry in self.tests.values() {
-            let bucket = match classify(entry) {
+            // pytest counts each failed subtest as a failure and the parent
+            // by its own call outcome (unittest leaves it passed; the
+            // `subtests` fixture fails it too).
+            let bucket = if entry.subtests_failed > 0 && !entry.quarantined {
+                *counts.entry("failed").or_default() += entry.subtests_failed;
+                classify_call(entry, entry.own_call.as_deref())
+            } else {
+                classify(entry)
+            };
+            let bucket = match bucket {
                 "passed" if entry.flaky => "flaky",
                 b => b,
             };
@@ -515,6 +716,21 @@ impl TestEntry {
             .iter()
             .any(|p| p.as_deref() == Some("failed"))
     }
+
+    /// Wall time of the whole test protocol (setup + call + teardown), the
+    /// time the test actually occupied its worker. `None` when the call phase
+    /// never reported (same population as `duration`).
+    pub fn protocol_seconds(&self) -> Option<f64> {
+        self.duration
+            .map(|d| d + self.setup_seconds + self.teardown_seconds)
+    }
+
+    /// CPU time of the whole protocol, when the call phase's CPU was measured.
+    /// A phase whose CPU was not reported counts as 0.
+    pub fn protocol_cpu(&self) -> Option<f64> {
+        self.cpu
+            .map(|c| c + self.setup_cpu.unwrap_or(0.0) + self.teardown_cpu.unwrap_or(0.0))
+    }
 }
 
 /// Bucket a `TestEntry` into its pytest-style outcome. This is the Rust twin of
@@ -522,6 +738,11 @@ impl TestEntry {
 /// implement the SAME decision tree and MUST be changed together, or the HTML
 /// report will disagree with the summary/report-json/junit for the same entry.
 fn classify(e: &TestEntry) -> &'static str {
+    classify_call(e, e.call.as_deref())
+}
+
+/// [`classify`] with the call outcome given explicitly.
+fn classify_call(e: &TestEntry, call: Option<&str>) -> &'static str {
     if e.quarantined {
         return "quarantined";
     }
@@ -529,10 +750,10 @@ fn classify(e: &TestEntry) -> &'static str {
     if setup == Some("failed") || e.teardown.as_deref() == Some("failed") {
         return "errors";
     }
-    if setup == Some("skipped") || e.call.as_deref() == Some("skipped") {
+    if setup == Some("skipped") || call == Some("skipped") {
         return if e.wasxfail { "xfailed" } else { "skipped" };
     }
-    match e.call.as_deref() {
+    match call {
         Some("passed") => {
             if e.wasxfail {
                 "xpassed"
@@ -549,6 +770,16 @@ fn classify(e: &TestEntry) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tb_style_last_flag_wins_in_both_forms() {
+        assert_eq!(TbStyle::from_opts([]), TbStyle::Full);
+        assert_eq!(TbStyle::from_opts(["--tb=line"]), TbStyle::Line);
+        assert_eq!(TbStyle::from_opts(["--tb", "no", "-q"]), TbStyle::No);
+        assert_eq!(TbStyle::from_opts(["--tb=no", "--tb=short"]), TbStyle::Full);
+        // A trailing bare --tb (pytest rejects it) changes nothing.
+        assert_eq!(TbStyle::from_opts(["--tb=line", "--tb"]), TbStyle::Line);
+    }
+
     fn report(nodeid: &str, when: &str, outcome: &str) -> proto::Report {
         proto::Report {
             nodeid: nodeid.into(),
@@ -563,6 +794,7 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         }
     }
 
@@ -618,10 +850,7 @@ mod tests {
         full(&mut run, "a.py::skip", "skipped");
         // setup failure counts as error, not failure
         run.record(None, report("a.py::err", "setup", "failed"));
-        assert_eq!(
-            run.summary_line(),
-            "1 errors, 1 failed, 2 passed, 1 skipped"
-        );
+        assert_eq!(run.summary_line(), "1 error, 1 failed, 2 passed, 1 skipped");
         assert!(!run.all_passed());
     }
 
@@ -641,7 +870,124 @@ mod tests {
         full(&mut run, "a.py::ok", "passed");
         run.collect_error("b.py".into(), "ImportError".into());
         assert!(!run.all_passed());
-        assert!(run.summary_line().contains("1 collect errors"));
+        // pytest's summary counts a collection error among its errors.
+        assert_eq!(run.summary_line(), "1 error, 1 passed");
+        assert_eq!(run.counts()["collect_errors"], 1);
+        // Plural from two on, as pytest words it.
+        run.collect_error("c.py".into(), "ImportError".into());
+        assert_eq!(run.summary_line(), "2 errors, 1 passed");
+    }
+
+    #[test]
+    fn collect_error_counts_once_however_many_workers_report_it() {
+        let mut run = Run::default();
+        assert!(run.collect_error("b.py".into(), "ImportError gw0".into()));
+        assert!(!run.collect_error("b.py".into(), "ImportError gw1".into()));
+        assert!(run.collect_error("c.py".into(), "SyntaxError".into()));
+        // Synthetic paths repeat only on identical text.
+        assert!(run.collect_error("<internalerror>".into(), "a".into()));
+        assert!(!run.collect_error("<internalerror>".into(), "a".into()));
+        assert!(run.collect_error("<internalerror>".into(), "b".into()));
+        assert_eq!(run.counts()["collect_errors"], 4);
+        let paths: Vec<&str> = run
+            .collect_errors()
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["b.py", "c.py", "<internalerror>", "<internalerror>"]
+        );
+    }
+
+    #[test]
+    fn summary_shows_deselected_like_pytest() {
+        let mut run = Run::default();
+        full(&mut run, "a.py::ok", "passed");
+        run.deselected = 12;
+        assert_eq!(run.summary_line(), "12 deselected, 1 passed");
+        // Not an outcome bucket: the report-json counts are unchanged.
+        assert!(!run.counts().contains_key("deselected"));
+        let none = Run {
+            deselected: 2,
+            ..Run::default()
+        };
+        assert_eq!(none.summary_line(), "2 deselected");
+    }
+
+    fn subtest(nodeid: &str, outcome: &str) -> proto::Report {
+        proto::Report {
+            subtest: true,
+            ..report(nodeid, "call", outcome)
+        }
+    }
+
+    #[test]
+    fn failed_unittest_subtest_fails_the_test_and_counts_like_pytest() {
+        // unittest subTest: pytest leaves the parent passed and counts the
+        // failed subtest on its own ("1 failed, 2 passed").
+        let mut run = Run::default();
+        run.record(None, report("t.py::T::sub", "setup", "passed"));
+        run.record(None, subtest("t.py::T::sub", "passed"));
+        run.record(None, subtest("t.py::T::sub", "failed"));
+        run.record(None, subtest("t.py::T::sub", "passed"));
+        run.record(None, report("t.py::T::sub", "call", "passed"));
+        run.record(None, report("t.py::T::sub", "teardown", "passed"));
+        full(&mut run, "t.py::ok", "passed");
+
+        let e = &run.tests()["t.py::T::sub"];
+        assert_eq!(e.call.as_deref(), Some("failed"));
+        assert_eq!(e.subtests_failed, 1);
+        assert_eq!(e.longrepr.as_deref(), Some("boom"));
+        assert_eq!(e.outcome(), "failed");
+        assert!(e.any_phase_failed());
+        assert!(!run.all_passed());
+        assert_eq!(run.summary_line(), "1 failed, 2 passed");
+        assert!(!run.green_nodeids().contains("t.py::T::sub"));
+        assert_eq!(run.failed_nodeids().count(), 1);
+    }
+
+    #[test]
+    fn failed_subtests_fixture_counts_parent_and_subtest() {
+        // The `subtests` fixture: pytest fails the parent too ("2 failed").
+        let mut run = Run::default();
+        run.record(None, subtest("t.py::native", "failed"));
+        run.record(None, report("t.py::native", "call", "failed"));
+        full(&mut run, "t.py::ok", "passed");
+        assert_eq!(run.summary_line(), "2 failed, 1 passed");
+    }
+
+    #[test]
+    fn passing_subtests_leave_the_test_alone() {
+        let mut run = Run::default();
+        run.record(None, subtest("t.py::t", "passed"));
+        run.record(None, report("t.py::t", "call", "passed"));
+        let e = &run.tests()["t.py::t"];
+        assert_eq!(e.call.as_deref(), Some("passed"));
+        assert_eq!(e.subtests_failed, 0);
+        assert_eq!(run.summary_line(), "1 passed");
+    }
+
+    #[test]
+    fn subtests_failed_serialized_only_when_nonzero() {
+        let meta = RunMeta {
+            exitstatus: 1,
+            duration_seconds: 0.0,
+            started_at_epoch: 0,
+            workers: 2,
+            argv: vec![],
+            shard: None,
+        };
+        let mut run = Run::default();
+        run.record(None, subtest("t.py::a", "failed"));
+        run.record(None, report("t.py::a", "call", "passed"));
+        full(&mut run, "t.py::b", "passed");
+        let doc = run.snapshot_value(&meta);
+        assert_eq!(doc["tests"]["t.py::a"]["subtests_failed"], 1);
+        assert_eq!(doc["tests"]["t.py::a"]["call"], "failed");
+        assert!(doc["tests"]["t.py::b"].get("subtests_failed").is_none());
+        assert_eq!(doc["meta"]["counts"]["failed"], 1);
+        assert_eq!(doc["meta"]["counts"]["passed"], 2);
     }
 
     #[test]
@@ -816,6 +1162,7 @@ mod tests {
                 fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
+                subtest: false,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -835,6 +1182,7 @@ mod tests {
                 fd_delta: None,
                 sections: Vec::new(),
                 lineno: None,
+                subtest: false,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

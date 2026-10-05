@@ -14,8 +14,9 @@ reports to the orchestrator.
 tests, merges results, and renders output.
 
 **`-n` (worker count)**: how many parallel worker processes run your tests.
-`-n auto` (the default) uses your cores, but never more workers than test
-files, and fewer on a suite whose cached run time is only a few seconds;
+`-n auto` (the default) uses your cores, but never more workers than the
+selected test files on a first run (cached timings lift that to the test
+count), and fewer on a suite whose cached run time is only a few seconds;
 `-n 4` uses exactly four; `-n 0` (or `-n 1`)
 turns parallelism off and runs one plain pytest session. You rarely need to
 set it. See [Byte-exact mode](#byte-exact-mode) for what `-n 0` gives you.

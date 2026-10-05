@@ -615,14 +615,21 @@ not show up at all.
   C code that never returns), and a job-level cap such as `timeout-minutes:`
   on GitHub Actions. When that cap cancels the job, the runner sends
   SIGTERM (or SIGINT): a parallel run then stops its workers, names the test
-  each was running and records it failed, writes the replay journal and any
-  `--junitxml`/`--report-json`, and exits 2. A second signal exits at once.
+  each was running and reports it failed (`crashed` in `--report-json`), says
+  how many tests did not run, writes the replay journal and any
+  `--junitxml`/`--report-json`, and exits 2. The stopped tests are not added
+  to `lastfailed`, flake history or the duration cache. A second signal exits
+  at once.
 - **Reproducing order-dependent failures**: `--shuffle` prints its seed;
-  rerun with `--shuffle=SEED` to replay the same order. `rstest bisect
+  rerun with `--shuffle=SEED` to replay the same order (`rstest replay`
+  re-runs the exact per-worker schedule of the failed run). `rstest bisect
   <nodeid>` narrows a test that fails only after others down to the
   polluting test(s).
 - **Colors** are disabled automatically when output is not a terminal;
-  force with `--color=yes` if your CI renders ANSI.
+  force with `--color=yes` (or `FORCE_COLOR=1`, which the workers' assertion
+  diffs honor too) if your CI renders ANSI. A job on a pty with `CI` set
+  (Buildkite, `docker -t`) keeps its colors but gets the plain `dots` log:
+  no live footer and no cursor movement.
 - **Platform**: these recipes are written for Linux runners but work
   unchanged on `windows-latest` and `macos-latest` (swap the runner image);
   rstest's full test gate runs on all three every commit. On macOS/Windows

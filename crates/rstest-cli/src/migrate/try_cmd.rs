@@ -10,18 +10,124 @@ use super::{Outcomes, Phase};
 use crate::reporting::sink::Sink;
 use crate::scheduling::worker;
 
-/// Run a command, return (parsed outcomes from its --report-json/recorder
-/// snapshot, wall seconds, exit code). `record_path` is where the run wrote its
-/// JSON.
-fn time_run(mut cmd: std::process::Command, record_path: &Path) -> (Option<Outcomes>, f64, i32) {
+/// One timed child run (the pytest baseline or the rstest run), read back
+/// from the JSON it wrote (recorder snapshot / `--report-json`).
+struct TimedRun {
+    /// Per-test outcomes; `None` when the run wrote no readable JSON.
+    outcomes: Option<Outcomes>,
+    /// Nodeids of the collectors that failed (the top-level `collect_errors`
+    /// list both JSON shapes carry).
+    collect_errors: Vec<String>,
+    /// `meta.workers` from rstest's report-json (0 = single-worker mode);
+    /// `None` for the pytest recorder, which has no such field.
+    workers: Option<u64>,
+    wall: f64,
+    code: i32,
+}
+
+/// Run a command and read back what it recorded at `record_path`.
+fn time_run(mut cmd: std::process::Command, record_path: &Path) -> TimedRun {
     let t0 = std::time::Instant::now();
     let code = cmd.status().ok().and_then(|s| s.code()).unwrap_or(-1);
     let wall = t0.elapsed().as_secs_f64();
-    let outcomes = std::fs::read_to_string(record_path).ok().and_then(|txt| {
-        let doc: serde_json::Value = serde_json::from_str(&txt).ok()?;
-        super::parse_outcomes(&doc, false)
-    });
-    (outcomes, wall, code)
+    let doc: Option<serde_json::Value> = std::fs::read_to_string(record_path)
+        .ok()
+        .and_then(|txt| serde_json::from_str(&txt).ok());
+    TimedRun {
+        outcomes: doc.as_ref().and_then(|d| super::parse_outcomes(d, false)),
+        collect_errors: doc.as_ref().map(collect_errors).unwrap_or_default(),
+        workers: doc
+            .as_ref()
+            .and_then(|d| d.get("meta")?.get("workers")?.as_u64()),
+        wall,
+        code,
+    }
+}
+
+/// The `collect_errors` list of a recorder / report-json document.
+fn collect_errors(doc: &serde_json::Value) -> Vec<String> {
+    doc.get("collect_errors")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|e| e.as_str().unwrap_or("<unknown>").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Why a run can't be compared, if it can't: a parity verdict over a suite
+/// that didn't fully collect, or collected nothing, would bless tests nobody
+/// ran. `side` names the runner (`pytest` / `rstest`) for the message.
+fn not_comparable(
+    side: &str,
+    outcomes: &Outcomes,
+    collect_errors: &[String],
+    code: i32,
+) -> Option<String> {
+    if !collect_errors.is_empty() {
+        let n = collect_errors.len();
+        let shown = collect_errors
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if n > 3 {
+            format!(", +{} more", n - 3)
+        } else {
+            String::new()
+        };
+        return Some(format!(
+            "{side} hit {n} collection error{} ({shown}{more})",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+    if outcomes.is_empty() {
+        return Some(format!(
+            "{side} ran no tests (none collected, or all deselected; exit {code})"
+        ));
+    }
+    None
+}
+
+/// The speed line's worker clause: what `-n auto` resolved to. The
+/// report-json records single-worker mode as 0 workers, which is `-n 1`.
+fn workers_clause(workers: Option<u64>) -> String {
+    match workers {
+        Some(n) => format!("at -n auto = -n {}", n.max(1)),
+        None => "at -n auto".to_string(),
+    }
+}
+
+/// The "already red" note for a pytest baseline that exited non-zero. Counts
+/// failing tests plus collection errors and never claims "0 failing": with
+/// neither, it quotes the exit code instead.
+fn red_note(failing: usize, collect_errors: usize, code: i32) -> String {
+    let errs = |c: usize| format!("{c} collection error{}", if c == 1 { "" } else { "s" });
+    let what = match (failing, collect_errors) {
+        (0, 0) => format!("exit {code}"),
+        (f, 0) => format!("{f} failing"),
+        (0, c) => errs(c),
+        (f, c) => format!("{f} failing, {}", errs(c)),
+    };
+    format!(
+        "  note: your pytest run was already red ({what}). That's pre-existing, \
+         not caused by rstest."
+    )
+}
+
+/// Print the "could not compare" verdict and return try's "couldn't run"
+/// exit code (2, as for a pytest/rstest run that produced nothing).
+fn report_not_comparable(sink: &mut Sink, reason: &str) -> i32 {
+    sink.out_line("\n================= rstest try =================");
+    sink.out_line(&format!("  ✗ could not compare: {reason}"));
+    sink.out_line("================================================");
+    sink.out_line(
+        "  → no verdict: parity needs a suite that collects cleanly and runs at least\n\
+         \x20   one test. Fix that (check `python -m pytest -q`), then re-run `rstest try`.",
+    );
+    2
 }
 
 /// Estimate CI runs/day from git history: commits in the last 30 days ÷ 30
@@ -97,16 +203,22 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     worker::scrub_secrets(&mut py);
-    let (py_out, py_wall, py_code) = time_run(py, &py_json);
+    let py_run = time_run(py, &py_json);
     let _ = std::fs::remove_file(&py_json);
+    let (py_wall, py_code) = (py_run.wall, py_run.code);
 
-    let Some(py_out) = py_out else {
+    let Some(py_out) = py_run.outcomes.as_ref() else {
         sink.out_line(
             "rstest try: couldn't run pytest (is it installed and your suite collectable?).\n\
              Try `python -m pytest -q` yourself, then re-run `rstest try`.",
         );
         return Ok(2);
     };
+    // A baseline with a collection error or no tests has nothing to compare
+    // against: empty == empty is not parity. Stop before the rstest run.
+    if let Some(reason) = not_comparable("pytest", py_out, &py_run.collect_errors, py_code) {
+        return Ok(report_not_comparable(sink, &reason));
+    }
 
     sink.warn("rstest try: running it under rstest (-n auto)…");
     let exe = std::env::current_exe()?;
@@ -123,19 +235,23 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
         .args(["-q", "--output", "dots"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let (rs_out, rs_wall, _rs_code) = time_run(rs, &rs_json);
+    let rs_run = time_run(rs, &rs_json);
     let _ = std::fs::remove_file(&rs_json);
+    let rs_wall = rs_run.wall;
 
-    let Some(rs_out) = rs_out else {
+    let Some(rs_out) = rs_run.outcomes.as_ref() else {
         sink.out_line(
             "rstest try: rstest produced no run (it may have refused to dispatch — \
              often an unstable parametrize id). Run `rstest migrate-check` to see why.",
         );
         return Ok(2);
     };
+    if let Some(reason) = not_comparable("rstest", rs_out, &rs_run.collect_errors, rs_run.code) {
+        return Ok(report_not_comparable(sink, &reason));
+    }
 
     // ---- parity ----
-    let parity = compute_parity(&py_out, &rs_out);
+    let parity = compute_parity(py_out, rs_out);
     let Parity {
         total,
         diffs,
@@ -164,9 +280,10 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
         0.0
     };
     sink.out_line(&format!(
-        "  ⚡ speed:   pytest {}  →  rstest {}   ({speedup:.1}× at -n auto)",
+        "  ⚡ speed:   pytest {}  →  rstest {}   ({speedup:.1}× {})",
         fmt_secs(py_wall),
-        fmt_secs(rs_wall)
+        fmt_secs(rs_wall),
+        workers_clause(rs_run.workers)
     ));
     let saved = (py_wall - rs_wall).max(0.0);
     if saved >= 1.0 {
@@ -184,10 +301,10 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     sink.out_line("================================================");
 
     if py_code != 0 {
-        sink.out_line(&format!(
-            "  note: your pytest run was already red ({} failing) — that's pre-existing, \
-             not caused by rstest.",
-            py_out.values().filter(|r| r.phase == Phase::Fail).count()
+        sink.out_line(&red_note(
+            py_out.values().filter(|r| r.phase == Phase::Fail).count(),
+            py_run.collect_errors.len(),
+            py_code,
         ));
     }
     if identical {
@@ -205,8 +322,59 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{commits_per_day, compute_parity, fmt_secs};
+    use super::{
+        collect_errors, commits_per_day, compute_parity, fmt_secs, not_comparable, red_note,
+        workers_clause,
+    };
     use crate::migrate::{Outcomes, Phase, Rec};
+
+    #[test]
+    fn not_comparable_on_a_collection_error_names_it() {
+        let ok = outcomes(&[("a", Phase::Pass)]);
+        let r = not_comparable("pytest", &ok, &["test_bad.py".into()], 2).unwrap();
+        assert!(r.contains("1 collection error (test_bad.py)"), "{r}");
+        // Even with no tests recorded, the collection error is the reason.
+        let r = not_comparable("rstest", &Outcomes::new(), &["x.py".into()], 2).unwrap();
+        assert!(r.starts_with("rstest hit 1 collection error"), "{r}");
+        let many: Vec<String> = (0..5).map(|i| format!("t{i}.py")).collect();
+        let r = not_comparable("pytest", &ok, &many, 2).unwrap();
+        assert!(
+            r.contains("5 collection errors (t0.py, t1.py, t2.py, +2 more)"),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn not_comparable_on_zero_tests_and_fine_otherwise() {
+        let r = not_comparable("pytest", &Outcomes::new(), &[], 5).unwrap();
+        assert!(r.contains("ran no tests") && r.contains("exit 5"), "{r}");
+        let ok = outcomes(&[("a", Phase::Fail)]);
+        assert_eq!(not_comparable("pytest", &ok, &[], 1), None);
+    }
+
+    #[test]
+    fn collect_errors_reads_the_top_level_list() {
+        let doc = serde_json::json!({"collect_errors": ["a.py", "b.py"], "tests": {}});
+        assert_eq!(collect_errors(&doc), vec!["a.py", "b.py"]);
+        assert!(collect_errors(&serde_json::json!({"tests": {}})).is_empty());
+    }
+
+    #[test]
+    fn workers_clause_names_the_resolved_count() {
+        assert_eq!(workers_clause(Some(4)), "at -n auto = -n 4");
+        // Single-worker mode records 0 workers.
+        assert_eq!(workers_clause(Some(0)), "at -n auto = -n 1");
+        assert_eq!(workers_clause(None), "at -n auto");
+    }
+
+    #[test]
+    fn red_note_never_says_zero_failing() {
+        assert!(red_note(2, 0, 1).contains("(2 failing)"));
+        assert!(red_note(0, 1, 2).contains("(1 collection error)"));
+        assert!(red_note(1, 2, 2).contains("(1 failing, 2 collection errors)"));
+        let n = red_note(0, 0, 3);
+        assert!(n.contains("(exit 3)") && !n.contains("0 failing"), "{n}");
+    }
 
     fn outcomes(entries: &[(&str, Phase)]) -> Outcomes {
         entries

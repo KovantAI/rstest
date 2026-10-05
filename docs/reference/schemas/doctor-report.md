@@ -7,21 +7,21 @@ Source: `--doctor-json`
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `coverage_waste` | CoverageWaste or null | yes | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
-| `cpu_time_seconds` | number | yes | Sum of call-phase CPU time, over tests where it was measured. |
+| `cpu_time_seconds` | number | yes | Sum of whole-protocol CPU time (the worker process plus child processes it waited for), over tests where it was measured. |
 | `fixtures` | array of FixtureEntry | yes |  |
 | `fork_prewarm` | boolean | yes | Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates the "try --fork-pool" hint so it isn't suggested when already on. |
-| `leaks` | array of Leak | no | Tests that leaked threads / fds (net positive after teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
+| `leaks` | array of Leak | no | Tests that leaked threads / fds (created by the test, still open after its teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
 | `parallel_efficiency` | ParallelEfficiency or null | yes |  |
 | `parallel_floor` | ParallelFloor or null | yes |  |
 | `rstest_version` | string | yes |  |
 | `schema` | integer | yes |  |
 | `slowest_files` | array of FileEntry | yes |  |
 | `startup_seconds` | number | yes | Wall from pool spawn to every worker's first event (imported core + started collecting), part of `wall_seconds`. A fixed per-run tax that `--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs. Surfaced so a startup-bound suite is legible. |
-| `test_time_seconds` | number | yes |  |
+| `test_time_seconds` | number | yes | Sum of each test's whole protocol (setup + call + teardown), so time spent in function fixtures counts. |
 | `tests` | integer | yes |  |
-| `wait_bound` | WaitBound or null | yes |  |
+| `wait_bound` | WaitBound or null | yes | Present only when waiting is a notable share (>= 20% and >= 1s); `--doctor-fail-on` gates `wait_*` on the measured values regardless. |
 | `wall_seconds` | number | yes |  |
-| `workers` | integer | yes |  |
+| `workers` | integer | yes | Workers that ran tests: 1 for a single-worker (`-n 0` / `-n 1`) run. |
 
 ### CoverageWaste
 
@@ -65,9 +65,9 @@ A test that ended with more threads / open fds than it started: a resource it op
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `fds` | integer | yes | Net open fds leaked (0 if only threads leaked). |
+| `fds` | integer | yes | Fds the test opened that are still open after its teardown (0 if only threads leaked). |
 | `nodeid` | string | yes |  |
-| `threads` | integer | yes | Net threads leaked (0 if only fds leaked). |
+| `threads` | integer | yes | Threads the test created that outlived its teardown (0 if only fds leaked). |
 
 ### ParallelEfficiency
 
@@ -78,7 +78,7 @@ Realized parallel speedup measured from an actual run. Unlike `ParallelFloor` (a
 | `efficiency_pct` | number | yes | 100 * realized / ideal: how busy the workers were, up to 100%. |
 | `ideal_speedup` | integer | yes | Worker count (`-n`) - the ceiling for a purely CPU-bound suite. |
 | `imbalance_pct` | number | yes | 100 * (busiest - idlest) / busiest. High = uneven distribution. |
-| `long_pole_seconds` | number | yes | Slowest single test: the hard floor no worker count beats. |
+| `long_pole_seconds` | number | yes | Slowest single test (setup + call + teardown): the hard floor no worker count beats. |
 | `realized_speedup` | number | yes | test_time / wall. At most `ideal_speedup`, since each worker runs one test at a time; a wait-bound suite run with `-n` above the core count can realize more than the core count. |
 | `workers_busy` | array of WorkerLoad | yes | Busy time summed per worker, descending - the load-balance picture. |
 

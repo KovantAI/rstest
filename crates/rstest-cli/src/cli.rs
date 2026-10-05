@@ -211,8 +211,8 @@ pub struct Cli {
     #[arg(long = "doctor-fail-on", value_name = "COND")]
     pub(crate) doctor_fail_on: Vec<String>,
 
-    /// Fail the run if any test leaks a thread or file descriptor (net still
-    /// open after its teardown). Turns the leak signal into a CI gate; enables
+    /// Fail the run if any test leaks a thread or file descriptor (one it
+    /// created that is still open after its teardown). Turns the leak signal into a CI gate; enables
     /// the leak-check instrumentation on its own (no --doctor needed).
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,
@@ -409,8 +409,9 @@ pub struct Cli {
     /// live progress) for terminals; "github", "gitlab", "buildkite",
     /// "teamcity", or "azure" for CI annotations; "tap" or "json" for
     /// machine-readable streams. Config `[tool.rstest] output`. Default "bar"
-    /// on a tty ("verbose" with -v), "dots" off-tty. An unknown style warns and
-    /// falls back to "dots".
+    /// on a tty ("verbose" with -v), "dots" off-tty. Any other value is not
+    /// rstest's: `--output VALUE` goes to the pytest session unchanged (a
+    /// plugin's own `--output`, e.g. pytest-playwright's artifacts dir).
     #[arg(long, value_name = "STYLE")]
     pub(crate) output: Option<String>,
 
@@ -736,7 +737,13 @@ pub(crate) fn is_collect_only(session_args: &[String]) -> bool {
 /// Split argv into rstest-owned args (fed to clap) and session args
 /// (paths + pytest flags, forwarded verbatim).
 pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
-    split_args(std::env::args().skip(1))
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Fail fast, before any worker spawns, like clap's own usage errors.
+    if let Some(msg) = misplaced_subcommand(&argv) {
+        eprintln!("{msg}");
+        std::process::exit(2);
+    }
+    split_args(argv)
 }
 
 /// Single source of truth for the rstest-owned flag surface. Every long/short
@@ -765,12 +772,13 @@ const BOOL_FLAGS: &[&str] = &[
     "--version",
 ];
 
-/// Run-less subcommand names (see [`Command`]). Recognized only as the LEADING
-/// argv token by [`split_args`], before the flag pre-scan; everything after the
-/// token is split by the flag tables as usual, so `rstest try -k foo tests/`
-/// still forwards `-k foo tests/` to the session. Kept in kebab-case to match
-/// clap's derived subcommand names. A pytest path literally named after a
-/// subcommand is shadowed (`rstest ./try` / `rstest -- try` disambiguates).
+/// Run-less subcommand names (see [`Command`]). Recognized by [`split_args`] as
+/// the leading argv token or after options only (`rstest -q try`; see
+/// [`subcommand_index`]); everything else is split by the flag tables as
+/// usual, so `rstest try -k foo tests/` still forwards `-k foo tests/` to the
+/// session. Kept in kebab-case to match clap's derived subcommand names. A
+/// pytest path literally named after a subcommand is shadowed when leading
+/// (`rstest ./try` / `rstest -- try` disambiguates).
 const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
@@ -784,6 +792,47 @@ const SUBCOMMANDS: &[&str] = &[
     "explain",
     "install-skills",
 ];
+
+/// The `--output` styles rstest renders. `--output` with any other value is a
+/// plugin's flag (pytest-playwright's `--output DIR`) and is forwarded to the
+/// pytest session instead (see [`split_args`]).
+pub(crate) const OUTPUT_STYLES: &[&str] = &[
+    "dots",
+    "verbose",
+    "bar",
+    "github",
+    "gitlab",
+    "buildkite",
+    "teamcity",
+    "azure",
+    "tap",
+    "json",
+];
+
+/// `--output VALUE` (or `--output=VALUE`) whose VALUE is not one of
+/// [`OUTPUT_STYLES`]: the plugin's flag, not rstest's.
+fn foreign_output(arg: &str, next: Option<&String>) -> bool {
+    let value = match arg.strip_prefix("--output=") {
+        Some(v) => Some(v),
+        None if arg == "--output" => next.map(String::as_str),
+        None => None,
+    };
+    value.is_some_and(|v| !OUTPUT_STYLES.contains(&v))
+}
+
+/// The value of an `--output` that [`split_args`] forwarded to the session.
+pub(crate) fn forwarded_output(session_args: &[String]) -> Option<&str> {
+    let mut it = session_args.iter();
+    while let Some(a) = it.next() {
+        if a == "--output" {
+            return it.next().map(String::as_str);
+        }
+        if let Some(v) = a.strip_prefix("--output=") {
+            return Some(v);
+        }
+    }
+    None
+}
 
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
@@ -850,40 +899,124 @@ fn owned_without_value(arg: &str) -> bool {
         || (arg.starts_with("-n") && arg != "-n")
 }
 
-pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
-    let mut own = vec!["rstest".to_string()];
-    let mut session = Vec::new();
-    let mut argv = argv.into_iter().peekable();
-    // A run-less subcommand is recognized ONLY as the leading token, so its
-    // paired flags (all `global` on `Cli`) follow it and pytest args still route
-    // to the session below. A non-leading match is treated as a pytest path.
-    if argv
-        .peek()
-        .is_some_and(|first| SUBCOMMANDS.contains(&first.as_str()))
-    {
-        let sub = argv.next().unwrap();
-        // `shard-verify` (report-json paths), `replay` (a run-id / `--journal`),
-        // `bisect` (a single nodeid), `explain` (a nodeid) and `install-skills`
-        // (its own flags) build no pytest
-        // session from argv: every token after them is a clap positional or a
-        // subcommand-local flag, so route them all to `own` rather than
-        // forwarding non-flag tokens to the (nonexistent argv-built) session.
-        // The nodeids contain `::`, which the flag tables would otherwise route
-        // to the session and hide from clap. `replay` gets its real session
-        // args from the journal, not argv.
-        let consumes_all = matches!(
-            sub.as_str(),
-            "shard-verify" | "replay" | "bisect" | "explain" | "install-skills"
-        );
-        own.push(sub);
-        if consumes_all {
-            own.extend(argv.by_ref());
-            return (own, session);
+/// pytest switches that never take a value, so a token after them is never
+/// their argument. Only these (plus rstest's own flags and self-contained
+/// `--flag=value` forms) may precede a subcommand: see [`subcommand_index`].
+const PYTEST_SWITCHES: &[&str] = &[
+    "--quiet",
+    "--verbose",
+    "--exitfirst",
+    "--showlocals",
+    "--lf",
+    "--last-failed",
+    "--ff",
+    "--failed-first",
+    "--nf",
+    "--new-first",
+    "--sw",
+    "--stepwise",
+    "--sw-skip",
+    "--stepwise-skip",
+    "--cache-clear",
+    "--strict-markers",
+    "--strict-config",
+    "--strict",
+    "--disable-warnings",
+    "--disable-pytest-warnings",
+    "--no-header",
+    "--no-summary",
+    "--runxfail",
+    "--setup-show",
+    "--full-trace",
+];
+
+/// A value-less pytest switch: one of [`PYTEST_SWITCHES`] or a cluster of the
+/// value-less short flags `-q -v -x -s -l` (`-q`, `-vv`, `-xs`).
+fn is_pytest_switch(arg: &str) -> bool {
+    PYTEST_SWITCHES.contains(&arg)
+        || arg.strip_prefix('-').is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| matches!(c, 'q' | 'v' | 'x' | 's' | 'l'))
+        })
+}
+
+/// Where the run-less subcommand sits in argv, if there is one.
+///
+/// The leading token always counts (`rstest try ...`; `./try` or `-- try`
+/// reach a path literally named after a subcommand). A later token counts
+/// only when everything before it is an option that cannot swallow it as a
+/// value: an rstest-owned flag (with its value), a value-less pytest switch
+/// (`-q`, `-x`, ...), or a self-contained `--flag=value`. So `rstest -q try`
+/// and `rstest --python X migrate-check` select the subcommand, while
+/// `rstest -k try` (the `-k` expression) and `rstest tests/ audit` don't. A
+/// non-leading match that exists as a path in the cwd stays a pytest path.
+fn subcommand_index(argv: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(arg) = argv.get(i) {
+        if SUBCOMMANDS.contains(&arg.as_str()) {
+            return (i == 0 || !std::path::Path::new(arg).exists()).then_some(i);
+        }
+        if foreign_output(arg, argv.get(i + 1)) {
+            return None;
+        }
+        if VALUE_FLAGS.contains(&arg.as_str()) {
+            i += 2;
+        } else if owned_without_value(arg)
+            || is_pytest_switch(arg)
+            || (arg.starts_with("--") && arg.contains('='))
+        {
+            i += 1;
+        } else {
+            return None;
         }
     }
+    None
+}
+
+/// A subcommand name that [`subcommand_index`] did not select but that sits
+/// where a test path would (not right after a flag that could take it as a
+/// value, not after `--`, not an existing path): almost certainly a misplaced
+/// subcommand, as in `rstest -k foo try`. Returns the usage error to print
+/// instead of letting pytest report `file or directory not found: try` after
+/// spawning workers.
+pub(crate) fn misplaced_subcommand(argv: &[String]) -> Option<String> {
+    if subcommand_index(argv).is_some() {
+        return None;
+    }
+    let end = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+    (1..end).find_map(|i| {
+        let tok = argv[i].as_str();
+        let prev = argv[i - 1].as_str();
+        let may_be_value = prev.starts_with('-') && !prev.contains('=');
+        (SUBCOMMANDS.contains(&tok) && !may_be_value && !std::path::Path::new(tok).exists()).then(
+            || {
+                format!(
+                    "rstest: `{tok}` is a subcommand, but subcommands must come first: \
+                     `rstest {tok} ...` (options after it). To run a test path named \
+                     `{tok}`, write `./{tok}`."
+                )
+            },
+        )
+    })
+}
+
+/// Route argv tokens to `own` (rstest flags, fed to clap) or `session`
+/// (pytest args, forwarded verbatim).
+fn route(argv: impl IntoIterator<Item = String>, own: &mut Vec<String>, session: &mut Vec<String>) {
+    let mut argv = argv.into_iter().peekable();
     while let Some(arg) = argv.next() {
         if arg == "--" {
             session.extend(argv.by_ref());
+        } else if foreign_output(&arg, argv.peek()) {
+            // Not an rstest style: a plugin's `--output` (pytest-playwright),
+            // forwarded whole so the plugin sees it at every worker count.
+            let joined = arg.contains('=');
+            session.push(arg);
+            if !joined {
+                session.extend(argv.next());
+            }
         } else if owned_without_value(&arg) {
             own.push(arg);
         } else if VALUE_FLAGS.contains(&arg.as_str()) {
@@ -895,6 +1028,42 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
             session.push(arg);
         }
     }
+}
+
+pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
+    let mut own = vec!["rstest".to_string()];
+    let mut session = Vec::new();
+    let mut argv: Vec<String> = argv.into_iter().collect();
+    // A run-less subcommand: the leading token, or the first positional after
+    // options that can't take it as a value (see `subcommand_index`). Options
+    // before it route as usual (clap accepts rstest's own before the
+    // subcommand; pytest switches like `-q` go to the session), and the
+    // subcommand's paired flags (all `global` on `Cli`) may follow it.
+    let Some(at) = subcommand_index(&argv) else {
+        route(argv, &mut own, &mut session);
+        return (own, session);
+    };
+    let rest = argv.split_off(at + 1);
+    let sub = argv.pop().expect("subcommand token at `at`");
+    route(argv, &mut own, &mut session);
+    // `shard-verify` (report-json paths), `replay` (a run-id / `--journal`),
+    // `bisect` (a single nodeid), `explain` (a nodeid) and `install-skills`
+    // (its own flags) build no pytest session from argv: every token after
+    // them is a clap positional or a subcommand-local flag, so route them all
+    // to `own` rather than forwarding non-flag tokens to the (nonexistent
+    // argv-built) session. The nodeids contain `::`, which the flag tables
+    // would otherwise route to the session and hide from clap. `replay` gets
+    // its real session args from the journal, not argv.
+    let consumes_all = matches!(
+        sub.as_str(),
+        "shard-verify" | "replay" | "bisect" | "explain" | "install-skills"
+    );
+    own.push(sub);
+    if consumes_all {
+        own.extend(rest);
+    } else {
+        route(rest, &mut own, &mut session);
+    }
     (own, session)
 }
 
@@ -904,6 +1073,30 @@ mod tests {
 
     fn v(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn output_routes_by_value() {
+        // One of rstest's styles: owned.
+        for args in [&["--output", "json"][..], &["--output=tap"][..]] {
+            let (own, session) = split_args(v(args));
+            assert!(session.is_empty(), "{args:?} leaked to the session");
+            let cli = Cli::try_parse_from(own).unwrap();
+            assert!(cli.output.is_some());
+        }
+        // Anything else is a plugin's `--output` (pytest-playwright): forwarded.
+        let (own, session) = split_args(v(&["-n", "2", "--output", "artifacts", "t.py"]));
+        assert_eq!(own, v(&["rstest", "-n", "2"]));
+        assert_eq!(session, v(&["--output", "artifacts", "t.py"]));
+        let (own, session) = split_args(v(&["--output=test-results"]));
+        assert_eq!(own, v(&["rstest"]));
+        assert_eq!(session, v(&["--output=test-results"]));
+        // A bare trailing `--output` stays rstest's (clap reports the missing value).
+        let (own, _) = split_args(v(&["--output"]));
+        assert_eq!(own, v(&["rstest", "--output"]));
+        assert_eq!(forwarded_output(&v(&["-x", "--output", "a"])), Some("a"));
+        assert_eq!(forwarded_output(&v(&["--output=b"])), Some("b"));
+        assert_eq!(forwarded_output(&v(&["-x"])), None);
     }
 
     #[test]
@@ -1261,10 +1454,80 @@ mod tests {
 
     #[test]
     fn split_only_recognizes_subcommand_as_leading_token() {
-        // `try` as a non-leading token is a pytest path, not the subcommand.
+        // `try` after a positional is a pytest path, not the subcommand.
         let (own, session) = split_args(v(&["tests/", "try"]));
         assert_eq!(own, v(&["rstest"]));
         assert_eq!(session, v(&["tests/", "try"]));
+        // ... and so is a flag's value (`-k try` is a keyword expression).
+        let (own, session) = split_args(v(&["-k", "try"]));
+        assert_eq!(own, v(&["rstest"]));
+        assert_eq!(session, v(&["-k", "try"]));
+    }
+
+    #[test]
+    fn split_accepts_options_before_the_subcommand() {
+        use clap::Parser;
+        // A pytest switch before the subcommand still forwards to the session.
+        let (own, session) = split_args(v(&["-q", "try", "-k", "foo"]));
+        assert_eq!(own, v(&["rstest", "try"]));
+        assert_eq!(session, v(&["-q", "-k", "foo"]));
+        assert_eq!(Cli::parse_from(&own).command, Some(Command::Try));
+        // rstest's own options (with values) before it stay owned; clap takes
+        // parent options before the subcommand token.
+        let (own, session) = split_args(v(&[
+            "--python",
+            "py3",
+            "-n",
+            "2",
+            "--dist=load",
+            "migrate-check",
+            "--migrate-check-json",
+            "o.json",
+        ]));
+        assert_eq!(
+            own,
+            v(&[
+                "rstest",
+                "--python",
+                "py3",
+                "-n",
+                "2",
+                "--dist=load",
+                "migrate-check",
+                "--migrate-check-json",
+                "o.json"
+            ])
+        );
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert_eq!(cli.command, Some(Command::MigrateCheck));
+        assert_eq!(cli.python.as_deref(), Some("py3"));
+        // A consume-all subcommand still takes everything after it.
+        let (own, _) = split_args(v(&["-vv", "explain", "t.py::test_a"]));
+        assert_eq!(own, v(&["rstest", "explain", "t.py::test_a"]));
+    }
+
+    #[test]
+    fn misplaced_subcommand_is_a_clear_usage_error() {
+        // Selected subcommands and flag values are not misplaced.
+        assert_eq!(misplaced_subcommand(&v(&["-q", "try"])), None);
+        assert_eq!(misplaced_subcommand(&v(&["try", "tests/"])), None);
+        assert_eq!(misplaced_subcommand(&v(&["-k", "try"])), None);
+        assert_eq!(misplaced_subcommand(&v(&["-x", "--", "a", "try"])), None);
+        // After an option with a value, or a path: explain the order.
+        let msg = misplaced_subcommand(&v(&["-k", "foo", "try"])).unwrap();
+        assert!(msg.contains("subcommands must come first"), "{msg}");
+        assert!(misplaced_subcommand(&v(&["tests/", "audit"])).is_some());
+    }
+
+    #[test]
+    fn pytest_switch_clusters_are_value_less_only() {
+        for s in ["-q", "-vv", "-xs", "--quiet", "--lf"] {
+            assert!(is_pytest_switch(s), "{s}");
+        }
+        for s in ["-k", "-m", "-p", "-rA", "-", "--tb", "-qk"] {
+            assert!(!is_pytest_switch(s), "{s}");
+        }
     }
 
     #[test]

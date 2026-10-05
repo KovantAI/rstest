@@ -49,6 +49,11 @@ pub enum Command {
     /// nextitem=None, releasing fixture finalizers), then keep listening -
     /// failed items elsewhere may rerun here (--reruns).
     NoMoreItems,
+    /// Run-wide `-x`/`--maxfail` tripped (or lazy collection aborted): start
+    /// nothing more. The worker drops its queued items, held lookahead
+    /// included, reports them via `Stopped`/`StoppedIds`, and waits for
+    /// EndSession. Checked between tests, so only the in-flight one finishes.
+    StopRun,
     /// Run pytest_testnodedown for a CRASHED worker: `workerinput` is
     /// the dead worker's snapshot (shipped via NodeInput while it was
     /// alive), so cleanup hooks see the exact idents it provisioned.
@@ -75,15 +80,17 @@ pub struct Report {
     pub wasxfail: bool,
     #[serde(default)]
     pub skip_reason: Option<String>,
-    /// Doctor mode: call-phase CPU time (process_time). wall >> cpu means
-    /// the test was waiting, not computing.
+    /// Doctor mode: this phase's CPU time (the worker's process_time plus
+    /// reaped child processes). wall >> cpu means the test was waiting, not
+    /// computing.
     #[serde(default)]
     pub cpu: Option<f64>,
-    /// Leak check: net Python threads after teardown vs before setup (on the
-    /// teardown report; positive = a thread the test never joined).
+    /// Leak check: Python threads the test created that are still alive after
+    /// its teardown (on the teardown report).
     #[serde(default)]
     pub thread_delta: Option<i64>,
-    /// Leak check: net open file descriptors after teardown vs before setup.
+    /// Leak check: file descriptors the test opened that are still open after
+    /// its teardown.
     #[serde(default)]
     pub fd_delta: Option<i64>,
     /// Captured stdout/stderr/log sections (any outcome that produced output);
@@ -94,6 +101,11 @@ pub struct Report {
     /// None when pytest reports no location. Used for editor mapping.
     #[serde(default)]
     pub lineno: Option<u64>,
+    /// A subtest's report (unittest `subTest` / the `subtests` fixture): it
+    /// shares the parent's nodeid and `when="call"`, so it must not stand in
+    /// for the parent's own call outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subtest: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -224,6 +236,10 @@ pub enum Event {
         /// ini `addopts` and `PYTEST_ADDOPTS` included), sent only when > 0.
         #[serde(default)]
         maxfail: Option<u64>,
+        /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks).
+        /// Every worker collects and deselects the same items.
+        #[serde(default)]
+        deselected: u64,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.
@@ -248,6 +264,9 @@ pub enum Event {
         serial: Vec<String>,
         #[serde(default)]
         flaky: std::collections::HashMap<String, u32>,
+        /// Items pytest deselected while collecting this file.
+        #[serde(default)]
+        deselected: u64,
     },
     /// Lazy-mode twins of ItemStart/ItemDone, keyed by nodeid (lazy
     /// workers share no index space).
@@ -341,6 +360,7 @@ mod tests {
             "run_items"
         );
         assert_eq!(kind_of(&Command::NoMoreItems), "no_more_items");
+        assert_eq!(kind_of(&Command::StopRun), "stop_run");
         assert_eq!(kind_of(&Command::EndSession), "end_session");
         assert_eq!(kind_of(&Command::Shutdown), "shutdown");
     }
@@ -482,6 +502,7 @@ mod property {
             Report {
                 nodeid, when, outcome, duration, longrepr, wasxfail,
                 skip_reason, cpu, thread_delta, fd_delta, sections, lineno,
+                subtest: false,
             }
         }
     }
@@ -520,7 +541,7 @@ mod property {
             flaky in prop::option::of(prop::collection::hash_map(small_str(), any::<u32>(), 0..4)),
             groups in prop::option::of(prop::collection::hash_map(small_str(), small_str(), 0..4)),
             // Grouped: proptest's tuple strategies stop at 12 elements.
-            (rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail) in (
+            (rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail, deselected) in (
                 prop::option::of(small_str()),
                 prop::option::of(small_str()),
                 prop::option::of(small_strs()),
@@ -528,11 +549,13 @@ mod property {
                 prop::option::of(small_strs()),
                 prop::option::of(small_str()),
                 prop::option::of(any::<u64>()),
+                any::<u64>(),
             ),
         ) -> Event {
             Event::CollectionDone {
                 count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
                 rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail,
+                deselected,
             }
         }
     }
@@ -543,8 +566,9 @@ mod property {
             ids in small_strs(),
             serial in small_strs(),
             flaky in prop::collection::hash_map(small_str(), any::<u32>(), 0..4),
+            deselected in any::<u64>(),
         ) -> Event {
-            Event::FileCollected { path, ids, serial, flaky }
+            Event::FileCollected { path, ids, serial, flaky, deselected }
         }
     }
 
@@ -614,6 +638,7 @@ mod property {
         "run_files",
         "run_ids",
         "no_more_items",
+        "stop_run",
         "node_down",
         "end_session",
         "shutdown",
@@ -629,6 +654,7 @@ mod property {
             small_strs().prop_map(|paths| Command::RunFiles { paths }),
             small_strs().prop_map(|ids| Command::RunIds { ids }),
             Just(Command::NoMoreItems),
+            Just(Command::StopRun),
             small_str().prop_map(|error| Command::NodeDown {
                 workerinput: serde_json::Value::Null,
                 error,

@@ -27,6 +27,42 @@ from rstest_worker._internal import mpack
 _MAX_FRAME_BYTES = 512 * 1024 * 1024
 
 
+def _readable(fd: int) -> bool:
+    """Whether a read on `fd` would return at once (data or EOF). False when
+    that can't be told, so the caller just carries on without polling."""
+    try:
+        if os.name == "nt":
+            return _peek_pipe(fd)
+        import select
+
+        if hasattr(select, "poll"):
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+            return bool(poller.poll(0))
+        return bool(select.select([fd], [], [], 0)[0])
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _peek_pipe(fd: int) -> bool:  # pragma: no cover - Windows only
+    """Windows: bytes waiting in the anonymous pipe behind `fd`."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009 - absent off Windows
+    avail = wintypes.DWORD()
+    ok = kernel32.PeekNamedPipe(
+        wintypes.HANDLE(getattr(msvcrt, "get_osfhandle")(fd)),  # noqa: B009
+        None,
+        0,
+        None,
+        ctypes.byref(avail),
+        None,
+    )
+    return bool(ok) and avail.value > 0
+
+
 class Connection:
     def __init__(self, cmd_fd: int, evt_fd: int) -> None:
         self._cmd_fd = cmd_fd
@@ -48,6 +84,21 @@ class Connection:
                 # The decoder yields a bare object; the {"kind", "payload"}
                 # contract is enforced by the schema (messages.py), not the wire.
                 return cast("m.Command", msg)
+            data = os.read(self._cmd_fd, 65536)
+            if not data:
+                return None
+            self._unpacker.feed(data)
+
+    def poll_one(self) -> m.Command | None:
+        """One command that has already arrived, without blocking; None when
+        nothing is waiting. EOF also reads as None here: the next blocking
+        `recv_one` reports it. Lets a worker notice a run-wide stop between
+        tests while it still has queued items of its own."""
+        while True:
+            for msg in self._unpacker:
+                return cast("m.Command", msg)
+            if not _readable(self._cmd_fd):
+                return None
             data = os.read(self._cmd_fd, 65536)
             if not data:
                 return None

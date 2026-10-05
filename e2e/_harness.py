@@ -68,8 +68,23 @@ PASS = 0
 FAIL = []
 
 
-def check(name, cond, detail=""):
+XFAIL = []
+
+
+def check(name, cond, detail="", known_bug=False):
+    """Record one assertion. `known_bug=True` marks a check that is expected
+    to fail until a known bug is fixed: a failure is reported as xfail and
+    keeps the gate green, a pass is reported as XPASS and fails the gate so
+    the marker gets removed (strict)."""
     global PASS
+    if known_bug:
+        if cond:
+            FAIL.append(name)
+            print(f"  XPASS {name}  [known bug looks fixed: drop known_bug=True]")
+        else:
+            XFAIL.append(name)
+            print(f"  xfail {name}  {detail}")
+        return
     if cond:
         PASS += 1
         print(f"  ok    {name}")
@@ -79,18 +94,22 @@ def check(name, cond, detail=""):
 
 
 class Gate:
-    def __init__(self, binary: Path, venv_dir: Path):
+    def __init__(self, binary: Path, venv_dir: Path, tmp=None):
         self.binary = binary
         self.venv = venv_dir
-        self.tmp = Path(tempfile.mkdtemp(prefix="rstest-gate-"))
+        self.tmp = tmp or Path(tempfile.mkdtemp(prefix="rstest-gate-"))
 
-    def run(self, *args, cwd=None, env_extra=None, timeout=120):
+    def run(self, *args, cwd=None, env_extra=None, env_drop=(), timeout=120):
         env = dict(
             os.environ,
             VIRTUAL_ENV=str(self.venv),
             RSTEST_WORKER_PATH=str(REPO / "python"),
         )
         env.pop("PYTEST_ADDOPTS", None)
+        # The persona specs drive this from inside a pytest session, which
+        # exports its own markers; the rstest under test must not see them.
+        env.pop("PYTEST_CURRENT_TEST", None)
+        env.pop("PYTEST_VERSION", None)
         # Doctor runs auto-publish to the CI job summary (GitHub step
         # summary / Buildkite annotation); keep the gate's fixture-suite
         # reports off the real run page.
@@ -108,6 +127,10 @@ class Gate:
             env.pop(k, None)
         if env_extra:
             env.update(env_extra)
+        # Interpreter-discovery scenarios need VIRTUAL_ENV truly unset (an
+        # empty value is still "set" to the discovery code).
+        for k in env_drop:
+            env.pop(k, None)
         return subprocess.run(
             [str(self.binary), *args],
             cwd=cwd or str(self.tmp),
@@ -116,8 +139,12 @@ class Gate:
             text=True,
             # rstest emits UTF-8 glyphs (✓ ✗ ─); pin the decode to UTF-8 so
             # the locale encoding (cp1252 on Windows) does not mangle them
-            # and make `"✓" in r.stdout` spuriously False.
+            # and make `"✓" in r.stdout` spuriously False. At -n 0 the
+            # child's own output passes through in the locale encoding; a
+            # strict decode would kill subprocess's reader thread and leave
+            # stdout None, so replace what is not UTF-8.
             encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
 

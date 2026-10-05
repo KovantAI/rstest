@@ -971,6 +971,42 @@ def test_logreport_basic_report_payload():
     assert payload["lineno"] == 1  # from location[1]
 
 
+def test_logreport_marks_subtest_reports():
+    # A subtest report shares the parent's nodeid and phase: the marker keeps
+    # the orchestrator from taking it for the parent's own call outcome.
+    SubtestReport = pytest.importorskip("_pytest.subtests").SubtestReport
+
+    class FakeSubtestReport(SubtestReport):
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    p = _plugin()
+    rep = mk_report("call", "failed", failed=True)
+    p.pytest_runtest_logreport(FakeSubtestReport(**vars(rep)))
+    p.pytest_runtest_logreport(mk_report("call", "passed"))
+    sub, parent = (payload for _, payload in p._conn.sent)
+    assert sub["subtest"] is True
+    assert "subtest" not in parent
+
+
+def test_logreport_fails_a_subtests_fixture_parent_with_failed_subtests():
+    # pytest fails such a parent only while rendering its status line, which
+    # may run after this hook: ship the outcome pytest ends up with.
+    from _pytest.stash import Stash
+
+    failed_subtests_key = pytest.importorskip("_pytest.subtests").failed_subtests_key
+
+    p = _plugin()
+    p._config = SimpleNamespace(stash=Stash())
+    p._config.stash[failed_subtests_key] = {"t.py::a": 2}
+    p.pytest_runtest_logreport(mk_report("call", "passed"))
+    p.pytest_runtest_logreport(mk_report("call", "passed", nodeid="t.py::b"))
+    flipped, other = (payload for _, payload in p._conn.sent)
+    assert flipped["outcome"] == "failed"
+    assert flipped["longrepr"] == "contains 2 failed subtests"
+    assert other["outcome"] == "passed"
+
+
 def test_logreport_attaches_cpu_on_call(monkeypatch):
     monkeypatch.setenv("RSTEST_DOCTOR", "1")
     p = _plugin()
@@ -1117,3 +1153,77 @@ def test_internalerror_ships_collect_error():
     p = _plugin()
     p.pytest_internalerror("kaboom")
     assert p._conn.sent == [("collect_error", {"path": "<internalerror>", "longrepr": "kaboom"})]
+
+
+# ── longrepr_text: failure text as pytest's terminal prints it ─────────────
+
+
+def _failing_call_report() -> pytest.TestReport:
+    def helper(v):
+        assert v == 0, "helper says no"
+
+    with pytest.raises(AssertionError) as excinfo:
+        helper(3)
+    longrepr = excinfo.getrepr(style="long")
+    return pytest.TestReport("t.py::a", ("t.py", 0, "a"), {}, "failed", longrepr, "call")
+
+
+def test_longrepr_text_keeps_first_line_indent():
+    report = _failing_call_report()
+    text = stream.longrepr_text(report)
+    assert text is not None
+    # longreprtext strips this indent; pytest's terminal does not.
+    assert report.longreprtext.startswith("def ")
+    assert text.startswith("    def ")
+    assert text.strip() == report.longreprtext
+
+
+def test_longrepr_text_line_style_appends_crash_line():
+    report = _failing_call_report()
+    text = stream.longrepr_text(report, "line")
+    assert text is not None
+    *_, last = text.split("\n")
+    assert last.endswith(": AssertionError: helper says no")
+    assert ".py:" in last
+    # Only the call phase of a failure gets it.
+    report.when = "setup"
+    assert stream.longrepr_text(report, "line") == stream.longrepr_text(report)
+
+
+def test_longrepr_text_absent_and_non_pytest_reports():
+    assert stream.longrepr_text(mk_report("call", "passed")) is None
+    fake = mk_report("call", "failed", failed=True, longrepr="x", longreprtext="\n  boom  \n")
+    assert stream.longrepr_text(fake) == "  boom"
+
+
+# ── doctor CPU timing: setup/teardown phases and child processes ───────────
+
+
+def test_cpu_now_counts_reaped_child_processes(monkeypatch):
+    times = SimpleNamespace(children_user=1.5, children_system=0.5)
+    monkeypatch.setattr(stream.os, "times", lambda: times)
+    monkeypatch.setattr("time.process_time", lambda: 2.0)
+    assert stream._cpu_now() == pytest.approx(4.0)
+
+
+def test_setup_and_teardown_reports_carry_phase_cpu(monkeypatch):
+    clock = iter([10.0, 10.25, 10.3, 10.3, 10.4, 10.45])
+    monkeypatch.setattr(stream, "_cpu_now", lambda: next(clock))
+    p = _plugin()
+    p._measure_cpu = True
+    p.pytest_runtest_logstart("t.py::a", ("t.py", 1, "a"))  # mark 10.0
+    p.pytest_runtest_logreport(mk_report("setup", "passed"))  # 0.25, mark 10.3
+    p._cpu["t.py::a"] = 0.01
+    p.pytest_runtest_logreport(mk_report("call", "passed"))  # call keeps its own, mark 10.3
+    p.pytest_runtest_logreport(mk_report("teardown", "passed"))  # 0.1, mark 10.45
+    cpus = [(pl["when"], pl.get("cpu")) for kind, pl in p._conn.sent if kind == "report"]
+    assert cpus == [("setup", 0.25), ("call", 0.01), ("teardown", 0.1)]
+
+
+def test_no_phase_cpu_when_not_measured():
+    p = _plugin()
+    p._measure_cpu = False
+    p.pytest_runtest_logstart("t.py::a", ("t.py", 1, "a"))
+    p.pytest_runtest_logreport(mk_report("setup", "passed"))
+    p.pytest_runtest_logreport(mk_report("teardown", "passed"))
+    assert all("cpu" not in pl for kind, pl in p._conn.sent if kind == "report")

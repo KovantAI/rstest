@@ -78,7 +78,9 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
             Plan::Run { args, mode } => (args, mode),
         };
 
-        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        // Interactive terminals only: TERM=dumb, NO_COLOR, --color=no and CI
+        // get no escape sequences (see `Palette::live`).
+        if sink.palette().live() {
             sink.out_inline("\x1b[2J\x1b[H"); // clear screen, home cursor
         }
         sink.warn(&format!(

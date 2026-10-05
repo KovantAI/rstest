@@ -5,6 +5,8 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+### Features
+
 - **`rstest install-skills`: install the bundled agent skills.** The
   `migrate-to-rstest` and `rstest-triage` skills now ship inside the binary.
   `rstest install-skills` writes them into `.claude/skills/` (or
@@ -15,13 +17,72 @@ between 0.x releases and are listed here.
   `/plugin marketplace add KovantAI/rstest` then `/plugin install rstest@rstest`
   makes both skills available in every project. The skills moved from
   `.claude/skills/` to `plugins/rstest/skills/`.
-- **SIGTERM/SIGINT stop a parallel run cleanly.** rstest used to die on the
-  spot: no summary, no replay journal, no reports, and its workers kept
-  running, reparented to init. Now it stops and reaps every worker, names the
-  test each was running and records it failed ("interrupted by SIGTERM after
-  12.3s"), writes the journal and any `--junitxml`/`--report-json`, and exits
-  2. A second signal exits at once. A CI job killed by its timeout now leaves
-  a `rstest replay` journal and the name of the hung test.
+
+### Behavior changes
+
+- **Behavior change: a project `.venv` without rstest stops the run.**
+  rstest used to skip it silently and run the workers under another
+  interpreter on `PATH`, so every test failed on the project's own imports.
+  It now exits with an error naming the venv and the install command
+  (`uv pip install --python .venv/bin/python rstest`). Pass `--python` to use
+  another interpreter on purpose. A stale `.python-version` no longer rejects
+  the project's own `.venv`, and a pin that can't be met names its file.
+- **Behavior change: `.rstest_cache` lives at the pytest rootdir.** It used to
+  be created in whatever directory you ran from, so a run from `tests/unit/`
+  kept its own durations, flake history, replay journals and `explain` data.
+  It now sits next to `.pytest_cache`, resolved the way pytest finds its
+  rootdir. Both caches get a `.gitignore` and `CACHEDIR.TAG`, so a run leaves
+  the git tree clean. `--incremental` and the coverage index key their paths
+  by rootdir too.
+- **Behavior change: `--output VALUE` with a value that is not an rstest
+  style goes to pytest.** pytest-playwright's `--output <dir>` used to be
+  swallowed (with a fallback to `dots`), at every `-n`. A typo now fails with
+  pytest's usage error plus a hint naming rstest's styles.
+- **Behavior change: `-p no:cacheprovider` writes no cache.** rstest no longer
+  creates `.rstest_cache` or `.pytest_cache` when pytest's cache plugin is
+  disabled; the run behaves like a cold one. `--collect lazy` with
+  `-p no:cacheprovider` no longer crashes.
+- **Behavior change: terminal output follows pytest's color rules.**
+  `--color`, `PY_COLORS`, `NO_COLOR`, `FORCE_COLOR` and `TERM=dumb` are
+  honored in that order. Without color (or under `CI`) there is no live
+  footer and no `bar` view, so `NO_COLOR` and `--color=no` now mean zero
+  escape codes. `FORCE_COLOR` colors piped output. The live footer fits the
+  terminal width.
+- **Behavior change: `rstest try` refuses to compare nothing.** A collection
+  error or zero tests on either side now prints "could not compare" and exits
+  2 instead of "drop-in ready". The speed line names the worker count
+  (`at -n auto = -n 4`).
+- **Behavior change: a session-scoped fixture's resources are never charged
+  to a test by the leak check.** See the leak check entry below.
+
+### Fixes
+
+- **unittest `subTest` and `subtests` failures count as failures.** In
+  parallel runs a failing subtest was reported passed, and report-json said
+  `failed: 0` even at `-n 0`, so a CI gate reading it went green. Counts now
+  match pytest, in the summary, report-json, JUnit and `rstest try`.
+- **A user `--basetemp` is split per worker.** Every worker shared it and wiped
+  it at startup, so `tmp_path` tests failed at random. Each worker now uses
+  `<basetemp>/gwN`, as with pytest-xdist.
+- **`--changed` and `--watch` select tests through `conftest.py`.** A changed
+  module imported by a conftest now selects every test under that conftest;
+  before, those tests were skipped and a broken test passed unnoticed.
+- **`--cov-fail-under` matches pytest-cov.** It is checked exactly once in
+  every report mode (it was skipped with `--cov-report=` or `annotate` in
+  parallel runs), honors `.coveragerc` `fail_under` and precision, and uses
+  pytest-cov's rounding. `--cov-config`, `show_missing` and `skip-covered`
+  are honored, and `-n 0` no longer prints the table twice.
+- **`-x` and `--maxfail` with reruns, `@flaky` or a quarantine.** A test
+  waiting for its rerun could stop a worker and drop the rest of its queue,
+  so a run with a failing test passed, or hung. A quarantined failure counted
+  toward `-x` and the run exited 0. The orchestrator now owns maxfail for
+  retryable and quarantined failures, and a run that maxfail stopped never
+  exits 0.
+- **`-x` stops at once.** Workers drop their queued tests on the stop, and the
+  run prints `stopping after N failures`.
+- **`@pytest.mark.flaky` reruns at `-n 0`.** The mark was ignored in
+  single-worker mode. A positional reruns count and `condition=` are now read
+  as pytest-rerunfailures does.
 - **`@pytest.mark.flaky` alone no longer fails a green run.** A marked test
   that recovered on retry without a global `--reruns` printed
   `1 flaky, ... passed` but exited 1. It now exits 0, like `--reruns`.
@@ -29,15 +90,97 @@ between 0.x releases and are listed here.
   `passed` (two tests read `1 flaky, 2 passed`). The summary and the
   report-json `counts` now put it in `flaky` only, so the counts add up to
   the tests run.
+- **`--durations-regress` keeps firing until the test is fast again.** Each run
+  used to overwrite the baseline with its own times, so the gate fired once
+  and a re-run passed; a failing run also stored its near-zero time. Failed
+  and regressed tests no longer update `durations.json` or the shared remote
+  cache.
+- **Doctor numbers include fixture time.** Efficiency, worker load, the long
+  pole, slowest files and WAIT-BOUND now count setup and teardown, so a
+  fixture-heavy suite no longer reads as 7% efficient. CPU spent in child
+  processes counts as computing, not waiting. `-n 0` reports 1 worker.
+- **`--doctor-fail-on` gates what it measures.** `wait_seconds`, `wait_pct`
+  and `long_pole_seconds` are evaluated whenever measured, at any worker
+  count; they were skipped below the report's display threshold. A skipped
+  condition is reported as skipped, not passed, and NaN or infinite
+  thresholds are rejected.
+- **The leak check blames the test that leaked.** It tracks thread and file
+  descriptor identities instead of net counts, so one test's leak is no
+  longer cancelled by another test's cleanup. Resources a wider-scoped
+  fixture creates (and releases at scope end) are not charged to any test.
+- **SIGTERM/SIGINT stop a parallel run cleanly.** rstest used to die on the
+  spot: no summary, no replay journal, no reports, and its workers kept
+  running, reparented to init. Now it stops and reaps every worker, names the
+  test each was running and records it failed ("interrupted by SIGTERM after
+  12.3s"), writes the journal and any `--junitxml`/`--report-json`, and exits
+  2. A second signal exits at once. A CI job killed by its timeout now leaves
+  a `rstest replay` journal and the name of the hung test.
+- **Ctrl-C keeps the history honest.** Tests running at the interrupt are no
+  longer recorded as failures in `lastfailed` or the flake history or given
+  a zero duration, and the summary says how many tests did not run. At `-n 0`
+  rstest no longer dies on Ctrl-C: it exits 2 and writes its reports, and it
+  passes SIGTERM on to the test session.
+- **`lastfailed` is merged like pytest's.** A passing subset run no longer
+  wipes earlier failures.
+- **`breakpoint()` in a parallel run fails with a hint.** It used to end in a
+  bare `BdbQuit` and could lose the next test on that worker. It now fails
+  the test with "rerun with -n 0 (or -s)" and every test is still reported.
+- **Startup errors print once.** A bad nodeid, missing path, unknown flag or
+  broken conftest printed its error once per worker. The usage line now says
+  `rstest`, not `pytest.main()`.
+- **The parallel summary reads like pytest's.** `1 error` and `1 warning`
+  (not `1 errors`), collection errors counted once and as errors, an
+  `N deselected` count, and pytest's warnings footer.
+- **Tracebacks keep their indentation and `--tb` works.** The first source
+  line of a parallel failure kept losing its indent, and `--tb=no` /
+  `--tb=line` printed full blocks.
+- **Collection errors reach CI.** `--output tap` emits a failed point with the
+  traceback instead of a passing `1..0`, and `github`, `azure` and `teamcity`
+  annotate each broken module. Azure issues show the exception line, and
+  GitHub `file=` paths are relative to the repository, so annotations land on
+  the PR diff under `working-directory`.
+- **An unwritable `GITHUB_STEP_SUMMARY` is a warning.** It used to fail a green
+  run and skip `--report-json`.
+- **`--shard` spreads zero-duration tests.** A warm cache with many 0.0s
+  timings put almost every test in one shard. Shard assignment is also the
+  same on every machine for near ties in lazy mode.
+- **The GitHub Action checks its inputs.** `shard` without `shard-total` (or
+  the reverse) fails the step instead of running the whole suite, and
+  `rerun-on` / `doctor-fail-on` values reach rstest unchanged (quotes and
+  backslashes were mangled).
+- **`-n auto` sizes the pool by what you selected.** One selected test runs in
+  single-worker mode, and a one-file suite of slow tests runs in parallel once
+  its timings are cached.
+- **The pool spreads long tests and groups.** Startup gave each early worker
+  two items, so cached long tests and `xdist_group` / `loadfile` groups
+  stacked on one worker.
 - **`bisect` finds a polluter that collects after the victim.** When the
   preceding tests don't reproduce the failure, bisect now also runs the victim
   after every other test before concluding it's not order-dependent. Before,
   a polluter later in collection order (one that ran first on another
   worker's CI schedule) was reported as a likely concurrency bug.
+- **`migrate-check` and `audit` really run in parallel.** Their parallel pass
+  could resolve to one worker and report "ready". `migrate-check` also flags
+  collections whose order changes between runs (for example parametrizing
+  over a `set`).
 - **Trailing `# comments` work in `--quarantine` files.** A line such as
   `tests/test_q.py::test_broken  # JIRA-1` was read as one pattern, comment
   included, and silently matched nothing. A `#` after whitespace now starts a
   comment; a `#` inside a nodeid (`test_x[#1]`) is still part of it.
+- **Lazy collection finds what pytest finds.** It honors `norecursedirs`,
+  expands glob `testpaths`, and ignores `.ignore` files.
+- **`@serial` tests share the designated worker's session.** Session fixtures
+  were set up again for every serial test.
+- **Smaller fixes.**
+  - `rstest -q try` runs `try`; a subcommand name in a later position gets a
+    clear error.
+  - `testrun_uid` is a 32-character uuid hex, as with pytest-xdist.
+  - `xdist-removal-check` gives the right advice for `import xdist.plugin`.
+  - A wrong interpreter under pre-commit gets a hint naming the project's
+    `.venv` when imports fail.
+  - The doctor's PARALLEL FLOOR no longer fires on a perfectly balanced pool.
+- **Docs.** The Azure shared-cache recipe now fails the step when tests fail.
+  The `--shuffle` docs point to `rstest replay` for an exact reproduction.
 
 ## 0.8.0 (2026-09-30)
 

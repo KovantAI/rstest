@@ -140,3 +140,90 @@ fn sigterm_stops_the_eager_pool_and_keeps_the_artifacts() {
 fn sigterm_stops_the_lazy_pool_and_keeps_the_artifacts() {
     sigterm_stops_the_pool("lazy", &["--collect", "lazy"]);
 }
+
+/// `-n 0` (the byte-exact single session): the orchestrator must outlive the
+/// signal so pytest prints its KeyboardInterrupt summary and the reports are
+/// written with pytest's INTERRUPTED (2). `group` sends SIGINT to the whole
+/// process group (Ctrl-C, a CI cancel); otherwise SIGTERM goes to rstest's
+/// pid alone and must be passed on to the session.
+fn signal_stops_the_single_session(tag: &str, group: bool) {
+    use std::os::unix::process::CommandExt;
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir(tag);
+    std::fs::write(
+        dir.join("test_hang.py"),
+        "import os, time\n\ndef test_ok():\n    pass\n\ndef test_hang():\n    \
+         open('hang.pid', 'w').write(str(os.getpid()))\n    time.sleep(300)\n",
+    )
+    .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rstest"));
+    cmd.args(["-n", "0", "--junitxml", "j.xml", "--report-json", "r.json"])
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    if let Some(v) = &venv {
+        let path = std::env::var("PATH").unwrap_or_default();
+        cmd.env("VIRTUAL_ENV", v)
+            .env("PATH", format!("{}:{path}", v.join("bin").display()));
+    }
+    let mut child = cmd.spawn().expect("spawn rstest");
+    let pgid = format!("-{}", child.id());
+    let pidfile = dir.join("hang.pid");
+    let started = wait_for(Duration::from_secs(60), || {
+        std::fs::read_to_string(&pidfile).is_ok_and(|s| !s.is_empty())
+    });
+    if !started {
+        let _ = Command::new("kill").args(["-9", "--", &pgid]).status();
+        panic!("the hanging test never started");
+    }
+    let worker_pid = std::fs::read_to_string(&pidfile).unwrap();
+    if group {
+        Command::new("kill")
+            .args(["-INT", "--", &pgid])
+            .status()
+            .unwrap();
+    } else {
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap();
+    }
+    let exited = wait_for(Duration::from_secs(20), || {
+        child.try_wait().is_ok_and(|s| s.is_some())
+    });
+    if !exited {
+        let _ = Command::new("kill").args(["-9", "--", &pgid]).status();
+        panic!("rstest did not exit after the signal");
+    }
+    let out = child.wait_with_output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let worker_gone = wait_for(Duration::from_secs(5), || !alive(&worker_pid));
+    if !worker_gone {
+        let _ = Command::new("kill").args(["-9", &worker_pid]).status();
+    }
+    let junit = std::fs::read_to_string(dir.join("j.xml")).unwrap_or_default();
+    let report = std::fs::read_to_string(dir.join("r.json")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(2), "{text}");
+    assert!(text.contains("KeyboardInterrupt"), "{text}");
+    assert!(worker_gone, "worker {worker_pid} outlived rstest\n{text}");
+    assert!(junit.contains("test_ok"), "{junit}");
+    let report: serde_json::Value = serde_json::from_str(&report).expect("--report-json");
+    assert_eq!(report["meta"]["exitstatus"], 2, "{report}");
+}
+
+#[test]
+fn sigint_to_the_group_lets_the_single_session_finish_and_report() {
+    signal_stops_the_single_session("n0-sigint", true);
+}
+
+#[test]
+fn sigterm_to_rstest_is_passed_on_to_the_single_session() {
+    signal_stops_the_single_session("n0-sigterm", false);
+}

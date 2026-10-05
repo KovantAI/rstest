@@ -198,8 +198,9 @@ pub(super) fn classify_failures(
     let serial: Vec<Outcomes> = (0..serial_runs)
         .map(|_| run_session(python, &["-n", "0"], &scoped))
         .collect::<Result<_>>()?;
+    let n = super::parallel_n();
     let loadfile: Vec<Outcomes> = (0..loadfile_runs)
-        .map(|_| run_session(python, &["--dist", "loadfile"], &scoped))
+        .map(|_| run_session(python, &["--dist", "loadfile", "-n", &n], &scoped))
         .collect::<Result<_>>()?;
 
     let fails = |o: &Outcomes, n: &str| matches!(o.get(n).map(|r| r.phase), Some(Phase::Fail));

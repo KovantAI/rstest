@@ -167,10 +167,11 @@ pub fn run_audit(
         .chain([MAXFAIL_LIFT.to_string()])
         .collect();
     let mut par = Outcomes::new();
+    let n = super::parallel_n();
     for _ in 0..runs {
         // No report at all means the child refused to dispatch; a report with
         // zero tests (e.g. a `-m` that matches nothing) is handled below.
-        let Some(o) = run_session_report(python, &["-n", "auto"], &par_args)? else {
+        let Some(o) = run_session_report(python, &["-n", &n], &par_args)? else {
             sink.out_line(
                 "rstest audit: rstest produced no run (it may have refused to dispatch — \
                  often an unstable parametrize id). Run `rstest migrate-check` to see why.",

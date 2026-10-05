@@ -47,7 +47,7 @@ cargo fmt --check                                        # formatting
 cargo clippy --all-targets --all-features -- -D warnings # lints (warnings are errors)
 cargo build --release                                    # build
 cargo test --release                                     # Rust tests
-python e2e/gate.py                                       # end-to-end test gate
+uv run python e2e/gate.py                                # end-to-end test gate (+ persona specs)
 ```
 
 The Python worker has its own checks (Linux in CI):
@@ -62,6 +62,26 @@ uvx --with msgpack --with coverage --with pytest-cov pytest python/tests
 
 `uvx pre-commit run --all-files` covers formatting, clippy, `cargo check`, and
 the file hygiene hooks.
+
+### Persona specs
+
+What each persona (first-time evaluator, migrator, daily developer, CI owner,
+maintainer) expects from rstest is written as Gherkin in
+`e2e/personas/features/*.feature`. Those files are the source of truth: every
+scenario runs against the built binary through pytest-bdd, and a step with no
+definition in `e2e/personas/steps/` fails the run. `python e2e/gate.py` runs
+them as its `personas` section; to iterate on them directly:
+
+```sh
+uv sync --group dev
+uv run pytest e2e/personas                   # all persona scenarios
+uv run pytest e2e/personas -k EV-10          # one scenario, by its id
+```
+
+Tag a scenario `@known_bug` to pin a current failure: it xfails until the bug
+is fixed, then the unexpected pass fails the run so the tag gets dropped.
+`@posix_only`, `@windows_only`, `@linux_only` and `@macos_only` skip a scenario
+on other platforms.
 
 ### Output schemas
 

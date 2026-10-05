@@ -11,6 +11,9 @@ pub(super) struct WorkerState {
     pub(super) worker: Worker,
     pub(super) collected: bool,
     pub(super) seeded: bool,
+    /// Seeded with one item during the initial seeding round; its second
+    /// (lookahead) dispatch waits until every worker has its first.
+    pub(super) awaiting_lookahead: bool,
     /// Told "queue exhausted for now" (NoMoreItems). Still listening!
     pub(super) finishing: bool,
     /// Told EndSession (no resend).
@@ -37,9 +40,6 @@ impl crate::scheduling::orchestrator::Slot for WorkerState {
     fn dead(&self) -> bool {
         self.dead
     }
-    fn finishing(&self) -> bool {
-        self.finishing
-    }
     fn set_finishing(&mut self, v: bool) {
         self.finishing = v;
     }
@@ -58,8 +58,8 @@ impl crate::scheduling::orchestrator::Slot for WorkerState {
     fn kill_worker(&mut self) {
         self.worker.kill();
     }
-    fn send_no_more_items(&mut self) {
-        let _ = self.worker.send(&proto::Command::NoMoreItems);
+    fn send_stop_run(&mut self) {
+        let _ = self.worker.send(&proto::Command::StopRun);
     }
     fn reap_dead(&mut self) {
         self.worker.reap();
@@ -73,6 +73,7 @@ impl WorkerState {
             worker,
             collected: false,
             seeded: false,
+            awaiting_lookahead: false,
             finishing: false,
             ended: false,
             dead: false,

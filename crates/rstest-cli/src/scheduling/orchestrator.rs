@@ -14,12 +14,11 @@ use crate::scheduling::proto;
 /// The per-worker behavior the shared loop mechanics touch. Each loop's own
 /// `WorkerState` implements it, so `watchdog_tick` / `stop_all` operate on
 /// either without knowing the item-id type or the dispatch bookkeeping. The two
-/// worker-process pokes (`kill_worker`, `send_no_more_items`) are trait methods
+/// worker-process pokes (`kill_worker`, `send_stop_run`) are trait methods
 /// rather than a raw `&mut Worker` so a mock can stand in — the loop mechanics
 /// are testable without spawning a child.
 pub(crate) trait Slot {
     fn dead(&self) -> bool;
-    fn finishing(&self) -> bool;
     fn set_finishing(&mut self, v: bool);
     fn timeout_killed(&self) -> bool;
     fn set_timeout_killed(&mut self);
@@ -28,8 +27,9 @@ pub(crate) trait Slot {
     fn running_watchdog(&self) -> Option<Watchdog>;
     /// Hard-kill the worker process (hang watchdog).
     fn kill_worker(&mut self);
-    /// Tell the worker its queue is closed (`NoMoreItems`); it drains and ends.
-    fn send_no_more_items(&mut self);
+    /// Tell the worker the run is stopping (`StopRun`): it starts nothing
+    /// more, reports its queued items unrun, and awaits EndSession.
+    fn send_stop_run(&mut self);
     /// Kill (if running) and reap the worker process, marking the slot dead.
     fn reap_dead(&mut self);
 }
@@ -103,13 +103,14 @@ pub(crate) fn watchdog_tick(sink: &mut Sink, states: &mut [impl Slot]) {
     }
 }
 
-/// Tell every still-listening worker the queue is closed (maxfail trip or a
-/// lazy collection abort): each finishes its in-flight work and ends. Bounded
-/// overshoot, the trade xdist makes.
+/// Stop the run (maxfail trip or a lazy collection abort): every live worker
+/// finishes the test it is running and starts nothing more, its queued items
+/// (the held lookahead included) reported unrun. Workers already draining
+/// (`finishing`) are told too: a drain still runs everything queued.
 pub(crate) fn stop_all(states: &mut [impl Slot]) {
-    for s in states.iter_mut().filter(|s| !s.dead() && !s.finishing()) {
+    for s in states.iter_mut().filter(|s| !s.dead()) {
         s.set_finishing(true);
-        s.send_no_more_items();
+        s.send_stop_run();
     }
 }
 
@@ -162,7 +163,16 @@ pub(crate) fn interrupt_all<S: Slot>(
         sink.emit_report(Some(i), &r);
         run.record(Some(i), r);
         run.mark_crashed(&nodeid);
+        run.mark_interrupted(&nodeid);
     }
+    // Everything selected that has no entry yet never started.
+    let not_run = prog
+        .total()
+        .map(|total| total.saturating_sub(run.tests().len()) as u64);
+    run.interruption = Some(crate::reporting::report::Interruption {
+        signal: sig,
+        not_run,
+    });
     for s in states.iter_mut().filter(|s| !s.dead()) {
         s.reap_dead();
     }
@@ -202,6 +212,7 @@ pub(crate) fn fabricate_crash_report(
         fd_delta: None,
         sections: Vec::new(),
         lineno: None,
+        subtest: false,
     }
 }
 
@@ -231,20 +242,32 @@ pub(crate) struct FinishedAttempt {
     pub flaky_key: Option<String>,
 }
 
+/// Whether a recorded report counts toward `-x` / `--maxfail`: a failure of a
+/// test outside the `--quarantine` list. A quarantined failure is demoted
+/// after the run and never fails it, so it must not stop the run either.
+pub(crate) fn counts_toward_maxfail(
+    quarantine: Option<&regex::RegexSet>,
+    report: &proto::Report,
+) -> bool {
+    report.outcome == "failed" && !quarantine.is_some_and(|q| q.is_match(&report.nodeid))
+}
+
 /// Commit a finished item's buffered attempt reports as final: record each
-/// (counting failures toward `fail_count`) and, if the item ultimately passed
-/// after >0 retries, mark it flaky under `flaky_key`. Called on the terminal
-/// (non-requeued) branch of the ItemDone rerun logic in both loops.
+/// (counting failures toward `fail_count`, quarantined ones excepted) and, if
+/// the item ultimately passed after >0 retries, mark it flaky under
+/// `flaky_key`. Called on the terminal (non-requeued) branch of the ItemDone
+/// rerun logic in both loops.
 pub(crate) fn finalize_attempt(
     sink: &mut Sink,
     run: &mut Run,
     prog: &mut Progress,
     fail_count: &mut u64,
+    quarantine: Option<&regex::RegexSet>,
     worker_idx: usize,
     attempt: FinishedAttempt,
 ) {
     for r in attempt.reports {
-        if r.outcome == "failed" {
+        if counts_toward_maxfail(quarantine, &r) {
             *fail_count += 1;
         }
         prog.on_report(sink, Some(worker_idx), &r);
@@ -265,20 +288,23 @@ pub(crate) fn finalize_attempt(
 /// passed. `retried` says retries were in play (a global `--reruns` budget,
 /// or any test marked flaky, which covers `@pytest.mark.flaky` retrying on
 /// its own). `collect_aborted` (lazy only) forces at least "interrupted" (2).
+/// `stopped`: `-x` / `--maxfail` cut the run short. Only a counted failure
+/// trips it, so the run never reads as passed, whatever was recorded.
 pub(crate) fn finalize_exit(
     statuses: &[i32],
     all_passed: bool,
     retried: bool,
     collect_aborted: bool,
+    stopped: bool,
 ) -> i32 {
     let mut exitstatus = crate::scheduling::pool::merge_statuses(statuses);
     if collect_aborted {
         exitstatus = exitstatus.max(2);
     }
-    if exitstatus == 0 && !all_passed {
+    if exitstatus == 0 && (!all_passed || stopped) {
         exitstatus = 1;
     }
-    if retried && exitstatus == 1 && all_passed {
+    if retried && exitstatus == 1 && all_passed && !stopped {
         exitstatus = 0;
     }
     exitstatus
@@ -296,7 +322,7 @@ mod tests {
         running_since: Option<Instant>,
         watchdog: Option<Watchdog>,
         killed: u32,
-        no_more_sent: u32,
+        stop_sent: u32,
         reaped: u32,
         // Only read by the unix-only interrupt_all test.
         #[cfg(unix)]
@@ -306,9 +332,6 @@ mod tests {
     impl Slot for MockSlot {
         fn dead(&self) -> bool {
             self.dead
-        }
-        fn finishing(&self) -> bool {
-            self.finishing
         }
         fn set_finishing(&mut self, v: bool) {
             self.finishing = v;
@@ -328,8 +351,8 @@ mod tests {
         fn kill_worker(&mut self) {
             self.killed += 1;
         }
-        fn send_no_more_items(&mut self) {
-            self.no_more_sent += 1;
+        fn send_stop_run(&mut self) {
+            self.stop_sent += 1;
         }
         fn reap_dead(&mut self) {
             self.reaped += 1;
@@ -351,11 +374,12 @@ mod tests {
             fd_delta: None,
             sections: Vec::new(),
             lineno: None,
+            subtest: false,
         }
     }
 
     #[test]
-    fn stop_all_finishes_only_live_unfinishing_workers() {
+    fn stop_all_stops_every_live_worker() {
         let mut states = vec![
             MockSlot::default(), // live -> stopped
             MockSlot {
@@ -365,16 +389,16 @@ mod tests {
             MockSlot {
                 finishing: true,
                 ..Default::default()
-            }, // finishing -> skipped
+            }, // draining -> stopped too (its queue would still run)
             MockSlot::default(), // live -> stopped
         ];
         stop_all(&mut states);
-        assert!(states[0].finishing && states[0].no_more_sent == 1);
+        assert!(states[0].finishing && states[0].stop_sent == 1);
         // A dead worker is never told and never marked finishing.
-        assert!(!states[1].finishing && states[1].no_more_sent == 0);
-        // An already-finishing worker is not re-sent (bounded overshoot).
-        assert_eq!(states[2].no_more_sent, 0);
-        assert!(states[3].finishing && states[3].no_more_sent == 1);
+        assert!(!states[1].finishing && states[1].stop_sent == 0);
+        // A draining worker still has queued items to drop.
+        assert!(states[2].finishing && states[2].stop_sent == 1);
+        assert!(states[3].finishing && states[3].stop_sent == 1);
     }
 
     fn wd(secs: u64) -> Option<Watchdog> {
@@ -602,22 +626,69 @@ mod tests {
     #[test]
     fn finalize_exit_recorded_outcomes_win() {
         // Clean sessions but a recorded failure (fabricated crash) -> 1.
-        assert_eq!(finalize_exit(&[0, 0], false, false, false), 1);
+        assert_eq!(finalize_exit(&[0, 0], false, false, false, false), 1);
         // Session says failed (1) but everything ultimately passed after a
         // retry (--reruns or a lone @mark.flaky) -> flaky pass, downgrade to 0.
-        assert_eq!(finalize_exit(&[1], true, true, false), 0);
+        assert_eq!(finalize_exit(&[1], true, true, false, false), 0);
         // Same with no retry in play stays failed.
-        assert_eq!(finalize_exit(&[1], true, false, false), 1);
+        assert_eq!(finalize_exit(&[1], true, false, false, false), 1);
         // All green -> 0.
-        assert_eq!(finalize_exit(&[0, 0], true, false, false), 0);
+        assert_eq!(finalize_exit(&[0, 0], true, false, false, false), 0);
+    }
+
+    #[test]
+    fn finalize_exit_never_passes_a_run_maxfail_stopped() {
+        // -x / --maxfail tripped: a retried run is not demoted to 0 even when
+        // every recorded outcome passed...
+        assert_eq!(finalize_exit(&[1, 0], true, true, false, true), 1);
+        // ...and clean session codes still read failed.
+        assert_eq!(finalize_exit(&[0, 0], true, true, false, true), 1);
+        // Severe codes are kept.
+        assert_eq!(finalize_exit(&[2], true, true, false, true), 2);
+    }
+
+    #[test]
+    fn quarantined_failures_do_not_count_toward_maxfail() {
+        let q = regex::RegexSet::new([r"^t\.py::x$"]).unwrap();
+        let failed = rep("failed", Some("assert"));
+        assert!(!counts_toward_maxfail(Some(&q), &failed));
+        assert!(counts_toward_maxfail(None, &failed));
+        let other = proto::Report {
+            nodeid: "t.py::y".into(),
+            ..rep("failed", Some("assert"))
+        };
+        assert!(counts_toward_maxfail(Some(&q), &other));
+        assert!(!counts_toward_maxfail(None, &rep("passed", None)));
+
+        let mut run = Run::default();
+        let mut prog = Progress::default();
+        let mut fail_count = 0u64;
+        let (mut sink, _cap) = Sink::captured();
+        finalize_attempt(
+            &mut sink,
+            &mut run,
+            &mut prog,
+            &mut fail_count,
+            Some(&q),
+            0,
+            FinishedAttempt {
+                attempts_used: 1,
+                reports: vec![failed],
+                failed: true,
+                flaky_key: None,
+            },
+        );
+        // Recorded (the quarantine demotes it after the run), not counted.
+        assert_eq!(fail_count, 0);
+        assert!(!run.all_passed());
     }
 
     #[test]
     fn finalize_exit_collect_abort_forces_interrupted() {
         // collect_aborted floors at 2 even when sessions were clean...
-        assert_eq!(finalize_exit(&[0], true, false, true), 2);
+        assert_eq!(finalize_exit(&[0], true, false, true, false), 2);
         // ...and never downgrades a more severe code.
-        assert_eq!(finalize_exit(&[3], false, false, true), 3);
+        assert_eq!(finalize_exit(&[3], false, false, true, false), 3);
     }
 
     #[test]
@@ -633,6 +704,7 @@ mod tests {
             &mut run,
             &mut prog,
             &mut fail_count,
+            None,
             0,
             FinishedAttempt {
                 attempts_used: 2,
@@ -656,6 +728,7 @@ mod tests {
             &mut run,
             &mut prog,
             &mut fail_count,
+            None,
             0,
             FinishedAttempt {
                 attempts_used: 0,

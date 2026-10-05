@@ -54,9 +54,6 @@ impl orchestrator::Slot for WorkerState {
     fn dead(&self) -> bool {
         self.dead
     }
-    fn finishing(&self) -> bool {
-        self.finishing
-    }
     fn set_finishing(&mut self, v: bool) {
         self.finishing = v;
     }
@@ -75,8 +72,8 @@ impl orchestrator::Slot for WorkerState {
     fn kill_worker(&mut self) {
         self.worker.kill();
     }
-    fn send_no_more_items(&mut self) {
-        let _ = self.worker.send(&proto::Command::NoMoreItems);
+    fn send_stop_run(&mut self) {
+        let _ = self.worker.send(&proto::Command::StopRun);
     }
     fn reap_dead(&mut self) {
         self.worker.reap();
@@ -158,8 +155,9 @@ pub fn run_lazy_pool(
         known_flaky,
         worker_env,
         fork_prewarm,
-        // Lazy never reorders by flake history, so quarantine is post-run only.
-        quarantine: _,
+        // Lazy never reorders by flake history; quarantine only keeps its
+        // failures out of the -x / --maxfail count.
+        quarantine,
     } = cfg;
     // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
     let mut maxfail = maxfail;
@@ -196,7 +194,7 @@ pub fn run_lazy_pool(
     let mut prog = Progress::default();
     // Json mode keeps stdout pure NDJSON; the footer would corrupt it.
     if mode != crate::reporting::progress::Mode::Json {
-        prog.enable_footer(n);
+        prog.enable_footer(n, sink.palette().live());
     }
     prog.set_mode(mode);
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
@@ -270,7 +268,7 @@ pub fn run_lazy_pool(
                         continue;
                     }
                 }
-                if r.outcome == "failed" {
+                if orchestrator::counts_toward_maxfail(quarantine, &r) {
                     fail_count += 1;
                 }
                 prog.on_report(sink, Some(idx), &r);
@@ -279,14 +277,18 @@ pub fn run_lazy_pool(
                 if let Some(limit) = maxfail {
                     if !stopping && fail_count >= limit {
                         stopping = true;
+                        run.stopped_after = Some(fail_count);
                         orchestrator::stop_all(&mut states);
                     }
                 }
             }
             Ok(Event::CollectError { path, longrepr }) => {
-                prog.on_collect_error(sink, &path, &longrepr);
-                sink.emit_collect_error(&path, &longrepr);
-                run.collect_error(path, longrepr);
+                // A file collected again elsewhere (steal / redistribution)
+                // reports the same error: show it once.
+                if run.collect_error(path.clone(), longrepr.clone()) {
+                    prog.on_collect_error(sink, &path, &longrepr);
+                    sink.emit_collect_error(&path, &longrepr);
+                }
                 if !continue_on_collect_errors && !stopping {
                     // pytest aborts on collection errors; in lazy mode the
                     // error can surface mid-run - stop dispatching and wind
@@ -345,7 +347,9 @@ pub fn run_lazy_pool(
                 ids,
                 serial: ser,
                 flaky,
+                deselected,
             }) => {
+                run.deselected += deselected;
                 total_items += ids.len();
                 prog.set_total(total_items);
                 sources.record(&ids);
@@ -401,6 +405,7 @@ pub fn run_lazy_pool(
                             &mut run,
                             &mut prog,
                             &mut fail_count,
+                            quarantine,
                             idx,
                             orchestrator::FinishedAttempt {
                                 attempts_used: attempts,
@@ -411,6 +416,7 @@ pub fn run_lazy_pool(
                         );
                         if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
                             stopping = true;
+                            run.stopped_after = Some(fail_count);
                             orchestrator::stop_all(&mut states);
                         }
                     }
@@ -425,12 +431,30 @@ pub fn run_lazy_pool(
                     }
                 }
                 if !stopping {
+                    // The worker's own session stopped (not a global stop):
+                    // it left its run loop and takes no more ids or files.
+                    // What it still had comes back at its Done.
+                    s.ended = true;
                     requeued.extend(unrun);
                 }
             }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
-                states[idx].dead = true;
+                let s = &mut states[idx];
+                s.dead = true;
+                // A session that ended on its own never ran what reached it
+                // after it left its loop. Hand it to the live workers, unless
+                // the run is stopping (as the crash path does).
+                let left = std::mem::take(&mut s.outstanding);
+                let own: Vec<String> = s.own_queue.drain(..).collect();
+                let files = std::mem::take(&mut s.uncollected_files);
+                if !stopping {
+                    requeued.extend(left);
+                    requeued.extend(own);
+                    for f in files.into_iter().rev() {
+                        file_queue.push_front(f);
+                    }
+                }
                 done_workers += 1;
                 if done_workers == states.len() {
                     break;
@@ -693,8 +717,13 @@ pub fn run_lazy_pool(
         let _ = w.wait();
     }
     let retried = reruns > 0 || !run.flaky.is_empty();
-    let exitstatus =
-        orchestrator::finalize_exit(&statuses, run.all_passed(), retried, collect_aborted);
+    let exitstatus = orchestrator::finalize_exit(
+        &statuses,
+        run.all_passed(),
+        retried,
+        collect_aborted,
+        run.stopped_after.is_some(),
+    );
     // Persist the schedule for `rstest replay`. Best-effort, like run_pool. No
     // collection hash: lazy never agrees on one ordered nodeid list, so replay's
     // drift check falls back to the collected count (when it is complete).

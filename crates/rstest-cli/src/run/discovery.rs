@@ -83,6 +83,8 @@ pub(super) fn run_collect_discovery(
         debug_port: None,
         stream_output: false,
         junitxml: None,
+        reruns: false,
+        quarantine: None,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     // Item-dispatch session: its `pytest_collection_finish` emits the
@@ -269,6 +271,7 @@ mod tests {
             order_flags: None,
             confcutdir: None,
             maxfail: None,
+            deselected: 0,
         }
     }
 

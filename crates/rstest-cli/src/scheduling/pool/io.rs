@@ -57,16 +57,14 @@ pub(super) fn dispatch_to(
     chunk: usize,
     is_designate: bool,
 ) -> Result<()> {
+    // Any dispatch gives a held first item its successor (or releases it).
+    s.awaiting_lookahead = false;
     if s.dead || s.ended {
         return Ok(());
     }
     // Long-pole zone at the head of `order`: hand out ONE slow item per
     // dispatch so they spread across workers instead of stacking.
-    let want = if d.cursor < d.slow_count && d.requeued.is_empty() {
-        1
-    } else {
-        chunk
-    };
+    let want = if d.in_slow_zone() { 1 } else { chunk };
     match d.take(want, is_designate) {
         Take::Items(indices) => {
             s.outstanding.extend(indices.iter().copied());
@@ -87,6 +85,27 @@ pub(super) fn dispatch_to(
                 s.finishing = true;
                 let _ = s.worker.send(&proto::Command::NoMoreItems);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Close the initial seeding round: send each worker still holding only its
+/// first item the second (lookahead) dispatch it needs to start running. Kept
+/// separate from the first so every worker gets one item (or affinity group)
+/// before any gets two: back-to-back pairs stacked long poles and groups on
+/// the first workers seeded and left later ones idle. No-op when stopping:
+/// `stop_all` told every worker to drop its held items.
+pub(super) fn release_lookahead(
+    states: &mut [WorkerState],
+    d: &mut Dispatch,
+    chunk: usize,
+    designate: usize,
+    stopping: bool,
+) -> Result<()> {
+    for (i, s) in states.iter_mut().enumerate() {
+        if std::mem::take(&mut s.awaiting_lookahead) && !stopping {
+            dispatch_to(s, d, chunk, i == designate)?;
         }
     }
     Ok(())

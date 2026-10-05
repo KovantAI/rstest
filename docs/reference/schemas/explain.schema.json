@@ -84,7 +84,7 @@
           "minimum": 0
         },
         "files": {
-          "description": "Covered source files, sorted, cwd-relative (the coverage-index keys).",
+          "description": "Covered source files, sorted, rootdir-relative (the coverage-index keys).",
           "type": "array",
           "items": {
             "type": "string"

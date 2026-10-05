@@ -319,6 +319,33 @@ def test_configure_worker_populates_workerinput(monkeypatch, tmp_path):
     assert p._xdist_node.workerinput is wi
 
 
+def test_configure_worker_nests_user_basetemp_per_worker(monkeypatch, tmp_path):
+    # A user --basetemp is the shared parent, like xdist's <basetemp>/gwN:
+    # pytest rm_rf's its basetemp at startup, so sharing it would let one
+    # worker delete another's live tmp_path dirs.
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw1")
+    monkeypatch.setenv("RSTEST_WORKER_COUNT", "2")
+    monkeypatch.setenv("RSTEST_BASETEMP", str(tmp_path / "rstest-default"))
+    user = tmp_path / "bt"
+    p = _plugin(monkeypatch)
+    config, _ = _config(dist="no", numprocesses=None, basetemp=str(user))
+    p.pytest_configure(config)
+
+    assert config.option.basetemp == user / "gw1"
+    assert user.is_dir()  # parent created: pytest mkdirs basetemp non-recursively
+    assert not (tmp_path / "rstest-default").exists()
+
+
+def test_configure_standalone_keeps_user_basetemp(monkeypatch, tmp_path):
+    # -n 0 (no RSTEST_WORKER_ID): the user's --basetemp is used as given.
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+    p = _plugin(monkeypatch)
+    config, _ = _config(dist="no", numprocesses=None, basetemp=str(tmp_path / "bt"))
+    p.pytest_configure(config)
+
+    assert config.option.basetemp == str(tmp_path / "bt")
+
+
 def test_configure_worker_overrides_inherited_xdist_env(monkeypatch, tmp_path):
     # A PYTEST_XDIST_WORKER[_COUNT] exported by the caller must not win over
     # the real per-worker values, or every worker would share one id.

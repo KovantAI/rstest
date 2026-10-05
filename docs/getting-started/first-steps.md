@@ -78,15 +78,20 @@ the rest of this page describes `dots`. On a single worker with no
 - **Dots** stream live as tests finish across all workers: `.` pass, `F`
   fail, `s` skip, `x` xfail, `X` xpass, `E` error, pytest's vocabulary.
 - **Failures** print with full pytest-style tracebacks (assertion rewriting
-  included) and captured stdout/stderr/log sections.
+  included) and captured stdout/stderr/log sections, in the `--tb` style you
+  pass: `--tb=line` prints pytest's one `path:line: message` line per failure
+  (after its captured output, as pytest does) and `--tb=no` prints no
+  failure block at all.
 - The **summary line** uses pytest's accounting: the counts match what
-  pytest would print for the same run, including warnings, with two
-  exceptions at `-n 2` or more: the `deselected` count is not shown, and a
-  test whose teardown errors counts only as an error (pytest also counts its
-  call outcome).
+  pytest would print for the same run, including warnings and the
+  `deselected` count, with one exception at `-n 2` or more: a test whose
+  teardown errors counts only as an error (pytest also counts its call
+  outcome).
 
 The live footer described above belongs to the `bar` view on a terminal;
-it is disabled automatically when output is piped or in CI. It is what
+it is disabled automatically when output is piped, in CI (a `CI` variable,
+even on a pty), and when color is off (`NO_COLOR`, `--color=no`,
+`TERM=dumb`), which then means no escape sequences at all. It is what
 makes long-running tests visible the moment they start, not after they
 finish.
 
@@ -110,7 +115,7 @@ see which worker hit each failure:
 
 ```console
 --- FAILED [gw0] tests/test_login.py::test_session ---
-def test_session():
+    def test_session():
         status = 401
 >       assert status == 200
 E       assert 401 == 200
@@ -168,9 +173,11 @@ $ rstest -n 0      # byte-exact pytest session (same as -n 1)
 $ rstest -n 1      # identical to -n 0
 ```
 
-`-n auto` never starts more workers than you have test files, and once
-timings are cached it also caps by total suite time, so a tiny suite runs
-on one or two workers. Pass an explicit `-n` to override.
+On a first run `-n auto` never starts more workers than the test files you
+select (one selected test runs one session). Once timings are cached it caps
+by the cached test count and total time instead, so a tiny suite runs on one
+or two workers while a slow single file still spreads across workers. Pass an
+explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
 in a single worker process, pytest's own behavior in every detail. With no
