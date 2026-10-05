@@ -597,8 +597,8 @@ Feature: pytest / pytest-xdist migrator
   Rule: scheduling marks behave like xdist's
 
     Scenario: MG-08 loadgroup puts each xdist_group on its own worker
-      # Two xdist_groups spread over four files, plus free tests. xdist runs
-      # this in about 0.4s of test time.
+      # Two xdist_groups spread over four files, plus free tests. The groups
+      # must run side by side, not one after the other.
       Given the fixture event logger in "conftest.py"
       And 4 files "test_g{i}.py" each containing:
         """
@@ -624,7 +624,7 @@ Feature: pytest / pytest-xdist migrator
       When I run "rstest -n 4 --dist loadgroup -v" 3 times collecting the fixture event log
       Then every run succeeded with 12 events, the "db" and the "net" events each on one worker
       And in every run the "db" and "net" groups ran on different workers
-      And in every run the events spanned less than 0.7s
+      And in every run the "db" and "net" groups overlapped in time
 
     Scenario: MG-12 serial tests reuse the designated worker's session
       # Ordering and exclusivity of serial tests are covered elsewhere; this

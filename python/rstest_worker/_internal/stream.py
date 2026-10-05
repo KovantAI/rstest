@@ -364,6 +364,13 @@ class StreamPlugin:
         # cmdline_main is the one clean window; rstest owns reruns natively.
         if os.environ.get("RSTEST_WORKER_ID") is not None:
             _neutralize_rerunfailures(config)
+        # `--looponfail` from ini `addopts` (rstest refuses it on its own
+        # command line): xdist's cmdline_main would take the session over and
+        # loop forever. Switched off here, before xdist's impl reads it, in the
+        # pool and in single sessions alike.
+        opt = getattr(config, "option", None)
+        if opt is not None and getattr(opt, "looponfail", False):
+            opt.looponfail = False
         return None  # tryfirst, non-firstresult: let pytest's own impl run
 
     @pytest.hookimpl(wrapper=True)

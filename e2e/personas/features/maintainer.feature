@@ -49,6 +49,8 @@ Feature: Suite maintainer
 
   Rule: CPU work in a child process is computing, not waiting
 
+    # os.times() reports no child CPU on Windows.
+    @posix_only
     Scenario: MT-08 subprocess CPU is not reported as wait-bound
       Given a file "test_cli.py" containing:
         """
@@ -442,9 +444,10 @@ Feature: Suite maintainer
       When I run "rstest -n <n> --cov=pkg --cov-report=term-missing:skip-covered --cov-fail-under=95" and note its coverage TOTAL lines
       Then the exit code is 1
       And the output contains "FAIL Required test coverage" exactly once
-      # The fully covered pkg/full.py is skipped.
-      And the output does not contain "pkg/full.py"
-      And the output contains "pkg/calc.py"
+      # The fully covered pkg/full.py is skipped. Basenames only: the report
+      # uses native path separators.
+      And the output does not contain "full.py"
+      And the output contains "calc.py"
       When I run "rstest -n <n> --cov=pkg --cov-report=annotate --cov-fail-under=95" and note its coverage TOTAL lines
       Then the exit code is 1
       And the output contains "FAIL Required test coverage" exactly once

@@ -339,12 +339,14 @@ mod tests {
 
     #[test]
     fn fnmatch_ex_matches_basename_or_anchored_path() {
-        use std::path::Path;
-        assert!(fnmatch_ex(".*", Path::new("/r/tests/.hidden")));
-        assert!(!fnmatch_ex(".*", Path::new("/r/.x/tests")));
-        assert!(fnmatch_ex("*.egg", Path::new("/r/foo.egg")));
-        assert!(fnmatch_ex("tests/data", Path::new("/r/tests/data")));
-        assert!(!fnmatch_ex("tests/data", Path::new("/r/tests/datum")));
+        // `/r` is not absolute on Windows (no drive), which would skip the
+        // `*/` anchoring under test; real collected paths always carry one.
+        let root = std::path::PathBuf::from(if cfg!(windows) { r"C:\r" } else { "/r" });
+        assert!(fnmatch_ex(".*", &root.join("tests/.hidden")));
+        assert!(!fnmatch_ex(".*", &root.join(".x/tests")));
+        assert!(fnmatch_ex("*.egg", &root.join("foo.egg")));
+        assert!(fnmatch_ex("tests/data", &root.join("tests/data")));
+        assert!(!fnmatch_ex("tests/data", &root.join("tests/datum")));
     }
 
     #[test]

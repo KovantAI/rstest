@@ -139,11 +139,12 @@ class Gate:
             text=True,
             # rstest emits UTF-8 glyphs (✓ ✗ ─); pin the decode to UTF-8 so
             # the locale encoding (cp1252 on Windows) does not mangle them
-            # and make `"✓" in r.stdout` spuriously False.
+            # and make `"✓" in r.stdout` spuriously False. At -n 0 the
+            # child's own output passes through in the locale encoding; a
+            # strict decode would kill subprocess's reader thread and leave
+            # stdout None, so replace what is not UTF-8.
             encoding="utf-8",
-            # pytest's own output (-n 0) can carry raw non-UTF-8 bytes, e.g. a
-            # surrogateescape'd filename; show them escaped rather than crash.
-            errors="backslashreplace",
+            errors="replace",
             timeout=timeout,
         )
 

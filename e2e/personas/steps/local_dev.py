@@ -45,6 +45,8 @@ def _env(world, extra=None):
         "NO_COLOR",
         "FORCE_COLOR",
         "PY_COLORS",
+        # CI turns the live footer off; these scenarios model a local terminal.
+        "CI",
     ):
         env.pop(k, None)
     env["TERM"] = "xterm-256color"
@@ -114,7 +116,8 @@ def _oracle(world, command, cwd):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        env=_env(world),
+        # pytest writes a pipe in the locale encoding (cp1252 on Windows).
+        env=_env(world, {"PYTHONIOENCODING": "utf-8"}),
         timeout=60,
     )
 

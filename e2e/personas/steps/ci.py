@@ -11,6 +11,7 @@ import subprocess
 import textwrap
 import time
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,12 +38,16 @@ def _load(path):
 
 
 def _subst(world, text):
-    """Expand {project}, {tmp} and {remote} placeholders in step text."""
+    """Expand {project}, {tmp} and {remote} placeholders in step text.
+    Forward slashes: the text goes through shlex.split, which eats Windows
+    backslashes."""
     for key, value in (
         ("project", world.project),
         ("tmp", world.gate.tmp),
         ("remote", world.notes.get("remote", "{remote}")),
     ):
+        if isinstance(value, Path):
+            value = value.as_posix()
         text = text.replace("{" + key + "}", str(value))
     return text
 
@@ -659,7 +664,7 @@ def _exit_neither(world, a, b):
 
 @then("stderr contains the GITHUB_STEP_SUMMARY path")
 def _stderr_summary(world):
-    summary = str(world.gate.tmp / "ci_nonexistent_dir" / "summary.md")
+    summary = (world.gate.tmp / "ci_nonexistent_dir" / "summary.md").as_posix()
     assert summary in world.result.stderr, world.tail()
 
 
