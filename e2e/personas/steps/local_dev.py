@@ -161,12 +161,6 @@ def _run_lockstep(world, command, oracle):
     world.run(command)
 
 
-@then(parsers.re(rf"the first test the order log recorded is {q('nodeid')}"))
-def _first_logged(world, nodeid):
-    rows = _log_rows(world.project, "order")
-    assert rows and rows[0][2] == nodeid, f"{rows[:3]}\n{world.tail(200)}"
-
-
 @then(parsers.re(rf"the first test the order log recorded is not {q('nodeid')}"))
 def _first_logged_not(world, nodeid):
     rows = _log_rows(world.project, "order")
