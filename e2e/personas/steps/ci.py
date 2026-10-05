@@ -392,7 +392,8 @@ def _action_step(world):
             "MODE": "plain",
             "BACKEND": "none",
             "REMOTE": "",
-            "BASE_REF": "",
+            "CHANGED_REV": "",
+            "CHANGED_MODE": "",
             "CACHE_PUSH": "false",
             "IN_CACHE_REMOTE_TOKEN": "",
         }
