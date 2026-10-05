@@ -44,10 +44,10 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   all on the same interpreter (xdist's heterogeneous `--tx` gateways have no
   equivalent), and rstest's `--reruns` is rejected in this mode. See the
   [xdist support matrix](../reference/xdist-support.md#flag-matrix).
-- **`--looponfail` / `-f`**: use [`--watch`](watch-mode.md) instead. rstest
-  does not handle `--looponfail`; with pytest-xdist installed it reaches every
-  worker session, xdist's loop-on-fail mode takes it over, and the run hangs.
-  Remove it from `addopts` before switching.
+- **`--looponfail` / `-f`**: use [`--watch`](watch-mode.md) instead. On
+  rstest's command line it is refused (exit 1) with a pointer to `--watch`;
+  from `addopts` it is switched off inside the workers, so a leftover entry
+  is harmless.
 - **`-p no:xdist`**: forwarded to pytest in every worker. rstest does not
   need pytest-xdist, so the run still parallelizes. A leftover
   `addopts = -n 4` then fails: pytest has no `-n` option once xdist is
@@ -246,8 +246,9 @@ these before you switch:
   usage error (exit 4). Pass `rstest --timeout N` on the command line; there
   is no `[tool.rstest]` key for it
   ([pytest-timeout](plugins.md)).
-- **`--looponfail` / `-f`**: remove it before switching; with pytest-xdist
-  installed it hangs the run (see the [flag map](#flag-map) above).
+- **`--looponfail` / `-f`**: refused on rstest's command line and switched
+  off from `addopts`; use `--watch` instead (see the [flag map](#flag-map)
+  above).
 - **`--tx`, `--rsync*`, `-d`, `--maxprocesses`, `--max-worker-restart`**: see
   the [flag map](#flag-map) above; drop them once no pytest-xdist job still
   needs them.

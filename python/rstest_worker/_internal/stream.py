@@ -376,13 +376,20 @@ class StreamPlugin:
 
     @staticmethod
     def _disable_xdist_distribution(config):
-        opt = config.option
+        opt = getattr(config, "option", None)
+        if opt is None:
+            return
         if hasattr(opt, "numprocesses"):
             opt.numprocesses = 0
         if hasattr(opt, "distload"):
             opt.distload = False
         if hasattr(opt, "dist"):
             opt.dist = "no"
+        # `--looponfail` from ini `addopts` (rstest refuses it on its own
+        # command line): xdist's cmdline_main would take the session over and
+        # loop forever.
+        if getattr(opt, "looponfail", False):
+            opt.looponfail = False
 
     @pytest.hookimpl(wrapper=True)
     def pytest_load_initial_conftests(self, early_config, parser, args):

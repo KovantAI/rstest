@@ -107,6 +107,20 @@ def test_cmdline_main_without_xdist_options_is_harmless(monkeypatch):
     assert vars(config.option) == {}
 
 
+def test_cmdline_main_switches_off_looponfail(monkeypatch):
+    # `--looponfail` from ini addopts: xdist's cmdline_main would loop forever,
+    # so it is off before xdist reads it, in the pool and at -n 0 alike.
+    monkeypatch.setattr(stream, "_neutralize_rerunfailures", lambda c: None)
+    for worker_id in ("gw0", None):
+        if worker_id is None:
+            monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
+        else:
+            monkeypatch.setenv("RSTEST_WORKER_ID", worker_id)
+        config = _xdist_config(looponfail=True)
+        assert _run_cmdline_main(config, result=0) == 0
+        assert config.option.looponfail is False
+
+
 # ── pytest_load_initial_conftests: pytest-cov erase race ────────────────────
 
 
