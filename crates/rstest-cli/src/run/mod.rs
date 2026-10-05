@@ -539,6 +539,7 @@ pub(crate) fn execute_inner(
         .or_else(|| std::env::var("RSTEST_CACHE_REMOTE").ok())
         .filter(|s| !s.is_empty());
     preflight_cache(cli, &cache_remote, &mut sink)?;
+    reject_looponfail(&args)?;
 
     // CLI > [tool.rstest] > built-in defaults.
     let settings = config::rstest_settings(&std::env::current_dir()?, sink.err());
@@ -2326,6 +2327,27 @@ fn validate_cache_flags(pull: bool, push: bool, remote_present: bool) -> Result<
     Ok(())
 }
 
+/// pytest-xdist's `--looponfail` / `-f` (alone or clustered, e.g. `-fv`)
+/// would reach every worker session, where xdist's loop-on-fail mode takes
+/// the session over and the run hangs. Refuse it up front and point at
+/// `--watch`. (The same flag from ini `addopts` is switched off in the worker.)
+fn reject_looponfail(args: &[String]) -> Result<()> {
+    let flagged = args
+        .iter()
+        .zip(crate::cli::positional_mask(args))
+        .find(|(a, positional)| {
+            !positional && (a.as_str() == "--looponfail" || crate::cli::has_short(a, 'f'))
+        });
+    if let Some((a, _)) = flagged {
+        anyhow::bail!(
+            "{a} is pytest-xdist's loop-on-fail mode, which rstest does not run \
+             (it would take over every worker session and hang); use --watch, \
+             which reruns on change with import-graph selection"
+        );
+    }
+    Ok(())
+}
+
 /// Cache-flag preflight for a normal run: validate that `--cache-pull` /
 /// `--cache-push` have a resolved remote, then warn when the `--cache-remote`
 /// FLAG is set with neither requested (it would silently do nothing). Gate the
@@ -2594,11 +2616,11 @@ mod tests {
         check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
         incremental_config, lazy_layout_fits, lazy_should_steal, mark_session_flaky,
         names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
-        parse_numprocesses, requests_doctests, resolve_changed_base, resolve_order,
-        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
-        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
-        warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
-        AUTO_LAZY_MIN_TESTS,
+        parse_numprocesses, reject_looponfail, requests_doctests, resolve_changed_base,
+        resolve_order, resolve_retention_policy, resolve_shard, resolve_shuffle_seed,
+        run_cache_compact, silent_master_plugin_warnings, validate_cache_flags,
+        warn_incremental_conflicts, warn_quarantine_passthrough, warn_windows_timeout,
+        DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -3261,6 +3283,31 @@ mod tests {
             8,
             100_000
         ));
+    }
+
+    #[test]
+    fn looponfail_is_refused_in_every_spelling() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for bad in [
+            &["--looponfail"][..],
+            &["-f"],
+            &["-fv"],
+            &["-vf"],
+            &["tests/", "-f"],
+        ] {
+            let err = reject_looponfail(&args(bad)).unwrap_err().to_string();
+            assert!(err.contains("--watch"), "{bad:?}: {err}");
+        }
+        // `f` as a value (-kf, -k f), a long flag, or after `--` is not the flag.
+        for ok in [
+            &["-kf"][..],
+            &["-k", "f"],
+            &["--ff"],
+            &["--", "-f"],
+            &["-v"],
+        ] {
+            assert!(reject_looponfail(&args(ok)).is_ok(), "{ok:?}");
+        }
     }
 
     #[test]
