@@ -25,8 +25,10 @@ use candidates::{discovery_candidates, python_version_arg, venv_candidates, venv
 use probe::{cached_probe, Probe};
 use request::{matches, parse_pyarg, PyArg, Request};
 
-/// Minimum interpreter we'll run workers on.
-const MIN_VERSION: (u8, u8) = (3, 9);
+/// Minimum interpreter we'll run workers on: the vendored pytest core and
+/// the worker need 3.10 (`requires-python` in pyproject.toml). A 3.9 that got
+/// past discovery would fail later with an obscure ImportError.
+const MIN_VERSION: (u8, u8) = (3, 10);
 
 /// Resolve the interpreter to run workers with. `scope` anchors the upward
 /// `.venv` / `.python-version` walk. An explicit `--python` is authoritative:
@@ -440,7 +442,17 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("3.7.0"), "{msg}");
-        assert!(msg.contains("3.9"), "{msg}");
+        assert!(msg.contains("3.10"), "{msg}");
+    }
+
+    #[test]
+    fn python_3_9_is_rejected_up_front() {
+        let cands = [PathBuf::from("python3")];
+        let err = run(&cands, &discovery(), |_| {
+            Some(probe_at("/x", (3, 9, 18), true))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("3.9.18"), "{err}");
     }
 
     #[test]

@@ -356,15 +356,33 @@ class StreamPlugin:
                 else:
                     defs.append(fd)
 
-    @pytest.hookimpl(tryfirst=True)
+    @pytest.hookimpl(wrapper=True)
     def pytest_cmdline_main(self, config):
+        # A wrapper, so this runs before every other impl, tryfirst ones
+        # included (pytest-xdist's is tryfirst).
+        #
         # Unregister pytest-rerunfailures BEFORE pytest_configure: under the pool
         # its configure KeyErrors on the never-stashed sock_port, and configure
         # is call_historic (impl list snapshotted, too late to unregister).
         # cmdline_main is the one clean window; rstest owns reruns natively.
         if os.environ.get("RSTEST_WORKER_ID") is not None:
             _neutralize_rerunfailures(config)
-        return None  # tryfirst, non-firstresult: let pytest's own impl run
+        # Switch off xdist's distribution before xdist's own cmdline_main sees
+        # it: with `addopts = -n 4` that impl raises "--pdb is incompatible with
+        # distributing tests" before pytest_configure's _neutralize_xdist runs.
+        # rstest owns parallelism in every session it starts.
+        self._disable_xdist_distribution(config)
+        return (yield)
+
+    @staticmethod
+    def _disable_xdist_distribution(config):
+        opt = config.option
+        if hasattr(opt, "numprocesses"):
+            opt.numprocesses = 0
+        if hasattr(opt, "distload"):
+            opt.distload = False
+        if hasattr(opt, "dist"):
+            opt.dist = "no"
 
     @pytest.hookimpl(wrapper=True)
     def pytest_load_initial_conftests(self, early_config, parser, args):

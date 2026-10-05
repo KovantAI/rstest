@@ -13,6 +13,14 @@ own analysis, not as a normal test run. The flags that only apply to a
 subcommand are documented with it; everything else is on
 [CLI flags](cli.md).
 
+After the subcommand, only its own flags and the global ones are accepted.
+The global flags are `--python`, `--cache-remote`, `--cache-compact-threshold`,
+`--migrate-check-json`, `--migrate-allow`, `--audit-json`, `--audit-repeat`
+and `--bisect-json`. Any other rstest flag there is a usage error (exit 2):
+`rstest try --doctor` prints `unexpected argument '--doctor' found`. Put
+rstest flags before the subcommand and it is no longer recognized: `rstest
+-n 2 try` is a normal test run with `try` as a test path.
+
 ```text
 rstest <COMMAND> [OPTIONS]
 ```
@@ -383,7 +391,7 @@ own when those flags are active. `-x` and `--maxfail` (from `addopts` or after
 failure, the culprit's own included, can't stop a run before the victim.
 `--nf` and `--sw` can't be switched off from the command line, so bisect
 refuses them (exit `2`) and says how to drop them for the bisect. rstest's own
-`reruns` (config or `--reruns`) is off in the child runs too: a passing rerun
+`[tool.rstest] reruns` config is off in the child runs too: a passing rerun
 would hide the failure, and a rerun run goes through the pool, which orders
 tests by duration. A `--confcutdir` of your own is kept as pytest applied it.
 

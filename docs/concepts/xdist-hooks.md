@@ -114,7 +114,8 @@ is the same model as xdist, where each worker also runs its own
 
 - A hook that mutates shared external state (writes a file, seeds a DB,
   increments a counter) runs N times concurrently: make it idempotent or
-  key it on `RSTEST_WORKER_ID` / `workerinput["workerid"]`.
+  key it on `workerinput["workerid"]` / `PYTEST_XDIST_WORKER`, which
+  xdist sets too (`RSTEST_WORKER_ID` is the rstest-only equivalent).
 - In `--collect full` mode each worker performs a **full**
   collection: `pytest_collection_modifyitems` sees the *entire* suite on
   every worker, exactly as under xdist; the orchestrator then dispatches only

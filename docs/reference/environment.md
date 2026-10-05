@@ -83,3 +83,5 @@ Standard variables from CI systems and tools that rstest reads when present:
 | `COVERAGE_RCFILE` | coverage.py's config file override: read when working out the `--cov` scope (unless `--cov-config` names a file), and by coverage itself when rstest combines and reports parallel coverage |
 | `XDG_CACHE_HOME`, `LOCALAPPDATA` | default base for the interpreter-probe cache (see `RSTEST_CACHE_DIR`) |
 | `COVERAGE_RCFILE` | coverage.py's config-file override. When `--cov-config` names no file, or names pytest-cov's default `.coveragerc`, rstest reads the `[run]` settings from this file (as coverage.py would) to decide what `--cov` measures |
+| `HOME` | Unix fallback base when the `XDG_*` variables are unset: `~/.cache` for the interpreter-probe cache and `~/.local/share/uv/python` for uv-managed interpreters. With neither set, probing isn't persisted and uv interpreters aren't searched |
+| `PYTHONPATH` | kept for the workers: rstest prepends `RSTEST_WORKER_PATH` (when set) and, in a source checkout, the repo's `python/` directory, then appends your existing entries in order |

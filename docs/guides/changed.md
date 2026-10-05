@@ -153,6 +153,12 @@ space, `--changed origin/main` is bare `--changed` plus a test path
     On the first push of a new branch, `github.event.before` is all zeros,
     which is not a commit: run the full suite there instead.
 
+    The bundled [GitHub action](https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest#pr-change-based-selection-strict-gate)
+    does all of this for `changed: true` / `strict`:
+    on a push it diffs against `github.event.before`, and with no usable base
+    (new branch, schedule, dispatch, or a base equal to `HEAD`) it warns and
+    runs the full suite.
+
 A typical layout: a scheduled main-branch job runs full coverage
 (`--cov-context=test`) and saves `.rstest_cache`; PR jobs restore it and run
 `rstest --changed` for a tight per-commit gate, falling back to the import

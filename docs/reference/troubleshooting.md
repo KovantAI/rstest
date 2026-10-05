@@ -58,10 +58,13 @@ names, install a matching Python, or pass `--python` to override it.
 
 ## `ImportError: cannot import name 'TypeAlias'` (or similar) at startup
 
-Your project's interpreter is older than Python 3.10 (interpreter discovery
-still accepts 3.9, so a 3.9 venv gets this far). The vendored pytest
+Your project's interpreter is older than Python 3.10. The vendored pytest
 core requires 3.10+, which matches the supported CPython line (3.9 is
 end-of-life as of October 2025). Upgrade the environment's Python.
+rstest rejects a 3.9 interpreter during discovery
+(`Python 3.9.x is older than the required 3.10`, listed with the other
+rejected candidates), so this error means a 3.9 interpreter was forced in
+some other way.
 
 ## Tests pass under pytest, fail under `rstest`, only in parallel
 

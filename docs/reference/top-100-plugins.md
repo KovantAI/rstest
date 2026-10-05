@@ -17,7 +17,7 @@ parallel also runtime-`V`.
 | 🟦 Native | Works, but rstest ships a built-in that supersedes it (prefer the native flag). |
 | ⚠️ Caveat | Works with a stated limitation, usually a subset that needs `-n 0`. |
 | 🔶 `-n 0` | Run single-worker for this plugin's feature (terminal painting, benchmarks, ordering). |
-| 🔴 Silent | Produces **nothing** at `-n ≥ 2` (report aggregators gated on the xdist controller); use `-n 0` or a native equivalent. |
+| 🔴 Silent | Produces **nothing usable** at `-n ≥ 2` (report aggregators gated on the xdist controller, or writing a racy partial file); use `-n 0` or a native equivalent. |
 | ➖ N/A | Unaffected by parallelism (assertion / fixture / format helpers). |
 
 **Verified** column: **V** = exercised by an e2e gate or loaded by a
@@ -125,7 +125,7 @@ plugin's category, not yet runtime-verified.
 | 95 | pytest-examples | 595K | ✅ Works | i | Code-example / docstring testing. Corpus-loaded only at `-n 0` (pydantic), so no parallel evidence yet. |
 | 96 | pytest-pytestrail | 566K | ⚠️ Caveat | i | TestRail reporter; per-worker case results, or `-n 0` for one run submission. |
 | 97 | pytest-mypy | 557K | ✅ Works | V | **Dead controller path closed.** Its worker branch reads `workerinput["mypy_config_stash_serialized"]`, a key only its xdist controller sets, so merely installing it `KeyError`'d every `-n ≥ 2` run. rstest now seeds a unique per-worker mypy results-cache path; mypy runs lazily per worker (`MypyResults.from_session`), so type errors surface identically at `-n auto` and `-n 0` (e2e gate). |
-| 98 | pytest-csv | 552K | ⚠️ Caveat | V\* | `--csv` writes a **racy per-worker** CSV under the pool (each worker opens the same path, last close wins, may capture only one worker's subset); use `-n 0` or native `--report-json`. e2e gate: no crash. |
+| 98 | pytest-csv | 552K | 🔴 Silent | V\* | No usable report at `-n ≥ 2` (rstest warns): `--csv` writes a **racy per-worker** CSV under the pool (each worker opens the same path, last close wins, may capture only one worker's subset); use `-n 0` or native `--report-json`. e2e gate: no crash. |
 | 99 | pytest-subprocess | 515K | ✅ Works | i | Per-test `fake_process` fixture; isolated per test. |
 | 100 | pytest-flake8 | 506K | ✅ Works | i | flake8-as-tests collected per file; runs per worker (shared flake8 cache is a mild contention caveat). |
 
@@ -163,8 +163,8 @@ common reporters.
 - **✅ Works, 24:** vcr, flakefinder, datadir, testinfra, flask, freezegun, freezer, alembic, opentelemetry, qt, describe, sftpserver, regressions, ansible, anyio, race, doctestplus, mpl, variables, pylint, examples, mypy, subprocess, flake8.
 - **🟦 Native, 4:** watcher, test-groups, watch, picked (rstest ships watch / sharding / changed-selection).
 - **🔶 `-n 0`, 5:** profiling, deadfixtures, find-dependencies, harvest, pretty.
-- **⚠️ Caveat, 6:** docker, celery, docker-tools, reportportal, pytestrail, csv.
-- **🔴 Silent, 4:** reportlog, md, nunit, azurepipelines (single-controller aggregators; emit at `-n 0` or use a native artifact).
+- **⚠️ Caveat, 5:** docker, celery, docker-tools, reportportal, pytestrail.
+- **🔴 Silent, 5:** reportlog, md, nunit, azurepipelines (single-controller aggregators), csv (racy per-worker file); emit at `-n 0` or use a native artifact.
 - **➖ N/A, 7:** lazy-fixtures, cases, assume, cache, clarity, lazy-fixture, pylint-pytest.
 
 The fault line is the same as in the top 50: a plugin that reads
