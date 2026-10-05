@@ -739,10 +739,13 @@ pub(super) fn run_post_gates(
     // Incremental testing: a fully green run advances the baseline to the commit
     // we ran at, so the next --since-green run only re-selects changes made after
     // it. Recorded only on green (exitstatus 0) — a failing test keeps being
-    // selected until it passes.
+    // selected until it passes - and only on a clean tree, since a green dirty
+    // tree says nothing about HEAD itself.
     if since_green && exitstatus == 0 {
         if let Some(h) = head {
-            incremental::record_green(&std::env::current_dir()?, h, env_fp);
+            if !incremental::record_green_if_clean(&std::env::current_dir()?, h, env_fp) {
+                sink.warn(incremental::DIRTY_TREE_NOTICE);
+            }
         }
     }
     // --incremental: persist this run's green set (tests that ran green + the
@@ -895,7 +898,6 @@ pub(super) fn finalize_output(
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
-        let warn_part = warnings_part(warn_total);
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
         // the stable summary line (which tooling/CI greps, so keep it intact).
@@ -917,8 +919,8 @@ pub(super) fn finalize_output(
             String::new()
         };
         let summary = format!(
-            "{}{warn_part} in {elapsed:.2}s{cached_note}",
-            outcome.run.summary_line()
+            "{} in {elapsed:.2}s{cached_note}",
+            outcome.run.summary_line_with(warn_total)
         );
         let summary = if outcome.run.all_passed() {
             palette.green(&summary)
@@ -996,14 +998,6 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
 /// unit-testable.
 /// The summary line's warnings segment, worded as pytest does
 /// (`1 warning`, `2 warnings`); empty without warnings.
-fn warnings_part(total: u64) -> String {
-    match total {
-        0 => String::new(),
-        1 => ", 1 warning".to_string(),
-        n => format!(", {n} warnings"),
-    }
-}
-
 fn print_warnings_summary(
     w: &mut dyn Write,
     warnings: &[proto::WarningEntry],
@@ -1912,13 +1906,6 @@ mod tests {
         let mut buf = Vec::new();
         write_teamcity_flaky(&mut buf, &[]);
         assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn warnings_part_is_worded_like_pytest() {
-        assert_eq!(super::warnings_part(0), "");
-        assert_eq!(super::warnings_part(1), ", 1 warning");
-        assert_eq!(super::warnings_part(2), ", 2 warnings");
     }
 
     #[test]

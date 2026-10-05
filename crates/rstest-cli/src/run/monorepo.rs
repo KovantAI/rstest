@@ -67,7 +67,7 @@ pub(super) fn execute_monorepo(
     let impacts: Option<Vec<mono::ChangeImpact>> = match &mono_changed {
         Some(rev) => {
             let rev = head_to_none(rev);
-            let changed = select::changed_files_from_git(rev)?;
+            let changed = select::changed_files_from_git(root, rev)?;
             let impacts =
                 mono::classify_changes(root, &projects, &changed, cli.changed_strict, sink);
             let skipped = impacts
@@ -132,7 +132,7 @@ pub(super) fn execute_monorepo(
         }
         let slug = mono::slug(root, project);
         // Only directly-changed projects narrow further; a dependent runs its
-        // full suite (its own files didn't change).
+        // full suite (its import graph cannot see the sibling's changes).
         let changed = mono_changed
             .as_deref()
             .filter(|_| impact == mono::ChangeImpact::Direct)

@@ -32,19 +32,55 @@ fn index(files: &[FileSpec]) -> CoverageIndex {
     idx
 }
 
-/// Baseline with `ids` green and each of their test files hashed to `tf_hash`.
+/// Baseline with `ids` green, each of their test files hashed to `tf_hash`
+/// and recorded with an empty import closure.
 fn base(ids: &[&str], tf_hash: &str) -> Baseline {
     let green: HashSet<String> = ids.iter().map(|s| s.to_string()).collect();
-    let test_file_hashes = green
+    let test_file_hashes: HashMap<String, String> = green
         .iter()
         .map(|id| (test_file_of(id).to_string(), tf_hash.to_string()))
+        .collect();
+    let test_imports = test_file_hashes
+        .keys()
+        .map(|tf| (tf.clone(), Vec::new()))
         .collect();
     Baseline {
         green,
         test_file_hashes,
-        test_lines: HashMap::new(),
-        test_named_hashes: HashMap::new(),
+        test_imports,
+        ..Baseline::default()
     }
+}
+
+#[test]
+fn changed_import_closure_file_is_not_skippable() {
+    // test_a covers only mod.py, but t.py imports consts.py at import time
+    // (no test owns those lines in the index). Editing it must bust.
+    let idx = index(&[("mod.py", "H", &[(1, &["t.py::test_a"])])]);
+    let mut b = base(&["t.py::test_a"], "TF");
+    b.test_imports
+        .insert("t.py".into(), vec!["consts.py".into()]);
+    b.import_hashes.insert("consts.py".into(), "C".into());
+    let live = |c: &'static str| {
+        move |rel: &str| {
+            Some(
+                match rel {
+                    "mod.py" => "H",
+                    "consts.py" => c,
+                    _ => "TF",
+                }
+                .to_string(),
+            )
+        }
+    };
+    assert!(skippable(&idx, &b, live("C")).contains("t.py::test_a"));
+    assert!(skippable(&idx, &b, live("EDITED")).is_empty());
+    // No recorded hash for a closure file: nothing vouches for it.
+    b.import_hashes.clear();
+    assert!(skippable(&idx, &b, live("C")).is_empty());
+    // No recorded closure for the test file at all: must run.
+    b.test_imports.clear();
+    assert!(skippable(&idx, &b, live("C")).is_empty());
 }
 
 /// A hash stub: test files hash to `tf`, everything else to `src`.
@@ -470,6 +506,59 @@ fn git_mode_folds_ignored_and_honors_staging() {
 }
 
 #[test]
+fn tracked_data_files_fold_into_the_fingerprint() {
+    // A data file a test reads is never measured by coverage: a tracked
+    // edit must bust, staging alone must not, and untracked outputs and
+    // runner artifacts never enter the fold.
+    let held = crate::test_env::lock();
+    let scope = git_repo(&held, "data");
+    std::fs::create_dir_all(scope.join("tests/data")).unwrap();
+    std::fs::write(scope.join("tests/data/case.json"), b"{\"n\": 1}\n").unwrap();
+    std::fs::write(scope.join("coverage.xml"), b"<x/>\n").unwrap();
+    std::fs::write(scope.join("mod.py"), b"x = 1\n").unwrap();
+    run_git(&scope, &["add", "."]);
+    run_git(&scope, &["commit", "-q", "-m", "init"]);
+    let names: Vec<String> = tracked_data_ids(&scope)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
+    assert_eq!(names, vec!["tests/data/case.json"]);
+    let cov = CovScope::default();
+    let base = config_fingerprint(&scope, &cov);
+    std::fs::write(scope.join("tests/data/case.json"), b"{\"n\": 2}\n").unwrap();
+    let edited = config_fingerprint(&scope, &cov);
+    assert_ne!(base, edited, "tracked data edit must bust");
+    run_git(&scope, &["add", "tests/data/case.json"]);
+    assert_eq!(
+        edited,
+        config_fingerprint(&scope, &cov),
+        "staging must not bust"
+    );
+    std::fs::write(scope.join("report.xml"), b"<r/>\n").unwrap();
+    std::fs::write(scope.join("coverage.xml"), b"<y/>\n").unwrap();
+    assert_eq!(
+        edited,
+        config_fingerprint(&scope, &cov),
+        "untracked outputs and coverage artifacts must not bust"
+    );
+    std::fs::remove_file(scope.join("tests/data/case.json")).unwrap();
+    assert_ne!(
+        edited,
+        config_fingerprint(&scope, &cov),
+        "deleting must bust"
+    );
+    drop(held);
+    let _ = std::fs::remove_dir_all(&scope);
+    // Outside git there is no tracked set: nothing folds (the documented gap).
+    let plain = std::env::temp_dir().join(format!("rstest-data-nogit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&plain);
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("case.json"), b"{}\n").unwrap();
+    assert!(tracked_data_ids(&plain).is_empty());
+    let _ = std::fs::remove_dir_all(&plain);
+}
+
+#[test]
 fn git_ids_match_walk_ids_in_a_repo_subdirectory() {
     // The project may sit in a SUBFOLDER of the repo (monorepo), or even be
     // ignored by a parent repo: hash-object resolves paths from the repo
@@ -803,9 +892,9 @@ fn skippable_now_hashes_live_files() {
     let green: HashSet<String> = [id.clone()].into_iter().collect();
     let baseline = Baseline {
         green,
+        test_imports: [(testrel.clone(), Vec::new())].into_iter().collect(),
         test_file_hashes: [(testrel, test_hash)].into_iter().collect(),
-        test_lines: HashMap::new(),
-        test_named_hashes: HashMap::new(),
+        ..Baseline::default()
     };
     let cfg = ConfigState {
         index_cov_args: Some(Vec::new()),

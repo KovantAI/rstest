@@ -286,8 +286,8 @@ read the guide, classify each by hand") into one command.
 It first collects the suite twice and flags test ids that differ between
 collections (a per-process address or uuid is a hard blocker, since workers
 can't agree on the test set; a timestamp may bail). If the ids are stable, it
-runs the suite at `-n auto` and sorts every parallel-only failure into one
-of six verdicts (order dependency, isolation leak, wall-clock sensitivity,
+runs the suite in parallel (at least two workers) and sorts every
+parallel-only failure into one of six verdicts (order dependency, isolation leak, wall-clock sensitivity,
 intrinsic flake, inconclusive, or not parallel-specific), names the fix for
 each, and bisects the polluting file for order and isolation failures (the
 first 3 such failures only; bisect the rest with

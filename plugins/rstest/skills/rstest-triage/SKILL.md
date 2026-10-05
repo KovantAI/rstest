@@ -54,7 +54,7 @@ after spending runs to find out.
 |---|---|---|
 | A red CI run that passes locally | `rstest replay --journal <latest.json>` | Pins the exact per-worker assignment and order CI used; recreating it by hand is guesswork |
 | One victim test that fails after others | `rstest bisect <nodeid>` | Delta-debugs the predecessor set at `-n 0` down to the minimal polluter(s), prints a repro command |
-| "Which of our tests aren't parallel-safe?" | `rstest audit` (add `--audit-repeat 5` for races) | Sweeps the suite at `-n auto` against a serial oracle, classifies each parallel-only failure, emits a paste-ready `serial` block |
+| "Which of our tests aren't parallel-safe?" | `rstest audit` (add `--audit-repeat 5` for races) | Sweeps the suite in parallel (at least two workers) against a serial oracle, classifies each parallel-only failure, emits a paste-ready `serial` block |
 | A suspicion of order dependence, no victim yet | `rstest --shuffle` | A seeded random order flushes it out; the printed seed reproduces it |
 | "Is this test flaky, and how often?" | `rstest explain <nodeid>` | Reads the caches (duration, flake/fail counts, last outcome, coverage) without running anything |
 | A hang (run never finishes, or a worker stalls) | `--timeout SECS` on the command line, plus `--stream-json` | Fails the stuck test in-process with a traceback at the stuck line and arms a backstop; the stream names the test even if the job is killed. See "Hangs" in `references/commands.md` |

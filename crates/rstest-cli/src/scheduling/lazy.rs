@@ -217,6 +217,9 @@ pub fn run_lazy_pool(
     let mut done_workers = 0usize;
     let mut restarts_left = n.max(4);
     let mut designate = 0usize;
+    // A worker died with the restart budget spent: its work moved to
+    // survivors, and anything left unrun at the end is reported as not run.
+    let mut lost_worker = false;
     // Replay journaling, as in run_pool: each worker's ordered item starts,
     // keyed by nodeid, so `rstest replay` can re-pin this schedule on the
     // eager pool. A one-worker run has no parallel schedule to reproduce.
@@ -485,36 +488,37 @@ pub fn run_lazy_pool(
                 // Collected-but-undispatched ids die with their owner's
                 // item cache; survivors re-collect the files.
                 orphaned.extend(states[idx].own_queue.drain(..));
+                // The crashed id is in `outstanding` too; drop it by identity
+                // so it never runs twice (retried below or reported failed).
+                orphaned.retain(|id| Some(id) != crashed.as_ref());
                 // Assigned-but-uncollected files go back to the queue.
                 for f in states[idx].uncollected_files.drain(..) {
                     file_queue.push_front(f);
                 }
                 let restartable = states[idx].ready && restarts_left > 0;
+                // The crashed id retries only when BOTH the rerun and the
+                // restart budgets allow (segfault-loop guard).
+                let mut report_crash = crashed;
+                if let (true, Some(id)) = (restartable, &report_crash) {
+                    let known_ok = known_flaky
+                        .is_none_or(|set| flaky_budget.contains_key(id) || set.contains(id));
+                    let used = rerun_used.entry(id.clone()).or_insert(0);
+                    if *used < budget_of(&flaky_budget, id) && known_ok {
+                        *used += 1;
+                        requeued.push_back(id.clone());
+                        report_crash = None;
+                    }
+                }
+                if let Some(id) = report_crash {
+                    let fab = orchestrator::fabricate_crash_report(id, killed_by, idx, &e);
+                    orchestrator::record_fabricated(sink, &mut run, &mut prog, Some(idx), fab);
+                }
+                // With or without a replacement, the rest is redistributed by
+                // the dispatch below; if no worker is left to run it, it is
+                // swept up as not run after the loop.
+                requeued.extend(orphaned);
                 if restartable {
                     restarts_left -= 1;
-                    let crashed_orig = crashed.clone();
-                    let mut crashed = crashed;
-                    if let Some(id) = &crashed {
-                        let known_ok = known_flaky
-                            .is_none_or(|set| flaky_budget.contains_key(id) || set.contains(id));
-                        let used = rerun_used.entry(id.clone()).or_insert(0);
-                        if *used < budget_of(&flaky_budget, id) && known_ok {
-                            *used += 1;
-                            requeued.push_back(id.clone());
-                            crashed = None;
-                        }
-                    }
-                    if let Some(id) = crashed {
-                        let fab = orchestrator::fabricate_crash_report(id, killed_by, idx, &e);
-                        prog.on_report(sink, Some(idx), &fab);
-                        sink.emit_report(Some(idx), &fab);
-                        run.record(Some(idx), fab);
-                    }
-                    requeued.extend(
-                        orphaned
-                            .into_iter()
-                            .filter(|id| Some(id) != crashed_orig.as_ref()),
-                    );
                     sink.warn(&format!(
                         "rstest: worker gw{idx} crashed; respawning \
                          ({restarts_left} restarts left)"
@@ -531,6 +535,7 @@ pub fn run_lazy_pool(
                     let worker = spawn_into(python, idx, states.len(), args, &tx, worker_env)?;
                     states[idx] = WorkerState::fresh(worker);
                 } else {
+                    lost_worker = true;
                     run.collect_error(
                         format!("<worker gw{idx}>"),
                         format!("worker terminated unexpectedly: {e:#}"),
@@ -543,17 +548,10 @@ pub fn run_lazy_pool(
                     states[idx].worker.reap();
                     done_workers += 1;
                     if idx == designate {
-                        if let Some(next) = states.iter().position(|s| !s.dead && !s.finishing) {
+                        // Promote the lowest worker still listening; with none
+                        // left the serial ids are swept up after the loop.
+                        if let Some(next) = states.iter().position(|s| !s.dead && !s.ended) {
                             designate = next;
-                        } else if !serial.is_empty() {
-                            run.collect_error(
-                                "<serial phase>".into(),
-                                format!(
-                                    "{} @serial tests lost: no worker left \
-                                     to host the serial phase",
-                                    serial.len()
-                                ),
-                            );
                         }
                     }
                     if done_workers == states.len() {
@@ -704,6 +702,36 @@ pub fn run_lazy_pool(
         }
     }
 
+    // Every worker able to run the rest died for good: report what never ran
+    // instead of dropping it from the artifacts. Ids are known for collected
+    // files; a file nobody collected can only be named as a collection error.
+    // Not after a -x/--maxfail or collection-error stop, where unrun is expected.
+    if lost_worker && !stopping {
+        let unrun: Vec<String> = requeued
+            .drain(..)
+            .chain(states.iter_mut().flat_map(|s| s.own_queue.drain(..)))
+            .chain(serial.drain(..))
+            .collect();
+        for id in unrun {
+            let fab = orchestrator::fabricate_lost_report(id, orchestrator::LOST_NO_WORKER);
+            orchestrator::record_fabricated(sink, &mut run, &mut prog, None, fab);
+        }
+        let uncollected: Vec<String> = file_queue
+            .iter()
+            .cloned()
+            .chain(
+                states
+                    .iter()
+                    .flat_map(|s| s.uncollected_files.iter().cloned()),
+            )
+            .collect();
+        for f in uncollected {
+            run.collect_error(
+                f,
+                format!("not collected: {}", orchestrator::LOST_NO_WORKER),
+            );
+        }
+    }
     // Files left uncollected (-x/--maxfail or a collection error stopped the
     // run) make `total_items` a partial count; record 0 then, which skips
     // replay's size-drift check instead of flagging a suite change.

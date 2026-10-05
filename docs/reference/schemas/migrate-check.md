@@ -40,7 +40,7 @@ Envelope metadata shared by the migrate documents.
 
 ### ParallelReport
 
-Result of the `-n auto` parallel phase. Fields other than `ran` are absent when the phase did not actually run to completion.
+Result of the parallel phase. Fields other than `ran` are absent when the phase did not actually run to completion.
 
 | Field | Type | Required | Description |
 |---|---|---|---|

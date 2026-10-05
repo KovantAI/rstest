@@ -3,7 +3,7 @@
 `rstest --changed` runs only the tests affected by your changes instead of the
 whole suite: the fast inner-loop and per-commit-CI gate. Changes come from git
 (working tree + untracked vs `HEAD`, or vs a `REV` like `--changed=origin/main`
-in CI).
+in CI), across the whole project whichever subdirectory you start it from.
 
 Two selection engines back it, and rstest picks the tightest one available:
 
@@ -18,8 +18,9 @@ the index warm.
 With no coverage index, `--changed` maps each changed `.py` file through the
 project's import graph to every test file that could reach it, and runs those.
 It is conservative by construction: ambiguous module names select every
-match, function-local imports still count as edges, a changed `conftest.py`
-selects its whole subtree (so does a change to any module a `conftest.py`
+match, function-local imports still count as edges, a deleted or renamed
+module selects the tests that imported it, a changed `conftest.py` selects its
+whole subtree (so does a change to any module a `conftest.py`
 imports, directly or through other modules), and any config or non-Python
 change falls back to a full run. The one documented gap is dynamic imports
 (`importlib.import_module`), which produce no edges; use
