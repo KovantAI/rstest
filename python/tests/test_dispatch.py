@@ -476,12 +476,24 @@ def test_eager_runtestloop_node_down_triggers_foreign_cleanup(monkeypatch):
 # ── LazyDispatchPlugin ──────────────────────────────────────────────────────
 
 
+def _lazy_collection_session(config, *, testscollected=0, items=None):
+    """A session stub for LazyDispatchPlugin.pytest_collection, which wraps
+    the session's collector-building methods."""
+    return SimpleNamespace(
+        testscollected=testscollected,
+        items=items if items is not None else [],
+        config=config,
+        _collect_path=lambda path, path_cache: (),
+        _collect_one_node=lambda node, handle_dupes=True: (None, False),
+    )
+
+
 def test_lazy_collection_announces_ready_and_short_circuits():
     conn = FakeConn()
-    session = SimpleNamespace(
+    session = _lazy_collection_session(
+        SimpleNamespace(cache=SimpleNamespace(_cachedir="/c"), rootpath="/r"),
         testscollected=1,
         items=[1],
-        config=SimpleNamespace(cache=SimpleNamespace(_cachedir="/c"), rootpath="/r"),
     )
     assert LazyDispatchPlugin(conn).pytest_collection(session) is True
     assert session.testscollected == 0 and session.items == []
@@ -490,9 +502,53 @@ def test_lazy_collection_announces_ready_and_short_circuits():
 
 def test_lazy_collection_without_cache():
     conn = FakeConn()
-    session = SimpleNamespace(testscollected=0, items=[], config=SimpleNamespace(cache=None))
+    session = _lazy_collection_session(SimpleNamespace(cache=None))
     LazyDispatchPlugin(conn).pytest_collection(session)
     assert conn.sent == [("lazy_ready", {})]
+
+
+class _FakeDir(pytest.Directory):
+    def collect(self):
+        return []
+
+
+def _fake_dir(nodeid):
+    # Bypass Node construction (needs a real parent/session); only the
+    # nodeid and the Directory type matter here.
+    d = object.__new__(_FakeDir)
+    d._nodeid = nodeid
+    return d
+
+
+def test_lazy_collection_shares_directory_nodes_across_collects():
+    # Each perform_collect builds fresh Dir/Package nodes; the wrapped
+    # collectors must hand back the first node seen per nodeid (package
+    # scope, conftest autouse and SetupState compare by identity), while
+    # non-directory nodes and failed reports pass through untouched.
+    first_root, second_root = _fake_dir("tests"), _fake_dir("tests")
+    first_pkg, second_pkg = _fake_dir("tests/pkg"), _fake_dir("tests/pkg")
+    module = SimpleNamespace(nodeid="tests/pkg/test_a.py")
+    roots = iter([(first_root,), (second_root,)])
+    reports = iter(
+        [
+            SimpleNamespace(passed=True, result=[first_pkg]),
+            SimpleNamespace(passed=True, result=[second_pkg, module]),
+            SimpleNamespace(passed=False, result=[_fake_dir("tests/pkg")]),
+        ]
+    )
+    session = _lazy_collection_session(SimpleNamespace(cache=None))
+    session._collect_path = lambda path, path_cache: next(roots)
+    session._collect_one_node = lambda node, handle_dupes=True: (next(reports), False)
+    LazyDispatchPlugin(FakeConn()).pytest_collection(session)
+
+    assert session._collect_path("tests", {}) == [first_root]
+    assert session._collect_path("tests", {})[0] is first_root
+    rep, dup = session._collect_one_node(first_root)
+    assert rep.result[0] is first_pkg and dup is False
+    rep, _ = session._collect_one_node(first_root, False)
+    assert rep.result[0] is first_pkg and rep.result[1] is module
+    rep, _ = session._collect_one_node(first_root)
+    assert rep.result[0] is not first_pkg  # failed report left alone
 
 
 def test_lazy_collect_file_reports_ids_serial_and_flaky():

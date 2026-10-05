@@ -83,10 +83,9 @@ the rest of this page describes `dots`. On a single worker with no
   (after its captured output, as pytest does) and `--tb=no` prints no
   failure block at all.
 - The **summary line** uses pytest's accounting: the counts match what
-  pytest would print for the same run, including warnings and the
-  `deselected` count, with one exception at `-n 2` or more: a test whose
-  teardown errors counts only as an error (pytest also counts its call
-  outcome).
+  pytest would print for the same run, in pytest's order, including
+  warnings, the `deselected` count, and a teardown error counted as an error
+  on top of the test's call outcome.
 
 The live footer described above belongs to the `bar` view on a terminal;
 it is disabled automatically when output is piped, in CI (a `CI` variable,

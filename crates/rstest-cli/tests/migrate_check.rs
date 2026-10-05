@@ -161,7 +161,7 @@ fn uuid_id_is_a_will_bail_blocker() {
 #[test]
 fn preexisting_failure_is_not_a_parallelism_issue() {
     // A test that fails deterministically (serial too) is a pre-existing bug,
-    // not a parallelism finding: it drives phase 2 (-n auto), the discriminator
+    // not a parallelism finding: it drives phase 2 (parallel), the discriminator
     // runs, and the NotParallel verdict, then the "ready + preexisting" summary.
     let Some(venv) = pytest_env() else { return };
     let dir = fresh_dir("pre");
@@ -211,13 +211,13 @@ fn time_stamped_id_is_a_may_bail_not_a_blocker() {
 #[test]
 fn concurrent_resource_race_is_a_parallel_only_finding() {
     // Several files whose one test each binds the SAME fixed port and holds it
-    // briefly. Serial (-n 0): no overlap, all pass. Under -n auto: files land on
+    // briefly. Serial (-n 0): no overlap, all pass. In parallel: files land on
     // different workers, run concurrently, and collide on the port -> a
     // parallel-only failure. This exercises the full phase-2 report: the
     // discriminator runs, the per-test classification, the polluter bisect
     // (concurrent races are not serially reproducible), the JSON findings doc,
-    // and the allow-list gate. Multiple FILES are required: `-n auto` never uses
-    // more workers than test files, so a one-file suite would stay serial.
+    // and the allow-list gate. Multiple FILES are required: a worker is
+    // seeded with two items, so one or two tests would share a worker.
     let Some(venv) = pytest_env() else { return };
     let dir = fresh_dir("race");
     let body = "import socket, time\n\
@@ -260,6 +260,30 @@ fn concurrent_resource_race_is_a_parallel_only_finding() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn warm_duration_cache_still_checks_on_two_workers() {
+    // A9: phase 2 ran at `-n auto`, which caps by the duration cache. Once a
+    // run had warmed it, this tiny suite got one worker, where the test
+    // passes, and migrate-check reported the suite ready.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("warm");
+    for i in 0..2 {
+        std::fs::write(
+            dir.join(format!("test_iso_{i}.py")),
+            "import os\n\ndef test_needs_serial():\n    \
+             assert 'RSTEST_WORKER_ID' not in os.environ\n",
+        )
+        .unwrap();
+    }
+    let (warm_code, warm) = run(&venv, &dir, &["-n", "0"]);
+    assert_eq!(warm_code, 0, "the serial warm-up run should pass\n{warm}");
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.contains("running -n 2 to check"), "{out}");
+    assert_eq!(code, 1, "a warm cache must not hide the failures\n{out}");
+    assert!(out.contains("fail only under parallelism"), "{out}");
 }
 
 #[test]

@@ -22,6 +22,7 @@ that first with `rstest -n 0 NODEID`.
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -63,10 +64,10 @@ def victim_fails(rstest, tests, nodeid, extra):
             f"error: rstest exited {proc.returncode}\n{proc.stdout[-2000:]}{proc.stderr[-2000:]}"
         )
     # Only the victim's own outcome counts; a predecessor failing is not a repro.
-    for line in proc.stdout.splitlines():
-        if line.startswith("FAILED ") and line.split()[1] == nodeid:
-            return True
-    return False
+    # A setup/teardown failure reports as ERROR, and a nodeid may contain spaces
+    # (`test_x[a b]`), so match the whole id up to the " - reason" separator.
+    victim = re.compile(rf"^(?:FAILED|ERROR) {re.escape(nodeid)}(?: - |$)", re.MULTILINE)
+    return victim.search(proc.stdout) is not None
 
 
 def ddmin(rstest, tests, nodeid, extra):

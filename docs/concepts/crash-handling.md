@@ -52,9 +52,15 @@ kill counts against the same restart cap below. Hangs outside a test
 ## Budgets
 
 Total restarts per run are capped (`max(workers, 4)`). Past the cap, a
-dead worker is reported as an internal error with its remaining tests
-listed as lost: a crash-loop ends loudly rather than spinning. Crashes
-during collection are not restarted (an import-time crash would recur).
+dead worker is not replaced and is reported as an internal error (exit 3):
+a crash-loop ends loudly rather than spinning. Its in-flight test still
+fails as in step 1, and its other tests move to the surviving workers as in
+step 2. A test that no worker is left to run is reported as an error with a
+"not run" message, so every test still appears in the summary, junit and
+report-json. Under `--dist each` and `rstest replay` a worker's tests are
+bound to it, so a dead worker's remaining tests are reported "not run"
+directly. Crashes during collection are not restarted (an import-time crash
+would recur).
 
 ## Cleanup hooks and the serial phase
 
@@ -65,8 +71,8 @@ ordering caveat with deterministic idents: [xdist hook
 emulation](xdist-hooks.md)). Under `--collect lazy` it does not run, and
 the dead worker's per-worker resources are left behind. If the
 crashed worker was the designated serial-phase host, the lowest
-surviving worker is promoted; if none can host it, the run reports the
-serial tests as lost rather than silently dropping them.
+surviving worker is promoted; if none can host it, the run reports each
+serial test as "not run" rather than silently dropping it.
 
 ## Exit codes
 

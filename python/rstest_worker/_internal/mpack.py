@@ -118,7 +118,8 @@ def _pack(out: bytearray, obj: object) -> None:
             data = obj.encode("utf-8")
         except UnicodeEncodeError:
             # A lone surrogate (os.fsdecode of a non-UTF-8 path) has no UTF-8
-            # form; escape it rather than kill the worker mid-report.
+            # form; escape it rather than kill the worker mid-report. Not
+            # surrogatepass: the Rust side rejects invalid UTF-8.
             data = obj.encode("utf-8", _UNICODE_ERRORS)
         n = len(data)
         if n <= 0x1F:  # fixstr

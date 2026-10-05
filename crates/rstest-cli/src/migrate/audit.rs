@@ -1,5 +1,6 @@
-//! `rstest audit`: the one-command parallel-safety check. Runs the suite under
-//! `-n auto` (optionally repeated, since parallel flakiness is probabilistic),
+//! `rstest audit`: the one-command parallel-safety check. Runs the suite in
+//! parallel on at least two workers (optionally repeated, since parallel
+//! flakiness is probabilistic),
 //! classifies every test that fails *only* in parallel against the `-n 0`
 //! oracle, and emits a ready-to-paste `@pytest.mark.serial` fix-list.
 //!
@@ -137,7 +138,7 @@ fn merge_worst(acc: &mut Outcomes, run: Outcomes) {
     }
 }
 
-/// Run the parallel-safety audit. Exit code: 0 = clean under `-n auto`, 1 = at
+/// Run the parallel-safety audit. Exit code: 0 = clean in parallel, 1 = at
 /// least one parallel-only failure (serial-fixable, intrinsic flake or
 /// inconclusive), 2 = the
 /// parallel run produced no snapshot to diff.
@@ -155,8 +156,9 @@ pub fn run_audit(
     if let Some(path) = json_path {
         crate::reporting::write_output(path, serde_json::to_string_pretty(&not_run_doc())?)?;
     }
+    let n = super::parallel_n();
     sink.warn(&format!(
-        "rstest audit: running -n auto {runs}× to surface parallel-only failures…"
+        "rstest audit: running -n {n} {runs}× to surface parallel-only failures…"
     ));
     // Lift -x/--maxfail (last wins, so after the user's args and addopts): a
     // parallel pass cut short at the first failure would audit only part of
@@ -167,7 +169,6 @@ pub fn run_audit(
         .chain([MAXFAIL_LIFT.to_string()])
         .collect();
     let mut par = Outcomes::new();
-    let n = super::parallel_n();
     for _ in 0..runs {
         // No report at all means the child refused to dispatch; a report with
         // zero tests (e.g. a `-m` that matches nothing) is handled below.
@@ -225,7 +226,7 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
     sink.out_line("\n================= rstest audit =================");
     if b.parallel_safe() {
         sink.out_line(&format!(
-            "  ✓ parallel-safe: all {tests} tests that pass at -n 0 also pass at -n auto."
+            "  ✓ parallel-safe: all {tests} tests that pass at -n 0 also pass in parallel."
         ));
         if preexisting > 0 {
             sink.out_line(&format!(
@@ -239,7 +240,7 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
 
     if !serial.is_empty() {
         sink.out_line(&format!(
-            "  ⚠ {} test(s) pass serially but fail under -n auto — mark them serial:\n",
+            "  ⚠ {} test(s) pass serially but fail in parallel — mark them serial:\n",
             serial.len()
         ));
         for (nodeid, v) in serial {
@@ -300,7 +301,7 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
 
     if !inconclusive.is_empty() {
         sink.out_line(&format!(
-            "\n  {} test(s) are INCONCLUSIVE: they failed under -n auto but did not run in \
+            "\n  {} test(s) are INCONCLUSIVE: they failed in parallel but did not run in \
              the -n 0 / loadfile follow-up runs, so they can't be classified:",
             inconclusive.len()
         ));
@@ -334,7 +335,7 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct AuditDoc {
-    /// Tests that failed under `-n auto` but did not run in the follow-up
+    /// Tests that failed in the parallel pass but did not run in the follow-up
     /// runs, so could not be classified. They still fail the gate.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "Vec<String>"))]
@@ -357,7 +358,7 @@ pub struct AuditDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "usize"))]
     pub preexisting_failures: Option<usize>,
-    /// Whether the `-n auto` pass produced a run to audit.
+    /// Whether the parallel pass produced a run to audit.
     pub ran: bool,
     /// Tests fixable by pinning them to `@pytest.mark.serial`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -429,7 +430,7 @@ fn audit_doc(tests: usize, b: &Buckets) -> AuditDoc {
     }
 }
 
-/// The `--audit-json` envelope when the `-n auto` pass produced no run.
+/// The `--audit-json` envelope when the parallel pass produced no run.
 pub fn not_run_doc() -> AuditDoc {
     AuditDoc {
         inconclusive: None,
@@ -603,7 +604,7 @@ mod tests {
         let (code, out) = render(5, &b);
         assert_eq!(code, 1);
         assert!(
-            out.contains("3 test(s) pass serially but fail under -n auto"),
+            out.contains("3 test(s) pass serially but fail in parallel"),
             "{out}"
         );
         assert!(

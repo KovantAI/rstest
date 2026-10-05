@@ -30,6 +30,29 @@ from _harness import (
     read_e2e_rows,
 )
 
+LAZY_PKG_CONFTEST = """
+import pytest
+
+@pytest.fixture(scope="package")
+def pkg_setups(request):
+    request.config._pkg_setups = getattr(request.config, "_pkg_setups", 0) + 1
+    return request.config._pkg_setups
+
+@pytest.fixture(autouse=True)
+def pkg_auto():
+    pass
+"""
+
+LAZY_PKG_TEST = """
+def test_a(pkg_setups, request):
+    assert pkg_setups == 1
+    assert "pkg_auto" in request.fixturenames
+
+def test_b(pkg_setups, request):
+    assert pkg_setups == 1
+    assert "pkg_auto" in request.fixturenames
+"""
+
 
 def gate_lazy_collection(g, args, binary):
     print("== lazy collection ==")
@@ -61,6 +84,19 @@ def gate_lazy_collection(g, args, binary):
         "lazy: session fixture once per worker",
         "3 passed" in r.stdout and "failed" not in r.stdout,
         r.stdout[-300:],
+    )
+    # Each file is its own perform_collect; the package node must be shared
+    # across them, or its fixtures rerun per file and the conftest's autouse
+    # fixtures stop applying after a worker's first file.
+    g.write("lazypkg/pkg/__init__.py", "")
+    g.write("lazypkg/pkg/conftest.py", LAZY_PKG_CONFTEST)
+    for i in range(6):
+        g.write(f"lazypkg/pkg/test_{i}.py", LAZY_PKG_TEST)
+    r = g.run("lazypkg", "-n", "2", "--collect", "lazy")
+    check(
+        "lazy: package fixture once per worker, autouse on every file",
+        "12 passed" in r.stdout and "failed" not in r.stdout,
+        r.stdout[-600:],
     )
     r = g.run("empty", "--collect", "lazy", "-n", "2")
     check("lazy: no tests exit 5", r.returncode in (4, 5), f"rc={r.returncode}")
@@ -494,6 +530,25 @@ def gate_duration_regression_gate(g, args, binary):
         and "1 duration regression" in r.stderr,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-150:],
     )
+    # Editing the test file stales its scheduling timings, but the gate still
+    # compares against them, so --require-baseline must accept that baseline.
+    with open(ddir / "test_d.py", "a") as f:
+        f.write("\n# edited\n")
+    r = g.run(
+        ".",
+        "-n",
+        "2",
+        "--durations-regress",
+        "2.0",
+        "--require-baseline",
+        cwd=ddir,
+        env_extra={"DREG_SLEEP": "0.1"},
+    )
+    check(
+        "durations-regress: require-baseline accepts an edited file's baseline",
+        r.returncode == 0 and "no regressions" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-200:],
+    )
 
 
 def gate_native_timeout(g, args, binary):
@@ -750,6 +805,92 @@ def gate_crash_restart_exhaustion(g, args, binary):
         r.returncode == 3 and "terminated unexpectedly" in (r.stdout + r.stderr),
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
     )
+
+    # After the budget is spent, a dead worker's in-flight test is reported
+    # failed and its queued tests move to the survivors; with no survivor
+    # left they are reported as not run. Every test id must reach the report
+    # and junit either way, eager and lazy.
+    def outcomes(suite, n, collect):
+        tag = f"{suite}_{collect}"
+        rj, xp = g.tmp / f"budget_{tag}.json", g.tmp / f"budget_{tag}.xml"
+        r = g.run(
+            suite,
+            "-n",
+            str(n),
+            "--collect",
+            collect,
+            "--report-json",
+            str(rj),
+            "--junitxml",
+            str(xp),
+            timeout=90,
+        )
+        tests = json.loads(rj.read_text(encoding="utf-8"))["tests"]
+
+        # pytest buckets: a setup failure with no call is an error (not run).
+        def bucket(v):
+            if v.get("setup") == "failed" and "call" not in v:
+                return "errors"
+            return v.get("call")
+
+        got = {k.split("::")[-1]: bucket(v) for k, v in tests.items()}
+        cases = {tc.get("name") for tc in ET.parse(xp).getroot().iter("testcase")}
+        return r, got, cases
+
+    # 6 crashers at -n 4: each crashes once (no reruns), so 4 respawns, then
+    # exactly 2 workers die for good and the other 2 finish the suite. Spread
+    # over 6 files: lazy mode runs at most one worker per file.
+    def crash_files(suite, crashers, ok, nfiles):
+        body = [
+            "import os\n"
+            + "".join(f"def {t}(): os._exit(1)\n" for t in crashers[k::nfiles])
+            + "".join(f"def {t}(): pass\n" for t in ok[k::nfiles])
+            for k in range(nfiles)
+        ]
+        for k, text in enumerate(body):
+            g.write(f"{suite}/test_f{k}.py", text)
+
+    survivors = {f"test_ok{i}" for i in range(30)}
+    crashers = {f"test_k{i}" for i in range(6)}
+    crash_files("crashsurv", sorted(crashers), sorted(survivors), 6)
+    for collect in ("full", "lazy"):
+        r, got, cases = outcomes("crashsurv", 4, collect)
+        check(
+            f"budget spent ({collect}): survivors run every queued test",
+            set(got) == survivors | crashers
+            and all(got[t] == "passed" for t in survivors)
+            and all(got[t] == "failed" for t in crashers),
+            f"rc={r.returncode} missing={sorted((survivors | crashers) - set(got))} {got}",
+        )
+        check(
+            f"budget spent ({collect}): junit has every test",
+            cases == survivors | crashers,
+            f"missing={sorted((survivors | crashers) - cases)}",
+        )
+        check(f"budget spent ({collect}): exit 3", r.returncode == 3, f"rc={r.returncode}")
+
+    # 10 crashers at -n 2: 6 crashes (4 respawns + 2 deaths), then nobody is
+    # left for the other 4, which are reported as not run (errors).
+    everything = {f"test_k{i:02d}" for i in range(1, 11)}
+    crash_files("crashnone", sorted(everything), [], 2)
+    for collect in ("full", "lazy"):
+        r, got, cases = outcomes("crashnone", 2, collect)
+        vals = sorted(got.values())
+        check(
+            f"no survivors ({collect}): every test reported, 6 crashed + 4 not run",
+            set(got) == everything and vals == ["errors"] * 4 + ["failed"] * 6,
+            f"rc={r.returncode} {got}",
+        )
+        check(
+            f"no survivors ({collect}): junit has every test",
+            cases == everything,
+            f"missing={sorted(everything - cases)}",
+        )
+        check(
+            f"no survivors ({collect}): not-run tests say why",
+            "not run: every worker" in r.stdout,
+            r.stdout[-400:],
+        )
 
 
 def gate_order_fail_fast(g, args, binary):
