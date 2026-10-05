@@ -138,7 +138,8 @@ Feature: Daily local developer
       And stdout contains "1 failed, 1 passed"
       And lastfailed matches the pytest oracle twin's
       When I run "rstest -n 2 -q --report-json dv-lf-ff.json --ff" and the pytest oracle runs "pytest -q -p no:randomly --ff" in the twin
-      Then the first test the order log recorded is "tests/test_m4.py::test_4_1"
+      # Dispatch order, not start time (see --nf below).
+      Then some worker's replay-journal assignment starts with "tests/test_m4.py::test_4_1"
       And stdout contains "1 failed, 9 passed"
       And lastfailed matches the pytest oracle twin's
       When I add "tests/test_new.py" to the project and its twin, containing:
