@@ -42,6 +42,12 @@ outputs that have one, see [Output schemas](output-schemas.md).
 }
 ```
 
+`meta.counts` follows pytest's terminal accounting, which counts phase
+reports rather than tests: a test that passes and then errors in teardown
+adds 1 to `passed` and 1 to `errors`, and an xfail test's teardown error
+adds to `xfailed`. The keys can therefore sum to more than the number of
+tests.
+
 !!! warning "`meta.argv` is the full command line"
     `meta.argv` records rstest's command line verbatim. A credential on it,
     such as a password in a `--cache-remote https://user:pass@host/...` URL,

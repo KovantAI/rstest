@@ -219,6 +219,17 @@ def test_pure_decoder_rejects_unsupported_type_byte():
         next(iter(up))
 
 
+# A lone surrogate, as os.fsdecode yields for a non-UTF-8 filename in an
+# exception message. Strict UTF-8 encoding raised and crashed the worker.
+LONE_SURROGATE = "bad\udcff.txt"
+
+
+def test_pure_packb_backslashreplaces_lone_surrogate():
+    # backslashreplace, not surrogatepass: the result must be valid UTF-8 for
+    # rmp_serde on the Rust side.
+    assert _pure_roundtrip(LONE_SURROGATE) == "bad\\udcff.txt"
+
+
 # ---- msgpack-backed wrappers ------------------------------------------------
 # The compiled backend, when present, is what `packb`/`Unpacker` actually bind
 # to; cover its thin adapter directly (independent of which backend is active).
@@ -229,6 +240,16 @@ def test_msgpack_packb_and_unpacker_roundtrip():
     up = mpack._MsgpackUnpacker()
     up.feed(mpack._msgpack_packb(SAMPLE))
     assert next(iter(up)) == SAMPLE
+
+
+@pytest.mark.skipif(_msgpack is None, reason="msgpack not installed")
+def test_msgpack_packb_backslashreplaces_lone_surrogate():
+    # Same policy as the pure encoder, byte for byte.
+    packed = mpack._msgpack_packb(LONE_SURROGATE)
+    assert packed == mpack._pure_packb(LONE_SURROGATE)
+    up = mpack._MsgpackUnpacker()
+    up.feed(packed)
+    assert next(iter(up)) == "bad\\udcff.txt"
 
 
 @pytest.mark.skipif(_msgpack is None, reason="msgpack not installed")

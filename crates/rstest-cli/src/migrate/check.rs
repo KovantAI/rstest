@@ -8,7 +8,8 @@
 //! ordered list. Each session is a fresh interpreter, so an unset
 //! `PYTHONHASHSEED` gives each its own random seed, exactly like the pool's
 //! workers.
-//! Then runs `-n auto` and classifies any parallel-only failures.
+//! Then runs the suite in parallel (at least two workers) and classifies any
+//! parallel-only failures.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -57,7 +58,7 @@ pub struct MigrateMeta {
     pub schema: u32,
 }
 
-/// Result of the `-n auto` parallel phase. Fields other than `ran` are absent
+/// Result of the parallel phase. Fields other than `ran` are absent
 /// when the phase did not actually run to completion.
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -295,15 +296,18 @@ pub fn run_migrate_check(
         return finish(false, None, if blocking > 0 { 1 } else { 0 });
     }
 
-    // Phase 2: run -n auto and classify any parallel-only failures.
-    sink.warn("rstest migrate-check: running -n auto to check parallel behaviour…");
+    // Phase 2: run in parallel and classify any parallel-only failures.
+    let n = super::parallel_n();
+    sink.warn(&format!(
+        "rstest migrate-check: running -n {n} to check parallel behaviour…"
+    ));
     // Lift -x/--maxfail so the parallel pass covers the whole suite (see audit).
     let par_args: Vec<String> = args
         .iter()
         .cloned()
         .chain([MAXFAIL_LIFT.to_string()])
         .collect();
-    let par = run_session(python, &["-n", &super::parallel_n()], &par_args)?;
+    let par = run_session(python, &["-n", &n], &par_args)?;
     if par.is_empty() {
         sink.out_line(
             "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
@@ -313,7 +317,7 @@ pub fn run_migrate_check(
     let verdicts = classify_failures(python, args, &par, 1, sink)?;
     if verdicts.is_empty() {
         sink.out_line(&format!(
-            "PARALLEL: ready — {} tests pass at -n auto.",
+            "PARALLEL: ready — {} tests pass in parallel.",
             par.len()
         ));
         return finish(true, Some(ParallelReport::ready(0)), 0);
@@ -331,7 +335,7 @@ pub fn run_migrate_check(
         .collect();
 
     if migration.is_empty() {
-        sink.out_line("PARALLEL: ready — every test that passes at -n 0 also passes at -n auto.");
+        sink.out_line("PARALLEL: ready — every test that passes at -n 0 also passes in parallel.");
         if preexisting > 0 {
             sink.out_line(&format!(
                 "  ({preexisting} test(s) already fail at -n 0 — pre-existing, not a parallelism \

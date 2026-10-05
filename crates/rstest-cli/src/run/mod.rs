@@ -92,9 +92,11 @@ fn apply_selection(
         // Coverage-aware selection: uses the line->test index when it is warm
         // (any --cov-context=test run writes it), else falls back per-file to
         // import-graph reachability, so --changed only ever gets tighter.
-        let changes = select::changed_line_ranges(rev)?;
+        // Paths are rootdir-relative and cover the whole project, whichever
+        // subdirectory rstest was started from.
+        let changes = select::changed_line_ranges(&project.rootdir, rev)?;
         // Coverage-map health, for the "of K mapped" ratio and the cold-map hint.
-        let mapped = select::mapped_test_count();
+        let mapped = select::mapped_test_count(&project.rootdir);
         let selection = select::affected_with_coverage(
             &project.rootdir,
             &project,
@@ -144,10 +146,14 @@ fn apply_selection(
                 }
                 // Nothing affected since the last green run is itself a green
                 // outcome: advance the baseline to HEAD so unrelated commits
-                // don't force a re-run next time.
+                // don't force a re-run next time. Clean tree only: uncommitted
+                // edits can mask a red HEAD (a local revert of a bad commit
+                // diffs as "nothing changed" against the old baseline).
                 if since_green {
                     if let Some(h) = &head {
-                        incremental::record_green(&cwd, h, env_fp);
+                        if !incremental::record_green_if_clean(&cwd, h, env_fp) {
+                            sink.warn(incremental::DIRTY_TREE_NOTICE);
+                        }
                     }
                 }
                 // Strict gating still wins on the exit code: it needs to
@@ -185,8 +191,7 @@ fn apply_selection(
                         tests.len()
                     )),
                 }
-                let mut selected: Vec<String> =
-                    tests.iter().map(|t| t.display().to_string()).collect();
+                let mut selected = select::targets_as_args(&project.rootdir, &cwd, &tests);
                 // Keep the user's flags; drop any explicit path args in
                 // favor of the selection.
                 selected.extend(crate::cli::without_path_args(&args));
@@ -808,7 +813,11 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     // report it the way `main` would and exit 2, their "couldn't run" code.
     let verdict = matches!(
         command,
-        Command::Try | Command::MigrateCheck | Command::Audit | Command::Bisect { .. }
+        Command::Try
+            | Command::MigrateCheck
+            | Command::XdistRemovalCheck
+            | Command::Audit
+            | Command::Bisect { .. }
     );
     let code = match result {
         Err(e) if verdict => {
@@ -843,6 +852,13 @@ fn record_verdict_error(cli: &Cli, command: &crate::cli::Command, e: &anyhow::Er
         }
         Command::MigrateCheck => {
             if let Some(path) = cli.migrate_check_json.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        // A stale `"ready": true` would let a CI gate uninstall pytest-xdist
+        // on the strength of a run that never happened.
+        Command::XdistRemovalCheck => {
+            if let Some(path) = cli.xdist_removal_json.as_deref() {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -1008,7 +1024,7 @@ fn check_require_baseline(cli: &Cli, passthrough: bool) -> Result<()> {
     if cli.require_baseline
         && cli.durations_regress.is_some()
         && !passthrough
-        && durations::load().is_empty()
+        && durations::load_baseline().is_empty()
     {
         anyhow::bail!(
             "--require-baseline: --durations-regress needs a duration baseline in \
@@ -2613,14 +2629,14 @@ fn fold_run_event(
 mod tests {
     use super::{
         attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
-        check_order_shuffle, collect_lazy, dispatch_command, fold_run_event, head_to_none,
-        incremental_config, lazy_layout_fits, lazy_should_steal, mark_session_flaky,
-        names_a_selection, names_existing_path, order_ignored_warning, parse_duration_secs,
-        parse_numprocesses, reject_looponfail, requests_doctests, resolve_changed_base,
-        resolve_order, resolve_retention_policy, resolve_shard, resolve_shuffle_seed,
-        run_cache_compact, silent_master_plugin_warnings, validate_cache_flags,
-        warn_incremental_conflicts, warn_quarantine_passthrough, warn_windows_timeout,
-        DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
+        check_order_shuffle, check_require_baseline, collect_lazy, dispatch_command,
+        fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
+        mark_session_flaky, names_a_selection, names_existing_path, order_ignored_warning,
+        parse_duration_secs, parse_numprocesses, reject_looponfail, requests_doctests,
+        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
+        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
+        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -3406,6 +3422,32 @@ mod tests {
         );
         // A bad duration flag is a hard error, never a silent fold-all.
         assert!(resolve_retention_policy(None, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn require_baseline_accepts_the_baseline_the_regress_gate_uses() {
+        // B11: an edited test file stales its scheduling timing (`load` prunes
+        // it), but `--durations-regress` still compares against it, so
+        // `--require-baseline` must not call that a cold cache.
+        let held = test_env::lock();
+        let dir =
+            std::env::temp_dir().join(format!("rstest-require-baseline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = test_env::set_var(&held, "RSTEST_CACHE", &dir);
+        let cli = Cli::parse_from(["rstest", "--durations-regress", "2", "--require-baseline"]);
+        // Cold: no durations.json at all.
+        assert!(check_require_baseline(&cli, false).is_err());
+        // Passthrough runs no gate, so there is nothing to require.
+        assert!(check_require_baseline(&cli, true).is_ok());
+        std::fs::write(
+            dir.join("durations.json"),
+            br#"{"gone.py::t":{"secs":1.0,"src":"rstest-no-such-dir/gone.py","hash":"00"}}"#,
+        )
+        .unwrap();
+        assert!(crate::scheduling::durations::load().is_empty());
+        assert!(check_require_baseline(&cli, false).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

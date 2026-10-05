@@ -138,6 +138,8 @@ def gate_monorepo(g, args, binary):
         '[project]\nname = "pkg-b"\ndependencies = ["pkg-a"]\n\n[tool.pytest.ini_options]\n',
     )
     g.write("monochg/libs/b/test_b.py", "def test_b(): pass\n")
+    # untested helper: editing it alongside pkg-a must not narrow libs/b
+    g.write("monochg/libs/b/y.py", "Y = 1\n")
     g.write(
         "monochg/libs/c/pyproject.toml",
         '[project]\nname = "pkg-c"\ndependencies = []\n\n[tool.pytest.ini_options]\n',
@@ -173,6 +175,16 @@ def gate_monorepo(g, args, binary):
     sec_b = section(r.stdout, "libs/b")
     check(
         "mono: dependent project runs full",
+        "1 passed" in sec_b and "no tests affected" not in sec_b,
+        sec_b[-300:],
+    )
+    # own change + changed dependency: libs/b's tests exercise pkg-a's
+    # change, so its own edit must not narrow it to tests of y.py (none)
+    (cm / "libs/b/y.py").write_text("Y = 2\n")
+    r = g.run("-n", "2", "--changed", cwd=cm)
+    sec_b = section(r.stdout, "libs/b")
+    check(
+        "mono: direct project with changed dependency runs full",
         "1 passed" in sec_b and "no tests affected" not in sec_b,
         sec_b[-300:],
     )

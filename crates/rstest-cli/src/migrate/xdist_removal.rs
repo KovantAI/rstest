@@ -193,8 +193,9 @@ fn probe(python: &Path) -> Option<Probe> {
 }
 
 /// Run the check. Exit code: 0 = pytest-xdist can go, 1 = at least one
-/// blocking finding (or a failed trial). `allow` holds location substrings
-/// that are reported but don't fail the gate.
+/// blocking finding (or a failed trial). An `Err` is an rstest error, which
+/// the dispatcher turns into exit 2 like the other verdict commands. `allow`
+/// holds location substrings that are reported but don't fail the gate.
 pub fn run_xdist_removal_check(
     python: &Path,
     args: &[String],
@@ -336,7 +337,7 @@ pub fn run_xdist_removal_check(
             trial: trial_report,
             xdist_version,
         };
-        std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+        crate::reporting::write_output(path, serde_json::to_string_pretty(&doc)?)?;
     }
     Ok(if ready { 0 } else { 1 })
 }

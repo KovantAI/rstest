@@ -10,6 +10,17 @@
 //! config) disables skipping wholesale, and an in-place dependency upgrade is
 //! the known gap shared with `--changed` (bust by deleting the cache file).
 //!
+//! Two more coverage-invisible inputs are guarded:
+//! - import-time code. A module-level constant runs while the test module is
+//!   imported, under coverage's empty context, so no test owns those lines.
+//!   Each green test file's transitive import closure (package `__init__`s
+//!   included) is recorded with content hashes ([`test_import_closures`]); a
+//!   change to any of them re-runs that file's tests.
+//! - data files. Every git-tracked non-Python file folds into the config
+//!   fingerprint ([`tracked_data_ids`]), so editing a fixture a test reads
+//!   busts skipping wholesale. Untracked/ignored files, and every non-Python
+//!   file outside a git checkout, remain a documented gap.
+//!
 //! One more coverage-invisible gap, now CLOSED: FIRST-PARTY source coverage
 //! doesn't MEASURE. A narrowed `--cov=<pkg>` (on the CLI, in `addopts`, or via
 //! the coverage config's `source`), an `include`, or an `omit` leaves some
@@ -52,7 +63,10 @@ pub const FILE: &str = "incremental_outcomes.json";
 // source line; an older schema-1 store reads as absent (one full run to rebuild).
 // Schema 3 added `test_named_hashes`: a schema-2 store never guarded shared
 // test-named helpers, so it must not seed a skip.
-const SCHEMA: u32 = 3;
+// Schema 4 added `import_hashes` / `test_imports` (each test file's import
+// closure): a schema-3 store never guarded import-time code, so it must not
+// seed a skip either.
+const SCHEMA: u32 = 4;
 
 /// Config files whose change invalidates the whole skip decision: markers,
 /// addopts, and coverage config aren't reflected in per-test coverage, so a
@@ -107,6 +121,14 @@ struct Outcomes {
     /// [`ConfigState::test_named`] at the start of the recorded run.
     #[serde(default)]
     test_named_hashes: HashMap<String, String>,
+    /// Every file in some green test file's import closure -> its content hash
+    /// at record time (see [`test_import_closures`]).
+    #[serde(default)]
+    import_hashes: HashMap<String, String>,
+    /// Test-file relpath -> the files its import closure reached (keys of
+    /// `import_hashes`).
+    #[serde(default)]
+    test_imports: HashMap<String, Vec<String>>,
     /// [`ConfigState::index_cov_args`] of the recorded run.
     #[serde(default)]
     index_cov_args: Option<Vec<String>>,
@@ -126,6 +148,10 @@ pub struct Baseline {
     pub test_lines: HashMap<String, u64>,
     /// Unmeasured test-named files at record time (see [`ConfigState::test_named`]).
     pub test_named_hashes: HashMap<String, String>,
+    /// Import-closure file -> hash at record time (see [`Outcomes::import_hashes`]).
+    pub import_hashes: HashMap<String, String>,
+    /// Test file -> its import closure (see [`Outcomes::test_imports`]).
+    pub test_imports: HashMap<String, Vec<String>>,
 }
 
 /// The skip-gating state computed at the start of an incremental run.
@@ -205,12 +231,68 @@ pub fn config_state(scope: &Path, cov: &CovScope) -> ConfigState {
         h.update(rel.as_bytes());
         h.update(id.as_bytes());
     }
+    for (rel, id) in tracked_data_ids(scope) {
+        h.update(b"data:");
+        h.update(rel.as_bytes());
+        h.update(id.as_bytes());
+    }
     ConfigState {
         fp: crate::incremental::hex_encode(&h.finalize()),
         test_named,
         index_cov_args: None,
         index_cov_cwd: None,
     }
+}
+
+/// `(relpath, content id)` of every git-tracked non-Python file under `scope`,
+/// sorted. Coverage never measures a data file (a JSON fixture, a template, a
+/// golden output), so a test that reads one would stay cached after it changed;
+/// folding them into the fingerprint makes such an edit bust skipping
+/// wholesale. Tracked files only: untracked and ignored files are where test
+/// and report outputs land, and folding those would bust every run. Cheap: a
+/// clean tracked file reuses its index blob id ([`git_blob_ids`]). Empty outside
+/// a git checkout (the documented gap) or on any git failure.
+fn tracked_data_ids(scope: &Path) -> Vec<(String, String)> {
+    let Some(out) = git_in(scope, &["ls-files", "-z"], None) else {
+        return Vec::new();
+    };
+    let Some(recs) = nul_records(&out) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut linked: HashSet<PathBuf> = HashSet::new();
+    for rel in recs {
+        let p = Path::new(rel);
+        if p.extension().is_some_and(|e| e == "py") || !is_data_input(p) {
+            continue;
+        }
+        let abs = scope.join(p);
+        // Deleted (drops out of the fold, which moves it), or a submodule dir.
+        if !abs.is_file() {
+            continue;
+        }
+        if std::fs::symlink_metadata(&abs).is_ok_and(|m| m.file_type().is_symlink()) {
+            linked.insert(abs.clone());
+        }
+        paths.push(abs);
+    }
+    let mut ids = content_ids(scope, &paths, &linked);
+    ids.sort();
+    ids
+}
+
+/// Whether a tracked non-Python path can be a test input: runner artifacts
+/// (coverage data, caches) churn every run and are never read by a test.
+fn is_data_input(rel: &Path) -> bool {
+    !rel.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str().unwrap_or(""),
+            ".pytest_cache" | ".rstest_cache" | "__pycache__" | "htmlcov"
+        )
+    }) && !rel
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(".coverage") || n == "coverage.xml" || n.ends_with(".pyc"))
 }
 
 /// Just the fingerprint of [`config_state`].
@@ -476,6 +558,8 @@ pub fn load(scope: &Path, config_fp: &str) -> Baseline {
             test_file_hashes: o.test_file_hashes,
             test_lines: o.test_lines,
             test_named_hashes: o.test_named_hashes,
+            import_hashes: o.import_hashes,
+            test_imports: o.test_imports,
         })
         .unwrap_or_default()
 }
@@ -554,12 +638,25 @@ pub fn record(
                     test_file_hashes.insert(tf.to_string(), old.clone());
                 }
             }
+            // Its import closure must be unchanged too: the closure is
+            // re-hashed below, so carrying a test whose import changed while
+            // it didn't run would vouch for code it never ran against.
+            let closure_unchanged = prev.test_imports.get(tf).is_some_and(|deps| {
+                deps.iter().all(|d| {
+                    let now = current_sha256(&cache::resolve(d));
+                    now.is_some() && now.as_ref() == prev.import_hashes.get(d)
+                })
+            });
+            if !closure_unchanged {
+                continue;
+            }
             if let Some(l) = prev.test_lines.get(&id) {
                 lines.entry(id.clone()).or_insert(*l);
             }
             green.insert(id);
         }
     }
+    let (import_hashes, test_imports) = test_import_closures(test_file_hashes.keys());
     let doc = Outcomes {
         schema: SCHEMA,
         config_fp: config.fp.clone(),
@@ -567,12 +664,58 @@ pub fn record(
         test_file_hashes,
         test_lines: lines,
         test_named_hashes: config.test_named.clone(),
+        import_hashes,
+        test_imports,
         index_cov_args: config.index_cov_args.clone(),
         index_cov_cwd: config.index_cov_cwd.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec(&doc) {
         let _ = cache::write_atomic(&cache::file_in(scope, FILE), &bytes);
     }
+}
+
+/// Each test file's import closure ([`crate::select::import_closures`] over
+/// the rootdir), keyed and listed as rootdir-relative paths like the test file
+/// hashes, plus one content hash per distinct file. This is what catches
+/// import-time code: a module-level constant runs while the test module is
+/// imported, under coverage's empty context, so no test owns those lines in
+/// the index and editing them moves no hash the index ties to a test. A
+/// closure file that can't be hashed gets no entry, so its importers are not
+/// skippable next run.
+fn test_import_closures<'a>(
+    test_files: impl Iterator<Item = &'a String>,
+) -> (HashMap<String, String>, HashMap<String, Vec<String>>) {
+    let by_path: HashMap<PathBuf, String> = test_files
+        .map(|tf| (cache::resolve(tf), tf.clone()))
+        .collect();
+    if by_path.is_empty() {
+        return Default::default();
+    }
+    let root = cache::base_dir();
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
+    let rel = |p: &Path| {
+        p.strip_prefix(&root_canon)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let roots: Vec<PathBuf> = by_path.keys().cloned().collect();
+    let mut hashes: HashMap<String, String> = HashMap::new();
+    let mut closures: HashMap<String, Vec<String>> = HashMap::new();
+    for (abs, deps) in crate::select::import_closures(&root, &roots) {
+        let deps: Vec<String> = deps.iter().map(|d| rel(d)).collect();
+        for d in &deps {
+            if !hashes.contains_key(d) {
+                if let Some(h) = current_sha256(&cache::resolve(d)) {
+                    hashes.insert(d.clone(), h);
+                }
+            }
+        }
+        if let Some(tf) = by_path.get(&abs) {
+            closures.insert(tf.clone(), deps);
+        }
+    }
+    (hashes, closures)
 }
 
 /// Hash the source file of every green nodeid's test file, once per distinct
@@ -679,10 +822,11 @@ fn covered_files(index: &CoverageIndex) -> HashMap<&str, HashSet<&str>> {
 
 /// The nodeids provably skippable this run: green last time, its own test file
 /// unchanged since then, present in the index (covered ≥1 file), and every
-/// covered file's CURRENT hash equal to the hash the index recorded.
-/// `hash_of(relpath)` returns the live hash (`None` = unreadable/deleted → not
-/// skippable). Pure over its inputs, for testing; [`skippable_now`] wires it to
-/// the on-disk index + working tree.
+/// covered file's CURRENT hash equal to the hash the index recorded, and every
+/// file its test file transitively imports ([`Baseline::test_imports`])
+/// unchanged since the record. `hash_of(relpath)` returns the live hash
+/// (`None` = unreadable/deleted → not skippable). Pure over its inputs, for
+/// testing; [`skippable_now`] wires it to the on-disk index + working tree.
 pub fn skippable(
     index: &CoverageIndex,
     baseline: &Baseline,
@@ -697,8 +841,12 @@ pub fn skippable(
     let mut needed: HashSet<&str> = HashSet::new();
     for (id, files) in &by_test {
         if baseline.green.contains(*id) {
-            needed.insert(test_file_of(id));
+            let tf = test_file_of(id);
+            needed.insert(tf);
             needed.extend(files.iter().copied());
+            if let Some(deps) = baseline.test_imports.get(tf) {
+                needed.extend(deps.iter().map(String::as_str));
+            }
         }
     }
     let cur: HashMap<&str, Option<String>> = needed.into_iter().map(|f| (f, hash_of(f))).collect();
@@ -714,6 +862,18 @@ pub fn skippable(
         let tf = test_file_of(id);
         if live(tf) != baseline.test_file_hashes.get(tf).map(String::as_str) || live(tf).is_none() {
             continue;
+        }
+        // Every file the test file transitively imports must be unchanged too:
+        // import-time lines (module constants) belong to no test in the index.
+        // No recorded closure -> nothing vouches for them -> must run.
+        let Some(deps) = baseline.test_imports.get(tf) else {
+            continue;
+        };
+        for d in deps {
+            let stored = baseline.import_hashes.get(d).map(String::as_str);
+            if live(d).is_none() || live(d) != stored {
+                continue 'test;
+            }
         }
         for f in files {
             let stored = index.files.get(*f).map(|c| c.hash.as_str());

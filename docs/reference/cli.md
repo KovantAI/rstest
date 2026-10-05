@@ -263,7 +263,10 @@ other test. `--doctest-glob` and friends forward the same way.
 
 Run only tests affected by changed files. Changes come from git (working
 tree + untracked vs `HEAD`, or vs `REV`, e.g. `--changed=origin/main` in
-CI) and map to the affected tests; only those run. Attach `REV` with `=`:
+CI) and map to the affected tests; only those run. The changes considered
+are the whole project's (everything under its rootdir, even when that is
+below the git root), whichever subdirectory you start rstest from. Attach
+`REV` with `=`:
 `--changed origin/main` is a bare `--changed` (diff against `HEAD`) plus a
 test path `origin/main` (see [Optional-value flags](#argument-splitting)).
 
@@ -356,6 +359,12 @@ the [`--changed`](#-changedrev) base, so only tests affected by changes since
 then run. The baseline advances **only when a run is fully green**, so a
 failing test keeps being selected until it passes.
 
+- The baseline advances only from a **clean working tree** (nothing
+  uncommitted or untracked, as `--changed` sees it). A green run over local
+  edits proves those edits green, not the commit under them, so it keeps the
+  old baseline and says so on stderr; the next run diffs from that older
+  commit, edits included. Commit, then run once more to advance it.
+
 - First run (no baseline yet) runs everything.
 - The baseline is keyed to an environment fingerprint (interpreter plus the
   content of `uv.lock`, `poetry.lock`, `pdm.lock`, `requirements.txt`); a
@@ -369,9 +378,10 @@ failing test keeps being selected until it passes.
 
 ### `--incremental`
 
-Dispatch-level incremental testing, without git. rstest collects the whole
-suite, then **skips** every test that passed last run and whose covered source
-is byte-identical now (content-addressed through the coverage index). Skipped
+Dispatch-level incremental testing; git is not required. rstest collects the
+whole suite, then **skips** every test that passed last run and whose covered
+source and imported modules are byte-identical now (content-addressed through
+the coverage index). Skipped
 tests are carried forward as cached passes: they count as passed and carry
 `"cached": true` in [`--report-json`](report-json.md).
 
@@ -382,8 +392,19 @@ tests are carried forward as cached passes: they count as passed and carry
 - Needs the parallel pool with full collection and `--dist load`. Under
   `-n 0/1`, another `--dist`, `--collect lazy`, `--shard` or `--shuffle`,
   rstest warns and runs everything.
+- A test also re-runs when any first-party module its test file imports,
+  directly or transitively (package `__init__.py` files included), has
+  changed. This catches import-time code such as a module-level constant,
+  which coverage records under no test.
 - A config-file change (conftest, pytest config) disables skipping for that
-  run.
+  run. So does a change to any **git-tracked non-Python file** in the
+  project (a JSON fixture, a template, a golden file), since coverage never
+  measures what a test reads. Untracked and ignored files are not watched,
+  and outside a git checkout no non-Python file is: after editing a data file
+  there, do one run without `--incremental`.
+- Other residual gaps: a module loaded by a dynamic import
+  (`importlib.import_module(name)`) or a script a test runs in a subprocess
+  is invisible to both coverage and the import scan.
 - Runs from the root and from a subdirectory share the rootdir's records (paths
   in them are rootdir-relative), and a run of part of the suite (a path, `-k`,
   a subdirectory) keeps what the rest of the suite recorded. With `--cov=.`, a
@@ -950,7 +971,10 @@ error)::<traceback>` line; the run still exits `2`.
 Tests that passed only after reruns (`--reruns` /
 `@pytest.mark.flaky`) additionally emit a `::warning` annotation
 (`flaky: passed only after N reruns`): the run stays green, but the
-flake is visible on the PR without opening the log.
+flake is visible on the PR without opening the log. Failures matched by
+[`--quarantine`](#-quarantine-file) are annotated as `::warning`
+(`quarantined (non-fatal): <traceback>`) rather than `::error`, matching the
+run's green exit.
 
 `azure` renders the normal `dots` log and additionally emits an [Azure
 Pipelines logging
@@ -970,7 +994,8 @@ line of the traceback's last `E` block, since logissue is single-line.
 Each collection error emits a `type=error` logissue too (`<path> (collection
 error): <exception>`). Flaky-passed tests
 (`--reruns`) additionally emit a `type=warning` logissue: green run,
-visible flake.
+visible flake. Quarantined failures are also `type=warning`, never
+`type=error`.
 
 `gitlab` renders the normal `dots` log; each failure in the end-of-run
 failures block is wrapped in a [GitLab CI collapsible

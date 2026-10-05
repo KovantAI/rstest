@@ -19,8 +19,18 @@ pub(super) struct WorkerState {
     /// Told EndSession (no resend).
     pub(super) ended: bool,
     pub(super) dead: bool,
+    /// Its session-local `-x` tripped (Stopped): the worker left its run loop,
+    /// so it must not be handed reclaimed items.
+    pub(super) stopped: bool,
     /// Indices dispatched but not yet item_done'd, in dispatch order.
     pub(super) outstanding: VecDeque<u64>,
+    /// The tail of `outstanding` not yet written to the worker (`--dist each`
+    /// and replay seed a whole list at once). Fed a chunk at a time by
+    /// [`super::io::feed`], so a worker that stops reading while it runs can
+    /// never block the event loop on a full pipe.
+    pub(super) backlog: VecDeque<u64>,
+    /// Release the worker (NoMoreItems) once `backlog` is fed.
+    pub(super) release_after_backlog: bool,
     /// The item the worker announced via item_start and hasn't finished.
     pub(super) running: Option<u64>,
     /// When the in-flight item started (hang watchdog).
@@ -77,7 +87,10 @@ impl WorkerState {
             finishing: false,
             ended: false,
             dead: false,
+            stopped: false,
             outstanding: VecDeque::new(),
+            backlog: VecDeque::new(),
+            release_after_backlog: false,
             running: None,
             running_since: None,
             running_watchdog: None,

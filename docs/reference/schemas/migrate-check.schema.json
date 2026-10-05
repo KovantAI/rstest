@@ -122,7 +122,7 @@
       ]
     },
     "ParallelReport": {
-      "description": "Result of the `-n auto` parallel phase. Fields other than `ran` are absent\nwhen the phase did not actually run to completion.",
+      "description": "Result of the parallel phase. Fields other than `ran` are absent\nwhen the phase did not actually run to completion.",
       "type": "object",
       "properties": {
         "findings": {

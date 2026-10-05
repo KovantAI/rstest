@@ -282,7 +282,8 @@ fn plan_rerun(
     match select::affected_tests_cached(&project.rootdir, project, changed, false, collect_cache) {
         Ok(select::Selection::Tests(tests)) if tests.is_empty() => Plan::Skip,
         Ok(select::Selection::Tests(tests)) => {
-            let mut args: Vec<String> = tests.iter().map(|t| t.display().to_string()).collect();
+            // Rootdir-relative: re-anchor at the cwd pytest runs in.
+            let mut args = select::targets_as_args(&project.rootdir, cwd, &tests);
             args.extend(flags_only(base_args));
             Plan::Run {
                 args,
@@ -867,5 +868,32 @@ mod tests {
             Plan::Skip => panic!("a source change reaching a test must run it"),
         }
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn plan_from_a_subdirectory_anchors_selected_tests_at_the_cwd() {
+        // Started in q/ under the rootdir: the graph selects rootdir-relative
+        // tests/test_q.py, which pytest (run in q/) must get as ../tests/...
+        let root = fresh_dir("subdir").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("q")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("q/mod.py"), "VALUE = 1\n").unwrap();
+        std::fs::write(root.join("tests/test_q.py"), "import q.mod\n").unwrap();
+        let cwd = root.join("q");
+        match plan_rerun(
+            &[cwd.join("mod.py")],
+            &project_at(&root),
+            &cwd,
+            &[],
+            &mut select::CollectionCache::new(),
+        ) {
+            Plan::Run { args, mode } => {
+                assert_eq!(mode, "affected tests");
+                let want = Path::new("..").join("tests").join("test_q.py");
+                assert_eq!(args, vec![want.display().to_string()]);
+            }
+            Plan::Skip => panic!("a source change reaching a test must run it"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
