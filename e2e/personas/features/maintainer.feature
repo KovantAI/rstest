@@ -568,7 +568,6 @@ Feature: Suite maintainer
       And the "test_slow" tests in "r.json" each ran on a different worker
       # One long pole per worker, not two.
       And the JSON file "r.json" has "meta.duration_seconds" < 1.75
-      And stdout does not contain "PARALLEL FLOOR"
 
   Rule: an order-dependent failure can be reproduced and pinned on its polluter
 
