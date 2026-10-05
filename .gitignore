@@ -11,11 +11,8 @@ lcov.info
 htmlcov/
 mutants.out/
 mutants.out.old/
-# Dev planning docs (ideas parked locally; not shipped source).
-/BACKLOG.md
-/github-action-plan.md
-/mutation-testing-plan.md
-/shared-cache-plan.md
+# Dev planning docs and bug notes (kept locally; not shipped source).
+/dev-notes/
 .gate-venv/
 .gate-venv-*/
 site/
