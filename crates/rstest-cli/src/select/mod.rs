@@ -96,7 +96,13 @@ mod tests {
             vec!["tests/test_q.py", "tests/test_q.py::test_a[x::y]"]
         );
         // From a subdirectory: relative to it, the nodeid suffix kept whole.
-        let up = |s: &str| PathBuf::from("..").join(s).to_string_lossy().into_owned();
+        // Join per component so the expected separators are native on Windows.
+        let up = |s: &str| {
+            s.split('/')
+                .fold(PathBuf::from(".."), |p, c| p.join(c))
+                .to_string_lossy()
+                .into_owned()
+        };
         assert_eq!(
             targets_as_args(&root, &root.join("q"), &targets),
             vec![
