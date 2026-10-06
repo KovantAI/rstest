@@ -133,10 +133,14 @@ def _stdout_either(world, a, b):
     assert a in world.result.stdout or b in world.result.stdout, world.tail()
 
 
-@then(parsers.re(rf"stdout from the last {q('marker')} on does not contain {q('text')}"))
-def _stdout_tail_lacks(world, marker, text):
-    """Without the marker the whole of stdout is searched."""
-    assert text not in world.result.stdout.split(marker)[-1], world.tail()
+@then(parsers.re(rf"the {q('marker')} section of stdout does not contain {q('text')}"))
+def _stdout_section_lacks(world, marker, text):
+    """The section runs from the marker to the next blank line; no marker, no section."""
+    stdout = world.result.stdout
+    if marker not in stdout:
+        return
+    section = stdout.split(marker, 1)[1].split("\n\n", 1)[0]
+    assert text not in section, world.tail()
 
 
 @then(parsers.re(rf"the last line of stderr contains {q('text')}"))

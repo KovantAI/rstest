@@ -67,7 +67,7 @@ Feature: Suite maintainer
       # Above the WAIT-BOUND display floor (>= 1s).
       And the JSON file "d.json" has "test_time_seconds" >= 1.0
       And the JSON file "d.json" has "wait_bound.wait_pct" < 70 or no such field
-      And stdout from the last "WAIT-BOUND" on does not contain "test_cli_cpu"
+      And the "WAIT-BOUND" section of stdout does not contain "test_cli_cpu"
 
   Rule: --doctor-fail-on fires exactly when a condition is true
 
