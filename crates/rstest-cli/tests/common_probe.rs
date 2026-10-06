@@ -60,6 +60,12 @@ fn a_missing_python_fails_when_required() {
     let _: Option<()> = common::skip_or_fail(true, "no python");
 }
 
+/// `text` with CRLF line endings folded to LF: a Windows checkout gets
+/// `ci.yml` with CRLF, and the step markers below are LF-only.
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 /// The text of the named step in `workflow`, from its `- name:` line to the
 /// next step.
 fn step<'a>(workflow: &'a str, name: &str) -> (usize, &'a str) {
@@ -73,11 +79,22 @@ fn step<'a>(workflow: &'a str, name: &str) -> (usize, &'a str) {
 }
 
 #[test]
+fn step_finds_a_step_in_a_crlf_checkout() {
+    // The regression: on Windows git checks `ci.yml` out with CRLF, so the
+    // `- name: X\n` marker never matched and the CI-contract test panicked.
+    let crlf =
+        "steps:\r\n      - name: a\r\n        run: x\r\n      - name: b\r\n        run: y\r\n";
+    let workflow = lf(crlf);
+    let (_, a) = step(&workflow, "a");
+    assert_eq!(a, "        run: x");
+}
+
+#[test]
 fn ci_installs_python_deps_before_cargo_test_and_requires_them() {
-    let ci = std::fs::read_to_string(
+    let ci = lf(&std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml"),
     )
-    .expect("read ci.yml");
+    .expect("read ci.yml"));
 
     // Gate job: the dev group (pytest, msgpack) lands before `cargo test`,
     // which then refuses to skip on Linux and macOS.
