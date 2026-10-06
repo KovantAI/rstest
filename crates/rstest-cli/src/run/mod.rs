@@ -381,6 +381,10 @@ fn resolve_run_config(
     // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
     // missing operator aborts now, never silently as a gate that can't fire.
     let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on, sink)?;
+    // Same for the --durations-regress ratio: refuse it before the suite runs.
+    if let Some(ratio) = cli.durations_regress {
+        gates::validate_regress_ratio(ratio)?;
+    }
     let doctor = cli.doctor
         || cli.doctor_json.is_some()
         || cli.doctor_md.is_some()
@@ -1003,6 +1007,9 @@ fn maybe_dispatch_monorepo(
     // bad value errors once, not once per child. Children get it forwarded.
     if let Some(o) = &cli.order {
         o.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if let Some(ratio) = cli.durations_regress {
+        gates::validate_regress_ratio(ratio)?;
     }
     monorepo::execute_monorepo(cli, args, &cwd, projects, run_uid, sink).map(ControlFlow::Break)
 }

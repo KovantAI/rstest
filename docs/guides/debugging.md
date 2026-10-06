@@ -60,7 +60,8 @@ explicitly when you need to be sure.
 !!! warning "`--reruns` turns `-n 0` back into a pool"
     With a nonzero `--reruns` (or `reruns` set in `[tool.rstest]`), `-n 0`
     and `-n 1` run a one-worker pool so reruns still apply, and a
-    `breakpoint()` fails with the same hint. Add `-s`, or pass `--reruns 0`.
+    `breakpoint()` fails with a hint saying so. Add `-s`, or pass
+    `--reruns 0`.
 
 `--pdb` (post-mortem on failure) and `--trace` (stop at the start of every
 test) need the terminal too, so they switch the run to single-worker mode by

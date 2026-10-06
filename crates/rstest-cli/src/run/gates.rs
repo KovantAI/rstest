@@ -141,7 +141,7 @@ fn warn_doctor_gate_passthrough(w: &mut dyn Write, gate_empty: bool, passthrough
 
 /// The `--durations-regress` ratio must be strictly > 1.0: a test is a
 /// regression only when it is *slower* than baseline by that factor.
-fn validate_regress_ratio(ratio: f64) -> Result<()> {
+pub(super) fn validate_regress_ratio(ratio: f64) -> Result<()> {
     if ratio <= 1.0 {
         anyhow::bail!("--durations-regress ratio must be > 1.0, got {ratio}");
     }
@@ -605,6 +605,12 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // Restore cached (--incremental, not-run) entries' def line from the
+    // baseline before any artifact is written: report-json and the HTML report
+    // read it, and coverage_skip::record below carries it to the next run.
+    if incremental_active {
+        outcome.run.backfill_cached_linenos(&baseline.test_lines);
+    }
     // Both reports get the pre-covtool wall, as they did when they ran first.
     let report_meta = report::RunMeta {
         duration_seconds: suite_wall,
@@ -646,7 +652,7 @@ pub(super) fn run_post_gates(
     // the gate fires again on the next identical run.
     let mut duration_regressions = 0usize;
     if let Some(ratio) = cli.durations_regress {
-        validate_regress_ratio(ratio)?;
+        // Validated before the run (run::resolve_run_config).
         let baseline = durations::load_baseline();
         if baseline.is_empty() {
             sink.warn(
@@ -780,10 +786,6 @@ pub(super) fn run_post_gates(
                 coverage_skip::write_index(&new_index);
             }
         }
-        // Restore cached (not-run) entries' def line from the baseline before
-        // reading it back — so it persists into this run's recorded lines and
-        // every artifact reflects the real line, not a blank.
-        outcome.run.backfill_cached_linenos(&baseline.test_lines);
         coverage_skip::record(
             scope,
             config,

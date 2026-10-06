@@ -889,6 +889,12 @@ def _snippet_contains(world, text):
     assert snippet and text in snippet, str(snippet)[:200]
 
 
+@then(parsers.re(rf"the snippet does not contain {q('text')}"))
+def _snippet_lacks(world, text):
+    snippet = world.notes.get("snippet")
+    assert snippet and text not in snippet, str(snippet)[:200]
+
+
 @then(parsers.re(rf"the fake CLI log contains {q('text')}"))
 def _fake_log(world, text):
     log = world.notes["fake_log"]
@@ -1090,6 +1096,49 @@ def _steps_set(world, snippet, setting):
     pinned = re.compile(rf"^\s*{re.escape(setting)}\b", re.M)
     bad = [s.splitlines()[0] for s in steps if not pinned.search(s)]
     assert not bad, f"steps without {setting!r}: {bad}"
+
+
+@then(parsers.re(rf"the project directory {q('dir')} holds a {q('glob')} file"))
+def _dir_holds(world, dir, glob):
+    found = sorted((world.project / dir).glob(glob))
+    assert found, f"no {glob} in {dir}/\n{world.tail()}"
+
+
+@then(
+    parsers.re(
+        rf"in the first block of {q('doc')} containing {q('needle')}, "
+        rf"the step {q('name')} runs only when {q('text')}"
+    )
+)
+def _step_condition(world, doc, needle, name, text):
+    block = _doc_block(REPO / doc, needle)
+    assert block, f"no block of {doc} contains {needle!r}"
+    # The step may sit at any depth (Azure nests steps under jobs), so find
+    # its displayName line and widen to the enclosing `- ` list item.
+    lines = block.splitlines()
+    hits = [
+        i for i, ln in enumerate(lines) if re.match(rf"\s*displayName:\s*{re.escape(name)}\s*$", ln)
+    ]
+    assert len(hits) == 1, f"{len(hits)} steps named {name!r}"
+    col = len(lines[hits[0]]) - len(lines[hits[0]].lstrip())
+    start = next(
+        i
+        for i in range(hits[0], -1, -1)
+        if lines[i].lstrip().startswith("- ") and len(lines[i]) - len(lines[i].lstrip()) < col
+    )
+    ind = len(lines[start]) - len(lines[start].lstrip())
+    end = next(
+        (
+            i
+            for i in range(start + 1, len(lines))
+            if lines[i].strip() and len(lines[i]) - len(lines[i].lstrip()) <= ind
+        ),
+        len(lines),
+    )
+    cond = next(
+        (ln.split(":", 1)[1] for ln in lines[start:end] if ln.strip().startswith("condition:")), ""
+    )
+    assert text in cond, f"{name!r} runs on: {cond.strip() or '(always)'}"
 
 
 @then(parsers.re(rf"no fenced block in {q('glob')} contains {q('text')}"))

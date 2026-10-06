@@ -615,13 +615,17 @@ Feature: CI / platform engineer
     Scenario: CI-09 Azure materialize-a-dir: the step fails when a test fails
       # Azure runs `script:` as a file under `bash --noprofile --norc` with no
       # errexit; the agent expands $(Var) macros before bash sees the script.
+      # The test step holds no cloud credentials: it stages its new segment in
+      # ./push, and a separate AzureCLI step uploads it from main only.
       Given the "- script:" literal of the first block in "docs/guides/ci-recipes.md" containing "az storage blob download-batch"
       Then the snippet contains "rstest"
+      And the snippet does not contain "az "
       When the agent expands "$(System.JobPositionInPhase)" and "$(System.TotalJobsInPhase)" in the snippet to "1"
       And I run the snippet with "bash --noprofile --norc" in the suite
       Then stdout contains "1 failed"
-      And the fake CLI log contains "upload-batch"
+      And the project directory "push" holds a "seg-*.json" file
       And the run fails
+      And in the first block of "docs/guides/ci-recipes.md" containing "az storage blob download-batch", the step "publish this shard's new segment" runs only when "refs/heads/main"
 
     Scenario: CI-09 shared-cache retry (reachable remote): rstest ran, the step fails
       # As a GitHub `run:` step (`bash -e {0}`).
@@ -903,3 +907,8 @@ Feature: CI / platform engineer
       Then the exit code is 0
       And the event stream "events.ndjson" has 3 "testreport" lines
       And the event stream "events.ndjson" has 0 "sessionfinish" lines
+
+    Scenario: CI-14 the recipes' cache cleanup runs in every agent shell
+      # rm -rf fails in cmd.exe and PowerShell (Windows agents on Azure and
+      # elsewhere); the Python one-liner from ci-shared-cache.md works in all.
+      Then no fenced block in "docs/guides/*.md" contains "rm -rf .rstest_cache"

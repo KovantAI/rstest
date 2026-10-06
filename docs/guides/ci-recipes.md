@@ -47,7 +47,7 @@ phases:
     commands:
       # Runs even when the build phase failed, before the cache is saved:
       # keep replay journals out of the cache.
-      - rm -rf .rstest_cache/replay
+      - python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"
 
 reports:
   rstest:
@@ -353,7 +353,7 @@ same way.
         - pip install -r requirements.txt && pip install rstest
         - rstest -n auto -q
       after_script:
-        - rm -rf .rstest_cache/replay   # runs before the cache is saved
+        - python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"   # runs before the cache is saved
 
     # Fails unless the shards ran every collected test exactly once.
     shard-verify:
@@ -484,7 +484,7 @@ steps:
       testResultsFiles: junit.xml
 
   # Cache@2 saves in a post-job step, after this one.
-  - script: rm -rf .rstest_cache/replay
+  - script: python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"
     displayName: keep replay journals out of the cache
     condition: always()
 ```
@@ -629,7 +629,7 @@ jobs:
       - run: rstest -n auto --junitxml test-results/junit.xml
       - store_test_results:
           path: test-results
-      - run: rm -rf .rstest_cache/replay   # keep replay journals out of the cache
+      - run: python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"   # keep replay journals out of the cache
       - save_cache:
           key: rstest-{{ arch }}-py3.13-{{ checksum "requirements.txt" }}-{{ .Branch }}-{{ .Revision }}
           paths:
@@ -685,7 +685,7 @@ file) so a monorepo's `junit.*.xml` are all collected.
           - run: rstest -n auto -q
           - run:
               name: keep replay journals out of the cache
-              command: rm -rf .rstest_cache/replay
+              command: python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"
               when: always
           - save_cache:
               key: rstest-durations-{{ arch }}-py3.13-{{ checksum "requirements.txt" }}-{{ .Revision }}

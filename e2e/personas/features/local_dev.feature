@@ -450,6 +450,14 @@ Feature: Daily local developer
       And the output outside the rstest banner shows a (Pdb) prompt or a hint naming -n 0 or -s
       And the JSON report "dv-bp.json" lists 2 tests, including "tests/test_bp.py::test_after_bp"
 
+    Scenario: DV-05 under --reruns the breakpoint hint doesn't send you back to -n 0
+      # --reruns at -n 0 runs a one-worker pool, so "rerun with -n 0" would fail
+      # the same way; the hint names what does give a prompt.
+      When I run "rstest -n 0 --reruns 1 tests/test_bp.py"
+      Then the exit code is 1
+      And the output contains "--reruns 0"
+      And the output does not contain "rerun with -n 0"
+
     @posix_only
     Scenario: DV-06 --pdb in the pool gives a real prompt and 'q' exits 2 (interrupted)
       When I run "rstest -n 2 --pdb tests/test_pdb.py" on a pty, typing "q" at the (Pdb) prompt
@@ -684,3 +692,12 @@ Feature: Daily local developer
       When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental" after clearing stale .coverage files
       Then the run succeeds
       And stdout does not contain "cached"
+
+    Scenario: DV-18 --incremental's cached tests keep their line in report-json
+      # docs/reference/report-json.md: a cached entry carries the lineno the
+      # prior run recorded.
+      When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental" after clearing stale .coverage files
+      Then the run succeeds
+      When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental --report-json r.json" after clearing stale .coverage files
+      Then stdout contains "(2 cached)"
+      And every cached test in the report "r.json" carries its lineno

@@ -63,9 +63,9 @@ value:
 
 - a **failed** test's time is not recorded, so a fail-fast `0.0002s` can't
   shrink its baseline;
-- a test the gate **flagged** is not recorded either (nor pushed with
+- a test the gate **flagged** keeps its old time (and is not pushed with
   `--cache-push`), so the next identical run fails again instead of adopting
-  the slow time.
+  the slow time, even when the same change edited the test's file.
 
 The comparison reads the cache as recorded, so a test in a file your change
 edited is still compared with its old time. `rstest explain` shows the value
@@ -87,12 +87,9 @@ Three consequences worth knowing:
   is always compared with main.
 - **Accepting an intended slowdown** means one run without
   `--durations-regress`: it records the new time as the baseline.
-- **An edited file drops its entries on save.** When a flagged test's file
-  was edited in the same run, the save prunes that file's entries as stale
-  instead of keeping the old time, and the next run on that cache has no
-  baseline for the test (so it skips it). A pull request job that saves its
-  own cache can therefore pass on its second push. Another reason to keep PR
-  jobs read-only.
+- **Editing a file re-times its other tests.** The save drops a changed
+  file's entries so they are timed afresh; a flagged test is the exception
+  and keeps its old baseline, so the gate fires again on the next push.
 
 ## Don't let a cold cache pass green
 

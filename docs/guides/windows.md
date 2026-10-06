@@ -171,15 +171,10 @@ on Linux only.
 includes `$(Agent.OS)`. Note that `script:` steps run in `cmd.exe` on Windows
 agents.
 
-**Shell commands.** Recipes that clean up with `rm -rf .rstest_cache/replay`
-need the native form on Windows:
-
-```text
-PowerShell:  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue .rstest_cache\replay
-cmd.exe:     if exist .rstest_cache\replay rmdir /s /q .rstest_cache\replay
-```
-
-Likewise `source .venv/bin/activate` becomes `.venv\Scripts\activate`, and
+**Shell commands.** The recipes remove `.rstest_cache/replay` with
+`python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"`,
+which works in bash, PowerShell and cmd.exe alike. In your own steps,
+`source .venv/bin/activate` becomes `.venv\Scripts\activate`, and
 `--python .venv/bin/python` becomes `--python .venv\Scripts\python.exe`
 (or just `--python .venv`, which works on both).
 

@@ -541,10 +541,7 @@ cache is refreshed.
 
 A flagged test's time is kept out of `durations.json` (and any `--cache-push`
 segment), so the regression keeps failing until the test is back under the
-threshold, unless the same run edited the test's file: saving then drops that
-file's entries as stale, and the next run has no baseline for the test
-([Catching slowdowns](../guides/slowdowns.md#where-the-baseline-comes-from)).
-A failed test's duration is never recorded either, so a fail-fast
+threshold, even when the same change edited the test's file. A failed test's duration is never recorded either, so a fail-fast
 run can't shrink the baseline. To accept an intended slowdown, run once
 without `--durations-regress`.
 
