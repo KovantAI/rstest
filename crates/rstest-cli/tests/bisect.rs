@@ -10,28 +10,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A venv dir to expose as VIRTUAL_ENV, or None to use the ambient PATH
-/// python3. Returns None to SKIP if no pytest is reachable.
-fn pytest_env() -> Option<Option<PathBuf>> {
-    if let Ok(venv) = std::env::var("RSTEST_TEST_VENV") {
-        let py = Path::new(&venv).join("bin").join("python");
-        if import_pytest(&py) {
-            return Some(Some(PathBuf::from(venv)));
-        }
-        return None;
-    }
-    if import_pytest(Path::new("python3")) {
-        return Some(None);
-    }
-    None
-}
+mod common;
 
-fn import_pytest(py: &Path) -> bool {
-    Command::new(py)
-        .args(["-c", "import pytest"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn pytest_env() -> Option<Option<PathBuf>> {
+    common::pytest_env("pytest")
 }
 
 fn fresh_dir(tag: &str) -> PathBuf {
@@ -392,7 +374,7 @@ fn child_runs_use_the_python_given_with_the_flag() {
         return;
     };
     let py = Path::new(&venv).join("bin").join("python");
-    if !import_pytest(&py) {
+    if !common::importable(&py, "pytest") {
         return;
     }
     let dir = fresh_dir("pyflag");

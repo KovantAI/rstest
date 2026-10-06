@@ -7,16 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn python() -> Option<PathBuf> {
-    let py = match std::env::var("RSTEST_TEST_VENV") {
-        Ok(venv) => Path::new(&venv).join("bin").join("python"),
-        Err(_) => PathBuf::from("python3"),
-    };
-    Command::new(&py)
-        .args(["-c", "import pytest"])
-        .status()
-        .is_ok_and(|s| s.success())
-        .then_some(py)
+    common::python("pytest")
 }
 
 fn fresh_dir(tag: &str) -> PathBuf {

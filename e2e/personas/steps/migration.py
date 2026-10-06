@@ -513,19 +513,26 @@ def _serial_reuses_session(world, ev):
     )
 
 
-@then(
-    parsers.re(
-        r"(?P<n>\d+) events were logged, each worker's \"i\" values descend, "
-        r"and (?P<first>\d+) is among the first two"
-    )
-)
-def _reversed_dispatch(world, n, first):
-    rows = world.notes["events"]
+def reversed_dispatch_ok(rows, n, first):
+    """`n` events, each worker's "i" values descend, and `first` opened some
+    worker's run. Not "among the first two logged": a worker that starts late
+    logs its first item after the other worker's second."""
     per_worker = {}
     for x in rows:
         per_worker.setdefault(x["w"], []).append(x["i"])
-    assert (
-        len(rows) == int(n)
+    return (
+        len(rows) == n
         and all(seq == sorted(seq, reverse=True) for seq in per_worker.values())
-        and int(first) in [x["i"] for x in rows[:2]]
-    ), str(per_worker)
+        and first in [seq[0] for seq in per_worker.values()]
+    ), per_worker
+
+
+@then(
+    parsers.re(
+        r"(?P<n>\d+) events were logged, each worker's \"i\" values descend, "
+        r"and (?P<first>\d+) is some worker's first"
+    )
+)
+def _reversed_dispatch(world, n, first):
+    ok, per_worker = reversed_dispatch_ok(world.notes["events"], int(n), int(first))
+    assert ok, str(per_worker)
