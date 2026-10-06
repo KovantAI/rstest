@@ -14,9 +14,12 @@ runner; see the limits note below for why not `-n auto`.)
 
 This is the fan-out for the common case: **one large suite is the long
 pole**, and you want it spread across a runner matrix. It is orthogonal
-to `-n` (each shard still runs its slice across local workers) and to
-[monorepo mode](monorepo.md), which splits *across projects on one box*.
-Sharding splits *one suite across many boxes*.
+to `-n`: each shard still runs its slice across local workers.
+[Monorepo mode](monorepo.md) is different: it splits *across projects on one
+box*, while sharding splits *one suite across many boxes*. The two don't
+combine at a monorepo root, which refuses `--shard`
+([Flags at a monorepo root](../concepts/monorepo.md#flags-at-a-monorepo-root));
+run `--shard` inside each project.
 
 ## How the split stays balanced
 

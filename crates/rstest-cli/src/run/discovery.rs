@@ -18,6 +18,8 @@ use crate::text::strip_verbatim;
 pub struct DiscoveryDoc {
     /// Per-collector import/collection errors (empty on a clean collection).
     pub collect_errors: Vec<CollectError>,
+    /// Envelope: producer, document kind, schema version, rootdir and test
+    /// count.
     pub meta: DiscoveryMeta,
     /// One entry per collected test item, in collection order.
     pub tests: Vec<DiscoveredTest>,

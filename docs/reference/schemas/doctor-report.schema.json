@@ -20,6 +20,7 @@
       "format": "double"
     },
     "fixtures": {
+      "description": "Fixture setup cost summed across all workers, costliest first (top 50).",
       "type": "array",
       "items": {
         "$ref": "#/definitions/FixtureEntry"
@@ -37,6 +38,7 @@
       }
     },
     "parallel_efficiency": {
+      "description": "Realized speedup and worker load balance; present only on multi-worker\npool runs.",
       "anyOf": [
         {
           "$ref": "#/definitions/ParallelEfficiency"
@@ -47,6 +49,7 @@
       ]
     },
     "parallel_floor": {
+      "description": "Present only when the longest test outlasts both a worker's even share\nof the test time and 1 second, plus 10%: no worker count can finish\nfaster than that test.",
       "anyOf": [
         {
           "$ref": "#/definitions/ParallelFloor"
@@ -57,14 +60,17 @@
       ]
     },
     "rstest_version": {
+      "description": "The rstest version that wrote the report.",
       "type": "string"
     },
     "schema": {
+      "description": "Document schema version, bumped when the shape changes incompatibly.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
     },
     "slowest_files": {
+      "description": "Test time per file, slowest first (top 20).",
       "type": "array",
       "items": {
         "$ref": "#/definitions/FileEntry"
@@ -81,6 +87,7 @@
       "format": "double"
     },
     "tests": {
+      "description": "Tests with a recorded call duration (tests skipped before their call\nphase drop out): the population every time figure is computed over.",
       "type": "integer",
       "format": "uint",
       "minimum": 0
@@ -97,6 +104,7 @@
       ]
     },
     "wall_seconds": {
+      "description": "Wall-clock time of the whole run, in seconds.",
       "type": "number",
       "format": "double"
     },
@@ -158,13 +166,16 @@
       "type": "object",
       "properties": {
         "file": {
+          "description": "Test file, the path part of its tests' nodeids.",
           "type": "string"
         },
         "pct": {
+          "description": "`total_seconds` as a percentage of `test_time_seconds`.",
           "type": "number",
           "format": "double"
         },
         "total_seconds": {
+          "description": "Summed whole-protocol time of the file's tests, in seconds.",
           "type": "number",
           "format": "double"
         }
@@ -183,11 +194,13 @@
           "type": "boolean"
         },
         "count": {
+          "description": "Setups across all workers.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "name": {
+          "description": "Fixture name.",
           "type": "string"
         },
         "projected_saving_seconds": {
@@ -196,9 +209,11 @@
           "format": "double"
         },
         "scope": {
+          "description": "pytest scope: `function`, `class`, `module`, `package` or `session`.",
           "type": "string"
         },
         "total_seconds": {
+          "description": "Setup time summed across all workers, in seconds.",
           "type": "number",
           "format": "double"
         }
@@ -214,10 +229,12 @@
       "type": "object",
       "properties": {
         "duration": {
+          "description": "Its whole-protocol time (setup + call + teardown), in seconds.",
           "type": "number",
           "format": "double"
         },
         "nodeid": {
+          "description": "The test that gates the wall time.",
           "type": "string"
         }
       },
@@ -236,6 +253,7 @@
           "format": "int64"
         },
         "nodeid": {
+          "description": "The test that leaked.",
           "type": "string"
         },
         "threads": {
@@ -301,16 +319,19 @@
       "type": "object",
       "properties": {
         "gate_tests": {
+          "description": "The tests that exceed the floor, longest first (at most 10).",
           "type": "array",
           "items": {
             "$ref": "#/definitions/GateTest"
           }
         },
         "ideal_share_seconds": {
+          "description": "A worker's even share of the test time (`test_time_seconds /\nworkers`), in seconds.",
           "type": "number",
           "format": "double"
         },
         "longest_seconds": {
+          "description": "The longest single test (setup + call + teardown), in seconds.",
           "type": "number",
           "format": "double"
         }
@@ -325,16 +346,19 @@
       "type": "object",
       "properties": {
         "tests": {
+          "description": "The biggest waiters, most waiting first (top 50): tests of at least\n0.2s that spent 60% or more of their time waiting.",
           "type": "array",
           "items": {
             "$ref": "#/definitions/WaitTest"
           }
         },
         "wait_pct": {
+          "description": "`wait_seconds` as a percentage of `test_time_seconds`.",
           "type": "number",
           "format": "double"
         },
         "wait_seconds": {
+          "description": "Test time spent waiting rather than on CPU (`test_time_seconds -\ncpu_time_seconds`).",
           "type": "number",
           "format": "double"
         }
@@ -349,13 +373,16 @@
       "type": "object",
       "properties": {
         "duration": {
+          "description": "Its whole-protocol time (setup + call + teardown), in seconds.",
           "type": "number",
           "format": "double"
         },
         "nodeid": {
+          "description": "The waiting test.",
           "type": "string"
         },
         "wait": {
+          "description": "The part of `duration` not spent on CPU, in seconds.",
           "type": "number",
           "format": "double"
         }
@@ -382,10 +409,12 @@
           "minimum": 0
         },
         "duration": {
+          "description": "Its whole-protocol time (setup + call + teardown), in seconds.",
           "type": "number",
           "format": "double"
         },
         "nodeid": {
+          "description": "The redundant test.",
           "type": "string"
         }
       },
@@ -400,15 +429,18 @@
       "type": "object",
       "properties": {
         "busy_seconds": {
+          "description": "Test time this worker spent running tests, in seconds.",
           "type": "number",
           "format": "double"
         },
         "tests": {
+          "description": "Tests this worker ran.",
           "type": "integer",
           "format": "uint",
           "minimum": 0
         },
         "worker": {
+          "description": "Worker id (`gw0`, `gw1`, ...), or `serial` for tests with no\nrecorded worker.",
           "type": "string"
         }
       },

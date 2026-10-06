@@ -28,7 +28,7 @@ Everything pytest does (via a vendored pytest core), plus:
 | Duration-aware scheduling | `--dist load` (default) | duration cache runs slowest tests first; module locality preserved |
 | Collection strategy | `--collect full/lazy` (default: auto) | auto picks [lazy](../concepts/lazy-collection.md) for large warm-cache parallel runs: each file is collected once and runs whole on one worker; `full` everywhere else |
 | Affinity modes | `--dist loadfile/loadscope/loadgroup` | file, fixture-scope, or `xdist_group` affinity (xdist-compatible) |
-| Broadcast mode | `--dist each` | every worker runs the full suite (xdist `--dist=each`) for multi-environment validation; outcomes keyed [`[gwN]`](../concepts/glossary.md#worker-id) |
+| Broadcast mode | `--dist each` | every worker runs the full suite (xdist `--dist=each`) on the same interpreter, for repeat-run validation; outcomes keyed [`[gwN]`](../concepts/glossary.md#worker-id) |
 | Crash recovery | automatic | crashed test reported failed; worker respawns; run completes |
 | Flaky handling | `--reruns N`, `@pytest.mark.flaky`, `--only-rerun` | failed-then-passed = flaky (green run, counted, listed); crash-aware. Works at any `-n`: at `-n 0/1`, `--reruns` runs a one-worker pool instead of single-worker mode |
 | Live status footer | automatic on a terminal | per-worker current test + elapsed, progress + ETA |

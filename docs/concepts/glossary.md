@@ -31,6 +31,9 @@ before running any. It imports your test files and builds the list of test
 items. "Workers collected different test sets" means two workers disagreed on
 that list, usually a randomized or time-based nodeid (see
 [Unstable parametrize ids](compatibility.md#unstable-parametrize-ids)).
+Under full collection every worker's list is verified by count and hash
+against whichever worker reports first, and worker `gw0` ships the full
+nodeid list.
 
 **Distribution mode (`--dist`)**{ #dist-mode }: controls *which worker* a
 test lands on. The default spreads individual tests across workers for speed.
@@ -213,12 +216,15 @@ with the vendored pytest core; executes tests and streams reports to the
 orchestrator. Each pool worker has a [worker id](#worker-id).
 
 **Worker count (`-n`)**{ #worker-count }: how many parallel worker processes
-run your tests. `-n auto` (the default) uses your cores, but never more
-workers than the selected test files on a first run (cached timings lift that
-to the test count), and fewer on a suite whose cached run time is only a few
-seconds; `-n 4` uses exactly four; `-n 0` (or `-n 1`) turns parallelism off
-and runs one plain pytest session. You rarely need to set it. See
-[Single-worker mode](#single-worker-mode) for what `-n 0` gives you.
+run your tests. You rarely need to set it.
+
+- `-n auto` (the default) uses your cores, capped by the work: no more
+  workers than selected test files on a first run (cached timings lift that
+  to the test count), and fewer when the cached run time is only a few
+  seconds.
+- `-n 4` uses exactly four.
+- `-n 0` (or `-n 1`) turns parallelism off and runs one plain pytest
+  session; see [Single-worker mode](#single-worker-mode).
 
 **Worker id (`gwN`)**{ #worker-id }: a pool worker's identity, `gw0`, `gw1`,
 ..., in pytest-xdist's format. Tests read it from the `worker_id` fixture,
@@ -268,9 +274,6 @@ coordinating process, called "master" in older xdist code and in the
 
 **Designate**{ #designate }: the worker chosen to host the serial phase,
 which is the lowest alive worker (promoted to the next one if it crashes).
-(The full collection nodeid list is always shipped by worker `gw0`; every
-worker's collection is verified by count and hash against whichever worker
-reports first.)
 
 **Fork pool**{ #fork-pool }: with [`--fork-pool`](../reference/cli.md#-fork-pool)
 (Unix), workers are forked from one process that has already imported the

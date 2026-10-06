@@ -13,6 +13,7 @@ Setting neither `--collect` nor `[tool.rstest] collect` selects the
 strategy automatically. rstest picks `lazy` when all of these hold, and
 `full` otherwise:
 
+- **Workers:** 2 or more (auto never picks `lazy` at `-n 0` or `-n 1`).
 - **Size:** at least **2000** known tests and a **`tests × workers` ≥
   16 000** product. Lazy's win is dropping the `(workers − 1)` redundant
   full collections, which only pays off once the suite and the worker count

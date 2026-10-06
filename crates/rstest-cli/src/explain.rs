@@ -59,6 +59,7 @@ struct Coverage {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(crate) struct ExplainReport {
+    /// Envelope: producer, document kind, schema version and rstest version.
     meta: Meta,
     /// The node id that was explained, as given.
     nodeid: String,

@@ -19,7 +19,12 @@
       }
     },
     "meta": {
-      "$ref": "#/definitions/AuditMeta"
+      "description": "Envelope: producer, document kind and schema version.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/AuditMeta"
+        }
+      ]
     },
     "order_dependent": {
       "description": "Tests that pass under `--dist loadfile`: they depend on a sibling in\ntheir file running first, so keep the file together rather than serial.",

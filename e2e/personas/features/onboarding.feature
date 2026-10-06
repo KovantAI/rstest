@@ -271,7 +271,7 @@ Feature: First-time evaluator onboarding
 
     Scenario: EV-23 --dist each is not sold as heterogeneous-environment testing
       # Every worker uses the same interpreter; xdist's --tx has no equivalent.
-      Then no paragraph of "docs/**/*.md" matches "(?i)configured differently"
+      Then no paragraph of "docs/**/*.md" matches "(?i)configured differently|multi-environment"
 
     Scenario: EV-24 path arguments are not offered as a way to split a monorepo
       # A path argument opts out of monorepo mode: one session from the root,
@@ -343,7 +343,7 @@ Feature: First-time evaluator onboarding
       Then no paragraph of "docs/**/*.md" matches "(?i)refuses to dispatch whenever every worker collects"
 
     Scenario: EV-39 the sample run's page quotes the measured allauth time
-      Then the intro of "docs/getting-started/run-your-suite.md" quotes the django-allauth `-n 4` time from "docs/reference/benchmarks.md"
+      Then the "## Reading the output" section of "docs/getting-started/run-your-suite.md" quotes the django-allauth `-n 4` time from "docs/reference/benchmarks.md"
 
     Scenario: EV-40 migrate-check's parallel pass is never described as -n auto
       # migrate::parallel_n uses run::check_workers: never capped by the
@@ -382,3 +382,42 @@ Feature: First-time evaluator onboarding
     Scenario: EV-47 the shadowed-flags table stays scannable
       # Edge cases go in the note under the table, not into a cell.
       Then no table cell in "docs/_snippets/shadowed-flags.md" is longer than 250 characters
+
+    Scenario: EV-48 pytest-html is never sent to a -n 0 run without the -- separator
+      # rstest owns a command-line --html at every worker count, so
+      # `rstest -n 0 --html x` writes rstest's report, never pytest-html's.
+      Then no paragraph of "docs/**/*.md" matches "(?i)pytest-html[^.,;]{0,30}\bneeds? a `-n 0`"
+      And no paragraph of "docs/**/*.md" matches "(?i)report/terminal plugins you move to `-n 0`"
+
+    Scenario: EV-49 sharding is not described as combining with monorepo mode
+      # run/monorepo.rs refuses --shard at a monorepo root.
+      Then no paragraph of "docs/**/*.md" matches "(?i)orthogonal[^.]*monorepo mode"
+
+    Scenario: EV-50 the report-aggregator gap names every controller-gated report plugin
+      # The evaluator page and the top-100 matrix both list reportlog and
+      # json-report as writing nothing at -n >= 2.
+      Given the table row of "docs/concepts/compatibility.md" starting with "| Plugins that aggregate worker output"
+      Then that docs section contains "pytest-reportlog"
+      And that docs section contains "pytest-json-report"
+
+    Scenario: EV-51 every definition of full collection defers to the lazy auto-default list
+      # Full collection is whatever auto doesn't pick, which includes path
+      # selection, --shuffle, --shard, --incremental and loadscope, not only
+      # cold caches and small suites.
+      Then every docs paragraph outside "concepts/lazy-collection.md" that matches "(?i)full\scollection[\s\S]{0,250}(cold|below|smaller\ssuites)" links to "lazy-collection.md#auto-default"
+      And no paragraph of "docs/**/*.md" matches "(?i)whole suite: the first, cold-cache run"
+      Given the "## Auto-default" section of "docs/concepts/lazy-collection.md"
+      Then that docs section contains "**Workers:** 2 or more"
+
+    Scenario: EV-52 try is not described as taking no flags
+      # try accepts --python and the shared flags.
+      Then no paragraph of "docs/**/*.md" matches "(?i)no flags, no config"
+
+    Scenario: EV-53 the existing-suite page walks a newcomer from first run to next steps
+      # The page used to open on a benchmark sample, never said how to build
+      # the coverage index --changed/--incremental read, and ended with no way
+      # forward.
+      Then the first command in "docs/getting-started/run-your-suite.md" is "rstest"
+      And the "## Selecting tests" section of "docs/getting-started/run-your-suite.md" contains "--cov-context=test"
+      And the "## What rstest writes to disk" section of "docs/getting-started/run-your-suite.md" contains ".gitignore"
+      And "docs/getting-started/run-your-suite.md" ends with a "## Next steps" section linking each of "../guides/migrate-from-pytest.md ../guides/ci-quickstart.md ../reference/troubleshooting.md"

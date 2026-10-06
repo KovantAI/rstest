@@ -13,7 +13,7 @@ The merged per-nodeid dossier. `null` fields are simply absent from every cache 
 | `flakes` | FlakeStats or null | yes | Cross-run flake/fail counts + last-event epoch, if the test has any. |
 | `found` | boolean | yes | Whether the node id appears in any cache. |
 | `last_outcome` | string or null | yes | `"passed"` if the test was green on the last incremental run; `null` otherwise (absence is not proof of failure; see `flakes` for fail history). |
-| `meta` | Meta | yes |  |
+| `meta` | Meta | yes | Envelope: producer, document kind, schema version and rstest version. |
 | `nodeid` | string | yes | The node id that was explained, as given. |
 | `source_line` | integer or null | yes | Source def line (1-based) recorded on the last incremental run, if known. |
 

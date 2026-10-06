@@ -392,6 +392,28 @@ mod tests {
         );
     }
 
+    /// Every field in a published schema table explains itself. The
+    /// Description column comes from the field's `///` doc comment; doctor
+    /// report fields such as `fixtures` and `wait_pct` shipped with none.
+    #[test]
+    fn every_schema_field_has_a_description() {
+        let undocumented: Vec<String> = generated_files()
+            .iter()
+            .filter(|f| f.rel_path.ends_with(".md"))
+            .flat_map(|f| {
+                f.contents
+                    .lines()
+                    .filter(|l| l.starts_with("| `") && l.trim_end().ends_with("|  |"))
+                    .map(move |l| format!("{}: {l}", f.rel_path))
+            })
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "schema fields with no `///` doc comment:\n{}",
+            undocumented.join("\n")
+        );
+    }
+
     #[test]
     fn sync_reports_missing_stale_and_orphaned_files_and_bless_fixes_them() {
         let root = std::env::temp_dir().join(format!("rstest-schema-sync-{}", std::process::id()));
