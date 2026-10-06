@@ -32,3 +32,10 @@ corpus/bench.json
 !.claude/skills/rstest-triage
 plugins/rstest/skills/*-workspace/
 .cursor
+
+# cargo-mutants output
+mutants.out/
+mutants.out.old/
+
+# coverage
+.coverage
