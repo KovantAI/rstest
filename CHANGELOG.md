@@ -3,7 +3,7 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
-## Unreleased
+## 0.9.0 (2026-10-06)
 
 ### Features
 

@@ -10,7 +10,7 @@ rstest runs the whole repo in one command:
 
 ```console
 $ cd my-monorepo && rstest
-rstest 0.8.0 — monorepo: 3 projects, 8 workers (libs/cli:-n2, libs/core:-n4, services/api:-n2)
+rstest 0.9.0 — monorepo: 3 projects, 8 workers (libs/cli:-n2, libs/core:-n4, services/api:-n2)
 
 =============== project: libs/core ===============
 ...
@@ -50,7 +50,7 @@ isolation and the budget split work:
 
 ```console
 $ rstest          # langgraph monorepo, 14-core machine, first run
-rstest 0.8.0 — monorepo: 5 projects, 14 workers (libs/checkpoint:-n3, libs/checkpoint-sqlite:-n3, libs/cli:-n3, libs/prebuilt:-n3, libs/sdk-py:-n2)
+rstest 0.9.0 — monorepo: 5 projects, 14 workers (libs/checkpoint:-n3, libs/checkpoint-sqlite:-n3, libs/cli:-n3, libs/prebuilt:-n3, libs/sdk-py:-n2)
 ...
 ```
 

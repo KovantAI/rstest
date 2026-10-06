@@ -1,6 +1,6 @@
 {
   "name": "rstest",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Skills for adopting rstest (migrate a pytest suite, make it parallel-safe, speed it up) and for triaging failures on a suite that already runs on rstest (replay, bisect, audit, flaky-test policy).",
   "author": {
     "name": "Kovant AI",

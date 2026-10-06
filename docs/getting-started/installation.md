@@ -26,7 +26,7 @@ From your project root, with one test file (`test_ok.py`) present:
 
 ```console
 $ rstest --version
-rstest 0.8.0
+rstest 0.9.0
 $ rstest --co -q   # list tests without running them
 test_ok.py::test_ok
 

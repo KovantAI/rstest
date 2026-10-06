@@ -33,7 +33,7 @@
         "Proposes a committed quarantine file with tracking-issue comments for persistent offenders",
         "States that failures outside the known-flaky/quarantine set still fail the build",
         "Suggests checking for order dependence (bisect/audit/shuffle) or history (explain) before quarantining",
-        "Uses only flags/inputs that exist in rstest 0.8.0 (no invented options)"
+        "Uses only flags/inputs that exist in rstest 0.9.0 (no invented options)"
       ]
     },
     {
@@ -50,7 +50,7 @@
         "Explains the timed-out test is reported failed and the run still completes",
         "Suggests replaying the CI schedule locally via the uploaded replay journal (rstest replay --journal)",
         "Names a shared cross-worker resource (e.g. fixed port) as a likely CI-only hang cause, with an ephemeral-port or per-worker fix",
-        "Uses only flags that exist in rstest 0.8.0 (no invented options)"
+        "Uses only flags that exist in rstest 0.9.0 (no invented options)"
       ]
     }
   ]
