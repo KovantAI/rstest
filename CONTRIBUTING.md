@@ -111,9 +111,12 @@ lockstep with the code automatically.
 
 ### Writing docs
 
-The site is built with MkDocs Material from `docs/` (nav in `mkdocs.yml`).
-Check a docs change with `mkdocs build --strict` (install the tools from
-`docs/requirements.txt`).
+The site is built with [Zensical](https://zensical.org/) from `docs/` (nav
+in `mkdocs.yml`, which Zensical reads). Check a docs change with
+`zensical build --strict`, which fails on broken links and anchors (install the
+tools from `docs/requirements.txt`; `zensical serve` previews it). Link pages
+relatively (`../guides/replay.md`), never by an absolute `/...` URL: the strict
+build doesn't check those, and a persona spec rejects them.
 
 - **Where a page goes.** Getting started is for first contact, Playbooks for a
   whole persona's path (wait-bound suites, the inner loop, a plugin stack),

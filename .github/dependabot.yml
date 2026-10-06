@@ -27,3 +27,50 @@ updates:
     labels:
       - ci
       - dependencies
+
+  # The docs toolchain pinned for Read the Docs and CI (zensical and the
+  # Markdown extensions it constrains). One grouped PR keeps the pins
+  # mutually compatible; CI's docs job (zensical build --strict) gates it.
+  - package-ecosystem: pip
+    directory: /docs
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: docs
+    groups:
+      docs-toolchain:
+        patterns:
+          - "*"
+    labels:
+      - documentation
+      - dependencies
+
+  # uv.lock: the dev environment (`uv sync --group dev`: coverage, pytest-bdd,
+  # psutil and the worker's runtime deps as resolved). lockfile-only keeps
+  # pyproject.toml untouched, so the published package's `dependencies`
+  # ranges stay as wide as users need.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    versioning-strategy: lockfile-only
+    commit-message:
+      prefix: deps
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+    ignore:
+      # Pinned to the vendored pytest core (python/VENDOR.md); bumped only
+      # when the vendored copy is.
+      - dependency-name: pytest
+    labels:
+      - dependencies

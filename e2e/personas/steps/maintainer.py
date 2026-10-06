@@ -364,3 +364,53 @@ def _counts_are(world, spec):
 def _counts_at_least(world, n, kind):
     c = _counts(world)
     assert c.get(kind, 0) >= int(n), f"rc={world.result.returncode} counts={c}"
+
+
+# -- dependency updates --------------------------------------------------------
+
+
+@then("Dependabot updates every tracked requirements file")
+def _dependabot_covers_requirements(world):
+    # Each `- package-ecosystem: pip` entry covers the requirements files in
+    # its `directory`; a pinned file outside every entry never gets a bump.
+    tracked = subprocess.run(
+        ["git", "ls-files", "*requirements*.txt"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert tracked, "no tracked requirements file"
+    config = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    pip_dirs = {
+        "/" + m.group(2).strip("\"'").strip("/")
+        for entry in re.split(r"\n  - (?=package-ecosystem:)", config)
+        if (m := re.search(r"package-ecosystem:\s*(\S+)[\s\S]*?\n\s*directory:\s*(\S+)", entry))
+        and m.group(1).strip("\"'") == "pip"
+    }
+    missing = [f for f in tracked if "/" + (f.rpartition("/")[0]) not in pip_dirs]
+    assert not missing, f"no Dependabot pip entry for: {missing} (pip directories: {pip_dirs})"
+
+
+def _dependabot_entry(ecosystem, directory):
+    """The text of the `.github/dependabot.yml` update entry for this
+    ecosystem and directory, or None."""
+    config = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    for entry in re.split(r"\n  - (?=package-ecosystem:)", config):
+        eco = re.search(r"package-ecosystem:\s*(\S+)", entry)
+        where = re.search(r"\n\s*directory:\s*(\S+)", entry)
+        if (
+            eco
+            and where
+            and eco.group(1).strip("\"'") == ecosystem
+            and "/" + where.group(1).strip("\"'").strip("/") == "/" + directory.strip("/")
+        ):
+            return entry
+    return None
+
+
+@then(parsers.re(rf"the Dependabot {q('eco')} entry for {q('dir')} has {q('setting')}"))
+def _dependabot_setting(world, eco, dir, setting):
+    entry = _dependabot_entry(eco, dir)
+    assert entry, f"no Dependabot {eco} entry for {dir}"
+    assert re.search(rf"^\s*{re.escape(setting)}\s*$", entry, re.M), entry
