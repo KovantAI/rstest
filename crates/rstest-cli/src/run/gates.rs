@@ -912,6 +912,10 @@ pub(super) fn finalize_output(
         if let Some(n) = outcome.run.stopped_after {
             sink.out_line(&palette.red(&stopping_banner(n)));
         }
+        // pytest.exit() in a test: pytest's Exit banner, with its reason.
+        if let Some(exit) = &outcome.run.session_exit {
+            sink.out_line(&palette.red(&exit.banner()));
+        }
         let cached = outcome.run.cached_count();
         let cached_note = if cached > 0 {
             format!(" ({cached} cached)")

@@ -309,6 +309,13 @@ pub enum Event {
     Stopped {
         unrun: Vec<u64>,
     },
+    /// `pytest.exit()` in a test: the whole run stops (every worker gets
+    /// stop_run), as under pytest. The worker then ends its session the
+    /// usual way and sends `Done` with `returncode` as its exit status.
+    SessionExit {
+        reason: String,
+        returncode: i32,
+    },
     Done {
         exitstatus: i32,
     },
@@ -457,6 +464,16 @@ mod tests {
             from_python(serde_json::json!({"kind": "stopped", "payload": {"unrun": [1, 2]}})),
             Event::Stopped { .. }
         ));
+        assert_eq!(
+            from_python(serde_json::json!({
+                "kind": "session_exit",
+                "payload": {"reason": "bye", "returncode": 2}
+            })),
+            Event::SessionExit {
+                reason: "bye".into(),
+                returncode: 2
+            }
+        );
     }
 }
 
@@ -607,6 +624,8 @@ mod property {
                 .prop_map(|(index, timeout)| Event::ItemStart { index, timeout }),
             any::<u64>().prop_map(|index| Event::ItemDone { index }),
             prop::collection::vec(any::<u64>(), 0..4).prop_map(|unrun| Event::Stopped { unrun }),
+            (small_str(), any::<i32>())
+                .prop_map(|(reason, returncode)| Event::SessionExit { reason, returncode }),
             any::<i32>().prop_map(|exitstatus| Event::Done { exitstatus }),
             (small_str(), small_strs())
                 .prop_map(|(nodeid, cases)| Event::JunitCase { nodeid, cases }),

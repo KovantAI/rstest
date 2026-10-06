@@ -441,6 +441,24 @@ pub fn run_lazy_pool(
                     requeued.extend(unrun);
                 }
             }
+            Ok(Event::SessionExit { reason, returncode }) => {
+                // pytest.exit() in a test ends the whole run (see the full
+                // pool): stop every worker; the calling test has no outcome.
+                let s = &mut states[idx];
+                s.attempt.clear();
+                s.attempt_failed = false;
+                s.running_since = None;
+                s.running_watchdog = None;
+                if let Some(id) = s.running.take() {
+                    run.forget_unfinished(&id);
+                }
+                run.session_exit
+                    .get_or_insert(crate::reporting::report::SessionExit { reason, returncode });
+                if !stopping {
+                    stopping = true;
+                    orchestrator::stop_all(&mut states);
+                }
+            }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
                 let s = &mut states[idx];
@@ -752,6 +770,11 @@ pub fn run_lazy_pool(
         collect_aborted,
         run.stopped_after.is_some(),
     );
+    // pytest.exit(): its returncode is the run's exit code, as under pytest.
+    let exitstatus = run
+        .session_exit
+        .as_ref()
+        .map_or(exitstatus, |x| x.returncode);
     // Persist the schedule for `rstest replay`. Best-effort, like run_pool. No
     // collection hash: lazy never agrees on one ordered nodeid list, so replay's
     // drift check falls back to the collected count (when it is complete).

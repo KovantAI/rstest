@@ -72,20 +72,35 @@ def gate_worker_identity_fixtures(g, args, binary):
 
 
 def gate_lone_surrogate_in_report(g, args, binary):
-    print("== lone surrogate in reported text ==")
-    # os.fsdecode of a non-UTF-8 filename yields a lone surrogate; a strict
-    # UTF-8 wire encode used to crash the worker (INTERNALERROR, exit 3).
+    # R17 (B1): a failure whose text holds a lone surrogate (a non-UTF-8 path
+    # through os.fsdecode) has no UTF-8 encoding. It used to crash the worker's
+    # msgpack encoder: INTERNALERROR, exit 3, and the next test never ran.
+    # Decode with surrogateescape explicitly: os.fsdecode uses it on POSIX, but
+    # on Windows its handler is surrogatepass and b"\xff" raises instead.
+    print("== lone surrogate in a report ==")
     g.write(
-        "surrogate/test_surrogate.py",
-        "import os\n"
+        "surrogate/test_sur.py",
         "def test_a(): pass\n"
-        "def test_bad(): raise FileNotFoundError(os.fsdecode(b'bad\\xff.txt'))\n"
+        "def test_bad():\n"
+        '    raise FileNotFoundError(b"bad\\xff.txt".decode("utf-8", "surrogateescape"))\n'
         "def test_c(): pass\n",
     )
     for n in ("0", "2"):
-        r = g.run("surrogate/test_surrogate.py", "-n", n)
+        r = g.run("surrogate", "-n", n, "-p", "no:cacheprovider")
+        out = r.stdout + r.stderr
         check(
-            f"-n {n}: surrogate reported as a plain failure",
+            f"surrogate -n {n}: every test reported, exit 1",
             "1 failed, 2 passed" in r.stdout and r.returncode == 1,
-            f"rc={r.returncode} " + r.stdout[-300:],
+            f"rc={r.returncode} " + out[-300:],
         )
+        check(
+            f"surrogate -n {n}: no worker crash",
+            "INTERNALERROR" not in out and "surrogates not allowed" not in out,
+            out[-300:],
+        )
+        if n != "0":  # -n 0 prints pytest's own output: the raw bytes
+            check(
+                f"surrogate -n {n}: escaped text shown",
+                "bad\\udcff.txt" in r.stdout,
+                r.stdout[-300:],
+            )

@@ -135,11 +135,11 @@ def _stdout_either(world, a, b):
 
 @then(parsers.re(rf"the {q('marker')} section of stdout does not contain {q('text')}"))
 def _stdout_section_lacks(world, marker, text):
-    """The section runs from the marker to the next blank line; no marker, no section."""
-    stdout = world.result.stdout
-    if marker not in stdout:
-        return
-    section = stdout.split(marker, 1)[1].split("\n\n", 1)[0]
+    """A section runs from its header to the next blank line; an absent
+    section passes. Later sections (PARALLEL FLOOR, SLOWEST TESTS) can
+    legitimately name the same test, so they must not be searched."""
+    _, found, rest = world.result.stdout.partition(marker)
+    section = rest.split("\n\n", 1)[0] if found else ""
     assert text not in section, world.tail()
 
 

@@ -131,6 +131,12 @@ class StoppedPayload(TypedDict):
     reason: str
 
 
+class SessionExitPayload(TypedDict):
+    # pytest.exit(reason, returncode) in a test: the whole run stops.
+    reason: str
+    returncode: int
+
+
 class ItemStartIdPayload(TypedDict):
     id: str
     timeout: float | None
@@ -194,6 +200,7 @@ EventKind = Literal[
     "item_start",
     "item_done",
     "stopped",
+    "session_exit",
     "done",
     "junit_case",
     "junit_suite",
