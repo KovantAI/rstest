@@ -5,7 +5,7 @@ required. If you already have a pytest project, skip to
 [Run your existing suite](first-steps.md): rstest runs it as-is.
 
 **You need:** Python 3.10+ and a terminal. That's it: no config, no prior
-pytest knowledge. New to the terms below (worker, byte-exact mode, `-n`)? The
+pytest knowledge. New to the terms below (worker, single-worker mode, `-n`)? The
 [glossary](../concepts/glossary.md) defines them.
 
 ## 1. Set up a folder
@@ -53,18 +53,10 @@ test_first.py ..                                                         [100%]
 ============================== 2 passed in 0.00s ===============================
 ```
 
-That's the whole loop: no config file, no flags. rstest collected both tests,
-ran them, and printed pytest's familiar output. It *is* pytest's output: this
-tiny suite runs on a **single worker**, and on one worker rstest runs one
-plain pytest session and lets it print its own terminal output (pass
-`--output dots` to get rstest's own `dots` view instead).
-It runs on one worker because `-n auto` (the default) deliberately caps
-itself low on tiny suites: it never starts more workers than you have test
-files, and once rstest has timings cached it also caps by how long the suite takes, since
-worker startup isn't worth it for a sub-second run. On a real suite with many
-files, the same command fans out across your cores; rstest is [parallel by
-default](features.md). Force a worker count any time with `-n`, e.g.
-`rstest -n 4`.
+That's the whole loop: no config file, no flags. This is pytest's own output:
+`-n auto` (the default) runs a one-file suite on a single worker, and there
+rstest lets one plain pytest session print its terminal output. A real suite
+fans out across your cores ([how `-n auto` sizes the pool](first-steps.md#controlling-parallelism)).
 
 ## 4. See a failure
 
@@ -125,11 +117,9 @@ def test_sleepy(i):
     time.sleep(1)  # pretend each test does real work
 ```
 
-This demo folder has only two test files, so `-n auto` would start at most
-two workers: it never starts more workers than test files, and once timings
-are cached it can go lower on a suite that takes only a few seconds. Ask for
-four explicitly. Twelve one-second tests then finish in about
-3 seconds, not 12:
+With only two test files, `-n auto` would start at most two workers, so ask
+for four explicitly. Twelve one-second tests then finish in about 3 seconds,
+not 12:
 
 ```console
 $ rstest -n 4 test_slow.py

@@ -2,8 +2,39 @@
 
 The short version: install rstest, run `rstest` where you ran `pytest`, and
 check the list under [What changes](#what-changes) before you rely on it in
-CI. This page is the long version: what is identical, what differs, how to
-roll out in stages, and how to roll back.
+CI. The checklist below is the order to do it in; the rest of the page is
+the long version: what is identical, what differs, how to roll out in
+stages, and how to roll back.
+
+## A migration checklist
+
+1. `rstest try`: the one-command answer to "should we switch?". It runs the
+   suite under your installed pytest and under `rstest -n auto`, and reports
+   whether outcomes match and how much faster rstest is, before you commit to
+   anything. It costs one serial pytest run plus one rstest run; if it flags
+   differences, it points you at `migrate-check` (step 4).
+2. **Still on pytest 8?** Do [Upgrading to pytest 9](upgrade-to-pytest9.md)
+   first. Until then, a difference `try` reports can be pytest 8 versus 9,
+   not rstest ([details](#what-changes)).
+3. `rstest -n 0`: on pytest 9.1.x, confirm identical results to pytest (this
+   is the contract; report a bug if not). Move any rstest-owned flags out of
+   `addopts` first ([why](#addopts-and-pytest_addopts)). See
+   [The escape hatch](#the-escape-hatch).
+4. `rstest migrate-check`: **the preflight that does the triage for you.**
+   Fix what it names, and steps 5 and 6 usually become a formality. See
+   [The migrate-check preflight](#the-migrate-check-preflight) below for
+   what it reports and how to keep it as a CI gate.
+5. `rstest`: run parallel. Green? You're done. Roll it out in CI with
+   [the staged rollout](#rolling-out-in-stages-and-rolling-back).
+6. A few tests fail only in parallel? `migrate-check` already classified
+   each one and named its fix; [Parallel safety](parallel-safety.md) is the
+   reference for the remedies (`@pytest.mark.serial`, `--dist loadfile`, or
+   fixing the shared state).
+7. Run `rstest --doctor` once. It usually pays for the migration by
+   itself.
+
+To have a coding agent run this checklist for you, see
+[Driving it with Claude](#driving-it-with-claude-the-migrate-to-rstest-skill).
 
 ## What stays identical
 
@@ -228,43 +259,6 @@ is not read by rstest either: set it as `[tool.rstest] dist` (see
 [above](#addopts-and-pytest_addopts)). See
 [Migrating from pytest-xdist](migrate-from-xdist.md).
 
-## Just want to know if it's worth it?
-
-`rstest try` runs your suite under plain pytest and under `rstest -n auto`
-and tells you, in one command, whether the results are identical and how much
-faster rstest is, before you commit to anything:
-
-```console
-$ rstest try
-```
-
-It costs one serial pytest run plus one rstest run. If it flags
-differences, it points you at `migrate-check` (below).
-
-## A migration checklist
-
-1. `rstest try`: the one-command answer to "should we switch?". It runs the
-   suite under your installed pytest and under rstest, and reports whether
-   outcomes match and how much faster rstest is
-   ([Just want to know if it's worth it?](#just-want-to-know-if-its-worth-it)).
-2. **Still on pytest 8?** Do [Upgrading to pytest 9](upgrade-to-pytest9.md)
-   first. Until then, a difference `try` reports can be pytest 8 versus 9,
-   not rstest.
-3. `rstest -n 0`: on pytest 9.1.x, confirm identical results to pytest (this
-   is the contract; report a bug if not). Move any rstest-owned flags out of
-   `addopts` first ([why](#addopts-and-pytest_addopts)).
-4. `rstest migrate-check`: **the preflight that does the triage for you.**
-   Fix what it names, and steps 5 and 6 usually become a formality. See
-   [The migrate-check preflight](#the-migrate-check-preflight) just below for
-   what it reports.
-5. `rstest`: run parallel. Green? You're done.
-6. A few tests fail only in parallel? `migrate-check` already classified
-   each one and named its fix; [Parallel safety](parallel-safety.md) is the
-   reference for the remedies (`@pytest.mark.serial`, `--dist loadfile`, or
-   fixing the shared state).
-7. Run `rstest --doctor` once. It usually pays for the migration by
-   itself.
-
 ## Driving it with Claude (the migrate-to-rstest skill)
 
 rstest ships a Claude Code skill that runs this whole checklist for you. Run
@@ -280,8 +274,9 @@ your tests or CI.
 ## The migrate-check preflight
 
 `rstest migrate-check` is not a test run: it is a parallel-readiness
-report. It turns the manual triage of step 6 ("a few tests fail in parallel,
-read the guide, classify each by hand") into one command.
+report. It turns the manual triage of [checklist](#a-migration-checklist)
+step 6 ("a few tests fail in parallel, read the guide, classify each by
+hand") into one command.
 
 It first collects the suite twice and flags test ids that differ between
 collections (a per-process address or uuid is a hard blocker, since workers
@@ -296,12 +291,21 @@ full classification is in the
 [`migrate-check` reference](../reference/cli-commands.md#migrate-check).
 
 It exits `1` if any blocking unstable id or parallelism-specific failure is
-found (`2` if it couldn't judge, for example no usable interpreter), so it
-doubles as a **CI gate** that blocks new parallel-unsafe tests:
+found (`2` if it couldn't judge, for example no usable interpreter), so a red
+job tells you which one to fix. That makes it a **CI gate** that blocks new
+parallel-unsafe tests while the suite migrates: no new co-location leak,
+order dependency, or unstable-id site sneaks in green.
 
-```console
-$ rstest migrate-check --migrate-check-json migrate.json \
-         --migrate-allow tests/legacy/    # tolerate a triaged backlog
+```yaml
+      - name: migrate-check gate
+        run: |
+          rstest migrate-check --migrate-check-json migrate.json \
+                 --migrate-allow tests/legacy/   # known-unsafe backlog, tolerated
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: migrate-check
+          path: migrate.json
 ```
 
 `--migrate-check-json` writes the findings as a versioned JSON document
@@ -312,3 +316,8 @@ fail the build, so the gate goes red only on **new** issues while you work
 through the backlog. Flag reference:
 [`--migrate-check-json`](../reference/cli-commands.md#-migrate-check-json-path)
 and [`--migrate-allow`](../reference/cli-commands.md#-migrate-allow-substring).
+
+The gate is heavier than a normal run (it collects twice and reruns the
+failing files under discriminators), so run it in its own job or on a
+schedule rather than on every push if the suite is large. Once the suite
+reports `ready`, drop the gate and just run `rstest`.

@@ -1,6 +1,7 @@
 # Wait-bound / IO suites
 
-A playbook for suites whose time goes to waiting (sleeps, network, timeouts) rather than computing, where rstest gains the most.
+A playbook for suites whose time goes to waiting (sleeps, network,
+timeouts) rather than computing, where rstest gains the most.
 
 ## Who this is for
 
@@ -51,11 +52,9 @@ tuning the worker count (next section).
 
 Here is the key move for a wait-bound suite, and it is counter-intuitive:
 
-- **`-n auto` only ever caps *downward*.** It starts at one worker per
-  available logical core, then caps by what the suite can use (test-file
-  count and cached total runtime). It never exceeds your core count, and
-  on a few-file suite it may settle *below* it. See
-  [`-n, --numprocesses`](../reference/cli.md#-n-numprocesses-nauto).
+- **`-n auto` only ever caps *downward*.** It never exceeds your logical
+  core count, and on a small or few-file suite it settles below it
+  ([how it sizes the pool](../getting-started/first-steps.md#controlling-parallelism)).
 - **An explicit `-n N` is a fixed count, regardless.** Pin `-n <k>` and
   you get exactly `k` workers; the auto cap does not apply. So a
   wait-bound suite can set `-n` **above** the logical core count to keep
@@ -163,11 +162,12 @@ $ rstest try
 
 It runs your suite once under plain `pytest` and once under
 `rstest -n auto`, then reports whether outcomes are **identical** and how
-much **faster** rstest is. No flags, no config. (It needs `pytest`
-installed on its own for the baseline.) Note that `try` uses `-n auto`.
-For a wait-bound suite your *real* ceiling is higher, so treat the `try`
-speedup as a floor and then run the `-n`-above-cores tuning loop from
-section 2 to find the actual best wall time.
+much **faster** rstest is. The baseline needs pytest installed in the
+project environment (`python -m pytest` must work), not just rstest.
+Because `try` uses `-n auto`, a wait-bound suite's *real* ceiling is
+higher, so treat the `try` speedup as a floor and then run the
+`-n`-above-cores tuning loop from section 2 to find the actual best wall
+time.
 
 ## Go deeper
 
@@ -182,6 +182,6 @@ section 2 to find the actual best wall time.
 - [CLI reference](../reference/cli.md): `-n`, `--dist`, `--timeout`,
   `--worker-timeout`, and the doctor flags.
 - [Migrating from pytest](migrate-from-pytest.md): the one-line switch
-  and the `-n 0` byte-exact escape hatch.
+  and the `-n 0` single-worker escape hatch.
 - [Environment variables](../reference/environment.md): the full
   `RSTEST_WORKER_ID` / `workerinput` contract.

@@ -55,13 +55,31 @@ Python 3.10 and `colorama` on Windows). It does **not** require pytest to be
 installed (it is not a dependency, so installing rstest never installs or
 upgrades pytest), and it does not conflict with an installed pytest either: the
 vendored pytest core lives inside the `rstest_worker` package and never
-touches your `pytest` installation. (One exception: `rstest try` runs your
-suite under plain `pytest` to produce a baseline, so *that* command needs
-pytest installed in the project's environment (`python -m pytest` must work); see [`try`](../reference/cli-commands.md#try).)
+touches your `pytest` installation. The one exception is
+[`rstest try`](../reference/cli-commands.md#try): it runs a plain-pytest
+baseline, so that command needs `python -m pytest` to work in the project
+environment.
 
-Tests always run on the vendored pytest core (currently 9.1.1), whatever
-pytest version your project or its plugins pin. If a plugin still requires
-an older pytest, see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
+The wheel ships a single `rstest` binary (the Rust orchestrator), the
+`rstest_worker` Python package, and the vendored pytest core.
+
+First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
+it covers the common install/first-run failures (no usable interpreter or a
+missing worker shim, rstest picking the wrong Python, `rstest: command not
+found`, and import errors from a Python older than 3.10).
+
+## Your suite runs on pytest 9
+
+Adopting rstest adopts pytest 9. Tests always run on the vendored pytest core
+(currently 9.1.1), whatever pytest version your project or its plugins pin,
+and there is no older-core build. A plugin's `pytest<9` install pin is inert
+at runtime: the plugin loads into the vendored core and must support pytest 9
+itself ([Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core)).
+
+pytest 9 is a cleanup major: it removes APIs that already warned throughout
+8.x. A suite that is warning-clean on a recent pytest 8.x is almost always
+already pytest-9-clean. If it isn't, clear the deprecations first, the same
+upgrade you would owe pytest anyway.
 
 !!! note "Still on pytest 8?"
     Your installed pytest does not need upgrading to install rstest. Your
@@ -76,14 +94,6 @@ an older pytest, see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
     check: a few pytest 9 behavior changes raise no warning, so finish with
     the short list and the `rstest -n 0` backstop in
     [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md#the-method).
-
-First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
-it covers the common install/first-run failures (no usable interpreter or a
-missing worker shim, rstest picking the wrong Python, `rstest: command not
-found`, and import errors from a Python older than 3.10).
-
-The wheel ships a single `rstest` binary (the Rust orchestrator), the
-`rstest_worker` Python package, and the vendored pytest core.
 
 ## Binary vs worker runtime (for tool-scoped installs)
 

@@ -12,8 +12,8 @@ streams back the nodeids.
 Setting neither `--collect` nor `[tool.rstest] collect` selects the
 strategy automatically. rstest picks `lazy` for a big-enough parallel
 run: at least **2000** known tests (counted from the duration cache) and
-a **`tests × workers` ≥ 16 000** product, on a file-affine dist
-(`--dist load`/`loadfile`). Otherwise it picks `full`. Rationale: lazy's win
+a **`tests × workers` ≥ 16 000** product, with `--dist load` (the default,
+implicit or explicit) or `--dist loadfile`. Otherwise it picks `full`. Rationale: lazy's win
 is dropping the `(workers − 1)` redundant full collections, which only
 pays off once the suite and the worker count are both large; smaller
 suites keep full collection's locality.
@@ -22,8 +22,7 @@ The estimate reads `.rstest_cache/durations.json`, so a **cold cache
 counts as zero tests** and the first run of a suite stays `full`; a warm
 run of a large suite flips to `lazy`. When auto picks `lazy` it prints a
 banner naming the test and worker counts. Force either strategy with an
-explicit `--collect full` / `--collect lazy`. An explicit `--dist load`
-enables work-stealing under lazy however lazy was chosen. Auto never
+explicit `--collect full` / `--collect lazy`. Auto never
 *rejects* a config: on `--dist loadscope|loadgroup`, a nodeid, `--pyargs`,
 a path selection (explicit paths, or `--changed`/`--since-green`
 narrowing), `--shard`, `--shuffle`, `--incremental`, or a fail-fast
@@ -39,12 +38,12 @@ file the lazy walk doesn't find. Files the walk finds but pytest would
 never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) are safe
 in any lazy run: the worker applies pytest's own ignore checks and reports
 them empty.
-Without an explicit `--dist load`, lazy never splits a file across workers,
-so auto stays `full` when one file's cached time exceeds an even per-worker
-share (`total time / workers`) by more than a second, since that file would
-hold up the run. Auto applies this check even under an explicit `--dist load`,
-where lazy could split the file; pass `--collect lazy` to use lazy collection
-for such a suite anyway.
+Auto also stays `full` when one file's cached time exceeds an even
+per-worker share (`total time / workers`) by more than a second, since lazy
+runs each file whole on one worker and that file would hold up the run. The
+check assumes no stealing, so it applies even under an explicit `--dist load`
+(which could split the file; see [When it doesn't](#when-it-doesnt)). Pass
+`--collect lazy` to use lazy collection for such a suite anyway.
 
 ```console
 $ rstest --collect lazy
@@ -74,22 +73,23 @@ collection work scales with what you select, not with worker count.
 
 ## When it doesn't
 
-**Suites with a few giant files.** Scheduling granularity defaults to
-the file. A file with thousands of parametrized tests pins one worker
+**Suites with a few giant files.** Under lazy collection the unit of
+dispatch is the file, not the test, even with the default `--dist load`. A file with thousands of parametrized tests pins one worker
 while the rest idle (aiohttp's full run is ~2× slower under lazy
 affinity; packaging's 61k-in-30-files similar). Two options:
 
 - stay with `--collect full` (the right call for full runs of such
   suites), or
-- add an explicit `--dist load` (on the command line or as
-  `[tool.rstest] dist = "load"`), which enables **stealing**: when the
+- set `--dist load` explicitly (on the command line or as
+  `[tool.rstest] dist = "load"`), which enables **stealing** however lazy
+  was chosen (the implicit default does not): when the
   file queue is empty, an idle worker takes half of the busiest
   worker's undispatched items, paying one extra collection of that
   file. This restores balance (packaging matches full mode) but
   reorders execution more aggressively (see below).
 
-`--dist loadfile` (or just the lazy default) keeps strict file
-affinity: a file's tests run on one worker, in file order. A `load` from
+Without an explicit `load`, lazy keeps strict file affinity (with the
+default dist or `--dist loadfile` alike): a file's tests run on one worker, in file order. A `load` from
 either source turns stealing on, so a command-line `--dist loadfile` does not
 switch off a `dist = "load"` in `[tool.rstest]`; remove it from the config
 for strict affinity.

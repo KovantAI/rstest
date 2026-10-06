@@ -13,11 +13,10 @@ rstest uses pytest's exit-code vocabulary:
 
 **Exit 1 is not only "tests failed".** On a test run, only syntax errors
 caught by rstest's argument parser exit 2. Every other error rstest raises
-itself exits **1**, the same code as a test failure. (The verdict
-subcommands `try`, `migrate-check`, `xdist-removal-check`, `audit` and
-`bisect` differ: their errors exit 2, see
-[below](#gating-flags-and-their-exit-codes).) That
-includes:
+itself exits **1**, the same code as a test failure. The verdict subcommands
+`try`, `migrate-check`, `xdist-removal-check`, `audit` and `bisect` are the
+exception: their errors exit 2 (see
+[below](#gating-flags-and-their-exit-codes)). Errors that exit 1 include:
 
 - a bad value or combination for an rstest flag: a non-integer `-n`,
   `--dist no`, `--order bogus`, `--shard 1/2` with `-n 0` (or an `-n auto`
@@ -85,7 +84,7 @@ Flags that gate CI have exit semantics beyond the table above:
 | [`replay`](cli-commands.md#replay) | the replayed run's own code; `1` with an `Error:` line when the journal is missing or unreadable |
 | [`shard-verify`](cli-commands.md#shard-verify) | `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
 | [`explain`](cli-commands.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
-| [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift |
+| [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift; `1` when no Python interpreter is found (pass one with `--python`) |
 
 For `try`, `migrate-check`, `xdist-removal-check`, `audit` and `bisect`,
 `1` is always a verdict ("found something"), never an rstest error: an

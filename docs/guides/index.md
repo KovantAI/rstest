@@ -20,13 +20,14 @@ Task-oriented how-tos. Start with the one that matches what you are doing.
 - [Suite diagnostics](doctor.md): reading `--doctor`
 - [Resource leaks](resource-leaks.md): detecting and gating tests that leak threads and file descriptors
 - [Flaky tests](flaky-tests.md): reruns, flake history, quarantine
+- [Replaying a CI failure locally](replay.md): re-run a failed CI job's per-worker schedule with `rstest replay`
 - [Watch mode](watch-mode.md): the edit loop
 - [Selecting changed tests](changed.md): `--changed` via import graph or coverage index
 - [Monorepos](monorepo.md): one command across a multi-package repo
 
 ## CI
 
-- [CI quickstart](ci-quickstart.md): GitHub Actions, Django and monorepo worked examples, doctor trending, migrate-check gating
+- [CI quickstart](ci-quickstart.md): GitHub Actions, Django and monorepo worked examples, doctor trending
 - [More CI systems](ci-recipes.md): GitLab, Azure, CircleCI, Jenkins, cloud builders, pre-commit
 - [Shared cache across CI jobs](ci-shared-cache.md): merging durations, flakes, and coverage across jobs
 - [Sharding across CI jobs](sharding.md): splitting one suite over N machines with `--shard K/N`

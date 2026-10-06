@@ -15,8 +15,9 @@ $ rstest try
 
 `try` runs your suite once under plain pytest and once under `rstest -n auto`,
 then reports whether per-test outcomes match and how much faster rstest was.
-It needs pytest installed in the project environment for the baseline run, and
-it takes as long as both runs. See [`try`](../reference/cli-commands.md#try).
+No migration and no config. It needs pytest installed in the project
+environment for the baseline run, and it takes as long as both runs. See
+[`try`](../reference/cli-commands.md#try).
 
 ## What it speeds up
 
@@ -35,9 +36,9 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
   ([CPU-bound suites](../reference/benchmarks.md#cpu-bound-suites)). The
   remaining value is `--doctor`, `--watch` and the rest, not speed; see
   [Already fast under xdist?](../guides/migrate-from-xdist.md#already-fast-cpu-bound).
-- **Suites that can't move to pytest 9.** rstest runs a vendored pytest 9.1.1
-  core whatever pytest you have installed, and there is no older-core build
-  ([Vendored pytest version](../concepts/compatibility.md#vendored-pytest-version)).
+- **Suites that can't move to pytest 9.** rstest always runs a vendored
+  pytest 9.1.1 core, with no older-core build
+  ([Your suite runs on pytest 9](installation.md#your-suite-runs-on-pytest-9)).
 - **Reliance on single-controller plugins at `-n ≥ 2`.** pytest-html (from
   `addopts` or after `--`), pytest-reportlog and pytest-json-report write
   nothing in parallel, and terminal-UI plugins such as pytest-sugar don't
@@ -73,9 +74,9 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
 
 ## Cost of adopting
 
-Adopting rstest adopts pytest 9. A suite that is warning-clean on recent
-pytest 8.x is almost always already pytest-9-clean; if not, clear the
-deprecations first ([Upgrading to pytest 9](../guides/upgrade-to-pytest9.md)).
+Adopting rstest adopts pytest 9, usually free for a suite warning-clean on
+recent pytest 8.x
+([Your suite runs on pytest 9](installation.md#your-suite-runs-on-pytest-9)).
 Tests that aren't parallel-safe need `@pytest.mark.serial` or a fix
 ([Parallel safety](../guides/parallel-safety.md)), and session fixtures run
 once per worker, as under pytest-xdist. The step-by-step, with a shadow stage

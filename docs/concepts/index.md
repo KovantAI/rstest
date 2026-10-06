@@ -1,10 +1,11 @@
 # Concepts
 
-How rstest works, and why it's built that way:
-
-Evaluating rstest? Read [Compatibility](compatibility.md),
+How rstest works, and why it's built that way. Evaluating rstest? Start
+with [Compatibility](compatibility.md),
 [Benchmarks](../reference/benchmarks.md), and
 [Security](../reference/security.md).
+
+The pages in this section:
 
 - [Architecture](architecture.md): Rust orchestrator, Python workers, the vendored pytest core
 - [Compatibility](compatibility.md): the contract, what's verified, known gaps

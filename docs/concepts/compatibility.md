@@ -4,27 +4,59 @@ What rstest promises about matching pytest's behavior, how that promise is measu
 
 ## The contract
 
-1. **At `-n 0`: pytest's exact outcomes.** One vendored-pytest session
-   over your arguments. Any difference in per-test outcomes at `-n 0` is a
-   bug in rstest. The named exceptions are the
-   [flags rstest shares with pytest or a plugin](../reference/cli.md#shadowed-flags)
+1. **At `-n 0`: pytest's exact outcomes.** [Single-worker mode](#single-worker-mode)
+   runs one vendored-pytest session over your arguments. Any difference in
+   per-test outcomes at `-n 0` is a bug in rstest. The named exceptions are
+   the [flags rstest shares with pytest or a plugin](../reference/cli.md#shadowed-flags)
    (`--junitxml`, `--html`, `--timeout`, `--reruns`, `--debug`, ...): rstest
    handles them itself at every worker count, so they behave the same at
    `-n 0` as in parallel rather than as in pytest. `@pytest.mark.timeout` is
    rstest's native timeout too (its SIGALRM timer is armed for marked tests
    even without `--timeout`). To give one of these flags to pytest instead,
-   pass it after `--`. With no `--output` set, the terminal output at `-n 0`
-   is pytest's own too, with rstest's extras (doctor, coverage, gate
-   messages) appended after pytest's summary line; an explicit `--output` switches back to rstest's
-   renderer. `--junitxml` is pytest's own document at every worker count,
-   plus rstest's `flaky` / `quarantined` properties; see
-   [`--junitxml`](../reference/cli.md#-junitxml-path).
+   pass it after `--`.
 2. **In parallel modes: outcomes preserved for parallel-safe tests.**
    Identical per-test outcomes (setup/call/teardown, skips, xfails) for
    tests without hidden timing/ordering/shared-state assumptions. Tests
    *with* such assumptions can flake under concurrency (the same class of
    flake pytest-xdist produces) and the
    [parallel safety](../guides/parallel-safety.md) rails exist for them.
+
+## Single-worker mode
+
+Single-worker mode is what `-n 0` and `-n 1` run, and what `-n auto` runs
+when it resolves to one worker. The two flags are identical: one Python
+process in your interpreter runs a single pytest session over your
+arguments, with no scheduling, no dispatch and no `[gwN]` worker identity.
+It is the compatibility anchor, and its output is byte-exact:
+
+- With no `--output` set, the terminal output is pytest's own, with
+  rstest's extras (doctor report, coverage report, quarantined failures,
+  gate messages) appended after pytest's summary line. An explicit
+  [`--output`](../reference/cli.md#output)
+  switches back to rstest's renderer.
+- `--junitxml` is pytest's own document, plus rstest's `flaky` /
+  `quarantined` properties (true at every worker count; see
+  [`--junitxml`](../reference/cli.md#-junitxml-path)).
+
+The flags that need pytest's own terminal or stdin switch any run to this
+mode automatically, whatever `-n` says (rstest calls this **passthrough**):
+
+- `--co` / `--collect-only`
+- `-s` (also clustered, as in `-sv`) and `--capture=...`
+- `--pdb` and `--trace`
+- `--sw` / `--stepwise`, `--sw-skip` / `--stepwise-skip`,
+  `--sw-reset` / `--stepwise-reset`
+- rstest's own `--debug`
+
+There is no worker identity below `-n 2`, unlike pytest-xdist, whose `-n 1`
+spawns a `gw0` worker (see [xdist migration](../guides/migrate-from-xdist.md)).
+
+One opt-in exception: passing [`--reruns`](../reference/cli.md#-reruns-n)
+runs `-n 0`/`-n 1` as a one-worker pool instead (worker `gw0`, rstest's
+renderer) so retries fire, trading byte-exact output for the reruns you
+asked for. Under a passthrough flag `--reruns` has no effect, and rstest
+warns about it. [Architecture](architecture.md#single-worker-mode) shows
+where this mode sits in the run.
 
 ## What "verified" means
 

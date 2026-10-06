@@ -47,7 +47,7 @@ caches (durations, lastfailed) live in each project where they belong (see
 
 Per-project `[tool.rstest]` settings are honored: a project that pins
 `numprocesses` keeps it, `numprocesses = 0` runs that project in
-single-worker [byte-exact mode](glossary.md#byte-exact-mode) (the escape
+[single-worker mode](compatibility.md#single-worker-mode) (the escape
 hatch for order-sensitive suites) while its siblings split the remaining
 budget. `dist`, `reruns`, and `worker-timeout` set in a project apply to that
 project; flags given on the root command line override everywhere.
@@ -66,12 +66,16 @@ project, so a project with its own `pyproject.toml` uses only its own
 ## Worker budget and scheduling
 
 Projects run **concurrently** under one worker budget: your `-n` (or `auto`)
-is split across projects weighted by each project's last-known suite time (its
-duration cache), minimum one worker each. A repo where one package dominates
+is split across projects weighted by each project's last-known cost, minimum
+one worker each. The cost is the suite's last wall-clock time from the
+project's `wall.json` (fixture setup and teardown included), falling back to
+the sum of its per-test times in `durations.json` (see
+[Caching](caching.md)). A repo where one package dominates
 finishes in roughly that package's own wall time: the small ones ride along
 on spare workers.
 
-First runs (no duration caches yet) split the budget evenly; from the second
+First runs (no caches yet) split the budget evenly, and a project with no
+cache yet is weighted at the average of the others; from the second
 run on, the weights kick in. Output is printed per project, in completion
 order, each block whole.
 

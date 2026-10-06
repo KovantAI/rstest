@@ -198,8 +198,8 @@ $ rstest --shuffle=1234 -n 2 --dist loadfile   # reproduce a failing order
   `AssertionError`. Use the `--only-rerun` flag instead.
 - `-x` / `--maxfail` count a test only once its reruns are used up, and never
   count a `--quarantine` match.
-- Pass `--reruns` whenever the suite relies on `@pytest.mark.flaky`: with the
-  marker alone, a parallel run retries and reports `1 flaky`, yet exits 1.
+- The marker works without a global `--reruns`: a marked test that recovers
+  on retry counts as `flaky` and the run exits 0.
 - History: every run (except `--dist each` and `replay`) merges into
   `.rstest_cache/flakes.json` (`flaky`, `failed`, `last_epoch`). Entries age
   out after 90 days without events (`RSTEST_FLAKE_RETENTION_DAYS`, `0` keeps

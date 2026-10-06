@@ -27,12 +27,7 @@ this from its queue, which can misattribute; the explicit signal cannot.)
    re-provisioning can race the crashed node's cleanup (see
    [xdist hook emulation](xdist-hooks.md)).
 
-A run gets as many replacements as it has workers, and at least 4. Once
-they are spent, step 3 no longer happens: the dead worker is reported as a
-`<worker gwN>` error (exit code 3) and the run carries on with the workers
-it has left. Steps 1 and 2 still apply, so no test is lost. If every worker
-dies, the tests that never got to run are listed in one `<not run>` error
-("N tests did not run: every worker died").
+Step 3 is limited by the restart budget (see [Budgets](#budgets)).
 
 ## Hung tests (`--worker-timeout`)
 
@@ -51,13 +46,15 @@ kill counts against the same restart cap below. Hangs outside a test
 
 ## Budgets
 
-Total restarts per run are capped (`max(workers, 4)`). Past the cap, a
-dead worker is not replaced and is reported as an internal error (exit 3):
-a crash-loop ends loudly rather than spinning. Its in-flight test still
-fails as in step 1, and its other tests move to the surviving workers as in
-step 2. A test that no worker is left to run is reported as an error with a
-"not run" message, so every test still appears in the summary, junit and
-report-json. Under `--dist each` and `rstest replay` a worker's tests are
+A run gets as many worker replacements as it has workers, and at least 4
+(`max(workers, 4)`). Past the cap, a dead worker is not replaced and is
+reported as a `<worker gwN>` internal error (exit 3): a crash-loop ends
+loudly rather than spinning. The run carries on with the workers it has
+left: the dead worker's in-flight test still fails as in step 1, and its
+other tests move to the survivors as in step 2. If every worker dies, the
+tests that never got to run are listed in one `<not run>` error ("N tests
+did not run: every worker died"), so every test still appears in the
+summary, junit and report-json. Under `--dist each` and `rstest replay` a worker's tests are
 bound to it, so a dead worker's remaining tests are reported "not run"
 directly. Crashes during collection are not restarted (an import-time crash
 would recur).

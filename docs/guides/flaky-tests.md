@@ -222,8 +222,9 @@ parallel, check whether it is flaky at all or order-dependent:
 [`--shuffle`](../reference/cli.md#-shuffleseed) reproduces an order,
 [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) names
 the test that pollutes it, and [`rstest audit`](../reference/cli-commands.md#audit)
-lists the parallel-only failures. An order dependency has a fix; quarantine
-is for real nondeterminism. See
+lists the parallel-only failures. If it failed on CI and passes locally,
+[replay the CI run's schedule](replay.md) first. An order dependency has a
+fix; quarantine is for real nondeterminism. See
 [Diagnosing a parallel-only failure](parallel-safety.md#diagnosing-a-parallel-only-failure).
 
 The failure mode to avoid is a quarantine list that only ever grows.

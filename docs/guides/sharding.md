@@ -67,7 +67,8 @@ To pin one snapshot:
 - Resolve the warm source **once** in an upstream job (the `gh run list`
   step, or an `actions/cache/restore` lookup) and pass the run id or cache key
   to every shard as a job output. Recipes:
-  [GitHub Actions](#github-actions) below (`actions/cache`) and the
+  [GitHub Actions](#github-actions) below (the action's `warm-run-id` input,
+  or a resolved `actions/cache` key) and the hand-wired
   [artifact backend](ci-shared-cache.md#github-native-no-external-cloud-no-secrets).
 - Or snapshot the remote once, have shards read that copy, and push their new
   segments from a single follow-up job, so no shard's write can change what
@@ -176,39 +177,39 @@ shard run stamps no collection hash and is not verifiable this way.
 
 ## GitHub Actions
 
-Use a matrix. An upstream job resolves **one** cache key; every shard restores
-exactly that key, runs its slice, and uploads its JUnit and report. A final job
-proves the shards covered the suite and merges the JUnit.
+The bundled [`rstest` action][action] does the wiring: `shard` and
+`shard-total` pass `--shard K/N`, and `cache-backend: artifact` gives every
+shard the [shared cache](ci-shared-cache.md) over GitHub artifacts (no
+external store, no secrets). Each shard pushes its own segment, and the next
+run warms from the union, so there is no single-writer job and no dedicated
+full run. An upstream job resolves the warm run **once** and passes it to
+every shard as `warm-run-id`, so all shards partition from the same snapshot
+([why](#keep-one-cache-snapshot-across-the-matrix)). A final job proves the
+shards covered the suite.
 
 ```yaml
+permissions: { contents: read, actions: read }   # actions:read reaches prior-run artifacts
 jobs:
-  # Resolve the newest duration cache ONCE. Every shard restores this exact
-  # key, so a new cache saved mid-matrix (or a re-run of one shard hours
-  # later) can't change any shard's partition.
-  resolve:
+  # Resolve the warm source ONCE: the latest green push run on main. Every
+  # shard warms from this run, so they all compute the same partition.
+  warm:
     runs-on: ubuntu-latest
     outputs:
-      key: ${{ steps.lookup.outputs.cache-matched-key }}
+      run-id: ${{ steps.r.outputs.run-id }}
     steps:
-      - uses: actions/checkout@v7   # hashFiles needs the lockfile
-      - id: lookup
-        uses: actions/cache/restore@v6
-        with:
-          # Replay journals stay out, so a restore never brings back an
-          # older run's latest.json. The path list is part of the cache version, so all three steps must
-          # list the same paths or the restores never match the save.
-          path: |
-            .rstest_cache
-            !.rstest_cache/replay
-          lookup-only: true         # find the key, don't download
-          # The `durations` job saves `...-<run_id>`, so this exact key never
-          # hits; the restore-keys prefix matches the newest saved cache.
-          key: rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
-          restore-keys: |
-            rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WF_REF: ${{ github.workflow_ref }}
+        run: |
+          wf="${WF_REF##*/.github/workflows/}"; wf="${wf%%@*}"
+          rid=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
+                  --branch main --event push --status success --limit 1 \
+                  --json databaseId --jq '.[0].databaseId // ""')
+          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
 
   test:
-    needs: resolve
+    needs: warm
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -216,107 +217,175 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
         with:
           python-version: "3.13"
-      - run: |
-          pip install -r requirements.txt
-          pip install rstest
-
-      # Read-only restore of the ONE resolved key (no restore-keys: a
-      # prefix match here could pick a different entry per shard).
-      # Cold start: no key yet, every shard uses the same even split.
-      - uses: actions/cache/restore@v6
-        if: needs.resolve.outputs.key != ''
-        with:
-          path: |
-            .rstest_cache
-            !.rstest_cache/replay
-          key: ${{ needs.resolve.outputs.key }}
-
-      - name: test shard ${{ matrix.shard }}
-        run: |
-          rstest -n 4 --shard ${{ matrix.shard }}/4 \
-                 --report-json shard.${{ matrix.shard }}.json \
-                 --junitxml junit.${{ matrix.shard }}.xml
-
+          cache-backend: artifact
+          warm-run-id: ${{ needs.warm.outputs.run-id }}   # empty = cold start
+          shard: ${{ matrix.shard }}
+          shard-total: 4
+          # Explicit -n: auto can resolve to one worker, which --shard rejects.
+          args: "-n 4 --report-json shard.${{ matrix.shard }}.json"
+          upload-junit: true
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: shard-${{ matrix.shard }}
-          overwrite: true           # a re-run of this shard replaces its files
-          path: |
-            junit.${{ matrix.shard }}.xml
-            shard.${{ matrix.shard }}.json
+          name: shard-report-${{ matrix.shard }}
+          overwrite: true           # a re-run of this shard replaces its report
+          path: shard.${{ matrix.shard }}.json
 
-  # One job runs the WHOLE suite and saves the fresh cache so the next
-  # push's shards are wall-time balanced. (Each shard writes only its own
-  # partial timings to its local copy and never saves it; something has to
-  # write the authoritative one.)
-  durations:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with: { python-version: "3.13" }
-      - run: pip install -r requirements.txt && pip install rstest
-      - uses: actions/cache@v6
-        with:
-          path: |
-            .rstest_cache
-            !.rstest_cache/replay
-          key: rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
-          restore-keys: |
-            rstest-durations-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
-      - run: rstest -n auto -q
-
-  merge:
+  verify:
     needs: test
     runs-on: ubuntu-latest
     if: always()
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: shard-*
+          pattern: shard-report-*
           merge-multiple: true
       # Gate: fail unless the shards covered the whole suite exactly once.
       - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
       - run: pip install rstest && rstest shard-verify shard.*.json
-      # Feed junit.*.xml to your test-report integration; most accept a
-      # glob. Or merge with junitparser: pip install junitparser &&
-      # junitparser merge junit.*.xml junit.xml
-      - uses: actions/upload-artifact@v7
-        with:
-          name: junit-all
-          overwrite: true
-          path: junit.*.xml
 ```
 
-Re-running one failed shard is safe here: it restores the same resolved key
-(the `resolve` job isn't re-run), so it recomputes the same partition, and
-`overwrite: true` replaces that shard's artifact, so `merge` and
-`shard-verify` see exactly one report per shard.
+Run this workflow on pushes to `main` too: those runs publish the segments
+that the `warm` job finds, and one complete sharded run unions into a full
+cache. Keep the `main` runs full (not `changed: true`), since the artifact
+backend warms from exactly one prior run. The first run is cold and every
+shard uses the same even count split; from the second run on, shards balance
+by wall time.
 
-!!! tip "Cache split, deliberately"
-    Shards **restore** the one key the `resolve` job found, so they agree; a
-    separate full run **saves** a fresh key each run so the numbers stay
-    current. Pointing shards at a per-run key, or letting each shard
-    prefix-match on its own, would give matrix jobs different caches and
-    break the partition. If you'd rather not run a separate full job, let
-    shard 1 save the cache instead, but accept that its timings only cover
-    1/N of the suite.
+Re-running one failed shard is safe: the `warm` job isn't re-run, so the
+shard warms from the same run id and recomputes the same partition, and
+`overwrite: true` replaces its report, so `shard-verify` sees exactly one
+report per shard. The action uploads each shard's JUnit as
+`rstest-junit-<suffix>-shard-K` (each holding `junit.xml`); download them with
+`pattern: rstest-junit-*` **without** `merge-multiple` and feed `*/junit.xml`
+to your test-report integration.
 
-!!! tip "Or skip the dance entirely with the shared cache"
-    The restore-key/refresh-job choreography above exists to work around
-    `actions/cache` immutability. The [shared-cache backend](../concepts/caching.md#shared-cache-backend)
-    removes it: every shard runs `--cache-pull --cache-push`, each pushing its
-    own immutable segment, and they union on the next pull, so there is no
-    single-writer job and no dedicated full run. One caveat: shards pull at
-    different times, so a shard that pushes early can change what a later
-    shard pulls in the **same** run. For a gating pipeline, pin one snapshot
-    as described in [Keep one cache snapshot across the matrix](#keep-one-cache-snapshot-across-the-matrix).
-    See [Shared cache across CI jobs](ci-shared-cache.md).
+[action]: https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest
+
+!!! note "Which cache backend for which layout"
+    - **`actions-cache`** (the action's default, or a raw `actions/cache`
+      step): a single unsharded job. In a shard matrix each shard would save
+      and restore on its own, so shards can partition from different caches.
+    - **`artifact`**: a shard matrix or PR suite on GitHub, as above.
+    - **`remote`** (`cache-remote: s3://…`): teams already on an object store
+      or a shared mount. For a gating matrix, use the
+      [snapshot layout](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
+      so no shard's push changes what another shard pulls.
+
+### Full control: raw YAML
+
+Without the action, there are two layouts:
+
+- **Segment-merge shared cache, hand-wired.** The same artifact flow as the
+  action, step by step, in
+  [Shared cache: GitHub-native](ci-shared-cache.md#github-native-no-external-cloud-no-secrets).
+- **Plain `actions/cache`**, below. `actions/cache` never re-saves an
+  existing key and holds one blob per key, so shards can't each contribute
+  their timings. Instead, the shards only **restore** one key resolved
+  upstream, and a separate full run **saves** a fresh cache each time.
+
+??? example "Shard matrix on plain `actions/cache`"
+
+    ```yaml
+    jobs:
+      # Resolve the newest duration cache ONCE. Every shard restores this exact
+      # key, so a new cache saved mid-matrix (or a re-run of one shard hours
+      # later) can't change any shard's partition.
+      resolve:
+        runs-on: ubuntu-latest
+        outputs:
+          key: ${{ steps.lookup.outputs.cache-matched-key }}
+        steps:
+          - uses: actions/checkout@v7   # hashFiles needs the lockfile
+          - id: lookup
+            uses: actions/cache/restore@v6
+            with:
+              # The path list is part of the cache version: all three cache
+              # steps must list the same paths, or the restores never match.
+              path: |
+                .rstest_cache
+                !.rstest_cache/replay
+              lookup-only: true         # find the key, don't download
+              # The `durations` job saves `...-<run_id>`, so this exact key never
+              # hits; the restore-keys prefix matches the newest saved cache.
+              key: rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
+              restore-keys: |
+                rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
+
+      test:
+        needs: resolve
+        runs-on: ubuntu-latest
+        strategy:
+          fail-fast: false
+          matrix:
+            shard: [1, 2, 3, 4]
+        steps:
+          - uses: actions/checkout@v7
+          - uses: actions/setup-python@v7
+            with: { python-version: "3.13" }
+          - run: pip install -r requirements.txt && pip install rstest
+
+          # Read-only restore of the ONE resolved key (no restore-keys: a
+          # prefix match here could pick a different entry per shard).
+          # Cold start: no key yet, every shard uses the same even split.
+          - uses: actions/cache/restore@v6
+            if: needs.resolve.outputs.key != ''
+            with:
+              path: |
+                .rstest_cache
+                !.rstest_cache/replay
+              key: ${{ needs.resolve.outputs.key }}
+
+          - run: |
+              rstest -n 4 --shard ${{ matrix.shard }}/4 \
+                     --report-json shard.${{ matrix.shard }}.json \
+                     --junitxml junit.${{ matrix.shard }}.xml
+
+          - uses: actions/upload-artifact@v7
+            if: always()
+            with:
+              name: shard-${{ matrix.shard }}
+              overwrite: true           # a re-run of this shard replaces its files
+              path: |
+                junit.${{ matrix.shard }}.xml
+                shard.${{ matrix.shard }}.json
+
+      # One job runs the WHOLE suite and saves the fresh cache, so the next
+      # push's shards are wall-time balanced. (Each shard writes only partial
+      # timings to its local copy and never saves it.)
+      durations:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v7
+          - uses: actions/setup-python@v7
+            with: { python-version: "3.13" }
+          - run: pip install -r requirements.txt && pip install rstest
+          --8<-- "docs/_snippets/actions-cache-step.md"
+          - run: rstest -n auto -q
+
+      merge:
+        needs: test
+        runs-on: ubuntu-latest
+        if: always()
+        steps:
+          - uses: actions/download-artifact@v8
+            with:
+              pattern: shard-*
+              merge-multiple: true
+          - uses: actions/setup-python@v7
+            with: { python-version: "3.13" }
+          - run: pip install rstest && rstest shard-verify shard.*.json
+          # Feed junit.*.xml to your test-report integration (most accept a
+          # glob), or merge: pip install junitparser &&
+          # junitparser merge junit.*.xml junit.xml
+    ```
+
+    If you'd rather not run a separate full job, let shard 1 save the cache
+    instead, but accept that its timings only cover 1/N of the suite.
 
 ## Other CI systems
 

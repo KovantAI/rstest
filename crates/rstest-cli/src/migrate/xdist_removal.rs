@@ -179,13 +179,19 @@ fn imported_at_startup(file: &Path, entry: &Path) -> bool {
             && file.parent().is_some_and(|dir| entry.starts_with(dir)))
 }
 
-fn probe(python: &Path) -> Option<Probe> {
-    let out = std::process::Command::new(python)
-        .args(["-c", PROBE])
+/// The plugin probe child, built without spawning it. It imports installed
+/// plugins, so it gets the same secret scrubbing as a test worker.
+fn probe_command(python: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(["-c", PROBE])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    crate::scheduling::worker::scrub_secrets(&mut cmd);
+    cmd
+}
+
+fn probe(python: &Path) -> Option<Probe> {
+    let out = probe_command(python).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1260,6 +1266,16 @@ mod tests {
 
     use super::*;
     use crate::migrate::Rec;
+
+    #[test]
+    fn probe_command_scrubs_the_remote_cache_token() {
+        let cmd = probe_command(Path::new("python"));
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == "RSTEST_CACHE_REMOTE_TOKEN" && v.is_none()),
+            "xdist-removal probe inherits RSTEST_CACHE_REMOTE_TOKEN"
+        );
+    }
 
     /// [`scan_source`] with no project-declared specs, as a non-test module.
     fn scan(text: &str, rel_path: &str) -> Vec<RemovalFinding> {

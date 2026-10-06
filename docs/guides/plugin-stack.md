@@ -1,6 +1,7 @@
 # Your plugin stack
 
-A playbook for checking that the pytest plugins you rely on work under rstest before you switch.
+A playbook for checking that the pytest plugins you rely on work under rstest
+before you switch.
 
 ## Who this is for
 
@@ -14,11 +15,11 @@ parallel pool and its vendored pytest 9 core?*
 The one-line reassurance: **every plugin in this stack either works as-is or
 is replaced by an rstest-native equivalent (coverage, timeouts, reruns,
 parallelism), and nothing needs porting**. The adjustments are two
-report/terminal plugins you move to `-n 0`, and pytest-timeout, which you
-uninstall or disable with `-p no:timeout` so a test doesn't get two timers.
-The config moves are small: an ini
-`timeout =` goes to `rstest --timeout`, and xdist's `--dist` mode goes to
-`[tool.rstest] dist`. Plugins load
+report/terminal plugins you move to `-n 0`, pytest-timeout, which you
+uninstall or disable with `-p no:timeout` so a test doesn't get two timers,
+and pytest-cov's `--cov`, which belongs on the rstest command line rather
+than in `addopts`. The config moves are small: an ini `timeout =` goes to
+`rstest --timeout`, and xdist's `--dist` mode goes to `[tool.rstest] dist`. Plugins load
 through the standard `pytest11` entry points against a real
 [pluggy](https://github.com/pytest-dev/pluggy), as under pytest
 ([Plugins](plugins.md)). The one thing to watch is flag names rstest owns,
@@ -31,8 +32,8 @@ The one command to check your own suite against the vendored core:
 $ rstest -n 0
 ```
 
-This is a single vendored-pytest-9.1.1 session over your arguments, the
-byte-exact contract ([Compatibility](../concepts/compatibility.md)).
+This is a single vendored-pytest-9.1.1 session over your arguments
+(single-worker mode; see [Compatibility](../concepts/compatibility.md)).
 Green here means the whole stack is happy with pytest 9 before you add a
 single worker.
 
@@ -66,10 +67,12 @@ around it, **pytest-freezegun** and **pytest-freezer**
 ([top-100](../reference/top-100-plugins.md)), are marked **✅ Works (i,
 inferred)**: same in-process time-freeze model, not yet runtime-verified.
 
-Eight of the eleven run unchanged or via a native flag with no change on your
-side. Three need one: pytest-html and pytest-sugar need a `-n 0` run for
-their own output, and pytest-timeout must be uninstalled or disabled with
-`-p no:timeout`.
+Seven of the eleven need no change on your side: five run as-is,
+pytest-rerunfailures is replaced by rstest's own reruns, and pytest-xdist is
+neutralized. Four need one: pytest-cov needs `--cov` on the rstest command
+line (from `addopts` alone a parallel run writes no report), pytest-html and
+pytest-sugar need a `-n 0` run for their own output, and pytest-timeout must
+be uninstalled or disabled with `-p no:timeout`.
 
 ## Plugin versions vs the vendored pytest 9
 
@@ -83,15 +86,11 @@ at runtime; rstest warns when it sees one. The full rule is in
 9.1.1** and surfaces any pytest-9 incompatibility *exactly as a real pytest
 upgrade would*, because that is effectively what it is. Clear it there first.
 
-Because pytest 9 is a **cleanup major** (it removes APIs that already warned
-throughout 8.x and keeps the collection model, fixture engine, `_pytest.*`
-paths, and pluggy contract; see [Compatibility](../concepts/compatibility.md)),
-a stack that is warning-clean on a recent pytest 8.x is almost always
-already pytest-9-clean. If it isn't, clear the deprecations *before* you
-switch the runner. The step-by-step is
-[Upgrading to pytest 9](upgrade-to-pytest9.md): run
-`pytest -W error::pytest.PytestDeprecationWarning` on your current pytest, then
-`rstest -n 0` as the backstop.
+A stack that is warning-clean on a recent pytest 8.x is almost always
+already pytest-9-clean; if it isn't, clear the deprecations *before* you
+switch the runner
+([Your suite runs on pytest 9](../getting-started/installation.md#your-suite-runs-on-pytest-9),
+with the step-by-step in [Upgrading to pytest 9](upgrade-to-pytest9.md)).
 
 ### Known-good versions
 
@@ -154,8 +153,8 @@ and having no Python controller to aggregate worker output.
 
 The rule of thumb: if a plugin's job is to *aggregate across workers from
 the controller* or *paint the terminal*, it wants `-n 0`. Everything else in
-this stack (django, asyncio, hypothesis, cov, mock, freezegun) runs
-parallel as-is, and timeout, rerunfailures and xdist are replaced by rstest's
+this stack (django, asyncio, hypothesis, mock, freezegun, and cov with
+`--cov` on the command line) runs in parallel, and timeout, rerunfailures and xdist are replaced by rstest's
 own features.
 
 ## Go deeper

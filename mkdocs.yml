@@ -110,6 +110,7 @@ nav:
       - Suite diagnostics: guides/doctor.md
       - Resource leaks: guides/resource-leaks.md
       - Flaky tests: guides/flaky-tests.md
+      - Replaying a CI failure locally: guides/replay.md
       - Watch mode: guides/watch-mode.md
       - Selecting changed tests: guides/changed.md
       - Monorepos: guides/monorepo.md

@@ -491,7 +491,7 @@ $ rstest replay --journal ./rstest-replay-tests-0/latest.json
 
 For the full CI-to-local walkthrough (download, portability rules, what to
 read in the output), see
-[Replaying a CI-only failure locally](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally).
+[Replaying a CI-only failure locally](../guides/replay.md).
 
 The journal keys on nodeid, not on the machine-local collection index, so it
 survives the machine hop. Replay collects the suite fresh, re-resolves each
@@ -641,7 +641,9 @@ Prove the vendored pytest tree in your installed rstest is intact. rstest ships
 an unmodified copy of pytest inside its worker package; this rehashes every
 file under `_vendor/` and compares it to the packaged manifest (`vendor.lock`),
 catching an accidentally-edited, corrupted, or partial install. Run-less: it
-verifies and exits without running your suite.
+verifies and exits without running your suite. It still needs a Python
+interpreter (the check runs under it), so it exits 1 when none is found; pass
+one with `--python`.
 
 ```console
 $ rstest verify-vendor

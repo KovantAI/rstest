@@ -54,7 +54,7 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   [`rstest replay`](../reference/cli-commands.md#replay). Local to the
   machine that ran it: keep it **out** of any CI cache and upload
   `latest.json` as a failure artifact instead (see
-  [Replaying a CI-only failure](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)).
+  [Replaying a CI-only failure](../guides/replay.md)).
 - `.lock`: an empty sentinel file. rstest takes an OS advisory lock on it
   around each read-modify-write of the cache files, so concurrent runs or
   shards sharing one cache directory don't lose each other's updates. Never

@@ -126,7 +126,7 @@ these by hand:
 ### 3. Verify
 
 Point rstest at the suite in
-[byte-exact mode](../concepts/glossary.md#byte-exact-mode): one worker, one pytest
+[single-worker mode](../concepts/glossary.md#single-worker-mode): one worker, one pytest
 session, pytest 9.1.1's exact outcomes:
 
 ```console

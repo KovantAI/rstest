@@ -193,7 +193,7 @@ break on upgrade.
 ### pytest-html's exact format: `-n 0` reporting pass
 
 If a workflow depends on pytest-html's *specific* HTML output and nothing
-else will do, run a dedicated byte-exact-mode (`-n 0`) pass for the report only:
+else will do, run a dedicated single-worker (`-n 0`) pass for the report only:
 
 ```console
 $ rstest -n auto                       # gate on this, the fast run

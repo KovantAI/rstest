@@ -259,7 +259,7 @@ job holds:
 
 ### Replay journals
 
-A [replay journal](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)
+A [replay journal](../guides/replay.md)
 records the run's arguments, and `rstest replay` passes them on to pytest
 as they are. They can include `-p <plugin>`, `-c <file>`, `-o <option>` or
 `--rootdir`, which load code or change configuration on your machine.

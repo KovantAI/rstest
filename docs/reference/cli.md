@@ -1,9 +1,11 @@
 # CLI flags
 
-rstest owns the flags listed on this page, grouped by topic below, plus a
-few forwarded pytest flags that rstest adds orchestration to (each marked
-*forwarded* in its section, e.g. `--doctest-modules`, `--durations`);
-**everything else forwards to the test session verbatim**, so the rest of the
+rstest owns the flags listed on this page, grouped by topic below. Two
+forwarded pytest flags also get their own sections because rstest adds
+orchestration to them (`--doctest-modules` and `--durations` /
+`--durations-min`, each marked *forwarded*); `-x` / `--maxfail`, `--lf` /
+`--ff` and `-v` are covered under [Forwarded pytest flags](#forwarded-pytest-flags).
+**Everything else forwards to the test session verbatim**, so the rest of the
 pytest flag surface, including flags added by your plugins, works without
 translation.
 
@@ -28,58 +30,100 @@ rstest <COMMAND> [OPTIONS]
     `addopts = --junitxml=x.xml` writes no file at `-n 2` or more. Move these
     flags to the command line or `[tool.rstest]`.
 
-Subcommands (`rstest try`, `rstest migrate-check`, `rstest
-xdist-removal-check`, `rstest audit`, `rstest bisect`, `rstest replay`, `rstest shard-verify`, `rstest explain`, `rstest cache-compact`,
-`rstest verify-vendor`, `rstest install-skills`) and their own flags are on [CLI
-subcommands](cli-commands.md).
+Subcommands (`try`, `migrate-check`, `xdist-removal-check`, `audit`,
+`bisect`, `replay`, `shard-verify`, `explain`, `cache-compact`,
+`verify-vendor`, `install-skills`) and their flags are on
+[CLI subcommands](cli-commands.md).
 
 At a [monorepo](../concepts/monorepo.md) root, rstest forwards most of these
 flags to every project, gives output files a per-project name, and refuses the
 few that need one project's session. The per-flag table is in
 [Flags at a monorepo root](../concepts/monorepo.md#flags-at-a-monorepo-root).
 
+## Flag summary
+
+Every rstest-owned flag, with its default and the config key or environment
+variable that also sets it. The command line wins over both. A blank cell
+means none.
+
+| Flag | Purpose | Default | `[tool.rstest]` key | Env var |
+|---|---|---|---|---|
+| [`-n, --numprocesses`](#-n-numprocesses-nauto) | worker count | `auto` | `numprocesses` | |
+| [`--fork-pool`](#-fork-pool) | fork workers off a prewarmed zygote (Unix) | off | | |
+| [`--dist`](#-dist-loadloadfileloadscopeloadgroupeach) | distribution mode | `load` | `dist` | |
+| [`--order`](#-order-throughputfail-fast) | dispatch order under `--dist load` | `throughput` (`fail-fast` under `--watch`) | `order` | |
+| [`--shuffle[=SEED]`](#-shuffleseed) | seeded random dispatch order | off | | |
+| [`--shard K/N`](#-shard-kn) | run one of N CI shards | off | | |
+| [`--collect`](#-collect-fulllazy) | collection strategy (`full` / `lazy`) | auto | `collect` | |
+| [`--changed[=REV]`](#-changedrev) | run only tests affected by changes | off | | |
+| [`--changed-strict`](#-changed-strict) | `--changed` hardened for gating CI | off | | |
+| [`--since-green`](#-since-green) | `--changed` against the last green commit | off | | |
+| [`--incremental`](#-incremental) | skip unchanged tests that passed last run | off | | |
+| [`--reruns N`](#-reruns-n) | rerun failed tests | `0` | `reruns` | |
+| [`--only-rerun REGEX`](#-only-rerun-regex) | rerun only matching failures | every failure | | |
+| [`--reruns-only-known-flaky`](#-reruns-only-known-flaky) | rerun only tests with flaky history | off | `reruns-only-known-flaky` | |
+| [`--quarantine FILE`](#-quarantine-file) | make listed tests' failures non-fatal | none | | |
+| [`--timeout SECS`](#-timeout-secs) | per-test call-phase deadline | none | | |
+| [`--worker-timeout SECS`](#-worker-timeout-secs) | fixed per-test hang backstop | none (per-test watchdog when a test has a timeout) | `worker-timeout` | |
+| [`--durations-regress RATIO`](#-durations-regress-ratio) | fail on per-test duration regressions | off | | |
+| [`--require-baseline`](#-require-baseline) | missing duration baseline is an error | off | | |
+| [`--cache-remote URL`](#-cache-remote-urldir-cache-pull-cache-push) | shared cache location | none | | `RSTEST_CACHE_REMOTE` |
+| [`--cache-pull` / `--cache-push`](#-cache-remote-urldir-cache-pull-cache-push) | merge / publish the shared cache | off | | |
+| [`--cache-compact-threshold N`](#-cache-compact-threshold-n) | compact the remote inline after a push | off | | `RSTEST_CACHE_COMPACT_THRESHOLD` |
+| [`--doctor`](#-doctor) | print a post-run diagnosis | off | | |
+| [`--doctor-json PATH`](#-doctor-json-path) | write the diagnosis as JSON | none | | |
+| [`--doctor-md PATH`](#-doctor-md-path) | write the diagnosis as markdown | none | | |
+| [`--doctor-fail-on COND`](#-doctor-fail-on-cond) | fail on a doctor metric threshold | none | | |
+| [`--fail-on-leak`](#-fail-on-leak) | fail on a leaked thread or fd | off | | |
+| [`--cov-diff-fail-under PCT`](#-cov-diff-fail-under-pct) | fail on low diff coverage | none | | |
+| [`--cov-diff-json PATH`](#-cov-diff-json-path) | write diff coverage as JSON | none | | |
+| [`--output STYLE`](#output) | terminal output style | `bar` on a TTY, else `dots`; pytest's own in single-worker mode | `output` | |
+| [`--junitxml PATH`](#-junitxml-path) | merged JUnit XML | none | | |
+| [`--html PATH`](#-html-path) | self-contained HTML report | none | | |
+| [`--report-json PATH`](#-report-json-path) | per-test outcome snapshot | none | | |
+| [`--stream-json FILE`](#-stream-json-file) | live NDJSON events to a side file | none | | |
+| [`--python`](#-python-path-or-version) | worker interpreter | discovered | | `VIRTUAL_ENV` (first in discovery) |
+| [`--watch`](#-watch) | rerun on file change | off | | |
+| [`--debug[=PORT]`](#-debugport) | run under debugpy | off (port `5678` when bare) | | |
+
+`[tool.rstest] projects` (monorepo subprojects) is a config key with no flag;
+see [Configuration file](#configuration-file). Flags of the subcommands
+(`--migrate-check-json`, `--audit-json`, ...) are on [CLI subcommands](cli-commands.md).
+
 ## Parallelism and scheduling
 
 ### `-n, --numprocesses <N|auto>`
 
-Worker count. Default `auto` (logical cores, capped as described below).
+Worker count. Default `auto`.
 
-- `-n auto`: one worker per available logical core, then capped by what the
-  selected tests can use. The selection is the paths and nodeids you pass
-  (else the invocation directory, or `testpaths` from the rootdir). With no
-  cached timings, never more workers than selected test files plus nodeids,
-  so one selected test runs in byte-exact mode. Once the duration cache times
-  the selection, the cap is its cached test count instead (`--dist load`
-  splits a file across workers, so a one-file suite can still fan out), and
-  at most one worker per ~2 s of cached time. On Linux the core
-  count honors the process CPU affinity mask and cgroup CPU quota, so a
-  CPU-limited container (`docker run --cpus=2`, a constrained CI runner) sees
-  its allocation, not the host's core count (no oversubscription). Pin `-n
-  <k>` if you want a fixed count regardless.
-- `-n 4`: four workers
-- `-n 0` or `-n 1`: **byte-exact mode**, one pytest session with byte-exact
-  pytest semantics; identical to each other, with no worker identity below
-  `-n 2`. `-n auto` runs this same mode when it resolves to one worker (a
-  small project). Exception: with `--reruns`, `-n 0/1` runs a one-worker pool instead
-  (worker `gw0`, not byte-exact); see [`--reruns`](#-reruns-n). With no
-  `--output` set, the session prints pytest's own terminal output; see
-  [`--output`](#-output-dotsverbosebargithubjson).
-  See [Byte-exact mode](../concepts/glossary.md#byte-exact-mode)
-  (and, for migrators, how it differs from pytest-xdist's `-n 1`).
+- `-n auto`: one worker per available logical core, capped by what the
+  selection (the paths and nodeids you pass, else the invocation directory or
+  `testpaths` from the rootdir) can use. With no cached timings, at most one
+  worker per selected test file or nodeid, so one selected test runs in
+  single-worker mode. With a warm duration cache, at most the cached test
+  count (`--dist load` splits a file across workers) and one worker per ~2 s
+  of cached time. On Linux the core count honors the CPU affinity mask and
+  cgroup quota, so a CPU-limited container sees its allocation.
+- `-n 4`: four workers.
+- `-n 0` or `-n 1`: **single-worker mode**, one pytest session with
+  byte-exact pytest semantics and no worker identity; `-n auto` runs this
+  mode when it resolves to one worker. With `--reruns`, `-n 0/1` runs a
+  one-worker pool instead (worker `gw0`, not byte-exact); see
+  [`--reruns`](#-reruns-n). With no `--output` set, the session prints
+  pytest's own terminal output (see [`--output`](#output)). See
+  [Single-worker mode](../concepts/glossary.md#single-worker-mode) (and, for
+  migrators, how it differs from pytest-xdist's `-n 1`).
 
-**An explicit `-n <k>` is not capped by core count.** Only `auto` caps down.
-A literal `-n 16` on an 8-core box runs 16 workers. This is the knob for
-**wait-bound suites** (IO, sleeps, network, timeouts): a worker holds no core
-while it waits, so running more workers than cores overlaps more waits and
-cuts wall time, something `auto` will never do on its own. `auto` can also
-settle *below* the core count on a few-file suite, so pin `-n` when you want to
-overlap more than the file count allows. The same caps can resolve `auto` to a
-single worker (one test file, or a warm cache under ~2 s), and
-[`--shard`](#-shard-kn) refuses to run on one worker, so pass an explicit
-`-n 2` or higher alongside `--shard`. Full tuning method:
-[wait-bound playbook](../guides/wait-bound.md#2-tune-the-worker-count).
-Conversely, load-sensitive suites (tight timing assertions) may need `-n`
-*capped* below cores; see [Parallel safety](../guides/parallel-safety.md#choosing-the-worker-count).
+**An explicit `-n <k>` is not capped by core count**; only `auto` caps. That
+is the knob for **wait-bound suites** (IO, sleeps, network, timeouts): a
+waiting worker holds no core, so `-n 16` on 8 cores overlaps more waits,
+which `auto` never does (see the
+[wait-bound playbook](../guides/wait-bound.md#2-tune-the-worker-count)).
+Load-sensitive suites (tight timing assertions) may need `-n` *below* cores;
+see [Parallel safety](../guides/parallel-safety.md#choosing-the-worker-count).
+Because `auto` can resolve to one worker (one test file, or a warm cache under
+~2 s) and [`--shard`](#-shard-kn) refuses one worker, pass `-n 2` or higher
+with `--shard`.
 
 `-s`, `--capture=…`, `--pdb`, `--trace`, `--debug` and the stepwise flags
 override `-n` and run one process (rstest warns when you set `-n` above 1);
@@ -90,168 +134,142 @@ see [Passthrough-IO flags](#passthrough-io-flags).
 Fork-prewarm the worker pool. **Unix only**, off by default.
 
 Normally each worker is a fresh `python` process that re-imports rstest's
-vendored pytest core over the `PYTHONPATH` prepend. At high `-n` that import is
-paid once per worker. With `--fork-pool` a single zygote imports the core **once**
-and `fork()`s the workers off it, so only the app/conftest imports (which must
-run per-worker anyway, at collection) are paid N times.
+vendored pytest core, so at high `-n` that import is paid once per worker.
+With `--fork-pool` a single zygote imports the core **once** and `fork()`s the
+workers off it; only the app/conftest imports (per-worker anyway, at
+collection) are paid N times.
 
-- Only the vendored core is shared. Per-worker isolation is unchanged: each child
-  sets its own `gwN` identity, collects independently, and owns its coverage
-  file / temp dir.
-- Only the **initial** pool is forked. A crash-respawned worker uses the normal
-  spawn path.
-- No effect on Windows, single-worker runs (`-n 0`/`-n 1`), or `-s`/`--pdb`/`--co`
-  passthrough. The flag is accepted everywhere but is a no-op where it can't apply.
+- Only the vendored core is shared. Each child still sets its own `gwN`
+  identity, collects independently, and owns its coverage file and temp dir.
+- Only the **initial** pool is forked; a crash-respawned worker uses the
+  normal spawn path.
+- Accepted everywhere, but a no-op on Windows, in single-worker runs
+  (`-n 0`/`-n 1`), and under `-s`/`--pdb`/`--co` passthrough.
 
-The win is a fixed per-run startup saving that grows with `-n` and with core
-contention (few cores, many workers). It is largest on short / cold suites where
-startup is a real fraction of wall time, and negligible on compute-heavy suites.
-Run `--doctor` to see the `startup:` line and whether it's worth turning on.
+The saving grows with `-n` and core contention: largest on short or cold
+suites, negligible on compute-heavy ones. The `--doctor` `startup:` line shows
+whether it's worth it.
 
 ### `--dist <load|loadfile|loadscope|loadgroup|each>`
 
-Distribution mode. Default `load`.
+Distribution mode. Default `load`. All five are pytest-xdist mode names.
 
 - `load`: test-granular, dynamic and duration-aware. Cached slow tests
-  dispatch first and individually; the rest flows in contiguous chunks
-  that preserve module-fixture locality.
+  dispatch first and individually; the rest flows in contiguous chunks that
+  preserve module-fixture locality.
 - `loadfile`: whole files stay on one worker, in file order. For
   order-dependent suites.
 - `loadscope`: fixture-scope affinity. A class's tests stay together,
-  module-level functions stay with their module. For expensive
-  class/module fixtures that must not duplicate.
-- `loadgroup`: `@pytest.mark.xdist_group("name")` affinity, across
-  files; unmarked tests distribute individually.
-- `each`: every worker runs the **full** suite. Counts are per-worker
-  totals and outcomes are keyed `nodeid [gwN]`; `--reruns` is
-  rejected (the mode exists to *expose* per-worker outcome
-  differences, and rerunning failures would mask exactly the
-  flakiness `each` is there to surface); the duration cache is not
-  updated. Honest scope note:
-  every worker uses the same interpreter, so this validates isolation
-  and shakes out flakiness; xdist's heterogeneous-environment use
-  (`--tx` gateways) has no rstest equivalent.
-
-All five are pytest-xdist-compatible mode names.
+  module-level functions stay with their module. For expensive class/module
+  fixtures that must not duplicate.
+- `loadgroup`: `@pytest.mark.xdist_group("name")` affinity, across files;
+  unmarked tests distribute individually.
+- `each`: every worker runs the **full** suite. Counts are per-worker totals
+  and outcomes are keyed `nodeid [gwN]`; `--reruns` is rejected (rerunning
+  would mask the per-worker differences `each` exists to expose); the
+  duration cache is not updated. Every worker uses the same interpreter, so
+  this validates isolation and shakes out flakiness; xdist's
+  heterogeneous-environment use (`--tx` gateways) has no rstest equivalent.
 
 ### `--order <throughput|fail-fast>`
 
-Dispatch **ordering** within `--dist load` (the other dist modes carry an
-affinity order that is the point, so they ignore this).
+Dispatch **ordering** within `--dist load` (the other dist modes keep their
+affinity order).
 
-- `throughput` (default): slowest cached tests first, individually, to
-  pack workers for the best wall-clock time. This is the historical
-  behavior.
-- `fail-fast`: order for the earliest **red** signal. Tests that
-  hard-failed go first (most recent failure first), then flaky tests (most
-  recent flake first), both read from `.rstest_cache/flakes.json`, each
-  dispatched on its own so they run in parallel. At most 128 lead, and
-  tests matched by [`--quarantine`](#-quarantine-file) are never pulled
-  forward. The remaining clean tests
-  follow in `throughput` order, so workers still pack and modules stay
-  together. Pair with [`--maxfail`/`-x`](#forwarded-pytest-flags) for true early exit. A
-  broken run then dies in seconds instead of minutes.
+- `throughput` (default): slowest cached tests first, individually, to pack
+  workers for the best wall-clock time.
+- `fail-fast`: earliest **red** signal first. Tests that hard-failed lead
+  (most recent failure first), then flaky tests (most recent flake first),
+  both read from `.rstest_cache/flakes.json`, each dispatched alone so they
+  run in parallel. At most 128 lead, and tests matched by
+  [`--quarantine`](#-quarantine-file) are never pulled forward. The rest
+  follow in `throughput` order. Pair with
+  [`--maxfail`/`-x`](#forwarded-pytest-flags) to stop at the first red. With
+  a cold `flakes.json` it matches `throughput`.
 
-**Auto:** with neither the flag nor `[tool.rstest] order` set, rstest
-picks `fail-fast` under [`--watch`](#-watch) (you want the failure now, on
-each save) and `throughput` otherwise. An explicit `--order fail-fast` (flag
-or config) warns where it has no effect: an affinity dist
-(`loadfile`/`loadscope`/`loadgroup`), `--dist each` (no dispatch queue), and
-`--collect lazy`. On a single-worker run or a passthrough run (`-s`, `--pdb`,
-`--co`, `--debug`, ...) it warns only when passed on the command line.
-Combining it with `--shuffle` is an error. `failfast` and `fail_fast` are
-accepted as spellings of `fail-fast` (flag and config). A cold `flakes.json`
-just means no test has a failure/flake signal yet, so fail-fast matches
-`throughput`. Monorepo runs forward `--order` to every project. Config `[tool.rstest] order`.
+**Auto:** with neither the flag nor `[tool.rstest] order` set, rstest picks
+`fail-fast` under [`--watch`](#-watch) and `throughput` otherwise. An
+explicit `fail-fast` (flag or config) warns where it has no effect: an
+affinity dist (`loadfile`/`loadscope`/`loadgroup`), `--dist each`,
+`--collect lazy`, and, only when passed on the command line, a single-worker
+or passthrough run (`-s`, `--pdb`, `--co`, `--debug`, ...). Combining it with
+`--shuffle` is an error. `failfast` and `fail_fast` are accepted spellings.
+Monorepo runs forward `--order` to every project.
 
 ### `--shuffle[=SEED]`
 
-Run tests in a seeded random order (the pytest-randomly idea, applied to
-the orchestrator's dispatch queue). Order dependence is the central
-parallel-readiness hazard; a shuffled run flushes it out on demand
-(in CI or before enabling more workers) instead of waiting for a
-scheduling change to bite. Without a value the seed is chosen per run
-and printed. `--shuffle=SEED` reproduces the shuffled dispatch order, but
-which worker runs which test still depends on timing, so the same seed can
-pair a polluter with its victim on one run and split them on the next. For
-an exact repro of a failed run, use [`rstest replay`](cli-commands.md#replay):
-its journal pins every worker's test order. The seed must be attached
-with `=`: `--shuffle 42` is a bare `--shuffle` plus a test path `42` (see
+Run tests in a seeded random order (the pytest-randomly idea, applied to the
+orchestrator's dispatch queue) to flush out order dependence on demand. Without a value the seed is chosen per run
+and printed. `--shuffle=SEED` reproduces the dispatch order but not which
+worker runs which test (that depends on timing), so a polluter and its victim
+can pair on one run and split on the next; for an exact repro use
+[`rstest replay`](cli-commands.md#replay). Attach the seed with `=`:
+`--shuffle 42` is a bare `--shuffle` plus a test path `42` (see
 [Optional-value flags](#argument-splitting)).
 
-Affinity modes (`loadfile`/`loadscope`/`loadgroup`) shuffle the group
-order and keep in-group order intact: in-group order is the affinity
-contract. In `load` mode the shuffle replaces duration-aware
-sequencing for that run. Requires the parallel pool with full
-collection: byte-exact mode, `--collect lazy`, and `--dist each`
-are refused (not silently ignored; a run probing for order
-dependence must not quietly run ordered).
-
-At a monorepo root the seed is chosen once and shared by every project, so one
-`--shuffle=SEED` reproduces the whole run.
+Affinity modes (`loadfile`/`loadscope`/`loadgroup`) shuffle the group order
+and keep in-group order. In `load` mode the shuffle replaces duration-aware
+sequencing. Requires the parallel pool with full collection: single-worker
+mode, `--collect lazy` and `--dist each` are refused, not silently ignored. At
+a monorepo root one seed is shared by every project, so one `--shuffle=SEED`
+reproduces the whole run.
 
 ### `--shard <K/N>`
 
 Split the suite across `N` independent CI jobs and run only shard `K`
-(1-based: `1/4` … `4/4`). Each job partitions the collected tests into
-`N` buckets balanced by the duration cache
-(`.rstest_cache/durations.json`, longest-processing-time-first) and runs
-its bucket; a cold cache falls back to an even count split. When every job
-sees the same collection and the same duration cache, buckets are disjoint
-and cover the whole suite, so merging the per-job JUnit reconstructs the full
-run. If jobs see different caches (for example a shared cache that changes
-mid-matrix), their partitions can disagree; verify with
-[`shard-verify`](cli-commands.md#shard-verify).
+(1-based: `1/4` … `4/4`). Each job partitions the collected tests into `N`
+buckets balanced by the duration cache (`.rstest_cache/durations.json`,
+longest-processing-time-first; a cold cache splits by count). Jobs that see
+the same collection and the same duration cache get disjoint buckets that
+cover the whole suite, so the merged per-job JUnit is the full run. Jobs with
+different caches (a shared cache that changes mid-matrix) can disagree;
+verify with [`shard-verify`](cli-commands.md#shard-verify).
 
-Orthogonal to `-n`: each shard still runs its slice across local
-workers. Requires the parallel pool (`-n ≥ 2`); rejected with
-`--shuffle` (a per-run shuffle breaks the identical-partition guarantee
-that lets jobs agree without coordinating) and `--dist each`. Under
-`--collect lazy` it shards at file granularity. Composes with
-`--changed` (selection first, then partition). Restore the **same**
-duration cache on every job so their partitions match: see the
+Orthogonal to `-n`: each shard still fans out across local workers. Requires
+`-n 2` or more; rejected with `--shuffle` (a per-run shuffle breaks the
+identical-partition guarantee) and `--dist each`. Under `--collect lazy` it
+shards by file. Composes with `--changed` (select, then partition). Restore
+the **same** duration cache on every job: see the
 [Sharding guide](../guides/sharding.md).
 
 ## Test selection and collection
 
 ### `--collect <full|lazy>`
 
-Collection strategy. `full`: every worker collects the whole
-suite (identical sessions, hash-verified). `lazy`: each test file is
-collected exactly once, on one worker, on demand, a distributed single
-collection pass. Big win for narrow `-k`/`-m` selections on large
-suites; full runs of suites with a few giant files prefer `full` (or
-`lazy` with an explicitly chosen `load`, from `--dist load` or
-`[tool.rstest] dist = "load"`, which enables work-stealing; the implicit
-default keeps strict file affinity).
-See [Lazy collection](../concepts/lazy-collection.md) for semantics and
-the compatibility trade. Configurable via `[tool.rstest] collect`.
+Collection strategy. `full`: every worker collects the whole suite
+(identical sessions, hash-verified). `lazy`: each test file is collected
+once, on one worker, on demand. Lazy wins on narrow `-k`/`-m` selections of
+large suites; a full run of a suite with a few giant files prefers `full`, or
+`lazy` with an explicit `--dist load` (flag or config), which enables
+work-stealing (the implicit default keeps strict file affinity). Semantics and
+the compatibility trade: [Lazy collection](../concepts/lazy-collection.md).
+Config `[tool.rstest] collect`.
 
-An explicit `--collect lazy` accepts only `--dist load` and `loadfile`; `loadscope`,
-`loadgroup` and `each` are rejected (exit 1):
+An explicit `--collect lazy` accepts only `--dist load` and `loadfile`;
+`loadscope`, `loadgroup` and `each` exit 1:
 
 ```text
 --collect lazy is file-affine and cannot honor --dist loadscope (only load/loadfile: loadscope/loadgroup need a global id list and each runs the full suite on every worker; use --collect full)
 ```
 
-Nodeid/`--pyargs` arguments fall back to full collection.
-Auto never rejects: on any of those it simply stays `full`.
+Nodeid and `--pyargs` arguments fall back to full collection.
 
-**Default: auto.** When you set neither the flag nor `[tool.rstest]
-collect`, rstest picks `lazy` automatically for a big-enough parallel run:
-at least 2000 known tests (from the duration cache) and a
-`tests × workers` product of at least 16 000, on a file-affine dist
-(`--dist load`/`loadfile`) with no path selection (explicit paths or
-`--changed`/`--since-green` narrowing), no nodeid or `--pyargs` argument,
-no doctest collection, every cached test's file found by the lazy walk, and
-no file outweighing an even per-worker share. `--shard`, `--shuffle`,
-`--incremental` and a fail-fast `--order` (including the one `--watch` picks
-by default) also keep it `full`, so a `--watch` run never auto-picks lazy.
-Otherwise `full`. A cold cache (no
-`.rstest_cache/durations.json` yet) counts as zero tests, so the first
-run of a suite stays `full`; warm runs of large suites flip to `lazy`.
-When auto picks `lazy`, a banner line reports it. Pass `--collect full`
-to force eager collection or `--collect lazy` to force it on.
+**Default: auto.** With neither the flag nor the config key, rstest picks
+`lazy` when all of these hold, and `full` otherwise (auto never errors):
+
+- at least 2000 known tests in the duration cache and a `tests × workers`
+  product of at least 16 000 (a cold cache counts as zero, so a suite's first
+  run stays `full`);
+- a file-affine dist (`load`/`loadfile`), with no path selection (explicit
+  paths, `--changed`, `--since-green`), no nodeid or `--pyargs` argument, and
+  no doctest collection;
+- every cached test's file found by the lazy walk, and no file outweighing an
+  even per-worker share;
+- no `--shard`, `--shuffle`, `--incremental` or fail-fast `--order`
+  (including the one `--watch` picks, so `--watch` never auto-picks lazy).
+
+A banner line reports when auto picks `lazy`. Pass `--collect full` or
+`--collect lazy` to force either.
 
 ### `--doctest-modules`
 
@@ -261,57 +279,45 @@ other test. `--doctest-glob` and friends forward the same way.
 
 ### `--changed[=REV]`
 
-Run only tests affected by changed files. Changes come from git (working
-tree + untracked vs `HEAD`, or vs `REV`, e.g. `--changed=origin/main` in
-CI) and map to the affected tests; only those run. The changes considered
-are the whole project's (everything under its rootdir, even when that is
-below the git root), whichever subdirectory you start rstest from. Attach
-`REV` with `=`:
-`--changed origin/main` is a bare `--changed` (diff against `HEAD`) plus a
-test path `origin/main` (see [Optional-value flags](#argument-splitting)).
+Run only tests affected by changed files. Changes come from git: working tree
++ untracked vs `HEAD`, or vs `REV` (e.g. `--changed=origin/main` in CI). The
+whole project's changes count (everything under its rootdir, even below the
+git root), whichever subdirectory you start from. Attach `REV` with `=`:
+`--changed origin/main` is a bare `--changed` plus a test path `origin/main`
+(see [Optional-value flags](#argument-splitting)). How selection works,
+keeping the index warm, and CI layouts: [Selecting changed tests](../guides/changed.md).
 
-**Coverage-aware when a line→test index is warm.** If
-`.rstest_cache/coverage_index.json` exists (written by any
-[`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest) run),
-`--changed` maps the *changed lines* to only the tests whose recorded coverage
-executed them: far tighter than the import graph, which reselects every test
-importing a changed module. This is automatic and needs no flag; selection only
-ever gets tighter once the index exists. The index is trusted for lines it
-recorded, so keep it warm (rebuild on your coverage runs; persist
-`.rstest_cache` across CI runs).
+Selection, per changed file:
 
-Falls back **per file** to the import graph (and is byte-identical to it with no index, i.e. a cold cache) for anything coverage can't vouch for: brand-new code
-(inserted lines have no prior coverage), files the index never measured, and
-untracked files. A changed test file always runs its own tests, and any config
-or non-Python change is still a full run. Over-selection is safe; the fallbacks
-never under-select against unknown code.
+- **Coverage index, when warm.** If `.rstest_cache/coverage_index.json`
+  exists (written by any
+  [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
+  run), changed *lines* map to the tests whose recorded coverage executed
+  them. Automatic, no flag.
+- **Import graph** for what the index can't vouch for: new lines, files it
+  never measured, untracked files, and everything when the cache is cold
+  (then byte-identical to plain import-graph selection). Conservative:
+  ambiguous module names select every match, function-local imports count,
+  and a changed `conftest.py` (or any module it imports, directly or
+  transitively) selects its whole subtree.
+- A changed test file always runs its own tests; any config or non-Python
+  change runs everything.
 
-**Map-health reporting.** With a warm map the selection banner reports the
-savings ratio (`N changed file(s) -> M of K mapped test(s) affected`)
-so you can see how much was skipped. Whole-file targets from the import-graph
-fallback or changed test files are counted separately
-(`... affected + F whole-file target(s)`). If the map is **cold** and a non-test
-`.py` file changed (exactly where coverage precision would have helped),
-`--changed` prints a one-line hint that it fell back to the import graph and
-that a prior `--cov --cov-context=test` run enables coverage-precise selection
-(not when the same diff forces a full run anyway).
-The hint stays silent for test-only, `conftest.py`, config, or non-Python
-changes, so it never nags a suite that doesn't use coverage.
+Over-selection is safe; the fallbacks never under-select. Known gap: dynamic
+imports (`importlib.import_module`) produce no graph edges; for
+correctness-critical runs use [`--changed-strict`](#-changed-strict).
 
-Conservative by construction: ambiguous module names select every match,
-function-local imports count, a changed `conftest.py` selects its whole
-subtree (as does a change to any module a `conftest.py` imports, directly or
-through other modules), and any config or non-Python change falls back to a
-full run.
-Known gap: dynamic imports (`importlib.import_module`) produce no graph
-edges; for correctness-critical runs, use `--changed-strict` below.
-With nothing affected, the run prints
+The banner reports `N changed file(s) -> M of K mapped test(s) affected`
+(`+ F whole-file target(s)` for import-graph and test-file targets). A cold
+map with a changed non-test `.py` file prints a one-line hint to warm it with
+`--cov --cov-context=test` (never for a full run or a test-only, `conftest.py`,
+config or non-Python change). With nothing affected, the run prints
 `no tests affected by N changed file(s)` and exits 0 without running.
 
-PR-aware in CI: on a pull-request / merge-request job, bare `--changed`
-diffs against the merge-base with the PR base branch instead of `HEAD`,
-so a clean checkout of the PR commit still selects exactly the PR's files.
-The base is auto-detected from the CI environment:
+**PR-aware in CI:** on a pull-request / merge-request job, bare `--changed`
+diffs against the merge-base with the PR base branch instead of `HEAD`, so a
+clean checkout of the PR commit selects exactly the PR's files. The base comes
+from the first variable set, in this order:
 
 | CI | Variable | Base |
 | --- | --- | --- |
@@ -320,96 +326,82 @@ The base is auto-detected from the CI environment:
 | GitLab CI | `CI_MERGE_REQUEST_TARGET_BRANCH_NAME` | target branch (fallback when the SHA is unset) |
 | Buildkite | `BUILDKITE_PULL_REQUEST_BASE_BRANCH` | base branch → merge-base |
 
-Variables are probed in that order; the first set wins. Requires the
-base to be present in the clone (`actions/checkout` with `fetch-depth: 0`,
-GitLab's default MR fetch, or `git fetch origin <branch>`); an
-unresolvable base is an error, never a silent full skip. An explicit
-`REV` disables the auto-targeting. TeamCity has no standard base-branch
-variable: pass one explicitly or expose a build parameter as env.
+The base must be in the clone (`actions/checkout` with `fetch-depth: 0`,
+GitLab's default MR fetch, or `git fetch origin <branch>`); an unresolvable
+base is an error, never a silent full skip. An explicit `REV` disables
+auto-targeting. TeamCity has no standard base-branch variable: pass `REV` or
+expose a build parameter as env.
 
 ### `--changed-strict`
 
-`--changed` hardened for gating CI (merge queues). Implies `--changed`
-(vs `HEAD`) when `--changed` isn't given. Three behavior changes:
+`--changed` hardened for gating CI (merge queues). Implies `--changed` (vs
+`HEAD`) when `--changed` isn't given. Three changes:
 
-- **A changed source file the import graph cannot connect to any test
-  forces a full run** (naming the file) instead of silently selecting
-  nothing for it: the dynamic-import / unused-module / deleted-file
-  cases stop being false skips.
-- **Monorepos: undeclared cross-project imports count as dependency
-  edges.** Each project's Python files are scanned; an import resolving
-  to a sibling's top-level modules adds the edge (with a warning naming
-  both projects) even when the pyproject never declared it, the
-  shared-workspace-venv trap. Namespace packages shared by several
-  siblings over-connect, which errs toward running more, never less.
-- **"Nothing affected" exits 5** (pytest's nothing-collected code)
-  instead of 0, so a pipeline must consciously allow it rather than
-  mistaking it for a green run.
+- **A changed source file the import graph can't connect to any test forces a
+  full run** (naming the file) instead of selecting nothing for it, so
+  dynamic-import, unused-module and deleted-file cases stop being false skips.
+- **Monorepos: undeclared cross-project imports count as dependency edges**
+  (with a warning naming both projects), catching the shared-workspace-venv
+  trap. Namespace packages shared by several siblings over-connect, erring
+  toward running more.
+- **"Nothing affected" exits 5** (pytest's nothing-collected code) instead of
+  0, so a pipeline must consciously allow it.
 
-Residual risk it cannot remove: imports constructed at runtime from
-strings the scanner can't see (`importlib.import_module(f"plugins.{name}")`)
-still produce no edges; name such modules in a test file import, or
-keep full runs on the gating path.
+Residual risk: imports built at runtime from strings
+(`importlib.import_module(f"plugins.{name}")`) still produce no edges; import
+such modules from a test file, or keep full runs on the gating path.
 
 ### `--since-green`
 
 Incremental testing against the last green run. rstest records the git commit
 of the last fully-passing run in the cache (`last_green.json`) and uses it as
-the [`--changed`](#-changedrev) base, so only tests affected by changes since
-then run. The baseline advances **only when a run is fully green**, so a
-failing test keeps being selected until it passes.
+the [`--changed`](#-changedrev) base. The baseline advances **only when a run
+is fully green**, so a failing test keeps being selected until it passes.
 
 - The baseline advances only from a **clean working tree** (nothing
-  uncommitted or untracked, as `--changed` sees it). A green run over local
-  edits proves those edits green, not the commit under them, so it keeps the
-  old baseline and says so on stderr; the next run diffs from that older
-  commit, edits included. Commit, then run once more to advance it.
-
+  uncommitted or untracked, as `--changed` sees it): a green run over local
+  edits keeps the old baseline and says so on stderr. Commit, then run once
+  more to advance it.
 - First run (no baseline yet) runs everything.
 - The baseline is keyed to an environment fingerprint (interpreter plus the
   content of `uv.lock`, `poetry.lock`, `pdm.lock`, `requirements.txt`); a
   change to any of them runs everything once.
 - Ignored when `--changed` is given explicitly. Mutually exclusive with
   `--incremental` (`--since-green` wins, with a warning).
-- Like `--changed`, it reasons over git-tracked first-party source: a
-  dependency upgraded in place without touching a lockfile is not detected.
-  Delete `.rstest_cache/last_green.json` (or do one full run) after such a
-  change.
+- Like `--changed`, it sees only git-tracked first-party source: a dependency
+  upgraded in place without a lockfile change is not detected. Delete
+  `.rstest_cache/last_green.json` (or do one full run) after such a change.
 
 ### `--incremental`
 
 Dispatch-level incremental testing; git is not required. rstest collects the
 whole suite, then **skips** every test that passed last run and whose covered
 source and imported modules are byte-identical now (content-addressed through
-the coverage index). Skipped
-tests are carried forward as cached passes: they count as passed and carry
-`"cached": true` in [`--report-json`](report-json.md).
+the coverage index). Skipped tests count as passed and carry `"cached": true`
+in [`--report-json`](report-json.md).
 
-- Needs a warm coverage index: a prior `--cov --cov-context=test` run. Pass
-  `--cov=.` on incremental runs too, so the index keeps advancing; rstest
-  warns when `--cov` is missing or scoped narrower than the whole tree (edits
-  outside a narrowed scope can't bust the skip).
+- Needs a warm coverage index (a prior `--cov --cov-context=test` run). Pass
+  `--cov=.` on incremental runs too so the index keeps advancing; rstest warns
+  when `--cov` is missing or narrower than the whole tree (edits outside a
+  narrowed scope can't bust the skip).
 - Needs the parallel pool with full collection and `--dist load`. Under
   `-n 0/1`, another `--dist`, `--collect lazy`, `--shard` or `--shuffle`,
   rstest warns and runs everything.
-- A test also re-runs when any first-party module its test file imports,
-  directly or transitively (package `__init__.py` files included), has
-  changed. This catches import-time code such as a module-level constant,
-  which coverage records under no test.
-- A config-file change (conftest, pytest config) disables skipping for that
-  run. So does a change to any **git-tracked non-Python file** in the
-  project (a JSON fixture, a template, a golden file), since coverage never
-  measures what a test reads. Untracked and ignored files are not watched,
+- A test also reruns when any first-party module its test file imports,
+  directly or transitively (package `__init__.py` included), changed: this
+  catches import-time code (a module-level constant) that coverage records
+  under no test.
+- A config-file change (conftest, pytest config) or a change to any
+  **git-tracked non-Python file** (a JSON fixture, a template, a golden file)
+  disables skipping for that run. Untracked and ignored files are not watched,
   and outside a git checkout no non-Python file is: after editing a data file
   there, do one run without `--incremental`.
-- Other residual gaps: a module loaded by a dynamic import
-  (`importlib.import_module(name)`) or a script a test runs in a subprocess
-  is invisible to both coverage and the import scan.
-- Runs from the root and from a subdirectory share the rootdir's records (paths
-  in them are rootdir-relative), and a run of part of the suite (a path, `-k`,
-  a subdirectory) keeps what the rest of the suite recorded. With `--cov=.`, a
-  subdirectory run measures only that subdirectory, so prefer a package name
-  (`--cov=app`) when you run `--incremental` from more than one place.
+- Other gaps: a dynamically imported module, or a script a test runs in a
+  subprocess, is invisible to both coverage and the import scan.
+- Root and subdirectory runs share the rootdir's records, and a partial run
+  keeps what the rest of the suite recorded. `--cov=.` from a subdirectory
+  measures only that subdirectory, so prefer a package name (`--cov=app`) when
+  you run `--incremental` from more than one place.
 - Mutually exclusive with `--changed` (which owns selection) and
   `--since-green`.
 
@@ -417,37 +409,26 @@ tests are carried forward as cached passes: they count as passed and carry
 
 ### `--reruns <N>`
 
-Rerun failed tests up to N times. A test that then
-passes is reported **flaky**: the run stays green, the test is counted in
-the summary (`N flaky`), listed in its own section, and flagged in
-`--report-json`. Only the final attempt's outcome and output are recorded.
+Rerun failed tests up to N times. A test that then passes is reported
+**flaky**: the run stays green, and the test is counted in the summary
+(`N flaky`), listed in its own section, and flagged in `--report-json`. Only
+the final attempt's outcome and output are recorded. Per-test budgets:
+`@pytest.mark.flaky(reruns=N)`, with or without the global flag, at any worker
+count (see [Markers](markers.md#pytestmarkflaky)). Config `[tool.rstest] reruns`.
 
-Per-test budgets are available via `@pytest.mark.flaky(reruns=N)`, which
-works with or without the global flag, at any worker count (see
-[Markers](markers.md#pytestmarkflaky)).
+**Works at any worker count.** Retries are orchestrator-side, so `-n 0`/`-n 1`
+with `--reruns` runs as a one-worker pool, outside
+[single-worker mode](../concepts/glossary.md#single-worker-mode): retries for
+rate-limited suites that must run few workers. An
+installed pytest-rerunfailures is neutralized inside workers, so nothing
+double-reruns. Reruns stay **inert** under a passthrough-IO flag (`--pdb`,
+`-s`, `--co`, …), which can't be pooled; rstest warns.
 
-**Works at any worker count, including `-n 0`/`-n 1`.** The retry machinery
-is orchestrator-side, so a single-worker run with `--reruns` set is executed
-as a **degenerate one-worker pool** to drive it: rstest neutralizes an
-installed pytest-rerunfailures inside that worker, so nothing double-reruns.
-This is the escape hatch for rate-limited suites that must run few workers
-(real-LLM tests capped on outbound calls) yet still need retries: you no
-longer have to pin `-n 2` just to get reruns. Passing `--reruns` opts that
-run out of [byte-exact mode](../concepts/glossary.md#byte-exact-mode): a
-plain `-n 0`/`-n 1` run with no reruns stays the byte-exact single session.
-
-One exception: reruns stay **inert** under a passthrough-IO flag (`--pdb`,
-`-s`, `--co`, …), which needs pytest's own terminal and can't be pooled;
-rstest warns when you combine them.
-
-Crash-aware: **while `--reruns` (or `@pytest.mark.flaky`) budget remains**,
-a test that killed its worker is retried on the replacement worker, bounded
-by both the rerun and restart budgets (the segfault-loop guard), something
-in-process rerun plugins cannot do. Once that budget is exhausted, or with
-no reruns configured at all, the crashed test is reported FAILED and not
-retried (see [crash handling](../concepts/crash-handling.md)). The flag is intercepted by rstest and an installed
-pytest-rerunfailures is neutralized inside workers, so nothing
-double-reruns.
+Crash-aware: **while `--reruns` (or `@pytest.mark.flaky`) budget remains**, a
+test that killed its worker is retried on the replacement worker, bounded by
+both the rerun and restart budgets (the segfault-loop guard). Once the budget
+is spent, or with no reruns configured, the crashed test is reported FAILED
+(see [crash handling](../concepts/crash-handling.md)).
 
 Reruns rescue a flake within one run; the flake history and
 [`--quarantine`](#-quarantine-file) manage it across runs: see
@@ -462,53 +443,29 @@ pytest-rerunfailures' flag: useful for retrying known-transient errors
 
 ### `--reruns-only-known-flaky`
 
-Spend the rerun budget only on tests that have a **prior flaky history**:
-tests recorded as passed-after-rerun in `.rstest_cache/flakes.json` on some
-earlier run. A first-time failure with no flaky history is reported failed
-immediately, without retrying.
+Spend the rerun budget only on tests with a **prior flaky history**: a
+`flaky > 0` record in `.rstest_cache/flakes.json` (passed after a rerun on some
+earlier run). Any other failure, including one with a hard-failure-only
+history (`failed > 0`, `flaky == 0`), is reported failed without a retry. This
+keeps a deterministic mass-failure (a missing migration or broken import
+failing many tests identically) from spending reruns that can't recover.
 
-The motivation is deterministic mass-failures: one root cause (a missing
-migration, a broken import) fails many tests *identically*, and a plain
-`--reruns 1` reruns every one of them for zero recovery: pure wall-time
-waste. Those tests were never flaky, so they carry no flaky history and this
-flag skips their reruns, while genuine known-flakes are still rescued.
+- **`@pytest.mark.flaky` always bypasses it**: the marker is an explicit
+  declaration, and a marker budget is unaffected by the gate.
+- **Composes with [`--only-rerun`](#-only-rerun-regex)**: both gates must pass.
+- **No-op unless `--reruns`** (or `[tool.rstest] reruns`) is active.
+- **It consumes history but can't build it**: it suppresses the very rerun
+  that would record a new flake. Seed `flakes.json` from an unflagged
+  `--reruns` run (nightly or pre-merge) or a `flaky` marker, and cache
+  `.rstest_cache` across CI runs. A brand-new flake fails on the flagged path
+  until a learning run records it.
 
-Details:
-
-- **Keys on flaky history, not failures.** Only a `flaky > 0` record counts.
-  A test with a hard-failure-only history (`failed > 0`, `flaky == 0`), the
-  signature of a deterministic failure, is *not* treated as known-flaky.
-- **`@pytest.mark.flaky` always bypasses it.** An explicit per-test marker is
-  an author declaration of flakiness, so a marked test is retried regardless
-  of history.
-- **Composes with [`--only-rerun`](#-only-rerun-regex).** Both gates must pass
-  for a retry to fire.
-- **Seeding the history is a separate step.** The flag *consumes* flaky
-  history; it does not build it. A `flaky > 0` record is only written when a
-  rerun actually fires and the test recovers, but this flag suppresses that
-  rerun for any not-yet-known test, so a run with the flag on can never
-  promote a brand-new flake into the known set. The history must come from
-  elsewhere:
-  - a run of `--reruns` *without* this flag (e.g. a nightly or pre-merge job)
-    that lets unknown failures rerun and records the ones that recover, or
-  - an explicit `@pytest.mark.flaky` (always rerun, see above).
-
-  So the intended setup is two-mode: an unflagged learning run builds
-  `.rstest_cache/flakes.json`, and the hot path runs with the flag to spend
-  budget only on what that history already knows. A brand-new flake fails the
-  first time it appears on the flagged path and is *not* rescued until a
-  learning run records it. Cache `.rstest_cache` across CI runs (as you would
-  for the duration cache) so the history persists.
-
-Also settable as `[tool.rstest] reruns-only-known-flaky = true`. The gate
-only affects tests whose rerun budget comes from `--reruns`, so it is a no-op
-unless `--reruns` (or `[tool.rstest] reruns`) is active. A `@pytest.mark.flaky`
-budget is unaffected either way: marked tests always bypass the gate.
+Config `[tool.rstest] reruns-only-known-flaky = true`.
 
 ### `--quarantine <FILE>`
 
-Ring-fence known-flaky tests without hiding them. `FILE` lists nodeids
-or `*` glob patterns (one per line, `#` comments):
+Ring-fence known-flaky tests without hiding them. `FILE` lists nodeids or `*`
+glob patterns (one per line, `#` comments):
 
 ```text
 # tracked in JIRA-1234, remove when fixed
@@ -516,241 +473,211 @@ tests/test_api.py::test_poll_eventually
 tests/test_ws.py::*
 ```
 
-A failure matching the list is demoted to a **quarantined** outcome:
-counted separately in the summary (`N quarantined`), printed with its
-traceback in its own section, flagged as a `quarantined` testcase
-property in junit (no `<failure>` element, so junit-gating CI stays green) and in `--report-json`, and never fatal: a run whose
-only failures are quarantined exits 0. **Failures outside the list
-still fail the run**, and a listed test that passes is a plain pass.
-A quarantined failure never counts toward `-x` / `--maxfail`, so it
-can't stop the run before a real failure surfaces.
+A failure matching the list is demoted to a **quarantined** outcome: counted
+separately in the summary (`N quarantined`), printed with its traceback in its
+own section, flagged as a `quarantined` testcase property in junit (no
+`<failure>` element, so junit-gating CI stays green) and in `--report-json`,
+and never fatal: a run whose only failures are quarantined exits 0.
+**Failures outside the list still fail the run**, and a listed test that
+passes is a plain pass. A quarantined failure never counts toward `-x` /
+`--maxfail`.
 
-Candidates come from the **flake history** every run records to
-`.rstest_cache/flakes.json`: per-test counts of flaky passes
-(`--reruns` rescues) and hard failures, with a last-seen timestamp.
-The flaky and quarantined sections annotate each test with its history
-(`flaked 3x before, failed 1x`). Difference from `--reruns`: reruns
-paper over a flake within one run; quarantine is cross-run policy for
-tests a team has explicitly decided to tolerate while fixing. Workflow,
-file format, and CI surfaces:
-[Flaky tests](../guides/flaky-tests.md).
+Candidates come from the flake history every run records to
+`.rstest_cache/flakes.json` (per-test flaky-pass and hard-failure counts, last
+seen); the flaky and quarantined sections annotate each test with it
+(`flaked 3x before, failed 1x`). Reruns paper over a flake within one run;
+quarantine is cross-run policy for tests a team has decided to tolerate while
+fixing. Workflow and CI surfaces: [Flaky tests](../guides/flaky-tests.md).
 
 ## Timeouts and crashes
 
 ### `--timeout <SECS>`
 
-Per-test deadline: fail any test whose **call phase** runs longer than SECS.
-The test is interrupted **in-process** (a signal in the worker), so the
-failure's traceback points at the exact line it was stuck on: the
-pytest-timeout behavior, built in, no plugin required and working under the
-parallel pool.
-
-```console
-$ rstest -n auto --timeout 30
-```
-
-Fractional seconds are allowed (`--timeout 0.5`). `@pytest.mark.timeout(N)`
-overrides the global value per test:
+Per-test deadline: fail any test whose **call phase** runs longer than SECS
+(fractional allowed, `--timeout 0.5`). The test is interrupted **in-process**
+(a signal in the worker), so the traceback points at the line it was stuck
+on: pytest-timeout's behavior, built in, no plugin, working under the parallel
+pool. `@pytest.mark.timeout(N)` overrides the value per test:
 
 ```python
 @pytest.mark.timeout(5)
 def test_slow_path(): ...
 ```
 
-A test hard-blocked inside a C extension never returns to the interpreter, so
-the signal can't fire. For that, rstest arms a hang watchdog per test, sized
-from that test's own timeout: **3 × its timeout + 10 s**, where its timeout
-is the `@pytest.mark.timeout` value if it has one, else `--timeout`. A test
-marked `timeout(300)` under `--timeout 30` gets a 910 s watchdog, not 100 s.
-When the watchdog fires, the whole worker is killed and the test is reported
-failed (the [`--worker-timeout`](#-worker-timeout-secs) crash path). An
-explicit `--worker-timeout` replaces the per-test watchdog with one fixed
-limit for every test.
+A test blocked inside a C extension never returns to the interpreter, so the
+signal can't fire. For that, each test gets a hang watchdog at **3 × its
+timeout + 10 s**, where its timeout is the marker value if any, else
+`--timeout`: a test marked `timeout(300)` under `--timeout 30` gets 910 s, not
+100 s. The watchdog kills the worker and reports the test failed (the
+[`--worker-timeout`](#-worker-timeout-secs) crash path). An explicit
+`--worker-timeout` replaces it with one fixed limit for every test.
 
 !!! warning "Windows: no in-process interrupt"
-    The interrupt is a Unix signal (SIGALRM) on the test's main thread, and
-    Windows has none. There, a slow test is **not** failed at its timeout:
-    only the watchdog applies, at 3 × the timeout + 10 s, and it kills the
-    worker rather than raising a traceback at the stuck line. With
-    `--timeout 30`, a 60 s test passes and a hung one is killed at 100 s.
-    `@pytest.mark.timeout(N)` arms the same coarse watchdog for its test,
-    with or without `--timeout`. For a tighter cap, set `--worker-timeout`.
+    The interrupt is a Unix signal (SIGALRM), which Windows lacks. There a
+    slow test is **not** failed at its timeout: only the watchdog applies, at
+    3 × the timeout + 10 s, and it kills the worker without a traceback at the
+    stuck line. With `--timeout 30`, a 60 s test passes and a hung one is
+    killed at 100 s. `@pytest.mark.timeout(N)` arms the same watchdog, with or
+    without `--timeout`. For a tighter cap, set `--worker-timeout`.
 
 ### `--worker-timeout <SECS>`
 
 Hang backstop with one fixed limit for every test: a worker stuck on **one
-test** for longer than SECS, in any phase (setup, call, or teardown), is
-killed. Without it, tests that have a timeout (`--timeout` or
-`@pytest.mark.timeout`) get a per-test watchdog at 3 × their timeout + 10 s
-(see [`--timeout`](#-timeout-secs)), and tests without one have none. Set it
-above your longest `@pytest.mark.timeout`, since it replaces the per-test
-limits. The test is reported failed with a timeout message, the
-worker's other tests redistribute, and a replacement worker joins (the
-crash-recovery machinery, same budgets). This is the coarse hang backstop;
-for ordinary per-test limits use [`--timeout`](#-timeout-secs) (above).
-`--worker-timeout` catches what an in-process timeout can't interrupt:
-tests hard-blocked inside C extensions or deadlocked threads. Under
-`--reruns`, a timed-out test is retried within the budget (deadlocks can be
-races). Hangs **outside** a test (during collection or session config) are not
-covered by this watchdog.
+test** longer than SECS, in any phase (setup, call or teardown), is killed. The
+test is reported failed with a timeout message, the worker's other tests
+redistribute, and a replacement worker joins (the crash-recovery budgets
+apply). It catches what an in-process [`--timeout`](#-timeout-secs) can't
+interrupt: tests blocked inside C extensions or deadlocked threads. Under
+`--reruns`, a timed-out test is retried within the budget.
+
+Without it, tests with a timeout (`--timeout` or `@pytest.mark.timeout`) get a
+per-test watchdog at 3 × their timeout + 10 s, and tests without one have
+none. It replaces those per-test limits, so set it above your longest
+`@pytest.mark.timeout`. Hangs **outside** a test (collection, session config)
+are not covered. Config `[tool.rstest] worker-timeout` (whole seconds).
 
 ## Durations and regression gates
 
 ### `--durations <N>` / `--durations-min <SECS>`
 
-*Forwarded pytest flags.* pytest's slowest-durations report, rendered by the orchestrator after
-the run (worker terminals are captured, so the merged block covers all
-workers). `--durations=0` shows everything; entries under
-`--durations-min` (default 0.005s) are hidden with pytest's note unless
-`-vv`. Phase granularity matches pytest: setup, call, and teardown each
-get a line. In byte-exact mode with no `--output` set, the
-single pytest session prints this report itself, exactly as pytest does.
+*Forwarded pytest flags.* pytest's slowest-durations report, rendered by the
+orchestrator after the run so the block covers all workers. `--durations=0`
+shows everything; entries under `--durations-min` (default 0.005s) are hidden
+with pytest's note unless `-vv`. Setup, call and teardown each get a line, as
+in pytest. In single-worker mode with no `--output` set, the pytest session
+prints this report itself, exactly as pytest does.
 
 ### `--durations-regress <RATIO>`
 
-Gate CI on per-test duration regressions. After the run, each test's
-wall time is compared against the duration cache
-(`.rstest_cache/durations.json`: the same file LPT (longest-processing-time-first) scheduling uses;
-restore it from your CI cache). Any test that grew past `RATIO` × its
-baseline is listed and the run exits 1:
+Gate CI on per-test duration regressions. After the run, each test's wall time
+is compared against the duration cache (`.rstest_cache/durations.json`, the
+file scheduling uses; restore it from your CI cache). Any test that grew past
+`RATIO` × its baseline is listed and the run exits 1:
 
 ```text
 =========== duration regressions (>= 2x baseline) ===========
      0.10s ->    1.21s  tests/test_api.py::test_poll
 ```
 
-Jitter-floored so CI noise can't flag: baselines under 50ms and
-absolute growth under 0.5s never count, and tests absent from the
-baseline (new or renamed) are skipped. A missing baseline file skips
-the comparison entirely (first run / cold cache). The comparison runs
-before the cache is refreshed with this run's times.
+Jitter-floored: baselines under 50 ms and absolute growth under 0.5 s never
+count, and tests absent from the baseline (new or renamed) are skipped. A
+missing baseline file skips the comparison (first run, cold cache; see
+[`--require-baseline`](#-require-baseline)). The comparison runs before the
+cache is refreshed.
 
-The baseline is not overwritten by the regression it caught: a flagged test's
-time is kept out of `durations.json` (and out of a `--cache-push` segment), so
-the same regression fails the next run too, until the test is back under the
+A flagged test's time is kept out of `durations.json` (and any `--cache-push`
+segment), so the regression keeps failing until the test is back under the
 threshold. A failed test's duration is never recorded either, so a fail-fast
-run cannot shrink the baseline to a few milliseconds and hide a later
-regression. When a slowdown is intended, accept it with one run without
-`--durations-regress` (it records the new time).
+run can't shrink the baseline. To accept an intended slowdown, run once
+without `--durations-regress`.
 
 ### `--require-baseline`
 
 With `--durations-regress` active, treat an **absent** duration baseline as a
-hard error instead of the silent "comparison skipped". This closes the
-dead-gate failure mode where a CI run that never restored (or pulled) the cache
-passes regressions green. A *failed* `--cache-pull` is always an error; this
-adds the "*successful* pull returned nothing, but a gate needs it" case. It only
-enforces on an actual gated run: collect-only (`--co`), `migrate-check`, and
-passthrough (`-s`/`--pdb`) modes don't evaluate the gate, so they don't trip it.
+hard error instead of silently skipping the comparison, so a CI run that never
+restored (or pulled) the cache can't pass regressions green. A *failed*
+`--cache-pull` is always an error; this adds the case of a successful pull
+that returned nothing. Not evaluated where the gate doesn't run: `--co`,
+`migrate-check`, and passthrough (`-s`/`--pdb`).
 
 ## Caching and remote cache
 
 ### `--cache-remote <URL|DIR>` / `--cache-pull` / `--cache-push`
 
 Publish and warm the `.rstest_cache` (durations, flake history, and the
-`--changed` coverage index) to/from a **shared remote**, no hand-rolled
-`actions/cache` glue, no dedicated refresh job, no cache-key dance. Also
-settable as `RSTEST_CACHE_REMOTE`. `--cache-remote` accepts:
+`--changed` coverage index) to and from a **shared remote**, with no
+hand-rolled `actions/cache` glue or dedicated refresh job. Env:
+`RSTEST_CACHE_REMOTE` (the flag wins). `--cache-remote` accepts:
 
 - a **directory** / `file://` path: local, an NFS/EFS mount, or a dir a CI step
   materializes via `download-artifact` / `aws s3 sync`;
-- an **`s3://` / `gs://`** bucket URL: driven through the `aws` / `gcloud`
-  (falling back to `gsutil`) CLI already installed and authenticated on the
-  runner; credentials come from the process environment (no SDK, no secrets in
-  the URL);
-- an **`http(s)://`** endpoint: the endpoint must serve `GET <root>/segments/`
-  as a JSON array of segment names (the [listing
+- an **`s3://` / `gs://`** bucket URL, through the `aws` / `gcloud` (else
+  `gsutil`) CLI already authenticated on the runner (no SDK, no secrets in the
+  URL);
+- an **`http(s)://`** endpoint: it must serve `GET <root>/segments/` as a JSON
+  array of segment names (the [listing
   contract](../concepts/caching.md#shared-cache-backend)) and support `GET` /
-  `PUT` / `DELETE`. Bearer auth from `RSTEST_CACHE_REMOTE_TOKEN`, sent on
-  every request: use `https://`, since plain `http://` sends the token in
-  cleartext.
+  `PUT` / `DELETE`. Bearer auth from `RSTEST_CACHE_REMOTE_TOKEN`, sent on every
+  request: use `https://`, since plain `http://` sends the token in cleartext.
 
-Any other `scheme://` is rejected loudly: rstest never silently writes to a
-junk local directory named after the URL.
+Any other `scheme://` is rejected rather than written to a local directory
+named after the URL.
 
-- `--cache-pull` merges the remote into the local cache **before** the run:
+- `--cache-pull` merges the remote into the local cache **before** the run,
   warming scheduling and the regression baseline. A failed pull (unreachable
-  remote, auth or listing error) **aborts the run with exit 1 before any test
-  runs** (`Error: pulling shared cache from <remote>`); an empty or missing
-  remote is not a failure. See
+  remote, auth or listing error) **aborts with exit 1 before any test runs**
+  (`Error: pulling shared cache from <remote>`); an empty or missing remote is
+  not a failure. See
   [Shared cache: reliability](../guides/ci-shared-cache.md#reliability).
 - `--cache-push` publishes **this run's** contribution afterward as one
-  immutable, uniquely-named **segment**. Concurrent shards/PRs each drop their
-  own segment and never conflict; readers union all segments on the next pull.
-  (A push failure warns but never fails an otherwise-green run.)
+  immutable, uniquely-named **segment**, so concurrent shards and PRs never
+  conflict; the next pull unions all segments. A push failure warns but never
+  fails an otherwise-green run.
 
-Because each run pushes an immutable segment rather than overwriting a shared
-blob, there is no single-writer job: every shard can run
-`--cache-pull --cache-push`. In a shard matrix, though, a shard that pushes
-early changes what a later-starting shard pulls; see
-[Keep one cache snapshot across the matrix](../guides/sharding.md#keep-one-cache-snapshot-across-the-matrix).
-See [Shared cache](../concepts/caching.md#shared-cache-backend).
+There is no single-writer job: every shard can run `--cache-pull --cache-push`.
+In a shard matrix, though, an early push changes what a later shard pulls; see
+[Keep one cache snapshot across the matrix](../guides/sharding.md#keep-one-cache-snapshot-across-the-matrix)
+and [Shared cache](../concepts/caching.md#shared-cache-backend).
 
-`--cache-remote` on its own (without pull/push/compact) does nothing and warns.
-Pull/push are **not** supported at a [monorepo root](../concepts/monorepo.md#flags-at-a-monorepo-root):
-each project has its own cache dir, so run rstest per project for shared
-caching there (rstest errors rather than silently no-op).
+`--cache-remote` alone (without pull, push or compact) does nothing and warns.
+Pull and push are **not** supported at a
+[monorepo root](../concepts/monorepo.md#flags-at-a-monorepo-root) (each
+project has its own cache dir; rstest errors): run rstest per project there.
 
 ### `--cache-compact-threshold <N>`
 
 Fold **on push** instead of in a separate job: after a `--cache-push`, if the
 remote holds more than N loose segments, rstest compacts inline (honoring
 `RSTEST_CACHE_KEEP_LAST` / `RSTEST_CACHE_MAX_AGE`). Env:
-`RSTEST_CACHE_COMPACT_THRESHOLD`. Strictly **best-effort**: a listing, config,
-or compaction failure warns and never fails an otherwise-green run. Concurrent
-auto-compactions are safe (the absorbed-id set prevents double-counting), only
-redundant. Leave it unset to keep compaction an explicit `cache-compact` step.
-On `s3://` / `gs://`, keep N low (20 to 50): a pull reads each loose segment
-with its own `aws` / `gcloud` process, one after another, so a high threshold
-means that many CLI calls before the first test runs.
+`RSTEST_CACHE_COMPACT_THRESHOLD`. **Best-effort**: any failure warns and never fails an
+otherwise-green run; concurrent auto-compactions are safe, only redundant. Leave it unset to keep
+compaction an explicit `cache-compact` step. On `s3://` / `gs://`, keep N low
+(20 to 50): a pull reads each loose segment with its own `aws` / `gcloud`
+process, one after another.
 
 ## Diagnostics
 
 ### `--doctor`
 
-After the run, print a diagnosis: wait-bound tests (wall vs CPU time),
-parallel-floor analysis (the tests that cap any `-n`), parallel efficiency
-(realized speedup and per-worker load imbalance, `-n ≥ 2` only), fixture
-hotspots (with scope advice), slowest files, and **resource leaks** (tests
-that ended with more threads / open file descriptors than they started; see
-the [Resource leaks](../guides/resource-leaks.md) guide). Adds a few cheap
-measurements to the run; outcomes are unaffected.
+After the run, print a diagnosis: wait-bound tests (wall vs CPU time), the
+parallel floor (tests that cap any `-n`), parallel efficiency (`-n ≥ 2` only),
+fixture hotspots with scope advice, slowest files, and **resource leaks**
+(threads or fds a test left open). Adds a few cheap measurements; outcomes are
+unaffected. Reading each section: [Suite diagnostics](../guides/doctor.md).
 
 ### `--doctor-json <path>`
 
-Write the doctor analysis as JSON (stable, versioned schema; the
-current version is in the `schema` field) for CI trending. Implies doctor instrumentation; combine with
+Write the doctor analysis as JSON (stable, versioned via the `schema`
+field) for CI trending. Implies doctor instrumentation; combine with
 `--doctor` for the human report too. Field reference:
 [Doctor JSON](report-json.md#doctor-json).
 
 ### `--doctor-md <path>`
 
-Write the doctor analysis as GitHub-flavored markdown: the same signals
-as the terminal report, rendered as job-summary tables. Implies doctor
-instrumentation.
+Write the doctor analysis as GitHub-flavored markdown: the terminal report's
+signals as job-summary tables. Implies doctor instrumentation.
 
-On GitHub Actions and Buildkite you rarely need the flag: any doctor run
-(`--doctor`, `--doctor-json`, or `--doctor-md`) automatically publishes
-this markdown to the job summary (appended to `$GITHUB_STEP_SUMMARY` on
-GitHub, piped to `buildkite-agent annotate` in info style on Buildkite), so the report shows up on the run page with zero extra steps. GitLab and
-TeamCity have no native markdown job-summary surface; use `--doctor-md`
-and publish the file as an artifact.
+On GitHub Actions and Buildkite you rarely need it: any doctor run
+(`--doctor`, `--doctor-json`, `--doctor-md` or `--doctor-fail-on`) publishes
+this markdown automatically (appended to `$GITHUB_STEP_SUMMARY` on GitHub,
+`buildkite-agent annotate` in info style on Buildkite). Use the flag for a
+file copy, or on GitLab and TeamCity, which have no markdown job-summary
+surface (publish the file as an artifact).
 
 ### `--doctor-fail-on <COND>`
 
-Fail the run when a doctor metric breaches a threshold, turning the
-otherwise-advisory doctor signal into a CI gate. Repeatable; the run fails
-if *any* condition fires. Implies doctor instrumentation.
-
-Grammar is `metric OP value`:
+Fail the run when a doctor metric breaches a threshold, turning the advisory
+doctor signal into a CI gate. Repeatable; the run fails if *any* condition
+fires. Implies doctor instrumentation. Walkthrough:
+[Gating a PR on doctor metrics](../guides/doctor.md#gating-a-pr-on-doctor-metrics).
 
 ```console
 $ rstest -n auto --doctor-fail-on 'parallel_efficiency<30' \
                  --doctor-fail-on 'wait_pct>50'
 ```
 
-Operators: `<`, `<=`, `>`, `>=`, `==`, `!=`. Metrics (from the
-[Doctor JSON](report-json.md#doctor-json) model):
+Grammar `metric OP value`, with operators `<`, `<=`, `>`, `>=`, `==`, `!=`.
+Metrics (from the [Doctor JSON](report-json.md#doctor-json) model):
 
 | metric | meaning |
 |---|---|
@@ -766,32 +693,24 @@ Operators: `<`, `<=`, `>`, `>=`, `==`, `!=`. Metrics (from the
 | `imbalance_pct` | busiest-vs-idlest worker load gap, % |
 | `long_pole_seconds` | slowest single test (setup + call + teardown) |
 
-`wait_pct` and `wait_seconds` are gated on the measured values, even when the
-doctor report hides its WAIT-BOUND section (below 20% or 1s of waiting).
-`long_pole_seconds` is measured at any worker count.
-
-A pool-only metric (`parallel_efficiency`, `efficiency_pct`,
-`realized_speedup`, `imbalance_pct`) at `-n 0` / `-n 1` is **skipped, not
-failed**: there is no parallelism to measure, so it prints a `not measured`
-note and never fails the gate. When no condition fires, the closing line is
-`all N condition(s) passed`, or `M condition(s) passed, K skipped (not
-measured for this run)` when some were skipped. An unknown metric, a malformed
-condition, or a threshold that is not a finite number (`NaN`, `inf`) aborts up
-front, before the run, so a typo can never become a gate that silently never
-fires (or always fires). `==`/`!=` are reliable only on the integer-valued
-metrics (`tests`, `workers`); on a floating-point metric they almost never
-match, so rstest warns and you should use a `<`/`>` threshold instead.
-
-The failure block prints to stderr, so `--output json`/`tap` stay pure on
-stdout. Under a passthrough-IO flag (`-s`/`--pdb`/`--co`) there is no doctor
-instrumentation, so the gate can't run: rstest warns instead of passing green.
-
-Because the gate is a doctor run, it also **publishes the full doctor report**
-the way any doctor run does (appended to `$GITHUB_STEP_SUMMARY` on GitHub
-Actions, `buildkite-agent annotate` on Buildkite), even when you pass only
-`--doctor-fail-on` (no `--doctor`). That is intentional: a failed gate shows
-its report on the run page so you can see *why* it failed. Pass `--doctor-md`
-for a file copy, or run in a CI with no summary surface if you want gate-only.
+- `wait_pct` and `wait_seconds` gate on the measured values, even when the
+  report hides its WAIT-BOUND section (under 20% or 1 s of waiting).
+  `long_pole_seconds` is measured at any worker count.
+- A pool-only metric (`parallel_efficiency`, `efficiency_pct`,
+  `realized_speedup`, `imbalance_pct`) at `-n 0` / `-n 1` is **skipped, not
+  failed**, with a `not measured` note. The closing line is then
+  `M condition(s) passed, K skipped (not measured for this run)` instead of
+  `all N condition(s) passed`.
+- An unknown metric, a malformed condition, or a non-finite threshold (`NaN`,
+  `inf`) aborts before the run.
+- `==` / `!=` are reliable only on the integer metrics (`tests`, `workers`);
+  on a floating-point metric rstest warns.
+- The failure block prints to stderr, so `--output json`/`tap` stay pure on
+  stdout. Under a passthrough-IO flag (`-s`/`--pdb`/`--co`) there is no
+  instrumentation, so rstest warns instead of passing green.
+- Like any doctor run it publishes the full report to the CI job summary
+  (GitHub Actions, Buildkite), even without `--doctor`, so a failed gate shows
+  why. Pass `--doctor-md` for a file copy.
 
 ### `--fail-on-leak`
 
@@ -804,29 +723,23 @@ gate.
 $ rstest -n auto --fail-on-leak
 ```
 
-Enables the leak-check instrumentation on its own: you do **not** need
-`--doctor`. Exits `1` when any leak is found (listing the offenders on stderr,
-so `--output json`/`tap` stay pure on stdout); exits `0` and prints
-`no thread/fd leaks detected` on a clean suite. Not evaluated under a
-passthrough-IO flag (`-s`/`--pdb`/`--co`), which has no instrumentation: the
-flag is ignored there with a warning rather than passing silently.
+Needs no `--doctor`. Exits `1` when any leak is found, listing the offenders
+on stderr (so `--output json`/`tap` stay pure on stdout); on a clean suite
+exits `0` and prints `no thread/fd leaks detected`. Under a passthrough-IO flag
+(`-s`/`--pdb`/`--co`), which has no instrumentation, it is ignored with a
+warning.
 
 The first test each worker runs is an unchecked **warm-up** (first-touch
 imports are not a per-test leak), so under `-n auto` one test per worker is not
-gated; a clean exit does not prove those tests are leak-free.
+gated. What is measured, how leaks are attributed (resources a class, module
+or session fixture creates are not charged to the triggering test), and how
+to fix one: [Resource leaks](../guides/resource-leaks.md).
 
-A leaked thread or fd is shared state that can flake a *later* test; the guide
-covers what is measured, how a leak is attributed (resources a class, module or
-session fixture creates are not charged to the test that triggered it), and how
-to fix a leak: [Resource leaks](../guides/resource-leaks.md).
-
-Exit-code note for machine consumers: the gate affects the **process exit
-code** (1 on breach), which is authoritative. It does **not** rewrite the
-`exitstatus` inside an already-streamed `--output json`/`tap` `sessionfinish`
-envelope: that field is emitted mid-run and reflects the *test* outcome, so a
-green session that fails the gate still shows `"exitstatus": 0` there. Key CI
-success off the process exit code, not the envelope field (same as
-[`--durations-regress`](#-durations-regress-ratio)).
+Like [`--durations-regress`](#-durations-regress-ratio), the gate sets the
+**process exit code** (1 on breach), which is authoritative. The `exitstatus`
+in an already-streamed `--output json`/`tap` `sessionfinish` envelope reflects
+only the test outcome, so a green session that fails the gate still shows
+`"exitstatus": 0` there.
 
 `--fail-on-leak` and `--doctor-fail-on` are command-line only (neither is a
 `[tool.rstest]` key): put them in the CI step that invokes rstest.
@@ -836,19 +749,17 @@ success off the process exit code, not the envelope field (same as
 ### `--cov-diff-fail-under <PCT>`
 
 Diff-coverage gate: fail the run when fewer than PCT% of the **lines added or
-changed in this diff** are covered by tests. The classic PR gate ("you added
-code with no test exercising it") computed from the run's own coverage data,
-no `diff-cover`/Codecov round-trip.
+changed in this diff** are covered by tests, computed from the run's own
+coverage data (no `diff-cover`/Codecov round-trip).
 
 ```console
 $ rstest -n auto --cov=. --cov-diff-fail-under=90 --changed=origin/main
 ```
 
-Requires `--cov` (there must be coverage data to score). The diff is taken
-against the [`--changed`](#-changedrev) base when given, otherwise `HEAD`. Only
-**executable** added lines count (blank lines, comments, and lines coverage.py
-doesn't treat as statements are ignored), and the report names the uncovered
-added lines per file:
+Requires `--cov`. The diff is against the [`--changed`](#-changedrev) base when
+given, else `HEAD`. Only **executable** added lines count (not blank lines,
+comments, or lines coverage.py doesn't treat as statements), and the report
+names the uncovered added lines per file:
 
 ```text
 rstest: diff coverage 83.3% (5/6 added lines covered)
@@ -856,9 +767,9 @@ rstest: diff coverage 83.3% (5/6 added lines covered)
 rstest: --cov-diff-fail-under: diff coverage 83.3% is below 90%
 ```
 
-Exits `1` when below the threshold (the gate line prints to stderr, keeping
-`--output json`/`tap` stdout pure). A diff with no added executable lines (or
-whose changed files aren't under `--cov`) passes (nothing to score). See the
+Exits `1` below the threshold (the gate line goes to stderr, keeping
+`--output json`/`tap` stdout pure). A diff with no added executable lines, or
+none under `--cov`, passes. See the
 [Coverage guide](../guides/coverage.md#diff-coverage-gate).
 
 ### `--cov-diff-json <PATH>`
@@ -876,198 +787,161 @@ report without gating the exit code.
 
 ## Output and reports
 
-### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>` { #-output-dotsverbosebargithubjson }
+<a id="-output-dotsverbosebargithubjson"></a>
 
-Terminal output style. The default is **automatic**: on an interactive
-terminal it's `bar` (the pretty view); off a TTY (CI, pipes) it falls back
-to `dots`, so logs stay byte-stable. A TTY counts as interactive only with
-color on and outside CI: `NO_COLOR`, `--color=no`, `TERM=dumb` or a `CI`
-variable also give `dots` and no live footer (see
-[environment](environment.md#honored-from-the-environment)). Pass
-`--output` to pin a style.
+### `--output <dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json>` { #output }
 
-A value that is not one of the styles above is not rstest's: `--output
-VALUE` goes to the pytest session unchanged, so a plugin's own `--output`
-(pytest-playwright's artifacts directory) keeps working, for example
-`rstest -n 4 --output test-artifacts`. If no plugin defines `--output`,
-pytest rejects it as an unrecognized argument (exit 4) and rstest names the
-styles. An unknown `output` in [`[tool.rstest]`](#configuration-file) warns
-and falls back to `dots`.
+Terminal output style. Config `[tool.rstest] output`. The default is
+automatic: `bar` on an interactive terminal (`verbose` with `-v`); `dots` with
+no live footer off a TTY (CI, pipes) or under `NO_COLOR`, `--color=no`,
+`TERM=dumb` or a `CI` variable, so logs stay byte-stable (see
+[environment](environment.md#honored-from-the-environment)); and pytest's own
+output in single-worker mode (see the note below).
 
-!!! note "pytest's own output in byte-exact mode"
-    In [byte-exact mode](../concepts/glossary.md#byte-exact-mode) (`-n 0`/`-n 1`,
-    or `-n auto` capped to one worker, without `--reruns`) with no `--output`
-    flag and no `[tool.rstest] output` key, the default is neither `bar` nor
-    `dots`: the single pytest session prints pytest's own terminal output,
-    on a TTY or not. That includes the session header, the FAILURES and
-    ERRORS sections, the warnings summary, `-r` and `--durations` sections,
-    plugin header and summary lines, and the final `= N passed in Xs =`
-    line. rstest prints no banner and no summary of its own there; it only
-    appends its extras after pytest's output (quarantined failures, the
-    `--doctor` report, the coverage report, gate messages) and still writes
-    `--junitxml`, `--report-json`, `--html` and `--stream-json` (see
-    [`--junitxml`](#-junitxml-path) for how that document matches pytest's).
-    An explicit `--output` style, on the command line or in
-    `[tool.rstest]`, keeps rstest's own renderer, under a
-    `single worker (pytest-exact mode)` banner. At `-n 2` and above nothing
-    changes.
+A value that is not one of the styles above is not rstest's: `--output VALUE`
+goes to the pytest session unchanged, so a plugin's own `--output`
+(pytest-playwright's artifacts directory, as in
+`rstest -n 4 --output test-artifacts`) keeps working. If no plugin defines
+`--output`, pytest rejects it (exit 4) and rstest names the styles. An unknown
+`output` in [`[tool.rstest]`](#configuration-file) warns and falls back to
+`dots`.
 
-`dots` is pytest's one-char-per-test (`.`/`F`/`s`/…) with a running
-percentage. `verbose` is the `-v` equivalent: one `nodeid OUTCOME` line
-per test. `bar` is a pytest-sugar-style view: a per-test result line
-(`✓ nodeid` / `✗ nodeid`) as each test finishes, the failure traceback
-inlined right under a failing test, a live filled progress bar in the
-footer, and a closing results bar, a full-width bar whose segments are
-colored green/red/yellow in proportion to passed/failed/skipped, over the
-test count:
+!!! note "pytest's own output in single-worker mode"
+    In [single-worker mode](../concepts/glossary.md#single-worker-mode)
+    (`-n 0`/`-n 1`, or `-n auto` capped to one worker, without `--reruns`)
+    with no `--output` flag or config key, the pytest session prints pytest's
+    own terminal output, on a TTY or not: header, FAILURES and ERRORS
+    sections, warnings summary, `-r` and `--durations` sections, plugin lines,
+    and the final `= N passed in Xs =` line. rstest adds no banner or summary;
+    it appends only its extras (quarantined failures, the `--doctor` report,
+    the coverage report, gate messages) and still writes `--junitxml`,
+    `--report-json`, `--html` and `--stream-json` (see
+    [`--junitxml`](#-junitxml-path)). An explicit `--output` style keeps
+    rstest's own renderer, under a `single-worker mode` banner.
+    At `-n 2` and above nothing changes.
+
+Human styles:
+
+- `dots`: pytest's one char per test (`.`/`F`/`s`/…) with a running
+  percentage.
+- `verbose`: the `-v` equivalent, one `nodeid OUTCOME` line per test. `-v`
+  selects it unless `--output` says otherwise (in single-worker mode with no
+  `--output`, `-v` is pytest's own).
+- `bar`: pytest-sugar-style: a `✓ nodeid` / `✗ nodeid` line per finished
+  test, the traceback inlined under a failing test, a live progress bar in the
+  footer, and a closing results bar colored by passed/failed/skipped share
+  (below). rstest renders it orchestrator-side, so unlike pytest-sugar (which
+  pytest-xdist disables, since workers would fight over one terminal) it works
+  under the parallel pool.
 
 ```text
 Results (4.20s):
   ██████████████████████████████ 29/29
 ```
 
-
-`bar` works **under the parallel pool**, where terminal-reporter plugins
-like pytest-sugar structurally can't (each worker would fight for the one
-terminal: the same reason pytest-sugar is disabled under pytest-xdist); rstest
-renders it orchestrator-side from the streamed results.
-
-When stdout is not a TTY (CI, pipes) the live footer, progress bar, and
-closing results bar self-disable; the live footer is also off on a TTY
-under `NO_COLOR`, `--color=no`, `TERM=dumb` or `CI`, and its lines are cut
-to the terminal width; the per-test lines plus the stable
-`N passed … in Xs` summary remain, so logs stay greppable. `-v` selects
-`verbose` unless `--output` says otherwise (in byte-exact mode with no
-`--output`, `-v` is pytest's own). Pin any style explicitly with
-`--output` or `[tool.rstest] output` to override the TTY auto-default.
+Without a live terminal the footer, progress bar and results bar
+self-disable; the per-test lines and the `N passed … in Xs` summary remain, so
+logs stay greppable. On a terminal, footer lines are cut to its width.
 
 #### Machine-readable styles { #machine-readable-styles }
 
-`github` renders the normal `dots` log and additionally emits a
-[GitHub Actions](https://docs.github.com/actions) `::error` workflow command
-for each failing test, so failures show up as inline annotations on the PR
-diff:
+`github`: the `dots` log plus a [GitHub Actions](https://docs.github.com/actions)
+`::error` workflow command per failing test, shown as inline annotations on
+the PR diff:
 
 ```text
 ::error file=<path>,title=<nodeid>,line=<n>::<traceback>
 ```
 
-`file` is the nodeid path made repo-relative: GitHub resolves annotation
-files from the repository root, so when the pytest rootdir sits in a
-subdirectory (a `working-directory:` step, a monorepo project) its path
-below the repo root is prepended (`proj/tests/test_a.py`). The repo root is
-`$GITHUB_WORKSPACE` (or Azure's `$BUILD_SOURCESDIRECTORY`) when it contains
-the rootdir, else the nearest ancestor with a `.git`; with neither, the path
-stays rootdir-relative. `line` is 1-based (the annotator adds 1 to
-pytest's 0-based `report.location`) and is omitted when no location is
-available. (The `lineno` field in the JSON reports stays 0-based, so
-`line` = `lineno + 1`.) The traceback is escaped per the
-workflow-command spec. Use it as your CI `--output`.
+- `file` is repo-relative: when the pytest rootdir sits below the repo root (a
+  `working-directory:` step, a monorepo project), its path from the repo root
+  is prepended (`proj/tests/test_a.py`). The repo root is `$GITHUB_WORKSPACE`
+  (or Azure's `$BUILD_SOURCESDIRECTORY`) when it contains the rootdir, else the
+  nearest ancestor with a `.git`; with neither, the path stays
+  rootdir-relative.
+- `line` is 1-based (`lineno + 1`, where `lineno` is the 0-based value in the
+  JSON reports), omitted when no location is available. The traceback is
+  escaped per the workflow-command spec.
+- A collection error gets `::error file=<path>,title=<path> (collection
+  error)::<traceback>`; the run still exits `2`.
+- A test that passed only after reruns (`--reruns` / `@pytest.mark.flaky`)
+  emits `::warning` (`flaky: passed only after N reruns`), and a
+  [quarantined](#-quarantine-file) failure emits `::warning`
+  (`quarantined (non-fatal): <traceback>`) instead of `::error`.
 
-A module that fails to import (a collection error) has no tests to
-annotate, so it gets its own `::error file=<path>,title=<path> (collection
-error)::<traceback>` line; the run still exits `2`.
-
-Tests that passed only after reruns (`--reruns` /
-`@pytest.mark.flaky`) additionally emit a `::warning` annotation
-(`flaky: passed only after N reruns`): the run stays green, but the
-flake is visible on the PR without opening the log. Failures matched by
-[`--quarantine`](#-quarantine-file) are annotated as `::warning`
-(`quarantined (non-fatal): <traceback>`) rather than `::error`, matching the
-run's green exit.
-
-`azure` renders the normal `dots` log and additionally emits an [Azure
-Pipelines logging
+`azure`: the `dots` log plus an [Azure Pipelines logging
 command](https://learn.microsoft.com/azure/devops/pipelines/scripts/logging-commands)
-per failing test, surfaced as an inline issue on the file in the PR:
+per failing test, shown as an inline issue on the file in the PR:
 
 ```text
 ##vso[task.logissue type=error;sourcepath=<path>;linenumber=<n>]<nodeid>: <message>
 ```
 
-`sourcepath` is the repo-relative nodeid path (same rule as `github`);
-`linenumber` (1-based: the 0-based
-`report.location` plus 1, as in the GitHub annotator) from pytest's report
-location, omitted when none is available. The message is the exception
-line (`AssertionError: x mismatch`, `RuntimeError: setup boom`), the first
-line of the traceback's last `E` block, since logissue is single-line.
-Each collection error emits a `type=error` logissue too (`<path> (collection
-error): <exception>`). Flaky-passed tests
-(`--reruns`) additionally emit a `type=warning` logissue: green run,
-visible flake. Quarantined failures are also `type=warning`, never
-`type=error`.
+`sourcepath` and `linenumber` follow the `github` rules for `file` and `line`.
+The message is the exception line (`AssertionError: x mismatch`), the first
+line of the traceback's last `E` block, since logissue is single-line. A
+collection error also emits `type=error` (`<path> (collection error):
+<exception>`); flaky passes and quarantined failures emit `type=warning`,
+never `type=error`.
 
-`gitlab` renders the normal `dots` log; each failure in the end-of-run
-failures block is wrapped in a [GitLab CI collapsible
+`gitlab`: the `dots` log, with each failure in the end-of-run block wrapped in
+a [GitLab CI collapsible
 section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
-(`section_start`/`section_end`, collapsed by default), so the job log
-folds tracebacks per test. GitLab has no per-line warning command, so the
-flaky-tests block folds into its own collapsed section under this style.
+(collapsed by default). GitLab has no per-line warning command, so the
+flaky-tests block folds into its own collapsed section.
 
-`buildkite` renders the normal `dots` log; each failure is emitted under
-an auto-expanded [`+++` group
-header](https://buildkite.com/docs/pipelines/configure/managing-log-output),
-so failing tests open as their own groups in the Buildkite log UI. Flaky
-tests are published as a `warning`
-[annotation](https://buildkite.com/docs/agent/v3/cli-annotate) on the
-build page (best-effort via `buildkite-agent`).
+`buildkite`: the `dots` log, with each failure under an auto-expanded [`+++`
+group header](https://buildkite.com/docs/pipelines/configure/managing-log-output).
+Flaky tests are published as a `warning`
+[annotation](https://buildkite.com/docs/agent/v3/cli-annotate) on the build
+page (best-effort via `buildkite-agent`).
 
-`teamcity` emits [TeamCity service
-messages](https://www.jetbrains.com/help/teamcity/service-messages.html)
-as each test finishes: a `testStarted`/`testFinished` pair per test,
-plus `testFailed` (with the escaped traceback as `details`) or
-`testIgnored` for skips/xfails. Each test's messages are emitted as one
-group, so parallel results never interleave. Each collection error is
-reported as a failed test named after the broken module (`testFailed`
-with `message='collection error'` and the traceback as `details`). Flaky
-tests emit a
-`WARNING`-status build message. The banner and summary stay: TeamCity
-ignores non-service lines.
+`teamcity`: [TeamCity service
+messages](https://www.jetbrains.com/help/teamcity/service-messages.html) as
+each test finishes: `testStarted`/`testFinished` per test, plus `testFailed`
+(escaped traceback as `details`) or `testIgnored` for skips and xfails,
+grouped per test so parallel results never interleave. A collection error is
+a failed test named after the broken module (`message='collection error'`,
+traceback as `details`). Flaky tests emit a `WARNING`-status build message.
+The banner and summary stay: TeamCity ignores non-service lines.
 
-`tap` makes stdout a pure [Test Anything Protocol](https://testanything.org)
-version 13 stream: one `ok N - nodeid` / `not ok N - nodeid` point per
-test as it finishes, failure text as `#` diagnostic lines, skips as
-`# SKIP <reason>`, xfail/xpass as `# TODO`, closed by the trailing
-`1..N` plan. Each collection error closes the stream as a
-`not ok N - <path> # collection error` point with its traceback as `#`
-lines, counted in the plan, so a suite that cannot import never reads as
-an empty (green) `1..0` run. No banner or human summary. For TAP harnesses (`prove`,
-Jenkins TAP plugin, etc.).
+`tap`: stdout is a pure [Test Anything Protocol](https://testanything.org)
+version 13 stream: `ok N - nodeid` / `not ok N - nodeid` per test as it
+finishes, failure text as `#` lines, skips as `# SKIP <reason>`, xfail/xpass as
+`# TODO`, closed by the `1..N` plan. A collection error is a
+`not ok N - <path> # collection error` point (traceback as `#` lines) counted
+in the plan, so a suite that can't import never reads as an empty green
+`1..0`. No banner or human summary. For TAP harnesses (`prove`, the Jenkins
+TAP plugin).
 
-`json` makes stdout a pure **newline-delimited JSON** stream: one
-`testreport` object per phase as each test finishes, closed by a
-`sessionfinish` envelope. No banner, footer, or human summary is printed,
-so every line parses on its own. Built for editors and tooling that consume
-results live; see [Streaming JSON](report-json.md#streaming-json) for the
-event shapes and fields. This differs from
-[`--report-json`](#-report-json-path), which writes a single end-of-run
-snapshot document to a file.
+`json`: stdout is a pure **newline-delimited JSON** stream: one `testreport`
+object per phase as each test finishes, closed by a `sessionfinish` envelope,
+with no banner, footer or summary. For editors and live tooling; event shapes
+in [Streaming JSON](report-json.md#streaming-json). Unlike
+[`--report-json`](#-report-json-path), which writes one end-of-run snapshot
+file.
 
 ### `--junitxml <path>`
 
-Write merged results as JUnit XML. Intercepted by rstest (rather than
-forwarded) because per-worker sessions would clobber a shared file. pytest's
-alias `--junit-xml` is intercepted the same way.
+Write merged results as JUnit XML. Intercepted by rstest (with pytest's alias
+`--junit-xml`) because per-worker sessions would clobber a shared file.
 
-The document is pytest's own at every worker count. Each
-worker runs pytest's junitxml plugin and streams every finished
-`<testcase>` element to rstest, which merges them in collection order
-(pytest's run order at `-n 0`). Suite name and attributes, `junit_family`,
-`junit_logging`, `junit_suite_name`, `--junit-prefix`, `record_property`,
-`record_xml_attribute` and `record_testsuite_property` all come out exactly
-as under pytest; only `time`, `timestamp` and `hostname` vary between runs.
+The document is pytest's own at every worker count: each worker runs pytest's
+junitxml plugin and streams every finished `<testcase>` to rstest, which
+merges them in collection order (pytest's run order at `-n 0`). Suite name and
+attributes, `junit_family`, `junit_logging`, `junit_suite_name`,
+`--junit-prefix`, `record_property`, `record_xml_attribute` and
+`record_testsuite_property` come out exactly as under pytest; only `time`,
+`timestamp` and `hostname` vary between runs. rstest's own signals are
+standard `<property>` extensions:
 
-rstest adds its own signals only as standard `<property>` extensions:
-
-- a test that passed after `--reruns` retries is a passing `<testcase>`
-  with `<property name="flaky" value="true" />`, and only its last attempt
-  appears;
-- a [quarantined](#-quarantine-file) failure has its `<failure>` / `<error>`
-  removed and carries `<property name="quarantined" value="true" />`, so a
+- a test that passed after `--reruns` retries is a passing `<testcase>` with
+  `<property name="flaky" value="true" />` (last attempt only);
+- a [quarantined](#-quarantine-file) failure loses its `<failure>` /
+  `<error>` and carries `<property name="quarantined" value="true" />`, so a
   junit-gated CI agrees with rstest's exit status;
-- a test no worker finished (a crash or `--worker-timeout` kill in a pool,
-  an `--incremental` cached pass) gets an element synthesized in pytest's
-  shape.
+- a test no worker finished (a crash or `--worker-timeout` kill in a pool, an
+  `--incremental` cached pass) gets an element synthesized in pytest's shape.
 
 A crash at `-n 0` still ends the run before any report is written.
 
@@ -1075,13 +949,10 @@ A crash at `-n 0` still ends the run before any report is written.
 
 Write a self-contained HTML report of the merged run: one file with inline CSS
 and a small script for sort, filter, search and expand, readable with
-JavaScript disabled. rstest renders it on the orchestrator from merged
-results, so it works under the parallel pool, where pytest-html writes nothing
-at `-n 2` or more (pytest-html only writes from a non-worker node, and every
-rstest worker is a worker node).
-
-`--html` is rstest-owned: pytest-html, if installed, never receives the flag,
-and the report layout is rstest's, not pytest-html's. Not written under a
+JavaScript disabled. Rendered on the orchestrator from merged results, so it
+works under the parallel pool, where pytest-html writes nothing at `-n 2` or
+more (it only writes from a non-worker node). rstest owns the flag:
+pytest-html never receives it, and the layout is rstest's. Not written under a
 passthrough-IO flag (`--pdb`, `-s`, `--co`, ...), which has no merged run.
 
 ### `--report-json <path>`
@@ -1099,114 +970,98 @@ markers, without running the suite. See
 
 Write the live [streaming-JSON](report-json.md#streaming-json) event stream
 (`testreport` per phase, closed by `sessionfinish`) to `FILE` as a **side
-channel**, leaving stdout's human output untouched. This is the same schema
-as `--output json`, but on a separate stream, so an editor can show normal
-terminal output **and** drive a Test Explorer from the events at the same
-time. `FILE` may be a regular file or a named pipe (fifo) the editor opened
-for reading first (opening a fifo for write blocks until a reader is
-present). Works in every pooled and single-worker run mode; under a
-passthrough-IO flag (`--pdb`, `-s`, `--co`, ...) there is no merged run, so
-no closing `sessionfinish` envelope is written. Lines are flushed as they are
-produced.
+channel**: the `--output json` schema on a separate stream, so an editor can
+show normal terminal output **and** drive a Test Explorer from the events.
+`FILE` may be a regular file or a named pipe (fifo) the editor opened for
+reading first (opening a fifo for write blocks until a reader is present).
+Lines are flushed as produced. Works in every pooled and single-worker mode;
+under a passthrough-IO flag (`--pdb`, `-s`, `--co`, ...) there is no merged
+run, so no closing `sessionfinish` envelope is written.
 
 ## Interpreter, watch mode and debugging
 
 ### `--python <path-or-version>`
 
-Interpreter for the workers. Accepts either a path to an interpreter, a
-virtualenv directory (`--python .venv` uses its `bin/python`, or
-`Scripts\python.exe` on Windows), a command on `PATH` (`python3.12`), or a
-version request: `3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t` (free-threaded).
-Without it, rstest searches, in order: the active virtualenv (`$VIRTUAL_ENV`),
-a `.venv` found walking up from the working directory (the walk stops at the
-repository root, the first directory containing `.git`), versioned `python` /
-`pythonX.Y` names on `PATH`, on Windows the python.org installs reachable
-through the `py` launcher, and finally uv-managed interpreters as a fallback.
-A `.python-version` file (or a `--python` version request) does not pick an
-interpreter directly: it sets the version that filters those candidates. A
+Interpreter for the workers: a path to an interpreter, a virtualenv directory
+(`--python .venv` uses its `bin/python`, or `Scripts\python.exe` on Windows),
+a command on `PATH` (`python3.12`), or a version request (`3.12`,
+`>=3.12,<3.13`, `pypy@3.10`, `3.13t` for free-threaded). Without it, rstest
+searches, in order: the active virtualenv (`$VIRTUAL_ENV`), a `.venv` found
+walking up from the working directory (stopping at the repository root, the
+first directory containing `.git`), versioned `python` / `pythonX.Y` names on
+`PATH`, on Windows the python.org installs behind the `py` launcher, and
+finally uv-managed interpreters. A `.python-version` file (or a `--python`
+version request) filters those candidates rather than picking one. A
 `.python-version` pin is soft (a usable `$VIRTUAL_ENV` or project `.venv` wins
 over it, with a warning); a `--python` request is not. Without `--python`, a
-virtualenv that runs but doesn't have rstest installed is an error rather than
-a silent fall-through to a `PATH` or uv-managed interpreter (see
+virtualenv that runs but lacks rstest is an error, not a silent fall-through to
+a `PATH` or uv-managed interpreter (see
 [Troubleshooting](troubleshooting.md#found-venvbinpython-but-rstest-is-not-installed-in-it)).
 
 ### `--watch`
 
-Watch the directory you started rstest in (recursively; not the project
-root when you start it from a subdirectory) and rerun on change. Only `.py`
-files and pytest config files (`pytest.toml`, `pytest.ini`, `pyproject.toml`,
+Watch the directory you started rstest in (recursively; not the project root
+when you start from a subdirectory) and rerun on change. Only `.py` files and
+pytest config files (`pytest.toml`, `pytest.ini`, `pyproject.toml`,
 `tox.ini`, `setup.cfg`, ...) trigger a rerun; data files, templates, `.json`,
-`.sql` and the like do not. A change set consisting only of
-test files reruns exactly those files (with your other flags); a source
-(`.py`) change reruns the tests the import graph says are affected
-(the `--changed` machinery; unresolvable changes fall back to the full
-selection); a pytest-config change reruns the full selection. Paths under a
-directory named exactly `.git`, `__pycache__`, `.pytest_cache`,
-`.rstest_cache`, `.venv`, `.gate-venv`, `node_modules` or `target` are
-ignored; other virtualenv or tool directories (`venv/`, `.tox/`, `.nox/`) are
-watched. Type `q` then Enter to exit cleanly (`Ctrl+C`
-also works). Closing stdin (`nohup`, `< /dev/null`) does not end the session.
-Started as a background job on a terminal (`rstest --watch &`), rstest leaves
-stdin alone so the shell does not suspend it for tty input; stop it with `kill`
-or bring it back with `fg`. A session moved to the background later (Ctrl+Z,
-then `bg`) may be suspended for tty input; `fg` resumes it.
-With a [passthrough flag](#passthrough-io-flags) (`--pdb`, `--trace`, `-s`,
+`.sql` and the like do not. A change set of only test files reruns exactly
+those files (with your other flags); a source (`.py`) change reruns the tests
+the import graph says are affected (the `--changed` machinery; unresolvable
+changes fall back to the full selection); a pytest-config change reruns the
+full selection. Paths under a directory named exactly `.git`, `__pycache__`,
+`.pytest_cache`, `.rstest_cache`, `.venv`, `.gate-venv`, `node_modules` or
+`target` are ignored; other virtualenv or tool directories (`venv/`, `.tox/`,
+`.nox/`) are watched.
+
+Type `q` then Enter to exit cleanly (`Ctrl+C` also works). Closing stdin
+(`nohup`, `< /dev/null`) does not end the session. Started as a background
+job (`rstest --watch &`), rstest leaves stdin alone so the shell doesn't
+suspend it; stop it with `kill` or `fg`. A session backgrounded later
+(Ctrl+Z, then `bg`) may be suspended for tty input; `fg` resumes it. With a
+[passthrough flag](#passthrough-io-flags) (`--pdb`, `--trace`, `-s`,
 `--capture=...`, `--co`/`--collect-only`, the stepwise flags) or `--debug`,
 stdin belongs to the test process, `q` is not read, and only `Ctrl+C` exits.
 
-Exit code: quitting with `q` exits `0` whatever the last cycle's outcome
-(the last cycle's exit code is shown in the waiting prompt); `Ctrl+C` ends the
-process by signal. An rstest-level error
-during a cycle (a bad flag combination, a failed `--cache-pull`) ends the
-session with exit `1`.
+Exit code: quitting with `q` exits `0` whatever the last cycle's outcome (the
+waiting prompt shows the last cycle's code); `Ctrl+C` ends the process by
+signal. An rstest-level error during a cycle (a bad flag combination, a failed
+`--cache-pull`) ends the session with exit `1`.
 
-Selection is **incremental** across the session. The import graph that maps a
-source change to affected tests is built once and then kept warm: each save
-re-checks every file's modification time and size, and re-reads only the files
-that changed, patching their graph edges in place, instead
-of re-walking and re-parsing the whole tree every save. Adding or deleting a
-`.py` file rebuilds the graph fully (a new module can be imported by files that
-did not themselves change), reusing the cached parse of every untouched file. On
-large suites this is the difference between each save reselecting in tens of
-milliseconds versus hundreds; on a 1,600-file tree it is roughly a 4x cut to the
-per-save selection latency.
+Selection is **incremental** across the session: the import graph stays
+warm, and each save re-parses only files whose mtime or size changed (adding
+or deleting a `.py` file rebuilds the graph from cached parses), roughly 4x
+faster per save on a 1,600-file tree.
 
-Watch reruns default to [`--order fail-fast`](#-order-throughputfail-fast)
-so a fresh failure surfaces first on each save; add `-x`/`--maxfail=1` to
-stop at it. Pass `--order throughput` to opt back into packing.
+Watch reruns default to [`--order fail-fast`](#-order-throughputfail-fast) so
+a fresh failure surfaces first; add `-x`/`--maxfail=1` to stop at it, or pass
+`--order throughput` to opt back into packing.
 
 ### `--debug[=PORT]`
 
 Run under [debugpy](https://github.com/microsoft/debugpy) for editor
-debugging (VS Code and any DAP client). Like `--pdb`, this forces
-single-worker mode with inherited stdio so exactly one Python process hosts
-the debugger; rstest then starts debugpy in that worker and **blocks until a
-client attaches** before collecting, so breakpoints in conftest, collection,
-and tests are all honored. Bare `--debug` listens on `127.0.0.1:5678`;
-`--debug=PORT` overrides the port.
+debugging (VS Code and any DAP client). Like `--pdb`, it forces single-worker
+mode with inherited stdio, so exactly one Python process hosts the debugger;
+rstest starts debugpy in that worker and **blocks until a client attaches**
+before collecting, so breakpoints in conftest, collection and tests are all
+honored. Bare `--debug` listens on `127.0.0.1:5678`; `--debug=PORT` overrides
+the port.
 
-The target interpreter (`--python`) must have `debugpy` installed
-(`pip install debugpy` in the test environment); without it the run proceeds
-without a debugger and prints a hint. The editor attaches with a DAP *attach*
-configuration pointed at the same host/port. `--reruns` and pooling are inert
-here, exactly as under `--pdb`.
+The `--python` interpreter must have `debugpy` installed; without it the run
+proceeds without a debugger and prints a hint. Attach with a DAP *attach*
+configuration on the same host and port. `--reruns` and pooling are inert, as
+under `--pdb`.
 
-When the listener is up, the worker prints a machine-readable ready line to
-**stderr** so an editor can attach deterministically instead of racing the
-port:
+Once listening, the worker prints a machine-readable ready line to **stderr**
+so an editor can attach without racing the port, then a human-readable
+`rstest: debugpy listening on …` line, both before the wait:
 
 ```json
 {"event": "debugpy", "host": "127.0.0.1", "port": 5678}
 ```
 
-A human-readable `rstest: debugpy listening on …` line follows it; both
-precede the blocking wait for the client.
-
 ## Configuration file
 
-rstest-owned defaults can live in `pyproject.toml`, so a project commits
-its runner settings once instead of repeating flags in CI and on every
-machine:
+rstest-owned defaults can live in `pyproject.toml`:
 
 ```toml
 [tool.rstest]
@@ -1221,108 +1076,101 @@ output = "bar"          # dots|verbose|bar|github|gitlab|buildkite|teamcity|azur
 projects = ["libs/*", "services/api"]   # monorepo subprojects; replaces auto-discovery
 ```
 
-These are the only keys read; other rstest flags (`--timeout`, `--html`,
-`--junitxml`, `--fail-on-leak`, `--doctor-fail-on`, ...) are command-line only.
-Keys use kebab-case. `worker-timeout` takes whole seconds (an integer), like
-the `--worker-timeout` flag.
+These are the only keys read (kebab-case); every other rstest flag
+(`--timeout`, `--html`, `--junitxml`, `--fail-on-leak`, `--doctor-fail-on`,
+...) is command-line only. `worker-timeout` takes whole seconds, like the flag.
 
 Precedence: command line > `[tool.rstest]` > built-in defaults. rstest reads
-the `[tool.rstest]` of the **nearest** `pyproject.toml`, walking up from the
-working directory, and stops there even if that file has no `[tool.rstest]`
-table. A `pyproject.toml` that is not valid TOML is skipped with a warning
-(`rstest: ignoring malformed <path>: ...`) and the walk continues to the next
-one up. pytest's own options stay where they always were
-(`[tool.pytest.ini_options]`, `addopts`, ...), but rstest-owned flags placed
-in `addopts` or `PYTEST_ADDOPTS` are **not** read by rstest (see the warning at
-the top of this page).
+the **nearest** `pyproject.toml`, walking up from the working directory, and
+stops there even if it has no `[tool.rstest]` table. One that is not valid TOML
+is skipped with a warning (`rstest: ignoring malformed <path>: ...`) and the
+walk continues. rstest-owned flags in pytest's `addopts` or `PYTEST_ADDOPTS`
+are **not** read by rstest (see the warning at the top of this page).
 
-**Invalid entries are reported, then ignored.** An unknown key or a wrong-typed value prints one
-warning to stderr per run, and that setting falls back to its default:
+**Invalid entries are reported, then ignored.** An unknown key or a
+wrong-typed value prints one warning per run, and that setting falls back to
+its default:
 
 ```text
 rstest: /repo/pyproject.toml: ignoring unknown [tool.rstest] key `worker_timeout` (did you mean `worker-timeout`?)
 rstest: /repo/pyproject.toml: ignoring [tool.rstest] reruns = "2" (expected a non-negative integer)
 ```
 
-The `did you mean` hint appears only when the kebab-case spelling is a real
-key. The expected types are: a non-negative integer (`reruns`,
-`worker-timeout`), a non-negative integer or `"auto"` (`numprocesses`),
-`true` or `false` (`reruns-only-known-flaky`), a string (`dist`, `collect`,
-`order`, `output`), and a list of glob strings (`projects`). Only the type is
-checked here; a string with an unknown value (`dist = "bogus"`) is still
-validated when the run starts, exactly as the same value passed as a flag.
+`did you mean` appears only when the kebab-case spelling is a real key.
+Expected types: a non-negative integer (`reruns`, `worker-timeout`), a
+non-negative integer or `"auto"` (`numprocesses`), `true` or `false`
+(`reruns-only-known-flaky`), a string (`dist`, `collect`, `order`, `output`),
+and a list of glob strings (`projects`). Only the type is checked here; an
+unknown string value (`dist = "bogus"`) is rejected at run start, like the
+same value passed as a flag.
 
 **Monorepo roots read only `projects`.** At a
-[monorepo](../concepts/monorepo.md) root, the root `[tool.rstest]` supplies the
-project list and nothing else: the worker budget comes from the command-line
-`-n` (else `auto`), and `dist`, `order`, `output`, `reruns` and
-`worker-timeout` reach the projects only when given on the root command line.
-Each project runs as its own rstest and reads its own nearest `pyproject.toml`,
-so a project with a `pyproject.toml` never sees the root's keys, while a
-project without one (configured by `pytest.toml`, `pytest.ini`, `tox.ini` or
-`setup.cfg`) finds the root `pyproject.toml` and uses its `[tool.rstest]`. See
-[Monorepo mode](../concepts/monorepo.md#session-isolation).
+[monorepo](../concepts/monorepo.md) root, `[tool.rstest]` supplies only the
+project list: the worker budget comes from the command-line `-n` (else
+`auto`), and `dist`, `order`, `output`, `reruns` and `worker-timeout` reach
+the projects only from the root command line. Each project reads its own
+nearest `pyproject.toml`, so a project without one (configured by
+`pytest.toml`, `pytest.ini`, `tox.ini` or `setup.cfg`) picks up the root's
+`[tool.rstest]`. See [Monorepo mode](../concepts/monorepo.md#session-isolation).
 
 ## Forwarded pytest flags
 
-Everything not listed above is passed to the vendored pytest core
-unchanged: `-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`,
-`--ff`, `-W`, `-p`, `--tb`, `--color`, `--basetemp`, plugin flags, ...
+Everything not listed above is passed to the vendored pytest core unchanged:
+`-k`, `-m`, `-x`, `--maxfail`, `-q`, `-v`/`-vv`, `--lf`, `--ff`, `-W`, `-p`,
+`--tb`, `--color`, `--basetemp`, plugin flags, ...
 
 Two more are rstest's own and never forwarded: `-h` / `--help` (rstest's flag
-and subcommand list) and `-V` / `--version` (prints `rstest <version>`). In byte-exact
-mode with no `--output` set, `rstest -- --help` prints the vendored pytest's
-help; at `-n 2` and above or with an explicit `--output` it does not. To list pytest's and
-your plugins' flags, run `python -m pytest --help` in the test environment (this needs pytest installed there, and shows
-that installed version's flags).
+and subcommand list) and `-V` / `--version` (prints `rstest <version>`). In
+single-worker mode with no `--output` set, `rstest -- --help` prints the
+vendored pytest's help; at `-n 2` and above or with an explicit `--output` it
+does not. To list pytest's and your plugins' flags, run
+`python -m pytest --help` in the test environment (it needs pytest installed
+there and shows that version's flags).
 
 Short flags combine the way pytest reads them: `-sv` is `-s -v`, `-xv` is
 `-x -v`, and `--capture no` is `--capture=no`.
 
 When rstest replaces your positional paths with its own selection
-(`--changed`, `--watch` reruns), it keeps every option and its value, even
-a value that names a path on disk (`-k api`, `--ignore tests/slow`,
-`--cov src`). It knows pytest's own options and the common plugins'; for
-another plugin's option whose value is a separate token, write it as
-`--option=value` so the value is not mistaken for a test path.
+(`--changed`, `--watch` reruns), it keeps every option and its value, even one
+that names a path on disk (`-k api`, `--ignore tests/slow`, `--cov src`). It
+knows pytest's own options and the common plugins'; for another plugin's
+option whose value is a separate token, write `--option=value` so the value
+isn't mistaken for a test path.
 
-Three of them get extra orchestration on top of their per-session meaning:
+Besides [`--doctest-modules`](#-doctest-modules) and
+[`--durations`](#-durations-n-durations-min-secs) (sections above), three more
+get extra orchestration on top of their per-session meaning:
 
-- **`-x` / `--maxfail=N`**: coordinated globally, whether given on the
-  command line, in ini `addopts`, or in `PYTEST_ADDOPTS`. When the threshold
-  is reached across all workers, dispatch halts and every worker winds down:
-  tests already running finish, and no other test starts, including the
-  ones a worker had queued. The summary then shows pytest's banner,
-  `!!!!!!!!!! stopping after 1 failures !!!!!!!!!!`. Only failures that
-  fail the run count: a failed attempt that a rerun may still rescue
-  ([`--reruns`](#-reruns-n), `@pytest.mark.flaky`) counts only once its
-  reruns are used up, and a [`--quarantine`](#-quarantine-file) match never
-  counts, at any worker count. A test whose rerun was still queued when the
-  run stopped is not run, like any other test the stop cut off. A run that
-  `-x`/`--maxfail` stopped always exits 1.
-- **`--lf` / `--ff`**: the last-failed cache is written by rstest from
-  merged results (workers each see only their own failures), so a
-  follow-up `--lf` behaves exactly as after a serial run.
-- **`-v`**: in the parallel pool, rendered by rstest as one line per test,
-  in completion order across workers, each prefixed with the worker that
-  ran it (`[gw2] ...`, xdist's convention). Failure headers carry the same
-  attribution; the worker also appears per-test in `--report-json`. In
-  byte-exact mode with no `--output` set, there is no
-  worker prefix: the single pytest session prints its own `-v` lines.
+- **`-x` / `--maxfail=N`**: coordinated globally, whether given on the command
+  line, in ini `addopts` or in `PYTEST_ADDOPTS`. At the threshold, dispatch
+  halts: running tests finish and no other test starts, including queued ones.
+  The summary shows pytest's `!!!!!!!!!! stopping after 1 failures !!!!!!!!!!`
+  banner, and the run always exits 1. Only failures that fail the run count:
+  an attempt a rerun may still rescue ([`--reruns`](#-reruns-n),
+  `@pytest.mark.flaky`) counts once its reruns are used up, and a
+  [`--quarantine`](#-quarantine-file) match never counts, at any worker count.
+  A rerun still queued at the stop is not run.
+- **`--lf` / `--ff`**: rstest writes the last-failed cache from merged results
+  (each worker sees only its own failures), so a follow-up `--lf` behaves as
+  after a serial run.
+- **`-v`**: in the parallel pool, rstest renders one line per test in
+  completion order, prefixed with the worker that ran it (`[gw2] ...`, xdist's
+  convention). Failure headers carry the same attribution, and `--report-json`
+  records the worker per test. In single-worker mode with no `--output` set,
+  the pytest session prints its own `-v` lines, with no worker prefix.
 
 ## Passthrough-IO flags
 
-Flags that need pytest's own terminal (or stdin) force single-worker mode
-with inherited stdio, and pytest renders its own output:
+Flags that need pytest's own terminal (or stdin) force single-worker mode with
+inherited stdio, and pytest renders its own output:
 
 ```text
 --collect-only / --co     -s / --capture=...     --pdb     --trace     --debug
 ```
 
-This **overrides any `-n` value or `[tool.rstest]` worker count**, e.g.
-`rstest -n 8 --pdb` runs one session, not eight, and prints no worker
-banner. When the worker count was set explicitly (above 1), rstest warns on
-stderr, naming the flag:
+This **overrides any `-n` value or `[tool.rstest]` worker count**: `rstest -n 8
+--pdb` runs one session, with no worker banner. When the worker count was set
+explicitly above 1, rstest warns on stderr, naming the flag:
 
 ```text
 rstest: -s runs the session in a single process with pytest's own output, so -n 8 is ignored (no parallel workers); drop -s to run in parallel
@@ -1336,13 +1184,13 @@ the run carries on.
 
 The default `-n auto` stays quiet (plain `rstest -s` is an ordinary request
 for pytest's `-s`), and so does `--co`, which runs no tests. `--reruns` is
-likewise inert on this path (unlike plain `-n 0/1`, where `--reruns` runs a
-one-worker pool). Drop the passthrough flag to get the pool back.
+inert on this path (unlike plain `-n 0/1`, where it runs a one-worker pool).
+Drop the passthrough flag to get the pool back.
 
-The stepwise flags also force single-worker mode, but for sequencing rather
-than IO: stepwise resumes from a single nodeid cursor into one global
-collection order, which parallel, duration-ordered dispatch cannot
-reproduce (xdist has the same constraint; stepwise wants `-n 0`):
+The stepwise flags also force single-worker mode, for sequencing rather than
+IO: stepwise resumes from one nodeid cursor into one global collection order,
+which parallel, duration-ordered dispatch can't reproduce (xdist has the same
+constraint):
 
 ```text
 --sw / --stepwise     --sw-skip / --stepwise-skip     --sw-reset / --stepwise-reset

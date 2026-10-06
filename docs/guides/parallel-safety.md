@@ -217,8 +217,7 @@ your numbers nondeterministic, but parallel execution can *expose* four things a
 serial run hides. All four are your test's contract to hold: rstest gives you
 the tools to hold it.
 
-**The floor: `-n 0` is bit-for-bit pytest.** Single-worker
-[byte-exact mode](../concepts/glossary.md#byte-exact-mode) is one pytest
+**The floor: `-n 0` is bit-for-bit pytest.** [Single-worker mode](../concepts/glossary.md#single-worker-mode) is one pytest
 session in one worker process, running the same vendored pytest code as a
 plain pytest run. If a value matches under `pytest`
 it matches under `rstest -n 0`. Any divergence there is a bug. Use it as the
@@ -327,7 +326,7 @@ to a fix:
 If the failure only shows up on CI, don't try to recreate the schedule by
 hand: upload the run's replay journal and re-run that exact schedule locally
 with `rstest replay`. See
-[Replaying a CI-only failure locally](ci-quickstart.md#replaying-a-ci-only-failure-locally).
+[Replaying a CI-only failure locally](replay.md).
 
 ## Worked examples
 

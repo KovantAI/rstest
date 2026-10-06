@@ -1056,7 +1056,7 @@ fn print_run_banner(
     let worker_desc = if single_worker_reruns {
         "single worker (rerun pool; not byte-exact)".to_string()
     } else if n <= 1 {
-        "single worker (pytest-exact mode)".to_string()
+        "single-worker mode".to_string()
     } else {
         format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
     };
@@ -2635,9 +2635,9 @@ mod tests {
         check_order_shuffle, check_require_baseline, collect_lazy, dispatch_command,
         fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
         mark_session_flaky, names_a_selection, names_existing_path, order_ignored_warning,
-        parse_duration_secs, parse_numprocesses, reject_looponfail, requests_doctests,
-        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        parse_duration_secs, parse_numprocesses, print_run_banner, reject_looponfail,
+        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
+        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
         warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
@@ -4018,5 +4018,14 @@ mod tests {
         // Nothing was attached, so emitting is a no-op (no panic writing to a
         // closed/absent stream).
         sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
+    }
+
+    #[test]
+    fn banner_names_single_worker_mode() {
+        let (mut sink, cap) = Sink::captured();
+        print_run_banner(progress::Mode::Dots, false, false, 0, &mut sink);
+        let line = cap.out();
+        assert!(line.contains("— single-worker mode"), "got {line}");
+        assert!(!line.contains("pytest-exact"), "got {line}");
     }
 }

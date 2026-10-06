@@ -19,7 +19,7 @@ selected test files on a first run (cached timings lift that to the test
 count), and fewer on a suite whose cached run time is only a few seconds;
 `-n 4` uses exactly four; `-n 0` (or `-n 1`)
 turns parallelism off and runs one plain pytest session. You rarely need to
-set it. See [Byte-exact mode](#byte-exact-mode) for what `-n 0` gives you.
+set it. See [Single-worker mode](#single-worker-mode) for what `-n 0` gives you.
 
 **Collection**: pytest's first phase, *finding* your tests before running any.
 It imports your test files and builds the list of test items. "Workers
@@ -27,12 +27,17 @@ collected different test sets" means two workers disagreed on that list,
 usually a randomized or time-based nodeid (see
 [Troubleshooting](../reference/troubleshooting.md)).
 
+**Lazy collection**: a collection strategy (`--collect lazy`) where each
+test file is collected once, on one worker, on demand, instead of every
+worker collecting the whole suite (`--collect full`). Picked automatically
+for large warm-cache parallel runs. See [Lazy collection](lazy-collection.md).
+
 **pytest-xdist (xdist)**: the original pytest plugin for running tests in
 parallel across worker processes. rstest replaces it (you don't need xdist
-to run in parallel, but you may keep it installed during migration; see
-[Migrating from pytest-xdist](../guides/migrate-from-xdist.md)), but reuses its vocabulary (`gw0`/`gw1` worker names, the
-`-n` flag, `--dist` modes), so xdist users feel at home. See
-[Migrating from xdist](../guides/migrate-from-xdist.md).
+to run in parallel, but you may keep it installed during migration), but
+reuses its vocabulary (`gw0`/`gw1` worker names, the `-n` flag, `--dist`
+modes), so xdist users feel at home. See
+[Migrating from pytest-xdist](../guides/migrate-from-xdist.md).
 
 **`--dist` mode (test distribution)**: controls *which worker* a test lands
 on. The default spreads individual tests across workers for speed. You only
@@ -43,6 +48,10 @@ change it when tests must stay together:
 - `--dist loadscope`: tests sharing a class/module fixture stay together.
 - `--dist loadgroup`: tests marked `@pytest.mark.xdist_group("name")` stay
   together.
+
+These three are the **affinity modes**: they dispatch whole groups and turn
+off slowest-first reordering (see
+[Affinity modes](scheduling.md#affinity-modes)).
 
 If you've never needed this, you don't need it now.
 
@@ -62,35 +71,25 @@ yet. (The exclusive run itself is the [Serial phase](#serial-phase).)
 cores on *one* machine; `--shard` uses multiple machines. You only need this
 for very large suites in CI. See [Sharding](../guides/sharding.md).
 
+**Monorepo project**: a subdirectory with its own pytest configuration, found
+when you run rstest from a repo root that has none. Each project runs as its
+own isolated session under a shared worker budget. Its **slug** is its path
+relative to the root with separators replaced by `-` (`libs/core` ->
+`libs-core`), used in per-project output file names and cache directories.
+See [Monorepo mode](monorepo.md).
+
 **Warm vs cold run**: rstest remembers how long each test took (in
 `.rstest_cache/`). The **first** run is "cold" (no timings yet), so scheduling
 isn't optimal. From the **second** ("warm") run on, it starts the slowest
 tests first and gets faster. **Don't judge rstest's speed on the first run.**
 
-**Byte-exact mode**{#byte-exact-mode}: `-n 0` (or `-n 1`, or `-n auto` when it
-resolves to one worker): one process, runs exactly like plain
-pytest. You get the same per-test outcomes and, with no `--output` set,
-pytest's own terminal output, with rstest's extras (doctor report, coverage
-report, quarantined failures, gate messages) appended after it. An explicit
-`--output` switches back to rstest's renderer. `--junitxml` is pytest's own
-document too, with rstest's `flaky` / `quarantined` properties added.
-`-n 0` and `-n 1` are identical. Both run one
-pytest session in a single Python process, with no scheduling and no `[gwN]`
-attribution (the compatibility anchor). Also called
-**single-worker mode** (the `-n` help and banner hint), **pytest-exact mode**
-(the run banner shown with an explicit `--output`), or **passthrough** when a terminal flag forces it; all
-name this same mode. There is no worker identity below
-`-n 2` (unlike pytest-xdist, whose `-n 1` spawns a `gw0` worker; see
-[xdist migration](../guides/migrate-from-xdist.md)). The flags that need
-pytest's own terminal (`--co`/`--collect-only`, `-s`, `--capture=...`,
-`--pdb`, `--trace`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
-`--sw-reset`/`--stepwise-reset`, and rstest's `--debug`) switch to this mode
-automatically. See [Compatibility](compatibility.md)
-for the guarantee and [Architecture](architecture.md) for how it falls
-back. One opt-in exception: passing [`--reruns`](../reference/cli.md#-reruns-n)
-runs `-n 0`/`-n 1` as a degenerate one-worker pool (worker `gw0`, rstest's
-renderer) so retries fire, trading byte-exactness for the reruns you asked
-for.
+<span id="byte-exact-mode"></span>**Single-worker mode**{#single-worker-mode}:
+what `-n 0` and `-n 1` run (and `-n auto` when it resolves to one worker):
+one pytest session in one process, with no scheduling and no `[gwN]`
+identity. Its output is byte-exact pytest output; flags such as `--pdb` and
+`-s` force it (**passthrough**). See
+[Single-worker mode](compatibility.md#single-worker-mode) for the full
+guarantee and its `--reruns` exception.
 
 **Vendored core**: the unmodified copy of pytest shipped inside
 `rstest_worker._vendor`; provides all test semantics. Never conflicts with
@@ -114,7 +113,7 @@ test: no worker count can finish faster. `--doctor` names the gate tests when
 the longest test exceeds the ideal per-worker share. See
 [Suite diagnostics](../guides/doctor.md#parallel-floor).
 
-**Duration-aware scheduling**: dispatching tests using the per-test durations
+**Duration-aware scheduling**{#duration-aware-scheduling}: dispatching tests using the per-test durations
 recorded in `.rstest_cache/` by earlier runs, slowest first, so long tests
 start early instead of stacking at the end. It needs one prior (warm) run.
 See [Scheduling](scheduling.md).
@@ -122,6 +121,11 @@ See [Scheduling](scheduling.md).
 **Flaky**: a test that failed and then passed on a retry, from the
 [`--reruns`](../reference/cli.md#-reruns-n) budget or its own
 `@pytest.mark.flaky(reruns=N)`; reported green but counted and listed.
+
+**Doctor**: the diagnosis report [`--doctor`](../reference/cli.md#-doctor)
+prints after a normal run: where test time goes (wait-bound share, parallel
+floor, fixture hotspots, slowest files, leaks), also available as JSON or
+Markdown. See [Suite diagnostics](../guides/doctor.md).
 
 **Selection**: the set of tests chosen to run; under
 [`--changed`](../reference/cli.md#-changedrev), derived from the
@@ -154,11 +158,16 @@ cache for [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
 (which [`--require-baseline`](../reference/cli.md#-require-baseline) makes
 mandatory).
 
-**Journal**: the record of which worker ran which test, in what order, that
+**Journal**{#journal}: the record of which worker ran which test, in what order, that
 a parallel run writes to `.rstest_cache/replay/` (not under `--shard`,
 `--dist each`, `rstest replay` itself, or with `RSTEST_NO_REPLAY_JOURNAL=1`).
 [`rstest replay`](../reference/cli-commands.md#replay) re-runs it to
 reproduce a parallel-only failure.
+
+**Replay**: [`rstest replay`](../reference/cli-commands.md#replay) re-runs a
+recorded [journal](#journal), pinning every test to the same worker in the
+same order, so a parallel-only failure reproduces on demand (including a CI
+journal you download). See [Replay](../guides/replay.md).
 
 **Hang watchdog**: the per-test time limit after which the orchestrator kills
 a stuck worker and reports the test failed:
@@ -178,9 +187,19 @@ plays that role), so controller-side xdist hooks are *emulated* per worker. See
 [xdist hook emulation](xdist-hooks.md).
 
 **Item dispatch**: distributing individual tests (not files) to workers.
-In the default eager mode a test travels as its index into the verified
-collection; under [lazy collection](lazy-collection.md) (`--collect lazy`)
+Under full collection (`--collect full`, where every worker collects the
+whole suite) a test travels as its index into the verified collection; under [lazy collection](lazy-collection.md) (`--collect lazy`)
 it travels by nodeid, since lazy workers share no index space.
+
+**LPT (longest-processing-time-first)**: the scheduling rule behind
+[duration-aware scheduling](#duration-aware-scheduling) and `--shard`: take
+the longest tests first, each to the next free worker (or, for `--shard`,
+to the lightest bucket). See [Scheduling](scheduling.md#dispatch-order).
+
+**Work-stealing**: under [lazy collection](lazy-collection.md) with an
+explicit `--dist load`, an idle worker with no files left to take grabs half
+of the busiest worker's undispatched tests, re-collecting that file. Off by
+default: lazy otherwise keeps each file on one worker.
 
 **Chunk**: a contiguous run of collection order dispatched as one unit,
 preserving module-fixture locality.

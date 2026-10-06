@@ -1,10 +1,7 @@
 # Run your existing suite
 
-!!! tip "First time? Run `rstest try`"
-    In a project where plain pytest already works, `rstest try` runs your
-    suite once under pytest and once under rstest, then reports whether the
-    outcomes match and how much faster rstest was. It takes as long as both
-    runs; see [`try`](../reference/cli-commands.md#try).
+New to rstest and only evaluating? [`rstest try`](evaluating.md#try-it-first)
+compares a pytest run and an rstest run of your suite in one command.
 
 Run rstest from your project root, exactly where you would run pytest. This
 sample is one run of django-allauth's 2,050-test suite at `-n 4`, the suite
@@ -67,9 +64,11 @@ runs through a vendored pytest core.
 On an interactive terminal the default style is **`bar`**: a
 pytest-sugar-style view (a `✓`/`✗` line per test, inline failures, a live
 progress bar). When output is piped or running in CI it falls back to the
-compact **`dots`** style shown above, so logs stay stable. Pick any style
-explicitly with [`--output dots|verbose|bar|github|json`](../reference/cli.md#-output-dotsverbosebargithubjson):
-the rest of this page describes `dots`. On a single worker with no
+compact **`dots`** style shown above, so logs stay stable. Pick a style
+explicitly with `--output`: `dots`, `verbose` or `bar` for terminals,
+`github`, `gitlab`, `buildkite`, `teamcity` or `azure` for CI annotations,
+`tap` or `json` for machine-readable streams (see the
+[CLI reference](../reference/cli.md)). The rest of this page describes `dots`. On a single worker with no
 `--output` set, rstest prints pytest's own terminal output instead
 (see [below](#controlling-parallelism)).
 
@@ -168,25 +167,25 @@ See [Watch mode](../guides/watch-mode.md) for the on-save version.
 ```console
 $ rstest -n 4      # four workers
 $ rstest -n auto   # the default: logical cores, capped for small suites
-$ rstest -n 0      # byte-exact pytest session (same as -n 1)
+$ rstest -n 0      # single-worker mode: one pytest session (same as -n 1)
 $ rstest -n 1      # identical to -n 0
 ```
 
-On a first run `-n auto` never starts more workers than the test files you
-select (one selected test runs one session). Once timings are cached it caps
-by the cached test count and total time instead, so a tiny suite runs on one
-or two workers while a slow single file still spreads across workers. Pass an
-explicit `-n` to override.
+How `-n auto` sizes the pool: it starts from your logical core count and
+never starts more workers than the work you selected. On a cold cache that
+means one worker per selected test file (one selected test runs one
+session). Once timings are cached it counts tests instead of files, and also
+caps at about one worker per 2 seconds of cached test time, since worker
+startup isn't worth it for a sub-second run. So a tiny suite runs on one or
+two workers while a slow single file still spreads across workers. It only
+ever caps downward; pass an explicit `-n` to override.
 
-`-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
-in a single worker process, pytest's own behavior in every detail. With no
-`--output` or `--reruns` set, the terminal output is pytest's own too, byte
-for byte, and rstest only appends its extras (doctor, coverage, gate
-messages) after pytest's summary line. You will see this one mode under
-three names: *byte-exact* in these docs, *pytest-exact* in its run banner
-(printed only when you pin rstest's renderer with `--output`), and
-*single-worker* in the `-n 0` hint of the parallel banner. See
-[Byte-exact mode](../concepts/glossary.md#byte-exact-mode) for what that
+`-n 0` and `-n 1` are the compatibility escape hatch, **single-worker mode**:
+one pytest session in a single worker process, pytest's own behavior in
+every detail. With no `--output` or `--reruns` set, the terminal output is
+pytest's own too, byte-exact, and rstest only appends its extras (doctor,
+coverage, gate messages) after pytest's summary line. See
+[Single-worker mode](../concepts/glossary.md#single-worker-mode) for what that
 guarantees and how it differs from pytest-xdist's `-n 1`.
 
 Commit your defaults to `[tool.rstest]` in `pyproject.toml` so you don't
@@ -205,7 +204,7 @@ Command-line flags override these; full key list in
 !!! tip "When to drop to `-n 0`"
     Under ~10 seconds of serial runtime, parallelism rarely pays: worker
     startup amortizes poorly and `-n auto` already caps itself low on small
-    suites. Reach for `-n 0` deliberately when you want byte-exact pytest
+    suites. Reach for `-n 0` deliberately when you want pytest's exact
     behavior: reproducing a difference from pytest, or running a suite
     whose tests depend on order across files (if the dependency is only
     within a file, `--dist loadfile` keeps each file on one worker).

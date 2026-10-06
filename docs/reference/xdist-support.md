@@ -6,7 +6,7 @@ How each pytest-xdist flag, hook and fixture maps onto rstest, for teams moving 
 
 You are moving a suite off pytest-xdist and need one lookup: for each xdist flag, hook, and worker-identity fixture, does rstest support it, emulate it, or drop it? This page answers that and links to the deeper treatment of each item.
 
-The baseline guarantee: at `-n 0` rstest runs in byte-exact mode (`-n 1` takes the same code path, unless `--reruns` turns it into a one-worker rerun pool), a single vendored-pytest session whose per-test outcomes **match pytest exactly**; any difference there is a bug (see [Compatibility](../concepts/compatibility.md)); only the [few flags rstest shares with pytest or a plugin](cli.md#shadowed-flags) are still handled by rstest. rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the two areas below: flags that silently no-op, and hooks that run per-worker instead of once. The worker-identity fixtures (`worker_id`, `testrun_uid`) are provided natively, so they are one thing you do *not* have to worry about.
+The baseline guarantee: at `-n 0` rstest runs in single-worker mode (`-n 1` takes the same code path, unless `--reruns` turns it into a one-worker rerun pool), a single vendored-pytest session whose per-test outcomes **match pytest exactly**; any difference there is a bug (see [Compatibility](../concepts/compatibility.md)); only the [few flags rstest shares with pytest or a plugin](cli.md#shadowed-flags) are still handled by rstest. rstest replaces xdist rather than wrapping it; the worker environment is xdist-shaped on purpose so plugins keep working. The migration risk is concentrated in the two areas below: flags that silently no-op, and hooks that run per-worker instead of once. The worker-identity fixtures (`worker_id`, `testrun_uid`) are provided natively, so they are one thing you do *not* have to worry about.
 
 For the narrative version see [Migrating from pytest-xdist](../guides/migrate-from-xdist.md).
 
@@ -17,12 +17,12 @@ For the narrative version see [Migrating from pytest-xdist](../guides/migrate-fr
 | `-n <N>` | `-n <N>` | Same. |
 | `-n auto` | `-n auto` (**differs**) | rstest's `auto` is the logical core count (as reported by the OS, which honors CPU affinity and, on Linux, a cgroup CPU quota), then capped by test-file count and by the cached suite time; it is the default. xdist's `auto` is the **physical** core count when psutil is installed. On a machine with SMT the two can differ by 2x: while comparing the runners, pin `-n` to the count your xdist job used. `PYTEST_XDIST_AUTO_NUM_WORKERS` is ignored: pass `-n` or set `[tool.rstest] numprocesses`. |
 | `-n logical` | none | **rstest error, exit 1** (`invalid digit found in string`). Use `-n auto` or an explicit number. |
-| `-n 1` | `-n 1` (**differs**) | xdist's `-n 1` runs one `gw0` worker **with** `workerinput`; rstest's `-n 1` (like `-n 0`) is plain byte-exact mode with **no worker identity**. |
+| `-n 1` | `-n 1` (**differs**) | xdist's `-n 1` runs one `gw0` worker **with** `workerinput`; rstest's `-n 1` (like `-n 0`) is plain single-worker mode with **no worker identity**. |
 | `--dist load` | `--dist load` (default) | Same, plus duration-aware long-pole-first scheduling. When auto picks [lazy collection](../concepts/lazy-collection.md) (large suite, warm cache), files are dispatched whole unless `--dist load` is given explicitly. |
 | `--dist loadfile` | `--dist loadfile` | Same. File affinity, in-file order. |
 | `--dist loadscope` / `loadgroup` | same names | Supported, incl. `@pytest.mark.xdist_group`; rejected under `--collect lazy` (needs full collection), and auto never picks lazy for them. See [`--dist`](cli.md). |
 | `--dist each` | `--dist each` (**partial**) | Full suite per worker, but every worker uses the **same** interpreter. Heterogeneous `--tx` gateways have no equivalent. `--reruns` rejected in this mode, and so is `--collect lazy`. |
-| `--dist no` / `--dist=no` | none | **rstest error, exit 1** (`no` is not a valid `--dist` mode); byte-exact mode is `-n 0`. |
+| `--dist no` / `--dist=no` | none | **rstest error, exit 1** (`no` is not a valid `--dist` mode); single-worker mode is `-n 0`. |
 | `--dist worksteal` | none | **rstest error, exit 1** (`unknown --dist mode: worksteal`). Use `--dist load` (the default). It doesn't steal work either; it balances by dispatching tests with a cached duration of 1s or more first, longest first, one at a time (see [Scheduling](../concepts/scheduling.md#dispatch-order)). |
 | `-p no:xdist` | `-p no:xdist` | Forwarded to the vendored pytest, which then doesn't load pytest-xdist. rstest's own parallelism and `worker_id` / `testrun_uid` fixtures are unaffected. But a leftover `-n` in `addopts` is then an unknown option: the run exits 4 (`unrecognized arguments: -n`). Remove `-n` from `addopts` before disabling or uninstalling xdist. |
 | `-d` | `--dist load` | `-d` is xdist's load-balancing shorthand, which is rstest's default. Forwarded verbatim (see below), no effect. |
@@ -67,7 +67,7 @@ Two structural caveats on the three emulated hooks: they run **N times concurren
 
 **rstest provides native `worker_id` and `testrun_uid` fixtures**, with pytest-xdist's semantics, so `def test(worker_id): ...` resolves whether or not pytest-xdist is installed. Removing pytest-xdist from your config does not lose them.
 
-- `worker_id`: the worker the test runs on, `gw0`, `gw1`, ..., or `"master"` below `-n 2` (byte-exact mode, no worker identity).
+- `worker_id`: the worker the test runs on, `gw0`, `gw1`, ..., or `"master"` below `-n 2` (single-worker mode, no worker identity).
 - `testrun_uid`: one uid shared by every worker in a run. Below `-n 2` a fresh uid is generated per session, matching xdist's standalone behavior.
 
 When pytest-xdist is also installed it defines the same two fixtures. rstest's definitions take precedence over xdist's (a conftest or test-module fixture of the same name still overrides both), and in a pool of two or more workers the two definitions return identical values anyway.

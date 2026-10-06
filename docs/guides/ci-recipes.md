@@ -14,7 +14,7 @@ at the [shared-cache backend](ci-shared-cache.md) instead.
 --8<-- "docs/_snippets/ci-pin-tip.md"
 
 !!! warning "Keep replay journals out of the cache"
-    Every parallel run also writes [replay journals](ci-quickstart.md#replaying-a-ci-only-failure-locally)
+    Every parallel run also writes [replay journals](replay.md)
     to `.rstest_cache/replay/`: up to 11 files, several MB each on a large
     suite. The recipes below cache the whole `.rstest_cache`, so they carry
     those journals from build to build, and a build that recorded nothing

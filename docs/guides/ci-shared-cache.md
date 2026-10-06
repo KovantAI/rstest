@@ -14,13 +14,20 @@ run one job (no shard matrix), you do not need this: the
 !!! tip "Turnkey via the composite action"
     On GitHub, the [`rstest` action](https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest#warm-cache-as-a-service)
     wires the whole flow below for you: `cache-backend: artifact` does the
-    resolve-run → download-segments → run → upload-segment bookends natively, and
-    `cache-remote: s3://…` drives the object-store path. The hand-wired YAML here
-    is the reference for other CI systems (or if you want full control). The
-    action resolves the warm run, or pulls and pushes the remote, inside each
-    job, so in a shard matrix each shard picks its own snapshot. For a gating
-    pipeline on the artifact backend, resolve the run once upstream and pass it
-    to every shard as the action's `warm-run-id` input; otherwise use the upstream-resolve layouts below.
+    resolve-run, download-segments, run, upload-segment bookends natively, and
+    `cache-remote: s3://…` drives the object-store path. For a shard matrix,
+    the ready-made recipe (one upstream job resolving the warm run, passed to
+    every shard as `warm-run-id`) is in
+    [Sharding: GitHub Actions](sharding.md#github-actions). The hand-wired
+    YAML on this page is for other CI systems, or for full control.
+
+Which backend fits which layout:
+
+| Layout | Backend |
+|---|---|
+| One unsharded job | `actions/cache` (the action's default `actions-cache` backend) is enough |
+| Shard matrix or PR suite on GitHub | GitHub artifacts (the action's `cache-backend: artifact`, or the hand-wired recipe below) |
+| Already on an object store or shared mount | `--cache-remote` (the action's `cache-remote`, or the [object-store layout](#object-store-s3gcsr2-oidc-no-secrets)) |
 
 ## GitHub-native, no external cloud, no secrets
 

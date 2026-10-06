@@ -67,21 +67,12 @@ points and find exactly the classes they expect.
 The protocol deliberately never rides stdin/stdout: those belong to your
 tests (and to pytest itself under `-s`/`--pdb`).
 
-## Byte-exact mode
+## Single-worker mode
 
-[Byte-exact mode](glossary.md#byte-exact-mode) is what `-n 0` and `-n 1`
-run. It skips the scheduling layer entirely: rstest (a Rust binary) still starts one Python
-process in your interpreter, which runs a single pytest session over your
-args, with no dispatch and no `[gwN]` identity. The orchestrator only relays
-that session's reports, or hands it the terminal when a flag needs pytest's
-own terminal: `--co`/`--collect-only`, `-s`, `--capture=...`, `--pdb`,
-`--trace`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
-`--sw-reset`/`--stepwise-reset`, or rstest's `--debug`. Those flags switch
-to this mode automatically. With no `--output` set, the session's own
-terminal output is what you see, and rstest only appends its extras after
-it (see
-[`--output`](../reference/cli.md#-output-dotsverbosebargithubjson)). It is
-the compatibility anchor: byte-exact pytest behavior. One opt-in
-exception: with [`--reruns`](../reference/cli.md#-reruns-n), `-n 0`/`-n 1`
-runs a one-worker pool instead (worker `gw0`, rstest's renderer) so retries
-fire; see [Byte-exact mode](glossary.md#byte-exact-mode).
+`-n 0` and `-n 1` skip the scheduling layer entirely: rstest still starts one
+Python process in your interpreter, which runs a single pytest session over
+your args, and the orchestrator only relays its reports (or hands it the
+terminal when a flag such as `--pdb` or `-s` needs it). This is the
+compatibility anchor, with byte-exact pytest output. See
+[Single-worker mode](compatibility.md#single-worker-mode) for the full
+guarantee, the flags that force it, and the `--reruns` exception.

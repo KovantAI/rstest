@@ -145,7 +145,7 @@ This only bites when `--html` reaches pytest-html itself: from `addopts` or
 after `--`. A `--html` on the rstest command line is rstest's native merged
 report and is written at every worker count, so the simplest fix is to move
 `--html` out of `addopts` and onto the command line. If you need pytest-html's
-own layout, generate it in byte-exact mode with
+own layout, generate it in single-worker mode with
 `rstest -n 0 -- --html=report.html` (no `workerinput` is set there); the rest of your suite
 can still run parallel in a separate step.
 

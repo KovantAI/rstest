@@ -196,7 +196,7 @@ $ rstest --output json
 
 It's built for editors and CI tooling
 that update a test tree incrementally. See
-[`--output`](cli.md#-output-dotsverbosebargithubjson) for the flag.
+[`--output`](cli.md#output) for the flag.
 
 The same stream is also available as a **side channel** via
 [`--stream-json FILE`](cli.md#-stream-json-file): identical `testreport` /

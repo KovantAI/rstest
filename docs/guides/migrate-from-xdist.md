@@ -35,7 +35,7 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   exactly.
 - **`-n 1`**: differs. xdist's `-n 1` is one `gw0` worker with `workerinput`;
   rstest's `-n 1`, like `-n 0`, is
-  [byte-exact mode](../concepts/glossary.md#byte-exact-mode), with no worker identity.
+  [single-worker mode](../concepts/glossary.md#single-worker-mode), with no worker identity.
 - **`--dist no`**: rejected (exit 1). Use `-n 0` for a single worker.
 - **`--dist worksteal`**: rejected (exit 1, `unknown --dist mode`). Use
   `load`, the default: it already dispatches slowest-first from the duration
