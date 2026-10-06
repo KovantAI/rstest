@@ -57,7 +57,7 @@ def latest_stable() -> str:
     finals = [v for v in data["releases"] if is_final(v)]
     if not finals:
         sys.exit("no final pytest releases found on PyPI")
-    return max(finals, key=parse)
+    return max(finals, key=lambda v: parse(v) or ())
 
 
 def emit(**kv) -> None:
@@ -73,7 +73,9 @@ def emit(**kv) -> None:
 def main() -> None:
     vendored = vendored_version()
     latest = latest_stable()
-    outdated = parse(latest) > parse(vendored)
+    lv, vv = parse(latest), parse(vendored)
+    assert lv is not None and vv is not None
+    outdated = lv > vv
     emit(vendored=vendored, latest=latest, outdated=str(outdated).lower())
 
 

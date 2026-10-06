@@ -1,11 +1,16 @@
 # Report JSON
 
+`rstest --report-json FILE` writes a per-test outcome snapshot after the run.
+The schema is stable and intended for tooling (dashboards, flake tracking,
+result diffing).
+
 ```console
 $ rstest --report-json results.json
 ```
 
-writes a per-test outcome snapshot after the run. The schema is stable and
-intended for tooling (dashboards, flake tracking, result diffing).
+This page is the walkthrough: example documents, what each field means, and
+the version history. For generated, machine-readable JSON Schemas of the
+outputs that have one, see [Output schemas](output-schemas.md).
 
 ## Shape
 
@@ -31,46 +36,87 @@ intended for tooling (dashboards, flake tracking, result diffing).
     "tests/test_login.py::test_skipped_one": {
       "setup": "skipped",
       "teardown": "passed",
-      "skip_reason": "needs postgres"
+      "skip_reason": "Skipped: needs postgres"
     }
   }
 }
 ```
 
+`meta.counts` follows pytest's terminal accounting, which counts phase
+reports rather than tests: a test that passes and then errors in teardown
+adds 1 to `passed` and 1 to `errors`, and an xfail test's teardown error
+adds to `xfailed`. The keys can therefore sum to more than the number of
+tests.
+
+!!! warning "`meta.argv` is the full command line"
+    `meta.argv` records rstest's command line verbatim. A credential on it,
+    such as a password in a `--cache-remote https://user:pass@host/...` URL,
+    lands in the report and in every CI artifact that uploads it. Pass
+    secrets through the environment instead (`RSTEST_CACHE_REMOTE`,
+    `RSTEST_CACHE_REMOTE_TOKEN`), which the report does not record.
+
 Per-test fields (absent when not applicable):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `setup` / `call` / `teardown` | `"passed"` / `"failed"` / `"skipped"` | phase outcomes; a skipped test has no `call` |
+| `setup` / `call` / `teardown` | `"passed"` / `"failed"` / `"skipped"` | phase outcomes; a test skipped at setup has no `call`. An xfail test records `"call": "skipped"` with `wasxfail: true`. A test with a failed subtest has `call: "failed"` |
+| `subtests_failed` | int | failed subtests (unittest `subTest`, the `subtests` fixture). Each counts once in `meta.counts.failed`, as in pytest's summary; the test itself counts by its own outcome (pytest leaves a unittest test passed and fails a `subtests` fixture test). Omitted when 0 |
 | `duration` | seconds | call-phase wall time, 4 decimal places |
+| `cpu` | seconds | call-phase CPU time (`process_time` plus child processes the test waited for), 4 decimals. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). **Only present when measured**: a `--doctor` run or a live-stream run (`--output json` / `--stream-json`); omitted on a plain run so the snapshot stays comparable to the pytest baseline |
 | `lineno` | int | 0-based source line of the test (pytest `report.location`); omitted when pytest reports none. The file is the nodeid's path |
 | `wasxfail` | `true` | the test was an expected failure (xfail/xpass) |
-| `skip_reason` | string | first 200 chars |
-| `flaky` | `true` | passed only after [`--reruns`](cli.md#-reruns-n) retries |
-| `quarantined` | `true` | failed, but matched the [`--quarantine`](cli.md#-quarantine-file) list — non-fatal |
-| `longrepr` | string | failure text (assertion repr / traceback), failures only, capped at 20k chars |
-| `crashed` | `true` | the failure was fabricated by the orchestrator — worker crash or `--worker-timeout` kill; pytest never reported it. `longrepr` says which |
+| `skip_reason` | string | pytest's skip message, first 200 chars; it keeps pytest's `Skipped: ` prefix (`@pytest.mark.skip(reason="needs postgres")` gives `"Skipped: needs postgres"`) |
+| `flaky` | `true` | passed only after [`--reruns`](cli.md#-reruns-n) or `@pytest.mark.flaky` retries. Counted in `meta.counts.flaky`, not also in `passed` |
+| `quarantined` | `true` | failed, but matched the [`--quarantine`](cli.md#-quarantine-file) list: non-fatal |
+| `longrepr` | string | failure text (assertion repr / traceback) as pytest prints it in the `--tb` style in effect (under `--tb=line` its last line is the `path:line: message` crash line), failures only, capped at 20,000 bytes (cut on a UTF-8 character boundary) |
+| `crashed` | `true` | the failure was fabricated by the orchestrator: worker crash, `--worker-timeout` kill, or the test that was running when SIGINT/SIGTERM stopped the run; pytest never reported it. `longrepr` says which |
 | `worker` | `"gw2"` | worker that produced the final outcome (pool runs only) |
+| `cached` | `true` | not executed this run: skipped by [`--incremental`](cli.md#-incremental) because it passed last run and its covered source is unchanged. Counts as passed. A cached entry carries only `"call": "passed"`, `"cached": true` and, when the prior run recorded it, `lineno` (no `setup`, `teardown` or `duration`) |
 
 `meta.schema` is the document version, currently `5`. History: `1` was
 the unversioned original (phases, `duration`, `wasxfail`,
 `skip_reason`, `flaky`, `worker`); `2` added `longrepr` and `crashed`
-plus the version field itself; `3` added the envelope — `counts`
-(pytest-accounting outcome totals, all keys always present, identical
-to the terminal summary line's numbers: never re-derive them by
-walking `tests`), `duration_seconds`, `started_at_epoch`, `workers`,
+plus the version field itself; `3` added the envelope, `counts`
+(pytest-accounting outcome totals, all keys always present, the same
+numbers as the terminal summary line, which like pytest's adds
+`collect_errors` into its errors and also shows the `deselected` count:
+never re-derive them by walking `tests`), `duration_seconds`, `started_at_epoch`, `workers`,
 and `argv`; `4` added per-test `lineno`; `5` added per-test
-`quarantined` and the `quarantined` counts key. Parse it —
+`quarantined` and the `quarantined` counts key. Parse it:
 incompatible changes will bump it.
+
+The per-test `cpu` field arrived **without** a schema bump: it is
+conditional (present only on `--doctor` / live-stream runs), so a plain
+run's document shape is unchanged. Treat it as an added optional field.
+The per-test `cached` field is the same kind of addition: present only on
+`--incremental` runs, no bump. So is `subtests_failed`: present only on a
+test with a failed subtest.
+
+Boolean fields (`wasxfail`, `flaky`, `quarantined`, `crashed`, `cached`) are
+**omitted when false**, never written as `false`. Read a missing key as
+`false`.
+
+The `meta.shard` block is the same kind of conditional, no-bump addition:
+present only on a [`--shard K/N`](cli.md#-shard-kn) run (full collection, not
+`--collect lazy`). It carries `{ "k", "n", "collection_hash", "collection_size" }`
+where `collection_hash` is the sha256 of the full ordered nodeid list and
+`collection_size` its length, identical across every shard of one run.
+[`rstest shard-verify`](cli-commands.md#shard-verify) consumes it to prove a shard matrix
+covered the whole suite.
 
 `collect_errors` lists the file paths of collectors that failed outright.
 
-At a [monorepo](../guides/monorepo.md) root, the document is the MERGED
+At a [monorepo](../guides/monorepo.md) root, the document is the **merged**
 result of every project: test keys are root-relative nodeids
 (`libs/core/tests/test_x.py::test_y`), collect-error paths are prefixed
 the same way, and `meta.projects` maps each project to
 `{"exitstatus": N, "counts": {...}}` or `{"skipped": true}`;
-`meta.counts` holds the grand totals across projects.
+`meta.counts` holds the grand totals across projects. `meta.projects` is
+added by the merge and is not in the generated
+[Run report schema](output-schemas.md#run-report). It carries the same
+`meta.schema` as a single-project document. (rstest 0.7.0 stamped merged
+documents `"schema": 4` although they carried schema-5 fields; treat those as
+schema 5.)
 
 For *suite-health* data (timings analysis, wait-bound tests, fixture
 costs) use [`--doctor-json`](cli.md#-doctor-json-path) instead; the two
@@ -79,7 +125,7 @@ schemas are independent.
 ## Discovery JSON
 
 Pairing `--report-json` with `--collect-only` (or `--co`) collects the
-suite **without running it** and writes a discovery document — the
+suite **without running it** and writes a discovery document: the
 machine-readable surface editor/CI integrations consume to build a test
 tree, instead of parsing pytest's text output.
 
@@ -110,17 +156,17 @@ $ rstest --collect-only --report-json discovery.json
 }
 ```
 
-This is a **distinct document** from the run snapshot above — its own
+This is a **distinct document** from the run snapshot above: its own
 `meta.kind` (`"discovery"`) and `meta.schema` (currently `1`).
 
 Per-test fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `nodeid` | string | pytest node id (parametrized variants are separate entries) |
-| `file` | string | absolute path to the test file (editor-ready URI) |
+| `nodeid` | string | pytest nodeid (parametrized variants are separate entries) |
+| `file` | string | absolute path to the test file (editor-ready URI); empty when pytest reports no location |
 | `lineno` | int / `null` | 0-based source line; `null` when pytest reports none |
-| `markers` | string[] | every pytest marker **name** on the item — own and inherited from class/module (`pytestmark`), sorted and de-duplicated. Includes `serial`, `flaky`, `skip`, `xfail`, `parametrize`, `xdist_group`, and any custom marks. Names only (no args/reason) |
+| `markers` | string[] | every pytest marker **name** on the item: own and inherited from class/module (`pytestmark`), sorted and de-duplicated. Includes `serial`, `flaky`, `skip`, `xfail`, `parametrize`, `xdist_group`, and any custom marks. Names only (no args/reason) |
 
 `collect_errors` lists files that failed to import/collect, with their
 `longrepr`. The process exit code matches pytest's collection result
@@ -128,7 +174,7 @@ Per-test fields:
 
 Discovery needs a single pytest session, so at a
 [monorepo](../guides/monorepo.md) root it is **refused** (each project has
-its own rootdir and config — one session can't represent them). Run it once
+its own rootdir and config: one session can't represent them). Run it once
 per project instead, with the working directory set to that project:
 
 ```console
@@ -140,38 +186,66 @@ within it.
 
 ## Streaming JSON
 
+`rstest --output json` produces a **third, separate** shape: a live
+newline-delimited JSON stream on stdout, one object per line, emitted as the
+run proceeds rather than a single document written at the end.
+
 ```console
 $ rstest --output json
 ```
 
-is a **third, separate** shape: a live newline-delimited JSON stream on
-stdout — one object per line, emitted as the run proceeds rather than a
-single document written at the end. It's built for editors and CI tooling
+It's built for editors and CI tooling
 that update a test tree incrementally. See
 [`--output`](cli.md#-output-dotsverbosebargithubjson) for the flag.
 
-Two event kinds, discriminated by `event`:
+The same stream is also available as a **side channel** via
+[`--stream-json FILE`](cli.md#-stream-json-file): identical `testreport` /
+`sessionfinish` events, written to `FILE` (a regular file or a fifo) instead
+of stdout, so the human terminal output is preserved. Use `--output json`
+when the process's stdout *is* the machine stream; use `--stream-json` when
+you want normal output on the terminal **and** the events on a separate
+stream at the same time (e.g. a VS Code extension showing a test terminal
+while updating the Test Explorer).
+
+Three event kinds, discriminated by `event`:
 
 ```json
 {"event": "testreport", "nodeid": "tests/test_api.py::test_get", "when": "call", "outcome": "passed", "duration": 0.0123, "wasxfail": false, "lineno": 41, "worker": "gw2"}
+{"event": "collecterror", "path": "tests/test_bad.py", "longrepr": "ImportError while importing test module ..."}
 {"event": "sessionfinish", "exitstatus": 1, "duration": 4.21, "counts": {"passed": 28, "failed": 1, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "flaky": 0, "quarantined": 0, "collect_errors": 0}}
 ```
 
 One `testreport` is emitted **per phase** (`setup`, `call`, `teardown`), so
-a single test produces up to three lines — mirroring pytest's own report
+a single test produces up to three lines, mirroring pytest's own report
 granularity. Fields:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | always `"testreport"` |
-| `nodeid` | string | pytest node id |
+| `nodeid` | string | pytest nodeid |
 | `when` | string | phase: `setup` / `call` / `teardown` |
 | `outcome` | string | `passed` / `failed` / `skipped` |
 | `duration` | float | phase duration in seconds (rounded to 1e-4) |
 | `wasxfail` | bool | the outcome was an expected failure / unexpected pass |
 | `lineno` | int | 0-based source line; **omitted** when pytest reports none |
-| `worker` | string | `gwN` — **pool runs only**; absent under `-n 0` |
+| `cpu` | float | call-phase CPU seconds (`process_time` plus child processes the test waited for); on the `call` report only. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). Present whenever a stream is active, including at `-n 0` |
+| `worker` | string | `gwN`: **pool runs only**; absent under `-n 0` |
 | `longrepr` | string | failure traceback; **present only on `failed`** |
+| `sections` | array | captured output: `[{name, text}]` (e.g. `Captured stdout call`), each tail-capped at 20 000 chars. Present on failures, and on **every** report when this stream is active (so passing-test output shows too); **omitted** when a report captured nothing |
+
+A `collecterror` is emitted when a module fails to import / collect during the
+run, so a tree can mark the file red live rather than waiting for
+`sessionfinish`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | always `"collecterror"` |
+| `path` | string | the failing collector: rootdir-relative file or nodeid |
+| `longrepr` | string | the collection traceback |
+
+Under full collection every worker collects the whole suite, but the
+same file's `collecterror` is emitted **once**, like its entry in
+`collect_errors` and `meta.counts.collect_errors`.
 
 The stream closes with exactly one `sessionfinish`:
 
@@ -180,11 +254,13 @@ The stream closes with exactly one `sessionfinish`:
 | `event` | string | always `"sessionfinish"` |
 | `exitstatus` | int | pytest-compatible exit code for the **test session** |
 | `duration` | float | total wall time in seconds |
-| `counts` | object | outcome tallies — the same keys and accounting as the snapshot's `meta.counts` |
+| `counts` | object | outcome tallies: the same keys and accounting as the snapshot's `meta.counts` |
 
 `exitstatus` reflects the test session only. Post-run gates
-(`--doctor-fail-on`, `--durations-regress`) run **after** this envelope is
-streamed, so they cannot change it — a green session that fails a gate still
+(`--fail-on-leak`, `--durations-regress`, `--doctor-fail-on`,
+`--cov-fail-under`, `--cov-diff-fail-under`; see
+[Exit codes](exit-codes.md#gating-ci-on-exit-code-and-report)) run **after** this envelope is
+streamed, so they cannot change it: a green session that fails a gate still
 reports `"exitstatus": 0` here while the **process** exits non-zero. Key CI
 success off the process exit code, not this field.
 
@@ -195,24 +271,27 @@ is interleaved, so every line parses on its own.
 
 ## Doctor JSON
 
+`rstest --doctor-json FILE` writes the [`--doctor`](cli.md#-doctor)
+suite-health analysis as a single versioned document: the machine-readable
+surface for CI trending (diff two runs to catch new long poles, fixture-cost
+growth, or wait-time regressions; a ready-made recipe is in the
+[CI quickstart](../guides/ci-quickstart.md#suite-health-trending-with-doctor)).
+
 ```console
 $ rstest --doctor-json doctor.json
 ```
 
-writes the [`--doctor`](cli.md#-doctor) suite-health analysis as a single
-versioned document — the machine-readable surface for CI trending (diff two
-runs to catch new long-poles, fixture-cost growth, or wait-time
-regressions; a ready-made recipe is in the
-[CI quickstart](../guides/ci-quickstart.md#suite-health-trending-with-doctor)).
 It is a **separate document** from the run snapshot above; combine with
 `--doctor` to also print the human report.
 
 ```json
 {
-  "schema": 2,
-  "rstest_version": "0.3.1",
+  "schema": 3,
+  "rstest_version": "0.8.0",
   "workers": 8,
   "wall_seconds": 68.4,
+  "startup_seconds": 0.6,
+  "fork_prewarm": false,
   "tests": 2048,
   "test_time_seconds": 412.9,
   "cpu_time_seconds": 120.3,
@@ -242,83 +321,117 @@ It is a **separate document** from the run snapshot above; combine with
     "long_pole_seconds": 84.1
   },
   "fixtures": [
-    { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 }
+    { "name": "pg_database", "scope": "session", "count": 8, "total_seconds": 31.2 },
+    { "name": "feature_flags", "scope": "function", "count": 206, "total_seconds": 4.3,
+      "constant": true, "projected_saving_seconds": 0.52 }
   ],
   "slowest_files": [
     { "file": "tests/test_e2e.py", "total_seconds": 84.1, "pct": 20.4 }
-  ]
+  ],
+  "coverage_waste": {
+    "wasted_seconds": 18.4,
+    "redundant_tests": 3,
+    "tests": [
+      { "nodeid": "tests/test_api.py::test_end_to_end_slow", "duration": 12.1, "covered_lines": 240, "also_covered_by": 4 }
+    ]
+  }
 }
 ```
 
-Top-level fields:
+Every field, with its type and whether it is always present, is listed in the
+generated [Doctor report field reference](output-schemas.md#doctor-report),
+which is built from the Rust type and so always matches the code. What that
+reference doesn't spell out:
 
-| Field | Type | Meaning |
-|---|---|---|
-| `schema` | int | document version, currently `2` |
-| `rstest_version` | string | the rstest version that wrote it |
-| `workers` | int | worker count for this run (`-n`) |
-| `wall_seconds` | float | total wall-clock time; **depends on worker count** — compare across runs only at equal `-n` |
-| `tests` | int | number of tests with a recorded duration |
-| `test_time_seconds` | float | summed per-test call durations (worker-count-independent — the stable trending metric) |
-| `cpu_time_seconds` | float | summed call-phase CPU time, over tests where it was measured |
-| `wait_bound` | object / `null` | wait-bound analysis; **`null`** unless CPU time was measured and waiting is significant (`wait_pct ≥ 20%` and `wait_seconds ≥ 1`) |
-| `parallel_floor` | object / `null` | parallel-floor analysis; **`null`** unless the longest test exceeds the ideal per-worker share |
-| `parallel_efficiency` | object / `null` | realized parallel speedup and per-worker load; **`null`** unless the run used more than one worker (`workers > 1`) |
-| `fixtures` | array | fixture timings, slowest first (≤ 50) |
-| `slowest_files` | array | per-file totals, slowest first (≤ 20) |
-
-`wait_bound` (wall ≫ CPU — tests that wait rather than compute):
-
-| Field | Type | Meaning |
-|---|---|---|
-| `wait_seconds` | float | total `test_time − cpu_time` |
-| `wait_pct` | float | `wait_seconds` as a percent of `test_time_seconds` |
-| `tests` | array | the worst offenders (`duration ≥ 0.2s` and ≥ 60% waiting), by wait descending (≤ 50): `{nodeid, duration, wait}` — all seconds |
-
-`parallel_floor` (the tests that cap any `-n`):
-
-| Field | Type | Meaning |
-|---|---|---|
-| `longest_seconds` | float | duration of the single longest test |
-| `ideal_share_seconds` | float | `test_time_seconds / workers` — the per-worker floor if work split perfectly |
-| `gate_tests` | array | up to 10 tests longer than that share: `{nodeid, duration}` (seconds) |
-
-`parallel_efficiency` (realized speedup vs the worker budget, measured from
-this run — `null` for single-worker runs):
-
-| Field | Type | Meaning |
-|---|---|---|
-| `realized_speedup` | float | `test_time_seconds / wall_seconds`. May exceed `ideal_speedup` for wait-bound suites (overlapping sleeps/IO run more tests at once than there are cores) |
-| `ideal_speedup` | int | worker count (`-n`) — the ceiling for a purely CPU-bound suite |
-| `efficiency_pct` | float | `100 × realized_speedup / ideal_speedup`; over 100% signals wait-bound overlap |
-| `workers_busy` | array | busy time per worker, busiest first (≤ 8 shown): `{worker, busy_seconds, tests}`. Tests with no recorded worker are bucketed as `"serial"` |
-| `imbalance_pct` | float | `100 × (busiest − idlest) / busiest` — load spread across workers |
-| `long_pole_seconds` | float | slowest single test — the hard floor no worker count beats |
-
-`fixtures[]`: `{name, scope, count, total_seconds}` — fixture name, pytest
-scope, setup count, summed setup time. `slowest_files[]`:
-`{file, total_seconds, pct}` — `pct` is the file's share of
-`test_time_seconds`.
+- **`schema`** is the document version, currently `3`.
+- **`wall_seconds` depends on the worker count**: compare it across runs only
+  at equal `-n`. **`test_time_seconds`** (summed per-test durations) is
+  worker-count-independent and is the stable metric to trend. Every per-test
+  time in the document (`test_time_seconds`, worker load, long pole, slowest
+  files, wait-bound and coverage-waste durations) is the whole protocol:
+  setup + call + teardown, so fixture time counts.
+  `cpu_time_seconds` sums CPU time over the same span (including child
+  processes the test waited for) over the tests where it was measured;
+  `tests` counts tests with a recorded call duration.
+- **`workers`** is the worker count, `1` for a single-worker run (`-n 0`).
+- **`startup_seconds`** is the wall time from pool spawn to every worker's
+  first event (import + collect start), part of `wall_seconds`, and `0.0` on
+  single-worker runs. [`--fork-pool`](cli.md#-fork-pool) cuts it;
+  **`fork_prewarm`** records whether this run used it.
+- **When the analysis objects are `null`:**
+    - `wait_bound` unless CPU time was measured and waiting is significant
+      (`wait_pct ≥ 20%` and `wait_seconds ≥ 1`);
+    - `parallel_floor` unless the longest test exceeds both the ideal
+      per-worker share and 1 second;
+    - `parallel_efficiency` unless the run used more than one worker
+      (`workers > 1`);
+    - `coverage_waste` unless this run collected per-test coverage
+      (`--cov --cov-context=test`) and at least one slow test qualified.
+- **`leaks`** (`{nodeid, threads, fds}`) is omitted when empty, and empty
+  unless leak checking ran (`--doctor` or
+  [`--fail-on-leak`](cli.md#-fail-on-leak)).
+- **`wait_bound`** (wall ≫ CPU: tests that wait rather than compute):
+  `wait_seconds` is total `test_time − cpu_time`, `wait_pct` is that as a
+  percent of `test_time_seconds`, and `tests` lists the worst offenders
+  (`duration ≥ 0.2s` and ≥ 60% waiting) by wait, descending, at most 50.
+- **`parallel_floor`** (the tests that cap any `-n`): `longest_seconds` is the
+  single longest test, `ideal_share_seconds` is `test_time_seconds / workers`
+  (the per-worker floor if work split perfectly), and `gate_tests` lists the
+  tests among the 10 longest that run longer than both that share and 1
+  second.
+- **`parallel_efficiency`** (realized speedup against the worker budget):
+  `realized_speedup` is `test_time_seconds / wall_seconds`. Each worker runs
+  one test at a time, so it stays at or below `ideal_speedup` (the worker
+  count) and `efficiency_pct` at or below 100%; a wait-bound suite run with
+  `-n` above the core count can realize more than the core count. `workers_busy` covers every worker,
+  busiest first (the terminal report shows at most 8; the JSON is not
+  truncated); tests with no recorded worker are bucketed as `"serial"`.
+  `imbalance_pct` is `100 × (busiest − idlest) / busiest`. `long_pole_seconds`
+  is the slowest single test, the hard floor no worker count beats.
+- **`fixtures[]`**: fixture name, pytest scope, setup count and summed setup
+  time, slowest first, at most 50. `constant` (present only when `true`)
+  marks a function-scoped fixture that returned the same immutable builtin
+  value on every call in every worker, a scope-promotion candidate;
+  `projected_saving_seconds` (present only when non-zero) is the wall time
+  promoting it to session scope would save: the largest per-worker-session
+  `(calls − 1) × mean setup`. `constant` also requires some worker session to
+  have run it at least twice, and is never set for fixtures with per-test
+  teardown or narrower-scoped dependencies, for parametrize arguments, or for
+  failed or skipped setups (see
+  [Suite diagnostics](../guides/doctor.md#scope-promotion-candidates)).
+- **`slowest_files[]`**: per-file totals, slowest first, at most 20; `pct` is
+  the file's share of `test_time_seconds`.
+- **`coverage_waste`** (slow tests that cover no line another test doesn't
+  also cover, so they are safe to delete or merge): `wasted_seconds` sums
+  every redundant slow test, not just the shown ones; `tests` shows the
+  slowest of them, worst first, at most 20.
 
 `schema` history: `1` was the original (`wall_seconds`, `test_time_seconds`,
 `cpu_time_seconds`, `wait_bound`, `parallel_floor`, `fixtures`,
-`slowest_files`); `2` added the `parallel_efficiency` object.
+`slowest_files`); `2` added the `parallel_efficiency` object; `3` added the
+per-fixture `constant` / `projected_saving_seconds` scope-promotion fields,
+the `coverage_waste` object, and the `startup_seconds` / `fork_prewarm`
+fields. The `leaks` array is a conditional, no-bump
+addition (omitted when empty); read a missing key as no leaks.
 
-`schema` aside, all times are raw seconds (no rounding) — round in your
+`schema` aside, all times are raw seconds (no rounding): round in your
 consumer. Increment-only: incompatible changes bump `schema`.
 
 ## Migrate-check JSON
 
+`rstest migrate-check --migrate-check-json FILE` writes the
+[`migrate-check`](cli-commands.md#migrate-check) parallel-readiness report as a
+single versioned document: the machine-readable surface for CI gating (fail the
+build when a new parallel-unsafe test appears) and for tooling that renders the
+findings.
+
 ```console
-$ rstest --migrate-check-json migrate.json
+$ rstest migrate-check --migrate-check-json migrate.json
 ```
 
-writes the [`--migrate-check`](cli.md#-migrate-check) parallel-readiness report
-as a single versioned document — the machine-readable surface for CI gating
-(fail the build when a new parallel-unsafe test appears) and for tooling that
-renders the findings. It is a **separate document** from the run snapshot;
-pass `--migrate-check` too to also print the human report. The flag implies
-`--migrate-check`.
+It is a **separate document** from the run snapshot.
+The flag is only read by the `migrate-check` subcommand, which prints its
+human report as well; passed to a normal run, it does nothing.
 
 ```json
 {
@@ -359,29 +472,29 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `meta` | object | `{runner, kind, schema}`; `schema` is the document version, currently `1` |
-| `ready` | bool | `true` only when the suite is parallel-ready: no unstable ids and no parallelism-specific failures |
+| `ready` | bool | `true` only when no id forces `-n 0` (WILL-bail) and the parallel phase ran with no parallel-only failures. Unstable ids that don't bail, and tests already failing at `-n 0`, don't clear it; allow-listing doesn't set it (an all-allow-listed run exits `0` with `ready: false`) |
 | `tests_collected` | int | tests seen across the two collection passes (their union) |
-| `will_bail_count` | int | count of unstable ids that are per-process (address / uuid) — these force `-n 0` |
+| `will_bail_count` | int | count of ids that force `-n 0`: per-process unstable ids (address / uuid) plus the ids at order-unstable sites |
 | `unstable_ids` | array | the unstable-id findings, grouped by parametrize site (see below) |
 | `parallel` | object / `null` | the parallel-classification phase; **`null`** when it was skipped (a WILL-bail id stopped the run before it) |
 
-`unstable_ids[]` — one entry per parametrize site with run-to-run unstable ids:
+`unstable_ids[]`: one entry per parametrize site with run-to-run unstable ids:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `site` | string | the nodeid up to the `[…]` parametrize segment |
-| `kinds` | object | count of each instability class at this site: `address`, `uuid`, `time`, `other` |
-| `will_bail` | bool | `true` if any id here is per-process (`address`/`uuid`) — i.e. forces `-n 0` |
+| `kinds` | object | count of each instability class at this site: `address`, `uuid`, `time`, `other`, or `order` (same ids, different order between the two collections) |
+| `will_bail` | bool | `true` if any id here is per-process (`address`/`uuid`) or the site is order-unstable (`order`), i.e. forces `-n 0` |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |
 | `sample` | string | a sample unstable param value from this site |
 | `fix` | string | the upstream fix (give the parametrize a stable `ids=`) |
 
-`parallel` (present only when the parallel phase ran):
+`parallel` (`{"ran": false}` alone when the phase started but captured no outcomes):
 
 | Field | Type | Meaning |
 |---|---|---|
 | `ran` | bool | whether the `-n auto` classification actually executed |
-| `ready` | bool | `true` when the parallel run was green |
+| `ready` | bool | `true` when no test failed only in parallel (tests already failing at `-n 0` don't count) |
 | `preexisting` | int | tests already failing at `-n 0` (a pre-existing bug, not a migration concern) |
 | `findings` | array | the classified parallel-only failures (see below) |
 
@@ -390,12 +503,34 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `nodeid` | string | the failing test |
-| `verdict` | string | `NOT PARALLEL-SPECIFIC` / `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` |
+| `verdict` | string | `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` / `INCONCLUSIVE` |
 | `why` | string | the evidence behind the verdict |
 | `fix` | string | the recommended fix plus rstest stopgap |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |
-| `polluter` | object / `null` | for ORDER-DEPENDENCY / ISOLATION: `{kind: "other_file", file}`, `{kind: "same_file", file}`, or `{kind: "not_reproducible"}`; `null` otherwise |
+| `polluter` | object / `null` | for `ORDER DEPENDENCY` / `ISOLATION / CO-LOCATION`: `{kind: "other_file", file}`, `{kind: "same_file", file}`, or `{kind: "not_reproducible"}`; `null` otherwise |
 
-The exit code is **not** in the document — read it from the process: non-zero
-when any non-allow-listed WILL-bail id or parallel finding exists. Increment-
-only: incompatible changes bump `meta.schema`.
+The exit code is **not** in the document; read it from the process: `1`
+when any non-allow-listed WILL-bail id or parallel finding exists, `2` when
+the parallel pass produced no outcomes (`parallel` is `{"ran": false}`) or
+rstest hit an error.
+Increment-only: incompatible changes bump `meta.schema`.
+
+## Audit, bisect, explain and xdist-removal-check JSON
+
+These four documents have no walkthrough on this page. Their field
+references and JSON Schemas are generated from the code on
+[Output schemas](output-schemas.md), and each subcommand's page covers when
+it writes the document and what its exit codes mean:
+
+| Document | Written by | Exit codes |
+|---|---|---|
+| audit | `rstest audit --audit-json FILE` | [`audit`](cli-commands.md#audit) |
+| bisect | `rstest bisect <nodeid> --bisect-json FILE` | [`bisect`](cli-commands.md#bisect-nodeid) |
+| explain | `rstest explain <nodeid> --json` (stdout) | [`explain`](cli-commands.md#explain) |
+| xdist-removal-check | `rstest xdist-removal-check --xdist-removal-json FILE` | [`xdist-removal-check`](cli-commands.md#xdist-removal-check) |
+
+As with migrate-check, the exit code is not in the document. Two cases to
+know: `bisect` exits `1` and still writes a full document
+(`"order_dependent": false`, no culprits) when the victim is not
+order-dependent, and `explain --json` exits `0` with `"found": false` for an
+unknown nodeid, where the human-readable form exits `1`.

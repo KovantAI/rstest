@@ -3,19 +3,34 @@ __pycache__/
 *.pyc
 .venv/
 .rstest_cache/
+# Coverage + mutation-testing artifacts (dev-local, never committed).
+.coverage
+.coverage.*
+*.profraw
+lcov.info
+htmlcov/
+mutants.out/
+mutants.out.old/
+# Dev planning docs and bug notes (kept locally; not shipped source).
+/dev-notes/
 .gate-venv/
 .gate-venv-*/
 site/
-uv.lock
 corpus/work/
 corpus/lock.json
 corpus/results.json
+# bench.py's latest run; published runs are archived in corpus/bench-results/.
+corpus/bench.json
 .claude/*
-# Ship the migrate-to-rstest skill as part of the source; keep the rest of
-# .claude (local settings) and the eval scratch workspace ignored.
+# The skills live in plugins/rstest/skills/ (the Claude Code plugin);
+# .claude/skills/ holds symlinks to them so they load when working in this repo.
+# Keep the rest of .claude (local settings) and the eval scratch workspaces
+# ignored.
 !.claude/skills/
 .claude/skills/*
-!.claude/skills/migrate-to-rstest/
+!.claude/skills/migrate-to-rstest
+!.claude/skills/rstest-triage
+plugins/rstest/skills/*-workspace/
 .cursor
 
 # cargo-mutants output

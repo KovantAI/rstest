@@ -1,16 +1,47 @@
-# Coverage measures the Rust orchestrator (crates/); the Python side is
-# mostly vendored pytest and is not instrumented.
+# Coverage spans two languages, uploaded under three flags:
+#   rust-unit  - cargo unit tests (crates/), the fast in-process suite
+#   rust-e2e   - the end-to-end gate (e2e/gate.py) driving the release binary
+#   python     - rstest_worker unit tests (python/tests); vendored pytest excluded
+# Splitting rust-unit from rust-e2e keeps the e2e gate from being the hidden
+# decider: rust-unit is gated on its own so orchestrator logic must be covered
+# by real unit tests, not just incidentally by the gate.
+flags:
+  rust-unit:
+    paths:
+      - crates/
+    carryforward: true
+  rust-e2e:
+    paths:
+      - crates/
+    carryforward: true
+  python:
+    paths:
+      - python/rstest_worker/
+    carryforward: true
+
 coverage:
   status:
     project:
       default:
         target: auto
         threshold: 1%
+      # Independent gate on the in-process unit suite so it can't hide behind
+      # e2e coverage of the same lines.
+      rust-unit:
+        target: auto
+        threshold: 1%
+        flags:
+          - rust-unit
+      python:
+        target: auto
+        threshold: 1%
+        flags:
+          - python
     patch:
       default:
         target: 80%
         threshold: 5%
 
 comment:
-  layout: "reach, diff, files"
+  layout: "reach, diff, flags, files"
   require_changes: true

@@ -1,0 +1,338 @@
+//! `migrate-check` and `try`: the pytest→rstest onboarding preflights.
+//!
+//! This file owns the run-snapshot model (`Outcomes`/`Rec`/`Phase`) and the
+//! child-session runner shared by both commands. [`classify`] owns the two
+//! classifiers (unstable ids, parallel-only failures); [`check`] is the
+//! `migrate-check` orchestrator; [`try_cmd`] is the `try` parity+speed run;
+//! [`xdist_removal`] is the uninstall-pytest-xdist readiness check.
+
+pub(crate) mod audit;
+pub(crate) mod bisect;
+pub(crate) mod check;
+mod classify;
+mod try_cmd;
+pub(crate) mod xdist_removal;
+
+pub use audit::{not_run_doc as audit_not_run_doc, run_audit};
+pub use bisect::{run_bisect, write_error_json as write_bisect_error_json};
+pub use check::run_migrate_check;
+pub use try_cmd::run_try;
+pub use xdist_removal::run_xdist_removal_check;
+
+use std::path::Path;
+
+use anyhow::Result;
+
+use crate::scheduling::{proto, worker};
+
+/// Per-test record from a run snapshot: pass/fail plus timing (for the
+/// wait-bound / wall-clock signal). A test absent from a run isn't in the map.
+pub(super) type Outcomes = std::collections::BTreeMap<String, Rec>;
+
+#[derive(Clone, Copy)]
+pub(super) struct Rec {
+    pub phase: Phase,
+    pub wall: f64,        // call-phase wall seconds
+    pub cpu: Option<f64>, // call-phase cpu seconds (only with doctor instrumentation)
+}
+
+impl Rec {
+    /// Wait-bound: spent its time blocked, not computing - the signature of a
+    /// wall-clock/timeout test. Needs cpu data (doctor) and a non-trivial wall.
+    pub(super) fn wait_bound(&self) -> bool {
+        matches!(self.cpu, Some(c) if self.wall >= 0.05 && c < 0.5 * self.wall)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Phase {
+    Pass,
+    Fail, // failed or errored in any phase
+}
+
+/// Build the per-test [`Outcomes`] map from a run's `--report-json` document
+/// (its top-level `tests` object). `with_cpu` pulls each test's call-phase cpu
+/// time (present only under doctor instrumentation, for the wait-bound signal);
+/// pass `false` when the run carried none. Returns `None` when the document has
+/// no `tests` object.
+pub(super) fn parse_outcomes(doc: &serde_json::Value, with_cpu: bool) -> Option<Outcomes> {
+    let tests = doc.get("tests")?.as_object()?;
+    let mut out = Outcomes::new();
+    for (nodeid, entry) in tests {
+        out.insert(
+            nodeid.clone(),
+            Rec {
+                phase: if is_fail(entry) {
+                    Phase::Fail
+                } else {
+                    Phase::Pass
+                },
+                wall: entry
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                cpu: with_cpu
+                    .then(|| entry.get("cpu").and_then(|v| v.as_f64()))
+                    .flatten(),
+            },
+        );
+    }
+    Some(out)
+}
+
+pub(super) fn is_fail(entry: &serde_json::Value) -> bool {
+    ["setup", "call", "teardown"].iter().any(|p| {
+        matches!(
+            entry.get(p).and_then(|v| v.as_str()),
+            Some("failed") | Some("error")
+        )
+    })
+}
+
+/// The test file of a nodeid (everything before the first `::`).
+pub(super) fn file_of(nodeid: &str) -> &str {
+    crate::text::nodeid_file(nodeid)
+}
+
+/// `-n` for a check's parallel pass: a real pool of at least 2 workers, never
+/// `auto` (which a single-file or short cached suite resolves to 1).
+pub(super) fn parallel_n() -> String {
+    crate::run::check_workers().to_string()
+}
+
+/// Run one full session in a child rstest process with the given config flags
+/// (e.g. `["-n","0"]`), capture per-test pass/fail from its `--report-json`.
+/// `python` is pinned with `--python`: the child would otherwise re-resolve an
+/// interpreter from the environment and could land on a different one than
+/// the parent collected with.
+///
+/// `config` is rstest's own flags; `args` go to pytest verbatim, after `--`, so
+/// an rstest flag among them (`--reruns`, `-n`) can't change how the child
+/// runs. Reruns are pinned off: a `[tool.rstest] reruns` would route `-n 0`
+/// through the one-worker pool (which reorders by the duration cache) and a
+/// passing rerun would hide the very failure the preflight is looking for.
+pub(super) fn run_session(python: &Path, config: &[&str], args: &[String]) -> Result<Outcomes> {
+    Ok(run_session_report(python, config, args)?.unwrap_or_default())
+}
+
+/// [`run_session`], but `None` when the child wrote no report at all (it
+/// refused to dispatch or crashed), as opposed to `Some` of an empty map for a
+/// run that finished with zero tests selected.
+pub(super) fn run_session_report(
+    python: &Path,
+    config: &[&str],
+    args: &[String],
+) -> Result<Option<Outcomes>> {
+    Ok(run_session_capture(python, config, args)?.0)
+}
+
+/// [`run_session_report`] plus the child's stderr, for callers that explain a
+/// session that never started (a pytest usage error, a plugin validation
+/// error) instead of just reporting it produced no outcomes.
+pub(super) fn run_session_capture(
+    python: &Path,
+    config: &[&str],
+    args: &[String],
+) -> Result<(Option<Outcomes>, String)> {
+    let exe = std::env::current_exe()?;
+    let seq = run_session_seq();
+    let tmp =
+        std::env::temp_dir().join(format!("rstest-migrate-{}-{seq}.json", std::process::id()));
+    // stderr goes to a file, not a pipe: a pipe is only drained at EOF, which a
+    // leaked grandchild (a server a test never stopped) holding the inherited
+    // fd would never send, hanging the call after the child itself exited.
+    let err_path = std::env::temp_dir().join(format!(
+        "rstest-migrate-{}-{seq}.stderr",
+        std::process::id()
+    ));
+    let err_file = std::fs::File::create(&err_path)?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--python")
+        .arg(python)
+        .args(config)
+        .arg("--report-json")
+        .arg(&tmp)
+        // worker instrumentation adds per-test cpu time (cheap) so the
+        // classifier can tell a wait-bound (wall-clock) failure from a real
+        // co-location/isolation one. A hidden flag, never an env var, so a
+        // user's environment can't turn it on for ordinary runs.
+        .arg("--instrument-workers")
+        // worker-timeout: a fixed-port / deadlock test (httpx, werkzeug) would
+        // otherwise hang the preflight; the stuck test becomes a failure.
+        .args(["--worker-timeout", "120"])
+        // dots off-tty keeps the child quiet & byte-stable; we discard stdout.
+        .args(["--output", "dots"])
+        .args(["--reruns", "0"])
+        .arg("--")
+        .arg("-q")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(err_file);
+    cmd.status()?; // non-zero is expected when tests fail; the snapshot is truth
+    let stderr = std::fs::read(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&err_path);
+    let out = std::fs::read_to_string(&tmp)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|doc| parse_outcomes(&doc, true));
+    let _ = std::fs::remove_file(&tmp);
+    Ok((out, String::from_utf8_lossy(&stderr).into_owned()))
+}
+
+pub(super) fn run_session_seq() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// One fresh collect-only session -> the collected nodeids in session order.
+pub(super) fn collect_ids(python: &Path, args: &[String]) -> Result<Vec<String>> {
+    Ok(collect_session(python, args)?.ids)
+}
+
+/// A collect-only session: the nodeids plus pytest's own view of its roots.
+pub(super) struct Collected {
+    pub ids: Vec<String>,
+    /// pytest's rootdir, the base every nodeid is relative to.
+    pub rootdir: Option<String>,
+    /// `config.args_source`: "args", "invocation_dir" or "testpaths".
+    pub args_source: Option<String>,
+    /// Absolute roots a no-arg run from the rootdir would collect.
+    pub root_args: Vec<String>,
+    /// The config file pytest loaded, when any.
+    pub inifile: Option<String>,
+    /// Active cache-driven order flags (`--nf`, `--ff`, `--lf`, `--sw`, ...).
+    pub order_flags: Vec<String>,
+    /// The conftest cutoff pytest used (absolute).
+    pub confcutdir: Option<String>,
+}
+
+/// One fresh collect-only session -> [`Collected`].
+pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collected> {
+    // Full id+location payload from pytest_collection_finish (single session).
+    // The lone worker ships ids; params ride its env, not process set_var.
+    let env = worker::WorkerEnv {
+        run_uid: std::env::var("RSTEST_RUN_UID")
+            .unwrap_or_else(|_| format!("migrate-{}", std::process::id())),
+        doctor: false,
+        timeout: None,
+        leakcheck: false,
+        send_ids: true,
+        debug_port: None,
+        stream_output: false,
+        junitxml: None,
+        reruns: false,
+        quarantine: None,
+    };
+    let mut collect_args = args.to_vec();
+    if !collect_args
+        .iter()
+        .any(|a| a == "--collect-only" || a == "--co")
+    {
+        collect_args.push("--collect-only".into());
+    }
+    let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
+    w.send(&proto::Command::RunItemsSession { args: collect_args })?;
+    let mut out = Collected {
+        ids: Vec::new(),
+        rootdir: None,
+        args_source: None,
+        root_args: Vec::new(),
+        inifile: None,
+        order_flags: Vec::new(),
+        confcutdir: None,
+    };
+    loop {
+        match w.recv()? {
+            proto::Event::CollectionDone {
+                ids: Some(i),
+                rootdir,
+                args_source,
+                root_args,
+                inifile,
+                order_flags,
+                confcutdir,
+                ..
+            } => {
+                out.ids = i;
+                out.rootdir = rootdir;
+                out.args_source = args_source;
+                out.root_args = root_args.unwrap_or_default();
+                out.inifile = inifile;
+                out.order_flags = order_flags.unwrap_or_default();
+                out.confcutdir = confcutdir;
+            }
+            proto::Event::Done { .. } => break,
+            _ => {}
+        }
+    }
+    w.shutdown()?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_of_strips_at_first_colons() {
+        assert_eq!(
+            file_of("tests/test_x.py::TestC::test_m[param]"),
+            "tests/test_x.py"
+        );
+        assert_eq!(file_of("tests/test_x.py"), "tests/test_x.py");
+    }
+
+    #[test]
+    fn is_fail_matches_any_failed_or_errored_phase() {
+        use serde_json::json;
+        // Any of setup/call/teardown failing or erroring counts as a failure.
+        assert!(is_fail(&json!({ "call": "failed" })));
+        assert!(is_fail(&json!({ "setup": "error" })));
+        assert!(is_fail(&json!({ "teardown": "failed" })));
+        assert!(is_fail(
+            &json!({ "setup": "passed", "call": "error", "teardown": "passed" })
+        ));
+        // All phases passed (or skipped/absent) -> not a failure.
+        assert!(!is_fail(
+            &json!({ "setup": "passed", "call": "passed", "teardown": "passed" })
+        ));
+        assert!(!is_fail(&json!({ "call": "skipped" })));
+        assert!(!is_fail(&json!({})));
+        // A non-string phase value is ignored, not treated as a failure.
+        assert!(!is_fail(&json!({ "call": 1 })));
+    }
+
+    #[test]
+    fn wait_bound_signal() {
+        // 1.0s wall, ~0 cpu -> waiting (wall-clock test).
+        let waiting = Rec {
+            phase: Phase::Fail,
+            wall: 1.0,
+            cpu: Some(0.01),
+        };
+        assert!(waiting.wait_bound());
+        // cpu-bound: most of the wall is compute.
+        let computing = Rec {
+            phase: Phase::Fail,
+            wall: 1.0,
+            cpu: Some(0.9),
+        };
+        assert!(!computing.wait_bound());
+        // no cpu data (doctor off) -> can't claim wait-bound.
+        let no_cpu = Rec {
+            phase: Phase::Fail,
+            wall: 1.0,
+            cpu: None,
+        };
+        assert!(!no_cpu.wait_bound());
+        // trivially short -> not meaningful, don't flag.
+        let quick = Rec {
+            phase: Phase::Fail,
+            wall: 0.001,
+            cpu: Some(0.0),
+        };
+        assert!(!quick.wait_bound());
+    }
+}

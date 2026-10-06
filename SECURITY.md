@@ -18,13 +18,13 @@ When reporting, please include:
 
 ## Supported versions
 
-rstest is alpha (0.0.x). Security fixes land on the **latest release**
+rstest is pre-1.0 (0.x). Security fixes land on the **latest release**
 only; there are no long-term support branches yet. Upgrade to the newest
 version before reporting.
 
 ## Vendored pytest
 
-rstest ships an **unmodified, vendored copy of pytest** (currently 9.0.3)
+rstest ships an **unmodified, vendored copy of pytest** (currently 9.1.1)
 inside `rstest_worker._vendor`. When upstream pytest ships a security fix
 affecting the vendored code, an rstest release with the re-vendored core is
 expected **within two weeks** of the upstream release. Because the vendored

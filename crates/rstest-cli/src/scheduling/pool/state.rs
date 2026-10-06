@@ -1,0 +1,103 @@
+//! Per-worker bookkeeping the pool event loop mutates: liveness, the
+//! outstanding/running item queues, rerun-attempt buffers, and the
+//! crash-time workerinput snapshot.
+
+use std::collections::VecDeque;
+
+use crate::scheduling::proto;
+use crate::scheduling::worker::Worker;
+
+pub(super) struct WorkerState {
+    pub(super) worker: Worker,
+    pub(super) collected: bool,
+    pub(super) seeded: bool,
+    /// Seeded with one item during the initial seeding round; its second
+    /// (lookahead) dispatch waits until every worker has its first.
+    pub(super) awaiting_lookahead: bool,
+    /// Told "queue exhausted for now" (NoMoreItems). Still listening!
+    pub(super) finishing: bool,
+    /// Told EndSession (no resend).
+    pub(super) ended: bool,
+    pub(super) dead: bool,
+    /// Its session-local `-x` tripped (Stopped): the worker left its run loop,
+    /// so it must not be handed reclaimed items.
+    pub(super) stopped: bool,
+    /// Indices dispatched but not yet item_done'd, in dispatch order.
+    pub(super) outstanding: VecDeque<u64>,
+    /// The tail of `outstanding` not yet written to the worker (`--dist each`
+    /// and replay seed a whole list at once). Fed a chunk at a time by
+    /// [`super::io::feed`], so a worker that stops reading while it runs can
+    /// never block the event loop on a full pipe.
+    pub(super) backlog: VecDeque<u64>,
+    /// Release the worker (NoMoreItems) once `backlog` is fed.
+    pub(super) release_after_backlog: bool,
+    /// The item the worker announced via item_start and hasn't finished.
+    pub(super) running: Option<u64>,
+    /// When the in-flight item started (hang watchdog).
+    pub(super) running_since: Option<std::time::Instant>,
+    /// The in-flight item's hang limit (from its reported timeout).
+    pub(super) running_watchdog: Option<crate::scheduling::orchestrator::Watchdog>,
+    /// Set when the watchdog killed this worker (better crash message).
+    pub(super) timeout_killed: bool,
+    /// Reports of the in-flight attempt (only used when reruns are on).
+    pub(super) attempt: Vec<proto::Report>,
+    pub(super) attempt_failed: bool,
+    /// workerinput snapshot (NodeInput) for crash-time testnodedown.
+    pub(super) node_input: Option<serde_json::Value>,
+}
+
+impl crate::scheduling::orchestrator::Slot for WorkerState {
+    fn dead(&self) -> bool {
+        self.dead
+    }
+    fn set_finishing(&mut self, v: bool) {
+        self.finishing = v;
+    }
+    fn timeout_killed(&self) -> bool {
+        self.timeout_killed
+    }
+    fn set_timeout_killed(&mut self) {
+        self.timeout_killed = true;
+    }
+    fn running_since(&self) -> Option<std::time::Instant> {
+        self.running_since
+    }
+    fn running_watchdog(&self) -> Option<crate::scheduling::orchestrator::Watchdog> {
+        self.running_watchdog
+    }
+    fn kill_worker(&mut self) {
+        self.worker.kill();
+    }
+    fn send_stop_run(&mut self) {
+        let _ = self.worker.send(&proto::Command::StopRun);
+    }
+    fn reap_dead(&mut self) {
+        self.worker.reap();
+        self.dead = true;
+    }
+}
+
+impl WorkerState {
+    pub(super) fn fresh(worker: Worker) -> Self {
+        Self {
+            worker,
+            collected: false,
+            seeded: false,
+            awaiting_lookahead: false,
+            finishing: false,
+            ended: false,
+            dead: false,
+            stopped: false,
+            outstanding: VecDeque::new(),
+            backlog: VecDeque::new(),
+            release_after_backlog: false,
+            running: None,
+            running_since: None,
+            running_watchdog: None,
+            timeout_killed: false,
+            attempt: Vec::new(),
+            attempt_failed: false,
+            node_input: None,
+        }
+    }
+}

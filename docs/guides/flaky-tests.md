@@ -4,7 +4,7 @@ Three tools, one lifecycle: [`--reruns`](../reference/cli.md#-reruns-n)
 rescues a flake *within* a run, the **flake history** remembers it
 *across* runs, and [`--quarantine`](../reference/cli.md#-quarantine-file)
 ring-fences the tests a team has explicitly decided to tolerate while
-they get fixed — without hiding them and without letting new failures
+they get fixed, without hiding them and without letting new failures
 sneak through.
 
 ## Detect: `--reruns`
@@ -19,40 +19,82 @@ flagged in JUnit (`flaky` property) and `--report-json`. See
 [`--reruns`](../reference/cli.md#-reruns-n) for per-test budgets
 (`@pytest.mark.flaky`) and crash-aware retry semantics.
 
+Coming from pytest-rerunfailures? rstest's retry reads `--reruns`,
+`--only-rerun` and the mark's budget (`reruns=` or positional, as in
+`flaky(3)`) and `condition=`. It does not carry over:
+
+- the mark's `reruns_delay`, `only_rerun` and `rerun_except` keywords: ignored
+- `--reruns-delay` and `--rerun-except`: forwarded to pytest, where they do
+  nothing with the plugin installed and are a usage error (exit 4) without it
+
+A marked test is retried at every worker count, `-n 0` included, with or
+without `--reruns`.
+
+Retries and `-x` / `--maxfail` compose: a failed attempt that may still be
+rerun does not count toward the limit, so a flake can't stop the run before
+its retry; a test counts once its last attempt fails.
+
+See [`@pytest.mark.flaky`](../reference/markers.md#pytestmarkflaky).
+
 Reruns answer "don't redden this run." They don't answer "which tests
-keep doing this?" — that's the history.
+keep doing this?": that's the history.
 
 ## Remember: the flake history
 
-Every run (except `--dist each`) merges its events into
+Every run (except `--dist each` and `rstest replay`) merges its events into
 `.rstest_cache/flakes.json`:
 
 ```json
 {
-  "tests/test_ws.py::test_reconnect": { "flaky": 7, "failed": 2, "last_epoch": 1783850000 },
-  "tests/test_api.py::test_poll":     { "flaky": 1, "failed": 0, "last_epoch": 1783700000 }
+  "tests/test_ws.py::test_reconnect": { "flaky": 7, "failed": 2, "last_epoch": 1783850000, "last_failed_epoch": 1783800000 },
+  "tests/test_api.py::test_poll":     { "flaky": 1, "failed": 0, "last_epoch": 1783700000, "last_failed_epoch": 0 }
 }
 ```
 
-- `flaky` — runs where the test passed only after rerun(s)
-- `failed` — runs where it hard-failed (quarantined failures included)
-- `last_epoch` — when it last misbehaved; also drives **aging** (below)
+- `flaky`: runs where the test passed only after rerun(s)
+- `failed`: runs where it hard-failed (quarantined failures included)
+- `last_epoch`: when it last misbehaved; also drives **aging** (below)
+- `last_failed_epoch`: when it last hard-failed (`0` = never). Older
+  caches lack it; readers fall back to `last_epoch` when `failed` is
+  non-zero. Full field reference:
+  [flake log schema](../reference/output-schemas.md#flake-log).
 
 The file is **sparse**: only tests that ever flaked or failed get an
 entry, so a green suite writes nothing and the file stays small at any
-suite size. No flag needed — recording is automatic, like the duration
+suite size. No flag needed: recording is automatic, like the duration
 cache. In CI, persist it the same way you persist `.rstest_cache` for
 scheduling (see [CI quickstart](ci-quickstart.md)) and the counts
 accumulate across runs; without persistence you still get history on
 developer machines and self-hosted runners.
 
+`failed` counts **every** red run that writes the cache, including local runs
+and each `--watch` cycle, so a test you broke on purpose while editing picks
+up `failed` counts too. Read `flaky` as the flake signal; a high `failed`
+count on a developer machine may just be your own edit loop. Those failures
+also move the test to the front of `--order fail-fast`. To keep a scratch
+history apart from the one you care about, point `RSTEST_CACHE` at another
+directory for that session.
+
 History **ages out**. A test with no flake or failure inside the
 retention window (default **90 days**, from `last_epoch`) reads as fixed:
-its entry is dropped on the next run and it stops carrying the
-annotation below — so a test you actually fixed goes quiet on its own,
-and the ranked candidate list stays current instead of haunted by
-last quarter's offenders. Tune with `RSTEST_FLAKE_RETENTION_DAYS`; set
-it to `0` to keep history forever.
+every reader ignores its entry, so it stops carrying the annotation below,
+and a test you actually fixed goes quiet on its own while the ranked
+candidate list stays current instead of haunted by last quarter's
+offenders. The stale entry stays in the file until the next run that
+records a flake or failure (or a `--cache-pull` merge) rewrites it; a
+green run writes nothing, so it prunes nothing. Tune with
+`RSTEST_FLAKE_RETENTION_DAYS`; set it to `0` to keep history forever. A
+value that is not a whole number of days silently falls back to 90.
+
+Everything that reads the history applies the same window:
+
+- the **run annotations** in the flaky and quarantined sections (below);
+- [`--reruns-only-known-flaky`](#target-reruns-only-known-flaky), which
+  retries only tests with a `flaky > 0` record;
+- [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast),
+  which dispatches recently failed and flaky tests first;
+- [`rstest explain`](../reference/cli-commands.md#explain),
+  which reports a test's flake and failure counts.
 
 The flaky and quarantined sections annotate each test from this file:
 
@@ -61,14 +103,14 @@ The flaky and quarantined sections annotate each test from this file:
   tests/test_ws.py::test_reconnect  (1 rerun; flaked 7x before, failed 2x)
 ```
 
-A test with `flaky: 7` is not "unlucky" — it's the ranked candidate
+A test with `flaky: 7` is not "unlucky": it's the ranked candidate
 list for the next step.
 
 ## Target: `--reruns-only-known-flaky`
 
 By default `--reruns N` retries *every* failure. That backfires on a
-deterministic mass-failure — one broken migration or import failing 50
-tests identically — where each retry just re-fails for zero recovery, at
+deterministic mass-failure (one broken migration or import failing 50
+tests identically) where each retry just re-fails for zero recovery, at
 50× the wall-time cost.
 
 `--reruns-only-known-flaky` spends the budget only on tests the history
@@ -78,17 +120,17 @@ already knows are flaky (a `flaky > 0` record):
 $ rstest -n auto --reruns 2 --reruns-only-known-flaky
 ```
 
-A hard-failure-only record (`failed > 0`, `flaky == 0`) — the signature of
-a deterministic failure — does *not* qualify, so mass-failures fail fast
+A hard-failure-only record (`failed > 0`, `flaky == 0`), the signature of
+a deterministic failure, does *not* qualify, so mass-failures fail fast
 while genuine known-flakes are still rescued. An explicit
 `@pytest.mark.flaky` always bypasses the gate (the author already declared
 it), and it composes with `--only-rerun`.
 
-The catch: this flag *spends* flaky history, it does not *build* it. The
+The catch: this flag *spends* flaky history; it does not *build* it. The
 gate suppresses the very rerun that would record a new flake as `flaky > 0`,
 so a flagged run can never learn a brand-new flake on its own. Seed the
-history with a separate learning run — plain `--reruns` **without** this
-flag (e.g. nightly or pre-merge) — that lets unknown failures rerun and
+history with a separate learning run (plain `--reruns` **without** this
+flag, e.g. nightly or pre-merge) that lets unknown failures rerun and
 records the ones that recover; then run the hot path with the flag to spend
 budget only on what that history knows. Persist `.rstest_cache` across CI
 runs so the history survives. Full semantics:
@@ -96,17 +138,17 @@ runs so the history survives. Full semantics:
 
 ## Ring-fence: `--quarantine`
 
-Write the known offenders to a file (commit it — the quarantine set is
+Write the known offenders to a file (commit it: the quarantine set is
 a team decision and its diff history is the audit trail):
 
 ```text
-# quarantine.txt — tracked in JIRA-1234; remove entries when fixed
+# quarantine.txt: tracked in JIRA-1234; remove entries when fixed
 tests/test_ws.py::test_reconnect
-tests/test_legacy_sync.py::*
+tests/test_legacy_sync.py::*  # JIRA-1301
 ```
 
-One nodeid or `*` glob per line; `#` comments and blank lines are
-skipped. Then:
+One nodeid or `*` glob per line; `#` comments (whole-line or trailing,
+after whitespace) and blank lines are skipped. Then:
 
 ```console
 $ rstest -n auto --quarantine quarantine.txt
@@ -127,14 +169,14 @@ ConnectionResetError: [Errno 54] Connection reset by peer
 The exact semantics:
 
 - **Failures outside the list still fail the run.** Quarantine never
-  becomes a blanket mute — a new failure exits 1 as always.
+  becomes a blanket mute: a new failure exits 1 as always.
 - A run whose only failures are quarantined **exits 0**. Exit codes
   ≥ 2 (usage/internal errors) are never touched.
-- A listed test that **passes** is a plain pass — no penalty for
+- A listed test that **passes** is a plain pass, no penalty for
   being on the list on a good day.
 - The traceback still prints, in its own section. A quarantined test
   is a tracked liability, not an invisible one.
-- `--lf` still reruns quarantined failures — locally they behave like
+- `--lf` still reruns quarantined failures: locally they behave like
   the failures they are.
 
 ## What CI consumers see
@@ -145,12 +187,12 @@ The exact semantics:
   `quarantined="true"` property and **no `<failure>` element**, so
   JUnit-gating CI (and dashboards that count failures) stays green
   while still being able to track the quarantine set.
-- **`--report-json`** (schema 5): per-test `"quarantined": true` plus
+- **`--report-json`**: per-test `"quarantined": true` plus
   a `quarantined` key in `meta.counts`. See
   [Run snapshot](../reference/report-json.md).
 - **Monorepos**: pass one file at the root; it's forwarded to every
   project as an absolute path. Patterns match each project's
-  **project-relative** nodeids (the same ids the child prints).
+  **project-relative** nodeids (the same nodeids the child prints).
 
 ## Quarantine vs `--reruns`
 
@@ -158,7 +200,7 @@ The exact semantics:
 |---|---|---|
 | Scope | one run | policy across runs |
 | Covers | intermittent failures that pass on retry | tests failing consistently or too often to retry away |
-| Cost | retries burn suite time every run | none — no retries, just accounting |
+| Cost | retries burn suite time every run | none, no retries, just accounting |
 | Visibility | flaky section + property | own count, section, property; committed list |
 | New failures | still fail | still fail |
 
@@ -173,11 +215,20 @@ run.
    with a comment linking the tracking issue.
 3. Fix the test; remove the entry. If it was really fixed, the history
    stops accruing and ages out of `flakes.json` after the retention
-   window — if the entry comes back in review, it wasn't.
+   window: if the entry comes back in review, it wasn't.
+
+Before quarantining a test that fails only in some orders or only in
+parallel, check whether it is flaky at all or order-dependent:
+[`--shuffle`](../reference/cli.md#-shuffleseed) reproduces an order,
+[`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) names
+the test that pollutes it, and [`rstest audit`](../reference/cli-commands.md#audit)
+lists the parallel-only failures. An order dependency has a fix; quarantine
+is for real nondeterminism. See
+[Diagnosing a parallel-only failure](parallel-safety.md#diagnosing-a-parallel-only-failure).
 
 The failure mode to avoid is a quarantine list that only ever grows.
 `flakes.json` self-ages (see [aging](#remember-the-flake-history)
-above), but `quarantine.txt` is committed and hand-curated on purpose:
-treat an addition like a TODO with an owner, and periodically audit it —
-an entry whose test no longer appears in the flake history is either
+above), but `quarantine.txt` is committed and hand-curated on purpose.
+Treat an addition like a TODO with an owner, and audit the list periodically.
+An entry whose test no longer appears in the flake history is either
 fixed (remove it) or abandoned (fix the test).

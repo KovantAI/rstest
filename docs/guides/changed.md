@@ -1,0 +1,197 @@
+# Selecting changed tests (`--changed`)
+
+`rstest --changed` runs only the tests affected by your changes instead of the
+whole suite: the fast inner-loop and per-commit-CI gate. Changes come from git
+(working tree + untracked vs `HEAD`, or vs a `REV` like `--changed=origin/main`
+in CI), across the whole project whichever subdirectory you start it from.
+
+Two selection engines back it, and rstest picks the tightest one available:
+
+--8<-- "docs/_snippets/changed-engines.md"
+
+The coverage engine is strictly tighter and turns on automatically once the
+index exists: there is no flag to set and nothing to remember beyond keeping
+the index warm.
+
+## Import graph (default, no setup)
+
+With no coverage index, `--changed` maps each changed `.py` file through the
+project's import graph to every test file that could reach it, and runs those.
+It is conservative by construction: ambiguous module names select every
+match, function-local imports still count as edges, a deleted or renamed
+module selects the tests that imported it, a changed `conftest.py` selects its
+whole subtree (so does a change to any module a `conftest.py`
+imports, directly or through other modules), and any config or non-Python
+change falls back to a full run. The one documented gap is dynamic imports
+(`importlib.import_module`), which produce no edges; use
+[`--changed-strict`](../reference/cli.md#-changed-strict) for
+correctness-critical runs.
+
+!!! warning "Django and other string-wired frameworks"
+    Django loads much of an app by string, not by `import`: `INSTALLED_APPS`,
+    `ROOT_URLCONF` and `include("app.urls")`, signal handlers connected in
+    `AppConfig.ready()`, middleware and settings paths. Those links produce no
+    import-graph edges. A change to a handler or URLconf can therefore affect
+    tests that the graph doesn't connect to it. `--changed-strict` catches the
+    case where a changed file connects to **no** test (it forces a full run),
+    but not the case where it connects to some tests and silently affects
+    others. For Django, prefer the [coverage index](#coverage-index-tighter-when-warm),
+    which records what each test actually executed, and keep full runs on
+    gating paths.
+
+Editing a widely-imported module reselects most of the suite: correct, but
+coarse. That is what the coverage index tightens.
+
+## Coverage index (tighter, when warm)
+
+Run your suite once with coverage contexts:
+
+```console
+$ rstest -n auto --cov=src --cov-context=test
+```
+
+That writes `.rstest_cache/coverage_index.json` (a map of *which tests'
+coverage executed each source line*) as a side effect (see
+[Coverage → per-test contexts](coverage.md#per-test-contexts-cov-contexttest)).
+From then on, `--changed` maps the *changed lines* to only the tests that
+actually executed them:
+
+```console
+$ rstest -n auto --changed
+rstest: 1 changed file(s) -> 1 of 12 mapped test(s) affected
+```
+
+Editing one function now runs only the tests that touch that function, not
+every test importing its module.
+
+## How selection decides
+
+Per changed file, `--changed` uses the tightest safe source and **unions** the
+results:
+
+| Change | Selected |
+|---|---|
+| a line the index recorded coverage for | exactly the tests whose coverage hit it |
+| **new** code (inserted lines, no prior coverage) | import-graph fallback for that file |
+| a file the index never measured | import-graph fallback for that file |
+| an untracked file | import-graph fallback for that file |
+| a file whose content **drifted** since the index was warmed | import-graph fallback for that file |
+| a changed **test** file | that test file runs itself |
+| `conftest.py` | its whole subtree (import-graph rule) |
+| a config or non-`.py` file | full run |
+| **no index at all** (cold cache) | byte-identical to the import graph |
+
+The guiding rule: **over-selection is safe, under-selection is not.** Anything
+the index can't vouch for falls back to the conservative import graph; the
+index is only trusted for the lines it actually recorded.
+
+Each index entry carries a SHA-256 of the source it was built from. Because the
+index is keyed by line number, its lookups are only valid while a file's
+content still matches: once commits land that shift a file's lines (or the
+index was warmed on a dirty tree), those line numbers point at the wrong code.
+`--changed` detects this per file by hashing the file's content at the diff base
+and comparing: on any mismatch the file drifts to the import graph rather than
+being looked up at stale lines. Warm on a **clean tree at the diff base** for
+the tightest selection.
+
+## Keeping the index warm
+
+The index reflects coverage *as of the run that wrote it*. It is trusted for
+the lines it recorded, so a stale index can miss a test added since. Keep it
+fresh:
+
+- **Rebuild on your coverage runs.** Any `--cov-context=test` run refreshes it.
+  A nightly or per-merge coverage job on the main branch keeps it current for
+  PRs.
+- **Persist `.rstest_cache` across CI runs**: the same cache you persist for
+  [duration-aware scheduling](../concepts/scheduling.md) carries the index
+  along (see [CI quickstart](ci-quickstart.md)). The
+  [shared cache backend](../concepts/caching.md#shared-cache-backend) also
+  unions sharded coverage slices into a full index on pull. No index →
+  `--changed` simply falls back to the import graph, so a cold cache is never
+  wrong, only coarser.
+- **Rebuild periodically to shed stale entries.** A same-hash file's line→test
+  map only grows on union: nodeids for deleted or renamed tests linger until the
+  file's content changes (resetting its map) or you rebuild. A dead nodeid on a
+  changed line demotes that file to the import graph: safe, only coarser.
+- **Safe to delete** at any time; the next `--cov-context=test` run rebuilds it.
+
+## CI usage
+
+`--changed` is PR-aware: on a pull-request job it diffs against the merge-base
+with the PR base branch (auto-detected from `GITHUB_BASE_REF`,
+`CI_MERGE_REQUEST_*`, `BUILDKITE_PULL_REQUEST_BASE_BRANCH`), so a clean checkout
+of the PR commit still selects exactly the PR's files. Full base-detection and
+shallow-clone rules: [`--changed`](../reference/cli.md#-changedrev).
+
+The value is optional, so it needs `=`: write `--changed=origin/main`. With a
+space, `--changed origin/main` is bare `--changed` plus a test path
+`origin/main`, and diffs against `HEAD`.
+
+!!! warning "Bare `--changed` outside a PR selects nothing and passes"
+    Base auto-detection only fires on pull/merge-request jobs. On a push,
+    schedule or manual GitHub workflow, or a GitLab branch pipeline (no
+    `GITHUB_BASE_REF`, no `CI_MERGE_REQUEST_*`), bare `--changed` diffs a
+    clean checkout against `HEAD`, finds 0 changed files, prints
+    `rstest: no tests affected by 0 changed file(s)`, writes no report
+    files, and **exits 0**. The job is green without running a test. Guard
+    the step by event, or give push jobs an explicit base, and add
+    [`--changed-strict`](../reference/cli.md#-changed-strict) so an empty
+    selection exits 5 instead of 0:
+
+    ```yaml
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0          # the merge-base needs the base branch history
+    - name: Changed tests (PR)
+      if: github.event_name == 'pull_request'
+      run: rstest --changed --changed-strict
+    - name: Changed tests (push)
+      if: github.event_name == 'push'
+      run: rstest --changed=${{ github.event.before }} --changed-strict
+    ```
+
+    On the first push of a new branch, `github.event.before` is all zeros,
+    which is not a commit: run the full suite there instead.
+
+    The bundled [GitHub action](https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest#pr-change-based-selection-strict-gate)
+    does all of this for `changed: true` / `strict`:
+    on a push it diffs against `github.event.before`, and with no usable base
+    (new branch, schedule, dispatch, or a base equal to `HEAD`) it warns and
+    runs the full suite.
+
+A typical layout: a scheduled main-branch job runs full coverage
+(`--cov-context=test`) and saves `.rstest_cache`; PR jobs restore it and run
+`rstest --changed` for a tight per-commit gate, falling back to the import
+graph for anything the index doesn't cover yet.
+
+**No affected tests means no report files.** When nothing is affected, rstest
+prints `rstest: no tests affected by N changed file(s)` and exits (0, or 5
+under `--changed-strict`) before running anything, so `--junitxml` and
+`--report-json` are **not written**. CI steps that expect those files
+(GitLab `reports: junit`, test-report publishers, `upload-artifact`, a JUnit
+ratio gate) should tolerate their absence, e.g. `if-no-files-found: ignore` on
+`actions/upload-artifact`. That applies to single-project runs. At a
+[monorepo](monorepo.md) root, the merged `--report-json` is still written,
+with every project marked `"skipped": true` (same exit code); only the
+per-project JUnit files are absent.
+
+Keep the default-branch runs that feed the cache **full**, not `--changed`:
+a `--changed` run only records durations and coverage for the tests it ran.
+
+## Interactions
+
+- **Sharding.** A sharded coverage run only measures the tests in its shard, so
+  each job's index is partial. Push the slices through the
+  [shared cache](../concepts/caching.md#shared-cache-backend)
+  (`--cache-pull --cache-push`) and they **union on pull** into a full index;
+  otherwise warm the index from an **unsharded** coverage run (or merge shard
+  data before building it). See [Sharding](sharding.md).
+- **Monorepos.** At the root, rstest classifies projects once against the
+  repo-wide change set. A project with changed files of its own gets
+  `--changed` and narrows within its own tree against its own `.rstest_cache`;
+  a project that only depends on a changed one runs its full suite; the rest
+  are skipped. See [Monorepos](monorepo.md) and
+  [Monorepo mode](../concepts/monorepo.md).
+- **Watch mode.** [`--watch`](watch-mode.md) uses import-graph selection for
+  its targeted reruns.

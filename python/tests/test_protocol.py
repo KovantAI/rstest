@@ -1,0 +1,126 @@
+"""Unit tests for the framed-msgpack Connection over raw fds."""
+
+import os
+
+import msgpack
+import pytest
+from rstest_worker._internal import messages as m
+from rstest_worker._internal import mpack, protocol
+from rstest_worker._internal.protocol import Connection
+
+
+def test_recv_one_decodes_a_framed_message():
+    r, w = os.pipe()
+    os.write(w, msgpack.packb({"kind": "run_tests", "payload": {"x": 1}}))
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        assert conn.recv_one() == {"kind": "run_tests", "payload": {"x": 1}}
+    finally:
+        os.close(w)
+        os.close(r)
+
+
+def test_poll_one_never_blocks():
+    # Nothing written: None at once. Then queued frames come out in order,
+    # a partial frame waits for the rest, and EOF reads as None.
+    r, w = os.pipe()
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        assert conn.poll_one() is None
+        frame = msgpack.packb({"kind": "stop_run"})
+        os.write(w, frame + frame[:1])
+        assert conn.poll_one() == {"kind": "stop_run"}
+        assert conn.poll_one() is None
+        os.write(w, frame[1:])
+        assert conn.poll_one() == {"kind": "stop_run"}
+        os.close(w)
+        w = -1
+        assert conn.poll_one() is None
+        assert conn.recv_one() is None
+    finally:
+        if w != -1:
+            os.close(w)
+        os.close(r)
+
+
+def test_readable_degrades_to_false_on_a_bad_fd():
+    assert protocol._readable(-1) is False
+
+
+def test_recv_one_returns_none_on_eof():
+    r, w = os.pipe()
+    os.close(w)  # writer gone -> os.read yields b"" -> EOF
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        assert conn.recv_one() is None
+    finally:
+        os.close(r)
+
+
+def test_recv_one_reassembles_split_frame():
+    # A frame delivered in two reads must still decode (unpacker buffers).
+    r, w = os.pipe()
+    packed = msgpack.packb({"kind": "run_tests", "payload": {"a": [1, 2, 3]}})
+    os.write(w, packed[:3])
+    os.write(w, packed[3:])
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        assert conn.recv_one() == {"kind": "run_tests", "payload": {"a": [1, 2, 3]}}
+    finally:
+        os.close(w)
+        os.close(r)
+
+
+def test_commands_yields_until_eof():
+    r, w = os.pipe()
+    os.write(w, msgpack.packb({"kind": "a", "payload": 1}))
+    os.write(w, msgpack.packb({"kind": "b", "payload": 2}))
+    os.close(w)  # EOF terminates the iterator
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        assert list(conn.commands()) == [
+            {"kind": "a", "payload": 1},
+            {"kind": "b", "payload": 2},
+        ]
+    finally:
+        os.close(r)
+
+
+def test_recv_one_rejects_oversized_frame(monkeypatch):
+    # A frame larger than the buffer cap must fail loud (BufferFull) rather
+    # than buffer unboundedly - the guard against a desynced stream claiming a
+    # giant map/array. Patch the cap small so the test stays cheap.
+    monkeypatch.setattr(protocol, "_MAX_FRAME_BYTES", 128)
+    r, w = os.pipe()
+    packed = msgpack.packb(b"x" * 4096)  # one frame well past the 128-byte cap
+    os.write(w, packed)
+    conn = Connection(cmd_fd=r, evt_fd=-1)
+    try:
+        with pytest.raises(mpack.BufferFull):
+            conn.recv_one()
+    finally:
+        os.close(w)
+        os.close(r)
+
+
+def test_send_writes_framed_message():
+    r, w = os.pipe()
+    conn = Connection(cmd_fd=-1, evt_fd=w)
+    payload: m.ReportPayload = {
+        "nodeid": "t.py::a",
+        "when": "call",
+        "outcome": "passed",
+        "duration": 0.0,
+        "longrepr": None,
+        "wasxfail": False,
+    }
+    try:
+        conn.send("report", payload)
+        data = os.read(r, 65536)
+        assert msgpack.unpackb(data, raw=False) == {
+            "kind": "report",
+            "payload": payload,
+        }
+    finally:
+        os.close(w)
+        os.close(r)

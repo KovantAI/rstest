@@ -1,0 +1,786 @@
+"""e2e gate sections: incremental."""
+
+import json
+import subprocess
+
+from _harness import check, git, git_commit, git_init_commit
+
+
+def _since_green_baseline(proj):
+    """The recorded last-green commit sha, or None if no baseline file yet."""
+    p = proj / ".rstest_cache" / "last_green.json"
+    if not p.exists():
+        return None
+    return json.loads(p.read_text())["sha"]
+
+
+def _head_sha(proj):
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=proj, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def gate_since_green_incremental(g, args, binary):
+    print("== since-green incremental ==")
+    sp = g.tmp / "incrproj"
+    g.write("incrproj/test_alpha.py", "def test_a():\n    assert 1 == 1\n")
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 == 2\n")
+    g.write("incrproj/pyproject.toml", "[tool.pytest.ini_options]\n")
+    git_init_commit(sp, "init")
+    env = {"PYTHONPATH": str(sp)}
+
+    # Run 1: no baseline -> establish it by running everything, then record HEAD.
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: first run has no baseline -> full run",
+        "no prior green run recorded" in r.stderr and "2 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+    check(
+        "since-green: green run records baseline == HEAD",
+        _since_green_baseline(sp) == _head_sha(sp),
+        f"baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # Run 2: nothing changed since the green baseline -> select nothing.
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: no changes since green -> nothing affected",
+        r.returncode == 0
+        and "selecting changes since last green run" in r.stderr
+        and "no tests affected" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 3: edit + commit one test -> only it is selected; baseline advances.
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 + 0 == 2  # touched\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "touch-beta")
+    r = g.run("--since-green", "-n", "2", "-v", cwd=sp, env_extra=env)
+    check(
+        "since-green: only the changed test is selected",
+        "1 affected test target(s)" in r.stderr
+        and "test_b" in r.stdout
+        and "test_a" not in r.stdout,
+        r.stderr[-200:] + r.stdout[-300:],
+    )
+    check(
+        "since-green: passing run advances baseline to new HEAD",
+        _since_green_baseline(sp) == _head_sha(sp),
+        f"baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # Run 4: break the test -> failing run must NOT advance the baseline.
+    baseline_before = _since_green_baseline(sp)
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 == 3  # boom\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "break-beta")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: failing run holds the baseline",
+        r.returncode == 1 and _since_green_baseline(sp) == baseline_before,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} before={baseline_before}",
+    )
+
+    # Run 5: fix the test -> green again advances the baseline to HEAD.
+    g.write("incrproj/test_beta.py", "def test_b():\n    assert 2 == 2  # fixed\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "fix-beta")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: recovery run advances baseline again",
+        r.returncode == 0 and _since_green_baseline(sp) == _head_sha(sp),
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # Run 6: an environment change git can't see (a new lockfile), with NO
+    # source change, must bust the baseline -> full run, not a false
+    # "nothing affected". This is the fingerprint guard against sticky
+    # false-greens after a dependency upgrade.
+    g.write("incrproj/uv.lock", "version = 1\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green: dependency change busts the baseline -> full run",
+        r.returncode == 0 and "no prior green run recorded" in r.stderr and "2 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 7: --changed-strict must NOT hijack --since-green's diff base. Commit a
+    # source change so the working tree is CLEAN; strict would otherwise imply a
+    # "HEAD" (working-tree) base and see nothing. --since-green owns the base, so
+    # the last-green baseline is still used -> the changed test is selected and
+    # runs green. The "selecting changes since last green run" line proves the
+    # baseline path was taken (it never prints when strict hijacks the base).
+    git(sp, "add", "-A")
+    git_commit(sp, "commit-lockfile")  # re-establishes baseline on the prior run's green
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)  # advance baseline, clean tree
+    g.write("incrproj/test_alpha.py", "def test_a():\n    assert 1 + 0 == 1  # touched\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "touch-alpha")
+    r = g.run("--since-green", "--changed-strict", "-n", "2", "-v", cwd=sp, env_extra=env)
+    check(
+        "since-green: --changed-strict does not hijack the since-green base",
+        r.returncode == 0
+        and "selecting changes since last green run" in r.stderr
+        and "test_a" in r.stdout,
+        r.stderr[-300:] + r.stdout[-300:],
+    )
+
+
+def gate_since_green_dirty_tree(g, args, binary):
+    """A green run over uncommitted edits proves the working tree green, not
+    HEAD. Recording HEAD there let a later revert of the edit diff as "0
+    changed" against a red commit: a false green."""
+    print("== since-green dirty tree ==")
+    sp = g.tmp / "sgdirty"
+    g.write("sgdirty/mod.py", "def f():\n    return 1\n")
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 2\n")
+    g.write("sgdirty/pyproject.toml", "[tool.pytest.ini_options]\n")
+    g.write("sgdirty/.gitignore", ".rstest_cache/\n.pytest_cache/\n__pycache__/\n")
+    git_init_commit(sp, "red")
+    env = {"PYTHONPATH": str(sp)}
+
+    # Fix HEAD's failure in the working tree only: green, but HEAD is red.
+    # (Edits change file size so a same-second revert cannot reuse a stale .pyc.)
+    g.write("sgdirty/mod.py", "def f():\n    return 1 + 1\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: green run on a dirty tree does not record HEAD",
+        r.returncode == 0
+        and _since_green_baseline(sp) is None
+        and "working tree has uncommitted changes" in r.stderr,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} {r.stderr[-300:]}",
+    )
+
+    # Revert the fix: the tree now IS the red HEAD, which must be re-run.
+    git(sp, "checkout", "-q", "mod.py")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: reverting to a red HEAD still runs and fails",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # Commit the fix: green on a clean tree now records HEAD.
+    g.write("sgdirty/mod.py", "def f():\n    return 1 + 1\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "fix")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: green run on a clean tree records HEAD",
+        r.returncode == 0 and _since_green_baseline(sp) == _head_sha(sp),
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} head={_head_sha(sp)}",
+    )
+
+    # "Nothing affected" also records only on a clean tree: commit a break, undo
+    # it in the working tree, and the baseline..worktree diff is empty, so no
+    # test runs. That must not advance the baseline to the red commit.
+    base = _since_green_baseline(sp)
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 333\n")
+    git(sp, "add", "-A")
+    git_commit(sp, "break-test")
+    g.write("sgdirty/test_mod.py", "import mod\ndef test_f():\n    assert mod.f() == 2\n")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: a masked red commit does not advance the baseline",
+        r.returncode == 0 and _since_green_baseline(sp) == base,
+        f"rc={r.returncode} baseline={_since_green_baseline(sp)} base={base} "
+        f"{r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    git(sp, "checkout", "-q", "test_mod.py")
+    r = g.run("--since-green", "-n", "2", cwd=sp, env_extra=env)
+    check(
+        "since-green dirty: the red HEAD is still selected after the revert",
+        r.returncode == 1 and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+
+def gate_incremental_dispatch_skip(g, args, binary):
+    print("== incremental dispatch skip (--incremental) ==")
+    sp = g.tmp / "incrdisp"
+    g.write("incrdisp/mod_a.py", "def a():\n    return 1\n")
+    g.write("incrdisp/mod_b.py", "def b():\n    return 2\n")
+    g.write("incrdisp/test_a.py", "import mod_a\ndef test_a():\n    assert mod_a.a() == 1\n")
+    g.write("incrdisp/test_b.py", "import mod_b\ndef test_b():\n    assert mod_b.b() == 2\n")
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        # Wipe only the coverage data (SQLite; a stale one can lock under the
+        # parallel combine); KEEP .rstest_cache so the index + outcomes persist.
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run(
+            "test_a.py", "test_b.py", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env
+        )
+
+    idx = sp / ".rstest_cache" / "coverage_index.json"
+
+    # Run 1: no baseline -> everything runs, warming the index + green outcomes.
+    r = run()
+    check(
+        "incremental: first run warms index + records green",
+        r.returncode == 0 and idx.exists() and "2 passed" in r.stdout,
+        f"rc={r.returncode} idx={idx.exists()} " + r.stdout[-200:],
+    )
+
+    # Run 2: nothing changed -> BOTH tests skipped as cached.
+    r = run()
+    check(
+        "incremental: unchanged suite -> all cached",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr and "(2 cached)" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 3: edit a dependency of ONE test -> only that test runs; the other is
+    # cached (per-test granularity).
+    g.write("incrdisp/mod_a.py", "def a():\n    return 1  # touched\n")
+    r = run()
+    check(
+        "incremental: changed dependency reruns only the affected test",
+        r.returncode == 0 and "1 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 4: nothing changed since the partial run -> BOTH cached again. This is
+    # the carry-forward guard: the cached test's coverage was folded back into
+    # the index covtool rewrote from only the test that ran.
+    r = run()
+    check(
+        "incremental: carry-forward keeps cached tests skippable",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 5: edit a test's OWN file (its dependency is unchanged) -> it reruns,
+    # proving the test-file hash gate (test files aren't always in the index).
+    g.write(
+        "incrdisp/test_b.py",
+        "import mod_b\ndef test_b():\n    assert mod_b.b() == 2  # touched\n",
+    )
+    r = run()
+    check(
+        "incremental: editing the test file reruns it",
+        r.returncode == 0 and "1 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Run 6: break a dependency -> the affected test reruns and FAILS; it is
+    # never skipped, and the failure surfaces.
+    g.write("incrdisp/mod_a.py", "def a():\n    return 999  # broken\n")
+    r = run()
+    check(
+        "incremental: a failing test is rerun, not skipped",
+        r.returncode == 1 and "1 failed" in r.stdout and "test_a" in r.stdout,
+        r.stderr[-200:] + r.stdout[-300:],
+    )
+
+
+def gate_incremental_import_time_and_data(g, args, binary):
+    """Changes per-test coverage cannot see: import-time lines run under the
+    empty coverage context (no test owns them), and a data file read by a test
+    is never measured. Either must re-run the test, not cache a stale pass."""
+    print("== incremental import-time + data files ==")
+    sp = g.tmp / "incrimp"
+    # Transitive: test_const -> wrap -> consts (LIMIT is set at import time).
+    g.write("incrimp/consts.py", "LIMIT = 5\n")
+    g.write("incrimp/wrap.py", "from consts import LIMIT\ndef limit():\n    return LIMIT\n")
+    g.write(
+        "incrimp/test_const.py", "import wrap\ndef test_const():\n    assert wrap.limit() == 5\n"
+    )
+    # Implicit package init: `import pkg.calc` also runs pkg/__init__.py.
+    g.write("incrimp/pkg/__init__.py", "FACTOR = 2\n")
+    g.write("incrimp/pkg/calc.py", "def calc(x):\n    return x\n")
+    g.write(
+        "incrimp/test_pkg.py",
+        "import pkg.calc\ndef test_pkg():\n    assert pkg.calc.calc(1) * pkg.FACTOR == 2\n",
+    )
+    # A data file only the test reads (never measured by coverage).
+    g.write("incrimp/data.json", '{"n": 1}\n')
+    g.write(
+        "incrimp/test_data.py",
+        "import json, pathlib\n"
+        "def test_data():\n"
+        "    p = pathlib.Path(__file__).with_name('data.json')\n"
+        "    assert json.loads(p.read_text())['n'] == 1\n",
+    )
+    g.write("incrimp/test_other.py", "def test_other():\n    assert True\n")
+    g.write("incrimp/.gitignore", ".rstest_cache/\n.pytest_cache/\n__pycache__/\n.coverage*\n")
+    git_init_commit(sp, "base")
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run("-n", "2", *cov, "--incremental", cwd=sp, env_extra=env)
+
+    r = run()
+    check(
+        "incremental import-time: warm run passes",
+        r.returncode == 0 and "4 passed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    r = run()
+    check(
+        "incremental import-time: unchanged suite is all cached",
+        r.returncode == 0 and "4 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # Edits change file size so a same-second rewrite cannot reuse a stale .pyc.
+    g.write("incrimp/consts.py", "LIMIT = 50\n")
+    r = run()
+    check(
+        "incremental import-time: a transitively imported constant reruns its test",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "test_const" in r.stdout
+        and "3 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    g.write("incrimp/consts.py", "LIMIT = 5\n")
+    g.write("incrimp/pkg/__init__.py", "FACTOR = 20\n")
+    r = run()
+    check(
+        "incremental import-time: a package __init__ constant reruns its test",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "test_pkg" in r.stdout
+        and "2 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    g.write("incrimp/pkg/__init__.py", "FACTOR = 2\n")
+    r = run()
+    check(
+        "incremental import-time: reverting both goes green",
+        r.returncode == 0 and "4 passed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # A tracked data file edit busts skipping wholesale.
+    g.write("incrimp/data.json", '{"n": 22}\n')
+    r = run()
+    check(
+        "incremental data file: editing a tracked data file reruns the suite",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "test_data" in r.stdout
+        and "unchanged" not in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+
+def gate_incremental_guards(g, args, binary):
+    print("== incremental guards (conftest / mutual-exclusion / no-cov) ==")
+    sp = g.tmp / "incrguard"
+    # A package under --cov=pkg, with tests and a conftest.py at the ROOT — both
+    # OUTSIDE the coverage scope, so covtool never measures the conftest.
+    g.write("incrguard/pkg/__init__.py", "")
+    g.write("incrguard/pkg/mod_a.py", "def a():\n    return 1\n")
+    g.write("incrguard/pkg/mod_b.py", "def b():\n    return 2\n")
+    g.write(
+        "incrguard/test_a.py",
+        "from pkg import mod_a\ndef test_a():\n    assert mod_a.a() == 1\n",
+    )
+    g.write(
+        "incrguard/test_b.py",
+        "from pkg import mod_b\ndef test_b():\n    assert mod_b.b() == 2\n",
+    )
+    g.write(
+        "incrguard/conftest.py",
+        "import pytest\n@pytest.fixture(autouse=True)\ndef _f():\n    yield\n",
+    )
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=pkg", "--cov-context=test", "--cov-report="]
+
+    def run(*extra, with_cov=True):
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        flags = ["test_a.py", "test_b.py", "-n", "2", "--incremental", *extra]
+        if with_cov:
+            flags = ["test_a.py", "test_b.py", "-n", "2", *cov, "--incremental", *extra]
+        return g.run(*flags, cwd=sp, env_extra=env)
+
+    # Warm the index + green outcomes, then confirm both tests cache.
+    run()
+    r = run()
+    check(
+        "incremental: unchanged suite caches under scoped --cov=pkg",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Finding 1: edit the ROOT conftest.py — invisible to --cov=pkg. Source is
+    # byte-identical, yet the behavior-bearing conftest changed; skipping must be
+    # busted (no cached passes), not a sticky false-green.
+    g.write(
+        "incrguard/conftest.py",
+        "import pytest\n@pytest.fixture(autouse=True)\ndef _f():\n    yield  # edited\n",
+    )
+    r = run()
+    check(
+        "incremental: conftest edit outside cov scope busts the skip",
+        r.returncode == 0
+        and "unchanged since last green" not in r.stderr
+        and "2 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Finding 3: --incremental and --since-green are mutually exclusive.
+    r = g.run(
+        "test_a.py",
+        "test_b.py",
+        "-n",
+        "2",
+        *cov,
+        "--incremental",
+        "--since-green",
+        cwd=sp,
+        env_extra=env,
+    )
+    check(
+        "incremental: mutually exclusive with --since-green",
+        "mutually exclusive" in r.stderr,
+        r.stderr[-300:],
+    )
+
+    # Finding 2: --incremental WITHOUT --cov (index stays warm from above but is
+    # never refreshed) must warn.
+    r = run(with_cov=False)
+    check(
+        "incremental: warns when run without --cov",
+        "without --cov" in r.stderr,
+        r.stderr[-300:],
+    )
+
+    # Review finding 1: a NARROWED --cov=pkg leaves first-party source outside
+    # the scope coverage-invisible, so skipping can go stale. The run must warn.
+    # (The whole gate here runs under --cov=pkg, so the scoped-cov warning fires
+    # on every `run()` above; assert it explicitly.)
+    r = run()
+    check(
+        "incremental: warns on a scoped --cov (invisible first-party source)",
+        "scoped --cov" in r.stderr,
+        r.stderr[-300:],
+    )
+
+
+def gate_incremental_out_of_scope_source(g, args, binary):
+    print("== incremental out-of-scope source (fold + test-file exclusion) ==")
+    sp = g.tmp / "incroos"
+    # pkg/ is the ONLY thing --cov=pkg measures. helper.py lives OUTSIDE it, so
+    # covtool never records coverage for it — yet test_b depends on it. test_b
+    # ALSO touches pkg/mod_b (in scope) so it is present in the coverage index
+    # and thus normally cacheable; that is what makes the helper.py edit a
+    # genuine false-green vector: every tracked hash stays byte-identical, and
+    # only the config-fingerprint fold of out-of-scope first-party source busts
+    # the skip. (A test that touched NO in-scope code would never be indexed, so
+    # it could never be cached in the first place — nothing to falsely keep.)
+    g.write("incroos/pkg/__init__.py", "")
+    g.write("incroos/pkg/mod_a.py", "def a():\n    return 1\n")
+    g.write("incroos/pkg/mod_b.py", "def b():\n    return 2\n")
+    g.write("incroos/helper.py", "def h():\n    return 10\n")
+    g.write(
+        "incroos/test_a.py",
+        "from pkg import mod_a\ndef test_a():\n    assert mod_a.a() == 1\n",
+    )
+    g.write(
+        "incroos/test_b.py",
+        "import helper\nfrom pkg import mod_b\n"
+        "def test_b():\n    assert mod_b.b() + helper.h() == 12\n",
+    )
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=pkg", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run(
+            "test_a.py", "test_b.py", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env
+        )
+
+    # Warm the index + green outcomes, then confirm both tests cache unchanged.
+    run()
+    r = run()
+    check(
+        "incremental(oos): unchanged suite caches under scoped --cov=pkg",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr and "(2 cached)" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # CORE of the branch: edit helper.py — first-party SOURCE outside --cov=pkg,
+    # so coverage never measured it. Pre-fix this stayed a sticky false-green
+    # (test_b cached despite its dependency changing); the config-fingerprint
+    # fold now busts skipping wholesale, so BOTH tests re-run (0 cached).
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited\n")
+    r = run()
+    check(
+        "incremental(oos): out-of-scope source edit busts the skip",
+        r.returncode == 0
+        and "unchanged since last green" not in r.stderr
+        and "cached)" not in r.stdout
+        and "2 passed" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # Re-establish green (the edited helper is now the recorded baseline), then
+    # edit an out-of-scope TEST file. Test files are EXCLUDED from the fold (they
+    # are guarded per-test by their own file hash), so this must re-run ONLY
+    # test_b and keep test_a cached — NOT bust the whole suite.
+    r = run()
+    check(
+        "incremental(oos): re-caches after the out-of-scope source settles",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+    g.write(
+        "incroos/test_b.py",
+        "import helper\nfrom pkg import mod_b\n"
+        "def test_b():\n    assert mod_b.b() + helper.h() == 12  # touched\n",
+    )
+    r = run()
+    check(
+        "incremental(oos): out-of-scope test-file edit reruns only that test",
+        r.returncode == 0 and "1 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # A test-NAMED helper that defines no tests (test_helpers.py) is guarded by no
+    # per-test hash, so it must fold like any other out-of-scope source: editing
+    # it busts the skip instead of leaving test_a cached on a stale pass.
+    g.write(
+        "incroos/test_helpers.py",
+        "class TestMixin:\n    EXPECTED = 1\ndef expected():\n    return TestMixin.EXPECTED\n",
+    )
+    g.write(
+        "incroos/test_a.py",
+        "from pkg import mod_a\nfrom test_helpers import expected\n"
+        "def test_a():\n    assert mod_a.a() == expected()\n",
+    )
+    run()
+    r = run()
+    check(
+        "incremental(oos): re-caches with the test-named helper in place",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+    g.write(
+        "incroos/test_helpers.py",
+        "class TestMixin:\n    EXPECTED = 2  # edited\n"
+        "def expected():\n    return TestMixin.EXPECTED\n",
+    )
+    r = run()
+    check(
+        "incremental(oos): test-named helper (TestMixin, no tests) edit busts the skip",
+        r.returncode != 0 and "cached)" not in r.stdout and "test_a" in r.stdout,
+        r.stderr[-200:] + r.stdout[-200:],
+    )
+
+    # A bare --cov narrowed by `[run] source = pkg` in .coveragerc is just as
+    # scoped as --cov=pkg: helper.py stays coverage-invisible, so editing it
+    # must bust the skip rather than leave test_b cached.
+    # Different length from the edit above: CPython's .pyc check is mtime+size,
+    # and a same-size rewrite within one second would reuse the stale bytecode.
+    g.write(
+        "incroos/test_helpers.py",
+        "class TestMixin:\n    EXPECTED = 1  # restored\n"
+        "def expected():\n    return TestMixin.EXPECTED\n",
+    )
+    g.write("incroos/.coveragerc", "[run]\nsource = pkg\n")
+
+    def run_bare():
+        for stale in sp.glob(".coverage.*"):
+            stale.unlink()
+        stale = sp / ".coverage"
+        if stale.exists():
+            stale.unlink()
+        return g.run(
+            "test_a.py",
+            "test_b.py",
+            "-n",
+            "2",
+            "--cov",
+            "--cov-context=test",
+            "--cov-report=",
+            "--incremental",
+            cwd=sp,
+            env_extra=env,
+        )
+
+    run_bare()
+    r = run_bare()
+    check(
+        "incremental(oos): bare --cov + .coveragerc source caches unchanged suite",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr and "scoped --cov" in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited again\n")
+    r = run_bare()
+    check(
+        "incremental(oos): bare --cov + .coveragerc source: out-of-scope edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
+    def run_plain(*cov_args):
+        for stale in [*sp.glob(".coverage.*"), sp / ".coverage"]:
+            if stale.exists():
+                stale.unlink()
+        return g.run(
+            "test_a.py",
+            "test_b.py",
+            "-n",
+            "2",
+            *cov_args,
+            "--cov-context=test",
+            "--cov-report=",
+            "--incremental",
+            cwd=sp,
+            env_extra=env,
+        )
+
+    # --cov=pkg living ONLY in the ini addopts narrows coverage just the same:
+    # the CLI carries no --cov at all, yet helper.py must still fold.
+    (sp / ".coveragerc").unlink()
+    g.write("incroos/pytest.ini", "[pytest]\naddopts = --cov=pkg\n")
+    run_plain()
+    r = run_plain()
+    check(
+        "incremental(oos): addopts-only --cov=pkg caches unchanged suite",
+        r.returncode == 0
+        and "2 of 2 test(s) unchanged" in r.stderr
+        and "scoped --cov" in r.stderr
+        and "without --cov" not in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited via addopts\n")
+    r = run_plain()
+    check(
+        "incremental(oos): addopts-only --cov=pkg: out-of-scope edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
+    # Whole-tree --cov=. but `omit = helper.py`: coverage never measures the
+    # helper, so editing it must bust just as under a narrowed scope.
+    (sp / "pytest.ini").unlink()
+    g.write("incroos/.coveragerc", "[run]\nomit = helper.py\n")
+    run_plain("--cov=.")
+    r = run_plain("--cov=.")
+    check(
+        "incremental(oos): --cov=. + omit caches unchanged suite",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited under omit\n")
+    r = run_plain("--cov=.")
+    check(
+        "incremental(oos): --cov=. + omit: omitted-file edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
+    # A run WITHOUT --cov after a --cov=pkg run reuses that run's coverage index,
+    # so it must reuse its scope too: helper.py (never measured) still folds.
+    (sp / ".coveragerc").unlink()
+    run_plain("--cov=pkg")
+    run_plain("--cov=pkg")
+    run_plain()
+    r = run_plain()
+    check(
+        "incremental(oos): no-cov run after --cov=pkg caches unchanged suite",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+    g.write("incroos/helper.py", "def h():\n    return 10  # edited with no --cov\n")
+    r = run_plain()
+    check(
+        "incremental(oos): no-cov run after --cov=pkg: out-of-scope edit busts",
+        r.returncode == 0 and "cached)" not in r.stdout and "2 passed" in r.stdout,
+        r.stderr[-300:] + r.stdout[-200:],
+    )
+
+
+def gate_explain(g, args, binary):
+    print("== explain <nodeid> (reads real run caches) ==")
+    sp = g.tmp / "explainproj"
+    g.write("explainproj/mod_a.py", "def a():\n    return 1\n")
+    g.write("explainproj/mod_b.py", "def b():\n    return 2\n")
+    g.write(
+        "explainproj/test_e.py",
+        "import mod_a\n\n\ndef test_green():\n    assert mod_a.a() == 1\n\n\n"
+        "def test_red():\n    assert False\n",
+    )
+    env = {"PYTHONPATH": str(sp)}
+    for stale in sp.glob(".coverage*"):
+        stale.unlink()
+    # One real run populates all four caches explain merges: durations,
+    # flakes (test_red's hard failure), incremental outcomes, coverage index.
+    g.run(
+        "test_e.py",
+        "-n",
+        "2",
+        "--cov=.",
+        "--cov-context=test",
+        "--cov-report=",
+        "--incremental",
+        cwd=sp,
+        env_extra=env,
+    )
+
+    def explain(nodeid, *extra):
+        return g.run("explain", nodeid, *extra, cwd=sp, env_extra=env)
+
+    r = explain("test_e.py::test_green", "--json")
+    try:
+        doc = json.loads(r.stdout)
+    except ValueError:
+        doc = {}
+    check(
+        "explain: --json dossier for a green test merges every cache",
+        r.returncode == 0
+        and doc.get("found") is True
+        and doc.get("meta", {}).get("kind") == "explain"
+        and isinstance(doc.get("duration_seconds"), float)
+        and doc.get("last_outcome") == "passed"
+        and doc.get("source_line") == 4
+        and doc.get("flakes") is None
+        and "mod_a.py" in (doc.get("coverage") or {}).get("files", [])
+        and "mod_b.py" not in (doc.get("coverage") or {}).get("files", []),
+        f"rc={r.returncode} out={r.stdout[-600:]} err={r.stderr[-200:]}",
+    )
+
+    r = explain("test_e.py::test_red", "--json")
+    try:
+        doc = json.loads(r.stdout)
+    except ValueError:
+        doc = {}
+    check(
+        "explain: failing test shows fail history, no last-green",
+        r.returncode == 0
+        and doc.get("last_outcome") is None
+        and (doc.get("flakes") or {}).get("failed") == 1,
+        f"rc={r.returncode} out={r.stdout[-600:]}",
+    )
+
+    r = explain("test_e.py::test_green")
+    check(
+        "explain: human report exits 0 with every section",
+        r.returncode == 0
+        and "test: test_e.py::test_green" in r.stdout
+        and "test_e.py:4" in r.stdout
+        and "passed" in r.stdout
+        and "mod_a.py" in r.stdout,
+        f"rc={r.returncode} out={r.stdout[-400:]} err={r.stderr[-200:]}",
+    )
+
+    r = explain("test_green")
+    check(
+        "explain: partial id exits 1 and suggests the full nodeid",
+        r.returncode == 1 and "no cached data" in r.stderr and "test_e.py::test_green" in r.stderr,
+        f"rc={r.returncode} err={r.stderr[-400:]}",
+    )

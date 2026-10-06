@@ -1,6 +1,6 @@
 site_name: rstest
-site_description: A fast, pytest-compatible test runner — parallel by design, with built-in suite diagnostics
-site_url: https://rstest.readthedocs.io/
+site_description: A fast, pytest-compatible test runner, parallel by design, with built-in suite diagnostics
+site_url: https://python-rstest.readthedocs.io/
 repo_url: https://github.com/KovantAI/rstest
 repo_name: KovantAI/rstest
 edit_uri: edit/main/docs/
@@ -76,7 +76,13 @@ markdown_extensions:
       custom_checkbox: true
 
 exclude_docs: |
-  PLAN.md
+  # Generated schema partials: embedded via pymdownx snippets into
+  # reference/output-schemas.md, not standalone pages. The .schema.json files
+  # are kept (copied as static assets) so they are directly downloadable.
+  reference/schemas/*.md
+  # Shared partials embedded via pymdownx snippets (--8<--), one canonical
+  # copy for content that appears on several pages.
+  _snippets/
 
 plugins:
   - search
@@ -85,24 +91,35 @@ nav:
   - Introduction: index.md
   - Getting started:
       - getting-started/index.md
+      - Evaluating rstest: getting-started/evaluating.md
       - Installation: getting-started/installation.md
-      - Your first test: getting-started/your-first-test.md
-      - First steps: getting-started/first-steps.md
+      - Start from scratch: getting-started/your-first-test.md
+      - Run your existing suite: getting-started/first-steps.md
       - Features: getting-started/features.md
       - Getting help: getting-started/getting-help.md
+  - Playbooks:
+      - Wait-bound / IO suites: guides/wait-bound.md
+      - Local dev / inner loop: guides/local-dev.md
+      - Your plugin stack: guides/plugin-stack.md
   - Guides:
       - guides/index.md
       - Migrating from pytest: guides/migrate-from-pytest.md
+      - Upgrading to pytest 9: guides/upgrade-to-pytest9.md
       - Migrating from pytest-xdist: guides/migrate-from-xdist.md
       - Parallel safety: guides/parallel-safety.md
       - Suite diagnostics: guides/doctor.md
+      - Resource leaks: guides/resource-leaks.md
       - Flaky tests: guides/flaky-tests.md
       - Watch mode: guides/watch-mode.md
+      - Selecting changed tests: guides/changed.md
       - Monorepos: guides/monorepo.md
       - CI quickstart: guides/ci-quickstart.md
+      - More CI systems: guides/ci-recipes.md
+      - Shared cache across CI jobs: guides/ci-shared-cache.md
       - Sharding across CI jobs: guides/sharding.md
       - Plugins: guides/plugins.md
       - Coverage: guides/coverage.md
+      - Agent skills: guides/agent-skills.md
   - Concepts:
       - concepts/index.md
       - Architecture: concepts/architecture.md
@@ -116,12 +133,18 @@ nav:
       - Glossary: concepts/glossary.md
   - Reference:
       - reference/index.md
-      - CLI: reference/cli.md
+      - CLI flags: reference/cli.md
+      - CLI subcommands: reference/cli-commands.md
       - Markers: reference/markers.md
       - Environment variables: reference/environment.md
       - Exit codes: reference/exit-codes.md
       - Report JSON: reference/report-json.md
+      - Output schemas: reference/output-schemas.md
       - Benchmarks: reference/benchmarks.md
-      - Parity divergences: reference/parity-divergences.md
+      - Parity divergences & upstream fixes: reference/parity-divergences.md
+      - Top 100 plugins: reference/top-100-plugins.md
+      - Plugins exercised by the corpus: reference/corpus-plugins.md
+      - xdist support matrix: reference/xdist-support.md
       - Troubleshooting: reference/troubleshooting.md
+      - Security & supply chain: reference/security.md
       - License: reference/license.md

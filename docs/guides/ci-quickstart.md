@@ -8,10 +8,27 @@ On top of that, rstest adds two things worth wiring up in CI: worker
 parallelism with no extra plugin, and a duration cache that makes scheduling
 smarter when persisted between runs.
 
-!!! tip "Pin for reproducible CI"
-    The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin a version (`pip install rstest==0.3.1` or `rstest~=0.3`) or install
-    from your lockfile.
+This page gets you running on **GitHub Actions** and walks two worked examples
+(Django, monorepo). For other CI systems (AWS CodeBuild, Google Cloud Build,
+GitLab, Azure, CircleCI, Jenkins, Buildkite, pre-commit), see [More CI
+systems](ci-recipes.md). For a shard matrix that needs a cache no native CI
+cache can merge, see [Shared cache across CI jobs](ci-shared-cache.md).
+
+--8<-- "docs/_snippets/ci-pin-tip.md"
+
+## Which layout do I want?
+
+| Your situation | Layout | Where |
+|---|---|---|
+| Single project | one job, `rstest -n auto`, cache `.rstest_cache` | [GitHub Actions](#github-actions) below |
+| Monorepo, **few** packages (≤ runner cores) | one root job, `cd repo && rstest`, merged report | [Monorepos guide](monorepo.md) |
+| Monorepo, **many** packages | one job **per package** via a matrix | [Monorepo worked example](#worked-example-monorepo-on-ephemeral-ci) |
+| One long suite you split across CI nodes | `--shard K/N` matrix + [shared cache](ci-shared-cache.md) | [Sharding](sharding.md) + [Shared cache](ci-shared-cache.md) |
+
+The rule of thumb: **the unit of CI parallelism should be the project, not the
+root** once you have more packages than runner cores. One job per package
+gives each the full runner and its own cache. Reach for `--shard` only when a
+*single* project's suite is itself the long pole.
 
 ## GitHub Actions
 
@@ -24,33 +41,54 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: KovantAI/rstest/.github/actions/rstest@v1
+      - uses: actions/checkout@v7
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
         with:
           python-version: "3.13"
           args: "-n auto"
           upload-junit: true
 ```
 
+!!! note "Use `@v0.8.0` or later"
+    Action tags before `v0.8.0` interpolate some inputs straight into their
+    shell steps and lack the `warm-from-event` guard on the artifact cache
+    backend. See
+    [Security: GitHub action inputs](../reference/security.md#github-action-inputs).
+
 That defaults `--output github` (so failures show as `::error` annotations and
 flaky reruns as `::warning`), persists `.rstest_cache` across runs, and writes
 `junit.xml`. See the [action README][action] for all inputs (`changed`,
 `durations-regress`, `reruns`/`rerun-on`, `fail-under-ratio`, `shard`, …).
 
+Pin the action to a release tag (`v0.8.0` or later) or a full commit SHA,
+and set `version:` to pin the rstest wheel; without it the action installs the
+latest rstest from PyPI. Under `runner: uv` (the default when the project has a
+`uv.lock` or `[tool.uv]`) `version:` is ignored and rstest comes from your
+lockfile, so pin it there.
+
+The YAML on these pages references third-party actions by major tag
+(`actions/checkout@v7`) for readability. If your security policy requires it,
+pin those by full commit SHA too; see [Security & supply
+chain](../reference/security.md).
+
+In a matrix, the action names its artifacts per leg (the `artifact-suffix`
+input, default `<os>-py<version>[-<working-directory>]`) so legs never share
+cache segments or JUnit names. See the [action README][action].
+
 [action]: https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest
 
 ### Under the hood
 
-The action is a thin wrapper. If you prefer raw YAML — or need something the
-action does not expose — the equivalent steps are:
+The action is a thin wrapper. If you prefer raw YAML (or need something the
+action does not expose), the equivalent steps are:
 
 ```yaml
 jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -61,312 +99,252 @@ jobs:
 
       # Persist the duration cache: from the second run on, the scheduler
       # starts the slowest tests first.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
-          path: .rstest_cache
-          # Unique key per run: actions/cache never RE-saves an
-          # existing key, so a ref-only key freezes the cache at the
-          # branch's first run. restore-keys picks the newest match.
-          key: rstest-durations-${{ github.ref_name }}-${{ github.run_id }}
+          # Replay journals are per-run; upload them on failure instead
+          # (see "Replaying a CI-only failure locally" below).
+          path: |
+            .rstest_cache
+            !.rstest_cache/replay
+          # Same components as the bundled action: OS + Python + lockfile
+          # hash, so a 3.12 or Windows run never seeds a 3.13 Linux one.
+          # Unique per run: actions/cache never RE-saves an existing key,
+          # so a fixed key freezes the cache at its first run. restore-keys
+          # picks the newest match (this branch first, then the base branch).
+          key: rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
           restore-keys: |
-            rstest-durations-${{ github.ref_name }}-
-            rstest-durations-
+            rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
 
       - name: test
         # --output github emits ::error per failure and ::warning for flaky
-        # reruns; --doctor auto-publishes diagnostics to the job summary.
+        # reruns. Add --doctor to also publish diagnostics to the job summary.
         run: rstest -n auto --output github --junitxml junit.xml
 
-      # Long pole? Fan the suite across a runner matrix with --shard K/N —
+      # Long pole? Fan the suite across a runner matrix with --shard K/N;
       # see the Sharding guide.
 
       # Monorepo roots: caches live in EACH project (.rstest_cache per
-      # package — widen the cache path to **/.rstest_cache), and junit
-      # files are written per project as junit.<slug>.xml — glob them
+      # package; widen the cache path to **/.rstest_cache and exclude
+      # !**/.rstest_cache/replay), and junit
+      # files are written per project as junit.<slug>.xml; glob them
       # in the artifact step.
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: junit
           path: junit.xml
 ```
 
-## AWS CodeBuild
+For a shard matrix, swap the `actions/cache` step for the segment-merge
+[shared cache](ci-shared-cache.md). It sidesteps the `run_id` key dance and
+lets every shard contribute its own segment. Keep every shard on the same
+cache snapshot, though: see
+[Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix).
 
-CodeBuild has no log-side annotation command (no equivalent of GitHub's
-`::error` or Azure's `##vso`), so there is no dedicated `--output` style
-— the integration surface is the JUnit file. Point a [CodeBuild report
-group](https://docs.aws.amazon.com/codebuild/latest/userguide/test-reporting.html)
-at `--junitxml` output and CodeBuild renders pass/fail, durations, and
-run-over-run trends in the console.
+## Worked example: Django on ephemeral CI
 
-```yaml
-# buildspec.yml
-version: 0.2
-phases:
-  install:
-    commands:
-      - pip install -r requirements.txt
-      - pip install rstest
-  build:
-    commands:
-      # The `cache` block below persists .rstest_cache across builds, so
-      # from the second run on the scheduler starts the slowest tests first.
-      - rstest -n auto --junitxml junit.xml
+A Django suite is the common case: pytest-django, a real database, ephemeral
+GitHub runners where nothing survives between runs unless you persist it. The
+two things people get wrong are the **cold-vs-warm cache** and **per-worker
+databases**. Both are handled below.
 
-reports:
-  rstest:
-    files:
-      - junit.xml
-    file-format: JUNITXML
-
-# Persist .rstest_cache between builds so scheduling stays warm.
-cache:
-  paths:
-    - '.rstest_cache/**/*'
-```
-
-`-n auto` uses the build container's vCPUs; size the compute type to the
-parallelism you want. For a monorepo root, widen the report `files` glob
-to `**/junit.*.xml` (junit is written per project as `junit.<slug>.xml`)
-and the cache to `**/.rstest_cache/**/*`.
-
-This single-job recipe re-saves `.rstest_cache` every build, which is
-correct here — one full run owns the authoritative cache. If you **shard**
-across CodeBuild batch jobs, don't let each shard save: follow the
-[sharding guide](sharding.md)'s discipline (shards restore a stable cache
-read-only; one separate full job saves the fresh one), or the shards will
-race to write divergent duration caches and their partitions will drift.
-
-## Google Cloud Build
-
-Cloud Build likewise has no annotation protocol — it streams step logs
-to Cloud Logging and has no native test-report UI, so again there is no
-`--output` style to add. Run rstest as a build step and publish the
-JUnit XML (and any doctor/report-json) as build
-[artifacts](https://cloud.google.com/build/docs/building/store-artifacts-in-cloud-storage).
+pytest-django is exercised continuously in rstest's battery *including
+per-worker test databases under parallelism* (see [Plugins](plugins.md)):
+rstest supplies each worker the xdist-style worker identity pytest-django keys
+off, so every worker gets its own isolated test DB (`test_app_gw0`,
+`test_app_gw1`, …) automatically. No extra flags, same as under xdist.
 
 ```yaml
-# cloudbuild.yaml
-steps:
-  - name: python:3.13
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        pip install -r requirements.txt
-        pip install rstest
-        rstest -n auto --junitxml junit.xml
-
-# Upload the JUnit (and doctor JSON, if produced) to Cloud Storage.
-artifacts:
-  objects:
-    location: 'gs://$PROJECT_ID-ci-artifacts/$BUILD_ID/'
-    paths:
-      - 'junit.xml'
-```
-
-The duration cache lives in `.rstest_cache`; on Cloud Build persist it
-between runs by syncing it to Cloud Storage
-(`gsutil rsync`) at the start and end of the step — the workspace itself
-is not retained across builds. Colors auto-disable off-tty, so the log
-stays clean; the JUnit file is the machine-readable surface for any
-downstream test-reporting tool.
-
-## GitLab CI
-
-GitLab reads JUnit from the `artifacts:reports:junit` key to render the
-[test report](https://docs.gitlab.com/ci/testing/unit_test_reports/) and
-per-MR diff. `--output gitlab` additionally folds each failure into a
-[collapsible section](https://docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections)
-so the job log stays readable.
-
-```yaml
-# .gitlab-ci.yml
-test:
-  image: python:3.13
-  # Persist the duration cache between runs (keyed per branch).
-  cache:
-    key: rstest-$CI_COMMIT_REF_SLUG
-    paths:
-      - .rstest_cache/
-  before_script:
-    - pip install -r requirements.txt
-    - pip install rstest
-  script:
-    - rstest -n auto --output gitlab --junitxml junit.xml
-  artifacts:
-    when: always
-    paths:
-      - junit.xml
-    reports:
-      junit: junit.xml
-```
-
-`-n auto` uses the runner's cores; size the runner (or set `-n <k>`) to
-the parallelism you want. For a monorepo root, glob `junit.*.xml` in
-`artifacts:paths` and widen the cache to `**/.rstest_cache/`.
-
-## Azure Pipelines
-
-`--output azure` emits an `##vso[task.logissue]` per failing test, which
-Azure surfaces as an inline issue on the file in the PR. Publish the
-JUnit with the
-[`PublishTestResults`](https://learn.microsoft.com/azure/devops/pipelines/tasks/reference/publish-test-results-v2)
-task for the run's Tests tab.
-
-```yaml
-# azure-pipelines.yml
-pool:
-  vmImage: ubuntu-latest
-
-steps:
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: "3.13"
-
-  # Persist the duration cache between runs.
-  - task: Cache@2
-    inputs:
-      key: 'rstest | "$(Agent.OS)" | "$(Build.SourceBranchName)"'
-      restoreKeys: |
-        rstest | "$(Agent.OS)"
-      path: .rstest_cache
-
-  - script: |
-      pip install -r requirements.txt
-      pip install rstest
-      rstest -n auto --output azure --junitxml junit.xml
-    displayName: test
-
-  - task: PublishTestResults@2
-    condition: always()
-    inputs:
-      testResultsFormat: JUnit
-      testResultsFiles: junit.xml
-```
-
-## CircleCI
-
-CircleCI has no log-side annotation protocol, so there is no dedicated
-`--output` style — the integration surface is the JUnit file, consumed by
-[`store_test_results`](https://circleci.com/docs/collect-test-data/) for
-the Tests tab and flaky-test detection.
-
-```yaml
-# .circleci/config.yml
-version: 2.1
+# .github/workflows/tests.yml
 jobs:
-  test:
-    docker:
-      - image: cimg/python:3.13
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: app }
+        ports: ["5432:5432"]
+        # createdb privilege matters: each worker CREATEs its own test DB
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s
+          --health-timeout 5s --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: myapp.settings.test
+      DATABASE_URL: postgres://ci:ci@localhost:5432/app
     steps:
-      - checkout
-      # Persist the duration cache between runs.
-      - restore_cache:
-          keys:
-            - rstest-{{ .Branch }}
-            - rstest-
-      - run: pip install -r requirements.txt
-      - run: pip install rstest
-      - run: rstest -n auto --junitxml test-results/junit.xml
-      - store_test_results:
-          path: test-results
-      - save_cache:
-          key: rstest-{{ .Branch }}-{{ .Revision }}
-          paths:
-            - .rstest_cache
-workflows:
-  ci:
-    jobs:
-      - test
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.13" }
+      - run: pip install -r requirements.txt && pip install rstest==0.8.0
+
+      # The cache is what makes run two fast. Keyed like the bundled action
+      # (OS + Python + lockfile hash), unique per run (actions/cache never
+      # re-saves an existing key); restore-keys picks the newest match.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            .rstest_cache
+            !.rstest_cache/replay
+          key: rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-${{ github.run_id }}
+          restore-keys: |
+            rstest-${{ runner.os }}-py3.13-${{ hashFiles('requirements.txt') }}-
+
+      # --reuse-db keeps the migrated test DB across runs on a warm workspace;
+      # on ephemeral runners the DB is fresh each time, so it's a no-op there
+      # (harmless to leave in, useful on self-hosted runners).
+      - run: rstest -n auto --reuse-db --output github --junitxml junit.xml
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: junit, path: junit.xml }
 ```
 
-`-n auto` uses the resource-class vCPUs; pick a larger class for more
-parallelism. Point `store_test_results` at a directory (not a single
-file) so a monorepo's `junit.*.xml` are all collected.
+**What the two runs look like.** Duration-aware scheduling needs one run of
+timing data, so the first run on a fresh cache key is *cold*: the scheduler
+has no per-test durations and falls back to an even split. The second run
+(and every run after, as long as the cache restores) is *warm*: it starts the
+slowest tests first and packs workers tightly.
 
-## Jenkins
+Concretely, on the runnable
+[`examples/ci-bench`](https://github.com/KovantAI/rstest/tree/main/examples/ci-bench)
+suite (161 wait-bound tests with duration skew), **measured**, `-n 4`, best of
+3, Apple Silicon / CPython 3.13:
 
-Jenkins renders JUnit via the [JUnit
-plugin](https://plugins.jenkins.io/junit/); publish the file with
-`junit` in a `post` block so results show even when the build fails.
+<!-- SOURCE OF TRUTH: examples/ci-bench/README.md, keep numbers in sync -->
+| config | wall | vs pytest |
+|---|---|---|
+| pytest (serial) | 12.1s | 1.0× |
+| rstest cold (`-n 4`, no cache) | 5.3s | 2.3× |
+| rstest warm (`-n 4`, cached durations) | 3.6s | 3.3× |
 
-```groovy
-// Jenkinsfile
-pipeline {
-  agent { docker { image 'python:3.13' } }
-  stages {
-    stage('test') {
-      steps {
-        sh '''
-          pip install -r requirements.txt
-          pip install rstest
-          rstest -n auto --junitxml junit.xml
-        '''
-      }
-    }
-  }
-  post {
-    always {
-      junit 'junit.xml'
-    }
-  }
-}
-```
+Cold already wins from parallelism; warm adds ~1.5× on top by scheduling the
+long pole first. That is a **synthetic** wait-bound example, not a Django app.
+rstest ships no canonical Django timing, and a suite's win depends on its own
+shape (see the self-check table in the
+[README](https://github.com/KovantAI/rstest#will-rstest-speed-up-your-suite)).
+To get *your* real numbers before committing, run [`rstest try`](../reference/cli-commands.md#try)
+locally. It runs your suite under plain pytest and under `rstest -n auto`,
+diffs outcomes, and reports the speedup, with no migration.
 
-Persist `.rstest_cache` between runs to keep scheduling warm — stash/unstash
-it, or use a shared workspace/volume on the agent. If you run a TAP harness
-instead, `--output tap` makes stdout a pure TAP 13 stream for the [TAP
-plugin](https://plugins.jenkins.io/tap/).
+!!! warning "Ephemeral runners: warm the cache from your default branch"
+    If PR jobs start from a cold cache every time, you only ever pay cold-run
+    cost. Run this workflow on pushes to your default branch too (GitHub lets
+    PR jobs restore the base branch's cache entries), so PRs restore a warm
+    `.rstest_cache` instead of rebuilding timing data from scratch. For a
+    matrix/shard layout, prefer the [shared-cache backend](ci-shared-cache.md)
+    (it sidesteps the `run_id` key dance entirely).
 
-## Pre-commit
+## Worked example: monorepo on ephemeral CI
 
-rstest ships [pre-commit](https://pre-commit.com) hooks so a suite runs
-before code lands. Add to your project's `.pre-commit-config.yaml`:
+Two monorepo constraints collide in ephemeral CI, and the fix resolves both
+at once:
+
+1. **Concurrency.** At the root, every project launches concurrently with at
+   least one worker each ([Monorepo mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
+   Many packages on a small (2–4 core) runner oversubscribes: 20 packages on
+   a 2-core runner is 20 concurrent single-worker children fighting for 2 cores.
+2. **Shared cache.** `--cache-pull` and `--cache-push` are **refused at a
+   monorepo root** (exit 1), and `--cache-remote` alone is inert there
+   ([CLI](../reference/cli.md#-cache-remote-urldir-cache-pull-cache-push)):
+   each project keeps its own `.rstest_cache`, so the segment-merge shared
+   cache is a per-project feature.
+
+**Both dissolve if you make the project the unit of CI parallelism**: one
+job per package via a matrix, instead of one root job running everything
+concurrently. Each job runs the bundled action **inside** its package
+(`working-directory`), so it is a plain single-project run: the package's
+own `[tool.rstest]`, lockfile or `.venv`, and `.rstest_cache` apply, it gets
+the runner's *full* core count with no oversubscription, and it can use the
+[shared cache](ci-shared-cache.md) normally:
 
 ```yaml
-repos:
-  - repo: https://github.com/KovantAI/rstest
-    rev: v0.3.1             # pin a released tag
-    hooks:
-      - id: rstest         # whole suite, on push
+# .github/workflows/tests.yml
+permissions: { contents: read, actions: read }
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.list.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v7
+      # Emit the matrix from your project layout. Keep this list in sync with
+      # [tool.rstest] projects in the root pyproject.toml (single source of truth).
+      - id: list
+        run: |
+          echo 'projects=["libs/core","libs/cli","services/api"]' >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.discover.outputs.projects) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+        with:
+          python-version: "3.13"
+          # Run inside the package, not `rstest libs/core` from the root:
+          # a root-relative path would skip the package's own [tool.rstest],
+          # its .venv, and its .rstest_cache.
+          working-directory: ${{ matrix.project }}
+          # Per-package segment-merge shared cache over GitHub artifacts.
+          # Artifact names carry the package (artifact-suffix defaults to
+          # <os>-py<version>-<working-directory>, e.g. Linux-py3.13-libs-core),
+          # so packages never warm from each other's segments.
+          cache-backend: artifact
+          # Non-uv package: install its dependencies here. For a uv package,
+          # delete this line: a set `install:` replaces the `uv sync --dev`
+          # the action would otherwise run, while tests still run under uv.
+          install: pip install -r requirements.txt rstest
+          args: "-n auto"
+          upload-junit: true
 ```
 
-Two hook ids are provided:
+Each package is its own job. It gets the whole runner, warms its own cache
+segments from the latest green run on `main` (cold on run one, warm from run
+two, exactly like the single-suite case), and uploads a fresh segment plus
+its JUnit under per-package artifact names. Isolation is free (matrix jobs
+don't share a runner), and a slow package no longer steals workers from a
+fast one. Each leg resolves its warm run on its own; that is fine here,
+because legs are different packages and never merge each other's segments
+(a [shard matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix) of
+one suite is different). The action only warms from green runs, so while
+`main` is red every leg keeps warming from the last green one. The
+segment-merge mechanics are in [Shared cache across CI jobs](ci-shared-cache.md).
 
-- `rstest` — runs the whole suite.
-- `rstest-changed` — runs only tests affected by the working-tree changes
-  (`rstest --changed`), for a fast per-commit gate.
+If a package is a member of a root uv workspace (one `uv.lock` at the repo
+root, none in the package), set `runner: uv` so the action doesn't fall
+back to pip. Point `working-directory` at a package, never at the monorepo
+root itself: the action caches `<working-directory>/.rstest_cache` and
+uploads a single JUnit file, which is not what a root run writes. The action
+refuses a monorepo root with an error that names the subprojects.
 
-`rstest` defaults to the `pre-push` stage (a full suite is heavy for every
-commit); move it to each commit with `stages: [pre-commit]`.
-
-`rstest-changed` defaults to `pre-commit`, because `--changed` diffs the
-working tree against HEAD — at pre-push everything is already committed, so
-it would select zero tests and pass silently. On CI, set `GITHUB_BASE_REF`
-or `CI_MERGE_REQUEST_*` and `--changed` diffs against the PR base instead.
-
-Pass extra flags with `args`:
-
-```yaml
-      - id: rstest-changed
-        args: ["-q", "--maxfail=1"]
-```
-
+!!! note "When to keep the root run instead"
+    If your packages are **few** (roughly ≤ the runner's core count) the root
+    `cd repo && rstest` from the [Monorepos guide](monorepo.md) is simpler:
+    one job, one merged `--report-json`, per-project `junit.<slug>.xml` (glob
+    `**/junit.*.xml`), and `.rstest_cache` persisted via `actions/cache` on
+    `**/.rstest_cache` (with `!**/.rstest_cache/replay` excluded). It also
+    keeps `--changed`'s cross-package skip logic in one place. Reach for the
+    matrix above when project count outgrows the runner, or when you want the
+    segment-merge shared cache per package. A project-level concurrency cap
+    for the root case is on the roadmap ([Monorepo
+    mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
 
 ## Suite-health trending with doctor
 
 `--doctor-json` writes the doctor analysis as a versioned JSON document
 (see [Suite diagnostics](doctor.md)). Archive it per run and compare a
-PR's report against the main branch's — no extra tooling required, the
+PR's report against the main branch's. No extra tooling is required: the
 document already contains totals, wait-bound tests, parallel-floor gate
 tests, and fixture costs by name.
 
 Any doctor run also publishes the report as markdown to the CI job
-summary automatically — appended to `$GITHUB_STEP_SUMMARY` on GitHub
-Actions, piped to `buildkite-agent annotate` on Buildkite — so the
+summary automatically (appended to `$GITHUB_STEP_SUMMARY` on GitHub
+Actions, piped to `buildkite-agent annotate` on Buildkite), so the
 current run's analysis is on the run page with no post-processing step.
 (GitLab and TeamCity have no native markdown summary; use `--doctor-md`
 and publish the file as an artifact.)
@@ -379,7 +357,7 @@ jobs restore it (GitHub lets PRs read the base branch's cache entries):
         run: rstest -n auto --junitxml junit.xml --doctor-json doctor.json
 
       # Save the baseline on main; restore the latest one on PRs.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: doctor-baseline.json
           key: doctor-baseline-${{ github.sha }}
@@ -422,9 +400,10 @@ Two practical notes:
 
 ## Gating new parallel-unsafe tests with migrate-check
 
-[`--migrate-check`](../reference/cli.md#-migrate-check) exits non-zero when a
-test has a run-to-run unstable id or fails only under parallelism, so a
-dedicated job keeps a migrating suite from regressing — no new co-location
+[`migrate-check`](../reference/cli-commands.md#migrate-check) exits `1` when a
+test has a run-to-run unstable id or fails only under parallelism (and `2`
+when it couldn't judge, so a red job tells you which one to fix), so a
+dedicated job keeps a migrating suite from regressing: no new co-location
 leak, order dependency, or unstable-id site sneaks in green. Use
 `--migrate-allow` to tolerate a triaged backlog so the gate fires only on
 **new** issues, and `--migrate-check-json` to archive the findings
@@ -433,9 +412,9 @@ leak, order dependency, or unstable-id site sneaks in green. Use
 ```yaml
       - name: migrate-check gate
         run: |
-          rstest --migrate-check-json migrate.json \
+          rstest migrate-check --migrate-check-json migrate.json \
                  --migrate-allow tests/legacy/   # known-unsafe backlog, tolerated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: migrate-check
@@ -447,24 +426,232 @@ files under discriminators), so run it on its own job or a schedule rather than
 every push if the suite is large. Once the suite reports `ready`, drop the gate
 and just run `rstest`.
 
+## Replaying a CI-only failure locally
+
+A test that fails on CI but passes on your machine is usually an ordering
+problem: on CI it shared a worker with a test that leaked state, and locally
+the scheduler put them apart. Every parallel run (`-n >= 2`) records which
+worker ran which tests, in what order, to `.rstest_cache/replay/latest.json`.
+Keep that file when a job fails and [`rstest replay`](../reference/cli-commands.md#replay)
+re-runs the same schedule on your machine.
+
+!!! warning "Sharded jobs record no journal"
+    A run with `--shard` (or the action's `shard`/`shard-total` inputs) writes
+    no journal, and neither do `-n 0`/`-n 1` and `--dist each`. To replay a failure from a sharded matrix, re-run the
+    failing shard's tests unsharded with `-n` set to the CI worker count; that
+    run records a journal you can replay.
+
+**1. In CI, upload the journal when the tests fail.** With the bundled action,
+give it an `id` and add one step after it:
+
+```yaml
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+        id: rstest
+        with:
+          python-version: "3.13"
+          args: "-n auto"
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.rstest.outputs.exit-code != '0'
+        with:
+          name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
+          path: .rstest_cache/replay/latest.json
+          if-no-files-found: ignore
+```
+
+The condition reads the action's `exit-code` output, not `failure()`. With
+`fail-under-ratio` set, the action's step can pass while tests failed, and
+`failure()` would then skip the upload. `if-no-files-found: ignore` covers a
+run that recorded nothing (for example `-n auto` resolving to one worker).
+
+The job name and matrix index in the artifact name keep the uploads apart
+when a matrix (Python versions, OSes) fails in several jobs at once:
+`upload-artifact` (v4 and later) refuses a second artifact with the same name
+in a run. Outside a matrix, `strategy.job-index` is `0`.
+
+Where the journal lands:
+
+- **With a `working-directory`**, prefix the path with it
+  (`libs/core/.rstest_cache/replay/latest.json`).
+- **At a monorepo root**, each project records its own journal inside the
+  project directory. Upload them all with a glob and keep the directory
+  layout, so you know which project each came from. `upload-artifact`
+  skips dot-directories such as `.rstest_cache` when it expands a glob, so
+  turn that off, or the step uploads nothing:
+
+    ```yaml
+          path: "**/.rstest_cache/replay/latest.json"
+          include-hidden-files: true
+    ```
+
+    Replay from inside that project's directory, not from the root.
+
+- **With `RSTEST_CACHE` set**, journals move with the cache:
+  `$RSTEST_CACHE/replay/latest.json` for a single project, or
+  `$RSTEST_CACHE/<slug>/replay/latest.json` per project at a monorepo root.
+
+With raw YAML, put the same `upload-artifact` step after your `rstest -n auto`
+step, with `if: failure()`. On other CI systems, save
+`.rstest_cache/replay/latest.json` as a failure artifact the same way you
+save `junit.xml`.
+
+**2. Locally, check out the failing commit and download the journal.**
+
+```console
+$ git checkout <failing-sha>
+$ pip install -r requirements.txt          # same deps as CI (use your lockfile)
+$ gh run download <run-id> -n rstest-replay-tests-0 -D ci-replay   # job "tests", matrix index 0
+```
+
+Run `gh run download <run-id>` with no `-n` to fetch every artifact of the run
+if you're unsure of the name.
+
+**3. Replay it.**
+
+```console
+$ rstest replay --journal ci-replay/latest.json
+rstest: replay: run 18d93d9429580fb015f7d (0.8.0 recorded), 4 worker(s), 22 test(s) across 4 slot(s)
+rstest: replay: args: tests -k 'not slow'
+...
+--- FAILED [gw0] tests/test_m2.py::test_victim ---
+```
+
+Check the `args:` line before the tests start. It shows the pytest
+arguments the CI run was given on the command line (paths, `-k`, `-p` and
+so on), `(none)` if there were none. rstest's own flags such as `-n` are
+not part of it, and neither are `addopts` or `PYTEST_ADDOPTS`, which
+replay reads from your checkout. Replay hands the recorded arguments to
+pytest as they are, so only replay journals from runs you trust
+(see [Security: replay journals](../reference/security.md#replay-journals)).
+To pick the interpreter, put `--python` after the subcommand:
+`rstest replay --journal ci-replay/latest.json --python .venv/bin/python`.
+
+Replay forces the recorded worker count (even on a laptop with fewer cores),
+runs each worker's recorded tests in the recorded order, and turns off reruns
+(`@pytest.mark.flaky` and `[tool.rstest] reruns` included), work stealing and
+shuffling. `@pytest.mark.serial` tests still run alone, after every other
+worker has finished, as they did on CI. A worker that crashes is replaced and
+the replacement picks up where it died. The test args (paths, `-k`, `-m`) come
+from the journal, so pass none. Recorded `--lf`/`--sw` are ignored with a note:
+they would select by your local pytest cache, not CI's. The failing test's `[gwN]` tag tells you which worker
+to look at: the tests that ran before it on that worker hold the likely
+polluter. Once you have a fix, run the same command again. Green means the
+fix holds for the schedule that broke CI.
+
+Things that keep a journal portable:
+
+- **Run from the same directory as CI.** Nodeids are relative to the rootdir,
+  so in a monorepo replay from the package directory the CI job ran in.
+- **Keep test paths inside the project.** Absolute paths under the directory
+  rstest ran in (`$GITHUB_WORKSPACE/tests`) are stored relative to it, so they
+  resolve on your checkout. A path outside it is stored as given; replay
+  warns when such a path doesn't exist on your machine.
+- **Match the code and dependencies.** If the suite changed since the
+  recording, replay says so, runs the tests that still match, and reports how
+  many recorded tests no longer collect. The reproduction may then be lost.
+- **Only parallel runs record.** `-n 0`/`-n 1`, `--dist each` and
+  `--shard` write no journal. A `--collect lazy` run records too, and replay
+  re-runs its schedule with full collection.
+- **Keep journals out of the CI cache.** The bundled action already leaves
+  `.rstest_cache/replay` out of the cache it persists. If you cache
+  `.rstest_cache` yourself (raw YAML, or another CI system's cache), exclude
+  that directory too (`!.rstest_cache/replay` for `actions/cache`). Otherwise
+  every save carries up to 11 journals, several MB each on a large suite, and
+  a job that recorded nothing can upload an older `latest.json` it restored.
+
+Replay reproduces what each worker ran and in what order, which is what
+state-leak and ordering failures depend on. How the workers' timing lines up
+with each other is not reproduced, so a true timing race (two workers touching
+the same file or port at the same moment) may need several replays or may
+not show up at all.
+
 ## Notes
 
-- **Exit codes** are pytest's (0 pass, 1 failures, 2 interrupted, 3
-  internal, 4 usage error, 5 nothing collected) with sensible merging across workers —
-  see [Exit codes](../reference/exit-codes.md).
+- **Exit codes** follow pytest's vocabulary (0 pass, 1 failures, 5 nothing
+  collected, ...), merged across workers. The CI gotcha: when rstest itself
+  rejects a run (a bad flag combination, no usable interpreter) it also exits
+  **1**, the same as test failures, so check the log or the report file, not
+  just the code. The full table and each gating flag's codes are in
+  [Exit codes](../reference/exit-codes.md).
+- **Nothing affected, no reports.** A single-project `--changed` run that
+  selects no tests exits before running and writes no `--junitxml` or
+  `--report-json`. Set `if-no-files-found: ignore` on artifact uploads and make
+  report steps tolerate a missing file. At a monorepo root, `--report-json` is
+  still written, with every project marked `"skipped": true` (exit 0, or 5
+  with `--changed-strict`); no JUnit is written. See
+  [Selecting changed tests](changed.md#ci-usage).
 - **`--junitxml`** is rendered by rstest from merged results; point your
   CI's test-report integration at it as you would pytest's.
 - **`--report-json`** emits a per-test outcome snapshot (stable schema) if
   you build tooling on top of results.
 - **`--output github`** keeps the normal log and additionally emits
   `::error` annotations for each failure, so failures appear inline on the
-  PR diff — see [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
+  PR diff. See [`--output`](../reference/cli.md#-output-dotsverbosebargithubjson).
 - **Crash safety matters most in CI**: a segfaulting test costs one FAILED
   entry instead of an aborted job with partial results.
-- **Worker count**: `-n auto` uses the runner's available logical cores —
-  on Linux it honors the CPU affinity mask and cgroup CPU quota, so a
-  CPU-limited container gets its allocation, not the host's core count. CI
-  runners are small (2–4 cores) and not oversubscribed, so `auto` is the
-  right default there; pin `-n <k>` only if you need a fixed count.
+- **Worker count**: `-n auto` starts from the runner's available cores
+  (on Linux, the count Rust's `available_parallelism` reports, which honors
+  the CPU affinity mask and cgroup quota), then **caps** it: never more
+  workers than test files, and, once durations are cached, roughly one worker
+  per 2 seconds of total test time. That is the right default for a plain run.
+  With `--shard`, pin `-n 2` or more: if `auto` resolves to one worker (a
+  1-vCPU runner, a one-file suite, a warm cache under ~2s), `--shard` fails
+  with exit 1. See [Sharding](sharding.md).
+- **Containers / Kubernetes**: `-n auto` sees a CPU *limit* (a cgroup CPU
+  quota, e.g. `docker run --cpus=2` or a pod `resources.limits.cpu`), but a
+  pod with only a CPU *request* and no limit has no quota, so `auto` counts
+  every core on the node and can start far more workers than the pod is
+  scheduled for. Set `-n` to the CPU request there. Memory scales with the
+  worker count: each worker is its own Python process, so budget roughly
+  (one worker's peak memory) × `-n` against the container's memory limit.
+  When the OOM killer takes a worker, rstest reports it like any worker
+  crash: the running test fails with the crash message, the worker is
+  restarted, and the restart counts against the per-run budget; past that
+  budget, the dead worker's remaining tests are reported lost
+  ([Crash handling: budgets](../concepts/crash-handling.md#budgets)). A job
+  full of crash failures on a memory-limited runner usually means `-n` is too
+  high.
+- **Timeouts**: a hung test otherwise runs until the CI job limit (6 hours
+  on GitHub). Set a per-test [`--timeout SECS`](../reference/cli.md#-timeout-secs)
+  (fails the stuck test with a traceback, and also arms the
+  [`--worker-timeout`](../reference/cli.md#-worker-timeout-secs) watchdog for
+  C code that never returns), and a job-level cap such as `timeout-minutes:`
+  on GitHub Actions. When that cap cancels the job, the runner sends
+  SIGTERM (or SIGINT): a parallel run then stops its workers, names the test
+  each was running and reports it failed (`crashed` in `--report-json`), says
+  how many tests did not run, writes the replay journal and any
+  `--junitxml`/`--report-json`, and exits 2. The stopped tests are not added
+  to `lastfailed`, flake history or the duration cache. A second signal exits
+  at once.
+- **Reproducing order-dependent failures**: `--shuffle` prints its seed;
+  rerun with `--shuffle=SEED` to replay the same order (`rstest replay`
+  re-runs the exact per-worker schedule of the failed run). `rstest bisect
+  <nodeid>` narrows a test that fails only after others down to the
+  polluting test(s).
 - **Colors** are disabled automatically when output is not a terminal;
-  force with `--color=yes` if your CI renders ANSI.
+  force with `--color=yes` (or `FORCE_COLOR=1`, which the workers' assertion
+  diffs honor too) if your CI renders ANSI. A job on a pty with `CI` set
+  (Buildkite, `docker -t`) keeps its colors but gets the plain `dots` log:
+  no live footer and no cursor movement.
+- **Platform**: these recipes are written for Linux runners but work
+  unchanged on `windows-latest` and `macos-latest` (swap the runner image);
+  rstest's full test gate runs on all three every commit. On macOS/Windows
+  `-n auto` starts from the runner's logical cores (the cgroup/affinity
+  narrowing above is Linux-specific), with the same file and time caps.
+  Windows has two behavior differences, both with automatic fallbacks:
+
+    - The per-test timeout has no signal-based interrupt, so a slow test is
+      only stopped by the hang watchdog, at 3 × its timeout + 10 s, which
+      kills its worker. Set `--worker-timeout` for a tighter cap. See
+      [`--timeout`](../reference/cli.md#-timeout-secs).
+    - File-descriptor leak tracking is unavailable (it reads `/proc/self/fd`
+      or `/dev/fd`), so `--doctor` reports thread leaks but not fd leaks. See
+      [Resource leaks](resource-leaks.md).
+
+## Go deeper
+
+- [More CI systems](ci-recipes.md): AWS CodeBuild, Google Cloud Build,
+  GitLab, Azure, CircleCI, Jenkins, Buildkite, and pre-commit.
+- [Shared cache across CI jobs](ci-shared-cache.md): the segment-merge cache
+  for a shard matrix.
+- [Sharding across CI jobs](sharding.md): how partitions are computed and the
+  identical-cache-snapshot rule.

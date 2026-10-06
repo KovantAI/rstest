@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BisectDoc",
+  "description": "The `--bisect-json` document (schema 1). A run that ended without a verdict\n(refused, or an error) carries `error` and no `rootdir`/`cwd`.",
+  "type": "object",
+  "properties": {
+    "culprits": {
+      "description": "The culprit test ids, in the order they run before the victim. Empty\nwhen the victim is not order-dependent or the run ended without a verdict.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cwd": {
+      "description": "Directory `reproduce_command` runs from.",
+      "type": "string"
+    },
+    "error": {
+      "description": "Why the run ended without a verdict (absent on a completed bisect).",
+      "type": "string"
+    },
+    "meta": {
+      "$ref": "#/definitions/BisectMeta"
+    },
+    "nodeid": {
+      "description": "The victim test's node id, relative to `rootdir`.",
+      "type": "string"
+    },
+    "order_dependent": {
+      "description": "Whether the victim fails only after the culprits run first.",
+      "type": "boolean"
+    },
+    "reproduce_command": {
+      "description": "A command that reproduces the failure, or `null` when the victim is\nnot order-dependent.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rootdir": {
+      "description": "The pytest rootdir the node ids are relative to.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "culprits",
+    "meta",
+    "nodeid",
+    "order_dependent",
+    "reproduce_command"
+  ],
+  "definitions": {
+    "BisectMeta": {
+      "description": "Envelope metadata for the bisect document.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Constant discriminator: always `\"bisect\"`.",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "kind",
+        "runner",
+        "schema"
+      ]
+    }
+  }
+}

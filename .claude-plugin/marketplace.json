@@ -1,0 +1,19 @@
+{
+  "name": "rstest",
+  "owner": {
+    "name": "Kovant AI",
+    "url": "https://github.com/KovantAI"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for rstest, the fast, parallel, pytest-compatible Python test runner."
+  },
+  "plugins": [
+    {
+      "name": "rstest",
+      "source": "./plugins/rstest",
+      "description": "Skills for adopting rstest (migrate a pytest suite, make it parallel-safe, speed it up) and for triaging failures on a suite that already runs on rstest (replay, bisect, audit, flaky-test policy).",
+      "category": "testing",
+      "homepage": "https://python-rstest.readthedocs.io/en/stable/"
+    }
+  ]
+}

@@ -1,0 +1,857 @@
+//! Doctor output surfaces: the terminal report, the GitHub-flavored markdown
+//! job summary, and the CI summary sinks (GitHub step summary, Buildkite
+//! annotation). All read-only over a `DoctorReport`.
+
+use super::{DoctorReport, FixtureEntry};
+use crate::reporting::sink::Sink;
+
+/// The tuning hint a fixture hotspot warrants, from its scope + run profile.
+/// The threshold ladder lived verbatim in both the terminal and markdown
+/// renderers; classify once here, let each surface word it (the wordings
+/// differ, so this returns the category, not the text).
+enum FixtureAdvice {
+    /// A function-scoped fixture that returned the same immutable value every
+    /// call, with no per-test teardown or narrower-scoped inputs: a likely
+    /// session-scope candidate that saves real time.
+    PromoteScope,
+    /// A function-scoped fixture that ran often and cost real time, but whose
+    /// value we did not verify constant (heuristic only).
+    WidenScope,
+    /// A session fixture that ran more than once (once per worker).
+    SessionPerWorker,
+    None,
+}
+
+/// Candidates saving less than this are noise (e.g. a cheap constant that
+/// ran a handful of times); the JSON still carries them.
+const MIN_PROMOTION_SAVING_SECONDS: f64 = 0.01;
+
+fn is_promotion_candidate(f: &FixtureEntry) -> bool {
+    f.constant && f.projected_saving_seconds >= MIN_PROMOTION_SAVING_SECONDS
+}
+
+fn fixture_advice(f: &FixtureEntry) -> FixtureAdvice {
+    if is_promotion_candidate(f) {
+        FixtureAdvice::PromoteScope
+    } else if f.scope == "function" && f.count >= 20 && f.total_seconds >= 1.0 {
+        FixtureAdvice::WidenScope
+    } else if f.scope == "session" && f.count > 1 {
+        FixtureAdvice::SessionPerWorker
+    } else {
+        FixtureAdvice::None
+    }
+}
+
+/// The doctor analysis as GitHub-flavored markdown, shaped for a job
+/// summary: same signals as the terminal report, tables instead of
+/// aligned columns.
+pub fn render_markdown(r: &DoctorReport) -> String {
+    use std::fmt::Write;
+
+    let mut md = String::from("## rstest doctor\n\n");
+    if r.tests == 0 {
+        md.push_str("No timing data collected.\n");
+        return md;
+    }
+    let _ = writeln!(
+        md,
+        "**{} tests** — test time {:.1}s (wall {:.1}s, {})\n",
+        r.tests,
+        r.test_time_seconds,
+        r.wall_seconds,
+        workers_label(r.workers)
+    );
+    if let Some(line) = startup_line(r) {
+        let _ = writeln!(md, "{line}\n");
+    }
+
+    if let Some(w) = &r.wait_bound {
+        let _ = writeln!(
+            md,
+            "**Wait-bound:** {:.0}% of test time ({:.1}s) is waiting, not \
+             computing (sleeps / IO / timeouts).\n",
+            w.wait_pct, w.wait_seconds
+        );
+        if !w.tests.is_empty() {
+            md.push_str("| Waiting | Duration | Test |\n|---:|---:|---|\n");
+            for t in w.tests.iter().take(8) {
+                let _ = writeln!(
+                    md,
+                    "| {:.2}s | {:.2}s | `{}` |",
+                    t.wait, t.duration, t.nodeid
+                );
+            }
+            if w.tests.len() > 8 {
+                let _ = writeln!(md, "\n... and {} more", w.tests.len() - 8);
+            }
+            md.push('\n');
+        }
+    }
+
+    if let Some(p) = &r.parallel_floor {
+        let _ = writeln!(
+            md,
+            "**Parallel floor:** the longest test ({:.1}s) exceeds the ideal \
+             per-worker share ({:.1}s at `-n {}`); no worker count can finish \
+             faster than its longest test.\n",
+            p.longest_seconds, p.ideal_share_seconds, r.workers
+        );
+        if !p.gate_tests.is_empty() {
+            md.push_str("| Duration | Gate test |\n|---:|---|\n");
+            for t in p.gate_tests.iter().take(5) {
+                let _ = writeln!(md, "| {:.2}s | `{}` |", t.duration, t.nodeid);
+            }
+            md.push('\n');
+        }
+    }
+
+    if let Some(pe) = &r.parallel_efficiency {
+        let _ = writeln!(
+            md,
+            "**Parallel efficiency:** {:.1}× realized of {}× possible ({:.0}%). \
+             Long pole {:.1}s; {:.0}% load imbalance between busiest and idlest \
+             worker.\n",
+            pe.realized_speedup,
+            pe.ideal_speedup,
+            pe.efficiency_pct,
+            pe.long_pole_seconds,
+            pe.imbalance_pct
+        );
+        if pe.efficiency_pct > 105.0 {
+            md.push_str("> Over 100% means tests overlap beyond core count (wait-bound).\n\n");
+        }
+        if !pe.workers_busy.is_empty() {
+            md.push_str("| Worker | Busy | Tests |\n|---|---:|---:|\n");
+            for w in pe.workers_busy.iter().take(8) {
+                let _ = writeln!(
+                    md,
+                    "| `{}` | {:.2}s | {} |",
+                    w.worker, w.busy_seconds, w.tests
+                );
+            }
+            md.push('\n');
+        }
+    }
+
+    let interesting: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| f.total_seconds >= 0.5)
+        .take(8)
+        .collect();
+    if !interesting.is_empty() {
+        let _ = writeln!(md, "### Fixture hotspots ({})\n", fixture_time_label(r));
+        md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
+        for f in interesting {
+            let advice = match fixture_advice(f) {
+                FixtureAdvice::PromoteScope => format!(
+                    "same value every call; promote to `scope=\"session\"` to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "ran many times; widen scope if value is reusable".to_string()
+                }
+                FixtureAdvice::SessionPerWorker => {
+                    "session fixture ran once per worker; must be safe to duplicate".to_string()
+                }
+                FixtureAdvice::None => String::new(),
+            };
+            let _ = writeln!(
+                md,
+                "| `{}` | {} | {} | {:.1}s | {advice} |",
+                f.name, f.scope, f.count, f.total_seconds
+            );
+        }
+        md.push('\n');
+    }
+
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| is_promotion_candidate(f))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        md.push_str("### Scope-promotion candidates\n\n");
+        md.push_str(
+            "> Function-scoped fixtures that produced the same value on every call. \
+             Promoting to `scope=\"session\"` skips the redundant re-setups \
+             (check the fixture body for side effects first).\n\n",
+        );
+        md.push_str("| Fixture | Runs | Projected saving |\n|---|---:|---:|\n");
+        for f in candidates.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| `{}` | {} | ~{:.2}s |",
+                f.name, f.count, f.projected_saving_seconds
+            );
+        }
+        md.push('\n');
+    }
+
+    if !r.slowest_files.is_empty() {
+        md.push_str("### Slowest files\n\n| File | Time | Share |\n|---|---:|---:|\n");
+        for f in r.slowest_files.iter().take(5) {
+            let _ = writeln!(
+                md,
+                "| `{}` | {:.2}s | {:.0}% |",
+                f.file, f.total_seconds, f.pct
+            );
+        }
+    }
+    if let Some(cw) = &r.coverage_waste {
+        let _ = writeln!(
+            md,
+            "### Coverage waste\n\n> {:.1}s across {} slow test(s) that cover no \
+             line another test doesn't also cover (delete/merge candidates).\n",
+            cw.wasted_seconds, cw.redundant_tests
+        );
+        md.push_str("| Duration | Lines | Shared with | Test |\n|---:|---:|---:|---|\n");
+        for t in cw.tests.iter().take(8) {
+            let _ = writeln!(
+                md,
+                "| {:.2}s | {} | {} | `{}` |",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            );
+        }
+        md.push('\n');
+    }
+    if !r.leaks.is_empty() {
+        md.push_str("### Resource leaks\n\n> Threads/fds a test created that are still open after its teardown.\n\n");
+        md.push_str("| Leaked | Test |\n|---|---|\n");
+        for l in r.leaks.iter().take(10) {
+            let _ = writeln!(md, "| {} | `{}` |", leak_delta(l), l.nodeid);
+        }
+    }
+    md
+}
+
+pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::Result<()> {
+    crate::reporting::write_output(path, render_markdown(report))
+}
+
+/// Publish the markdown report to the CI's job-summary surface, if any:
+/// GitHub Actions appends to `$GITHUB_STEP_SUMMARY`, Buildkite pipes to
+/// `buildkite-agent annotate`. Others: use `--doctor-md` as an artifact.
+pub fn append_ci_summary(sink: &mut Sink, report: &DoctorReport) {
+    // GitHub Actions: append to the step-summary file. Best-effort, like the
+    // Buildkite branch: the summary is cosmetic, and an unwritable path (act,
+    // container jobs that don't mount the runner's file dir) must not turn a
+    // green run red or stop the report files that are written after this.
+    if let Some(path) = std::env::var("GITHUB_STEP_SUMMARY")
+        .ok()
+        .filter(|p| !p.is_empty())
+    {
+        use std::io::Write;
+        let res = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(render_markdown(report).as_bytes()));
+        if let Err(e) = res {
+            sink.warn(&format!(
+                "rstest: skipping the GitHub job summary (GITHUB_STEP_SUMMARY={path}: {e})"
+            ));
+        }
+        return;
+    }
+    // Buildkite: pipe the markdown to the agent as an info annotation.
+    // Best-effort - a missing/failing agent must not fail the test run.
+    if std::env::var("BUILDKITE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some()
+    {
+        buildkite_annotate(sink, &render_markdown(report));
+    }
+}
+
+/// Feed markdown to `buildkite-agent annotate` over stdin. Swallows all
+/// errors (logging to stderr) - see `append_ci_summary`.
+fn buildkite_annotate(sink: &mut Sink, md: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let child = Command::new("buildkite-agent")
+        .args(["annotate", "--style", "info", "--context", "rstest-doctor"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            sink.warn(&format!(
+                "rstest: skipping Buildkite annotation (buildkite-agent: {e})"
+            ));
+            return;
+        }
+    };
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        let _ = stdin.write_all(md.as_bytes());
+    }
+    if let Err(e) = child.wait() {
+        sink.warn(&format!("rstest: buildkite-agent annotate failed: {e}"));
+    }
+}
+
+/// One-line pool-startup summary, or None when there's nothing to say (no pool
+/// spawned, i.e. single-worker). When startup is a notable share of wall on a
+/// multi-worker run, append the `--fork-pool` hint (Unix): that's exactly the
+/// tax the fork-prewarm path cuts.
+fn startup_line(r: &DoctorReport) -> Option<String> {
+    if r.startup_seconds <= 0.0 {
+        return None;
+    }
+    let pct = 100.0 * r.startup_seconds / r.wall_seconds.max(f64::EPSILON);
+    let mut line = format!(
+        "startup: {:.2}s spawning {} workers ({:.0}% of wall)",
+        r.startup_seconds, r.workers, pct
+    );
+    // Advisory only when it matters and isn't already on: a real chunk of a
+    // short multi-worker run, on Unix, without --fork-pool.
+    if cfg!(unix) && !r.fork_prewarm && r.workers > 1 && pct >= 15.0 && r.startup_seconds >= 0.1 {
+        line.push_str(" — try --fork-pool to prewarm the pool");
+    }
+    Some(line)
+}
+
+pub fn render(sink: &mut Sink, r: &DoctorReport) {
+    if r.tests == 0 {
+        sink.out_line("\n== rstest doctor: no timing data collected ==");
+        return;
+    }
+    sink.out_line("\n================== rstest doctor ==================");
+    sink.out_line(&format!(
+        "{} tests, {:.1}s test time (wall {:.1}s, {})",
+        r.tests,
+        r.test_time_seconds,
+        r.wall_seconds,
+        workers_label(r.workers)
+    ));
+
+    if let Some(line) = startup_line(r) {
+        sink.out_line(&line);
+    }
+
+    if let Some(w) = &r.wait_bound {
+        sink.out_line(&format!(
+            "\nWAIT-BOUND: {:.0}% of test time ({:.1}s) is waiting, \
+             not computing (sleeps / IO / timeouts).",
+            w.wait_pct, w.wait_seconds
+        ));
+        for t in w.tests.iter().take(8) {
+            sink.out_line(&format!(
+                "  {:7.2}s waiting of {:7.2}s  {}",
+                t.wait, t.duration, t.nodeid
+            ));
+        }
+        if w.tests.len() > 8 {
+            sink.out_line(&format!("  ... and {} more", w.tests.len() - 8));
+        }
+    }
+
+    if let Some(p) = &r.parallel_floor {
+        sink.out_line(&format!(
+            "\nPARALLEL FLOOR: the longest test ({:.1}s) exceeds the ideal \
+             per-worker share ({:.1}s at -n {});\nno worker count can finish \
+             faster than its longest test. Gate tests:",
+            p.longest_seconds, p.ideal_share_seconds, r.workers
+        ));
+        for t in p.gate_tests.iter().take(5) {
+            sink.out_line(&format!("  {:7.2}s  {}", t.duration, t.nodeid));
+        }
+    }
+
+    if let Some(pe) = &r.parallel_efficiency {
+        sink.out_line(&format!(
+            "\nPARALLEL EFFICIENCY: {:.1}x realized of {}x possible ({:.0}%).",
+            pe.realized_speedup, pe.ideal_speedup, pe.efficiency_pct
+        ));
+        if pe.efficiency_pct > 105.0 {
+            sink.out_line(
+                "  over 100%: tests overlap beyond core count \
+                 (wait-bound; see WAIT-BOUND above).",
+            );
+        }
+        sink.out_line(&format!(
+            "  long pole: {:.1}s (no worker count finishes faster)",
+            pe.long_pole_seconds
+        ));
+        sink.out_line("  worker load (busy time):");
+        for w in pe.workers_busy.iter().take(8) {
+            sink.out_line(&format!(
+                "    {:<8} {:7.2}s ({} tests)",
+                w.worker, w.busy_seconds, w.tests
+            ));
+        }
+        if pe.workers_busy.len() > 8 {
+            sink.out_line(&format!("    ... and {} more", pe.workers_busy.len() - 8));
+        }
+        sink.out_line(&format!(
+            "  imbalance: {:.0}% between busiest and idlest worker",
+            pe.imbalance_pct
+        ));
+    }
+
+    let interesting: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| f.total_seconds >= 0.5)
+        .take(8)
+        .collect();
+    if !interesting.is_empty() {
+        sink.out_line(&format!("\nFIXTURE HOTSPOTS ({}):", fixture_time_label(r)));
+        for f in interesting {
+            let advice = match fixture_advice(f) {
+                FixtureAdvice::PromoteScope => format!(
+                    "  <- same value every call; promote to scope=\"session\" to save ~{:.2}s",
+                    f.projected_saving_seconds
+                ),
+                FixtureAdvice::WidenScope => {
+                    "  <- ran many times; widen scope if value is reusable".to_string()
+                }
+                FixtureAdvice::SessionPerWorker => {
+                    "  <- session fixture ran once PER WORKER; must be safe to duplicate (DBs, servers, ports)".to_string()
+                }
+                FixtureAdvice::None => String::new(),
+            };
+            sink.out_line(&format!(
+                "  {:7.2}s {:6}x  scope={:<8} {}{advice}",
+                f.total_seconds, f.count, f.scope, f.name
+            ));
+        }
+    }
+
+    // Scope-promotion advisor: candidates verified value-constant, listed even
+    // when below the hotspot threshold, sorted by projected saving.
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| is_promotion_candidate(f))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    if !candidates.is_empty() {
+        sink.out_line(
+            "\nSCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):",
+        );
+        for f in candidates.iter().take(8) {
+            sink.out_line(&format!(
+                "  ~{:6.2}s saved  {:6}x  {}  <- @pytest.fixture(scope=\"session\")",
+                f.projected_saving_seconds, f.count, f.name
+            ));
+        }
+        sink.out_line("  (check the fixture body for side effects before promoting)");
+    }
+
+    sink.out_line("\nSLOWEST FILES:");
+    for f in r.slowest_files.iter().take(5) {
+        sink.out_line(&format!(
+            "  {:7.2}s ({:4.1}%)  {}",
+            f.total_seconds, f.pct, f.file
+        ));
+    }
+
+    if let Some(cw) = &r.coverage_waste {
+        sink.out_line(&format!(
+            "\nCOVERAGE WASTE: {:.1}s across {} slow test(s) that cover no line \
+             another test doesn't also cover (delete/merge candidates):",
+            cw.wasted_seconds, cw.redundant_tests
+        ));
+        for t in cw.tests.iter().take(8) {
+            sink.out_line(&format!(
+                "  {:7.2}s  {} line(s), all shared with {} other test(s)  {}",
+                t.duration, t.covered_lines, t.also_covered_by, t.nodeid
+            ));
+        }
+        if cw.redundant_tests > cw.tests.len().min(8) {
+            sink.out_line(&format!(
+                "  ... and {} more",
+                cw.redundant_tests - cw.tests.len().min(8)
+            ));
+        }
+    }
+
+    if !r.leaks.is_empty() {
+        sink.out_line(
+            "\nRESOURCE LEAKS (threads/fds a test created, still open after its teardown):",
+        );
+        for l in r.leaks.iter().take(10) {
+            sink.out_line(&format!("  {}  {}", leak_delta(l), l.nodeid));
+        }
+        if r.leaks.len() > 10 {
+            sink.out_line(&format!("  ... and {} more", r.leaks.len() - 10));
+        }
+        sink.out_line(
+            "  a test opened a thread/fd it never released; leaked state can flake \
+             later tests (reset it, or close in teardown).",
+        );
+    }
+    sink.out_line("===================================================");
+}
+
+/// `+3 threads`, `+5 fds`, or `+3 threads +5 fds` for a leak entry.
+/// Shared by the doctor report and the `--fail-on-leak` gate.
+pub(crate) fn leak_delta(l: &super::Leak) -> String {
+    let mut parts = Vec::new();
+    if l.threads > 0 {
+        parts.push(format!("+{} thread{}", l.threads, plural(l.threads)));
+    }
+    if l.fds > 0 {
+        parts.push(format!("+{} fd{}", l.fds, plural(l.fds)));
+    }
+    parts.join(" ")
+}
+
+/// "1 worker" for a single-worker run (`-n 0` / `-n 1`), else "N workers".
+fn workers_label(n: usize) -> String {
+    if n <= 1 {
+        "1 worker".to_string()
+    } else {
+        format!("{n} workers")
+    }
+}
+
+/// What the fixture-hotspot totals sum over: one worker's setup time on a
+/// single-worker run, every worker's on a pool run.
+fn fixture_time_label(r: &DoctorReport) -> &'static str {
+    if r.workers > 1 {
+        "setup time across all workers"
+    } else {
+        "setup time"
+    }
+}
+
+fn plural(n: i64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testutil::report;
+    use super::*;
+
+    #[test]
+    fn single_worker_wording() {
+        let mut r = report(12);
+        r.workers = 1;
+        r.parallel_efficiency = None;
+        let md = render_markdown(&r);
+        assert!(md.contains("(wall 9.0s, 1 worker)"), "{md}");
+        assert!(md.contains("### Fixture hotspots (setup time)\n"), "{md}");
+        assert!(!md.contains("across all workers"));
+        let (mut sink, buf) = Sink::captured();
+        render(&mut sink, &r);
+        let out = buf.out();
+        assert!(out.contains("(wall 9.0s, 1 worker)"), "{out}");
+        assert!(out.contains("FIXTURE HOTSPOTS (setup time):"), "{out}");
+        assert!(!out.contains("across all workers"));
+    }
+
+    #[test]
+    fn markdown_renders_all_sections() {
+        let md = render_markdown(&report(12));
+        assert!(md.starts_with("## rstest doctor\n"));
+        assert!(md.contains("**12 tests** — test time 30.0s (wall 9.0s, 4 workers)"));
+        assert!(md.contains("**Wait-bound:** 80% of test time (24.0s)"));
+        assert!(md.contains("| 5.00s | 5.10s | `tests/test_a.py::test_sleepy` |"));
+        assert!(md.contains("**Parallel floor:**"));
+        assert!(md.contains("| 8.40s | `tests/test_a.py::test_long` |"));
+        assert!(md.contains("**Parallel efficiency:** 3.3× realized of 4× possible (82%)"));
+        assert!(md.contains("| `gw0` | 16.00s | 6 |"));
+        assert!(md.contains("### Fixture hotspots"));
+        assert!(md.contains("| `db` | session | 4 | 6.1s | session fixture ran once per worker"));
+        // The constant function-scoped `settings` fixture surfaces as a
+        // promotion candidate with its projected saving, and its hotspot row
+        // carries the promote advice.
+        assert!(md.contains("### Scope-promotion candidates"));
+        assert!(md.contains("| `settings` | 40 | ~0.90s |"));
+        assert!(md.contains("promote to `scope=\"session\"` to save ~0.90s"));
+        assert!(md.contains("### Slowest files"));
+        assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
+        assert!(md.contains("### Coverage waste"));
+        assert!(md.contains("12.0s across 1 slow test(s)"));
+        assert!(md.contains("| 12.00s | 40 | 3 | `tests/test_a.py::test_redundant` |"));
+    }
+
+    #[test]
+    fn startup_line_reports_and_hints_conditionally() {
+        // No pool spawned (single-worker): nothing to report.
+        let mut r = report(12);
+        r.startup_seconds = 0.0;
+        assert!(startup_line(&r).is_none());
+
+        // A notable share of a short multi-worker run: line + hint (Unix only).
+        let mut r = report(12);
+        r.startup_seconds = 0.5;
+        r.wall_seconds = 1.0;
+        r.workers = 8;
+        r.fork_prewarm = false;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            line.contains("0.50s spawning 8 workers (50% of wall)"),
+            "{line}"
+        );
+        assert_eq!(
+            line.contains("--fork-pool"),
+            cfg!(unix),
+            "hint gated on unix"
+        );
+
+        // Already forked: report the line, never suggest --fork-pool again.
+        r.fork_prewarm = true;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            !line.contains("--fork-pool"),
+            "no hint when already forked: {line}"
+        );
+
+        // Tiny share: line still shown, but no hint (not worth acting on).
+        let mut r = report(12);
+        r.startup_seconds = 0.02;
+        r.wall_seconds = 9.0;
+        r.fork_prewarm = false;
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            !line.contains("--fork-pool"),
+            "no hint for a tiny share: {line}"
+        );
+    }
+
+    #[test]
+    fn markdown_empty_run() {
+        let md = render_markdown(&report(0));
+        assert!(md.contains("No timing data collected."));
+        assert!(!md.contains("Wait-bound"));
+    }
+
+    // Terminal `render()` mirrors `render_markdown()` but prints to stdout, so
+    // there's nothing to assert on — these drive every branch (the harness
+    // captures stdout) to prove the printing paths don't panic and are covered.
+    #[test]
+    fn render_terminal_populated_and_empty_dont_panic() {
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &report(12)); // full report: every section printed
+        let out = cap.out();
+        assert!(
+            out.contains("COVERAGE WASTE: 12.0s across 1 slow test(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "40 line(s), all shared with 3 other test(s)  tests/test_a.py::test_redundant"
+            ),
+            "{out}"
+        );
+        render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
+    }
+
+    #[test]
+    fn render_truncates_long_lists_after_eight() {
+        use super::super::{FileEntry, GateTest, WaitTest, WorkerLoad};
+        let mut r = report(12);
+        // Push each capped list past 8 so the "... and N more" tails fire in
+        // BOTH the terminal and markdown renderers.
+        if let Some(wb) = r.wait_bound.as_mut() {
+            for i in 0..9 {
+                wb.tests.push(WaitTest {
+                    nodeid: format!("tests/test_a.py::w{i}"),
+                    duration: 1.0,
+                    wait: 0.5,
+                });
+            }
+        }
+        if let Some(pf) = r.parallel_floor.as_mut() {
+            for i in 0..9 {
+                pf.gate_tests.push(GateTest {
+                    nodeid: format!("tests/test_a.py::g{i}"),
+                    duration: 1.0,
+                });
+            }
+        }
+        if let Some(pe) = r.parallel_efficiency.as_mut() {
+            for i in 0..9 {
+                pe.workers_busy.push(WorkerLoad {
+                    worker: format!("gw{i}"),
+                    busy_seconds: 1.0,
+                    tests: 1,
+                });
+            }
+        }
+        for i in 0..9 {
+            r.slowest_files.push(FileEntry {
+                file: format!("tests/test_{i}.py"),
+                total_seconds: 1.0,
+                pct: 1.0,
+            });
+        }
+
+        render(&mut Sink::captured().0, &r);
+        let md = render_markdown(&r);
+        assert!(md.contains("... and")); // truncation tail rendered
+    }
+
+    #[test]
+    fn coverage_waste_terminal_tail_counts_every_unshown_test() {
+        use super::super::WasteTest;
+        let mut r = report(12);
+        let cw = r.coverage_waste.as_mut().unwrap();
+        // 12 redundant tests found, only the 10 slowest kept: the terminal shows
+        // 8 and the tail counts the rest against the full total, not the list.
+        cw.redundant_tests = 12;
+        cw.tests = (0..10)
+            .map(|i| WasteTest {
+                nodeid: format!("tests/test_a.py::dup{i}"),
+                duration: 2.0,
+                covered_lines: 5,
+                also_covered_by: 1,
+            })
+            .collect();
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(out.contains("tests/test_a.py::dup7"), "{out}");
+        assert!(!out.contains("tests/test_a.py::dup8"), "{out}");
+        assert!(out.contains("  ... and 4 more"), "{out}");
+    }
+
+    #[test]
+    fn markdown_coverage_waste_without_slowest_files() {
+        let mut r = report(12);
+        r.slowest_files.clear();
+        let md = render_markdown(&r);
+        assert!(!md.contains("### Slowest files"));
+        assert!(md.contains("### Coverage waste"));
+    }
+
+    #[test]
+    fn no_coverage_index_omits_coverage_waste_section() {
+        let mut r = report(12);
+        r.coverage_waste = None;
+        assert!(!render_markdown(&r).contains("Coverage waste"));
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(!cap.out().contains("COVERAGE WASTE"));
+    }
+
+    #[test]
+    fn leak_delta_pluralizes_and_combines() {
+        use super::super::Leak;
+        let d = |threads, fds| {
+            leak_delta(&Leak {
+                nodeid: "t".into(),
+                threads,
+                fds,
+            })
+        };
+        assert_eq!(d(1, 0), "+1 thread"); // singular, threads only
+        assert_eq!(d(3, 0), "+3 threads"); // plural
+        assert_eq!(d(0, 1), "+1 fd"); // singular, fds only
+        assert_eq!(d(0, 5), "+5 fds"); // plural
+        assert_eq!(d(3, 2), "+3 threads +2 fds"); // both combined
+        assert_eq!(d(0, 0), ""); // nothing positive
+    }
+
+    #[test]
+    fn leaks_render_in_terminal_and_markdown() {
+        use super::super::Leak;
+        let mut r = report(12);
+        r.leaks = vec![
+            Leak {
+                nodeid: "tests/test_pool.py::test_executor".into(),
+                threads: 3,
+                fds: 0,
+            },
+            Leak {
+                nodeid: "tests/test_io.py::test_reader".into(),
+                threads: 0,
+                fds: 5,
+            },
+        ];
+        render(&mut Sink::captured().0, &r); // exercises the terminal RESOURCE LEAKS branch
+        let md = render_markdown(&r);
+        assert!(md.contains("### Resource leaks"));
+        assert!(md.contains("| +3 threads | `tests/test_pool.py::test_executor` |"));
+        assert!(md.contains("| +5 fds | `tests/test_io.py::test_reader` |"));
+    }
+
+    #[test]
+    fn terminal_leaks_truncate_past_ten() {
+        use super::super::Leak;
+        let mut r = report(30);
+        // 12 leaks: terminal caps at 10 and prints a "... and 2 more" tail.
+        r.leaks = (0..12)
+            .map(|i| Leak {
+                nodeid: format!("t.py::leak{i}"),
+                threads: 1,
+                fds: 0,
+            })
+            .collect();
+        render(&mut Sink::captured().0, &r); // exercises the len > 10 truncation-tail branch
+    }
+
+    /// Covers every `FixtureAdvice` arm plus candidate sorting (needs two or
+    /// more candidates) in both the terminal and markdown renderers.
+    #[test]
+    fn fixture_advice_arms_and_candidate_order() {
+        use super::super::FixtureEntry;
+        let mut r = report(12);
+        let entry = |name: &str, count, total, constant, saving| FixtureEntry {
+            name: name.into(),
+            scope: "function".into(),
+            count,
+            total_seconds: total,
+            constant,
+            projected_saving_seconds: saving,
+        };
+        r.fixtures.extend([
+            // Many runs, real time, value not verified constant => widen.
+            entry("client", 25, 2.0, false, 0.0),
+            // Hotspot by time but too few runs for any advice.
+            entry("tmpdir", 2, 0.6, false, 0.0),
+            // Second candidate, smaller saving: must sort after `settings`.
+            entry("config", 30, 0.3, true, 0.3),
+        ]);
+
+        let md = render_markdown(&r);
+        assert!(md.contains("| `client` | function | 25 | 2.0s | ran many times; widen scope if value is reusable |"));
+        assert!(md.contains("| `tmpdir` | function | 2 | 0.6s |  |"));
+        let (settings, config) = (
+            md.find("| `settings` | 40 | ~0.90s |").unwrap(),
+            md.find("| `config` | 30 | ~0.30s |").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
+
+        let (mut sink, captured) = Sink::captured();
+        render(&mut sink, &r);
+        let out = captured.out();
+        assert!(out.contains(
+            "scope=function client  <- ran many times; widen scope if value is reusable"
+        ));
+        let tmpdir = out.lines().find(|l| l.contains("tmpdir")).unwrap();
+        assert!(
+            tmpdir.ends_with("scope=function tmpdir"),
+            "no advice: {tmpdir:?}"
+        );
+        let (settings, config) = (
+            out.find("40x  settings  <- @pytest.fixture").unwrap(),
+            out.find("30x  config  <- @pytest.fixture").unwrap(),
+        );
+        assert!(
+            settings < config,
+            "candidates sorted by saving, largest first"
+        );
+    }
+}

@@ -31,8 +31,9 @@ import re
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
+
+import tomllib  # stdlib on 3.11+, this script's runtime
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -43,8 +44,9 @@ RESULTS = HERE / "results.json"
 PHASE_TIMEOUT = 2400  # seconds, per pytest/rstest run
 # Baseline pytest is PINNED to the version rstest vendors: a newer pytest
 # in the baseline venv produces version-skew collection diffs that look
-# like rstest bugs (seen with packaging/jsonschema on pytest 9.1).
-PYTEST_PIN = "pytest==9.0.3"
+# like rstest bugs (seen with packaging/jsonschema on pytest 9.1). rstest
+# 0.5.0 vendors pytest 9.1.1, so the baseline matches it.
+PYTEST_PIN = "pytest==9.1.1"
 NET_TIMEOUT = 900  # seconds, per clone / install step
 
 T0 = time.monotonic()
@@ -63,6 +65,20 @@ def sh(args, cwd=None, env=None, timeout=PHASE_TIMEOUT):
         capture_output=True,
         text=True,
     )
+
+
+def _strip_opt(args, opt):
+    """Drop an `--opt value` pair (e.g. `-n 4`) from an args list."""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == opt:
+            skip = True
+            continue
+        out.append(a)
+    return out
 
 
 def load_lock():
@@ -111,6 +127,14 @@ class Suite:
         if r.returncode != 0:
             raise RuntimeError(f"install failed: {specs}\n{r.stderr[-800:]}")
 
+    def plugin_versions(self):
+        """The pytest plugins installed in this suite's venv (offline), as
+        `[{name, version, requires_pytest}]`; see corpus/plugin_probe.py."""
+        r = sh([str(self.venv / "bin" / "python"), str(HERE / "plugin_probe.py")])
+        if r.returncode != 0:
+            raise RuntimeError(f"plugin probe failed: {r.stderr[-400:]}")
+        return json.loads(r.stdout)
+
     # -- PREPARE (network) ------------------------------------------------
     def fetch(self, lock):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -131,11 +155,19 @@ class Suite:
         if r.returncode != 0:
             raise RuntimeError(f"clone failed: {r.stderr[-400:]}")
         if pinned:
-            r = sh(["git", "fetch", "--depth", "1", "origin", pinned], cwd=self.src, timeout=NET_TIMEOUT)
+            r = sh(
+                ["git", "fetch", "--depth", "1", "origin", pinned],
+                cwd=self.src,
+                timeout=NET_TIMEOUT,
+            )
             if r.returncode == 0:
                 sh(["git", "checkout", pinned], cwd=self.src)
                 if self.cfg.get("submodules"):
-                    sh(["git", "submodule", "update", "--init", "--depth", "1"], cwd=self.src, timeout=NET_TIMEOUT)
+                    sh(
+                        ["git", "submodule", "update", "--init", "--depth", "1"],
+                        cwd=self.src,
+                        timeout=NET_TIMEOUT,
+                    )
         sha = sh(["git", "rev-parse", "HEAD"], cwd=self.src).stdout.strip()
         log(f"  {self.name}: at {sha[:12]}")
         return sha
@@ -188,6 +220,15 @@ class Suite:
                 if last:
                     raise last
         self.pip(PYTEST_PIN, str(self.wheel))
+        # Optional compat shim: a rootdir conftest.py written into the checkout,
+        # loaded before collection by BOTH runners (same src), so parity holds.
+        # Used to re-provide a private pytest symbol a pinned suite still imports
+        # but the vendored/baseline pytest has since removed (e.g. flask's
+        # `_pytest.monkeypatch.notset`, dropped in 9.1).
+        shim = self.cfg.get("root_conftest")
+        if shim and self.mode != "pyargs":
+            (self.src / "conftest.py").write_text(shim)
+            log(f"  {self.name}: wrote compat conftest.py")
         log(f"  {self.name}: prepared")
 
     def apply_mono_policy(self):
@@ -213,7 +254,7 @@ class Suite:
                 flags = " ".join(f"-p no:{name}" for name in disable)
                 text = re.sub(
                     r'addopts\s*=\s*"([^"]*)"',
-                    lambda m: f'addopts = "{m.group(1)} {flags}"',
+                    lambda m, flags=flags: f'addopts = "{m.group(1)} {flags}"',
                     text,
                     count=1,
                 )
@@ -227,28 +268,45 @@ class Suite:
             return ["--pyargs", self.cfg["package"], *args]
         return args
 
-    def run_pytest(self):
+    def run_pytest(self, xdist_workers=None):
+        """Baseline run. `xdist_workers` (bench only) runs it under pytest-xdist
+        at that -n instead, into its own snapshot, so the serial baseline is
+        never overwritten."""
         if self.mode == "mono":
+            if xdist_workers is not None:
+                raise RuntimeError("xdist series is not supported in mono mode")
             return self.run_pytest_mono()
-        snap = self.dir / "pytest.json"
+        snap = self.dir / ("pytest.json" if xdist_workers is None else "xdist.json")
         env = self.env()
         env["PYTHONPATH"] = str(HERE)  # recorder plugin
         env["RSTEST_RECORD"] = str(snap)
         # Drop any prior snapshot: a failed run that writes nothing must NOT be
         # silently diffed against a stale file (it reads as bogus parity).
         snap.unlink(missing_ok=True)
-        log(f"  {self.name}: pytest baseline starting")
+        xdist = [] if xdist_workers is None else ["-n", str(xdist_workers)]
+        label = "pytest" if xdist_workers is None else f"xdist -n {xdist_workers}"
+        log(f"  {self.name}: {label} starting")
         t0 = time.monotonic()
         r = sh(
-            [str(self.venv / "bin" / "python"), "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
+            [
+                str(self.venv / "bin" / "python"),
+                "-m",
+                "pytest",
+                "-p",
+                "recorder",
+                "-q",
+                *xdist,
+                *self.target_args(),
+            ],
             cwd=self.cwd(),
             env=env,
         )
         wall = time.monotonic() - t0
-        log(f"  {self.name}: pytest done in {wall:.1f}s (rc={r.returncode})")
+        log(f"  {self.name}: {label} done in {wall:.1f}s (rc={r.returncode})")
         if not snap.exists():
             raise RuntimeError(
-                f"pytest produced no snapshot (rc={r.returncode})\n{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
+                f"pytest produced no snapshot (rc={r.returncode})\n"
+                f"{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
             )
         return snap, wall
 
@@ -261,9 +319,7 @@ class Suite:
         # stale on-disk pyproject and the rstest candidate would measure a
         # different set than the (in-memory) baseline loop.
         projects_toml = ", ".join(f'"{p}"' for p in self.cfg["projects"])
-        (self.src / "pyproject.toml").write_text(
-            f"[tool.rstest]\nprojects = [{projects_toml}]\n"
-        )
+        (self.src / "pyproject.toml").write_text(f"[tool.rstest]\nprojects = [{projects_toml}]\n")
 
     def run_pytest_mono(self):
         # The native workflow: pytest has no monorepo mode, so the baseline is
@@ -284,7 +340,14 @@ class Suite:
             snap.unlink(missing_ok=True)  # never diff against a stale snapshot
             log(f"  {self.name}: pytest baseline starting ({proj})")
             t0 = time.monotonic()
-            r = sh([py, "-m", "pytest", "-p", "recorder", "-q"], cwd=proj_dir, env=env)
+            # target_args() (the suite's `args`, e.g. a `-W` filter) must ride
+            # the mono baseline too, or it diverges from the rstest candidate
+            # (which always forwards them) and reads as a false parity drop.
+            r = sh(
+                [py, "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
+                cwd=proj_dir,
+                env=env,
+            )
             wall = time.monotonic() - t0
             total += wall
             log(f"  {self.name}: pytest {proj} done in {wall:.1f}s (rc={r.returncode})")
@@ -301,34 +364,41 @@ class Suite:
         merged.write_text(json.dumps(combined, sort_keys=True))
         return merged, total
 
-    def run_rstest(self):
+    def rstest_argv(self, snap, workers=None):
+        extra = list(self.cfg.get("rstest_args", []))
+        # `workers` (bench worker-sweep) is authoritative: strip any `-n N` from
+        # the per-suite rstest_args and pin the requested count. Default (None)
+        # keeps the suite's own policy, falling back to rstest's own `-n auto`.
+        if workers is not None:
+            extra = _strip_opt(extra, "-n")
+            extra += ["-n", str(workers)]
+        return [
+            str(self.rstest_bin),
+            "--report-json",
+            str(snap),
+            # hang backstop: a stuck suite becomes failures, not a stall
+            "--worker-timeout",
+            "120",
+            *extra,
+            *self.target_args(),
+        ]
+
+    def run_rstest(self, workers=None):
         snap = self.dir / "rstest.json"
         # Drop any prior snapshot: rstest exits non-zero and writes nothing on a
         # fatal error (e.g. no usable interpreter). A leftover file would pass
         # the exists() check below and get diffed as bogus parity.
         snap.unlink(missing_ok=True)
-        log(f"  {self.name}: rstest starting (-n auto, --worker-timeout 120)")
+        nlabel = f"-n {workers}" if workers is not None else "-n auto"
+        log(f"  {self.name}: rstest starting ({nlabel}, --worker-timeout 120)")
         t0 = time.monotonic()
-        extra = self.cfg.get("rstest_args", [])
-        r = sh(
-            [
-                str(self.rstest_bin),
-                "--report-json",
-                str(snap),
-                # hang backstop: a stuck suite becomes failures, not a stall
-                "--worker-timeout",
-                "120",
-                *extra,
-                *self.target_args(),
-            ],
-            cwd=self.cwd(),
-            env=self.env(),
-        )
+        r = sh(self.rstest_argv(snap, workers), cwd=self.cwd(), env=self.env())
         wall = time.monotonic() - t0
         log(f"  {self.name}: rstest done in {wall:.1f}s (rc={r.returncode})")
         if not snap.exists():
             raise RuntimeError(
-                f"rstest produced no snapshot (rc={r.returncode})\n{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
+                f"rstest produced no snapshot (rc={r.returncode})\n"
+                f"{(r.stdout or '')[-600:]}\n{(r.stderr or '')[-400:]}"
             )
         return snap, wall
 
@@ -351,8 +421,12 @@ def _norm(nodeid):
 
 
 def diff(baseline_path, candidate_path):
-    a = json.loads(Path(baseline_path).read_text())["tests"]
-    b = json.loads(Path(candidate_path).read_text())["tests"]
+    # Read each snapshot ONCE: the bench's gate needs collect-error counts too,
+    # so surface them here rather than re-parsing the same files downstream.
+    da = json.loads(Path(baseline_path).read_text())
+    db = json.loads(Path(candidate_path).read_text())
+    a = da["tests"]
+    b = db["tests"]
     keys = ("setup", "call", "teardown", "wasxfail")
     only_a = sorted(set(a) - set(b))
     only_b = sorted(set(b) - set(a))
@@ -385,6 +459,13 @@ def diff(baseline_path, candidate_path):
     only_b = [nid for c in norm_b.values() for nid in c]
     agree = len(set(a) & set(b)) - len(mismatch) + unstable_pairs
     denom = max(len(set(a) | set(b)) - unstable_pairs, 1)
+    # Of the candidate-only ("extra") tests, how many come from a module the
+    # BASELINE failed to collect? Those are explained: rstest rescued a module
+    # the drifting baseline dropped. Any extra from a module the baseline DID
+    # collect is unexplained — phantom over-collection, a real rstest fault. The
+    # bench's superset carve-out keys off this so it can't waive that fault.
+    base_ce_modules = {c.split("::", 1)[0] for c in da.get("collect_errors", [])}
+    extra_unexplained = sum(1 for nid in only_b if nid.split("::", 1)[0] not in base_ce_modules)
     return {
         "baseline_tests": len(a),
         "candidate_tests": len(b),
@@ -395,8 +476,22 @@ def diff(baseline_path, candidate_path):
         "mismatch": sorted(mismatch)[:20],
         "mismatch_count": len(mismatch),
         "unstable_id_pairs": unstable_pairs,
+        "baseline_collect_errors": len(da.get("collect_errors", [])),
+        "candidate_collect_errors": len(db.get("collect_errors", [])),
+        "extra_unexplained_count": extra_unexplained,
         "score": round(100.0 * agree / denom, 2),
     }
+
+
+def _record_plugins(suite, res):
+    """Record the suite venv's plugin versions into its result row. Plugins
+    install unpinned, so versions move between runs; the docs' plugin-version
+    tables are refreshed from this (corpus/plugin_versions.py). A probe
+    failure is logged and never costs the suite its run."""
+    try:
+        res["plugins"] = suite.plugin_versions()
+    except Exception as e:
+        log(f"  {suite.name}: plugin probe failed: {str(e)[:200]}")
 
 
 def main():
@@ -406,10 +501,14 @@ def main():
     ap.add_argument("--wheel", default=None, help="rstest wheel (default: newest in target/wheels)")
     ap.add_argument("--rstest", default=str(REPO / "target" / "release" / "rstest"))
     ap.add_argument("--prepare-only", action="store_true", help="network phase only")
-    ap.add_argument("--execute-only", action="store_true", help="offline phase only (assumes prepared)")
+    ap.add_argument(
+        "--execute-only", action="store_true", help="offline phase only (assumes prepared)"
+    )
     args = ap.parse_args()
 
-    wheel = args.wheel or max(glob.glob(str(REPO / "target" / "wheels" / "rstest-*.whl")), key=os.path.getmtime)
+    wheel = args.wheel or max(
+        glob.glob(str(REPO / "target" / "wheels" / "rstest-*.whl")), key=os.path.getmtime
+    )
     suites_cfg = tomllib.loads((HERE / "suites.toml").read_text())
     if args.only:
         keep = set(args.only.split(","))
@@ -420,7 +519,7 @@ def main():
 
     suites = {name: Suite(name, cfg, wheel, args.rstest) for name, cfg in suites_cfg.items()}
     lock = load_lock()
-    results = {name: {"suite": name} for name in suites}
+    results: dict[str, dict[str, object]] = {name: {"suite": name} for name in suites}
 
     # ---------- PHASE 1: PREPARE (all network) ----------
     if not args.execute_only:
@@ -434,10 +533,11 @@ def main():
                     results[name]["commit"] = sha[:12]
                 suite.install()
                 results[name]["prepared"] = True
+                _record_plugins(suite, results[name])
             except subprocess.TimeoutExpired as e:
                 results[name].update(status="prepare-timeout", error=str(e.cmd[:3]))
                 log(f"  {name}: PREPARE TIMEOUT")
-            except Exception as e:  # noqa: BLE001 — resilient by design
+            except Exception as e:
                 results[name].update(status="prepare-error", error=str(e)[:600])
                 log(f"  {name}: PREPARE FAILED: {str(e)[:200]}")
             save_lock(lock)
@@ -458,6 +558,8 @@ def main():
             res.setdefault("status", "not-prepared")
             continue
         log(f"[{i}/{len(suites)}] execute {name}")
+        if "plugins" not in res:  # --execute-only: PREPARE didn't record them
+            _record_plugins(suite, res)
         try:
             base, base_wall = suite.run_pytest()
             res["pytest_wall"] = round(base_wall, 1)
@@ -469,7 +571,7 @@ def main():
         except subprocess.TimeoutExpired as e:
             res.update(status="timeout", error=str(e.cmd[:3]))
             log(f"  {name}: EXECUTE TIMEOUT")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             res.update(status="error", error=str(e)[:600])
             log(f"  {name}: EXECUTE FAILED: {str(e)[:200]}")
         RESULTS.write_text(json.dumps(list(results.values()), indent=1))

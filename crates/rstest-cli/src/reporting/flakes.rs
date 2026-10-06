@@ -1,0 +1,298 @@
+//! Cross-run flake history: `.rstest_cache/flakes.json` in the cwd.
+//! `--reruns` forgets a flake when the run ends; this log is the memory.
+//! Sparse (only tests that flaked/failed), feeds history + `--quarantine`.
+
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
+use crate::cache;
+use crate::reporting::report::Run;
+
+pub const FILE: &str = "flakes.json";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct FlakeStats {
+    /// Runs where the test passed only after rerun(s).
+    #[serde(default)]
+    pub flaky: u32,
+    /// Runs where the test hard-failed (quarantined failures included).
+    #[serde(default)]
+    pub failed: u32,
+    /// Unix epoch of the last recorded event (flake or failure).
+    #[serde(default)]
+    pub last_epoch: u64,
+    /// Unix epoch of the last hard failure. 0 = none, or a cache written
+    /// before this field existed (readers then fall back to
+    /// `last_epoch` when `failed` is non-zero).
+    #[serde(default)]
+    pub last_failed_epoch: u64,
+}
+
+impl FlakeStats {
+    /// When the test last hard-failed. Older caches lack `last_failed_epoch`,
+    /// so a recorded failure falls back to `last_epoch` (best available).
+    pub fn failed_epoch(&self) -> u64 {
+        match (self.failed, self.last_failed_epoch) {
+            (0, _) => 0,
+            (_, 0) => self.last_epoch,
+            (_, t) => t,
+        }
+    }
+}
+
+/// Seconds a flake/failure record stays relevant. A test with no event inside
+/// this window reads as fixed and its entry is dropped, so long-green tests
+/// stop carrying "flaked Nx before" annotations. Override with
+/// `RSTEST_FLAKE_RETENTION_DAYS`; `0` disables aging (keep forever).
+fn retention_secs() -> u64 {
+    parse_retention(std::env::var("RSTEST_FLAKE_RETENTION_DAYS").ok())
+}
+
+/// Pure retention parse: days string -> seconds, defaulting to 90 days when
+/// unset or unparseable. Split out so the policy is testable without env.
+fn parse_retention(raw: Option<String>) -> u64 {
+    const DEFAULT_DAYS: u64 = 90;
+    let days = raw
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DAYS);
+    days.saturating_mul(24 * 60 * 60)
+}
+
+/// Drop entries whose last event predates the retention window. Pure so the
+/// aging policy is testable without a clock. `max_age == 0` disables aging.
+/// `saturating_sub` means a zeroed/future `last_epoch` (bad clock, skew) is
+/// retained, never wiped.
+fn retain_recent(log: &mut HashMap<String, FlakeStats>, now: u64, max_age: u64) {
+    if max_age == 0 {
+        return;
+    }
+    log.retain(|_, e| now.saturating_sub(e.last_epoch) <= max_age);
+}
+
+pub fn load() -> HashMap<String, FlakeStats> {
+    load_from(&cache::file(FILE))
+}
+
+/// `load` against an explicit `flakes.json` path, with the same retention aging.
+pub fn load_from(path: &std::path::Path) -> HashMap<String, FlakeStats> {
+    let mut log: HashMap<String, FlakeStats> = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    retain_recent(&mut log, crate::time::now_epoch_secs(), retention_secs());
+    log
+}
+
+/// Node ids with a recorded *flaky* history (`flaky > 0`) — tests that have
+/// passed-after-rerun on some past run. This is the candidate set for
+/// `--reruns-only-known-flaky`: a hard-failure-only history (`failed > 0`,
+/// `flaky == 0`) is deliberately excluded, so a deterministic mass-failure
+/// (one root cause failing many tests identically, recorded as `failed`) is
+/// never treated as known-flaky and does not consume the rerun budget.
+pub fn known_flaky() -> HashSet<String> {
+    filter_known_flaky(load())
+}
+
+fn filter_known_flaky(log: HashMap<String, FlakeStats>) -> HashSet<String> {
+    log.into_iter()
+        .filter(|(_, s)| s.flaky > 0)
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Fold `(nodeid, was_flaky)` events into the history: `was_flaky` bumps the
+/// flaky counter, otherwise the failed counter, and every touched entry's
+/// `last_epoch` advances to `now`. Pure (no clock, no IO) so the tallying is
+/// testable in isolation from the load/save round-trip in `record`.
+fn merge_events(log: &mut HashMap<String, FlakeStats>, events: &[(&String, bool)], now: u64) {
+    for &(nodeid, was_flaky) in events {
+        let e = log.entry(nodeid.clone()).or_default();
+        if was_flaky {
+            e.flaky += 1;
+        } else {
+            e.failed += 1;
+            e.last_failed_epoch = now;
+        }
+        e.last_epoch = now;
+    }
+}
+
+/// Merge this run's flake/failure events over the stored history.
+/// Best-effort like the duration cache: IO errors are ignored.
+pub fn record(run: &Run) {
+    let mut events: Vec<(&String, bool)> = Vec::new();
+    for (nodeid, _) in &run.flaky {
+        events.push((nodeid, true));
+    }
+    for nodeid in run.history_failed_nodeids() {
+        events.push((nodeid, false));
+    }
+    if events.is_empty() {
+        return;
+    }
+    let now = crate::time::now_epoch_secs();
+    // Hold the cache lock across load→merge→write: flake counts ACCUMULATE, so a
+    // lost update here doesn't just stale a value, it drops a run's +1 events
+    // entirely. load() has already dropped entries past the retention window, so
+    // writing the merged map back garbage-collects the file on any event run.
+    cache::with_lock(|| {
+        let mut log = load();
+        merge_events(&mut log, &events, now);
+        if let Ok(bytes) = serde_json::to_vec(&log) {
+            let _ = cache::write_atomic(&cache::file(FILE), &bytes);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_flaky_keys_on_flaky_not_failed() {
+        let mut log = HashMap::new();
+        log.insert(
+            "a::flaked".into(),
+            FlakeStats {
+                flaky: 2,
+                failed: 0,
+                last_epoch: 1,
+                last_failed_epoch: 0,
+            },
+        );
+        // Hard-failure-only history must NOT count as known-flaky — this is
+        // what keeps a deterministic mass-failure from burning the budget.
+        log.insert(
+            "b::failed_only".into(),
+            FlakeStats {
+                flaky: 0,
+                failed: 9,
+                last_epoch: 1,
+                last_failed_epoch: 0,
+            },
+        );
+        log.insert(
+            "c::both".into(),
+            FlakeStats {
+                flaky: 1,
+                failed: 3,
+                last_epoch: 1,
+                last_failed_epoch: 0,
+            },
+        );
+        let set = filter_known_flaky(log);
+        assert!(set.contains("a::flaked"));
+        assert!(set.contains("c::both"));
+        assert!(!set.contains("b::failed_only"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn merge_events_tallies_flaky_and_failed_separately() {
+        let a = "a::t".to_string();
+        let b = "b::t".to_string();
+        let mut log = HashMap::new();
+        // Two flaky events for a, one failure for b.
+        merge_events(&mut log, &[(&a, true), (&a, true), (&b, false)], 7);
+        assert_eq!(log[&a].flaky, 2, "each flaky event increments by exactly 1");
+        assert_eq!(log[&a].failed, 0, "flaky events must not touch failed");
+        assert_eq!(log[&b].failed, 1);
+        assert_eq!(log[&b].flaky, 0, "failure events must not touch flaky");
+        assert_eq!(log[&a].last_epoch, 7);
+        assert_eq!(log[&b].last_epoch, 7);
+    }
+
+    #[test]
+    fn merge_events_accumulates_over_prior_history() {
+        let a = "a::t".to_string();
+        let mut log = HashMap::from([(
+            a.clone(),
+            FlakeStats {
+                flaky: 5,
+                failed: 1,
+                last_epoch: 1,
+                last_failed_epoch: 0,
+            },
+        )]);
+        merge_events(&mut log, &[(&a, true), (&a, false)], 42);
+        // +1 on top of the stored 5/1 — pins that the op is add, not set/sub/mul.
+        assert_eq!(log[&a].flaky, 6);
+        assert_eq!(log[&a].failed, 2);
+        assert_eq!(log[&a].last_epoch, 42);
+        assert_eq!(log[&a].last_failed_epoch, 42);
+    }
+
+    #[test]
+    fn failed_epoch_prefers_field_and_falls_back_for_old_caches() {
+        let e = |failed, last_epoch, last_failed_epoch| FlakeStats {
+            failed,
+            last_epoch,
+            last_failed_epoch,
+            ..Default::default()
+        };
+        assert_eq!(e(1, 900, 100).failed_epoch(), 100);
+        // Pre-field cache: no last_failed_epoch, fall back to last_epoch.
+        assert_eq!(e(1, 900, 0).failed_epoch(), 900);
+        // Never hard-failed.
+        assert_eq!(e(0, 900, 0).failed_epoch(), 0);
+        // Old JSON without the field still deserializes.
+        let old: FlakeStats =
+            serde_json::from_str(r#"{"flaky":0,"failed":2,"last_epoch":5}"#).unwrap();
+        assert_eq!(old.failed_epoch(), 5);
+    }
+
+    fn entry(last_epoch: u64) -> FlakeStats {
+        FlakeStats {
+            flaky: 1,
+            failed: 0,
+            last_epoch,
+            last_failed_epoch: 0,
+        }
+    }
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    #[test]
+    fn drops_entries_past_window_keeps_recent() {
+        let now = 100 * DAY;
+        let mut log = HashMap::from([
+            ("stale".to_string(), entry(now - 91 * DAY)), // older than 90d
+            ("edge".to_string(), entry(now - 90 * DAY)),  // exactly at window
+            ("fresh".to_string(), entry(now - DAY)),
+        ]);
+        retain_recent(&mut log, now, 90 * DAY);
+        assert!(!log.contains_key("stale"), "past-window entry must drop");
+        assert!(log.contains_key("edge"), "at-window entry must stay");
+        assert!(log.contains_key("fresh"));
+    }
+
+    #[test]
+    fn max_age_zero_disables_aging() {
+        let now = 1_000 * DAY;
+        let mut log = HashMap::from([("ancient".to_string(), entry(0))]);
+        retain_recent(&mut log, now, 0);
+        assert!(log.contains_key("ancient"), "0 window keeps everything");
+    }
+
+    #[test]
+    fn bad_clock_or_future_epoch_is_retained_not_wiped() {
+        // now behind the recorded epoch (skew) -> saturating_sub == 0 -> keep.
+        let mut log = HashMap::from([("future".to_string(), entry(500 * DAY))]);
+        retain_recent(&mut log, 100 * DAY, 90 * DAY);
+        assert!(log.contains_key("future"), "future epoch must not be wiped");
+    }
+
+    #[test]
+    fn retention_parse_override_and_defaults() {
+        assert_eq!(parse_retention(Some("7".into())), 7 * DAY);
+        assert_eq!(parse_retention(Some("0".into())), 0, "0 -> disabled");
+        assert_eq!(parse_retention(None), 90 * DAY, "unset -> 90d default");
+        assert_eq!(
+            parse_retention(Some("garbage".into())),
+            90 * DAY,
+            "unparseable -> default"
+        );
+    }
+}

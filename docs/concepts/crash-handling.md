@@ -1,7 +1,7 @@
 # Crash handling
 
-A test that kills its worker process — a segfaulting C extension, an
-`os._exit`, an OOM kill — costs one FAILED line, not the run.
+A test that kills its worker process (a segfaulting C extension, an
+`os._exit`, an OOM kill) costs one FAILED line, not the run.
 
 ## Attribution
 
@@ -12,41 +12,70 @@ this from its queue, which can misattribute; the explicit signal cannot.)
 ## What happens
 
 1. The in-flight test is reported **failed**, with a "crashed while
-   running this test" message. It is **not retried** by default — a
+   running this test" message. It is **not retried** by default: a
    reliably-segfaulting test would otherwise kill workers in a loop.
-   With [`--reruns`](../reference/cli.md#-reruns-n), it gets retried on
-   the replacement worker within the rerun budget.
+   With [`--reruns`](../reference/cli.md#-reruns-n), it is requeued
+   within the rerun budget and retried on whichever worker takes it next.
 2. The worker's other outstanding tests requeue at the head of the
    dispatch queue and run elsewhere.
 3. A replacement worker spawns under the same identity (`gw3` stays
-   `gw3` — PASSIVE per-worker resources keyed on worker id, like
+   `gw3`: **passive** per-worker resources keyed on worker id, like
    pytest-django's `test_db_gw3`, stay bounded and get reused),
    re-collects, verifies its collection by hash, and rejoins. Note the
-   distinction: resources PROVISIONED by master-side hooks should use
-   uuid idents, not worker-id-derived ones — the replacement's
+   distinction: resources **provisioned** by controller-side hooks should use
+   uuid idents, not worker-id-derived ones, because the replacement's
    re-provisioning can race the crashed node's cleanup (see
    [xdist hook emulation](xdist-hooks.md)).
+
+A run gets as many replacements as it has workers, and at least 4. Once
+they are spent, step 3 no longer happens: the dead worker is reported as a
+`<worker gwN>` error (exit code 3) and the run carries on with the workers
+it has left. Steps 1 and 2 still apply, so no test is lost. If every worker
+dies, the tests that never got to run are listed in one `<not run>` error
+("N tests did not run: every worker died").
+
+## Hung tests (`--worker-timeout`)
+
+A test that hangs instead of crashing goes through the same machinery when
+its hang watchdog fires. The limit is
+[`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs) when set,
+the same for every test. Otherwise a test that has a timeout
+([`--timeout`](../reference/cli.md#-timeout-secs) or
+`@pytest.mark.timeout`) gets 3 × that timeout + 10 s, and a test without one
+has no watchdog. A worker stuck on one test past its limit, in any phase, is
+killed; the test is reported failed with a timeout message
+instead of the crash message, and steps 2 and 3 above follow unchanged.
+Under `--reruns` the timed-out test is retried within the budget, and the
+kill counts against the same restart cap below. Hangs outside a test
+(collection, session config) are not covered.
 
 ## Budgets
 
 Total restarts per run are capped (`max(workers, 4)`). Past the cap, a
-dead worker is reported as an internal error with its remaining tests
-listed as lost — a crash-loop ends loudly rather than spinning. Crashes
-during collection are not restarted (an import-time crash would recur).
+dead worker is not replaced and is reported as an internal error (exit 3):
+a crash-loop ends loudly rather than spinning. Its in-flight test still
+fails as in step 1, and its other tests move to the surviving workers as in
+step 2. A test that no worker is left to run is reported as an error with a
+"not run" message, so every test still appears in the summary, junit and
+report-json. Under `--dist each` and `rstest replay` a worker's tests are
+bound to it, so a dead worker's remaining tests are reported "not run"
+directly. Crashes during collection are not restarted (an import-time crash
+would recur).
 
 ## Cleanup hooks and the serial phase
 
-If the suite uses xdist's master-side hooks, a crashed worker's
-`pytest_testnodedown` still runs — on a surviving worker, against the
-dead worker's `workerinput` snapshot (details and the ordering caveat
-with deterministic idents: [xdist hook
-emulation](xdist-hooks.md)). If the
+If the suite uses xdist's controller-side hooks, a crashed worker's
+`pytest_testnodedown` still runs under `--collect full`, on a surviving
+worker, against the dead worker's `workerinput` snapshot (details and the
+ordering caveat with deterministic idents: [xdist hook
+emulation](xdist-hooks.md)). Under `--collect lazy` it does not run, and
+the dead worker's per-worker resources are left behind. If the
 crashed worker was the designated serial-phase host, the lowest
-surviving worker is promoted; if none can host it, the run reports the
-serial tests as lost rather than silently dropping them.
+surviving worker is promoted; if none can host it, the run reports each
+serial test as "not run" rather than silently dropping it.
 
 ## Exit codes
 
 Crash-fabricated failures never pass through any worker session, so
-session exit codes alone would read 0; recorded outcomes take precedence —
+session exit codes alone would read 0; recorded outcomes take precedence:
 a run with a crashed test exits 1.

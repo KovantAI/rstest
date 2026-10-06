@@ -1,0 +1,9 @@
+# The vendored pytest tree and its integrity manifest must be byte-stable
+# across checkouts and platforms, or the vendor-integrity hashes drift.
+# Treat them as binary so git never rewrites line endings or normalizes them.
+python/rstest_worker/_vendor/** -text
+python/rstest_worker/vendor.lock -text
+
+# Generated schema docs are compared byte-for-byte against what the Rust types
+# produce (src/schema.rs golden test); keep them LF on every platform.
+docs/reference/schemas/** text eol=lf

@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Map_of_FlakeStats",
+  "type": "object",
+  "additionalProperties": {
+    "$ref": "#/definitions/FlakeStats"
+  },
+  "definitions": {
+    "FlakeStats": {
+      "type": "object",
+      "properties": {
+        "failed": {
+          "description": "Runs where the test hard-failed (quarantined failures included).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "flaky": {
+          "description": "Runs where the test passed only after rerun(s).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "last_epoch": {
+          "description": "Unix epoch of the last recorded event (flake or failure).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "last_failed_epoch": {
+          "description": "Unix epoch of the last hard failure. 0 = none, or a cache written\nbefore this field existed (readers then fall back to\n`last_epoch` when `failed` is non-zero).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "flaky",
+        "failed",
+        "last_epoch",
+        "last_failed_epoch"
+      ]
+    }
+  }
+}

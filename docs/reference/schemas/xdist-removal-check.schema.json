@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "XdistRemovalDoc",
+  "description": "The `--xdist-removal-json` document (schema 1). Fields are alphabetical, as\nin the other migrate documents.",
+  "type": "object",
+  "properties": {
+    "findings": {
+      "description": "Every finding, blocking ones first.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RemovalFinding"
+      }
+    },
+    "meta": {
+      "description": "Envelope: `kind` is `\"xdist-removal-check\"`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/MigrateMeta"
+        }
+      ]
+    },
+    "ready": {
+      "description": "Whether pytest-xdist can be uninstalled now (no non-allowed blocking\nfinding, and the trial passed when it ran).",
+      "type": "boolean"
+    },
+    "trial": {
+      "description": "The `--xdist-trial` result: `null` when the trial was not requested.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TrialReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "xdist_version": {
+      "description": "The installed pytest-xdist version: `null` when it is not installed or\nthe interpreter could not be probed.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "findings",
+    "meta",
+    "ready",
+    "trial",
+    "xdist_version"
+  ],
+  "definitions": {
+    "MigrateMeta": {
+      "description": "Envelope metadata shared by the migrate documents.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Constant discriminator: the producing subcommand (`\"migrate-check\"`,\n`\"xdist-removal-check\"`).",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "kind",
+        "runner",
+        "schema"
+      ]
+    },
+    "RemovalFinding": {
+      "description": "One thing that breaks or changes when pytest-xdist is removed.",
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "description": "Whether this location is on the `--migrate-allow` list.",
+          "type": "boolean"
+        },
+        "blocking": {
+          "description": "Whether it breaks the run once xdist is gone (`false`: a behavior\nchange or a warning).",
+          "type": "boolean"
+        },
+        "fix": {
+          "description": "The suggested fix.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`,\n`ini_key`, `import`, `hook`, `hasplugin_gate`, `plugin_import`, or\n`plugin_gate`.",
+          "type": "string"
+        },
+        "location": {
+          "description": "Where it is: a config source (`pytest.ini addopts`, `PYTEST_ADDOPTS`)\nor `path:line`.",
+          "type": "string"
+        },
+        "text": {
+          "description": "The offending flag, key, or source line.",
+          "type": "string"
+        },
+        "why": {
+          "description": "What happens once pytest-xdist is gone.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "allowed",
+        "blocking",
+        "fix",
+        "kind",
+        "location",
+        "text",
+        "why"
+      ]
+    },
+    "TrialReport": {
+      "description": "Result of the `--xdist-trial` run with `-p no:xdist`.",
+      "type": "object",
+      "properties": {
+        "baseline_error": {
+          "description": "The tail of the child's stderr when pytest-xdist is installed but the\nrun with it loaded never started, so nothing could be compared.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compared": {
+          "description": "Whether a run with pytest-xdist loaded was compared against (`false`\nwhen it isn't installed, so nothing can be called a regression).",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "The tail of the child's stderr when the session never started.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "description": "Tests that failed with xdist hidden.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "regressions": {
+          "description": "Tests that pass with pytest-xdist loaded but fail (or are no longer\ncollected) with it hidden.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "started": {
+          "description": "Whether the session with xdist hidden started and reported outcomes.",
+          "type": "boolean"
+        },
+        "tests": {
+          "description": "Tests that ran with xdist hidden.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "compared",
+        "failed",
+        "regressions",
+        "started",
+        "tests"
+      ]
+    }
+  }
+}
