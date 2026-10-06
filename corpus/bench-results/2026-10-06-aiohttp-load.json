@@ -3,7 +3,7 @@
   "date": "2026-10-06",
   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
   "logical_cpus": 14,
-  "load_1m_at_start": 24.15,
+  "load_1m_at_start": 3.77,
   "rstest": "rstest 0.8.0",
   "rstest_commit": "cd0b03d",
   "suite_commits": {
@@ -46,33 +46,76 @@
   "xdist_dist": "load (xdist default)",
   "bench_python": "3.14.6",
   "suite_runtimes": {
-   "langgraph": {
-    "python": "3.12.12",
+   "aiohttp": {
+    "python": "3.13.13",
     "python_implementation": "CPython",
     "pytest": "9.1.1",
-    "pytest_xdist": null,
+    "pytest_xdist": "3.8.0",
     "rstest_worker": "0.8.0"
    }
   }
  },
  "spectrum": [
   {
-   "suite": "langgraph",
-   "pytest_wall": 190.0,
-   "pytest_band": "190.0 (185.7-201.8)",
-   "rstest_wall": 26.1,
-   "rstest_band": "26.1 (25.0-27.2)",
-   "speedup": 7.28,
+   "suite": "aiohttp",
+   "pytest_wall": 194.1,
+   "pytest_band": "194.1 (193.9-195.3)",
+   "rstest_wall": 57.0,
+   "rstest_band": "57.0 (56.9-57.9)",
+   "speedup": 3.4,
    "parity": 100.0,
    "parity_missing": 0,
    "parity_mismatch": 0,
    "parity_unexplained": 0,
-   "baseline_collect_errors": 10,
-   "baseline_tests": 838,
-   "candidate_collect_errors": 10
+   "baseline_collect_errors": 0,
+   "baseline_tests": 4469,
+   "candidate_collect_errors": 1
   }
  ],
- "sweeps": [],
+ "sweeps": [
+  {
+   "suite": "aiohttp",
+   "pytest_wall": 194.1,
+   "pytest_band": "194.1 (193.9-195.3)",
+   "points": [
+    {
+     "workers": 8,
+     "rstest_wall": 67.0,
+     "rstest_band": "67.0 (67.0-67.0)",
+     "min": 66.99,
+     "max": 67.02,
+     "speedup": 2.9,
+     "efficiency": 0.36,
+     "parity": 100.0,
+     "parity_missing": 0,
+     "parity_mismatch": 0,
+     "parity_unexplained": 0,
+     "baseline_collect_errors": 0,
+     "baseline_tests": 4469,
+     "candidate_collect_errors": 0,
+     "xdist": {
+      "wall": 158.9,
+      "band": "158.9 (157.0-163.4)",
+      "min": 156.95,
+      "max": 163.4,
+      "speedup": 1.22,
+      "efficiency": 0.15,
+      "parity": 99.98,
+      "parity_missing": 0,
+      "parity_mismatch": 1,
+      "parity_unexplained": 0,
+      "baseline_collect_errors": 0,
+      "baseline_tests": 4469,
+      "candidate_collect_errors": 0
+     }
+    }
+   ]
+  }
+ ],
  "memory": [],
- "grid": null
+ "grid": null,
+ "notes": [
+  "Same-day companion to 2026-10-06-aiohttp-worksteal.json: xdist at its default --dist load. The sweep (-n 8) points are the published ones.",
+  "The spectrum row (rstest under the suite's own policy, -n auto) recorded 1 rstest collect error on its last timed run while all 4,469 tests still matched the baseline (parity 100%), so bench.py's gate failed this invocation (exit 1). The snapshot was overwritten by the following -n 8 runs, so the error text was not kept; the -n 8 points and the worksteal file's spectrum row show 0 collect errors."
+ ]
 }

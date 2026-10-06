@@ -13,6 +13,10 @@ Evaluating rstest for your team? Start with
     related to the Rust fixture crate [`rstest`](https://crates.io/crates/rstest)
     on crates.io.
 
+Illustrative run of rich's 981-test suite at `-n 4`. The wall time is left
+out because it depends on the machine; measured timings, at `-n 8`, are in
+[Benchmarks](reference/benchmarks.md):
+
 ```console
 $ pip install rstest
 $ rstest -n 4      # -n is optional; plain `rstest` picks a worker count
@@ -21,7 +25,7 @@ rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 69%]
 ......................................................                   [100%]
 
-956 passed, 25 skipped in 2.50s
+956 passed, 25 skipped in [...]s
 ```
 
 ## Highlights
@@ -32,8 +36,9 @@ rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
   does. Most pytest flags (`-k`, `-m`, `-x`, `--lf`, plugin flags) forward
   unchanged; a few, such as `--timeout`, `--reruns` and `--html`, are
   rstest's own with the same basic syntax as the plugins they replace.
-- **xdist semantics in parallel.** Session fixtures run once per worker, as
-  under pytest-xdist, plus a
+- **xdist semantics in parallel.** Session fixtures run
+  [once per worker](guides/parallel-safety.md#session-scoped-fixtures-duplicate),
+  as under pytest-xdist, plus a
   [short list of differences](guides/migrate-from-pytest.md#what-changes).
 - **Parallel by design.** Work distribution across worker processes,
   duration-aware scheduling that starts your slowest tests first (per test,
@@ -44,26 +49,23 @@ rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 - **Crash-safe.** A segfaulting test costs you one FAILED line: the worker
   is replaced, its remaining tests redistribute, and the run completes.
 - **`rstest --doctor`.** Tells you *why* the suite is slow: tests that wait
-  instead of compute, the long-pole tests that cap any parallelism, fixture
+  instead of compute, the [long-pole](concepts/glossary.md#long-pole) tests that cap any parallelism, fixture
   hotspots, slowest files.
-- **`rstest --watch`.** Instant reruns on save; changed test files rerun
+- **`rstest --watch`.** Reruns on save; changed test files rerun
   alone, source changes rerun only the tests the import graph says are
   affected.
 
 ## Measured
 
-Outcome parity is measured per-test against pytest baselines across four
-real suites (201,343 tests total):
+Per-test outcome parity against pytest (identical setup/call/teardown
+outcomes, with each suite's real plugins loaded) on four real suites
+(201,343 tests total):
 
 --8<-- "docs/reference/benchmarks.md:suite-table"
 
-Parity means identical per-test setup/call/teardown outcomes, including
-skips, xfails, and expected failures, with the suites' real plugins loaded.
-See [Benchmarks](reference/benchmarks.md) for methodology and caveats.
-
-Speed depends on suite *shape* and on a warm duration cache (the first run
-is cold): see [Evaluating rstest](getting-started/evaluating.md#what-it-speeds-up)
-for what to expect from yours.
+Methodology and caveats: [Benchmarks](reference/benchmarks.md). Speed
+depends on suite *shape* and a warm duration cache:
+[what to expect from yours](getting-started/evaluating.md#what-it-speeds-up).
 
 ## The compatibility contract
 
@@ -81,8 +83,7 @@ for what to expect from yours.
 
 ## Go deeper
 
-- [Installation](getting-started/installation.md)
-- [Start from scratch](getting-started/your-first-test.md): no suite yet? from empty folder to green run
-- [Run your existing suite](getting-started/first-steps.md): already have a pytest suite? run it from your project root
+- [Getting started](getting-started/index.md): pick a starting point by situation
 - [Migrating from pytest](guides/migrate-from-pytest.md)
+- [CI quickstart](guides/ci-quickstart.md): run rstest in GitHub Actions with a persisted cache
 - [Glossary](concepts/glossary.md): worker, single-worker mode, long pole, and the rest

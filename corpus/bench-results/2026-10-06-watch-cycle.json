@@ -1,0 +1,155 @@
+{
+ "environment": {
+  "date": "2026-10-06",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "rstest": "rstest 0.8.0",
+  "rstest_commit": "cd0b03d",
+  "worker_python": "3.13.13",
+  "pytest": "9.1.1",
+  "cycles": 10,
+  "settle_s": 1.0,
+  "notes": "Measured with `python3 corpus/watch_cycle.py` under caffeinate; a video call (Microsoft Teams) was active on the machine. rstest commit cd0b03d plus uncommitted working tree."
+ },
+ "points": [
+  {
+   "workers": 0,
+   "cycles": [
+    {
+     "detect_ms": 312.7,
+     "run_ms": 167.8,
+     "total_ms": 480.5
+    },
+    {
+     "detect_ms": 313.0,
+     "run_ms": 165.1,
+     "total_ms": 478.1
+    },
+    {
+     "detect_ms": 316.5,
+     "run_ms": 159.0,
+     "total_ms": 475.4
+    },
+    {
+     "detect_ms": 313.7,
+     "run_ms": 161.8,
+     "total_ms": 475.5
+    },
+    {
+     "detect_ms": 314.9,
+     "run_ms": 165.0,
+     "total_ms": 480.0
+    },
+    {
+     "detect_ms": 312.7,
+     "run_ms": 161.5,
+     "total_ms": 474.2
+    },
+    {
+     "detect_ms": 314.6,
+     "run_ms": 161.5,
+     "total_ms": 476.0
+    },
+    {
+     "detect_ms": 311.9,
+     "run_ms": 163.0,
+     "total_ms": 474.9
+    },
+    {
+     "detect_ms": 316.2,
+     "run_ms": 166.0,
+     "total_ms": 482.2
+    },
+    {
+     "detect_ms": 313.4,
+     "run_ms": 158.5,
+     "total_ms": 471.9
+    }
+   ],
+   "detect_ms": {
+    "median": 313.5,
+    "min": 311.9,
+    "max": 316.5
+   },
+   "run_ms": {
+    "median": 162.4,
+    "min": 158.5,
+    "max": 167.8
+   },
+   "total_ms": {
+    "median": 475.8,
+    "min": 471.9,
+    "max": 482.2
+   }
+  },
+  {
+   "workers": 2,
+   "cycles": [
+    {
+     "detect_ms": 317.3,
+     "run_ms": 200.8,
+     "total_ms": 518.1
+    },
+    {
+     "detect_ms": 315.3,
+     "run_ms": 206.4,
+     "total_ms": 521.7
+    },
+    {
+     "detect_ms": 312.4,
+     "run_ms": 210.6,
+     "total_ms": 523.0
+    },
+    {
+     "detect_ms": 313.3,
+     "run_ms": 202.8,
+     "total_ms": 516.0
+    },
+    {
+     "detect_ms": 314.3,
+     "run_ms": 206.1,
+     "total_ms": 520.4
+    },
+    {
+     "detect_ms": 312.2,
+     "run_ms": 190.7,
+     "total_ms": 502.9
+    },
+    {
+     "detect_ms": 315.2,
+     "run_ms": 183.8,
+     "total_ms": 499.0
+    },
+    {
+     "detect_ms": 317.3,
+     "run_ms": 180.9,
+     "total_ms": 498.2
+    },
+    {
+     "detect_ms": 311.4,
+     "run_ms": 185.7,
+     "total_ms": 497.1
+    },
+    {
+     "detect_ms": 314.2,
+     "run_ms": 205.2,
+     "total_ms": 519.5
+    }
+   ],
+   "detect_ms": {
+    "median": 314.2,
+    "min": 311.4,
+    "max": 317.3
+   },
+   "run_ms": {
+    "median": 201.8,
+    "min": 180.9,
+    "max": 210.6
+   },
+   "total_ms": {
+    "median": 517.0,
+    "min": 497.1,
+    "max": 523.0
+   }
+  }
+ ]
+}

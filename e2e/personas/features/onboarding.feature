@@ -217,3 +217,40 @@ Feature: First-time evaluator onboarding
         | workers |
         | 0       |
         | 2       |
+
+  Rule: the docs a newcomer reads agree with rstest and with each other
+
+    Scenario: EV-16 the "Start from scratch" walkthrough runs as its page says
+      # The page's own code blocks, run in order. Step 5's prose must count
+      # what steps 2 to 4 built (three tests in one file, run on one worker),
+      # then what test_slow.py brings (twelve tests in one selected file, which
+      # a cold -n auto runs on one worker). Sleeps are shortened for speed.
+      Given the python blocks of "docs/getting-started/your-first-test.md" containing "def test_add", joined, as "test_first.py"
+      When I run "rstest" and note the worker count
+      Then the exit code is 1
+      And stdout contains "1 failed, 2 passed"
+      And the worker count is 1
+      Given the prose before code block 1 of the "## 5. Watch it go parallel" section of "docs/getting-started/your-first-test.md"
+      Then every count that prose states matches 3 tests, 1 file and 1 worker
+      Given the python blocks of "docs/getting-started/your-first-test.md" containing "# test_slow.py", joined, as "test_slow.py"
+      And in "test_slow.py", "time.sleep(1)" is replaced by "time.sleep(0.02)"
+      When I run "rstest test_slow.py" and note the worker count
+      Then the run succeeds
+      And stdout contains "12 passed"
+      And the worker count is 1
+      Given the prose before code block 2 of the "## 5. Watch it go parallel" section of "docs/getting-started/your-first-test.md"
+      Then every count that prose states matches 12 tests, 1 file and 1 worker
+      When I run "rstest -n 4 test_slow.py" and note the worker count
+      Then the run succeeds
+      And the worker count is 4
+
+    Scenario: EV-17 the Guides nav mirrors the guides index page
+      Then the mkdocs nav's "Guides" section lists the groups and pages of "docs/guides/index.md", in order
+      And the mkdocs nav has no top-level "Playbooks" section
+
+    Scenario: EV-18 every glossary term is linkable and easy to find
+      Then every term in "docs/concepts/glossary.md" has an explicit anchor id
+      And the terms in each section of "docs/concepts/glossary.md" are in alphabetical order
+
+    Scenario: EV-19 the hang-watchdog formula has one home, and restatements link to it
+      Then every docs paragraph outside "concepts/crash-handling.md" that matches "timeout \+ 10" links to "crash-handling.md#"

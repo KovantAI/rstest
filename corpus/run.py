@@ -268,10 +268,11 @@ class Suite:
             return ["--pyargs", self.cfg["package"], *args]
         return args
 
-    def run_pytest(self, xdist_workers=None):
+    def run_pytest(self, xdist_workers=None, xdist_args=()):
         """Baseline run. `xdist_workers` (bench only) runs it under pytest-xdist
         at that -n instead, into its own snapshot, so the serial baseline is
-        never overwritten."""
+        never overwritten. `xdist_args` (e.g. `--dist worksteal`) ride along
+        with `-n` only."""
         if self.mode == "mono":
             if xdist_workers is not None:
                 raise RuntimeError("xdist series is not supported in mono mode")
@@ -283,7 +284,7 @@ class Suite:
         # Drop any prior snapshot: a failed run that writes nothing must NOT be
         # silently diffed against a stale file (it reads as bogus parity).
         snap.unlink(missing_ok=True)
-        xdist = [] if xdist_workers is None else ["-n", str(xdist_workers)]
+        xdist = [] if xdist_workers is None else ["-n", str(xdist_workers), *xdist_args]
         label = "pytest" if xdist_workers is None else f"xdist -n {xdist_workers}"
         log(f"  {self.name}: {label} starting")
         t0 = time.monotonic()

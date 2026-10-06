@@ -252,7 +252,9 @@ projects = [
 # pytest-retry's own ReportServer (see rstest_worker `_seed_pytest_retry`) — so
 # the plugin runs unmodified at any worker count and NO per-lib policy is needed.
 # Mono parity verified on the 5-lib subset: 838 tests, 100% per-test outcome
-# parity (10-run mean, rstest 0.6.0).
+# parity (2026-10-06, rstest 0.8.0, bench-results/2026-10-06-langgraph.json).
+# libs/sdk-py contributes 0 of them: its tests import starlette, which its
+# test group does not install, so both runners hit the same 10 collect errors.
 
 [langchain]
 # Second monorepo, chosen to exercise mono mode WITHOUT pytest-retry (see the

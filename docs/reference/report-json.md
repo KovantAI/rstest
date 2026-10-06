@@ -275,7 +275,7 @@ is interleaved, so every line parses on its own.
 suite-health analysis as a single versioned document: the machine-readable
 surface for CI trending (diff two runs to catch new long poles, fixture-cost
 growth, or wait-time regressions; a ready-made recipe is in the
-[CI quickstart](../guides/ci-quickstart.md#suite-health-trending-with-doctor)).
+[Suite diagnostics](../guides/doctor.md#suite-health-trending-in-ci)).
 
 ```console
 $ rstest --doctor-json doctor.json

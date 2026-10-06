@@ -11,7 +11,7 @@ It is deliberately short. pytest 9 is a **cleanup major**, not a redesign:
 it removes APIs that already emitted `DeprecationWarning` throughout 8.x and
 keeps the collection model, fixture engine, `_pytest.*` import paths, and
 the `pluggy` hook contract. If your suite is warning-clean today, you are
-almost certainly nearly done: check the
+likely nearly done: check the
 [behavioral changes the probe won't catch](#behavioral-changes-the-w-probe-wont-catch),
 then jump to [Verify](#3-verify).
 
@@ -81,7 +81,7 @@ actually bite real suites (grounded in the upstream
 | Removed in | What broke | Fix |
 |---|---|---|
 | **9.0** | A **sync test depends on an async fixture** | Make the test `async`, or wrap the async fixture in a sync one. A sync test can no longer pull an un-awaited coroutine from an async fixture. |
-| **9.0** | A **mark applied to a fixture function** (`@pytest.mark.* ` above `@pytest.fixture`) | Move the mark to the *test* functions that use the fixture. Marks on fixture defs were silently ignored and are now an error. |
+| **9.0** | A **mark applied to a fixture function** (`@pytest.mark.*` above `@pytest.fixture`) | Move the mark to the *test* functions that use the fixture. Marks on fixture defs were silently ignored and are now an error. |
 | **9.0** | A **hook takes `py.path.local`** args | Rename the parameter to its `pathlib.Path` twin (below). |
 | **9.1** | `importorskip("x")` **swallowed a real `ImportError`** | It now only skips on `ModuleNotFoundError`. If you relied on catching a deeper `ImportError`, pass `exc_type=ImportError` explicitly. |
 | **9.1** | `SomeCollector.from_parent(..., fspath=...)` | Pass `path=<pathlib.Path>` instead of `fspath=<py.path.local>`. |

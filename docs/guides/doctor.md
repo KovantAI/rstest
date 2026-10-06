@@ -6,7 +6,8 @@ from data the runner already owns (per-test wall time, per-test CPU time,
 and per-fixture setup time), so it adds almost nothing to the run.
 
 ```console
-$ rstest --doctor
+$ rstest --doctor          # a suite that "feels slow"
+$ rstest -n 4 --doctor     # diagnosing parallel scaling
 ```
 
 ## A real report
@@ -36,15 +37,14 @@ SLOWEST FILES:
 
 (That's [aiohttp]'s real suite, trimmed for the page: WAIT-BOUND lists up
 to 8 tests before its `... and N more` line, and the `startup:` line and the
-PARALLEL EFFICIENCY section are cut. One file is 81% of total test time,
-almost all of it waiting on 10-second proxy timeouts.)
+[PARALLEL EFFICIENCY](#parallel-efficiency) section, which appears in any
+`-n ≥ 2` run, are cut. One file is 81% of total test time, almost all of it
+waiting on 10-second proxy timeouts.)
 
 The `4442 tests` count is tests with a **recorded call duration**, which is
 what doctor analyzes: slightly fewer than the 4,469 the suite *collects*
 ([benchmarks](../reference/benchmarks.md)), because skips and zero-duration
-tests contribute no timing. The
-**PARALLEL EFFICIENCY** section (see below) is omitted from the sample for
-brevity; it appears in any `-n ≥ 2` run.
+tests contribute no timing.
 
 [aiohttp]: https://github.com/aio-libs/aiohttp
 
@@ -54,10 +54,11 @@ Every number in the report counts a test's **whole protocol**: fixture setup,
 the test call, and fixture teardown. That is the time the test held its
 worker, so a suite whose cost lives in function fixtures reads correctly:
 its test time, worker load, long pole, slowest files and realized speedup
-all include the fixture work. CPU time is measured over the same span and
-includes CPU used by child processes the test waited for (a CLI run with
-`subprocess.run`), so a test that shells out to a CPU-heavy tool reads as
-computing, not waiting.
+all include the fixture work. CPU time is measured over the same span. On
+Linux and macOS it includes CPU used by child processes the test waited for (a
+CLI run with `subprocess.run`), so a test that shells out to a CPU-heavy tool
+reads as computing, not waiting. Windows reports no child CPU time, so there
+such a test reads as waiting.
 
 A single-worker run (`-n 0` or `-n 1`) reports `1 worker`.
 
@@ -83,9 +84,12 @@ spends 95% waiting on proxy timeouts.
 
 ### PARALLEL FLOOR
 
-No worker count can finish faster than the longest single test. If your
-longest test exceeds both the ideal per-worker share and 1 second, the
-report names the gate tests: splitting or shrinking them lowers that floor.
+No worker count can finish faster than the longest single test (the
+[parallel floor](../concepts/glossary.md#parallel-floor)). The section appears
+when that test clearly exceeds the ideal per-worker share: test time ÷
+workers, or 1 second if that is larger, plus 10% slack. It names up to 10
+gate tests above that threshold; splitting or shrinking them lowers the
+floor.
 
 ### PARALLEL EFFICIENCY
 
@@ -97,12 +101,13 @@ direct answer to "why isn't `-n auto` faster?".
 
 Two things cap it, both named in the section:
 
-- **long pole**: the slowest single test. When it exceeds the ideal
+- **long pole**: the slowest single test. When it clearly exceeds the ideal
   per-worker share, it is also the PARALLEL FLOOR above.
 - **worker load**: busy time summed per worker, plus the imbalance
   between the busiest and idlest worker. A high imbalance means the
   scheduler couldn't spread the work evenly (usually a few long tests
-  pinned to one worker); consider splitting them or `--dist load`.
+  pinned to one worker); split them, or switch to the default `--dist load`
+  if you're on `loadfile` or `loadscope`.
 
 Efficiency is measured against the worker count, so it stays at or below
 100%. On a wait-bound suite, set `-n` above the core count: overlapping
@@ -138,16 +143,17 @@ SCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):
   (check the fixture body for side effects before promoting)
 ```
 
-Promoting to session scope runs the fixture once per worker session
-instead of once per call, so every call after a worker's first is a
-redundant re-setup. Each worker session totals its own
-`(calls − 1) × mean setup time`, and the projected saving is the largest
-of those: the wall time saved on the worker that benefits most. That
-holds whether the calls were spread across the pool or pinned to one
-worker by `--dist loadfile`. A fixture is only flagged when some worker
-session actually ran it twice, so a run where every worker (including a
-respawned one) called it once is not evidence. Candidates are listed even
-when below the hotspot threshold (from 0.01s up), biggest saving first.
+A session-scoped fixture runs once per worker session, so every call
+after a worker's first is a redundant re-setup. Each worker session
+totals its own `(calls − 1) × mean setup time`. The projected saving is
+the largest of those totals: the wall time saved on the worker that
+benefits most, whether the calls were spread across the pool or pinned to
+one worker by `--dist loadfile`.
+
+A fixture is flagged only when some worker session ran it at least twice.
+If every worker (including a respawned one) called it once, that is not
+evidence. Candidates are listed even below the hotspot threshold (from
+0.01s up), biggest saving first.
 
 The check is deliberately narrow. Only **immutable builtin values**
 qualify: `str`, `bytes`, `int`, `float`, `bool`, `complex`, and tuples or
@@ -253,15 +259,6 @@ re-importing per worker. The hint is dropped once the run already uses
 `--fork-pool`, on Windows, and on single-worker runs. It's a fixed per-run tax,
 so it matters most on short / cold suites and is negligible on long ones.
 
-## Workflow
-
-Doctor is cheap enough to run on a whim and most valuable on a cadence:
-
-```console
-$ rstest --doctor          # after a suite "feels slow"
-$ rstest -n 4 --doctor     # diagnosing parallel scaling
-```
-
 ## JSON output for CI
 
 `rstest --doctor-json doctor.json` writes the same analysis as a versioned
@@ -281,11 +278,71 @@ Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.
 
-Persist it as a CI artifact per run and you have suite-health trending:
-diff two reports to see what a PR added (new long poles, fixture cost
-growth, wait-time regressions). A ready-made GitHub Actions recipe
-(baseline via the actions cache, jq comparison into the job summary)
-is in [CI quickstart](ci-quickstart.md#suite-health-trending-with-doctor).
+### Suite-health trending in CI
+
+Archive `doctor.json` per run and compare a PR's report against the main
+branch's to see what the PR added: new wait-bound tests, new parallel-floor
+gate tests, fixture cost growth. No extra tooling is needed; the document
+already holds totals, wait-bound tests, gate tests, and fixture costs by name.
+
+On GitHub Actions the baseline can travel through the actions cache. Pushes to
+main save it; PR jobs only restore it (GitHub lets a PR read its base branch's
+cache entries):
+
+```yaml
+      - name: test (with doctor)
+        run: rstest -n auto --junitxml junit.xml --doctor-json doctor.json
+
+      # PRs only restore, so a PR never reads back its own earlier save:
+      # the latest baseline always comes from main.
+      - uses: actions/cache/restore@v6
+        if: github.event_name == 'pull_request'
+        with:
+          path: doctor-baseline.json
+          key: doctor-baseline-${{ github.sha }}
+          restore-keys: doctor-baseline-
+
+      - name: compare against main
+        if: github.event_name == 'pull_request'
+        run: |
+          [ -f doctor-baseline.json ] || { echo "no baseline yet"; exit 0; }
+          {
+            echo "## Suite health vs main"
+            jq -rn --slurpfile a doctor-baseline.json --slurpfile b doctor.json '
+              def d(f): ($b[0][f] - $a[0][f]);
+              "tests: \($a[0].tests) -> \($b[0].tests)",
+              "test time: \($a[0].test_time_seconds|round)s -> \($b[0].test_time_seconds|round)s (\(d("test_time_seconds")|round)s)",
+              "wait-bound: \($a[0].wait_bound.wait_pct // 0|round)% -> \($b[0].wait_bound.wait_pct // 0|round)%"
+            '
+            echo "new wait-bound tests:"
+            comm -13 \
+              <(jq -r '.wait_bound.tests[]?.nodeid' doctor-baseline.json | sort) \
+              <(jq -r '.wait_bound.tests[]?.nodeid' doctor.json | sort) \
+              | sed 's/^/- /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: refresh baseline
+        if: github.ref == 'refs/heads/main'
+        run: cp doctor.json doctor-baseline.json
+
+      - uses: actions/cache/save@v6
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: doctor-baseline.json
+          key: doctor-baseline-${{ github.sha }}
+```
+
+Two practical notes:
+
+- **Don't fail the job on timing deltas.** CI runners are noisy;
+  single-digit-percent changes in `test_time_seconds` are jitter. Treat
+  the summary as a review aid; alert only on structural signals (new
+  wait-bound tests, a fixture's `count` doubling, a new parallel-floor
+  gate test) or on large sustained moves. To enforce a threshold, use
+  [`--doctor-fail-on`](#gating-a-pr-on-doctor-metrics).
+- **Compare like with like.** `wall_seconds` depends on the worker
+  count; if runner sizes vary, compare `test_time_seconds` (summed test
+  time) and per-test signals instead.
 
 ## Markdown output and GitHub job summaries
 
@@ -305,7 +362,8 @@ $ rstest --doctor-md doctor.md
 ```
 
 `--doctor-md` is additive: under GitHub Actions or Buildkite the automatic
-summary is still published.
+summary is still published. GitLab and TeamCity have no native markdown
+summary, so write the file with `--doctor-md` and publish it as an artifact.
 
 ## Gating a PR on doctor metrics
 

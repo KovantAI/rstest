@@ -16,9 +16,8 @@ This usually means rstest was installed somewhere else: with `pipx` or
 Install rstest into the project environment itself (`uv add --dev rstest`,
 `pip install rstest` inside the venv), or point `--python` at an interpreter
 that has it. Each rejected candidate is listed with its reason (older than
-3.9, not runnable, missing the shim, or not matching a `--python` version
-request). A 3.9 interpreter is not rejected here; it fails at startup instead
-(next section).
+3.10, not runnable, missing the shim, or not matching a `--python` version
+request).
 
 ## `found .venv/bin/python but rstest is not installed in it`
 
@@ -89,20 +88,36 @@ set, a fixed PYTHONHASHSEED for the run, or -n 0. `rstest migrate-check`
 names the unstable sites
 ```
 
-Your collection is nondeterministic. The most common cause is a
-`@pytest.mark.parametrize` whose ids differ between processes: ids built
-from `repr()` of an object without a stable repr (it contains a memory
-address), a `uuid4()`, or a timestamp. Give it an explicit stable `ids=`; see
-[the parametrize ids note](markers.md#a-note-on-pytestmarkparametrize-ids).
-Other causes: a randomizing plugin (pytest-randomly without a fixed seed) or
-parametrization built from an unordered source (set iteration, directory
-listing). rstest refuses to dispatch rather than misassign tests. Fix the
-nondeterminism (stable ids, seed it, sort it) or run `-n 0`.
+Your collection is nondeterministic, usually a `@pytest.mark.parametrize`
+whose ids differ between processes (a memory address, a uuid, a timestamp),
+a `parametrize` over a set, or an unseeded randomizing plugin. rstest refuses
+to dispatch rather than misassign tests. Fix the nondeterminism or run
+`-n 0`; [Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids)
+lists the causes and fixes, and
+[`rstest migrate-check`](cli-commands.md#migrate-check) names each unstable
+site before a parallel run.
 
-To find the exact sites before a parallel run, run
-[`rstest migrate-check`](cli-commands.md#migrate-check): it names each
-unstable parametrize id, and each site whose ids come back in a different
-order between two runs (`UNSTABLE ORDER`).
+## `workers collected different test sets (N vs N items)`: same count, intermittent
+
+Same error, but both counts match and it comes and goes between runs. The
+workers collected the same ids in a different order, almost always a
+`parametrize` over a `set` of strings: string hashing follows
+`PYTHONHASHSEED`, which is random per process, so each worker iterates the
+set differently. Iterate a list or `sorted(...)` instead, or pin one seed for
+the whole run (`PYTHONHASHSEED=0 rstest`). `rstest migrate-check` reports
+these sites as `UNSTABLE ORDER`. See
+[Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids).
+
+## Tests fail once the cache is warm: `auto-selected lazy collection`
+
+A large suite that passed on its first runs starts failing after rstest
+prints `rstest: auto-selected lazy collection (...)`. Under lazy collection
+each worker imports only the test files it runs, so a test that relied on
+another test file's import breaks: a `skipif` that reads `sys.modules` stops
+skipping, or a registration done by a sibling module never happens. Pass
+`--collect full` (or set `[tool.rstest] collect = "full"`) to restore eager
+collection, and fix the hidden dependency when you can. See
+[The compatibility trade](../concepts/lazy-collection.md#the-compatibility-trade).
 
 ## My plugin's terminal output doesn't appear
 
@@ -180,35 +195,37 @@ test): rstest interrupts a test whose call phase runs past the limit, reports
 it failed with a traceback at the line it was stuck on, and the run
 completes. `@pytest.mark.timeout(N)` sets a per-test limit. This is built in;
 you don't need pytest-timeout (and rstest consumes `--timeout`, so the plugin
-never sees it). On Windows there is no in-process interrupt: the test is
-only stopped by the hang watchdog below, at 3 × its timeout + 10 s, which
-kills its worker instead of printing a traceback.
+never sees it).
 
 For a hang the in-process interrupt can't break (a test blocked inside a C
-extension), [`--worker-timeout 300`](cli.md#-worker-timeout-secs) is the
-backstop: a worker stuck on one test past the limit is killed, the test
-reported failed, and the run completes. Without it, rstest arms a watchdog
-per test at 3 × that test's timeout + 10 s (its `@pytest.mark.timeout`, else
-`--timeout`), so a long marker is not cut short by a short global
-`--timeout`. Caveat: the watchdog covers
-hangs on a **test** (any phase); a hang during collection or session config
-is outside it, so wrap the invocation in an external timeout if your
-environment can hang before tests start.
+extension, or any test on Windows), the per-test
+[hang watchdog](../concepts/crash-handling.md#hung-tests-worker-timeout)
+kills the worker and reports the test failed;
+[`--worker-timeout 300`](cli.md#-worker-timeout-secs) sets one fixed limit
+for every test instead. Hangs during collection or session config are outside
+both, so wrap the invocation in an external timeout if your environment can
+hang before tests start.
 
 ## A worker crashed: what happened to its tests?
 
 The test that killed it is reported FAILED with a "crashed while running"
 message. By default it is *not* retried: segfault loops are worse. With
 [`--reruns`](cli.md#-reruns-n) (or `@pytest.mark.flaky`) it does get
-another attempt on the replacement worker while budget remains, bounded by
-both the rerun and restart budgets so a repeatable crash can't loop. Its
-remaining tests are redistributed to other workers automatically. If you see
-`worker terminated unexpectedly` instead, the restart budget was
-exhausted: something is killing workers repeatedly, and the longrepr of
-the first crash is the lead. The surviving workers still run the dead
-worker's remaining tests; any test no worker was left to run is reported as
-an error that starts with "not run". Each such failure carries the worker's exit
-code (or the signal that killed it) and the last lines it wrote to stderr.
+another attempt, on whichever worker takes it next, while budget remains,
+bounded by both the rerun and restart budgets so a repeatable crash can't
+loop. Its remaining tests are redistributed to other workers automatically.
+
+If a run has already had crashes and you then see a `<worker gwN>` error
+reading `worker terminated unexpectedly`, the restart budget was exhausted:
+something is killing workers repeatedly, and the longrepr of the first crash
+is the lead. The surviving workers still run the dead worker's remaining
+tests; any test no worker was left to run is reported as an error that
+starts with `not run:` (see
+[Budgets](../concepts/crash-handling.md#budgets)). Each crash failure and
+`<worker gwN>` error carries the worker's exit code (or the signal that
+killed it) and the last lines it wrote to stderr. The same `worker terminated unexpectedly` text also appears
+when a worker dies before it collects anything, with no crash before it; that
+case is covered next.
 
 ## `worker terminated unexpectedly: exited during startup`
 
@@ -232,3 +249,47 @@ check that rstest is using the interpreter you expect (see
 [`rstest` runs the wrong Python](#rstest-runs-the-wrong-python-cant-find-my-venv)).
 Anything else in the tail, such as an error from a `sitecustomize` or a
 `.pth` file, comes from the environment itself.
+
+## `Error: pulling shared cache from <remote>` (exit 1)
+
+`--cache-pull` could not reach or read the remote (an unreachable endpoint,
+expired credentials, a listing or read error), and rstest stopped with exit
+1 before running any test. An empty or missing remote is not an error, so
+this is a transport or permission problem: check the credential against
+[the grants each backend needs](../concepts/caching.md#cache-permissions). To
+keep a remote outage from turning the job red, retry the step or rerun
+without `--cache-pull` when the pull was the failure; see
+[Shared cache: reliability](../guides/ci-shared-cache.md#reliability).
+
+## `--shard needs the parallel pool (-n >= 2)`
+
+`--shard` refuses single-worker mode, and the default `-n auto` can resolve
+to one worker (one selected test file, or a warm cache with only a couple of
+seconds of test time), so the same job can pass on one machine and exit 1 on
+another. Pass an explicit `-n 2` or higher with `--shard`. See
+[`--shard`](cli.md#-shard-kn).
+
+## `--reruns`, `--junitxml` or `--timeout` in `addopts` is ignored or rejected
+
+rstest reads its own flags only from the command line and `[tool.rstest]`.
+The same flag in pytest's `addopts` or in `PYTEST_ADDOPTS` goes to the pytest
+session inside each worker instead. There it either fails the run with
+`unrecognized arguments: --timeout --reruns` (exit 4) when no plugin defines
+the flag, or reaches the plugin rather than rstest: with pytest-rerunfailures
+installed `addopts = --reruns 2` silently gives no reruns under the pool (the
+plugin is neutralized inside workers), and `addopts = --junitxml=x.xml`
+writes no file at `-n 2` or more. Move these flags to the command line or
+`[tool.rstest]`. The rstest-owned flags that share a name with a pytest or
+plugin flag are listed under
+[Owned flags that shadow plugin or pytest flags](cli.md#shadowed-flags).
+
+## `--changed` selected nothing and the artifact upload step failed
+
+When nothing is affected, `--changed` prints
+`rstest: no tests affected by N changed file(s)` and exits before running
+anything (0, or 5 under `--changed-strict`), so no `--junitxml` or
+`--report-json` file is written. A later step that requires those files,
+such as `actions/upload-artifact` or a JUnit publisher, then fails. Make the
+step tolerate a missing file (`if-no-files-found: ignore`). See
+[Exit codes: special cases](exit-codes.md#special-cases) and
+[Selecting changed tests: CI usage](../guides/changed.md#ci-usage).

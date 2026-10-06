@@ -67,7 +67,7 @@ cores). The default spectrum is picked to span every regime, not just the wins:
 | httpx | struggler: forced `-n 0` (session fixture, fixed port) | ~1.0× |
 | fastapi | mid gain | 2.6× |
 | anyio | big gain (also the sweep suite) | 3.9× |
-| langgraph | monorepo: N serial per-lib pytest vs one root run | 1.45× |
+| langgraph | monorepo: N serial per-lib pytest vs one root run | 7.3× |
 
 Speedup tracks the *parallelizable share*, not raw size (a tiny or
 serial-pinned suite can sit at or below 1×). Every point is the **median** of
@@ -89,6 +89,12 @@ python3 corpus/bench.py --only scikit-learn --sweep '' --memory scikit-learn \
     --grid scikit-learn --grid-workers 1,2,4,10,14 --grid-threads 1,2,4,unset
 ```
 
+`--xdist-dist MODE` runs the xdist series with that `--dist` mode (e.g.
+`worksteal`; default: xdist's own `load`). Two standalone measurements back
+specific claims on the benchmarks page: `cpu_sample.py` samples the CPU of a
+run's coordinating process and its workers (the pandas controller reading),
+and `watch_cycle.py` times `rstest --watch` reruns on a one-test project.
+
 Every point gets `--warmup` untimed runs first (default 1). rstest is warm
 unless `--cold` (drops `.rstest_cache` before every run). A run the machine
 slept through is detected (wall clock vs monotonic clock) and re-run; on macOS,
@@ -109,7 +115,7 @@ published numbers (re-measured 2026-09-30 with rstest 0.8.0) are in
 and walls there differ from this table.
 
 The table covers 31 of the 33 parity suites: langgraph is measured
-separately [below](#monorepo-mono-mode-rstest-060), and langchain joined the
+separately [below](#monorepo-mono-mode), and langchain joined the
 corpus after this snapshot. 25/31 suites at 100% per-test outcome parity; every non-100% suite is
 explained below (permanent by-design diffs or upstream flakes that hit
 plain pytest equally).
@@ -151,10 +157,12 @@ plain pytest equally).
 Totals: ~337k tests. Headline walls: pandas 4.6×, aiohttp 3.0×,
 anyio 3.9×, allauth 3.0×, requests 5.5×, typer 3.1×.
 
-### Monorepo (mono mode, rstest 0.6.0)
+### Monorepo (mono mode)
 
-Measured separately from the table above (wheel 0.6.0, pytest 9.1.1 pin,
-10-run mean ± σ on an idle M-series box). langgraph is a monorepo: N
+Measured separately from the table above (2026-10-06, rstest 0.8.0, pytest
+9.1.1 pin, `bench.py --only langgraph --sweep ''`: median of 5 after one
+warm-up, min-max in parentheses; result in
+`bench-results/2026-10-06-langgraph.json`). langgraph is a monorepo: N
 per-lib pytest configs the baseline runs serially vs one root rstest
 pass. The measured subset is the five DB-free, service-free libs
 (`libs/langgraph` itself is excluded: its live-app/service tests hang
@@ -162,11 +170,11 @@ the plain-pytest baseline in a service-less env; see `suites.toml`).
 
 | suite | tests | parity | pytest | rstest | speedup |
 |---|---|---|---|---|---|
-| langgraph (5 libs) | 838 | 100% | 187.4±4.4s | 128.9±3.2s | 1.45× |
+| langgraph (5 libs) | 838 | 100% | 190.0s (185.7-201.8) | 26.1s (25.0-27.2) | 7.3× |
 
-The 1.45× (vs 3.0-5.5× for the headline flat suites above) is capped by a few slow
-wait/IO-bound tests in `libs/checkpoint`, not by dispatch; per-test
-outcome parity is exact across the separate-pyproject libs in one run.
+`libs/sdk-py` collects no tests under either runner (its test modules import
+`starlette`, which the prepared venv lacks; both runners report the same 10
+collection errors), so the 838 tests come from the other four libs.
 
 ## Per-suite policies
 

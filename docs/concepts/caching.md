@@ -139,7 +139,9 @@ The `s3`/`gs` transports shell out to the cloud CLI already installed and
 authenticated in CI: no SDK, no secrets in the URL. Any other `scheme://` is
 rejected loudly rather than silently written to a junk local directory.
 
-**Permissions.** Every transport needs four operations on the `<root>` prefix:
+### Permissions { #cache-permissions }
+
+Every transport needs four operations on the `<root>` prefix:
 **list** and **read** (pull), **write** (push a segment), and **delete**
 (compaction and retention only, via `cache-compact` or `--cache-compact-threshold`).
 A pull/push-only job that never compacts can drop delete. Least privilege: scope
@@ -154,7 +156,9 @@ the credential to the cache prefix, not the whole bucket. Concretely:
 | dir / mount (`/path`, `file://`) | filesystem read+write+delete on the directory |
 | GitHub artifacts (the action's `artifact` backend) | workflow `permissions: { contents: read, actions: read }`; `actions: read` reaches a prior run's segments |
 
-**HTTP listing contract.** A bare `GET`/`PUT` can't enumerate a collection, so
+### HTTP listing contract { #http-listing-contract }
+
+A bare `GET`/`PUT` can't enumerate a collection, so
 an `http(s)://` remote must answer `GET <root>/segments/` with a JSON array of
 segment names (filenames or full keys/URLs) and support `GET` / `PUT` / `DELETE`
 on the blobs. A static file server with autoindex-as-JSON, an S3 REST bucket, or

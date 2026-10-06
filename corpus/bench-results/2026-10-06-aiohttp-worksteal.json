@@ -3,7 +3,7 @@
   "date": "2026-10-06",
   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
   "logical_cpus": 14,
-  "load_1m_at_start": 24.15,
+  "load_1m_at_start": 5.75,
   "rstest": "rstest 0.8.0",
   "rstest_commit": "cd0b03d",
   "suite_commits": {
@@ -43,36 +43,75 @@
   "repeat": 5,
   "warmup": 1,
   "rstest_cache": "warm",
-  "xdist_dist": "load (xdist default)",
+  "xdist_dist": "worksteal",
   "bench_python": "3.14.6",
   "suite_runtimes": {
-   "langgraph": {
-    "python": "3.12.12",
+   "aiohttp": {
+    "python": "3.13.13",
     "python_implementation": "CPython",
     "pytest": "9.1.1",
-    "pytest_xdist": null,
+    "pytest_xdist": "3.8.0",
     "rstest_worker": "0.8.0"
    }
   }
  },
  "spectrum": [
   {
-   "suite": "langgraph",
-   "pytest_wall": 190.0,
-   "pytest_band": "190.0 (185.7-201.8)",
-   "rstest_wall": 26.1,
-   "rstest_band": "26.1 (25.0-27.2)",
-   "speedup": 7.28,
+   "suite": "aiohttp",
+   "pytest_wall": 196.7,
+   "pytest_band": "196.7 (194.0-198.0)",
+   "rstest_wall": 57.0,
+   "rstest_band": "57.0 (57.0-57.9)",
+   "speedup": 3.45,
    "parity": 100.0,
    "parity_missing": 0,
    "parity_mismatch": 0,
    "parity_unexplained": 0,
-   "baseline_collect_errors": 10,
-   "baseline_tests": 838,
-   "candidate_collect_errors": 10
+   "baseline_collect_errors": 0,
+   "baseline_tests": 4469,
+   "candidate_collect_errors": 0
   }
  ],
- "sweeps": [],
+ "sweeps": [
+  {
+   "suite": "aiohttp",
+   "pytest_wall": 196.7,
+   "pytest_band": "196.7 (194.0-198.0)",
+   "points": [
+    {
+     "workers": 8,
+     "rstest_wall": 67.0,
+     "rstest_band": "67.0 (67.0-67.0)",
+     "min": 66.97,
+     "max": 67.03,
+     "speedup": 2.93,
+     "efficiency": 0.37,
+     "parity": 100.0,
+     "parity_missing": 0,
+     "parity_mismatch": 0,
+     "parity_unexplained": 0,
+     "baseline_collect_errors": 0,
+     "baseline_tests": 4469,
+     "candidate_collect_errors": 0,
+     "xdist": {
+      "wall": 73.0,
+      "band": "73.0 (72.0-73.1)",
+      "min": 72.03,
+      "max": 73.05,
+      "speedup": 2.7,
+      "efficiency": 0.34,
+      "parity": 100.0,
+      "parity_missing": 0,
+      "parity_mismatch": 0,
+      "parity_unexplained": 0,
+      "baseline_collect_errors": 0,
+      "baseline_tests": 4469,
+      "candidate_collect_errors": 0
+     }
+    }
+   ]
+  }
+ ],
  "memory": [],
  "grid": null
 }

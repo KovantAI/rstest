@@ -168,6 +168,28 @@ def _doc_block(path, *needles):
     return None
 
 
+def _workflow_steps(block):
+    """The steps of a GitHub Actions snippet (a YAML sequence of mappings), as
+    {key: value} dicts of each step's own scalar keys (`uses`, `if`, `name`,
+    ...). Nested mappings such as `with:` are skipped."""
+    lines = [ln for ln in block.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    starts = [len(ln) - len(ln.lstrip()) for ln in lines if ln.lstrip().startswith("- ")]
+    if not starts:
+        return []
+    ind = min(starts)
+    steps = []
+    for ln in lines:
+        col = len(ln) - len(ln.lstrip())
+        if col == ind and ln.lstrip().startswith("- "):
+            steps.append({})
+            ln = " " * (ind + 2) + ln.lstrip()[2:]
+            col = ind + 2
+        m = re.match(r"\s*([\w-]+):\s*(.*)$", ln)
+        if steps and col == ind + 2 and m:
+            steps[-1][m.group(1)] = m.group(2).strip()
+    return steps
+
+
 def _yaml_literal(text, key_re):
     """Body of the first `key: |` literal scalar whose key line matches
     `key_re`: the following lines indented deeper than the key, dedented."""
@@ -930,3 +952,42 @@ def _names_hook(world, text):
 def _section_contains(world, a, b):
     sec = world.notes["section"]
     assert a in sec or b in sec, sec[:200]
+
+
+@then(
+    parsers.re(
+        rf"every actions/cache step that can save, in a docs block containing {q('needle')}, "
+        r"runs only on main"
+    )
+)
+def _cache_saves_on_main(world, needle):
+    blocks = [
+        (path.relative_to(REPO), b)
+        for path in sorted(DOCS.rglob("*.md"))
+        for b in _doc_blocks(path)
+        if needle in b
+    ]
+    assert blocks, f"no docs block contains {needle!r}"
+    saves = 0
+    for path, block in blocks:
+        for step in _workflow_steps(block):
+            uses = step.get("uses", "")
+            # `actions/cache` restores and then saves in its post step;
+            # `actions/cache/save` only saves; `actions/cache/restore` never does.
+            if not re.match(r"actions/cache(/save)?@", uses):
+                continue
+            saves += 1
+            cond = step.get("if", "")
+            assert "refs/heads/main" in cond and "pull_request" not in cond, (
+                f"{path}: `{uses}` saves with if: {cond or '(always)'!r}, so a PR "
+                "run can save its own baseline and read it back later"
+            )
+    assert saves, f"no cache-saving step in the {needle!r} blocks"
+
+
+@then(parsers.re(rf"no fenced block in {q('glob')} contains {q('text')}"))
+def _no_block_contains(world, glob, text):
+    pages = sorted(REPO.glob(glob))
+    assert pages, f"{glob} matches no file"
+    bad = [str(p.relative_to(REPO)) for p in pages for b in _doc_blocks(p) if text in b]
+    assert not bad, f"{text!r} in a code block of: {', '.join(bad)}"

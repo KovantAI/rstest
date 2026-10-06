@@ -44,10 +44,13 @@ points and find exactly the classes they expect.
 1. **Spawn.** N workers start in your project's interpreter, each
    announced with an xdist-style identity (`gw0`, `gw1`, ...) that plugins
    like pytest-django key resources on.
-2. **Collect.** Every worker runs identical pytest collection (same args,
-   same ini, same conftest semantics: this is what keeps skip/marker
-   behavior exact). Workers verify they collected the same test set by
-   count and hash; worker `gw0` ships the full id list.
+2. **Collect.** By default every worker runs identical pytest collection
+   (same args, same ini, same conftest semantics: this is what keeps
+   skip/marker behavior exact). Workers verify they collected the same
+   test set by count and hash; worker `gw0` ships the full id list. A
+   large suite on a warm cache switches to
+   [lazy collection](lazy-collection.md) instead: each file is collected
+   once, on one worker, on demand.
 3. **Dispatch.** The orchestrator feeds item indices: cached slow tests
    first (individually, so they spread across workers), then contiguous
    chunks that preserve module-fixture locality. Workers run each test

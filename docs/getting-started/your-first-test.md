@@ -41,6 +41,9 @@ def test_add_negative():
 
 ## 3. Run it
 
+A one-file suite runs as a single plain pytest session, so the output looks
+exactly like pytest's:
+
 ```console
 $ rstest
 ============================= test session starts ==============================
@@ -53,10 +56,9 @@ test_first.py ..                                                         [100%]
 ============================== 2 passed in 0.00s ===============================
 ```
 
-That's the whole loop: no config file, no flags. This is pytest's own output:
-`-n auto` (the default) runs a one-file suite on a single worker, and there
-rstest lets one plain pytest session print its terminal output. A real suite
-fans out across your cores ([how `-n auto` sizes the pool](first-steps.md#controlling-parallelism)).
+That's the whole loop: no config file, no flags. `-n auto` (the default)
+sized the pool to one worker for one file; a real suite fans out across your
+cores ([how `-n auto` sizes the pool](first-steps.md#controlling-parallelism)).
 
 ## 4. See a failure
 
@@ -95,6 +97,7 @@ Full pytest tracebacks, assertion rewriting included: on one worker this is
 exactly what pytest prints. (Across multiple workers rstest renders the
 output itself, and each failure header also carries the `[gwN]` worker that
 hit it.)
+
 Rerun just the failure while you fix it:
 
 ```console
@@ -103,7 +106,8 @@ $ rstest --lf          # --last-failed: only the tests that failed last run
 
 ## 5. Watch it go parallel
 
-Two tests stayed single-worker because there's nothing to parallelize. Give
+So far everything ran on one worker: one small file has nothing to
+parallelize. Give
 rstest real work and it fans out. Drop this in `test_slow.py`:
 
 ```python
@@ -117,8 +121,8 @@ def test_sleepy(i):
     time.sleep(1)  # pretend each test does real work
 ```
 
-With only two test files, `-n auto` would start at most two workers, so ask
-for four explicitly. Twelve one-second tests then finish in about 3 seconds,
+With one selected file and no timing data yet, `-n auto` would start a
+single worker, so ask for four explicitly. Twelve one-second tests then finish in about 3 seconds,
 not 12:
 
 ```console

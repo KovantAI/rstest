@@ -9,9 +9,10 @@ Where to report problems and where to look first:
   we want.
 - **Questions**: the repository has no Discussions forum, so questions are
   welcome as [issues](https://github.com/KovantAI/rstest/issues) too.
-- **Parallel-only failures**: work through the
-  [three-run diagnosis](../guides/parallel-safety.md#diagnosing-a-parallel-only-failure)
-  first; it classifies most cases.
+- **Parallel-only failures**: run
+  [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) first;
+  it classifies each failure and names the fix. For what it leaves open, see
+  [Diagnosing a parallel-only failure](../guides/parallel-safety.md#diagnosing-a-parallel-only-failure).
 - **Known gaps** are tracked in
   [Compatibility](../concepts/compatibility.md#known-gaps).
 

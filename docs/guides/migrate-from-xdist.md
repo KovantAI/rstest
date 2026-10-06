@@ -4,6 +4,25 @@ rstest replaces pytest-xdist rather than wrapping it: parallelism is
 native, and the worker environment is xdist-shaped on purpose so plugins
 keep working.
 
+The short version, in order:
+
+1. **Carry your `-n` and `--dist` over.** rstest reads neither from
+   `addopts`; put them on the rstest command line or in `[tool.rstest]`
+   ([If xdist is still in your ini](#if-xdist-is-still-in-your-ini)), and
+   check the [flag map](#flag-map) for the few flags that differ (`-n 1`,
+   `--dist no`, `--dist worksteal`, `--looponfail`).
+2. **Check controller-side code.** xdist's controller hooks and
+   controller-only conftest branches run in every worker, or never
+   ([Controller-side hooks](#controller-side-hooks),
+   [Controller-only conftest code](#controller-only-conftest-code)).
+3. **Shadow-run both** with the same `-n`, following the
+   [staged rollout](migrate-from-pytest.md#rolling-out-in-stages-and-rolling-back);
+   the pytest checklist (pytest 9, `rstest try`, `migrate-check`) applies as
+   is ([checklist](migrate-from-pytest.md#a-migration-checklist)).
+4. **Remove pytest-xdist** once no job needs it, after
+   `rstest xdist-removal-check --xdist-trial` prints `ready`
+   ([Removing pytest-xdist](#removing-pytest-xdist)).
+
 ## Flag map
 
 Most xdist flags carry over unchanged. The ones people actually touch:
@@ -17,7 +36,7 @@ Most xdist flags carry over unchanged. The ones people actually touch:
   many workers. Pin `-n` to the count your xdist job actually used while you
   shadow-run both, so timing and load differences are not a worker-count
   difference.
-- **`-n logical`**: not supported (exit 1). Use `-n auto` or an explicit `-n N`.
+- **`-n logical`**: not supported (a parse error, exit 2). Use `-n auto` or an explicit `-n N`.
 - **`--dist load` / `loadfile` / `loadscope` / `loadgroup`**: same names and
   semantics, including `@pytest.mark.xdist_group`. `load` (the default) adds
   duration-aware slowest-first scheduling. Pass the mode on the rstest command
@@ -343,56 +362,12 @@ up to your performance-core count, then a flat or falling curve.
   a bigger inner-loop win than any scheduler tweak when a full run costs
   cores × time.
 
-**BLAS threads (numpy, scikit-learn, torch).** numpy and friends run their own
-thread pools, so at `-n N` you get N workers, each with its own pool. Measured
-on numpy with Accelerate (macOS;
-[cpu-bench grid](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#worker-x-blas-thread-grid)):
+**Worker count, memory and BLAS threads.** Each worker is a full OS process,
+and numpy-style libraries add their own thread pools per worker. How to size
+`-n` for memory and when to cap BLAS threads apply to any parallel runner;
+see [Memory per worker](parallel-safety.md#memory-per-worker) and
+[BLAS threads and speed](parallel-safety.md#blas-threads-and-speed).
 
-- On a realistic suite (scikit-learn `linear_model`, small ops) the thread cap
-  made no difference from `-n 2` up (at `-n 1`, uncapped was about 7% slower).
-- On heavy matmul/solve tests, library threads **help** while `-n` is below
-  the core count (one worker: 13.4s capped at one thread, 7.7s uncapped), and
-  the cap moves the wall by 3% at most once `-n` reaches the core count.
-
-So one thread per worker is not a free default. Pin it when you see
-oversubscription on your stack (OpenBLAS and MKL spin their own threads and
-can behave differently from Accelerate), or when you need bit-stable
-reductions (a tight `assert x == expected` can flip when the reduction order
-changes):
-
-```console
-$ OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-    VECLIB_MAXIMUM_THREADS=1 rstest -n auto
-```
-
-`VECLIB_MAXIMUM_THREADS` is the one Accelerate reads (numpy's macOS arm64
-wheels use it). Measure your own stack with `examples/cpu-bench/measure.py
---grid`. See [Numeric determinism](parallel-safety.md#numeric-determinism-ml-numerics-suites).
-
-**Memory.** Each worker is a full OS process. Measured
-([cpu-bench](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#memory),
-[scikit-learn](../reference/benchmarks.md#memory-and-blas-threads)):
-
-```text
-peak ≈ orchestrator + N × (worker baseline + your suite's working set)
-```
-
-- **Worker baseline:** 38 MiB (interpreter, pytest, rstest's worker), the same
-  as an xdist worker.
-- **Orchestrator:** about 10 MiB for rstest (Rust). xdist's controller is a
-  Python process: about 38 MiB.
-- **Working set:** your serial run's peak RSS minus the baseline. A suite that
-  holds about 400 MiB per worker (the cpu-bench `blas` tests) peaks at 3.3 GiB
-  at `-n 8`: 8 × its single-worker peak.
-
-That total is the upper bound, reached when every worker is at its peak at
-once (normal for a long suite; a short one comes in under it). Size `-n` as
-available RAM ÷ your serial peak RSS, and leave headroom for processes your
-tests start themselves (scikit-learn's joblib pools add about 500 MiB on its
-own suite). `--doctor` does not measure memory; use `/usr/bin/time -v`,
-`psutil`, or your CI's memory graph.
-
-**How to decide for real.** [`rstest try`](../reference/cli-commands.md#try) runs your own
-suite under plain pytest and under `rstest -n auto`, reporting parity and speed
-before you change any config. Confirm the parity-not-a-win call on your tests
-and cores, not on sympy's.
+**How to decide for real.** Run [`rstest try`](../getting-started/evaluating.md#try-it-first)
+on your own suite and confirm the parity-not-a-win call on your tests and
+cores, not on sympy's.

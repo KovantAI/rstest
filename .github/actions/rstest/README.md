@@ -180,7 +180,7 @@ PR runs read newest-main.
 | `cache-backend` | Backend | When |
 |---|---|---|
 | `actions-cache` (default) | one blob per key via `actions/cache` | a single unsharded job; no cross-shard merge, so not for a shard matrix |
-| `artifact` | GitHub artifacts, no external cloud, no secrets | shard matrices and PR suites (with `warm-run-id` for a gating matrix, see [Sharding](#sharding)) |
+| `artifact` | GitHub artifacts, no external cloud, no secrets | shard matrices (with `warm-run-id` for a gating matrix, see [Sharding](#sharding)) |
 | `remote` | object store or HTTP endpoint (`cache-remote`) | teams already on S3/GCS/R2 or a shared mount |
 
 ### GitHub-native (no cloud, no secrets)

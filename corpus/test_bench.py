@@ -292,6 +292,119 @@ def test_rstest_argv_default_keeps_suite_policy(tmp_path):
     assert argv[argv.index("-n") + 1] == "4"
 
 
+def test_run_pytest_passes_xdist_args_only_with_workers(tmp_path, monkeypatch):
+    import types
+
+    import run
+
+    argvs = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        argvs.append(argv)
+        assert env is not None
+        Path(env["RSTEST_RECORD"]).write_text('{"tests": {}, "collect_errors": []}')
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    monkeypatch.setattr(run, "WORK", tmp_path)
+    suite = Suite("x", {}, "w.whl", "rstest")
+    suite.dir = tmp_path
+    suite.run_pytest(xdist_workers=8, xdist_args=["--dist", "worksteal"])
+    suite.run_pytest()
+    assert argvs[0][-4:] == ["-n", "8", "--dist", "worksteal"]
+    assert "--dist" not in argvs[1] and "-n" not in argvs[1]
+
+
+# ---- main(): what a result file records, and how each point is run -----------
+
+
+def _fake_python(tmp_path):
+    """A venv-shaped `bin/python` that forwards to this interpreter."""
+    py = tmp_path / "venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    py.chmod(0o755)
+    return py
+
+
+def _run_main(tmp_path, monkeypatch, argv):
+    """Run bench.main() offline against a fake suite; returns (bench.json, calls)."""
+    import bench
+
+    _fake_python(tmp_path)
+    snap = _write_snap(tmp_path / "snap.json", {"t.py::a": {"call": "passed"}})
+    calls = []
+
+    class FakeSuite:
+        def __init__(self, name, cfg, wheel, rstest_bin):
+            self.name, self.venv, self.dir = name, tmp_path / "venv", tmp_path
+
+        def cwd(self):
+            return tmp_path
+
+        def run_pytest(self, xdist_workers=None, xdist_args=()):
+            calls.append(("pytest", xdist_workers, tuple(xdist_args)))
+            return snap, 1.0
+
+        def run_rstest(self, workers=None):
+            calls.append(("rstest", workers, ()))
+            return snap, 0.5
+
+    out = tmp_path / "bench.json"
+    monkeypatch.setattr(bench, "Suite", FakeSuite)
+    monkeypatch.setattr(bench, "BENCH", out)
+    monkeypatch.setattr(bench, "_has_xdist", lambda s: True)
+    monkeypatch.setattr(bench, "XDIST_ARGS", [], raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(sys, "argv", ["bench.py", "--rstest", sys.executable, *argv])
+    bench.main()
+    return json.loads(out.read_text()), calls
+
+
+def test_result_records_interpreter_and_runner_versions(tmp_path, monkeypatch):
+    # The published Environment table states Python / pytest / pytest-xdist
+    # versions: they must come from the result file, not from memory.
+    import importlib.metadata
+    import platform
+
+    doc, _ = _run_main(tmp_path, monkeypatch, ["--only", "fastapi", "--sweep", ""])
+    env = doc["environment"]
+    assert env["bench_python"] == platform.python_version()
+    assert env["platform"] == platform.platform()
+    assert env["xdist_dist"] == "load (xdist default)"
+    rt = env["suite_runtimes"]["fastapi"]
+    assert rt["python"] == platform.python_version()
+    assert rt["pytest"] == importlib.metadata.version("pytest")
+    assert "pytest_xdist" in rt
+    assert "rstest_worker" in rt
+
+
+def test_xdist_dist_mode_reaches_every_xdist_run(tmp_path, monkeypatch):
+    doc, calls = _run_main(
+        tmp_path,
+        monkeypatch,
+        [
+            *("--only", "fastapi", "--sweep", "fastapi", "--sweep-workers", "8", "--xdist"),
+            *("--xdist-dist", "worksteal", "--repeat", "2", "--warmup", "0"),
+        ],
+    )
+    xdist = [c for c in calls if c[0] == "pytest" and c[1] is not None]
+    assert xdist and all(c == ("pytest", 8, ("--dist", "worksteal")) for c in xdist)
+    assert doc["environment"]["xdist_dist"] == "worksteal"
+
+
+def test_spectrum_points_get_the_warmup_run(tmp_path, monkeypatch):
+    # Methodology: every point gets --warmup untimed runs before its timed ones,
+    # the spectrum's serial pytest baseline and rstest row included.
+    _, calls = _run_main(
+        tmp_path,
+        monkeypatch,
+        ["--only", "fastapi", "--sweep", "", "--repeat", "2", "--warmup", "1"],
+    )
+    assert [c[0] for c in calls].count("pytest") == 3
+    assert [c[0] for c in calls].count("rstest") == 3
+
+
 if __name__ == "__main__":  # allow `python corpus/test_bench.py` without pytest
     import pytest
 

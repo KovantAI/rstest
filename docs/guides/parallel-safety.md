@@ -29,9 +29,9 @@ Serial tests run in the **designated worker's own session**, not a fresh one:
 they reuse the session-scoped fixtures that worker already built during its
 parallel phase (one instance, on that worker, not a merge of all workers'
 fixtures). Narrower scopes (package, module, class) may be set up again,
-even between two serial tests of one module. So a serial test depending on a session fixture gets a
-normally-constructed one; just don't expect it to see state another worker's
-copy of that fixture accumulated.
+even between two serial tests of one module. So a serial test depending on a
+session fixture gets a normally-constructed one; just don't expect it to see
+state another worker's copy of that fixture accumulated.
 
 ## File affinity
 
@@ -69,6 +69,31 @@ reasons to override it with an explicit `-n`, in opposite directions:
   need `-n` capped to stay green under a busy machine.
 
 An explicit `-n <k>` is exact: the `auto` caps do not apply.
+
+### Memory per worker { #memory-per-worker }
+
+Each worker is a full OS process, so memory grows with `-n`. Measured
+([cpu-bench](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#memory),
+[scikit-learn](../reference/benchmarks.md#memory-and-blas-threads)):
+
+```text
+peak ≈ orchestrator + N × (worker baseline + your suite's working set)
+```
+
+- **Worker baseline:** 38 MiB (interpreter, pytest, rstest's worker), the same
+  as a pytest-xdist worker.
+- **Orchestrator:** about 10 MiB for rstest (Rust). xdist's controller is a
+  Python process: about 38 MiB.
+- **Working set:** your serial run's peak RSS minus the baseline. A suite that
+  holds about 400 MiB per worker (the cpu-bench `blas` tests) peaks at 3.3 GiB
+  at `-n 8`: 8 × its single-worker peak.
+
+That total is the upper bound, reached when every worker is at its peak at
+once (normal for a long suite; a short one comes in under it). Size `-n` as
+available RAM ÷ your serial peak RSS, and leave headroom for processes your
+tests start themselves (scikit-learn's joblib pools add about 500 MiB on its
+own suite). `--doctor` does not measure memory; use `/usr/bin/time -v`,
+`psutil`, or your CI's memory graph.
 
 ## Session-scoped fixtures duplicate
 
@@ -262,8 +287,7 @@ $ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 (Or cap `-n` to leave headroom for the internal threads.) Pin for
 determinism, not for speed: on numpy with Accelerate the cap made no
 difference on a realistic suite, and on heavy linear algebra it was slower
-below the core count
-([measured](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#worker-x-blas-thread-grid)).
+below the core count ([measured](#blas-threads-and-speed)).
 `VECLIB_MAXIMUM_THREADS` is for macOS: Accelerate ignores the other three.
 
 **3. Reset global numeric state per test.** `np.seterr`, `torch.set_default_dtype`,
@@ -286,6 +310,26 @@ If a value differs between `-n 0` and a parallel run, it is one of the four
 above: start by diffing against the `-n 0` baseline, then check thread pinning
 (2) and per-test state (3) first, as those are the usual culprits for numerics.
 
+### BLAS threads and speed { #blas-threads-and-speed }
+
+numpy, scikit-learn and torch run their own thread pools, so at `-n N` you
+get N workers, each with its own pool. Measured on numpy with Accelerate
+(macOS;
+[cpu-bench grid](https://github.com/KovantAI/rstest/tree/main/examples/cpu-bench#worker-x-blas-thread-grid)):
+
+- On a realistic suite (scikit-learn `linear_model`, small ops) the thread cap
+  made no difference from `-n 2` up (at `-n 1`, uncapped was about 7% slower).
+- On heavy matmul/solve tests, library threads **help** while `-n` is below
+  the core count (one worker: 13.4s capped at one thread, 7.7s uncapped), and
+  the cap moves the wall by 3% at most once `-n` reaches the core count.
+
+So one thread per worker is not a free default. Pin it (the command under
+point 2 above) when you see oversubscription on your stack (OpenBLAS and MKL
+spin their own threads and can behave differently from Accelerate), or when
+you need bit-stable reductions. `VECLIB_MAXIMUM_THREADS` is the one
+Accelerate reads (numpy's macOS arm64 wheels use it). Measure your own stack
+with `examples/cpu-bench/measure.py --grid`.
+
 ## Diagnosing a parallel-only failure
 
 ```console
@@ -302,9 +346,13 @@ anything failing at `-n 0` too is a plain bug.
 whole suite and scoped to the files that actually fail: serial runs (twice)
 and a `--dist loadfile` run, with load sensitivity inferred from wall time
 far exceeding CPU time rather than from a separate `-n 2` run. It classifies
-each failure into the classes above, and bisects the polluting file for order /
-isolation defects (the first 3; use `rstest bisect` for the rest). Reach for it instead of running the three commands by hand;
-see [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
+each failure into the classes above. For order-dependency and isolation
+failures it also bisects for the polluting file, but for at most three such
+tests, since each bisection costs several runs; run
+[`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) on
+each of the others. Reach for
+it instead of running the three commands by hand; see
+[The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
 
 For an order-dependent suite, three more tools go from "it flakes sometimes"
 to a fix:
@@ -326,7 +374,11 @@ to a fix:
 If the failure only shows up on CI, don't try to recreate the schedule by
 hand: upload the run's replay journal and re-run that exact schedule locally
 with `rstest replay`. See
-[Replaying a CI-only failure locally](replay.md).
+[Replaying a CI failure locally](replay.md).
+
+If none of this reproduces it and the test fails intermittently even at
+`-n 0`, it is real nondeterminism, not an order dependency: retry, track and
+ring-fence it with the tools in [Flaky tests](flaky-tests.md).
 
 ## Worked examples
 

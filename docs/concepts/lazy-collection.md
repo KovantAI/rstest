@@ -10,40 +10,44 @@ streams back the nodeids.
 ## Auto-default
 
 Setting neither `--collect` nor `[tool.rstest] collect` selects the
-strategy automatically. rstest picks `lazy` for a big-enough parallel
-run: at least **2000** known tests (counted from the duration cache) and
-a **`tests × workers` ≥ 16 000** product, with `--dist load` (the default,
-implicit or explicit) or `--dist loadfile`. Otherwise it picks `full`. Rationale: lazy's win
-is dropping the `(workers − 1)` redundant full collections, which only
-pays off once the suite and the worker count are both large; smaller
-suites keep full collection's locality.
+strategy automatically. rstest picks `lazy` when all of these hold, and
+`full` otherwise:
 
-The estimate reads `.rstest_cache/durations.json`, so a **cold cache
-counts as zero tests** and the first run of a suite stays `full`; a warm
-run of a large suite flips to `lazy`. When auto picks `lazy` it prints a
-banner naming the test and worker counts. Force either strategy with an
-explicit `--collect full` / `--collect lazy`. Auto never
-*rejects* a config: on `--dist loadscope|loadgroup`, a nodeid, `--pyargs`,
-a path selection (explicit paths, or `--changed`/`--since-green`
-narrowing), `--shard`, `--shuffle`, `--incremental`, or a fail-fast
-`--order` (including the one `--watch` picks by default) it just stays `full`. The test count covers the whole cached
-suite, so a run narrowed to a few files keeps full collection's per-test
-spread across workers.
+- **Size:** at least **2000** known tests and a **`tests × workers` ≥
+  16 000** product. Lazy's win is dropping the `(workers − 1)` redundant
+  full collections, which only pays off once the suite and the worker count
+  are both large; smaller suites keep full collection's locality.
+- **Dist:** `--dist load` (the default, implicit or explicit) or
+  `--dist loadfile`.
+- **Selection:** no nodeid, no `--pyargs`, and no path selection (explicit
+  paths, or `--changed`/`--since-green` narrowing). The test count covers
+  the whole cached suite, so a run narrowed to a few files keeps full
+  collection's per-test spread across workers.
+- **Features:** no `--shard`, `--shuffle`, `--incremental` or fail-fast
+  `--order` (including the one `--watch` picks by default).
+- **Doctests:** none enabled (argv, ini `addopts` or `PYTEST_ADDOPTS`). Lazy
+  hands workers only `python_files` matches, so it would miss doctests in
+  non-test modules, `--doctest-glob` files and plugin-collected non-`.py`
+  items.
+- **File walk:** every cached test's file is found by the lazy walk; a
+  missing one means lazy would lose tests.
+- **Balance:** no file's cached time exceeds an even per-worker share
+  (`total time / workers`) by more than a second. Lazy runs each file whole
+  on one worker, so such a file would hold up the run. The check assumes no
+  stealing, so it applies even under an explicit `--dist load` (which could
+  split the file; see [When it doesn't](#when-it-doesnt)).
 
-Lazy hands workers only `python_files` matches, so it would miss doctests
-in non-test modules, `--doctest-glob` files and plugin-collected non-`.py`
-items. Auto therefore stays `full` when doctests are enabled (argv, ini
-`addopts` or `PYTEST_ADDOPTS`) or when the duration cache holds tests from a
-file the lazy walk doesn't find. Files the walk finds but pytest would
-never recurse into (`norecursedirs`, `collect_ignore`, `--ignore`) are safe
-in any lazy run: the worker applies pytest's own ignore checks and reports
-them empty.
-Auto also stays `full` when one file's cached time exceeds an even
-per-worker share (`total time / workers`) by more than a second, since lazy
-runs each file whole on one worker and that file would hold up the run. The
-check assumes no stealing, so it applies even under an explicit `--dist load`
-(which could split the file; see [When it doesn't](#when-it-doesnt)). Pass
-`--collect lazy` to use lazy collection for such a suite anyway.
+The test count comes from `.rstest_cache/durations.json`, so a **cold cache
+counts as zero tests** and a suite's first run stays `full`; a warm run of a
+large suite flips to `lazy`. When auto picks `lazy` it prints a banner
+naming the test and worker counts. Auto never *rejects* a config: when a
+condition fails it just stays `full`. Force either strategy with an explicit
+`--collect full` / `--collect lazy`; the latter also uses lazy collection
+for a suite the balance check turned down.
+
+Files the walk finds but pytest would never recurse into (`norecursedirs`,
+`collect_ignore`, `--ignore`) are safe in any lazy run: the worker applies
+pytest's own ignore checks and reports them empty.
 
 ```console
 $ rstest --collect lazy
@@ -74,8 +78,9 @@ collection work scales with what you select, not with worker count.
 ## When it doesn't
 
 **Suites with a few giant files.** Under lazy collection the unit of
-dispatch is the file, not the test, even with the default `--dist load`. A file with thousands of parametrized tests pins one worker
-while the rest idle (aiohttp's full run is ~2× slower under lazy
+dispatch is the file, not the test, even with the default `--dist load`.
+A file with thousands of parametrized tests pins one worker while the rest
+idle (aiohttp's full run is ~2× slower under lazy
 affinity; packaging's 61k-in-30-files similar). Two options:
 
 - stay with `--collect full` (the right call for full runs of such
@@ -89,10 +94,10 @@ affinity; packaging's 61k-in-30-files similar). Two options:
   reorders execution more aggressively (see below).
 
 Without an explicit `load`, lazy keeps strict file affinity (with the
-default dist or `--dist loadfile` alike): a file's tests run on one worker, in file order. A `load` from
-either source turns stealing on, so a command-line `--dist loadfile` does not
-switch off a `dist = "load"` in `[tool.rstest]`; remove it from the config
-for strict affinity.
+default dist or `--dist loadfile` alike): a file's tests run on one worker,
+in file order. A `load` from either source turns stealing on, so a
+command-line `--dist loadfile` does not switch off a `dist = "load"` in
+`[tool.rstest]`; remove it from the config for strict affinity.
 
 ## The compatibility trade
 

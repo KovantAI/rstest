@@ -265,6 +265,25 @@ Feature: Daily local developer
       And stderr contains "4 of 4 test(s) unchanged"
       And stdout contains "(4 cached)"
 
+    Scenario: DV-14 a run from a subdirectory keeps its cache at the rootdir, as documented
+      Given a file "pyproject.toml" containing:
+        """
+        [tool.pytest.ini_options]
+        testpaths = ['tests']
+        """
+      And a file "tests/unit/test_u.py" containing:
+        """
+        def test_u():
+            pass
+        """
+      When I run "rstest -n 2" in "tests/unit"
+      Then the run succeeds
+      And ".rstest_cache" is a directory
+      And "tests/unit/.rstest_cache" does not exist
+      Given the table row of "docs/reference/environment.md" starting with "| `RSTEST_CACHE`"
+      Then that docs section contains "default `.rstest_cache` at the pytest rootdir"
+      And that docs section does not contain "invocation directory"
+
   Rule: --changed and --watch follow the import graph through conftest.py
 
     Background:

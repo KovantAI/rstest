@@ -56,16 +56,16 @@ root.
 |---|---|
 | `RSTEST_RUN_UID` | the run id to use instead of generating one. Every worker sees it as `RSTEST_RUN_UID` and `workerinput["testrun_uid"]`. Set the same value on every CI shard to give them one shared run id (for example `RSTEST_RUN_UID=${{ github.run_id }}-${{ github.run_attempt }}`). A monorepo run passes its own to each project's rstest this way |
 | `VIRTUAL_ENV` | worker interpreter discovery (first after `--python`) |
-| `NO_COLOR` | a non-empty value turns color off, and with it the live footer, so a terminal gets no escape sequences at all. Decided as pytest does: `--color=yes` / `--color=no` (also forwarded to pytest) beats every variable, then `PY_COLORS`, then `NO_COLOR`, then `FORCE_COLOR`, then whether stdout is a terminal |
+| `NO_COLOR` | a non-empty value turns color off, and with it the live footer, so a terminal gets no escape sequences (see [Color precedence](#color-precedence)) |
 | `FORCE_COLOR` | a non-empty value colors the output even when piped, matching the workers' colored assertion diffs (pytest reads it too). `NO_COLOR` wins over it. Color alone never brings back the live footer off a terminal |
 | `PY_COLORS` | `1` forces color on, `0` forces it off; beats `NO_COLOR` and `FORCE_COLOR`, as in pytest |
 | `TERM` | `dumb` means no color and no live footer on a terminal, as pytest does (Emacs compile buffers) |
 | `CI` | any value other than empty, `0` or `false` turns the live footer and the `bar` default off even on a pty (Buildkite, `docker -t`): the run prints `dots` and no cursor movement. Color stays as decided above |
 | `COLUMNS` | the terminal width for the live footer when the terminal can't report its size (default 80); footer lines are cut to fit so they never wrap |
 | `PYTEST_ADDOPTS` | read by the vendored core, exactly as under pytest. rstest-owned flags placed here (`--reruns`, `--junitxml`, `--timeout`, ...) are **not** seen by rstest; see [CLI](cli.md) |
-| `RSTEST_CACHE` | relocates the project cache directory (default `.rstest_cache` in the invocation directory): durations, flakes, coverage index, last-green baseline, and [replay journals](../guides/replay.md) (`replay/`). At a [monorepo](../concepts/monorepo.md#caches-per-project) root each project gets `<RSTEST_CACHE>/<slug>` (a relative value resolves against the monorepo root); unset, each project keeps its own `<project>/.rstest_cache` |
+| `RSTEST_CACHE` | relocates the project cache directory (default `.rstest_cache` at the pytest rootdir); see [Cache location](#cache-location) |
 | `RSTEST_CACHE_REMOTE` | default for [`--cache-remote`](cli.md#-cache-remote-urldir-cache-pull-cache-push) (the flag wins) |
-| `RSTEST_CACHE_REMOTE_TOKEN` | bearer token sent to an `http(s)://` cache remote. rstest removes it from the environment it gives test processes (workers, and the pytest baseline of `rstest try`), so it doesn't show up in `os.environ`. That is defense in depth, not a secret boundary: the rstest process itself still holds it, and a test running as the same user can read another process's environment (`/proc/<pid>/environ` on Linux). Give jobs that run untrusted code a read-only token |
+| `RSTEST_CACHE_REMOTE_TOKEN` | bearer token sent to an `http(s)://` cache remote, hidden from test processes; see [Remote cache token](#remote-cache-token) |
 | `RSTEST_NO_REPLAY_JOURNAL` | set to `1` to stop parallel runs writing a [replay journal](cli-commands.md#replay); empty, `0` and `false` leave journaling on |
 | `RSTEST_CACHE_KEEP_LAST` | `cache-compact` / auto-compaction retention: keep the newest N segments loose (default for `--keep-last`) |
 | `RSTEST_CACHE_MAX_AGE` | retention by age: keep segments younger than this loose, e.g. `30d` (default for `--max-age`) |
@@ -73,9 +73,52 @@ root.
 | `RSTEST_WORKER_PATH` | extra directory prepended to the workers' `PYTHONPATH` to locate the `rstest_worker` package (for unusual installs where the project interpreter can't import it) |
 | `RSTEST_MAX_MESSAGE_BYTES` | Cap on one worker-to-orchestrator message (default 256 MiB); raise it only if a huge suite hits the limit |
 | `RSTEST_WALL_TTL_DAYS` | How long a project's recorded wall time (`.rstest_cache/wall.json`, used by the monorepo planner to weight projects) stays valid. Default `30`; `0` keeps it forever |
-| `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache **only** (`<dir>/rstest/interp-probes-v1.json`), which speeds up repeated `--python` version resolution. It does **not** relocate `.rstest_cache/` (durations/flakes); use `RSTEST_CACHE` for that. Defaults to `$XDG_CACHE_HOME` (or `~/.cache`) on Unix and `%LOCALAPPDATA%` on Windows; if none resolve, probing just isn't persisted |
+| `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache only, not `.rstest_cache/`; see [Interpreter-probe cache](#interpreter-probe-cache) |
 | `RSTEST_FLAKE_RETENTION_DAYS` | how long a test's flake/failure history (`.rstest_cache/flakes.json`) stays relevant. A test with no flake or failure inside this window reads as fixed: its entry is dropped and it stops carrying "flaked _N_x before" annotations. Defaults to `90`; `0` keeps history forever |
-| `COVERAGE_CORE` | coverage.py's measurement core. Under `--cov-context`, rstest sets it to `ctrace` in the workers unless you already set it to a non-empty value; your value wins (an empty value is overwritten). Don't set `sysmon` (Python 3.14's default core) for a `--cov-context=test` run: it keeps only the first test's context per line, which silently corrupts the coverage index behind `--changed` and `--incremental` |
+| `COVERAGE_CORE` | coverage.py's measurement core; set to `ctrace` in workers under `--cov-context` unless you set it; see [Coverage core](#coverage-core) |
+
+### Color precedence
+
+Color is decided as pytest decides it: `--color=yes` / `--color=no` (also
+forwarded to pytest) beats every variable, then `PY_COLORS`, then
+`NO_COLOR`, then `FORCE_COLOR`, then whether stdout is a terminal.
+
+### Cache location
+
+`.rstest_cache` sits at the pytest rootdir, so a run from a subdirectory
+shares the project's cache. It holds durations, flakes, the coverage index,
+the last-green baseline and [replay journals](../guides/replay.md)
+(`replay/`). At a [monorepo](../concepts/monorepo.md#caches-per-project)
+root with `RSTEST_CACHE` set, each project gets `<RSTEST_CACHE>/<slug>` (a
+relative value resolves against the monorepo root); unset, each project
+keeps its own `<project>/.rstest_cache`.
+
+### Remote cache token
+
+rstest removes `RSTEST_CACHE_REMOTE_TOKEN` from the environment it gives
+test processes (workers, and the pytest baseline of `rstest try`), so it
+doesn't show up in `os.environ`. That is defense in depth, not a secret
+boundary: the rstest process itself still holds it, and a test running as
+the same user can read another process's environment
+(`/proc/<pid>/environ` on Linux). Give jobs that run untrusted code a
+read-only token.
+
+### Interpreter-probe cache
+
+`RSTEST_CACHE_DIR` sets where `<dir>/rstest/interp-probes-v1.json` lives;
+that file speeds up repeated `--python` version resolution. It does **not**
+relocate `.rstest_cache/` (durations, flakes); use `RSTEST_CACHE` for that.
+It defaults to `$XDG_CACHE_HOME` (or `~/.cache`) on Unix and
+`%LOCALAPPDATA%` on Windows; if none resolve, probing just isn't persisted.
+
+### Coverage core
+
+Under `--cov-context`, rstest sets `COVERAGE_CORE=ctrace` in the workers
+unless you already set it to a non-empty value; your value wins (an empty
+value is overwritten). Don't set `sysmon` (Python 3.14's default core) for a
+`--cov-context=test` run: it keeps only the first test's context per line,
+which silently corrupts the coverage index behind `--changed` and
+`--incremental`.
 
 ## Also read
 
@@ -83,7 +126,7 @@ Standard variables from CI systems and tools that rstest reads when present:
 
 | Variable | Used for |
 |---|---|
-| `GITHUB_BASE_REF`, `CI_MERGE_REQUEST_DIFF_BASE_SHA`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`, `BUILDKITE_PULL_REQUEST_BASE_BRANCH` | the pull-request base for a bare `--changed`, probed in that order (see [`--changed`](cli.md#-changedrev)) |
+| `GITHUB_BASE_REF`, `CI_MERGE_REQUEST_DIFF_BASE_SHA`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`, `BUILDKITE_PULL_REQUEST_BASE_BRANCH` | the pull-request base for a bare `--changed`, probed in that order (see [Selecting changed tests: CI usage](../guides/changed.md#ci-usage)) |
 | `GITHUB_STEP_SUMMARY` | doctor runs append their markdown report to this file on GitHub Actions |
 | `BUILDKITE` | on Buildkite (non-empty), doctor reports and flaky tests are published with `buildkite-agent annotate` |
 | `UV_PYTHON_INSTALL_DIR`, `XDG_DATA_HOME`, `APPDATA` | locating uv-managed interpreters during interpreter discovery (`UV_PYTHON_INSTALL_DIR` first, else uv's default under `XDG_DATA_HOME` or `~/.local/share` on Unix, `%APPDATA%` on Windows) |

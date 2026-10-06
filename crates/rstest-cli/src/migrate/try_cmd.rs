@@ -353,6 +353,36 @@ mod tests {
     }
 
     #[test]
+    fn exit_codes_doc_lists_the_not_comparable_exit() {
+        // Regression: exit-codes.md's `try` row gave `2` only for "couldn't
+        // run pytest, refused to dispatch, or an error", missing the most
+        // common `2`: nothing to compare (a collection error or no tests).
+        let (mut sink, cap) = crate::reporting::sink::Sink::captured();
+        let code = super::report_not_comparable(&mut sink, "pytest ran no tests (exit 5)");
+        assert!(cap.out().contains("could not compare"), "{}", cap.out());
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/reference/exit-codes.md"),
+        )
+        .unwrap();
+        let row = doc
+            .lines()
+            .find(|l| l.starts_with("| [`try`]"))
+            .expect("exit-codes.md has a `try` row");
+        // The row's text for this code: from `N` to the next backticked code.
+        let marker = format!("`{code}`");
+        let tail = &row[row.find(&marker).expect("try row lists the code") + marker.len()..];
+        let next = regex::Regex::new(r"`\d+`").unwrap();
+        let cell = next.find(tail).map_or(tail, |m| &tail[..m.start()]);
+        for words in ["nothing to compare", "collection error", "no tests"] {
+            assert!(
+                cell.contains(words),
+                "try row, `{code}`: {cell:?} lacks {words:?}"
+            );
+        }
+    }
+
+    #[test]
     fn collect_errors_reads_the_top_level_list() {
         let doc = serde_json::json!({"collect_errors": ["a.py", "b.py"], "tests": {}});
         assert_eq!(collect_errors(&doc), vec!["a.py", "b.py"]);

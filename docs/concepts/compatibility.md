@@ -98,16 +98,13 @@ rstest currently vendors **pytest 9.1.1**, unmodified. Policy:
   lives in `rstest_worker` around it.
 
 !!! note "If your suite is pinned to an older pytest"
-    Adopting rstest implicitly adopts the vendored pytest's major version:
-    a suite (or plugin set) that isn't pytest-9-clean will see pytest 9
-    behavior inside rstest workers, whatever pytest version is installed.
+    Adopting rstest adopts pytest 9 whatever pytest is installed (see
+    [Your suite runs on pytest 9](../getting-started/installation.md#your-suite-runs-on-pytest-9)).
     There is currently no older-core build, and none is planned: one
     vendored core, tracked forward. When a new pytest **major** ships, the
     core is re-vendored after the early point releases stabilize: the
     same timing a cautious team upgrades pytest itself. Minor releases
     are folded in routinely; security fixes within two weeks.
-    Run `rstest -n 0` first: it
-    surfaces version incompatibilities exactly as a pytest upgrade would.
 
 ### Why 9, not 8
 
@@ -120,17 +117,12 @@ effectively the same as 8.x (same supported-CPython line, same core
 dependencies), so vendoring 9 doesn't raise the bar to adopt rstest beyond
 what running pytest 8 already required.
 
-What that means in practice:
-
-- A suite that runs clean on a recent pytest 8.x with **no deprecation
-  warnings** is almost always already pytest-9-clean: the removed APIs are
-  exactly the ones 8.x was warning you about.
-- The realistic migration cost is auditing those warnings, not rewriting
-  tests. `rstest -n 0` (or `pytest -W error::pytest.PytestDeprecationWarning`
-  on your current pytest first) surfaces them.
-- Vendoring 8 would buy almost nothing (the same suites pass on both) while
-  immediately leaving rstest a major version behind upstream. Tracking 9
-  forward keeps the vendored core current for the same near-zero cost.
+For what that means for your suite (warning-clean on 8.x is almost always
+9-clean), see
+[Your suite runs on pytest 9](../getting-started/installation.md#your-suite-runs-on-pytest-9).
+Vendoring 8 would buy almost nothing (the same suites pass on both) while
+immediately leaving rstest a major version behind upstream. Tracking 9
+forward keeps the vendored core current for the same near-zero cost.
 
 If your suite is *not* yet warning-clean on pytest 8.x, treat the rstest
 switch as "clear pytest deprecations first, then change one command": the
@@ -186,19 +178,107 @@ crash-during-provisioning behavior are not yet in the battery (tests
 requiring live services or absent optional dependencies fail
 identically under vanilla pytest).
 
+## Unstable parametrize ids { #unstable-parametrize-ids }
+
+The most common thing that blocks a parallel run is a test id that differs
+from one collection to the next. Under full collection (every cold-cache run,
+and any suite below the [lazy](lazy-collection.md) auto threshold) each
+worker collects the whole suite and reports a count and hash of its nodeids.
+If any worker disagrees, rstest refuses to dispatch rather than misattribute
+results, and exits with:
+
+```text
+workers collected different test sets (N vs M items); cannot dispatch safely.
+```
+
+There is no automatic fallback; pytest-xdist has the same constraint. The
+usual sources:
+
+- **Per-process values in a `parametrize` id**: a `repr()` fallback that
+  embeds a memory address (`0x...`), a `uuid4()`, a random value, or a
+  sub-second timestamp. These differ in every worker, so the pool never
+  starts.
+- **Second-resolution timestamps** (`now()` in the parameter list). Workers
+  collect within the same second, so these usually match and the run works,
+  but a collection that straddles a second boundary fails intermittently
+  (marshmallow runs 100% at `-n auto`; see
+  [parity divergences §3](../reference/parity-divergences.md#3-run-dependent-nodeids-now-resolved)).
+- **Order, not content**: a `parametrize` over a `set` of strings yields the
+  same ids in a different order per process, because string hashing follows
+  `PYTHONHASHSEED`, which is random per process.
+- A randomizing plugin, such as pytest-randomly without a fixed seed.
+
+Lazy collection collects each file once and compares nothing, so a large
+warm-cache run may pass, but the next cold-cache run collects in full and
+refuses: fix the ids anyway.
+
+**Fix:** give the `parametrize` a stable `ids=` (for example
+`ids=[c.name for c in cases]`), iterate a list or `sorted(...)` instead of a
+set (or pin `PYTHONHASHSEED` for the whole run), seed or disable the
+randomizing plugin (`-p no:randomly`), or run `-n 0`.
+[`rstest migrate-check`](../reference/cli-commands.md#migrate-check) collects
+twice before your first parallel run and names each unstable site, with its
+class.
+
 ## Known gaps
 
 Maintained as things close:
 
-| Gap | Status |
-|---|---|
-| Windows at corpus scale | supported: the full gate runs on `windows-latest` in CI every commit and wheels are smoke-tested there; the 33-suite public corpus, however, is run only on macOS/Linux, so large-real-world-suite validation on Windows is lighter than on the other platforms |
-| Terminal-rendering plugins (pytest-sugar, pytest-rich UIs) | by design at `-n ≥ 2`: rstest owns the terminal; data-level plugin behavior unaffected |
-| hypothesis's shared `.hypothesis` example database under many workers | untested at high worker counts; hypothesis itself handles concurrent DB access, but rstest has not verified it beyond `-n 8`. Mitigation if you hit contention: in a `settings` profile give each worker its own DB (`database=DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('PYTEST_XDIST_WORKER', 'master')}")`) or set `database=None` in CI to disable it entirely |
-| `--sw` (stepwise, `--stepwise-skip`, `--stepwise-reset`) | runs in a single pytest session automatically (like `--pdb`/`-s`/`--co`): the vendored stepwise plugin owns resume/stop and its `cache/stepwise` round-trips exactly as upstream. Sequential by nature: stop-at-first-failure + resume-from-a-single-cursor has no meaning under split, duration-ordered parallel dispatch, so it does not run at `-n ≥ 2`. Same constraint as xdist. |
-| xdist controller-side hooks (`pytest_configure_node` and friends) | emulated for hooks that are per-node-stateless (read `gateway.id`, fill `node.workerinput`: SQLAlchemy's pattern, measured). Structural divergences from a single xdist controller: the hooks run N times concurrently in N processes (controller-side shared state needs rework), and crashed-node `pytest_testnodedown` runs on a survivor without the dead node's configure-time state. Details: [xdist hook emulation](xdist-hooks.md). |
-| Plugins needing a controller-side service *shared* across all workers | rstest runs no central controller, so a plugin that needs one shared service for the whole pool isn't emulated. The known ecosystem cases are instead handled per worker: pytest-retry's branch self-provisions its own report server per worker (its `server_port` is set locally, no controller needed; if that seeding fails, rstest unregisters the plugin and falls back to native `--reruns`) and pytest-rerunfailures is neutralized in favor of native `--reruns`; both work at `-n ≥ 2`. See [parity divergences §8](../reference/parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed). |
-| Time-derived parametrize IDs (`now()` in `@pytest.mark.parametrize`) | under full collection (every cold-cache run, and any suite below the [lazy](lazy-collection.md) auto threshold), collection runs once per worker, and rstest compares every worker's collected nodeids (count + hash). Lazy collection collects each file once and compares nothing, but the next cold run is full again. IDs that come out identical on every worker run normally: second-resolution timestamps usually do, since workers collect within the same second (marshmallow runs 100% at `-n auto`; [parity divergences §3](../reference/parity-divergences.md#3-run-dependent-nodeids-now-resolved)). IDs that differ between workers (sub-second timestamps, uuids, random values, or a second-resolution collection that straddles a tick) make rstest refuse to dispatch rather than misattribute results; there is no automatic fallback. Use stable `ids=` or `-n 0` (same constraint as xdist) |
-| Plugins that need a single controller process to aggregate worker output into one artifact (pytest-html) | pytest-html registers its report writer only on a node *without* `workerinput` (its xdist controller check); every rstest worker has one, so at `-n ≥ 2` no writer is registered and an `--html` that reaches the plugin (via `addopts` or after `--`) silently produces nothing (no crash). Merging all workers into one file needs a controller process rstest doesn't run. A command-line `--html` is rstest's native merged report at every worker count; for pytest-html's own report, run `rstest -n 0 -- --html=...`. Full per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility) |
+| Gap | Status | Notes |
+|---|---|---|
+| Windows at corpus scale | supported, lighter validation | [1](#gap-windows) |
+| Terminal-rendering plugins (pytest-sugar, pytest-rich UIs) | by design at `-n ≥ 2` | [2](#gap-terminal) |
+| hypothesis's shared `.hypothesis` database under many workers | untested above `-n 8` | [3](#gap-hypothesis) |
+| `--sw` / stepwise flags | single process only | [4](#gap-stepwise) |
+| xdist controller-side hooks (`pytest_configure_node` and friends) | emulated per worker | [5](#gap-controller-hooks) |
+| Plugins needing one controller-side service for the whole pool | not emulated; known cases handled per worker | [6](#gap-shared-service) |
+| Time-derived or random parametrize ids | pool refuses to dispatch | [7](#gap-parametrize-ids) |
+| Plugins that aggregate worker output into one artifact (pytest-html) | writes nothing at `-n ≥ 2` | [8](#gap-pytest-html) |
+
+1. **Windows at corpus scale.**{ #gap-windows } The full gate runs on
+   `windows-latest` in CI on every commit and wheels are smoke-tested there,
+   but the 33-suite public corpus runs only on macOS/Linux, so
+   large-real-world-suite validation on Windows is lighter than on the other
+   platforms.
+2. **Terminal-rendering plugins.**{ #gap-terminal } At `-n ≥ 2` rstest owns
+   the terminal, so plugin-drawn UIs don't paint. Data-level plugin behavior
+   is unaffected.
+3. **hypothesis example database.**{ #gap-hypothesis } hypothesis handles
+   concurrent access to its database itself, but rstest has not verified it
+   beyond `-n 8`. If you hit contention, give each worker its own database in
+   a `settings` profile
+   (`database=DirectoryBasedExampleDatabase(f".hypothesis/{os.environ.get('PYTEST_XDIST_WORKER', 'master')}")`),
+   or set `database=None` in CI to disable it.
+4. **Stepwise.**{ #gap-stepwise } `--sw`, `--stepwise-skip` and
+   `--stepwise-reset` run in a single pytest session automatically (like
+   `--pdb`, `-s` or `--co`): the vendored stepwise plugin owns resume and
+   stop, and its `cache/stepwise` round-trips exactly as upstream. Stopping at
+   the first failure and resuming from one cursor has no meaning under split,
+   duration-ordered parallel dispatch, so it does not run at `-n ≥ 2`. Same
+   constraint as xdist.
+5. **Controller-side hooks.**{ #gap-controller-hooks } Emulated for hooks
+   that are per-node-stateless (read `gateway.id`, fill `node.workerinput`:
+   SQLAlchemy's pattern, measured). Structural differences from a single
+   xdist controller: the hooks run N times concurrently in N processes, so
+   controller-side shared state needs rework, and a crashed node's
+   `pytest_testnodedown` runs on a survivor without the dead node's
+   configure-time state. Details: [xdist hook emulation](xdist-hooks.md).
+6. **Shared controller-side services.**{ #gap-shared-service } rstest runs no
+   central controller, so a plugin that needs one service for the whole pool
+   isn't emulated. The known cases are handled per worker:
+   pytest-retry's branch self-provisions its own report server per worker
+   (if that fails, rstest unregisters the plugin and falls back to native
+   `--reruns`), and pytest-rerunfailures is neutralized in favor of native
+   `--reruns`. Both work at `-n ≥ 2`. See
+   [parity divergences §8](../reference/parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed).
+7. **Parametrize ids.**{ #gap-parametrize-ids } See
+   [Unstable parametrize ids](#unstable-parametrize-ids).
+8. **pytest-html.**{ #gap-pytest-html } pytest-html registers its report
+   writer only on a node without `workerinput` (its xdist controller check).
+   Every rstest worker has one, so at `-n ≥ 2` an `--html` that reaches the
+   plugin (via `addopts` or after `--`) silently produces nothing. A
+   command-line `--html` is rstest's native merged report at every worker
+   count; for pytest-html's own report, run `rstest -n 0 -- --html=...`. Full
+   per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility).
 
 Found a difference not listed here? That's a bug report we want.

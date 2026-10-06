@@ -74,5 +74,10 @@
  ],
  "sweeps": [],
  "memory": [],
- "grid": null
+ "grid": null,
+ "notes": [
+  "Monorepo spectrum row: baseline = 5 serial per-package pytest invocations (wall = their sum), candidate = one rstest run at the root under the suite policy (-n auto). One untimed warm-up each, then 5 timed runs.",
+  "libs/sdk-py collects 0 tests under BOTH runners: its 10 test modules fail to import (ModuleNotFoundError: starlette, missing from the prepared venv). Both runners report the same 10 collect errors, so the 838 measured tests are libs/cli 330, libs/prebuilt 228, libs/checkpoint 172, libs/checkpoint-sqlite 108. rstest exits 2 for the collect errors; pytest's sdk-py invocation exits 2 as well.",
+  "libs/checkpoint has 13 failing tests under serial pytest; rstest matches them (parity 100%)."
+ ]
 }

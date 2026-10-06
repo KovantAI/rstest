@@ -168,7 +168,7 @@ pub struct Cli {
     /// Number of worker processes (logical cores); rstest is parallel by
     /// design. Use 0 or 1 for single-worker mode (byte-exact pytest semantics).
     /// Config: `[tool.rstest] numprocesses`. [default: auto]
-    #[arg(short = 'n', long = "numprocesses")]
+    #[arg(short = 'n', long = "numprocesses", value_parser = numprocesses_arg)]
     pub(crate) numprocesses: Option<String>,
 
     /// Fork-prewarm the worker pool (Unix only): import the vendored pytest core
@@ -839,6 +839,18 @@ pub(crate) fn forwarded_output(session_args: &[String]) -> Option<&str> {
     None
 }
 
+/// clap validator for `-n`: reject a non-count up front as a usage error
+/// (naming the flag and value) instead of failing later with a bare
+/// `invalid digit found in string`. The value stays a string (`auto` kept
+/// verbatim for the banner).
+fn numprocesses_arg(s: &str) -> Result<String, String> {
+    if crate::config::is_valid_numprocesses(s) {
+        Ok(s.to_string())
+    } else {
+        Err(format!("expected {}", crate::config::NUMPROCESSES_EXPECTED))
+    }
+}
+
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
 /// the following argv item (that item is a path / pytest flag).
@@ -1254,6 +1266,29 @@ mod tests {
     }
 
     #[test]
+    fn numprocesses_rejects_non_count_at_parse_time() {
+        // Regression: `-n abc` used to parse fine and later die with a bare
+        // `Error: invalid digit found in string` (no flag, no value named).
+        for good in ["auto", "0", "4", "16"] {
+            let cli = Cli::try_parse_from(v(&["rstest", "-n", good])).unwrap();
+            assert_eq!(cli.numprocesses.as_deref(), Some(good));
+        }
+        for bad in ["abc", "2 ", "4.0", "", "logical"] {
+            let err = Cli::try_parse_from(v(&["rstest", "-n", bad]))
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains("-n"), "{bad:?}: {err}");
+            assert!(
+                err.contains("non-negative integer or \"auto\""),
+                "{bad:?}: {err}"
+            );
+        }
+        // The long and attached forms go through the same validator.
+        assert!(Cli::try_parse_from(v(&["rstest", "--numprocesses=x"])).is_err());
+        assert!(Cli::try_parse_from(v(&["rstest", "-nx"])).is_err());
+    }
+
+    #[test]
     fn maxfail_forms() {
         assert_eq!(parse_maxfail(&v(&["-x"])), Some(1));
         assert_eq!(parse_maxfail(&v(&["--exitfirst"])), Some(1));
@@ -1510,6 +1545,81 @@ mod tests {
         // A consume-all subcommand still takes everything after it.
         let (own, _) = split_args(v(&["-vv", "explain", "t.py::test_a"]));
         assert_eq!(own, v(&["rstest", "explain", "t.py::test_a"]));
+    }
+
+    #[test]
+    fn docs_never_call_a_selected_subcommand_a_test_path() {
+        // Regression: cli-commands.md, exit-codes.md and replay.md said a
+        // subcommand is recognized only as the first argument, so
+        // `rstest --python X try` would run `try` as a test path. The parser
+        // selects it (see `subcommand_index`). Every documented
+        // `rstest ... <subcommand>` example the parser treats as the
+        // subcommand must not be described as a test path / plain run.
+        let wrong = regex::Regex::new(
+            r"(?i)test path|plain test run|normal test run|no longer recognized|only as the first argument",
+        )
+        .unwrap();
+        let mut bad = Vec::new();
+        for (page, text) in crate::doc_pages::pages() {
+            for sentence in crate::doc_pages::sentences(&text) {
+                let selects_late = crate::doc_pages::code_spans(&sentence)
+                    .iter()
+                    .filter_map(|span| span.strip_prefix("rstest "))
+                    .any(|cmd| {
+                        let argv: Vec<String> = cmd.split_whitespace().map(String::from).collect();
+                        subcommand_index(&argv).is_some_and(|i| i > 0)
+                    });
+                if selects_late && wrong.is_match(&sentence) {
+                    bad.push(format!("{page}: {sentence}"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "docs describe a subcommand the parser selects as a test path:\n{}",
+            bad.join("\n")
+        );
+        // The example the docs now give parses as documented.
+        let (own, session) = split_args(v(&["--python", "X", "try"]));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert_eq!(cli.command, Some(Command::Try));
+        assert_eq!(cli.python.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn docs_never_mention_a_hidden_flag() {
+        // Regression: concepts/monorepo.md listed the internal
+        // `--instrument-workers` (hidden from --help) as a user-facing flag.
+        // Hidden flags are plumbing between rstest processes, not interface.
+        use clap::CommandFactory;
+        fn hidden(cmd: &clap::Command, out: &mut Vec<String>) {
+            out.extend(
+                cmd.get_arguments()
+                    .filter(|a| a.is_hide_set())
+                    .filter_map(|a| a.get_long().map(|l| format!("--{l}"))),
+            );
+            for sub in cmd.get_subcommands() {
+                hidden(sub, out);
+            }
+        }
+        let mut flags = Vec::new();
+        hidden(&Cli::command(), &mut flags);
+        assert!(flags.contains(&"--instrument-workers".to_string()));
+        let mut bad = Vec::new();
+        for (page, text) in crate::doc_pages::pages() {
+            for flag in &flags {
+                let pat = format!(r"{}(?:[^a-z0-9-]|$)", regex::escape(flag));
+                if regex::Regex::new(&pat).unwrap().is_match(&text) {
+                    bad.push(format!("{page}: {flag}"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "hidden flags documented:\n{}",
+            bad.join("\n")
+        );
     }
 
     #[test]

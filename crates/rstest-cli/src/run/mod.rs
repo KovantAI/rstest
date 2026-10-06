@@ -2109,7 +2109,13 @@ fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
     if value == "auto" {
         return Ok(auto_workers(args));
     }
-    Ok(value.parse()?)
+    value.parse().with_context(|| {
+        format!(
+            "invalid worker count {value:?} for -n/--numprocesses or [tool.rstest] \
+             numprocesses (expected {})",
+            config::NUMPROCESSES_EXPECTED
+        )
+    })
 }
 
 /// `auto` = logical cores, capped by what the selected tests can use (worker
@@ -2834,8 +2840,13 @@ mod tests {
     fn parse_numprocesses_parses_and_rejects() {
         assert_eq!(parse_numprocesses("4", &[]).unwrap(), 4);
         assert_eq!(parse_numprocesses("0", &[]).unwrap(), 0);
-        assert!(parse_numprocesses("abc", &[]).is_err());
         assert!(parse_numprocesses("-1", &[]).is_err());
+        // Regression: the error names the bad value and where it comes from,
+        // not just a bare `invalid digit found in string`.
+        let err = format!("{:#}", parse_numprocesses("abc", &[]).unwrap_err());
+        assert!(err.contains("\"abc\""), "{err}");
+        assert!(err.contains("--numprocesses"), "{err}");
+        assert!(err.contains("non-negative integer or \"auto\""), "{err}");
     }
 
     #[test]

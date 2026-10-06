@@ -181,12 +181,8 @@ two workers while a slow single file still spreads across workers. It only
 ever caps downward; pass an explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch, **single-worker mode**:
-one pytest session in a single worker process, pytest's own behavior in
-every detail. With no `--output` or `--reruns` set, the terminal output is
-pytest's own too, byte-exact, and rstest only appends its extras (doctor,
-coverage, gate messages) after pytest's summary line. See
-[Single-worker mode](../concepts/glossary.md#single-worker-mode) for what that
-guarantees and how it differs from pytest-xdist's `-n 1`.
+one pytest session with pytest's own behavior and output
+([what it guarantees](../guides/migrate-from-pytest.md#the-escape-hatch)).
 
 Commit your defaults to `[tool.rstest]` in `pyproject.toml` so you don't
 retype flags:
@@ -217,7 +213,7 @@ rstest records per-test durations in `.rstest_cache/`. From the second run
 on, the scheduler starts your slowest tests first, which is what keeps
 workers busy at the end of the run instead of waiting on one long test.
 On wait-heavy suites this is dramatic: aiohttp's suite more than halves
-between its cold and warm runs (150s to 67s) (see [Benchmarks](../reference/benchmarks.md)).
+between its cold and warm runs (150s to 67s; see [Benchmarks](../reference/benchmarks.md)).
 
 ## When something fails
 
@@ -230,19 +226,9 @@ $ rstest --doctor    # and if the suite feels slow, ask why
     If tests fail *only* under parallelism on a freshly migrated suite, run
     [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) first: it
     classifies each parallel-only failure (for example order dependency,
-    isolation leak, or wall-clock timing) and names the fix, so you don't triage by
-    hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
-
-## Which command when?
-
-Four commands answer four different questions:
-
-| You want to… | Run | It tells you |
-|---|---|---|
-| Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli-commands.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup: zero risk |
-| Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) | Onboarding preflight: finds unstable test ids first, then classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
-| Quarantine the parallel-unsafe tests in one step | [`rstest audit`](../reference/cli-commands.md#audit) | Focused fix loop: same classification, repeatable to catch intermittent races, plus a ready-to-paste `conftest.py` block marking exactly the serial-fixable tests `@pytest.mark.serial` |
-| Understand why a passing suite is **slow** | [`rstest --doctor`](../guides/doctor.md) | Plain-English breakdown of where test time goes (wait-bound, a long-pole test, poor parallel balance) |
+    wall-clock timing, or an isolation leak, where one test leaves global
+    state behind that breaks a later test on the same worker) and names the
+    fix, so you don't triage by hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
 
 ## A test that isn't parallel-safe
 

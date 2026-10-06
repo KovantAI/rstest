@@ -61,8 +61,14 @@ $ rstest -n auto --changed
 rstest: 1 changed file(s) -> 1 of 12 mapped test(s) affected
 ```
 
-Editing one function now runs only the tests that touch that function, not
+With the index, editing one function runs only the tests that touch it, not
 every test importing its module.
+
+The banner reports `N changed file(s) -> M of K mapped test(s) affected`, plus
+`+ F whole-file target(s)` for import-graph and test-file targets. With no
+index, a changed non-test `.py` file prints a one-line hint to warm it with
+`--cov --cov-context=test` (never for a full run or a test-only, `conftest.py`,
+config or non-Python change).
 
 ## How selection decides
 
@@ -85,12 +91,12 @@ The guiding rule: **over-selection is safe, under-selection is not.** Anything
 the index can't vouch for falls back to the conservative import graph; the
 index is only trusted for the lines it actually recorded.
 
-Each index entry carries a SHA-256 of the source it was built from. Because the
-index is keyed by line number, its lookups are only valid while a file's
-content still matches: once commits land that shift a file's lines (or the
-index was warmed on a dirty tree), those line numbers point at the wrong code.
-`--changed` detects this per file by hashing the file's content at the diff base
-and comparing: on any mismatch the file drifts to the import graph rather than
+The index is keyed by line number, so its lookups are only valid while a
+file's content still matches the source it was built from. Commits that shift
+a file's lines, or warming on a dirty tree, leave those line numbers pointing
+at the wrong code. To catch this, each index entry carries a SHA-256 of its
+source, and `--changed` compares it per file against the file's content at the
+diff base. On a mismatch the file falls back to the import graph instead of
 being looked up at stale lines. Warm on a **clean tree at the diff base** for
 the tightest selection.
 
@@ -118,11 +124,23 @@ fresh:
 
 ## CI usage
 
-`--changed` is PR-aware: on a pull-request job it diffs against the merge-base
-with the PR base branch (auto-detected from `GITHUB_BASE_REF`,
-`CI_MERGE_REQUEST_*`, `BUILDKITE_PULL_REQUEST_BASE_BRANCH`), so a clean checkout
-of the PR commit still selects exactly the PR's files. Full base-detection and
-shallow-clone rules: [`--changed`](../reference/cli.md#-changedrev).
+`--changed` is PR-aware: on a pull-request or merge-request job, bare
+`--changed` diffs against the merge-base with the PR base branch instead of
+`HEAD`, so a clean checkout of the PR commit still selects exactly the PR's
+files. The base comes from the first variable set, in this order:
+
+| CI | Variable | Base |
+| --- | --- | --- |
+| GitHub Actions | `GITHUB_BASE_REF` | base branch → `git merge-base origin/<branch> HEAD` |
+| GitLab CI | `CI_MERGE_REQUEST_DIFF_BASE_SHA` | exact MR diff-base SHA (used directly) |
+| GitLab CI | `CI_MERGE_REQUEST_TARGET_BRANCH_NAME` | target branch (fallback when the SHA is unset) |
+| Buildkite | `BUILDKITE_PULL_REQUEST_BASE_BRANCH` | base branch → merge-base |
+
+The base must be in the clone (`actions/checkout` with `fetch-depth: 0`,
+GitLab's default MR fetch, or `git fetch origin <branch>`); an unresolvable
+base is an error, never a silent full skip. An explicit `REV`
+(`--changed=origin/main`) disables auto-targeting. TeamCity has no standard
+base-branch variable: pass `REV` or expose a build parameter as env.
 
 The value is optional, so it needs `=`: write `--changed=origin/main`. With a
 space, `--changed origin/main` is bare `--changed` plus a test path

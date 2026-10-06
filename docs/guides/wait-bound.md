@@ -27,13 +27,14 @@ here:
   includes child processes the test waited for, so a test that runs a
   CPU-heavy CLI through `subprocess.run` counts as computing, not waiting
   (oversubscribing `-n` will not help it). Windows reports no child CPU
-  time, so there such a test counts as waiting. Doctor prints the share of test
-  time spent waiting and names the worst offenders. In one real suite
+  time, so there such a test counts as waiting. Doctor prints the share of
+  test time spent waiting and names the worst offenders. In one real suite
   ([aiohttp]) this was **95% of test time (176.5s) waiting**, almost all
   of it on 10-second proxy timeouts.
 - **PARALLEL FLOOR**: no worker count can finish faster than the longest
-  single test. If your longest test exceeds both the ideal per-worker share
-  and 1 second, doctor names the **gate tests**; splitting or shrinking them is the only
+  single test. If your longest test exceeds the ideal per-worker share (at
+  least 1 second) by more than 10%, doctor names the
+  [gate tests](../concepts/glossary.md#gate-test); splitting or shrinking them is the only
   way to lower that floor (adding workers won't).
 
 ```console
@@ -90,12 +91,12 @@ tracks how well the run parallelized, e.g. `--doctor-fail-on
 gate on `wait_pct` for this; it measures how wait-bound the suite *is*,
 not whether the worker count is well-tuned.)
 
-> Caveat: this oversubscription trick is safe *because* the work is
-> waiting, not computing. Tests that assert on rate-limit windows, token
-> expiries, or tight elapsed-time bounds can degrade under high `-n`;
-> that's load, not ordering. Contain them with `@pytest.mark.serial`, a
-> clock mock, or a capped `-n`; see
-> [Parallel safety](parallel-safety.md).
+!!! warning "Timing-sensitive tests degrade under high `-n`"
+    This oversubscription trick is safe *because* the work is waiting, not
+    computing. Tests that assert on rate-limit windows, token expiries, or
+    tight elapsed-time bounds can degrade under high `-n`; that's load, not
+    ordering. Contain them with `@pytest.mark.serial`, a clock mock, or a
+    capped `-n`; see [Parallel safety](parallel-safety.md).
 
 **Arm a hang backstop.** A wait-bound suite is exactly the one that hits a
 real hang: a socket that never returns, a timeout that never fires. Set
@@ -103,53 +104,32 @@ real hang: a socket that never returns, a timeout that never fires. Set
 exceeds it is reported **failed** with a timeout message, its worker is killed
 and replaced, and that worker's remaining tests redistribute so the run still
 finishes. Concurrency exposes these; without a backstop one hung test can
-stall a whole worker for the length of the run. (A per-test cap, `@pytest.mark.timeout`,
-is the finer-grained tool; see [Markers](../reference/markers.md).)
+stall a whole worker for the length of the run. A per-test cap,
+`@pytest.mark.timeout`, is the finer-grained tool (see
+[Markers](../reference/markers.md)).
+
+An explicit `--worker-timeout` replaces the per-test hang watchdogs that
+`--timeout` and `@pytest.mark.timeout` arm (3× the test's timeout + 10s) with
+one fixed limit for every test, so set it above your longest
+`mark.timeout`, or that test is killed before its own timeout fires. See
+[Hung tests](../concepts/crash-handling.md#hung-tests-worker-timeout).
 
 ## 3. Per-worker isolation (DB / ports)
 
-More workers means more concurrent copies of every shared resource. A
-session-scoped fixture runs **once per worker**, not once per run: N
-workers means N databases, N servers, N bound ports
-([Parallel safety](parallel-safety.md)). So each worker's resources must
-be safe to duplicate:
+More workers means more concurrent copies of every shared resource: a
+session-scoped fixture runs once per worker, so N workers means N databases,
+N servers, N bound ports
+([Session-scoped fixtures duplicate](parallel-safety.md#session-scoped-fixtures-duplicate)).
+Each worker's resources must be safe to duplicate:
 
 - **Ports:** bind port `0` (let the OS assign) instead of a fixed port.
-- **Databases / directories:** derive a per-worker name or path.
+- **Databases / directories:** derive a per-worker name or path from
+  `RSTEST_WORKER_ID` (`gw0`, `gw1`, ...) or xdist's `workerinput`; see
+  [Worker identity](parallel-safety.md#worker-identity).
 
-Tests and fixtures read their worker identity from the environment:
-
-```python
-import os
-
-worker = os.environ.get("RSTEST_WORKER_ID")  # "gw0", "gw1", ...; unset at -n 0/1 (unless --reruns)
-```
-
-Plugins that check pytest-xdist's `workerinput` get the same answer via
-`request.config.workerinput["workerid"]`; that path works under both
-runners when tests run in workers (`-n 2` or more). At `-n 0` there is no
-`workerinput`, so guard with `hasattr(request.config, "workerinput")`. Full
-contract:
-[Parallel safety](parallel-safety.md) and
-[Environment variables](../reference/environment.md).
-
-**Django is handled for you.** rstest announces each worker exactly like
-an xdist worker (`gw0`, `gw1`, …), so pytest-django suffixes the test
-database per worker automatically (`test_app_gw0`, `test_app_gw1`, …),
-with no extra flags. rstest's own corpus only exercises pytest-django on
-SQLite `:memory:`, where each process has a private database anyway, so
-confirm the suffixing on your Postgres or MySQL setup with one parallel run.
-See the
-[Django on ephemeral CI worked example](ci-quickstart.md#worked-example-django-on-ephemeral-ci).
-The general rule holds for anything else: key the resource on
-`RSTEST_WORKER_ID` (or `workerinput`) so N workers don't collide.
-
-`rstest --doctor` flags session fixtures that ran more than once with this
-exact caveat ("session fixture ran once PER WORKER; must be safe to
-duplicate"), but only on rows of its FIXTURE HOTSPOTS table: fixtures with at
-least 0.5s of total setup time, top 8. It is a quick way to spot the expensive
-resources you haven't made per-worker-safe yet; a cheap session fixture that
-runs per worker gets no warning, so audit those by hand.
+pytest-django suffixes the test database per worker automatically. As you
+raise `-n`, `rstest --doctor` flags the expensive session fixtures that ran
+once per worker, so you can spot the ones that aren't per-worker-safe yet.
 
 ## 4. Measure the real win
 

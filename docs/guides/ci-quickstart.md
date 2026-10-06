@@ -99,18 +99,7 @@ jobs:
 
       --8<-- "docs/_snippets/actions-cache-step.md"
       - name: test
-        # --output github emits ::error per failure and ::warning for flaky
-        # reruns. Add --doctor to also publish diagnostics to the job summary.
         run: rstest -n auto --output github --junitxml junit.xml
-
-      # Long pole? Fan the suite across a runner matrix with --shard K/N;
-      # see the Sharding guide.
-
-      # Monorepo roots: caches live in EACH project (.rstest_cache per
-      # package; widen the cache path to **/.rstest_cache and exclude
-      # !**/.rstest_cache/replay), and junit
-      # files are written per project as junit.<slug>.xml; glob them
-      # in the artifact step.
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -119,9 +108,19 @@ jobs:
           path: junit.xml
 ```
 
-This `actions/cache` step is for a single job. For a shard matrix, use the
-action with `cache-backend: artifact` and one `warm-run-id` shared by every
-shard: see [Sharding: GitHub Actions](sharding.md#github-actions).
+`--output github` emits an `::error` annotation per failure and a `::warning`
+per flaky rerun. Add `--doctor` to also publish
+[suite diagnostics](doctor.md) to the job summary.
+
+Run from a monorepo root, the same steps need two changes: each project keeps
+its own `.rstest_cache`, so widen the cache `path` to `**/.rstest_cache` (and
+exclude `!**/.rstest_cache/replay`), and JUnit is written per project as
+`junit.<slug>.xml`, so glob `**/junit.*.xml` in the upload step.
+
+This `actions/cache` step is for a single job. If one suite is the long pole
+and you fan it across a runner matrix with `--shard K/N`, use the action with
+`cache-backend: artifact` and one `warm-run-id` shared by every shard: see
+[Sharding: GitHub Actions](sharding.md#github-actions).
 
 ## Worked example: Django on ephemeral CI
 
@@ -130,11 +129,13 @@ GitHub runners where nothing survives between runs unless you persist it. The
 two things people get wrong are the **cold-vs-warm cache** and **per-worker
 databases**. Both are handled below.
 
-pytest-django is exercised continuously in rstest's battery *including
-per-worker test databases under parallelism* (see [Plugins](plugins.md)):
-rstest supplies each worker the xdist-style worker identity pytest-django keys
-off, so every worker gets its own isolated test DB (`test_app_gw0`,
-`test_app_gw1`, …) automatically. No extra flags, same as under xdist.
+rstest supplies each worker the xdist-style worker identity pytest-django
+keys off, so with a server database every worker should create its own test
+DB (`test_app_gw0`, `test_app_gw1`, …) with no extra flags, as under xdist.
+pytest-django is exercised continuously in rstest's battery, but on SQLite
+`:memory:` only (see [Plugins](plugins.md)): the per-worker server-database
+naming is not exercised yet, so confirm it with one parallel run against your
+database before you rely on it.
 
 ```yaml
 # .github/workflows/tests.yml
@@ -157,18 +158,20 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with: { python-version: "3.13" }
-      - run: pip install -r requirements.txt && pip install rstest==0.8.0
+      - run: pip install -r requirements.txt && pip install rstest
 
       --8<-- "docs/_snippets/actions-cache-step.md"
-      # --reuse-db keeps the migrated test DB across runs on a warm workspace;
-      # on ephemeral runners the DB is fresh each time, so it's a no-op there
-      # (harmless to leave in, useful on self-hosted runners).
       - run: rstest -n auto --reuse-db --output github --junitxml junit.xml
 
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: junit, path: junit.xml }
 ```
+
+`--reuse-db` keeps the migrated test database across runs on a warm
+workspace. On ephemeral runners the database is fresh every run, so the flag
+does nothing there; it is harmless to leave in and pays off on self-hosted
+runners.
 
 **What the two runs look like.** Duration-aware scheduling needs one run of
 timing data, so the first run on a fresh cache key is *cold*: the scheduler
@@ -199,11 +202,13 @@ diffs outcomes, and reports the speedup, with no migration.
 
 !!! warning "Ephemeral runners: warm the cache from your default branch"
     If PR jobs start from a cold cache every time, you only ever pay cold-run
-    cost. Run this workflow on pushes to your default branch too (GitHub lets
-    PR jobs restore the base branch's cache entries), so PRs restore a warm
-    `.rstest_cache` instead of rebuilding timing data from scratch. For a
-    matrix/shard layout, prefer the [shared-cache backend](ci-shared-cache.md)
-    (it sidesteps the `run_id` key dance entirely).
+    cost. Run this workflow on pushes to your default branch too: GitHub lets
+    PR jobs restore the base branch's cache entries, so a single-job PR suite
+    restores a warm `.rstest_cache` with `actions/cache` alone. What a PR job
+    saves is scoped to that PR and never replaces the default branch's entry.
+    A shard matrix is different: it needs the
+    [shared-cache backend](ci-shared-cache.md) so every shard partitions from
+    the same snapshot.
 
 ## Worked example: monorepo on ephemeral CI
 
@@ -304,84 +309,6 @@ refuses a monorepo root with an error that names the subprojects.
     for the root case is on the roadmap ([Monorepo
     mode](../concepts/monorepo.md#worker-budget-and-scheduling)).
 
-## Suite-health trending with doctor
-
-`--doctor-json` writes the doctor analysis as a versioned JSON document
-(see [Suite diagnostics](doctor.md)). Archive it per run and compare a
-PR's report against the main branch's. No extra tooling is required: the
-document already contains totals, wait-bound tests, parallel-floor gate
-tests, and fixture costs by name.
-
-Any doctor run also publishes the report as markdown to the CI job
-summary automatically (appended to `$GITHUB_STEP_SUMMARY` on GitHub
-Actions, piped to `buildkite-agent annotate` on Buildkite), so the
-current run's analysis is on the run page with no post-processing step.
-(GitLab and TeamCity have no native markdown summary; use `--doctor-md`
-and publish the file as an artifact.)
-
-The baseline travels via the actions cache: pushes to main save it, PR
-jobs restore it (GitHub lets PRs read the base branch's cache entries):
-
-```yaml
-      - name: test (with doctor)
-        run: rstest -n auto --junitxml junit.xml --doctor-json doctor.json
-
-      # Save the baseline on main; restore the latest one on PRs.
-      - uses: actions/cache@v6
-        with:
-          path: doctor-baseline.json
-          key: doctor-baseline-${{ github.sha }}
-          restore-keys: doctor-baseline-
-
-      - name: compare against main
-        if: github.event_name == 'pull_request'
-        run: |
-          [ -f doctor-baseline.json ] || { echo "no baseline yet"; exit 0; }
-          {
-            echo "## Suite health vs main"
-            jq -rn --slurpfile a doctor-baseline.json --slurpfile b doctor.json '
-              def d(f): ($b[0][f] - $a[0][f]);
-              "tests: \($a[0].tests) -> \($b[0].tests)",
-              "test time: \($a[0].test_time_seconds|round)s -> \($b[0].test_time_seconds|round)s (\(d("test_time_seconds")|round)s)",
-              "wait-bound: \($a[0].wait_bound.wait_pct // 0|round)% -> \($b[0].wait_bound.wait_pct // 0|round)%"
-            '
-            echo "new wait-bound tests:"
-            comm -13 \
-              <(jq -r '.wait_bound.tests[]?.nodeid' doctor-baseline.json | sort) \
-              <(jq -r '.wait_bound.tests[]?.nodeid' doctor.json | sort) \
-              | sed 's/^/- /' || true
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: refresh baseline
-        if: github.ref == 'refs/heads/main'
-        run: cp doctor.json doctor-baseline.json
-```
-
-Two practical notes:
-
-- **Don't fail the job on timing deltas.** CI runners are noisy;
-  single-digit-percent changes in `test_time_seconds` are jitter. Treat
-  the summary as a review aid; alert only on structural signals (new
-  wait-bound tests, a fixture's `count` doubling, a new parallel-floor
-  gate test) or on large sustained moves.
-- **Compare like with like.** `wall_seconds` depends on the worker
-  count; if runner sizes vary, compare `test_time_seconds` (summed test
-  time) and per-test signals instead.
-
-## Gating new parallel-unsafe tests with migrate-check
-
-While a suite is still migrating, a `rstest migrate-check` job keeps new
-parallel-unsafe tests from landing green. The job YAML, exit codes and the
-`--migrate-allow` backlog flag are in
-[The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
-
-## Replaying a CI-only failure locally
-
-Every parallel run records its per-worker schedule to
-`.rstest_cache/replay/latest.json`. Upload that file when a job fails, and
-`rstest replay` re-runs the same schedule on your machine: see
-[Replaying a CI failure locally](replay.md).
-
 ## Notes
 
 - **Exit codes** follow pytest's vocabulary (0 pass, 1 failures, 5 nothing
@@ -424,9 +351,10 @@ Every parallel run records its per-worker schedule to
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` (or `FORCE_COLOR=1`) if your CI renders ANSI.
 - **Platform.** These recipes work unchanged on `windows-latest` and
-  `macos-latest`. On Windows the per-test timeout is enforced only by the
-  hang watchdog ([`--timeout`](../reference/cli.md#-timeout-secs)) and fd-leak
-  tracking is unavailable ([Resource leaks](resource-leaks.md)).
+  `macos-latest`. On Windows [`--timeout`](../reference/cli.md#-timeout-secs)
+  is enforced only by the
+  [hang watchdog](../concepts/crash-handling.md#hung-tests-worker-timeout), and
+  fd-leak tracking is unavailable ([Resource leaks](resource-leaks.md)).
 
 ## Go deeper
 
@@ -436,5 +364,11 @@ Every parallel run records its per-worker schedule to
   for a shard matrix.
 - [Sharding across CI jobs](sharding.md): how partitions are computed and the
   identical-cache-snapshot rule.
-- [Replaying a CI failure locally](replay.md): re-run a failed job's
-  per-worker schedule on your machine.
+- [Replaying a CI failure locally](replay.md): every parallel run records its
+  per-worker schedule to `.rstest_cache/replay/latest.json`; upload it when a
+  job fails and `rstest replay` re-runs that schedule on your machine.
+- [Suite-health trending in CI](doctor.md#suite-health-trending-in-ci): archive
+  `--doctor-json` per run and compare each PR against main in the job summary.
+- [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight):
+  while a suite is still migrating, a `rstest migrate-check` job keeps new
+  parallel-unsafe tests from landing green.

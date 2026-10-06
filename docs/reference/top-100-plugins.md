@@ -175,28 +175,12 @@ reporters have native rstest equivalents.
 
 ## Detecting dark plugins
 
-**Shipped: runtime flag warning.** When a parallel run (`-n ≥ 2`) is invoked
-with a flag whose plugin goes dark under the pool (`--json-report`,
+When a parallel run (`-n ≥ 2`) is invoked with a flag whose plugin goes dark under the pool (`--json-report`,
 `--report-log`, `--ctrf`, `--nunit-xml`, `--md`, `--benchmark*`), or with
 `--csv` (racy rather than dark), rstest prints a heads-up before the run
 naming the plugin and the parallel-safe alternative; see
 [the silent-no-op class](../guides/plugins.md#the-silent-no-op-class). This is
 argv-driven: it catches the known-dark flags deterministically, with no false
-positives.
-
-**Planned: static dead-controller-path scan.** A general `--warn-on-dead-master-path`
-detector that inspects *any* installed plugin's code for the "am I the xdist
-master?" branch pattern (predicting silent-no-op **and** crash classes for
-unlisted plugins) is designed but **not yet implemented**. Two false-positive shapes it will have to handle, from analyzing
-the corpus plugins, illustrate the precision work still required:
-
-- **pytest-sugar**: pairs a `hasplugin("xdist")` gate with a `slaveinput`
-  read, but the read is a defensive `getattr(config, "slaveinput", None)` (not a
-  subscript), so it can't `KeyError`. Real behavior: terminal not painted at
-  `-n ≥ 2` (the benign 🔶 `-n 0` case above), not a crash.
-- **sqlalchemy** test conftest: a real `workerinput["follower_ident"]`
-  subscript, yet it runs crash-free at `-n auto` because rstest **seeds**
-  `follower_ident` via its `pytest_configure_node` emulation; a static scan
-  would need to model that runtime seeding.
+positives. Plugins outside that flag list are not scanned.
 
 No genuinely non-compatible plugin has surfaced across the corpus.

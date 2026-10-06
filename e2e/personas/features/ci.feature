@@ -827,3 +827,24 @@ Feature: CI / platform engineer
     Scenario: CI-13 docs: the pre-commit section shows a hook that uses the project interpreter
       Given the level-2 section "## Pre-commit" of "docs/guides/ci-recipes.md"
       Then that level-2 section contains "language: system" or "--python"
+
+  Rule: documented CI setups are safe to copy (CI-14)
+
+    Scenario: CI-14 the doctor-baseline workflow saves its cache only from main
+      # A PR job that can save would read its own earlier baseline back on the
+      # next push, so "vs main" would compare the PR against itself.
+      Then every actions/cache step that can save, in a docs block containing "doctor-baseline", runs only on main
+
+    Scenario: CI-14 the CI recipes install a bare rstest, as their pin tip says
+      Given the "!!! tip" section of "docs/_snippets/ci-pin-tip.md"
+      Then that docs section contains "The recipes use a bare `pip install rstest`"
+      And no fenced block in "docs/guides/ci-*.md" contains "rstest=="
+      And no fenced block in "docs/guides/sharding.md" contains "rstest=="
+
+    Scenario: CI-14 the action README leaves PR suites to the actions-cache backend
+      # actions-cache saves a PR-scoped cache on pull_request (cache-push auto),
+      # so the artifact backend is for shard matrices, not PR suites.
+      Given the table row of ".github/actions/rstest/README.md" starting with "| `cache-push`"
+      Then that docs section contains "`actions-cache` saves only on `push`/`pull_request`"
+      Given the table row of ".github/actions/rstest/README.md" starting with "| `artifact`"
+      Then that docs section does not contain "PR"

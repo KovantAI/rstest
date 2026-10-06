@@ -124,7 +124,7 @@ is the same model as xdist, where each worker also runs its own
   the orchestrator assigns files and each worker collects only its assigned
   files on demand, so the hook sees a partial item set. Run at `-n 0` (or
   `--collect full`) if a hook must see the whole suite.
-- **`pytest_collection_modifyitems` reordering is a starting point, not a
+- <span id="modifyitems-ordering"></span>**`pytest_collection_modifyitems` reordering is a starting point, not a
   guarantee, at `-n ≥ 2`.** Deselection is honored (a deselected item won't
   run), and the order you impose is the order the orchestrator dispatches
   from, with two changes: tests whose cached duration is 1s or more are

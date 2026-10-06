@@ -689,6 +689,14 @@ Feature: pytest / pytest-xdist migrator
 
   Rule: --collect lazy finds the same tests as pytest
 
+    Scenario: MG-14 the concepts pages that describe collection point at lazy collection
+      # Large warm-cache runs collect lazily by default; a page that explains
+      # collection as "every worker collects the whole suite" must say so.
+      Given the level-2 section "## How a parallel run works" of "docs/concepts/architecture.md"
+      Then that level-2 section contains "lazy-collection.md" or "--collect lazy"
+      Given the level-2 section "## Collection and verification" of "docs/concepts/scheduling.md"
+      Then that level-2 section contains "lazy-collection.md" or "--collect lazy"
+
     Scenario: MG-10 overriding norecursedirs collects a hidden directory
       # Overriding norecursedirs drops pytest's default '.*'.
       Given a file "pytest.ini" containing:

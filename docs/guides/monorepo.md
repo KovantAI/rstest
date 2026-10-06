@@ -21,23 +21,25 @@ rstest 0.8.0 — monorepo: 3 projects, 8 workers (libs/cli:-n2, libs/core:-n4, s
 3 projects in 41.20s (exit 1)
 ```
 
-## How projects are found
+## 1. Run from the root
 
 Run `rstest` from a root that has **no pytest configuration of its own**:
-rstest finds each package by its pytest config and runs them all. To
-restrict or pin the set, list globs in the root `pyproject.toml`:
+rstest finds each package by its pytest config and runs them all. Passing an
+explicit path (`rstest libs/core`) opts out of monorepo mode and runs that
+project alone. The full discovery rules (search depth, which config files
+count, what's pruned) are in
+[Monorepo mode](../concepts/monorepo.md#discovery).
+
+## 2. Pin the project set (optional)
+
+To restrict or pin the set, list globs in the root `pyproject.toml`:
 
 ```toml
 [tool.rstest]
 projects = ["libs/*", "services/api"]
 ```
 
-Passing an explicit path (`rstest libs/core`) opts out of monorepo mode and
-runs that project alone, exactly as before. The full discovery rules (search
-depth, which config files count, what's pruned) are in
-[Monorepo mode](../concepts/monorepo.md#discovery).
-
-## How it runs
+## 3. Check the worker split
 
 Each project is an isolated child run, and projects run concurrently under
 one worker budget weighted by each project's last-known suite time, so a repo
@@ -55,15 +57,13 @@ rstest 0.8.0 — monorepo: 5 projects, 14 workers (libs/checkpoint:-n3, libs/che
 Projects are listed in sorted path order. On a first run there are no
 duration caches yet, so the 14 workers are split evenly, as above. Later runs
 weight each project's share by its recorded suite time, so the slowest
-package gets most of the workers. On the corpus's five-package subset one
-root run took 128.9s against 187.4s for five serial pytest invocations
-(1.45×); see [Benchmarks](../reference/benchmarks.md#monorepo).
+package gets most of the workers.
 
-What to set up and expect:
+A project can pin its own `[tool.rstest]`, e.g. `numprocesses = 0` for an
+order-sensitive package; root command-line flags override everywhere.
 
-- **Per-project settings.** A project can pin its own `[tool.rstest]`, e.g.
-  `numprocesses = 0` for an order-sensitive package; root command-line flags
-  override everywhere.
+## 4. Wire it into CI
+
 - **Results.** One merged exit code and one `--report-json` at the root;
   JUnit and `--doctor-json` files per project (`junit.libs-core.xml`). Point
   your CI's test-report step at `junit.*.xml`. Exact rules:
@@ -92,18 +92,8 @@ command (workers use that env's interpreter). Replacing the matrix
 itself (one rstest invocation spanning multiple Pythons) is not
 supported; keep the matrix in tox/CI and put rstest inside each cell.
 
-## Validation
+## Measured
 
-The reference target is langchain-ai/langgraph: 8 `libs/*` packages,
-each with its own `[tool.pytest]` config. rstest at the repo root
-discovers all 8 (the JS package, which has no Python config, is
-correctly skipped). The measured subset is the five libs that need no live
-services; the two postgres-backed checkpoint stores require a running
-database under any runner, and `libs/langgraph` itself is left out because
-its live-service tests hang the plain-pytest baseline without those
-services. One command at the root replaces five serial pytest invocations,
-with per-test outcome parity of 100% across all 838 tests. `checkpoint-sqlite`
-uses pytest-retry, which once forced a single-worker pin (`server_port`);
-that is resolved, and it now runs at the full worker count with no per-lib
-policy (see [Benchmarks](../reference/benchmarks.md#monorepo) for the wall
-times).
+On five langchain-ai/langgraph `libs/*` packages, one root run replaces five
+serial pytest invocations with 100% per-test outcome parity; setup and wall
+times are in [Benchmarks](../reference/benchmarks.md#monorepo).

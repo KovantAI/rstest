@@ -110,7 +110,6 @@ flag is silently dropped.
 | `--timeout`, `--collect`, `--incremental`, `--reruns-only-known-flaky`, `--fork-pool` | forwarded to every project |
 | `--fail-on-leak`, `--durations-regress`, `--require-baseline` | forwarded; each gate applies per project, and a project that fails its gate fails the root through the merged exit code |
 | `--shuffle[=SEED]` | resolved once at the root, so every project uses the same seed. A bare `--shuffle` picks one and prints `rstest: shuffle seed <N> for every project (reproduce with --shuffle=<N>)`. Each project still needs `-n 2` or more, so a project whose share is one worker errors |
-| `--instrument-workers` | forwarded to every project. Internal and hidden from `--help`: a parent rstest passes it (for `migrate-check`'s classifier runs) to turn on worker instrumentation without the doctor report |
 | `--junitxml`, `--doctor-json`, `--doctor-md` | one file per project, slug before the extension (see below) |
 | `--html` | one file per project, like `--junitxml`: `out.html` -> `out.libs-core.html` |
 | `--report-json` | one merged document at the requested path (see below) |

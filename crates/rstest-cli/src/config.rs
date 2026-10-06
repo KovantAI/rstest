@@ -189,6 +189,15 @@ pub fn rootdir(invocation_dir: &Path, args: &[String]) -> PathBuf {
     }
 }
 
+/// What a worker count (`-n` / `[tool.rstest] numprocesses`) must look like,
+/// for error messages.
+pub(crate) const NUMPROCESSES_EXPECTED: &str = "a non-negative integer or \"auto\"";
+
+/// True for a usable worker count: `auto` or a non-negative integer.
+pub(crate) fn is_valid_numprocesses(s: &str) -> bool {
+    s == "auto" || s.parse::<usize>().is_ok()
+}
+
 /// pytest's `locate_config` reduced to the directory: the first ancestor of
 /// `start` with a config file pytest accepts, else the directory of the
 /// first `pyproject.toml` seen on the way up (pytest 8.1+ anchors rootdir
@@ -653,8 +662,10 @@ pub fn rstest_settings(start: &Path, err: &mut dyn Write) -> RstestSettings {
                 None => None,
                 // Reject negatives; a `-3` typo must not become the literal "-3".
                 Some(toml::Value::Integer(n)) if *n >= 0 => Some(n.to_string()),
-                Some(toml::Value::String(s)) => Some(s.clone()),
-                Some(v) => check.invalid("numprocesses", v, "a non-negative integer or \"auto\""),
+                // A string must still be a worker count: `"four"` / `"4 "` would
+                // otherwise reach the run as an unparseable `-n`.
+                Some(toml::Value::String(s)) if is_valid_numprocesses(s) => Some(s.clone()),
+                Some(v) => check.invalid("numprocesses", v, NUMPROCESSES_EXPECTED),
             },
             dist: check.string(tool, "dist"),
             // `try_from` rejects negatives instead of wrapping to a huge budget.
@@ -735,6 +746,41 @@ worker-timeout = 120
                 .numprocesses
                 .as_deref(),
             Some("auto")
+        );
+    }
+
+    #[test]
+    fn settings_reject_non_count_numprocesses_string() {
+        // Regression: a string that is not `auto` or a count (`"four"`, `"4 "`)
+        // used to pass through and abort the run with a bare
+        // `Error: invalid digit found in string`. It is now ignored with a
+        // warning, like every other invalid [tool.rstest] value.
+        let d = tmpdir("np-string");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nnumprocesses = \"4 \"\n",
+        )
+        .unwrap();
+        let mut err = Vec::new();
+        let s = rstest_settings(&d, &mut err);
+        let err = String::from_utf8_lossy(&err);
+        assert_eq!(s.numprocesses, None);
+        assert!(
+            err.contains(
+                "ignoring [tool.rstest] numprocesses = \"4 \" (expected a non-negative integer or \"auto\")"
+            ),
+            "{err}"
+        );
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nnumprocesses = \"8\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rstest_settings(&d, &mut std::io::sink())
+                .numprocesses
+                .as_deref(),
+            Some("8")
         );
     }
 

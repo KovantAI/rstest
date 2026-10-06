@@ -142,8 +142,15 @@ def _repeat_pytest(suite, repeat, warmup=0):
     return _repeat(suite.run_pytest, repeat, warmup)
 
 
+# --xdist-dist: extra pytest-xdist args for every xdist run (e.g. `--dist
+# worksteal`). Empty keeps xdist's own default scheduler (`--dist load`).
+XDIST_ARGS = []
+
+
 def _repeat_xdist(suite, repeat, workers, warmup=0):
-    return _repeat(lambda: suite.run_pytest(xdist_workers=workers), repeat, warmup)
+    return _repeat(
+        lambda: suite.run_pytest(xdist_workers=workers, xdist_args=XDIST_ARGS), repeat, warmup
+    )
 
 
 # --cold: drop rstest's duration cache before every rstest run, so each one
@@ -335,6 +342,7 @@ def _xdist_argv(suite, n):
         "-q",
         "-n",
         str(n),
+        *XDIST_ARGS,
         *suite.target_args(),
     ]
 
@@ -549,7 +557,41 @@ def _int_list(s):
     return [int(x) for x in s.split(",") if x]
 
 
-def _environment(args):
+# Run inside each suite venv: the interpreter and runner versions the timed
+# runs actually use (the venvs are rebuilt by --prepare, so a later prepare
+# would otherwise erase what a published result was measured on).
+_RUNTIME_PROBE = """
+import importlib.metadata as m, json, platform
+def v(d):
+    try:
+        return m.version(d)
+    except m.PackageNotFoundError:
+        return None
+print(json.dumps({
+    "python": platform.python_version(),
+    "python_implementation": platform.python_implementation(),
+    "pytest": v("pytest"),
+    "pytest_xdist": v("pytest-xdist"),
+    "rstest_worker": v("rstest"),
+}))
+"""
+
+
+def _suite_runtime(suite):
+    """Interpreter + runner versions inside one suite's venv, or an error."""
+    py = suite.venv / "bin" / "python"
+    try:
+        r = subprocess.run(
+            [str(py), "-c", _RUNTIME_PROBE], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": str(e)}
+    if r.returncode != 0:
+        return {"error": r.stderr.strip()[-400:]}
+    return json.loads(r.stdout)
+
+
+def _environment(args, suites=None):
     """What every published table records next to it (benchmark methodology)."""
 
     def _out(cmd):
@@ -570,6 +612,9 @@ def _environment(args):
         "repeat": args.repeat,
         "warmup": args.warmup,
         "rstest_cache": "cold" if args.cold else "warm",
+        "xdist_dist": getattr(args, "xdist_dist", None) or "load (xdist default)",
+        "bench_python": platform.python_version(),
+        "suite_runtimes": {name: _suite_runtime(s) for name, s in (suites or {}).items()},
     }
 
 
@@ -583,7 +628,7 @@ def main():
     #   fastapi          ~2.6x mid gain
     #   anyio            ~3.9x big gain (also the worker-sweep suite)
     #   langgraph        monorepo: N serial per-lib pytest vs one root rstest
-    #                    run; ~1.45x, capped by slow wait/IO tests in checkpoint
+    #                    run; ~7.3x (bench-results/2026-10-06-langgraph.json)
     # All five are documented at 100% per-test parity, so the parity gate is
     # meaningful (a real regression drops well below --parity-floor).
     ap.add_argument(
@@ -607,6 +652,12 @@ def main():
         "--xdist",
         action="store_true",
         help="also run pytest-xdist at every sweep -n (the suite venv needs pytest-xdist)",
+    )
+    ap.add_argument(
+        "--xdist-dist",
+        default=None,
+        help="pytest-xdist --dist mode for the xdist series (e.g. worksteal); "
+        "default: xdist's own default (load)",
     )
     ap.add_argument("--repeat", type=int, default=5, help="runs per point; median is reported")
     ap.add_argument(
@@ -649,6 +700,8 @@ def main():
     args = ap.parse_args()
     global COLD
     COLD = args.cold
+    if args.xdist_dist:
+        XDIST_ARGS[:] = ["--dist", args.xdist_dist]
 
     wheel = args.wheel or (
         max(
@@ -664,7 +717,7 @@ def main():
         sys.exit(f"unknown suite(s): {', '.join(missing)}")
 
     suites = {n: Suite(n, cfg[n], wheel, args.rstest) for n in names}
-    env_info = _environment(args)  # before any run: the load it records is the start load
+    env_info = _environment(args, suites)  # before any run: the load it records is the start load
 
     spectrum, py_cache = [], {}
     for name, suite in suites.items():
@@ -673,7 +726,7 @@ def main():
                 f"{name}: not prepared — run `corpus/run.py --prepare-only --only {name}` first"
             )
         log(f"spectrum: {name}")
-        row, py_walls, py_snap = bench_suite(suite, args.repeat)
+        row, py_walls, py_snap = bench_suite(suite, args.repeat, args.warmup)
         spectrum.append(row)
         py_cache[name] = (py_walls, py_snap)
 

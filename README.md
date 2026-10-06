@@ -10,9 +10,10 @@
 [![Docs](https://readthedocs.org/projects/python-rstest/badge/?version=stable)](https://python-rstest.readthedocs.io/en/stable/)
 [![GitHub stars](https://img.shields.io/github/stars/KovantAI/rstest)](https://github.com/KovantAI/rstest/stargazers)
 
-**Runs most pytest suites unchanged, in parallel, usually faster.** Same
-fixtures, same plugins, parallel by default, with built-in suite diagnostics
-(`--doctor`) that tell you *where your test time actually goes*.
+**Runs most pytest suites unchanged, in parallel.** Same fixtures, same
+plugins, parallel by default, with built-in suite diagnostics (`--doctor`)
+that tell you *where your test time actually goes*. How much faster depends
+on your suite's shape ([self-check below](#will-rstest-speed-up-your-suite)).
 
 > **Note:** This is the Python test runner on PyPI (`pip install rstest`). It is
 > not related to the Rust fixture crate [`rstest`](https://crates.io/crates/rstest)
@@ -44,18 +45,19 @@ pdm add -dG test rstest       # PDM
 ```
 
 Install rstest into the same environment as your tests: workers run in
-that interpreter. (A `pipx` / `uv tool` install also needs rstest in the
-project environment; see
-[Installation](https://python-rstest.readthedocs.io/en/stable/getting-started/installation/).)
+that interpreter. A `pipx` / `uv tool` install alone can't run your tests;
+it only puts `rstest` on your PATH
+([details](https://python-rstest.readthedocs.io/en/stable/getting-started/installation/#tool-install)).
 
 Requires Python 3.10+ on macOS (Apple silicon), Linux, or Windows (Windows is
 validated at a smaller scale than macOS/Linux). rstest is alpha (0.x): expect
 breaking changes between minor versions until 1.0.
 
 No config and no test changes needed: rstest runs your pytest suite in
-parallel (`-n auto`) out of the box. As with pytest-xdist, each worker is a
-separate process, so session- and module-scoped fixtures run once per
-worker, not once per run.
+parallel (`-n auto`) out of the box. As with pytest-xdist, session- and
+module-scoped fixtures run
+[once per worker](https://python-rstest.readthedocs.io/en/stable/guides/parallel-safety/#session-scoped-fixtures-duplicate),
+not once per run.
 
 - Tests that can't run in parallel (shared files, ports, databases) →
   `@pytest.mark.serial` (run exclusively, after the parallel phase).
@@ -72,9 +74,9 @@ The wins come from suite *shape*, not magic. Quick self-check:
 | Your suite | What to expect |
 |---|---|
 | Wait-bound (IO, sleeps, network, timeouts) | **Biggest win**: xdist's default `--dist load` hands out consecutive batches in collection order with no timing data, so a file of slow tests clusters on a few workers and starts late; rstest's duration cache starts the slowest tests first, spread across workers. |
-| CPU-bound, already splits well under xdist | **Parity, not a win**: gain up to the performance-core count, same as xdist (sympy `-n 8`: 16.1s vs 14.8s, overlapping spreads). |
+| CPU-bound, already splits well under xdist | **Parity, not a win**: gain up to the [performance-core](https://python-rstest.readthedocs.io/en/stable/concepts/glossary/#performance-cores) count, same as xdist (sympy `-n 8`: 16.1s vs 14.8s, overlapping spreads). |
 | Very many tests (100k+) | **Win over xdist**: xdist's single Python controller becomes the bottleneck; rstest's orchestrator is Rust (pandas `-n 8`: 43s vs 89s). |
-| Gated by one long test | **No win beyond that test**: no worker count beats the long pole. `--doctor` names it. |
+| Gated by one long test | **No win beyond that test**: no worker count beats the [long pole](https://python-rstest.readthedocs.io/en/stable/concepts/glossary/#long-pole). `--doctor` names it. |
 | Small (< ~10s serial) | **Little wall-time change**: value is `--watch`, `--changed`, `--doctor`, not raw speed. |
 | Many tiny per-service suites | Speedup is per-suite; the aggregate CI win depends on your largest suites. |
 
@@ -85,15 +87,12 @@ Two more things to know before you benchmark:
 - **Warm cache matters.** Duration-aware scheduling needs one run of timing
   data. First run is cold; the win arrives on run two. In ephemeral CI,
   persist `.rstest_cache` or expect cold-run timing.
-- **Adopting rstest adopts pytest 9.** rstest runs a vendored pytest 9.1.1
-  core whatever pytest you have installed. A suite warning-clean on recent
-  pytest 8.x is almost always already pytest-9-clean
+- **Adopting rstest adopts pytest 9**, whatever pytest you have installed
   ([details](https://python-rstest.readthedocs.io/en/stable/getting-started/installation/#your-suite-runs-on-pytest-9)).
 
-Fastest way to find out for real: `rstest try` runs your suite under plain
-pytest and under `rstest -n auto`, then reports whether outcomes match and
-how much faster rstest was. No migration, no config. (The baseline runs as
-`python -m pytest`, so pytest must be installed in the project environment.)
+Fastest way to find out for real: `rstest try` compares a plain pytest run
+with `rstest -n auto` and reports parity and speed, with no config
+([how it works](https://python-rstest.readthedocs.io/en/stable/getting-started/evaluating/#try-it-first)).
 
 ## Benchmarks
 
@@ -106,8 +105,8 @@ warning flake hits xdist too (every known flake is catalogued in the docs).
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | Suite | Tests | pytest | xdist `-n 8` | rstest `-n 8` |
 |---|---|---|---|---|
-| aiohttp | 4,469 | 193s | 160s | **67s** warm · 150s cold |
-| pandas | 193,843 | 190s | 89s | **43s** (xdist's controller is the bottleneck) |
+| aiohttp | 4,469 | 193s | 160s (73s with `--dist worksteal`) | **67s** warm · 150s cold |
+| pandas | 193,843 | 190s | 89s | **43s** (xdist's controller pins a core) |
 | django-allauth | 2,050 | 26s | 8.9s | **5.8s** |
 | rich | 981 | 3.7s | 2.7s | **2.5s** |
 
@@ -122,11 +121,13 @@ can't run from the root at all):
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | | wall | parity |
 |---|---|---|
-| pytest: 5 serial invocations | 187.4s | baseline |
-| rstest at the root | **128.9s** (1.45×) | 100% |
+| pytest: 5 serial invocations | 190.0s | baseline |
+| rstest at the root | **26.1s** (7.3×) | 100% |
 
-Measured with rstest 0.6.0 (10-run mean) and not yet re-measured on 0.8.0.
-The gain is capped by a few slow wait-bound tests in `libs/checkpoint`.
+Same method as above (median of 5, rstest `-n auto`). One of the five
+packages, `libs/sdk-py`, collects no tests under either runner in the
+benchmark venv (a missing test dependency), so the 838 tests come from the
+other four.
 
 Full methodology:
 [benchmarks](https://python-rstest.readthedocs.io/en/stable/reference/benchmarks/).
@@ -153,12 +154,14 @@ Full methodology:
   crashed workers respawn without losing your run.
 - **`rstest --doctor`.** Wait-bound tests, parallel-floor analysis, fixture
   hotspots, slowest files.
-- **`rstest --watch`.** Instant reruns on save; changed test files rerun
+- **`rstest --watch`.** Reruns on save; changed test files rerun
   alone, source changes rerun only the tests the import graph says are
   affected.
 
 **Compatibility contract.** At `-n 0` (single-worker mode) per-test outcomes
-match pytest exactly, and any difference is a bug. In parallel, outcomes are
+match pytest exactly, and any difference is a bug (except for the
+[few flags rstest shares with pytest or a plugin](https://python-rstest.readthedocs.io/en/stable/reference/cli/#shadowed-flags),
+which rstest handles itself at every worker count). In parallel, outcomes are
 preserved for parallel-safe tests, with the same caveats as pytest-xdist and
 a few report plugins that go quiet. Details:
 [Compatibility](https://python-rstest.readthedocs.io/en/stable/concepts/compatibility/)
@@ -202,6 +205,7 @@ recorded call duration, so skipped tests drop out: 4442 here against the
 ## Docs
 
 - [Getting started](https://python-rstest.readthedocs.io/en/stable/getting-started/)
+- [Evaluating rstest](https://python-rstest.readthedocs.io/en/stable/getting-started/evaluating/): what it speeds up, when not to adopt, and what switching costs
 - [Migrating from pytest](https://python-rstest.readthedocs.io/en/stable/guides/migrate-from-pytest/)
 - [Migrating from pytest-xdist](https://python-rstest.readthedocs.io/en/stable/guides/migrate-from-xdist/)
 - [Parallel safety](https://python-rstest.readthedocs.io/en/stable/guides/parallel-safety/)
@@ -209,6 +213,7 @@ recorded call duration, so skipped tests drop out: 4442 here against the
 - [Watch mode](https://python-rstest.readthedocs.io/en/stable/guides/watch-mode/)
 - [CI quickstart](https://python-rstest.readthedocs.io/en/stable/guides/ci-quickstart/)
 - [CLI reference](https://python-rstest.readthedocs.io/en/stable/reference/cli/)
+- [Troubleshooting](https://python-rstest.readthedocs.io/en/stable/reference/troubleshooting/)
 - [Agent skills](https://python-rstest.readthedocs.io/en/stable/guides/agent-skills/): `rstest install-skills` or the Claude Code plugin
 
 ## License

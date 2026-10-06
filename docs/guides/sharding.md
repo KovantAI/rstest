@@ -52,35 +52,15 @@ see [Verify no test was dropped](#verify-no-test-was-dropped).
 ### Keep one cache snapshot across the matrix
 
 "Restore the same cache" is harder than it sounds, because each shard pulls
-at its own start time:
-
-- **Shared-cache remote backend** (`--cache-remote … --cache-pull --cache-push`):
-  a fast shard can finish and push its segment before a slow shard starts
-  pulling. The slow shard then sees newer durations and computes a different
-  partition.
-- **Artifact backend**: each shard looks up "the latest successful main run"
-  on its own. If a main run finishes while the matrix is starting, shards can
-  warm from different runs.
-
-To pin one snapshot:
-
-- Resolve the warm source **once** in an upstream job (the `gh run list`
-  step, or an `actions/cache/restore` lookup) and pass the run id or cache key
-  to every shard as a job output. Recipes:
-  [GitHub Actions](#github-actions) below (the action's `warm-run-id` input,
-  or a resolved `actions/cache` key) and the hand-wired
-  [artifact backend](ci-shared-cache.md#github-native-no-external-cloud-no-secrets).
-- Or snapshot the remote once, have shards read that copy, and push their new
-  segments from a single follow-up job, so no shard's write can change what
-  another shard reads:
-  [object-store recipe](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets).
-- Add `--report-json shard.K.json` to every shard and gate the merge job on
-  [`rstest shard-verify`](#verify-no-test-was-dropped), which catches any
-  divergence these steps miss.
-
-Resolving "the latest **successful** main run" (`gh run list --status
-success`) has one side effect: while main is red, every run keeps warming from
-the last green run, so the timings stop advancing until main is fixed.
+at its own start time. With a shared remote (`--cache-remote … --cache-pull
+--cache-push`), a fast shard can push its segment before a slow shard pulls,
+and the slow shard computes a different partition. With the artifact backend,
+shards that each look up "the latest successful main run" can warm from
+different runs if one finishes while the matrix starts. So fix the cache once,
+upstream of the matrix, and gate on `shard-verify`: the layout every recipe
+follows is
+[One snapshot per shard matrix](ci-shared-cache.md#one-snapshot-per-shard-matrix),
+and the GitHub recipes are [below](#github-actions).
 
 !!! note "Requirements & limits"
     - Needs the parallel pool: `-n ≥ 2`. Prefer an explicit `-n 2` or higher
@@ -249,12 +229,11 @@ jobs:
       - run: pip install rstest && rstest shard-verify shard.*.json
 ```
 
-Run this workflow on pushes to `main` too: those runs publish the segments
-that the `warm` job finds, and one complete sharded run unions into a full
-cache. Keep the `main` runs full (not `changed: true`), since the artifact
-backend warms from exactly one prior run. The first run is cold and every
-shard uses the same even count split; from the second run on, shards balance
-by wall time.
+Run this workflow on full (not `changed: true`) pushes to `main` too: those
+runs publish the segments the `warm` job finds, and one complete sharded run
+unions into a full cache ([why](ci-shared-cache.md#warm-from-full-default-branch-runs)).
+The first run is cold and every shard uses the same even count split; from
+the second run on, shards balance by wall time.
 
 Re-running one failed shard is safe: the `warm` job isn't re-run, so the
 shard warms from the same run id and recomputes the same partition, and
@@ -268,9 +247,10 @@ to your test-report integration.
 
 !!! note "Which cache backend for which layout"
     - **`actions-cache`** (the action's default, or a raw `actions/cache`
-      step): a single unsharded job. In a shard matrix each shard would save
+      step): a single unsharded job, PR runs included (a PR job restores the
+      base branch's newest entry). In a shard matrix each shard would save
       and restore on its own, so shards can partition from different caches.
-    - **`artifact`**: a shard matrix or PR suite on GitHub, as above.
+    - **`artifact`**: a shard matrix on GitHub, as above.
     - **`remote`** (`cache-remote: s3://…`): teams already on an object store
       or a shared mount. For a gating matrix, use the
       [snapshot layout](ci-shared-cache.md#object-store-s3gcsr2-oidc-no-secrets)
@@ -356,8 +336,11 @@ Without the action, there are two layouts:
 
       # One job runs the WHOLE suite and saves the fresh cache, so the next
       # push's shards are wall-time balanced. (Each shard writes only partial
-      # timings to its local copy and never saves it.)
+      # timings to its local copy and never saves it.) Only on main: a PR's
+      # shards restore main's cache, and a full extra run per PR push would
+      # double the compute sharding saves.
       durations:
+        if: github.ref == 'refs/heads/main'
         runs-on: ubuntu-latest
         steps:
           - uses: actions/checkout@v7
@@ -384,22 +367,23 @@ Without the action, there are two layouts:
           # junitparser merge junit.*.xml junit.xml
     ```
 
-    If you'd rather not run a separate full job, let shard 1 save the cache
-    instead, but accept that its timings only cover 1/N of the suite.
-
 ## Other CI systems
 
-Every CI system with a job matrix exposes the job's index and the total;
-wire them into `--shard K/N` (K is 1-based) and keep an explicit `-n 2` or
-more. Full recipes, including the read-only cache and the job that refreshes
-it, live on the per-system pages:
+Wire the job's shard number and the total into `--shard K/N` (K is 1-based)
+and keep an explicit `-n 2` or more. Systems with a parallel-job setting
+expose both as variables; on the others you set them per job yourself. Each
+system's full recipe gives every shard one cache snapshot and gates on
+`shard-verify` ([the rules](ci-shared-cache.md#ci-cache-rules)):
 
 | System | Index / total | Recipe |
 |---|---|---|
+| AWS CodeBuild | none built in: each batch `build-graph` entry sets its own `SHARD`, with a fixed `SHARDS` | [AWS CodeBuild](ci-recipes.md#aws-codebuild) |
+| Google Cloud Build | none built in (no job matrix): whatever launches the shard builds passes `_SHARD` / `_SHARDS` substitutions | [Google Cloud Build](ci-recipes.md#google-cloud-build) |
 | GitLab CI | `CI_NODE_INDEX` (1-based) / `CI_NODE_TOTAL`, with `parallel:` | [GitLab CI](ci-recipes.md#gitlab-ci) |
-| CircleCI | `CIRCLE_NODE_INDEX` (**0-based**, add 1) / `CIRCLE_NODE_TOTAL`, with `parallelism:` | [CircleCI](ci-recipes.md#circleci) |
-| Buildkite | `BUILDKITE_PARALLEL_JOB` (**0-based**, add 1) / `BUILDKITE_PARALLEL_JOB_COUNT`, with `parallelism:` | [Buildkite](ci-recipes.md#buildkite) |
 | Azure Pipelines | `System.JobPositionInPhase` (1-based) / `System.TotalJobsInPhase`, with `strategy: parallel: N` | [Azure Pipelines](ci-recipes.md#azure-pipelines) |
+| CircleCI | `CIRCLE_NODE_INDEX` (**0-based**, add 1) / `CIRCLE_NODE_TOTAL`, with `parallelism:` | [CircleCI](ci-recipes.md#circleci) |
+| Jenkins | none built in: a declarative `matrix` axis `SHARD` (`1` to `4`), with the total written into the step | [Jenkins](ci-recipes.md#jenkins) |
+| Buildkite | `BUILDKITE_PARALLEL_JOB` (**0-based**, add 1) / `BUILDKITE_PARALLEL_JOB_COUNT`, with `parallelism:` | [Buildkite](ci-recipes.md#buildkite) |
 
 ## Any other CI (generic)
 

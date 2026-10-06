@@ -389,6 +389,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn docs_state_the_minimum_python_discovery_enforces() {
+        // Regression: troubleshooting.md said discovery rejects interpreters
+        // "older than 3.9" while MIN_VERSION is 3.10. Every "older than X.Y"
+        // and "Python X.Y+" claim in the docs names MIN_VERSION.
+        let claim = regex::Regex::new(
+            r"(?i)(?:older than (?:the required )?(?:python )?|python \**)(\d+)\.(\d+)(\+?)",
+        )
+        .unwrap();
+        let want = format!("{}.{}", super::MIN_VERSION.0, super::MIN_VERSION.1);
+        let (mut bad, mut seen) = (Vec::new(), 0);
+        for (page, text) in crate::doc_pages::pages() {
+            for sentence in crate::doc_pages::sentences(&text) {
+                for c in claim.captures_iter(&sentence) {
+                    // "Python 3.13.13" in sample output is not a floor claim.
+                    let floor = c[0].to_lowercase().starts_with("older") || !c[3].is_empty();
+                    if !floor {
+                        continue;
+                    }
+                    seen += 1;
+                    if format!("{}.{}", &c[1], &c[2]) != want {
+                        bad.push(format!("{page}: {sentence}"));
+                    }
+                }
+            }
+        }
+        assert!(seen > 0, "no minimum-Python claim found in the docs");
+        assert!(
+            bad.is_empty(),
+            "docs give a minimum Python other than {want}:\n{}",
+            bad.join("\n")
+        );
+    }
+
     /// Plain discovery with no venvs (the guard has nothing to trigger on).
     fn discovery() -> Policy<'static> {
         Policy {

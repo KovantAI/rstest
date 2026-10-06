@@ -99,7 +99,7 @@ not part of it, and neither are `addopts` or `PYTEST_ADDOPTS`, which
 replay reads from your checkout. Replay hands the recorded arguments to
 pytest as they are, so only replay journals from runs you trust
 (see [Security: replay journals](../reference/security.md#replay-journals)).
-To pick the interpreter, put `--python` after the subcommand:
+To pick the interpreter, pass `--python`:
 `rstest replay --journal ci-replay/latest.json --python .venv/bin/python`.
 
 Replay forces the recorded worker count (even on a laptop with fewer cores),
@@ -132,12 +132,9 @@ for the schedule that broke CI.
 - **Only parallel runs record.** `-n 0`/`-n 1`, `--dist each` and
   `--shard` write no journal. A `--collect lazy` run records too, and replay
   re-runs its schedule with full collection.
-- **Keep journals out of the CI cache.** The bundled action already leaves
-  `.rstest_cache/replay` out of the cache it persists. If you cache
-  `.rstest_cache` yourself (raw YAML, or another CI system's cache), exclude
-  that directory too (`!.rstest_cache/replay` for `actions/cache`). Otherwise
-  every save carries up to 11 journals, several MB each on a large suite, and
-  a job that recorded nothing can upload an older `latest.json` it restored.
+- **Keep journals out of the CI cache.** If you cache `.rstest_cache`
+  yourself, exclude `.rstest_cache/replay`; see
+  [Keep replay journals out of the cache](ci-shared-cache.md#keep-replay-journals-out-of-the-cache).
 
 ## What replay does not reproduce
 

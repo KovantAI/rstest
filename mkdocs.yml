@@ -87,6 +87,20 @@ exclude_docs: |
 plugins:
   - search
 
+# Every link problem is a warning, so `mkdocs build --strict` (CI's docs job)
+# fails on it. mkdocs only reports broken #anchors at info level by default,
+# which let a link to a renamed heading ship silently.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
 nav:
   - Introduction: index.md
   - Getting started:
@@ -97,30 +111,35 @@ nav:
       - Run your existing suite: getting-started/first-steps.md
       - Features: getting-started/features.md
       - Getting help: getting-started/getting-help.md
-  - Playbooks:
-      - Wait-bound / IO suites: guides/wait-bound.md
-      - Local dev / inner loop: guides/local-dev.md
-      - Your plugin stack: guides/plugin-stack.md
   - Guides:
       - guides/index.md
-      - Migrating from pytest: guides/migrate-from-pytest.md
-      - Upgrading to pytest 9: guides/upgrade-to-pytest9.md
-      - Migrating from pytest-xdist: guides/migrate-from-xdist.md
-      - Parallel safety: guides/parallel-safety.md
-      - Suite diagnostics: guides/doctor.md
-      - Resource leaks: guides/resource-leaks.md
-      - Flaky tests: guides/flaky-tests.md
-      - Replaying a CI failure locally: guides/replay.md
-      - Watch mode: guides/watch-mode.md
-      - Selecting changed tests: guides/changed.md
-      - Monorepos: guides/monorepo.md
-      - CI quickstart: guides/ci-quickstart.md
-      - More CI systems: guides/ci-recipes.md
-      - Shared cache across CI jobs: guides/ci-shared-cache.md
-      - Sharding across CI jobs: guides/sharding.md
-      - Plugins: guides/plugins.md
-      - Coverage: guides/coverage.md
-      - Agent skills: guides/agent-skills.md
+      - Migrating:
+          - Migrating from pytest: guides/migrate-from-pytest.md
+          - Upgrading to pytest 9: guides/upgrade-to-pytest9.md
+          - Migrating from pytest-xdist: guides/migrate-from-xdist.md
+      - Running tests well:
+          - Parallel safety: guides/parallel-safety.md
+          - Suite diagnostics: guides/doctor.md
+          - Wait-bound / IO suites: guides/wait-bound.md
+          - Local dev / inner loop: guides/local-dev.md
+          - Watch mode: guides/watch-mode.md
+          - Selecting changed tests: guides/changed.md
+          - Flaky tests: guides/flaky-tests.md
+          - Resource leaks: guides/resource-leaks.md
+          - Replaying a CI failure locally: guides/replay.md
+          - Monorepos: guides/monorepo.md
+      - CI:
+          - CI quickstart: guides/ci-quickstart.md
+          - CI output formats: guides/ci-output.md
+          - More CI systems: guides/ci-recipes.md
+          - Shared cache across CI jobs: guides/ci-shared-cache.md
+          - Sharding across CI jobs: guides/sharding.md
+      - Plugins and coverage:
+          - Your plugin stack: guides/plugin-stack.md
+          - Plugins: guides/plugins.md
+          - Coverage: guides/coverage.md
+      - Coding agents:
+          - Agent skills: guides/agent-skills.md
   - Concepts:
       - concepts/index.md
       - Architecture: concepts/architecture.md
