@@ -2601,6 +2601,9 @@ fn fold_run_event(
         | proto::Event::ItemStart { .. }
         | proto::Event::ItemDone { .. }
         | proto::Event::Stopped { .. }
+        // Pool-only: a single session runs pytest's own loop, which handles
+        // pytest.exit() itself.
+        | proto::Event::SessionExit { .. }
         | proto::Event::LazyReady { .. }
         | proto::Event::FileCollected { .. }
         | proto::Event::ItemStartId { .. }

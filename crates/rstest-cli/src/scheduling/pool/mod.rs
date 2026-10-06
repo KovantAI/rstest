@@ -889,6 +889,33 @@ pub fn run_pool(
                     }
                 }
             }
+            Ok(Event::SessionExit { reason, returncode }) => {
+                // pytest.exit() in a test ends the whole run, as under pytest:
+                // every worker finishes its test in flight and starts nothing
+                // more. The calling test never finished, so (like pytest) it
+                // has no outcome. The worker's Done follows.
+                let s = &mut states[idx];
+                s.attempt.clear();
+                s.attempt_failed = false;
+                s.running_since = None;
+                s.running_watchdog = None;
+                if let Some(i) = s.running.take() {
+                    if let Some(id) = nodeid_at(&ids_store, i) {
+                        let id = if dist == Dist::Each {
+                            format!("{id} [gw{idx}]")
+                        } else {
+                            id.to_string()
+                        };
+                        run.forget_unfinished(&id);
+                    }
+                }
+                run.session_exit
+                    .get_or_insert(crate::reporting::report::SessionExit { reason, returncode });
+                if !stopping {
+                    stopping = true;
+                    orchestrator::stop_all(&mut states);
+                }
+            }
             Ok(Event::Done { exitstatus }) => {
                 statuses.push(exitstatus);
                 let s = &mut states[idx];
@@ -1448,6 +1475,11 @@ pub fn run_pool(
         false,
         run.stopped_after.is_some(),
     );
+    // pytest.exit(): its returncode is the run's exit code, as under pytest.
+    let exitstatus = run
+        .session_exit
+        .as_ref()
+        .map_or(exitstatus, |x| x.returncode);
     let (collection_size, collection_hash) = match reference {
         Some((count, hash)) => (count, Some(hash)),
         None => (0, None),

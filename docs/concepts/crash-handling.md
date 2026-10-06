@@ -27,6 +27,13 @@ this from its queue, which can misattribute; the explicit signal cannot.)
    re-provisioning can race the crashed node's cleanup (see
    [xdist hook emulation](xdist-hooks.md)).
 
+A run gets as many replacements as it has workers, and at least 4. Once
+they are spent, step 3 no longer happens: the dead worker is reported as a
+`<worker gwN>` error (exit code 3) and the run carries on with the workers
+it has left. Steps 1 and 2 still apply, so no test is lost. If every worker
+dies, the tests that never got to run are listed in one `<not run>` error
+("N tests did not run: every worker died").
+
 ## Hung tests (`--worker-timeout`)
 
 A test that hangs instead of crashing goes through the same machinery when

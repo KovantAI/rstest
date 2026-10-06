@@ -26,6 +26,7 @@ from gates.coverage import (
 )
 from gates.dispatch import (
     gate_auto_worker_capping,
+    gate_crash_after_restart_budget,
     gate_crash_restart_exhaustion,
     gate_dist_each,
     gate_dist_each_crash_remnant,
@@ -41,6 +42,7 @@ from gates.dispatch import (
     gate_order_fail_fast,
     gate_serial_after_crash,
     gate_serial_mark,
+    gate_session_exit_stops_pool,
     gate_shard_k_n,
     gate_shard_verify,
     gate_shuffle,
@@ -226,6 +228,9 @@ def main():
         gate_lazy_work_stealing,
         gate_dist_each_crash_remnant,
         gate_crash_restart_exhaustion,
+        gate_crash_after_restart_budget,
+        gate_session_exit_stops_pool,
+        gate_lone_surrogate_in_report,
         gate_replay,
         gate_replay_serial,
         gate_replay_crash,
