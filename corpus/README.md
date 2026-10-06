@@ -198,8 +198,9 @@ for plugins that register mid-`configure`). This covers hooks whose
 injected value is **self-derivable** (a `uuid4`, or a `workerid` suffix):
 
 - **sqlalchemy** (`follower_ident`) runs at full **`-n auto`**: 4.6×
-  (552.4s→119.8s), 99.96% in the latest `results.json` (the table above,
-  an older snapshot, has 10× and 99.97%). xdist installed → its `XDistHooks` registers → the
+  (552.4s→119.8s), 99.96% in
+  `bench-results/2026-09-26-sqlalchemy-parity.json` (the table above, an
+  older snapshot, has 10× and 99.97%). xdist installed → its `XDistHooks` registers → the
   emulation fires `configure_node` → each worker self-assigns
   `follower_ident=uuid4()` and provisions its own follower DB. The 9-test
   gap is serial-baseline-vs-parallel (those IMV/RETURNING tests skip in the

@@ -279,8 +279,10 @@ change is required.
 ### sqlalchemy: IMV / RETURNING tests
 
 The corpus runs SQLAlchemy (about 25,300 tests) at `-n auto` and measures
-about 99.96% parity (`corpus/results.json`). The gap is 9 IMV/RETURNING tests
-(`test_insert_exec.py` `IMVSentinelTest`, `test_suite.py` `ReturningTest`)
+about 99.96% parity
+(`corpus/bench-results/2026-09-26-sqlalchemy-parity.json`). The gap is 9
+IMV/RETURNING tests (`test_insert_exec.py` `IMVSentinelTest`,
+`test_suite.py` `ReturningTest`)
 that **skip in the serial pytest baseline**, where their outcome depends on
 what ran before them in the full serial order, and **pass under any parallel
 runner**. Real `pytest-xdist -n 2` passes them too, so this is a

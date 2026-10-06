@@ -283,7 +283,7 @@ Feature: First-time evaluator onboarding
       Then every diff-coverage report in the docs counts as many uncovered lines as it lists
 
     Scenario: EV-26 the SQLAlchemy parity figures match the corpus results
-      Then every docs paragraph on "sqlalchemy" parity states the score and mismatch count in "corpus/results.json"
+      Then every docs paragraph on "sqlalchemy" parity states the score and mismatch count in "corpus/bench-results/2026-09-26-sqlalchemy-parity.json"
 
     Scenario: EV-27 the pytest-django SQLite caveat has one home, and restatements link to it
       Then every docs paragraph outside "reference/corpus-plugins.md" that matches "(?s)pytest-django.*SQLite|SQLite.*pytest-django" links to "corpus-plugins.md#what-pytest-djangos-evidence-covers"
