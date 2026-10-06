@@ -76,6 +76,7 @@ tests (and to pytest itself under `-s`/`--pdb`).
 Python process in your interpreter, which runs a single pytest session over
 your args, and the orchestrator only relays its reports (or hands it the
 terminal when a flag such as `--pdb` or `-s` needs it). This is the
-compatibility anchor, with byte-exact pytest output. See
+compatibility anchor, with byte-exact pytest output unless `--output` picks
+rstest's renderer. See
 [Single-worker mode](compatibility.md#single-worker-mode) for the full
 guarantee, the flags that force it, and the `--reruns` exception.

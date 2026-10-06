@@ -154,7 +154,8 @@ after whitespace) and blank lines are skipped. Then:
 $ rstest -n auto --quarantine quarantine.txt
 ```
 
-A **failure** matching the list is demoted to a `quarantined` outcome:
+A **failure** matching the list is demoted to a `quarantined` outcome, and
+with no other failure the run exits 0:
 
 ```text
 =========== quarantined failures (known-flaky, non-fatal) ===========
@@ -163,7 +164,7 @@ A **failure** matching the list is demoted to a `quarantined` outcome:
 ConnectionResetError: [Errno 54] Connection reset by peer
 ...
 
-1 failed, 41 passed, 1 quarantined in 12.31s
+41 passed, 1 quarantined in 12.31s
 ```
 
 The exact semantics:

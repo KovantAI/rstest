@@ -63,7 +63,7 @@ Per-test fields (absent when not applicable):
 | `subtests_failed` | int | failed subtests (unittest `subTest`, the `subtests` fixture). Each counts once in `meta.counts.failed`, as in pytest's summary; the test itself counts by its own outcome (pytest leaves a unittest test passed and fails a `subtests` fixture test). Omitted when 0 |
 | `duration` | seconds | call-phase wall time, 4 decimal places |
 | `cpu` | seconds | call-phase CPU time (`process_time` plus child processes the test waited for), 4 decimals. `duration` ≫ `cpu` ⇒ wait-bound (sleep/IO). **Only present when measured**: a `--doctor` run or a live-stream run (`--output json` / `--stream-json`); omitted on a plain run so the snapshot stays comparable to the pytest baseline |
-| `lineno` | int | 0-based source line of the test (pytest `report.location`); omitted when pytest reports none. The file is the nodeid's path |
+| `lineno` | int | **0-based** source line of the test (pytest `report.location`; add 1 for an editor line or [`rstest explain`](cli-commands.md#explain)'s 1-based `source_line`); omitted when pytest reports none. The file is the nodeid's path |
 | `wasxfail` | `true` | the test was an expected failure (xfail/xpass) |
 | `skip_reason` | string | pytest's skip message, first 200 chars; it keeps pytest's `Skipped: ` prefix (`@pytest.mark.skip(reason="needs postgres")` gives `"Skipped: needs postgres"`) |
 | `flaky` | `true` | passed only after [`--reruns`](cli.md#-reruns-n) or `@pytest.mark.flaky` retries. Counted in `meta.counts.flaky`, not also in `passed` |
@@ -361,8 +361,9 @@ reference doesn't spell out:
 - **When the analysis objects are `null`:**
     - `wait_bound` unless CPU time was measured and waiting is significant
       (`wait_pct ≥ 20%` and `wait_seconds ≥ 1`);
-    - `parallel_floor` unless the longest test exceeds both the ideal
-      per-worker share and 1 second;
+    - `parallel_floor` unless the longest test exceeds the
+      [floor threshold](../concepts/glossary.md#parallel-floor): the larger of
+      the ideal per-worker share and 1 second, plus 10% slack;
     - `parallel_efficiency` unless the run used more than one worker
       (`workers > 1`);
     - `coverage_waste` unless this run collected per-test coverage
@@ -377,8 +378,8 @@ reference doesn't spell out:
 - **`parallel_floor`** (the tests that cap any `-n`): `longest_seconds` is the
   single longest test, `ideal_share_seconds` is `test_time_seconds / workers`
   (the per-worker floor if work split perfectly), and `gate_tests` lists the
-  tests among the 10 longest that run longer than both that share and 1
-  second.
+  tests among the 10 longest that run longer than the larger of that share
+  and 1 second, plus 10% slack.
 - **`parallel_efficiency`** (realized speedup against the worker budget):
   `realized_speedup` is `test_time_seconds / wall_seconds`. Each worker runs
   one test at a time, so it stays at or below `ideal_speedup` (the worker
@@ -493,7 +494,7 @@ Top-level fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `ran` | bool | whether the `-n auto` classification actually executed |
+| `ran` | bool | whether the parallel classification actually executed (one worker per test file, up to your logical cores, at least 2; [not `-n auto`](cli-commands.md#migrate-check)) |
 | `ready` | bool | `true` when no test failed only in parallel (tests already failing at `-n 0` don't count) |
 | `preexisting` | int | tests already failing at `-n 0` (a pre-existing bug, not a migration concern) |
 | `findings` | array | the classified parallel-only failures (see below) |

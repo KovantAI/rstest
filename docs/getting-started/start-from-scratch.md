@@ -2,7 +2,7 @@
 
 This is the five-minute path from nothing to a green run, no existing suite
 required. If you already have a pytest project, skip to
-[Run your existing suite](first-steps.md): rstest runs it as-is.
+[Run your existing suite](run-your-suite.md): rstest runs it as-is.
 
 **You need:** Python 3.10+ and a terminal. That's it: no config, no prior
 pytest knowledge. New to the terms below (worker, single-worker mode, `-n`)? The
@@ -60,7 +60,7 @@ test_first.py ..                                                         [100%]
 
 That's the whole loop: no config file, no flags. `-n auto` (the default)
 sized the pool to one worker for one file; a real suite fans out across your
-cores ([how `-n auto` sizes the pool](first-steps.md#controlling-parallelism)).
+cores ([how `-n auto` sizes the pool](run-your-suite.md#controlling-parallelism)).
 
 ## 4. See a failure
 
@@ -142,7 +142,7 @@ On a real suite you rarely need `-n`: with many test files, the default
 
 ## Go deeper
 
-- [Run your existing suite](first-steps.md): reading the output in depth, selecting
+- [Run your existing suite](run-your-suite.md): reading the output in depth, selecting
   tests, controlling parallelism
 - [Migrating from pytest](../guides/migrate-from-pytest.md): point rstest at
   a real suite; what stays identical and what changes

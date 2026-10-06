@@ -452,3 +452,100 @@ def _index_names_sections(world, index, page, skip):
     missing = [h for h in heads if h not in skip.split(", ") and h.lower() not in entry.lower()]
     assert heads, f"{page} has no level-2 headings"
     assert not missing, f"{index} entry for {page} leaves out: {missing}"
+
+
+@then(parsers.re(rf"the mkdocs nav lists {q('title')} at {q('path')}"))
+def _nav_lists(world, title, path):
+    def walk(nodes):
+        for t, p in nodes:
+            if isinstance(p, list):
+                yield from walk(p)
+            else:
+                yield t, p
+
+    nav = list(walk(_nav_tree((REPO / "mkdocs.yml").read_text(encoding="utf-8"))))
+    assert (title, path) in nav, [n for n in nav if n[0] == title or n[1] == path]
+
+
+@then(parsers.re(rf"mkdocs.yml redirects {q('old')} to {q('new')}"))
+def _redirects(world, old, new):
+    text = (REPO / "mkdocs.yml").read_text(encoding="utf-8")
+    assert re.search(rf"^\s+{re.escape(old)}:\s*{re.escape(new)}\s*$", text, re.M), old
+    assert not (REPO / "docs" / old).exists(), f"docs/{old} still exists"
+
+
+def _secs(text):
+    """`1m15s` / `21.0s` (the try report's fmt_secs) as seconds."""
+    m = re.fullmatch(r"(?:(\d+)m)?(\d+(?:\.\d+)?)s", text)
+    assert m, text
+    return int(m.group(1) or 0) * 60 + float(m.group(2))
+
+
+@then(
+    parsers.re(rf"every `rstest try` saves line in {q('glob')} has the report's 30-day projection")
+)
+def _try_saves(world, glob):
+    lines = [
+        (p, ln)
+        for p in sorted(REPO.glob(glob))
+        for ln in p.read_text(encoding="utf-8").splitlines()
+        if "💸 saves" in ln
+    ]
+    assert lines, f"no try report in {glob}"
+    for page, ln in lines:
+        m = re.search(
+            r"saves   (\S+) per run — ≈ (\S+) over your last 30 days \((\d+) commits ≈ CI runs\)",
+            ln,
+        )
+        assert m, f"{page.relative_to(REPO)}: {ln.strip()}"
+        assert abs(_secs(m.group(1)) * int(m.group(3)) - _secs(m.group(2))) < 1, ln
+
+
+@then(
+    parsers.re(rf"the intro of {q('doc')} quotes the django-allauth `-n 4` time from {q('bench')}")
+)
+def _allauth_time(world, doc, bench):
+    row = next(
+        ln
+        for ln in (REPO / bench).read_text(encoding="utf-8").splitlines()
+        if ln.startswith("| django-allauth |")
+    )
+    want = re.search(r"\(([\d.]+s) at its recommended `-n 4`\)", row)
+    assert want, row
+    intro = (REPO / doc).read_text(encoding="utf-8").split("```", 1)[0]
+    said = re.findall(r"([\d.]+s) at\s+`-n 4`", " ".join(intro.split()))
+    assert said == [want.group(1)], f"{doc} intro says {said}, {bench} says {want.group(1)}"
+
+
+@then(
+    parsers.re(
+        rf"every environment variable the CLI reads is named in {q('doc')}, "
+        rf"except {q('skip')}"
+    )
+)
+def _env_documented(world, doc, skip):
+    src = REPO / "crates" / "rstest-cli" / "src"
+    names = set()
+    for f in src.rglob("*.rs"):
+        text = f.read_text(encoding="utf-8")
+        names |= set(re.findall(r'var(?:_os)?\("([A-Z][A-Z0-9_]+)"\)', text))
+        # Lists looped over and read one by one (`for var in ["A", "B"]`).
+        looped = r"for \w+ in \[([^\]]+)\]\s*\{\s*if let Some\([^)]*\) = std::env::var"
+        for lst in re.findall(looped, text):
+            names |= set(re.findall(r'"([A-Z][A-Z0-9_]+)"', lst))
+    assert names, "found no env reads"
+    page = (REPO / doc).read_text(encoding="utf-8")
+    missing = sorted(n for n in names - set(skip.split()) if f"`{n}`" not in page)
+    assert not missing, f"read by the CLI but not in {doc}: {missing}"
+
+
+@then(parsers.re(rf"no table cell in {q('doc')} is longer than (?P<n>\d+) characters"))
+def _short_cells(world, doc, n):
+    long = [
+        c.strip()[:60] + "..."
+        for ln in (REPO / doc).read_text(encoding="utf-8").splitlines()
+        if ln.startswith("|")
+        for c in ln.strip("|").split("|")
+        if len(c.strip()) > int(n)
+    ]
+    assert not long, f"cells over {n} chars: {long}"

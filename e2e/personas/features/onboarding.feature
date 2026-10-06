@@ -225,20 +225,20 @@ Feature: First-time evaluator onboarding
       # what steps 2 to 4 built (three tests in one file, run on one worker),
       # then what test_slow.py brings (twelve tests in one selected file, which
       # a cold -n auto runs on one worker). Sleeps are shortened for speed.
-      Given the python blocks of "docs/getting-started/your-first-test.md" containing "def test_add", joined, as "test_first.py"
+      Given the python blocks of "docs/getting-started/start-from-scratch.md" containing "def test_add", joined, as "test_first.py"
       When I run "rstest" and note the worker count
       Then the exit code is 1
       And stdout contains "1 failed, 2 passed"
       And the worker count is 1
-      Given the prose before code block 1 of the "## 5. Watch it go parallel" section of "docs/getting-started/your-first-test.md"
+      Given the prose before code block 1 of the "## 5. Watch it go parallel" section of "docs/getting-started/start-from-scratch.md"
       Then every count that prose states matches 3 tests, 1 file and 1 worker
-      Given the python blocks of "docs/getting-started/your-first-test.md" containing "# test_slow.py", joined, as "test_slow.py"
+      Given the python blocks of "docs/getting-started/start-from-scratch.md" containing "# test_slow.py", joined, as "test_slow.py"
       And in "test_slow.py", "time.sleep(1)" is replaced by "time.sleep(0.02)"
       When I run "rstest test_slow.py" and note the worker count
       Then the run succeeds
       And stdout contains "12 passed"
       And the worker count is 1
-      Given the prose before code block 2 of the "## 5. Watch it go parallel" section of "docs/getting-started/your-first-test.md"
+      Given the prose before code block 2 of the "## 5. Watch it go parallel" section of "docs/getting-started/start-from-scratch.md"
       Then every count that prose states matches 12 tests, 1 file and 1 worker
       When I run "rstest -n 4 test_slow.py" and note the worker count
       Then the run succeeds
@@ -265,9 +265,9 @@ Feature: First-time evaluator onboarding
       Then no paragraph of "docs/getting-started/features.md" matches "(?i)full surface|every flag|all flags"
 
     Scenario: EV-22 the first-run page names every selector rstest adds
-      Given the level-2 section "## Selecting tests" of "docs/getting-started/first-steps.md"
+      Given the level-2 section "## Selecting tests" of "docs/getting-started/run-your-suite.md"
       Then that level-2 section names each of "--changed --changed-strict --since-green --incremental"
-      And no paragraph of "docs/getting-started/first-steps.md" matches "(?i)one selector"
+      And no paragraph of "docs/getting-started/run-your-suite.md" matches "(?i)one selector"
 
     Scenario: EV-23 --dist each is not sold as heterogeneous-environment testing
       # Every worker uses the same interpreter; xdist's --tx has no equivalent.
@@ -322,3 +322,63 @@ Feature: First-time evaluator onboarding
       # (unit test env_fingerprint_reflects_dist_info_records), so an in-place
       # upgrade IS detected.
       Then no paragraph of "docs/**/*.md" matches "(?i)upgraded in place without a lockfile change is not detected|fingerprint \(interpreter and dependency manifests\)"
+
+    Scenario: EV-35 a getting-started page's URL says what the page is
+      Then the mkdocs nav lists "Run your existing suite" at "getting-started/run-your-suite.md"
+      And the mkdocs nav lists "Start from scratch" at "getting-started/start-from-scratch.md"
+      And mkdocs.yml redirects "getting-started/first-steps.md" to "getting-started/run-your-suite.md"
+      And mkdocs.yml redirects "getting-started/your-first-test.md" to "getting-started/start-from-scratch.md"
+
+    Scenario: EV-36 the existing-suite page doesn't borrow the walkthrough's file name
+      # start-from-scratch.md builds test_first.py with three tests; a different
+      # test_first.py here (test_add_zero, test_skipped) confused readers of both.
+      Then no fenced block in "docs/getting-started/run-your-suite.md" contains "test_first.py"
+
+    Scenario: EV-37 the sample try report shows what a git checkout prints
+      # try_cmd.rs adds the 30-day projection whenever git history is there,
+      # which is the usual case; the arithmetic must hold.
+      Then every `rstest try` saves line in "docs/**/*.md" has the report's 30-day projection
+
+    Scenario: EV-38 the refusal is tied to workers disagreeing, not to full collection itself
+      Then no paragraph of "docs/**/*.md" matches "(?i)refuses to dispatch whenever every worker collects"
+
+    Scenario: EV-39 the sample run's page quotes the measured allauth time
+      Then the intro of "docs/getting-started/run-your-suite.md" quotes the django-allauth `-n 4` time from "docs/reference/benchmarks.md"
+
+    Scenario: EV-40 migrate-check's parallel pass is never described as -n auto
+      # migrate::parallel_n uses run::check_workers: never capped by the
+      # duration cache, never below 2.
+      Then no paragraph of "docs/reference/report-json.md" matches "`-n auto` classification"
+
+    Scenario: EV-41 every statement of the parallel-floor threshold includes the 10% slack
+      # doctor::FLOOR_SLACK = 1.1: a balanced pool sitting at the share is not flagged.
+      Then no paragraph of "docs/**/*.md" matches "(?i)(both|than) (the ideal per-worker share|that share) and 1 second(?!, plus 10%)"
+
+    Scenario: EV-42 the two line-number conventions are called out where each is defined
+      # report-json lineno is pytest's 0-based location; explain's source_line
+      # is 1-based. Off-by-one in editor integrations otherwise.
+      Given the "### `explain`" section of "docs/reference/cli-commands.md"
+      Then that docs section contains "`source_line` is **1-based**"
+      Given the table row of "docs/reference/report-json.md" starting with "| `lineno` | int | **0-based**"
+      Then that docs section contains "1-based `source_line`"
+
+    Scenario: EV-43 every environment variable rstest reads is documented
+      # PATH/PATHEXT are the OS's; the rest of the exceptions are developer-only
+      # test and benchmark knobs.
+      Then every environment variable the CLI reads is named in "docs/reference/environment.md", except "PATH PATHEXT RSTEST_BENCH_CYCLES RSTEST_BENCH_EDITS RSTEST_BENCH_FILES RSTEST_BLESS_SCHEMAS RSTEST_TEST_PYTHON"
+
+    Scenario: EV-44 the quarantine example shows a run that quarantine turns green
+      # A stray "1 failed" next to the exit-0 rule read as a contradiction.
+      Then no fenced block in "docs/guides/flaky-tests.md" contains "failed, 41 passed, 1 quarantined"
+
+    Scenario: EV-45 explain is not described as reading replay journals
+      # explain reads durations, flakes and the coverage index, never journals.
+      Then no paragraph of "docs/**/*.md" matches "(?i)replay journal for `rstest replay` or `rstest explain`"
+
+    Scenario: EV-46 "byte-exact" single-worker output always carries its --output exception
+      # An explicit --output switches -n 0 to rstest's renderer (compatibility.md).
+      Then no paragraph of "docs/**/*.md" matches "^(?!.*--output).*byte-exact pytest output"
+
+    Scenario: EV-47 the shadowed-flags table stays scannable
+      # Edge cases go in the note under the table, not into a cell.
+      Then no table cell in "docs/_snippets/shadowed-flags.md" is longer than 250 characters

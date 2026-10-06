@@ -21,10 +21,14 @@ No migration and no config. A typical report:
 ================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
   ⚡ speed:   pytest 1m36s  →  rstest 21.0s   (4.6× at -n auto = -n 8)
-  💸 saves   1m15s per run
+  💸 saves   1m15s per run — ≈ 52m30s over your last 30 days (42 commits ≈ CI runs)
 ================================================
   → drop-in ready: `rstest` is `pytest`, in parallel. Switch with confidence.
 ```
+
+The 30-day figure projects the saving over the repository's recent commits
+(one commit taken as one CI run); outside a git checkout the line stops at
+`per run`.
 
 It needs pytest installed in the project environment for the baseline run
 (it runs `python -m pytest` with the interpreter rstest uses), and it takes
@@ -62,12 +66,13 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
   paint. rstest's own `--html` works at any worker count
   ([Known gaps](../concepts/compatibility.md#known-gaps)).
 - **Unstable parametrize ids.** Ids built from memory addresses, reprs,
-  uuids or timestamps make workers collect different test sets, and rstest
-  refuses to dispatch whenever every worker collects the whole suite. That
-  is full collection: the first, cold-cache run of any suite, every run of a
-  suite below the [lazy collection](../concepts/lazy-collection.md#auto-default)
-  threshold, and any run pinned to `--collect full`. The fix is stable
-  `ids=`, or `-n 0`
+  uuids or timestamps make workers collect different test sets, and when
+  rstest sees that it refuses to dispatch rather than run the wrong tests.
+  It can only see it under full collection, when every worker collects the
+  whole suite: the first, cold-cache run of any suite, every run of a suite
+  below the [lazy collection](../concepts/lazy-collection.md#auto-default)
+  threshold, and any run pinned to `--collect full`. Such a suite will hit
+  it. The fix is stable `ids=`, or `-n 0`
   ([Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids)).
 - **Windows-heavy fleets.** Windows is supported and gated in CI, but
   real-world validation there is lighter and `--timeout` can't interrupt a

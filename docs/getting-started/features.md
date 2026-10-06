@@ -13,7 +13,7 @@ Everything pytest does (via a vendored pytest core), plus:
 
 | Feature | Flag / API | Notes |
 |---|---|---|
-| Parallel by default | `-n auto` (default) | logical cores, capped for small suites ([how](first-steps.md#controlling-parallelism)); `-n 0` = single-worker mode, one pytest session |
+| Parallel by default | `-n auto` (default) | logical cores, capped for small suites ([how](run-your-suite.md#controlling-parallelism)); `-n 0` = single-worker mode, one pytest session |
 | Suite diagnostics | `--doctor`, `--doctor-json` | wait-bound tests, parallel floor, fixture hotspots, slowest files |
 | Watch mode | `--watch` | targeted reruns on save via the import graph |
 | Failure reruns cache | `--lf`, `--ff` | merged across workers |

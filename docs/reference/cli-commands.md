@@ -46,7 +46,7 @@ $ rstest try
 ================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
   ⚡ speed:   pytest 1m36s  →  rstest 21.0s   (4.6× at -n auto = -n 8)
-  💸 saves   1m15s per run
+  💸 saves   1m15s per run — ≈ 52m30s over your last 30 days (42 commits ≈ CI runs)
 ================================================
   → drop-in ready: `rstest` is `pytest`, in parallel. Switch with confidence.
 ```
@@ -603,7 +603,9 @@ test: tests/test_api.py::test_login
 Add `--json` for a schema-stamped object on stdout (`{meta, nodeid, found,
 duration_seconds, last_outcome, source_line, flakes, coverage}`), suitable for an
 editor or CI step. Absent fields are `null`: a never-flaked test has no `flakes`,
-a cold coverage index yields `null` coverage. Field reference:
+a cold coverage index yields `null` coverage. `source_line` is **1-based**, as
+an editor counts, while report-json's `lineno` is 0-based as pytest reports it:
+the same test reads `15` here and `14` there. Field reference:
 [Explain JSON](output-schemas.md#explain).
 
 It reads only cache files, needs no interpreter, and runs no tests. The data

@@ -86,6 +86,11 @@ exclude_docs: |
 
 plugins:
   - search
+  # Renamed pages keep their old URLs working.
+  - redirects:
+      redirect_maps:
+        getting-started/first-steps.md: getting-started/run-your-suite.md
+        getting-started/your-first-test.md: getting-started/start-from-scratch.md
 
 # Every link problem is a warning, so `mkdocs build --strict` (CI's docs job)
 # fails on it. mkdocs only reports broken #anchors at info level by default,
@@ -107,8 +112,8 @@ nav:
       - getting-started/index.md
       - Evaluating rstest: getting-started/evaluating.md
       - Installation: getting-started/installation.md
-      - Start from scratch: getting-started/your-first-test.md
-      - Run your existing suite: getting-started/first-steps.md
+      - Start from scratch: getting-started/start-from-scratch.md
+      - Run your existing suite: getting-started/run-your-suite.md
       - Features: getting-started/features.md
       - Getting help: getting-started/getting-help.md
   - Guides:

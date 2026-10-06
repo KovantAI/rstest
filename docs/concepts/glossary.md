@@ -187,10 +187,11 @@ only need this for very large suites in CI. See
 <span id="byte-exact-mode"></span>**Single-worker mode**{ #single-worker-mode }:
 what `-n 0` and `-n 1` run (and `-n auto` when it resolves to one worker):
 one pytest session in one process, with no scheduling and no
-[worker id](#worker-id). Its output is byte-exact pytest output;
+[worker id](#worker-id). With no `--output` set, its output is byte-exact
+pytest output;
 [passthrough](#passthrough) flags such as `--pdb` and `-s` force it. See
 [Single-worker mode](compatibility.md#single-worker-mode) for the full
-guarantee and its `--reruns` exception.
+guarantee and its `--output` and `--reruns` exceptions.
 
 **Vendored core**{ #vendored-core }: the unmodified copy of pytest shipped
 inside `rstest_worker._vendor`; provides all test semantics. Never conflicts

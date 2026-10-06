@@ -7,13 +7,13 @@ Pick the page that matches where you are:
   backing out. `rstest try` gives the one-command answer
   ([how](evaluating.md#try-it-first)).
 - **Have a pytest suite?** [Install](installation.md), then
-  [run your existing suite](first-steps.md). Before relying on it in CI,
+  [run your existing suite](run-your-suite.md). Before relying on it in CI,
   follow [Migrating from pytest](../guides/migrate-from-pytest.md)
   (or [from pytest-xdist](../guides/migrate-from-xdist.md)).
 - **Wiring it into CI?** [CI quickstart](../guides/ci-quickstart.md):
   GitHub Actions with a persisted duration cache, plus Django and monorepo
   examples.
-- **No suite yet?** [Start from scratch](your-first-test.md): from an empty
+- **No suite yet?** [Start from scratch](start-from-scratch.md): from an empty
   folder to a green run.
 - **Want the feature list?** [Features](features.md): what rstest adds over
   pytest.

@@ -55,7 +55,7 @@ Here is the key move for a wait-bound suite, and it is counter-intuitive:
 
 - **`-n auto` only ever caps *downward*.** It never exceeds your logical
   core count, and on a small or few-file suite it settles below it
-  ([how it sizes the pool](../getting-started/first-steps.md#controlling-parallelism)).
+  ([how it sizes the pool](../getting-started/run-your-suite.md#controlling-parallelism)).
 - **An explicit `-n N` is a fixed count, regardless.** Pin `-n <k>` and
   you get exactly `k` workers; the auto cap does not apply. So a
   wait-bound suite can set `-n` **above** the logical core count to keep

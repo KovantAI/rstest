@@ -5,8 +5,8 @@ compares a pytest run and an rstest run of your suite in one command.
 
 Run rstest from your project root, exactly where you would run pytest. This
 sample is one run of django-allauth's 2,050-test suite at `-n 4`, the suite
-measured in [Benchmarks](../reference/benchmarks.md) (the middle lines are
-elided):
+measured in [Benchmarks](../reference/benchmarks.md), which reports 8.4s at
+`-n 4`; single runs vary around that (the middle lines are elided):
 
 ```console
 $ rstest -n 4
@@ -29,11 +29,11 @@ how long (`idle` when it has nothing). Here is a small four-test file at
 
 ```text
 rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
-[gw0] ✓ tests/test_first.py::test_add  0.20s [ 25%]
-[gw1] ✓ tests/test_first.py::test_add_zero  0.21s [ 50%]
-[gw1] s tests/test_first.py::test_skipped [ 75%]
+[gw0] ✓ tests/test_math.py::test_add  0.20s [ 25%]
+[gw1] ✓ tests/test_math.py::test_add_zero  0.21s [ 50%]
+[gw1] s tests/test_math.py::test_skipped [ 75%]
 ██████████████████████░░░░░░░░  75% (3/4) ~0s left
-gw0    0.0s tests/test_first.py::test_add_negative
+gw0    0.0s tests/test_math.py::test_add_negative
 gw1    idle
 ```
 
@@ -42,7 +42,7 @@ yellow segments for passed, failed, and skipped or xfail) and pytest's
 summary line:
 
 ```text
-[gw0] ✓ tests/test_first.py::test_add_negative  0.21s [100%]
+[gw0] ✓ tests/test_math.py::test_add_negative  0.21s [100%]
 
 Results (0.61s):
   ██████████████████████████████ 4/4
@@ -100,10 +100,10 @@ finish:
 ```console
 $ rstest -n 2 -v
 rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
-[gw0] tests/test_first.py::test_add PASSED [ 16%]
-[gw1] tests/test_first.py::test_add_zero PASSED [ 33%]
-[gw1] tests/test_first.py::test_skipped SKIPPED [ 50%]
-[gw0] tests/test_first.py::test_add_negative PASSED [ 66%]
+[gw0] tests/test_math.py::test_add PASSED [ 16%]
+[gw1] tests/test_math.py::test_add_zero PASSED [ 33%]
+[gw1] tests/test_math.py::test_skipped SKIPPED [ 50%]
+[gw0] tests/test_math.py::test_add_negative PASSED [ 66%]
 [gw1] tests/test_login.py::test_logout PASSED [ 83%]
 [gw0] tests/test_login.py::test_session FAILED [100%]
 ```
@@ -133,8 +133,8 @@ cachedir: .pytest_cache
 rootdir: /path/to/project
 collecting ... collected 6 items
 
-tests/test_first.py::test_add PASSED                                     [ 16%]
-tests/test_first.py::test_add_zero PASSED                                [ 33%]
+tests/test_math.py::test_add PASSED                                      [ 16%]
+tests/test_math.py::test_add_zero PASSED                                 [ 33%]
 ...
 ```
 

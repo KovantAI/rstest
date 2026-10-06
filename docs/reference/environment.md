@@ -128,9 +128,10 @@ Standard variables from CI systems and tools that rstest reads when present:
 |---|---|
 | `GITHUB_BASE_REF`, `CI_MERGE_REQUEST_DIFF_BASE_SHA`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`, `BUILDKITE_PULL_REQUEST_BASE_BRANCH` | the pull-request base for a bare `--changed`, probed in that order (see [Selecting changed tests: CI usage](../guides/changed.md#ci-usage)) |
 | `GITHUB_STEP_SUMMARY` | doctor runs append their markdown report to this file on GitHub Actions |
+| `GITHUB_WORKSPACE`, `BUILD_SOURCESDIRECTORY` | the repository root that `--output github` / `--output azure` annotation paths are made relative to, when it contains the rootdir; otherwise the nearest ancestor holding `.git` |
 | `BUILDKITE` | on Buildkite (non-empty), doctor reports and flaky tests are published with `buildkite-agent annotate` |
 | `UV_PYTHON_INSTALL_DIR`, `XDG_DATA_HOME`, `APPDATA` | locating uv-managed interpreters during interpreter discovery (`UV_PYTHON_INSTALL_DIR` first, else uv's default under `XDG_DATA_HOME` or `~/.local/share` on Unix, `%APPDATA%` on Windows) |
 | `XDG_CACHE_HOME`, `LOCALAPPDATA` | default base for the interpreter-probe cache (see `RSTEST_CACHE_DIR`) |
 | `COVERAGE_RCFILE` | coverage.py's config-file override. When `--cov-config` names no file, or names pytest-cov's default `.coveragerc`, rstest reads the `[run]` settings from this file (as coverage.py would) to decide what `--cov` measures. coverage.py follows the same rule when rstest combines and reports parallel coverage |
-| `HOME` | Unix fallback base when the `XDG_*` variables are unset: `~/.cache` for the interpreter-probe cache and `~/.local/share/uv/python` for uv-managed interpreters. With neither set, probing isn't persisted and uv interpreters aren't searched |
+| `HOME`, `USERPROFILE` | the home directory for [`rstest install-skills --user`](cli-commands.md#install-skills) (`HOME` first, then `USERPROFILE`). `HOME` is also the Unix fallback base when the `XDG_*` variables are unset: `~/.cache` for the interpreter-probe cache and `~/.local/share/uv/python` for uv-managed interpreters. With neither set, probing isn't persisted and uv interpreters aren't searched |
 | `PYTHONPATH` | kept for the workers: rstest prepends `RSTEST_WORKER_PATH` (when set) and, in a source checkout, the repo's `python/` directory, then appends your existing entries in order |

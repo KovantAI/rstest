@@ -84,7 +84,8 @@ line, in `addopts` or in `PYTEST_ADDOPTS`), a run leaves no cache behind,
 as pytest does: `.rstest_cache/` is neither read nor created, and neither is
 `.pytest_cache/`. The run uses a private scratch directory that is removed
 when it ends, so it schedules cold (no saved durations), records no flake
-history and leaves no replay journal for `rstest replay` or `rstest explain`.
+history, leaves no replay journal for `rstest replay`, and adds nothing for
+`rstest explain` to report (durations, flakes, coverage) later.
 An explicit `RSTEST_CACHE` still takes effect.
 
 Writes are atomic (tmp + rename), so a concurrent reader never sees a
