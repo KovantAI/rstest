@@ -657,7 +657,7 @@ needs no interpreter and runs no tests.
 $ rstest install-skills
   migrate-to-rstest: installed
   rstest-triage: installed
-rstest 0.8.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
+rstest 0.9.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
 ```
 
 | Flag | Effect |
