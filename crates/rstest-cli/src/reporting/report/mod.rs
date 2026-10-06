@@ -15,24 +15,34 @@ mod render;
 #[derive(Debug, Default, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TestEntry {
+    /// Setup-phase outcome: `"passed"`, `"failed"` or `"skipped"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub setup: Option<String>,
+    /// Call-phase outcome: `"passed"`, `"failed"` or `"skipped"`. Absent when
+    /// the test was skipped at setup; an xfail test records `"skipped"` with
+    /// `wasxfail`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub call: Option<String>,
+    /// Teardown-phase outcome: `"passed"`, `"failed"` or `"skipped"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub teardown: Option<String>,
+    /// Call-phase wall time in seconds, 4 decimal places.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "f64"))]
     pub duration: Option<f64>,
+    /// `true` when the test was an expected failure (xfail or xpass); absent
+    /// otherwise.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wasxfail: bool,
     /// Worker that produced the final outcome (pool runs only).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub worker: Option<String>,
+    /// pytest's skip message (first 200 characters), keeping its `Skipped: `
+    /// prefix.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub skip_reason: Option<String>,
@@ -152,6 +162,7 @@ pub struct RunMeta {
 pub struct Snapshot<'a> {
     /// Paths of collectors that failed to import/collect.
     pub collect_errors: Vec<&'a String>,
+    /// Run metadata: argv, counts, exit status, schema version, shard.
     pub meta: SnapshotMeta<'a>,
     /// Per-test outcomes, keyed by node id.
     pub tests: &'a BTreeMap<String, TestEntry>,

@@ -71,7 +71,7 @@ rstest: warning: --timeout can't interrupt a blocked test in-process on Windows 
 For a tighter, fixed cap set
 [`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs), which
 also silences the warning. Plugins that rely on SIGALRM, such as
-pytest-timeouts, are Unix-only for the same reason.
+pytest-timeout, are Unix-only for the same reason.
 
 ### Ctrl+C and cancelled jobs { #interrupts }
 

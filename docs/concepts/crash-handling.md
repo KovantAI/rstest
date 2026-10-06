@@ -32,22 +32,27 @@ Step 3 is limited by the restart budget (see [Budgets](#budgets)).
 ## Hung tests (`--worker-timeout`)
 
 A test that hangs instead of crashing goes through the same machinery when
-its hang watchdog fires. The limit is
-[`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs) when set,
-the same for every test. Otherwise a test that has a timeout
-([`--timeout`](../reference/cli.md#-timeout-secs) or
-`@pytest.mark.timeout`) gets 3 × that timeout + 10 s, and a test without one
-has no watchdog. The marker value wins over `--timeout`: a test marked
-`timeout(300)` under `--timeout 30` gets 910 s, not 100 s. On Windows this
-watchdog is the only timeout enforcement: with `--timeout 30` a 60 s test
-passes and a hung one is killed at 100 s, without a traceback at the stuck
-line ([Running on Windows: timeouts](../guides/windows.md#timeouts)).
-A worker stuck on one test past its limit, in any phase, is
-killed; the test is reported failed with a timeout message
-instead of the crash message, and steps 2 and 3 above follow unchanged.
-Under `--reruns` the timed-out test is retried within the budget, and the
-kill counts against the same restart cap below. Hangs outside a test
-(collection, session config) are not covered.
+its hang watchdog fires. The watchdog's limit:
+
+- [`--worker-timeout SECS`](../reference/cli.md#-worker-timeout-secs) when
+  set, the same for every test.
+- Otherwise, for a test that has a timeout
+  ([`--timeout`](../reference/cli.md#-timeout-secs) or
+  `@pytest.mark.timeout`), 3 × that timeout + 10 s. The marker value wins
+  over `--timeout`: a test marked `timeout(300)` under `--timeout 30` gets
+  910 s, not 100 s.
+- A test without a timeout has no watchdog.
+
+A worker stuck on one test past its limit, in any phase, is killed. The test
+is reported failed with a timeout message instead of the crash message, and
+steps 2 and 3 above follow unchanged. Under `--reruns` the timed-out test is
+retried within the budget, and the kill counts against the same restart cap
+below. Hangs outside a test (collection, session config) are not covered.
+
+On Windows this watchdog is the only timeout enforcement: with
+`--timeout 30` a 60 s test passes and a hung one is killed at 100 s, without
+a traceback at the stuck line
+([Running on Windows: timeouts](../guides/windows.md#timeouts)).
 
 ## Budgets
 

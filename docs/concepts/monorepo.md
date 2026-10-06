@@ -13,18 +13,22 @@ projects, or at least one when `projects` is set in the root
 `pyproject.toml`. With a single discovered project and no `projects` key,
 rstest runs one plain session from the root instead (which can fail, for
 example with an import-file-mismatch error); set `projects` or run from the
-project's directory. Discovery descends at most
-five directory levels below the root (projects nested deeper are not found,
-even when listed in `projects`, which only filters what discovery found; run
-those from their own directory), looking for any of pytest 9's config
-files: `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`,
-`pyproject.toml`, `tox.ini`, `setup.cfg`. The first four count even when
-empty; `pyproject.toml` counts with a `[tool.pytest]` table (pytest 9's native
-TOML form) or `[tool.pytest.ini_options]` (even empty), `tox.ini` with a
-`[pytest]` section, and `setup.cfg` with `[tool:pytest]`. A `pyproject.toml`
-without a pytest section does not count.
+project's directory.
+
+Discovery descends at most **five directory levels** below the root.
+Projects nested deeper are not found, even when listed in `projects` (which
+only filters what discovery found); run those from their own directory.
 Hidden directories, virtualenvs, `node_modules`, and `site-packages` are
 pruned, and a found project owns its subtree (nested configs belong to it).
+
+A directory is a project when it holds one of pytest 9's config files:
+
+- `pytest.toml`, `.pytest.toml`, `pytest.ini` or `.pytest.ini`, even empty.
+- `pyproject.toml` with a `[tool.pytest]` table (pytest 9's native TOML form)
+  or `[tool.pytest.ini_options]` (even empty). A `pyproject.toml` without a
+  pytest section does not count.
+- `tox.ini` with a `[pytest]` section.
+- `setup.cfg` with `[tool:pytest]`.
 
 Restrict or pin the set with `projects` globs in the root `pyproject.toml`:
 

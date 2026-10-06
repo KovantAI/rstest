@@ -181,9 +181,10 @@ identically under vanilla pytest).
 ## Unstable parametrize ids { #unstable-parametrize-ids }
 
 The most common thing that blocks a parallel run is a test id that differs
-from one collection to the next. Under full collection (every cold-cache run,
-and any suite below the [lazy](lazy-collection.md) auto threshold) each
-worker collects the whole suite and reports a count and hash of its nodeids.
+from one collection to the next. Under full collection (every run that
+[lazy collection's auto-default](lazy-collection.md#auto-default) doesn't
+pick, which includes every cold-cache run and any suite below the size
+threshold) each worker collects the whole suite and reports a count and hash of its nodeids.
 If any worker disagrees, rstest refuses to dispatch rather than misattribute
 results, and exits with:
 
@@ -233,7 +234,7 @@ Maintained as things close:
 | xdist controller-side hooks (`pytest_configure_node` and friends) | emulated per worker | [5](#gap-controller-hooks) |
 | Plugins needing one controller-side service for the whole pool | not emulated; known cases handled per worker | [6](#gap-shared-service) |
 | Time-derived or random parametrize ids | pool refuses to dispatch | [7](#gap-parametrize-ids) |
-| Plugins that aggregate worker output into one artifact (pytest-html) | writes nothing at `-n ≥ 2` | [8](#gap-pytest-html) |
+| Plugins that aggregate worker output into one artifact (pytest-html, pytest-reportlog, pytest-json-report) | writes nothing at `-n ≥ 2` | [8](#gap-pytest-html) |
 
 1. **Windows at corpus scale.**{ #gap-windows } The full gate runs on
    `windows-latest` in CI on every commit, but the 33-suite public corpus
@@ -278,7 +279,10 @@ Maintained as things close:
    Every rstest worker has one, so at `-n ≥ 2` an `--html` that reaches the
    plugin (via `addopts` or after `--`) silently produces nothing. A
    command-line `--html` is rstest's native merged report at every worker
-   count; for pytest-html's own report, run `rstest -n 0 -- --html=...`. Full
-   per-plugin table in [Plugins](../guides/plugins.md#tested-compatibility).
+   count; for pytest-html's own report, run `rstest -n 0 -- --html=...`.
+   pytest-reportlog (`--report-log`) and pytest-json-report (`--json-report`)
+   gate their writers on the controller the same way and write nothing at
+   `-n ≥ 2`; rstest's `--report-json` replaces both. Full per-plugin table in
+   [Plugins](../guides/plugins.md#tested-compatibility).
 
 Found a difference not listed here? That's a bug report we want.

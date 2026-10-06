@@ -501,10 +501,22 @@ def _try_saves(world, glob):
         assert abs(_secs(m.group(1)) * int(m.group(3)) - _secs(m.group(2))) < 1, ln
 
 
+def _level2_section(doc, heading):
+    """The body of `heading` (a level-2 heading line) in `doc`, up to the next
+    level-2 heading. Fails when the heading is missing, rather than silently
+    searching the whole page."""
+    text = (REPO / doc).read_text(encoding="utf-8")
+    assert f"\n{heading}\n" in text, f"{doc} has no {heading!r} heading"
+    return text.split(f"\n{heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
 @then(
-    parsers.re(rf"the intro of {q('doc')} quotes the django-allauth `-n 4` time from {q('bench')}")
+    parsers.re(
+        rf"the {q('heading')} section of {q('doc')} quotes the django-allauth `-n 4` time "
+        rf"from {q('bench')}"
+    )
 )
-def _allauth_time(world, doc, bench):
+def _allauth_time(world, heading, doc, bench):
     row = next(
         ln
         for ln in (REPO / bench).read_text(encoding="utf-8").splitlines()
@@ -512,9 +524,32 @@ def _allauth_time(world, doc, bench):
     )
     want = re.search(r"\(([\d.]+s) at its recommended `-n 4`\)", row)
     assert want, row
-    intro = (REPO / doc).read_text(encoding="utf-8").split("```", 1)[0]
-    said = re.findall(r"([\d.]+s) at\s+`-n 4`", " ".join(intro.split()))
-    assert said == [want.group(1)], f"{doc} intro says {said}, {bench} says {want.group(1)}"
+    sec = _level2_section(doc, heading)
+    said = re.findall(r"([\d.]+s) at\s+`-n 4`", " ".join(sec.split()))
+    assert said == [want.group(1)], f"{doc} {heading} says {said}, {bench} says {want.group(1)}"
+
+
+@then(parsers.re(rf"the first command in {q('doc')} is {q('command')}"))
+def _first_command(world, doc, command):
+    text = (REPO / doc).read_text(encoding="utf-8")
+    first = re.search(r"^\$ (.*)$", text, re.M)
+    assert first, f"{doc} shows no command"
+    assert first.group(1).split("#")[0].strip() == command, first.group(0)
+
+
+@then(parsers.re(rf"{q('doc')} ends with a {q('heading')} section linking each of {q('links')}"))
+def _ends_with_links(world, doc, heading, links):
+    text = (REPO / doc).read_text(encoding="utf-8")
+    last = text.rsplit("\n## ", 1)[-1]
+    assert f"## {last}".startswith(heading + "\n"), f"{doc} ends with ## {last.splitlines()[0]}"
+    missing = [t for t in links.split() if f"]({t})" not in last]
+    assert not missing, f"{heading} lacks links to {missing}"
+
+
+@then(parsers.re(rf"the {q('heading')} section of {q('doc')} contains {q('text')}"))
+def _level2_contains(world, heading, doc, text):
+    sec = _level2_section(doc, heading)
+    assert text in sec, f"{heading} of {doc} lacks {text!r}"
 
 
 @then(

@@ -10,7 +10,7 @@ The `--audit-json` document (schema 1). Every field but `meta`, `ran` and `paral
 |---|---|---|---|
 | `inconclusive` | array of string | no | Tests that failed in the parallel pass but did not run in the follow-up runs, so could not be classified. They still fail the gate. |
 | `intrinsic_flakes` | array of string | no | Tests that fail intermittently whatever the scheduling (intrinsic flakes). |
-| `meta` | AuditMeta | yes |  |
+| `meta` | AuditMeta | yes | Envelope: producer, document kind and schema version. |
 | `order_dependent` | array of string | no | Tests that pass under `--dist loadfile`: they depend on a sibling in their file running first, so keep the file together rather than serial. |
 | `parallel_safe` | boolean | yes | Whether the suite is parallel-safe (no parallel-only failures). Always `false` when the audit did not run. |
 | `preexisting_failures` | integer | no | Tests that already fail at `-n 0`: pre-existing, not a parallelism issue, and not counted against the gate. |

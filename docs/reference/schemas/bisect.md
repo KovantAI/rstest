@@ -11,7 +11,7 @@ The `--bisect-json` document (schema 1). A run that ended without a verdict (ref
 | `culprits` | array of string | yes | The culprit test ids, in the order they run before the victim. Empty when the victim is not order-dependent or the run ended without a verdict. |
 | `cwd` | string | no | Directory `reproduce_command` runs from. |
 | `error` | string | no | Why the run ended without a verdict (absent on a completed bisect). |
-| `meta` | BisectMeta | yes |  |
+| `meta` | BisectMeta | yes | Envelope: producer, document kind and schema version. |
 | `nodeid` | string | yes | The victim test's node id, relative to `rootdir`. |
 | `order_dependent` | boolean | yes | Whether the victim fails only after the culprits run first. |
 | `reproduce_command` | string or null | yes | A command that reproduces the failure, or `null` when the victim is not order-dependent. |

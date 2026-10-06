@@ -3,29 +3,22 @@
 New to rstest and only evaluating? [`rstest try`](evaluating.md#try-it-first)
 compares a pytest run and an rstest run of your suite in one command.
 
-Run rstest from your project root, exactly where you would run pytest. This
-sample is one run of django-allauth's 2,050-test suite at `-n 4`, the suite
-measured in [Benchmarks](../reference/benchmarks.md), which reports 8.4s at
-`-n 4`; single runs vary around that (the middle lines are elided):
+Run rstest from your project root, exactly where you would run pytest:
 
 ```console
-$ rstest -n 4
-rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
-........................................................................ [  3%]
-..............................s......................................... [  7%]
-[... 25 more lines ...]
-..................................................s..................... [ 98%]
-.................................. [100%]
-
-2048 passed, 2 skipped in 8.02s
+$ rstest
 ```
 
-That `dots` output is what you get in CI and in these docs. **On your own
-terminal you'll instead see the `bar` view** because rstest auto-detects the
-TTY: a `✓`/`✗` line per test, inline failures, and a live footer showing
-overall progress with an ETA and, per worker, which test is running and for
-how long (`idle` when it has nothing). Here is a small four-test file at
-`-n 2`, caught mid-run:
+No other arguments needed: rstest honors your project's pytest configuration
+(`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`,
+`tox.ini`, or `setup.cfg`, including
+`testpaths`, `addopts`, `python_files`, and markers) because collection
+runs through a vendored pytest core.
+
+On your own terminal you'll see the **`bar`** view: a `✓`/`✗` line per
+test, inline failures, and a live footer showing overall progress with an
+ETA and, per worker, which test is running and for how long (`idle` when it
+has nothing). Here is a small four-test file at `-n 2`, caught mid-run:
 
 ```text
 rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
@@ -49,28 +42,46 @@ Results (0.61s):
 3 passed, 1 skipped in 0.61s
 ```
 
-Both views render the same run (details in [Reading the
-output](#reading-the-output)). This page's examples use `dots` for
-stability.
-
-No other arguments needed: rstest honors your project's pytest configuration
-(`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`,
-`tox.ini`, or `setup.cfg`, including
-`testpaths`, `addopts`, `python_files`, and markers) because collection
-runs through a vendored pytest core.
+In CI, or whenever output is piped, you get the compact `dots` view instead
+([Reading the output](#reading-the-output)). If the first run fails before
+any test runs (an interpreter or plugin error), see
+[Troubleshooting](../reference/troubleshooting.md); if tests fail only under
+rstest, see [When something fails](#when-something-fails).
 
 ## Reading the output
 
-On an interactive terminal the default style is **`bar`**: a
-pytest-sugar-style view (a `✓`/`✗` line per test, inline failures, a live
-progress bar). When output is piped or running in CI it falls back to the
-compact **`dots`** style shown above, so logs stay stable. Pick a style
-explicitly with `--output`: `dots`, `verbose` or `bar` for terminals,
-`github`, `gitlab`, `buildkite`, `teamcity` or `azure` for CI annotations,
-`tap` or `json` for machine-readable streams (see the
-[CLI reference](../reference/cli.md)). The rest of this page describes `dots`. On a single worker with no
-`--output` set, rstest prints pytest's own terminal output instead
+rstest picks the output style from where the output goes:
+
+- **`bar`** on an interactive terminal: the pytest-sugar-style view shown
+  above.
+- **`dots`** when output is piped or running in CI, so logs stay stable:
+  one character per test, pytest's classic progress view.
+
+Here is `dots` on django-allauth's 2,050-test suite at `-n 4` (the middle
+lines are elided). [Benchmarks](../reference/benchmarks.md) measures this
+suite at 8.4s at `-n 4`:
+
+```console
+$ rstest -n 4
+rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
+........................................................................ [  3%]
+..............................s......................................... [  7%]
+[... 25 more lines ...]
+..................................................s..................... [ 98%]
+.................................. [100%]
+
+2048 passed, 2 skipped in 8.02s
+```
+
+Pick a style explicitly with `--output`: `dots`, `verbose` or `bar` for
+terminals, `github`, `gitlab`, `buildkite`, `teamcity` or `azure` for CI
+annotations, `tap` or `json` for machine-readable streams (see the
+[CLI reference](../reference/cli.md)). The rest of this page uses `dots`,
+since it is stable to show. On a single worker with no `--output` set, rstest
+prints pytest's own terminal output instead
 (see [below](#controlling-parallelism)).
+
+What each part of a run tells you:
 
 - The **header line** states the worker count. rstest is parallel by
   default; this line is the visible reminder.
@@ -164,8 +175,22 @@ coverage index when it is warm and the import graph otherwise; for gating CI
 use [`--changed-strict`](../reference/cli.md#-changed-strict), which runs
 everything when it can't connect a change. `--since-green` does the same
 against the commit of the last all-passing run. Both need a git checkout.
-[`--incremental`](../reference/cli.md#-incremental) needs no git but a warm
-coverage index. More in [Selecting changed tests](../guides/changed.md);
+[`--incremental`](../reference/cli.md#-incremental) needs no git, but it does
+need the coverage index.
+
+The **coverage index** records which tests executed each source line. Build
+it with one coverage run that keeps per-test contexts (this needs pytest-cov
+installed):
+
+```console
+$ rstest --cov=. --cov-context=test     # writes .rstest_cache/coverage_index.json
+```
+
+Without it, `--changed` still works from the import graph, and
+`--incremental` has nothing to skip, so it runs every test. Keep `--cov=.` on
+`--incremental` runs so the index stays current. More in
+[Selecting changed tests](../guides/changed.md) and
+[Per-test contexts](../guides/coverage.md#per-test-contexts-cov-contexttest);
 see [Watch mode](../guides/watch-mode.md) for the on-save version.
 
 ## Controlling parallelism
@@ -220,6 +245,21 @@ on, the scheduler starts your slowest tests first, which is what keeps
 workers busy at the end of the run instead of waiting on one long test.
 On wait-heavy suites this is dramatic: aiohttp's suite more than halves
 between its cold and warm runs (150s to 67s; see [Benchmarks](../reference/benchmarks.md)).
+
+## What rstest writes to disk
+
+A run leaves two directories in your project root. Add both to
+`.gitignore`; both are safe to delete at any time.
+
+- **`.rstest_cache/`** is rstest's own: test durations for scheduling, the
+  flaky-test history, the coverage index (once built), and the schedules of
+  the last few parallel runs for [`rstest replay`](../guides/replay.md).
+  In CI, persist it between runs to keep the warm-cache speedup
+  ([CI quickstart](../guides/ci-quickstart.md)).
+- **`.pytest_cache/`** is pytest's, as under pytest: `--lf` and `--ff` read
+  it.
+
+The full file list is in [Caching](../concepts/caching.md).
 
 ## When something fails
 
@@ -326,3 +366,14 @@ For a resource outside the temp directory (a database name, a port), key it
 on the `worker_id` fixture: `gw0`, `gw1`, ... at `-n ≥ 2`, and `"master"`
 below `-n 2`, where there is only one process. See
 [Parallel safety](../guides/parallel-safety.md#session-scoped-fixtures-duplicate).
+
+## Next steps
+
+- [Migrating from pytest](../guides/migrate-from-pytest.md): what changes
+  and what to check before you rely on rstest in CI.
+- [CI quickstart](../guides/ci-quickstart.md): GitHub Actions with a
+  persisted cache.
+- [Parallel safety](../guides/parallel-safety.md): finding and fixing tests
+  that can't run in parallel.
+- [Troubleshooting](../reference/troubleshooting.md): first-run errors and
+  their fixes.
