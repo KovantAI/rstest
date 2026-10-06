@@ -27,12 +27,7 @@ this from its queue, which can misattribute; the explicit signal cannot.)
    re-provisioning can race the crashed node's cleanup (see
    [xdist hook emulation](xdist-hooks.md)).
 
-A run gets as many replacements as it has workers, and at least 4. Once
-they are spent, step 3 no longer happens: the dead worker is reported as a
-`<worker gwN>` error (exit code 3) and the run carries on with the workers
-it has left. Steps 1 and 2 still apply, so no test is lost. If every worker
-dies, the tests that never got to run are listed in one `<not run>` error
-("N tests did not run: every worker died").
+Step 3 is limited by the restart budget (see [Budgets](#budgets)).
 
 ## Hung tests (`--worker-timeout`)
 
@@ -42,7 +37,12 @@ its hang watchdog fires. The limit is
 the same for every test. Otherwise a test that has a timeout
 ([`--timeout`](../reference/cli.md#-timeout-secs) or
 `@pytest.mark.timeout`) gets 3 × that timeout + 10 s, and a test without one
-has no watchdog. A worker stuck on one test past its limit, in any phase, is
+has no watchdog. The marker value wins over `--timeout`: a test marked
+`timeout(300)` under `--timeout 30` gets 910 s, not 100 s. On Windows this
+watchdog is the only timeout enforcement: with `--timeout 30` a 60 s test
+passes and a hung one is killed at 100 s, without a traceback at the stuck
+line ([Running on Windows: timeouts](../guides/windows.md#timeouts)).
+A worker stuck on one test past its limit, in any phase, is
 killed; the test is reported failed with a timeout message
 instead of the crash message, and steps 2 and 3 above follow unchanged.
 Under `--reruns` the timed-out test is retried within the budget, and the
@@ -51,16 +51,27 @@ kill counts against the same restart cap below. Hangs outside a test
 
 ## Budgets
 
-Total restarts per run are capped (`max(workers, 4)`). Past the cap, a
-dead worker is not replaced and is reported as an internal error (exit 3):
-a crash-loop ends loudly rather than spinning. Its in-flight test still
-fails as in step 1, and its other tests move to the surviving workers as in
-step 2. A test that no worker is left to run is reported as an error with a
-"not run" message, so every test still appears in the summary, junit and
-report-json. Under `--dist each` and `rstest replay` a worker's tests are
-bound to it, so a dead worker's remaining tests are reported "not run"
-directly. Crashes during collection are not restarted (an import-time crash
-would recur).
+A run gets as many worker replacements as it has workers, and at least 4
+(`max(workers, 4)`). Past the cap, a dead worker is not replaced and is
+reported as a `<worker gwN>` internal error (exit 3): a crash-loop ends
+loudly rather than spinning. The run carries on with the workers it has
+left: the dead worker's in-flight test still fails as in step 1, and its
+other tests move to the survivors as in step 2. If no worker is left to run
+them, each test that never ran is reported as its own setup error, so every
+test still appears in the summary, junit and report-json. Its message reads:
+
+```text
+not run: every worker that could run it crashed and the restart budget was spent
+```
+
+Under [lazy collection](lazy-collection.md), a test file no worker got to
+collect is reported as a collection error starting `not collected:` with the
+same reason. Under `--dist each` and `rstest replay` a worker's tests are
+bound to it, so a dead worker's remaining tests are reported the same way
+straight away, with the reason `not run: worker gwN crashed and the restart
+budget was spent; under --dist each its tests cannot move to another worker`
+(`replay` in place of `--dist each` for a replay). Crashes during collection
+are not restarted (an import-time crash would recur).
 
 ## Cleanup hooks and the serial phase
 

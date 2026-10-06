@@ -1,0 +1,30 @@
+[
+ {
+  "suite": "sqlalchemy",
+  "commit": "4e97e0abaf5c",
+  "prepared": true,
+  "pytest_wall": 552.4,
+  "rstest_wall": 119.8,
+  "baseline_tests": 25300,
+  "candidate_tests": 25300,
+  "missing": [],
+  "missing_count": 0,
+  "extra": [],
+  "extra_count": 0,
+  "mismatch": [
+   "test/dialect/test_suite.py::ReturningTest_sqlite+pysqlite_3_50_4::test_imv_returning_datatypes[multiple_rows-sort_by_parameter_order-non_native_uuid]",
+   "test/dialect/test_suite.py::ReturningTest_sqlite+pysqlite_3_50_4::test_imv_returning_datatypes[multiple_rows-sort_by_parameter_order-non_native_uuid_str]",
+   "test/dialect/test_suite.py::ReturningTest_sqlite+pysqlite_3_50_4::test_imv_returning_datatypes[not_multiple_rows-not_sort_by_parameter_order-LargeBinary1]",
+   "test/dialect/test_suite.py::ReturningTest_sqlite+pysqlite_3_50_4::test_imv_returning_datatypes[not_multiple_rows-not_sort_by_parameter_order-LargeBinary2]",
+   "test/sql/test_insert_exec.py::IMVSentinelTest_sqlite+pysqlite_3_50_4::test_upsert_downgrades[sort_by_parameter_order-not_randomize_returning-warn_for_downgrades-separate_sentinel-serverside]",
+   "test/sql/test_insert_exec.py::IMVSentinelTest_sqlite+pysqlite_3_50_4::test_upsert_downgrades[sort_by_parameter_order-not_randomize_returning-warn_for_downgrades-separate_uuid-clientside]",
+   "test/sql/test_insert_exec.py::IMVSentinelTest_sqlite+pysqlite_3_50_4::test_upsert_downgrades[sort_by_parameter_order-not_randomize_returning-warn_for_downgrades-separate_uuid-serverside]",
+   "test/sql/test_insert_exec.py::IMVSentinelTest_sqlite+pysqlite_3_50_4::test_upsert_downgrades[sort_by_parameter_order-not_randomize_returning-warn_for_downgrades-use_pk-clientside]",
+   "test/sql/test_insert_exec.py::IMVSentinelTest_sqlite+pysqlite_3_50_4::test_upsert_downgrades[sort_by_parameter_order-not_randomize_returning-warn_for_downgrades-use_pk-serverside]"
+  ],
+  "mismatch_count": 9,
+  "unstable_id_pairs": 0,
+  "score": 99.96,
+  "status": "diff"
+ }
+]

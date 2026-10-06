@@ -200,6 +200,44 @@ Feature: Suite maintainer
       Then the exit code is 1
       And the output contains "test_poll"
 
+    Scenario: MT-05 a regression keeps firing when the same change edited the test's file
+      # Saving prunes a file's entries when its content changed; a flagged
+      # test's baseline must survive that, or a PR job that saves its own
+      # cache passes the gate on its second push.
+      Given I have run "rstest -n 2 -q" with environment "MT_D=0.1"
+      Given a file "test_p.py" containing:
+        """
+        import os, time
+
+        # edited by the change under review
+
+        def test_poll():
+            assert not os.environ.get('MT_FAIL'), 'fails fast'
+            time.sleep(float(os.environ.get('MT_D', '0.1')))
+
+        def test_other():
+            time.sleep(0.02)
+        """
+      When I run "rstest -n 2 -q --durations-regress 2" with environment "MT_D=1.0"
+      Then the exit code is 1
+      And the output contains "test_poll"
+      When I run "rstest -n 2 -q --durations-regress 2" with environment "MT_D=1.0"
+      Then the exit code is 1
+      And the output contains "test_poll"
+
+    Scenario: MT-05 a bad --durations-regress ratio is refused before any test runs
+      # Like a typo'd --doctor-fail-on: an unusable gate fails fast, not after
+      # the whole suite.
+      Given a file "test_mark.py" containing:
+        """
+        def test_mark():
+            open('ran.txt', 'w').close()
+        """
+      When I run "rstest -n 2 -q --durations-regress 1 test_mark.py"
+      Then the exit code is 1
+      And stderr contains "--durations-regress ratio must be > 1.0"
+      And "ran.txt" does not exist
+
     Scenario: MT-05 a failed run does not overwrite the baseline
       # A failed run's ~0s must not become the baseline.
       Given I have run "rstest -n 2 -q" with environment "MT_D=0.3"
@@ -210,6 +248,24 @@ Feature: Suite maintainer
       When I run "rstest -n 2 -q --durations-regress 2" with environment "MT_D=1.0"
       Then the exit code is 1
       And the output contains "test_poll"
+
+    Scenario: MT-05 a cold cache with --require-baseline refuses before any test runs
+      # docs/guides/slowdowns.md: a dead gate is an error, not a silent pass.
+      When I run "rstest -n 2 -q --durations-regress 2 --require-baseline --report-json r.json"
+      Then the exit code is 1
+      And stdout does not contain " passed"
+      And stderr contains "--require-baseline"
+      And "r.json" does not exist
+
+    Scenario: MT-05 the regression row shows baseline -> current; the test session itself passed
+      # docs/guides/slowdowns.md: exit 1 from the gate, meta.exitstatus 0.
+      Given I have run "rstest -n 2 -q" with environment "MT_D=0.1"
+      When I run "rstest -n 2 -q --durations-regress 2 --report-json r.json" with environment "MT_D=1.2"
+      Then the exit code is 1
+      And the stdout line containing "test_p.py::test_poll" matches "\d+\.\d\ds ->\s+\d+\.\d\ds"
+      And stdout does not contain "test_other"
+      And stderr contains "1 duration regression vs baseline"
+      And the JSON file "r.json" has "meta.exitstatus" == 0
 
   Rule: --fail-on-leak blames the test that leaked
 

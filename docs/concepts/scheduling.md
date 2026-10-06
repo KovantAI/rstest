@@ -5,11 +5,14 @@ mode.
 
 ## Collection and verification
 
-Every worker collects the identical session (same args, same ini, same
-conftest semantics). Workers verify agreement by item count + hash of the
-nodeid list; worker `gw0` ships the full list. Divergent
-collections (typically a randomizing plugin without a fixed seed) abort
-the run before any misassignment.
+With full collection (the default for small suites and cold caches), every
+worker collects the identical session (same args, same ini, same
+conftest semantics). Large suites on a warm cache use
+[lazy collection](lazy-collection.md) instead, where each file is collected
+on one worker; the rest of this section describes full collection.
+Workers verify agreement by item count + hash of the nodeid list; worker
+`gw0` ships the full list. Divergent collections (typically a randomizing
+plugin without a fixed seed) abort the run before any misassignment.
 
 Seeding is barrier-free: each worker starts receiving work the moment its
 own collection verifies against the reference; early collectors run
@@ -24,8 +27,9 @@ workers may have started by then.
 1. **Slow tests first.** Tests with a cached duration ≥ 1s dispatch first,
    longest first, one at a time, so they spread across workers instead of
    stacking. This is what beats duration-blind schedulers (xdist's default
-   `--dist load` queues collection-order chunks) on wait-heavy suites: a 54-second test starting at t=0 instead of t=90 changes the
-   whole run's wall time.
+   `--dist load` queues collection-order chunks) on wait-heavy suites: a
+   54-second test starting at t=0 instead of t=90 changes the whole run's
+   wall time.
 2. **Everything else in contiguous chunks.** Chunks preserve module
    locality (module/class fixtures set up once per worker visit) and cut
    protocol round-trips. Chunk size scales with suite size; refills happen
@@ -40,20 +44,30 @@ first run is collection-ordered and every later run is duration-aware.
 
 The order above is `--order throughput`, the default. [`--order
 fail-fast`](../reference/cli.md#-order-throughputfail-fast) re-sequences the
-`--dist load` queue for the earliest red signal instead: tests that recently
-hard-failed go first (most recent first), then flaky tests (most recent
-flake first), both read from `.rstest_cache/flakes.json` and each dispatched
-on its own; at most 128 lead, and quarantined tests are never pulled
-forward. The remaining tests follow in throughput order. With neither the
-flag nor `[tool.rstest] order` set, rstest picks `fail-fast` under
-`--watch` and `throughput` otherwise. It has no effect (and an explicit
-`--order fail-fast` warns) under the affinity modes
-(`loadfile`/`loadscope`/`loadgroup`), `--dist each` (no dispatch queue),
-`--collect lazy`, a single-worker run (`-n 0`/`-n 1`, or `-n auto` resolving
-to one worker), and a passthrough run (`-s`, `--pdb`, `--co`, `--debug`,
-...); in the last two cases the warning fires only when the flag is on the
-command line, not from config. Combining it with `--shuffle` is an error.
-See [`--order`](../reference/cli.md#-order-throughputfail-fast).
+`--dist load` queue for the earliest red signal instead:
+
+1. Tests that recently hard-failed, most recent first.
+2. Flaky tests, most recent flake first.
+3. Everything else, in throughput order.
+
+The first two groups are read from `.rstest_cache/flakes.json`, each test
+dispatched on its own. At most 128 tests lead, and quarantined tests are
+never pulled forward.
+
+With neither the flag nor `[tool.rstest] order` set, rstest picks
+`fail-fast` under `--watch` and `throughput` otherwise.
+
+Fail-fast has no effect, and an explicit `--order fail-fast` warns, under:
+
+- an affinity mode (`loadfile`/`loadscope`/`loadgroup`);
+- `--dist each` (no dispatch queue);
+- `--collect lazy`;
+- a single-worker run (`-n 0`/`-n 1`, or `-n auto` resolving to one
+  worker), and a passthrough run (`-s`, `--pdb`, `--co`, `--debug`, ...).
+  For these two the warning fires only when the flag is on the command
+  line, not from config.
+
+Combining an explicit fail-fast with `--shuffle` is an error.
 
 ## The nextitem invariant
 
@@ -95,8 +109,10 @@ long-pole splitting):
 
 `--dist each` is not distribution at all: every worker runs the **full
 suite** (xdist `--dist=each`), so the run legitimately contains each test N
-times. It is for multi-environment validation: run the same suite across N
-workers configured differently. There is no item dispatch queue; each worker
+times. Every worker uses the same interpreter, so it checks that the suite
+passes repeatedly in isolation and shakes out flakiness; xdist's
+heterogeneous `--tx` environments have no rstest equivalent. There is no item
+dispatch queue; each worker
 is seeded with every index, and a crash replacement reruns only the dead
 worker's remaining items.
 

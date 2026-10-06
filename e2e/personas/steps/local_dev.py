@@ -225,6 +225,13 @@ def _git_commit_project(world):
     git_init_commit(world.project)
 
 
+@given("I commit all changes")
+def _git_commit_all(world):
+    git = ["git", "-c", "user.email=e2e@rstest", "-c", "user.name=e2e"]
+    subprocess.run([*git, "add", "-A"], cwd=world.project, check=True)
+    subprocess.run([*git, "commit", "-qm", "step"], cwd=world.project, check=True)
+
+
 @then("git status --porcelain -uall shows a clean tree")
 def _porcelain_clean(world):
     out = subprocess.run(
@@ -705,3 +712,12 @@ def _inflight_no_zero_duration(world):
     durs = _read_json(world.project / ".rstest_cache/durations.json") or {}
     zero = sorted(n for n in _inflight(world) if n in durs and durs[n].get("secs") == 0.0)
     assert not zero, f"zero durations: {zero}"
+
+
+@then(parsers.re(rf"every cached test in the report {q('path')} carries its lineno"))
+def _cached_lineno(world, path):
+    tests = json.loads((world.project / path).read_text(encoding="utf-8"))["tests"]
+    cached = {k: v for k, v in tests.items() if v.get("cached")}
+    assert cached, f"no cached test in {path}: {tests}"
+    missing = [k for k, v in cached.items() if "lineno" not in v]
+    assert not missing, f"cached tests without lineno: {missing}"

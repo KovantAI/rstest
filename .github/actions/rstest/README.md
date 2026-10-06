@@ -85,60 +85,56 @@ has no `parallel_efficiency`) are skipped, not failed.
 
 ### Sharding
 
+Shards balance by the duration cache, so every shard must partition from the
+same cache snapshot. Use the `artifact` (or `remote`)
+[cache backend](#warm-cache-as-a-service), not the default `actions-cache`:
+with `actions-cache` each shard saves and restores on its own (every shard
+tries to save the same key and only the first wins), so shards can restore
+different entries. Resolve the warm run **once** upstream and pass it to every
+shard as `warm-run-id`; otherwise each shard resolves its own and can warm from
+a different run:
+
 ```yaml
-strategy:
-  matrix:
-    shard: [1, 2, 3, 4]
-steps:
-  - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
-    with:
-      args: "-n 4"            # explicit: -n auto can resolve to 1 worker, which --shard rejects
-      cache-backend: artifact # the default actions-cache backend is for single unsharded jobs
-      shard: ${{ matrix.shard }}
-      shard-total: 4
-      upload-junit: true
+permissions: { contents: read, actions: read }
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    outputs: { run-id: "${{ steps.warm.outputs.run-id }}" }
+    steps:
+      # Same step as docs/_snippets/warm-run-step.md (kept identical by a test).
+      - id: warm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash  # bash syntax: Windows runners default to PowerShell
+        run: |
+          wf="${GITHUB_WORKFLOW_REF##*/.github/workflows/}"; wf="${wf%%@*}"
+          rid=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
+                  --branch main --event push --status success --limit 1 \
+                  --json databaseId --jq '.[0].databaseId // ""')
+          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+  test:
+    needs: warm
+    strategy: { fail-fast: false, matrix: { shard: [1, 2, 3, 4] } }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+        with:
+          args: "-n 4"            # explicit: -n auto can resolve to 1 worker, which --shard rejects
+          cache-backend: artifact
+          warm-run-id: ${{ needs.warm.outputs.run-id }}
+          shard: ${{ matrix.shard }}
+          shard-total: 4
+          upload-junit: true
 ```
 
-> Cross-shard JUnit merge (one gate over the whole suite) is a **workflow-level**
-> concern: each shard uploads its own JUnit; merge them in a downstream job.
-> Shards balance by the duration cache, so use the `artifact` or `remote`
-> [cache backend](#warm-cache-as-a-service), not the default `actions-cache`:
-> with `actions-cache` every shard tries to save the same key (only the first
-> wins) and shards can restore different entries. Even with a shared backend,
-> shards pull at different times, and each job resolves its own warm run, so
-> shards can warm from different runs. For a gating pipeline, resolve the run
-> once upstream and pass it as `warm-run-id`:
->
-> ```yaml
-> jobs:
->   warm:
->     runs-on: ubuntu-latest
->     outputs: { run-id: "${{ steps.r.outputs.run-id }}" }
->     steps:
->       - id: r
->         env: { GH_TOKEN: "${{ github.token }}", WF_REF: "${{ github.workflow_ref }}" }
->         run: |
->           wf="${WF_REF##*/.github/workflows/}"; wf="${wf%%@*}"
->           rid=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
->                   --branch main --event push --status success --limit 1 \
->                   --json databaseId --jq '.[0].databaseId // ""')
->           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
->   test:
->     needs: warm
->     strategy: { matrix: { shard: [1, 2, 3, 4] } }
->     runs-on: ubuntu-latest
->     steps:
->       - uses: actions/checkout@v7
->       - uses: KovantAI/rstest/.github/actions/rstest@<sha>
->         with:
->           args: "-n 4"
->           cache-backend: artifact
->           warm-run-id: ${{ needs.warm.outputs.run-id }}
->           shard: ${{ matrix.shard }}
->           shard-total: 4
-> ```
->
-> See [Keep one cache snapshot across the matrix](https://python-rstest.readthedocs.io/en/stable/guides/sharding/#keep-one-cache-snapshot-across-the-matrix).
+Cross-shard JUnit merge and the `rstest shard-verify` coverage gate are
+**workflow-level** concerns: each shard uploads its own JUnit; merge and verify
+in a downstream job. The full recipe, including the verify job, is in
+[Sharding: GitHub Actions](https://python-rstest.readthedocs.io/en/stable/guides/sharding/#github-actions);
+the reasoning is in
+[Keep one cache snapshot across the matrix](https://python-rstest.readthedocs.io/en/stable/guides/sharding/#keep-one-cache-snapshot-across-the-matrix).
 
 ### Monorepos
 
@@ -154,7 +150,7 @@ jobs:
         project: [libs/core, libs/cli, services/api]
     steps:
       - uses: actions/checkout@v7
-      - uses: KovantAI/rstest/.github/actions/rstest@<sha>
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
         with:
           python-version: "3.13"
           working-directory: ${{ matrix.project }}
@@ -173,22 +169,22 @@ using the same rule rstest uses to enter monorepo mode. A root run keeps a
 cache and a `junit.<slug>.xml` per project and refuses
 `--cache-pull`/`--cache-push`, none of which fit this action's cache path,
 JUnit upload or fail-ratio gate. Full recipe, including the single-job root alternative:
-[monorepo on ephemeral CI](https://python-rstest.readthedocs.io/en/latest/guides/ci-quickstart/#worked-example-monorepo-on-ephemeral-ci).
+[monorepo on ephemeral CI](https://python-rstest.readthedocs.io/en/stable/guides/ci-quickstart/#worked-example-monorepo-on-ephemeral-ci).
 
 ## Warm cache as a service
 
 Duration-aware scheduling and sharding need warm timing data. In ephemeral CI
 the cache is cold every run unless persisted, so you pay cold-run scheduling
 forever. `cache-backend` productizes the [shared-cache
-backend](https://github.com/KovantAI/rstest/blob/main/docs/concepts/caching.md#shared-cache-backend):
+backend](https://python-rstest.readthedocs.io/en/stable/concepts/caching/#shared-cache-backend):
 pull the authoritative baseline before the run, push this run's immutable
 segment after, **merge-on-read**, so concurrent shards and PRs never clobber and
 PR runs read newest-main.
 
 | `cache-backend` | Backend | When |
 |---|---|---|
-| `actions-cache` (default) | one blob per key via `actions/cache` | single unsharded job; no cross-shard merge |
-| `artifact` | GitHub artifacts, no external cloud, no secrets | the turnkey default for sharded / PR suites |
+| `actions-cache` (default) | one blob per key via `actions/cache` | a single unsharded job; no cross-shard merge, so not for a shard matrix |
+| `artifact` | GitHub artifacts, no external cloud, no secrets | shard matrices (with `warm-run-id` for a gating matrix, see [Sharding](#sharding)) |
 | `remote` | object store or HTTP endpoint (`cache-remote`) | teams already on S3/GCS/R2 or a shared mount |
 
 ### GitHub-native (no cloud, no secrets)
@@ -272,7 +268,7 @@ read-only role or token, for example by choosing the role per event:
 `id-token: write` is for the OIDC role assumption; the assumed role needs
 `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on the prefix (`Delete` only if
 `cache-compact-threshold` is set or you run a `cache-compact` job): the
-[full permission table](https://github.com/KovantAI/rstest/blob/main/docs/concepts/caching.md#transports)
+[full permission table](https://python-rstest.readthedocs.io/en/stable/concepts/caching/#transports)
 covers GCS / Azure / HTTP.
 
 ## Inputs
@@ -336,10 +332,11 @@ a `${...}-` restore-key. Two deliberate choices:
   history are interpreter-specific. Without this, a 3.13 run would seed a 3.12
   shard's baseline. Segmenting keeps each matrix leg's baseline separate.
 
-To seed a shared baseline for PR shards, run the full unsharded suite on your
-default branch (a normal run of this action on `push` writes the cache). PR runs
-restore the newest matching entry; anything a PR run saves is scoped to that PR,
-so it never replaces the default branch's baseline.
+To seed the baseline PR runs restore, run the suite on your default branch (a
+normal run of this action on `push` writes the cache). PR runs restore the
+newest matching entry; anything a PR run saves is scoped to that PR, so it never
+replaces the default branch's baseline. This design is for a single unsharded
+job; for a shard matrix use the `artifact` backend (see [Sharding](#sharding)).
 
 ## Security and matrix behavior
 

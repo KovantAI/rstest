@@ -14,13 +14,84 @@ run one job (no shard matrix), you do not need this: the
 !!! tip "Turnkey via the composite action"
     On GitHub, the [`rstest` action](https://github.com/KovantAI/rstest/tree/main/.github/actions/rstest#warm-cache-as-a-service)
     wires the whole flow below for you: `cache-backend: artifact` does the
-    resolve-run → download-segments → run → upload-segment bookends natively, and
-    `cache-remote: s3://…` drives the object-store path. The hand-wired YAML here
-    is the reference for other CI systems (or if you want full control). The
-    action resolves the warm run, or pulls and pushes the remote, inside each
-    job, so in a shard matrix each shard picks its own snapshot. For a gating
-    pipeline on the artifact backend, resolve the run once upstream and pass it
-    to every shard as the action's `warm-run-id` input; otherwise use the upstream-resolve layouts below.
+    resolve-run, download-segments, run, upload-segment bookends natively, and
+    `cache-remote: s3://…` drives the object-store path. For a shard matrix,
+    the ready-made recipe (one upstream job resolving the warm run, passed to
+    every shard as `warm-run-id`) is in
+    [Sharding: GitHub Actions](sharding.md#github-actions). The hand-wired
+    YAML on this page is for other CI systems, or for full control.
+
+Which backend fits which layout:
+
+| Layout | Backend |
+|---|---|
+| One unsharded job, including its PR runs | `actions/cache` (the action's default `actions-cache` backend) is enough: a PR job restores the base branch's newest entry, and what it saves stays scoped to that PR |
+| Shard matrix on GitHub | GitHub artifacts (the action's `cache-backend: artifact`, or the hand-wired recipe below). Not `actions/cache`: it keeps one blob per key, so it can't list and merge every shard's segment |
+| Already on an object store or shared mount | `--cache-remote` (the action's `cache-remote`, or the [object-store layout](#object-store-s3gcsr2-oidc-no-secrets)) |
+
+## Rules for every CI cache { #ci-cache-rules }
+
+The recipes on this page, in [More CI systems](ci-recipes.md), and in
+[Sharding](sharding.md) all follow these three rules.
+
+### One snapshot per shard matrix { #one-snapshot-per-shard-matrix }
+
+`--shard K/N` partitions from the duration cache each shard sees. If shards
+pull and push the live cache (an object-store prefix, a shared mount), a shard
+that finishes early pushes a segment that a later-starting shard then pulls,
+the two compute different partitions, and tests can be dropped or run twice
+while the build stays green
+([why](sharding.md#keep-one-cache-snapshot-across-the-matrix)). Every sharded
+recipe therefore:
+
+1. fixes the cache **once**, before any shard starts: it copies the remote
+   into a snapshot, resolves one warm run id or cache key in an upstream job,
+   or restores one native-cache key read-only that only a job after the
+   matrix saves;
+2. runs each shard against that fixed copy (for a remote, a local copy:
+   `--cache-remote rcache --cache-pull --cache-push`) with
+   `--report-json shard.K.json`;
+3. uploads only the segment each shard wrote, and only from trusted
+   default-branch builds: whoever can push segments can steer a later
+   `--changed` selection or `--reruns-only-known-flaky`
+   ([trust boundary](../concepts/caching.md#trust-boundary));
+4. gates on `rstest shard-verify shard.*.json` in a job after the matrix,
+   which catches any divergence the steps above miss.
+
+To keep the live segment set small, run
+`rstest cache-compact --cache-remote <remote> --keep-last 50` on a schedule
+from a default-branch job.
+
+### Warm from full default-branch runs { #warm-from-full-default-branch-runs }
+
+Run the workflow on pushes to your default branch too (a scheduled run works
+as well): those runs publish what pull-request jobs and shards warm from. Keep
+them **full** runs, not `--changed` runs: a backend that warms from one prior
+run (the GitHub artifact backend) would otherwise hold durations and coverage
+for the selected tests only. Warming from the latest **successful** run has
+one side effect: while the default branch is red, every job keeps warming from
+the last green run, so durations and the coverage index stop advancing until
+it is fixed.
+
+### Keep replay journals out of the cache { #keep-replay-journals-out-of-the-cache }
+
+Every parallel run writes [replay journals](replay.md) to
+`.rstest_cache/replay/` (up to 11 files, several MB each on a large suite;
+`--shard` runs write none). A cache that carries them grows build after build,
+and a build that recorded nothing can upload an older `latest.json` it
+restored. The bundled action already leaves them out. Wherever you persist
+`.rstest_cache` yourself, pick one:
+
+- **Exclude or remove the directory** before the cache is saved
+  (`!.rstest_cache/replay` for `actions/cache`), after any step that uploads
+  `latest.json` as a failure artifact.
+  `python -c "import shutil; shutil.rmtree('.rstest_cache/replay', True)"`
+  works in bash, PowerShell and cmd.exe alike.
+- **Cache only the files that matter** where the provider takes file paths:
+  `durations.json`, `flakes.json`, `coverage_index.json`, `wall.json`,
+  `last_green.json` and `incremental_outcomes.json` under `.rstest_cache/`.
+- **Turn journaling off** with `RSTEST_NO_REPLAY_JOURNAL=1` if you won't
+  replay CI failures.
 
 ## GitHub-native, no external cloud, no secrets
 
@@ -38,23 +109,8 @@ jobs:
     outputs:
       run-id: ${{ steps.warm.outputs.run-id }}
     steps:
-      # Warm from the latest successful push run on your default branch; its
-      # shard segments union into a full index.
-      - name: resolve warm-cache run
-        id: warm
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Match this workflow by file name, not display name (two workflows
-          # can share a `name:`). GITHUB_WORKFLOW_REF is
-          # owner/repo/.github/workflows/<file>@ref.
-          wf="${GITHUB_WORKFLOW_REF##*/.github/workflows/}"; wf="${wf%%@*}"
-          rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "$wf" --branch main --event push \
-                  --status success --limit 1 \
-                  --json databaseId --jq '.[0].databaseId // ""')
-          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
+      # Its shard segments union into a full index.
+      --8<-- "docs/_snippets/warm-run-step.md"
 
   test:
     needs: resolve
@@ -95,7 +151,14 @@ jobs:
       - run: rstest -n 4 --shard ${{ matrix.shard }}/4
                --cov=YOUR_PACKAGE --cov-context=test --cov-report=
                --cache-remote ./rcache --cache-pull --cache-push
+               --report-json shard.${{ matrix.shard }}.json
                --junitxml junit.${{ matrix.shard }}.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: shard-report-${{ matrix.shard }}
+          overwrite: true                # a re-run of this shard replaces it
+          path: shard.${{ matrix.shard }}.json
 
       # Push: stage only the segment(s) this run wrote (absent from .warm-segs),
       # so each shard's artifact is its own disjoint delta, no collision on the
@@ -115,33 +178,41 @@ jobs:
           name: rstest-seg-py3.13--${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
           path: ./push/seg-*.json
           if-no-files-found: ignore
+
+  # Gate: fail unless the shards ran every collected test exactly once.
+  verify:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: shard-report-*
+          merge-multiple: true
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.13" }
+      - run: pip install rstest && rstest shard-verify shard.*.json
 ```
 
 No refresh job, no `run_id`/`restore-keys` dance, no single writer: each shard
 contributes its segment (durations, flake events, **and** its share of the
 coverage index). The `resolve` job and pull step above warm from the latest
 successful default-branch run, whose shard segments union into a whole
-`--changed` index (no dedicated unsharded job). **Run this workflow on pushes to
-your default branch too**, so those runs publish the segments PR jobs warm from
-(a scheduled run works as well). The first run, or any cold pull, has nothing to
-union and falls back to the import graph (correct, only coarser). Artifact
-retention gives free segment eviction.
-
-Those default-branch runs must be **full runs**, not `--changed` runs. The
-artifact backend warms from exactly one prior run, so if that run only
-executed the tests `--changed` picked, the warm cache holds durations and
-coverage for those tests only.
+`--changed` index (no dedicated unsharded job), so run this workflow on full
+pushes to your default branch too
+([why](#warm-from-full-default-branch-runs)). The first run, or any cold pull,
+has nothing to union and falls back to the import graph (correct, only
+coarser). Artifact retention gives free segment eviction.
 
 The warm source is pinned to **push** runs on `main` (`--branch main --event
 push` above), so segments a `pull_request` run uploads are never read back by
 anyone. Keep that filter if PRs come from forks or less-trusted branches; see
 [Trust boundary](../concepts/caching.md#trust-boundary).
 
-`--status success` only ever picks a **green** run. While main is red, every
-shard keeps warming from the last green run, so durations and the coverage
-index stop advancing until main is fixed (and a long red streak means
-scheduling from increasingly stale timings). Use `--status completed` instead
-if you would rather warm from the newest finished run, red or not.
+`--status success` only ever picks a **green** run, so a long red streak on
+main means scheduling from increasingly stale timings. Use `--status
+completed` instead if you would rather warm from the newest finished run, red
+or not.
 
 !!! note "How the cross-run pull works"
     Artifacts are run-scoped, so warming reaches back to **one** prior run by id.
@@ -172,17 +243,11 @@ steps:
            --cache-compact-threshold 50
 ```
 
-**A shard matrix needs two more things.** First, every shard must partition
-from the **same** cache snapshot: if shards pull and push the live prefix, a
-shard that finishes early pushes a segment that a later-starting shard then
-pulls, and their partitions disagree (see
-[Keep one cache snapshot across the matrix](sharding.md#keep-one-cache-snapshot-across-the-matrix)).
-Second, only trusted runs should write: whoever can push segments can steer a
-later `--changed` selection or `--reruns-only-known-flaky`
-([Trust boundary](../concepts/caching.md#trust-boundary)). The layout below
-handles both: one job snapshots the prefix, shards run against that local copy
-and upload only their new segments, and a final job pushes them to the bucket,
-only for pushes to `main`:
+**A shard matrix needs the snapshot layout** from
+[One snapshot per shard matrix](#one-snapshot-per-shard-matrix): one job
+snapshots the prefix, shards run against that local copy and upload only their
+new segments, and a final job pushes them to the bucket, only for pushes to
+`main`:
 
 ```yaml
 permissions: { id-token: write, contents: read }
@@ -234,6 +299,26 @@ jobs:
           name: rstest-newseg-${{ github.run_attempt }}-${{ matrix.shard }}
           path: ./push/seg-*.json
           if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: shard-report-${{ matrix.shard }}
+          overwrite: true             # a re-run of this shard replaces it
+          path: shard.${{ matrix.shard }}.json
+
+  # Gate: fail unless the shards ran every collected test exactly once.
+  verify:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: shard-report-*
+          merge-multiple: true
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.13" }
+      - run: pip install rstest && rstest shard-verify shard.*.json
 
   # The only writer: pushes to main. PR runs never get the write role.
   publish:
@@ -262,8 +347,9 @@ for the snapshot job and any PR job, and `ci-cache-write` (adds
 `s3:PutObject`, plus `s3:DeleteObject` if it compacts) that only the `main`
 branch can assume. On AWS, restrict the write role's trust policy to the
 `main` ref (the OIDC `sub` claim `repo:<owner>/<repo>:ref:refs/heads/main`), so
-the `if:` above is not the only guard. Gate the merge on
-[`rstest shard-verify shard.*.json`](sharding.md#verify-no-test-was-dropped).
+the `if:` above is not the only guard. Make the `verify` job a required check:
+[`rstest shard-verify`](sharding.md#verify-no-test-was-dropped) fails when the
+shards dropped or duplicated a test.
 
 To keep the segment set small, compact from the `publish` job or a schedule:
 `rstest cache-compact --cache-remote s3://ci-cache/rstest --keep-last 50`
@@ -291,10 +377,6 @@ is a hard error too, never a silent green:
 $ rstest -n auto --cache-remote ./rcache --cache-pull --require-baseline --durations-regress 1.5
 ```
 
-(`actions/cache` is **not** recommended for this. It keeps one blob per key, so
-it can't list-and-merge every segment, which is the exact limitation this design
-removes.)
-
 **Pull and push fail differently.** A failed `--cache-pull` (an unreachable
 endpoint, expired credentials, a listing or read error) aborts the run with
 exit `1` **before any test runs**:
@@ -311,10 +393,13 @@ even though no test failed. If your CI can't tolerate that, retry the step
 
 ```bash
 set -o pipefail
-if ! rstest -n 4 --cache-remote "$REMOTE" --cache-pull 2>&1 | tee rstest.log; then
-  # Test failures fall through (grep finds nothing, the step stays red).
-  grep -q '^Error: pulling shared cache' rstest.log && rstest -n 4
+code=0
+rstest -n 4 --cache-remote "$REMOTE" --cache-pull 2>&1 | tee rstest.log || code=${PIPESTATUS[0]}
+# Retry cold only when the pull itself failed; any other failure keeps its code.
+if [ "$code" -ne 0 ] && grep -q '^Error: pulling shared cache' rstest.log; then
+  rstest -n 4 && code=0 || code=$?
 fi
+exit "$code"
 ```
 
 The retried run is cold (even count split), which matters for a shard matrix:
@@ -341,19 +426,12 @@ and carry no interpreter tag. Give each distinct suite its own remote prefix
 
 ## Permissions
 
-The remote needs **list + read + write + delete** on the cache prefix. Delete
-only when a job compacts (`--cache-compact-threshold` or a `cache-compact`
-step); pull/push-only jobs can drop it. Scope the credential to the prefix, not
-the whole bucket. Per backend ([full table](../concepts/caching.md#transports)):
-
-| Backend | What to grant |
-|---|---|
-| GitHub `artifact` | workflow `permissions: { contents: read, actions: read }` (`actions: read` reaches the prior run's segments). Object store instead? add `id-token: write` for OIDC. |
-| S3 | role/keys with `s3:ListBucket` + `s3:{Get,Put,Delete}Object` on `bucket/prefix/*` (via CodeBuild role, GitHub/CircleCI OIDC, or GitLab CI vars) |
-| GCS | service account with `storage.objects.{list,get,create,delete}` on the bucket/prefix (`roles/storage.objectAdmin`) |
-| Azure Blob | `Storage Blob Data Contributor` on the container (dir-materialize via the `az` CLI) |
-| `http(s)://` | a token in `RSTEST_CACHE_REMOTE_TOKEN`; the endpoint enforces authz |
-| dir / shared mount | filesystem read+write+delete on the directory |
+The remote needs **list + read + write** on the cache prefix, plus **delete**
+only for a job that compacts (`--cache-compact-threshold` or a
+`cache-compact` step). Scope the credential to the prefix, not the whole
+bucket, and give write access only to default-branch jobs. The exact grant per
+backend (S3, GCS, Azure Blob, `http(s)://`, a mount, GitHub artifacts) is in
+[Caching: permissions](../concepts/caching.md#cache-permissions).
 
 ## Per-CI-system shared-cache recipes
 
@@ -361,7 +439,8 @@ Each provider's `--cache-remote` wiring (object store, blob, mount) lives with
 its recipe in [More CI systems](ci-recipes.md): [AWS CodeBuild](ci-recipes.md#aws-codebuild),
 [Google Cloud Build](ci-recipes.md#google-cloud-build), [GitLab CI](ci-recipes.md#gitlab-ci),
 [Azure Pipelines](ci-recipes.md#azure-pipelines), [CircleCI](ci-recipes.md#circleci),
-and [Jenkins](ci-recipes.md#jenkins).
+[Jenkins](ci-recipes.md#jenkins), and [Buildkite](ci-recipes.md#buildkite). Each
+sharded recipe there follows the snapshot layout above.
 
 ## Go deeper
 

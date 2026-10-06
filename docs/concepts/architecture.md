@@ -44,10 +44,13 @@ points and find exactly the classes they expect.
 1. **Spawn.** N workers start in your project's interpreter, each
    announced with an xdist-style identity (`gw0`, `gw1`, ...) that plugins
    like pytest-django key resources on.
-2. **Collect.** Every worker runs identical pytest collection (same args,
-   same ini, same conftest semantics: this is what keeps skip/marker
-   behavior exact). Workers verify they collected the same test set by
-   count and hash; worker `gw0` ships the full id list.
+2. **Collect.** By default every worker runs identical pytest collection
+   (same args, same ini, same conftest semantics: this is what keeps
+   skip/marker behavior exact). Workers verify they collected the same
+   test set by count and hash; worker `gw0` ships the full id list. A
+   large suite on a warm cache switches to
+   [lazy collection](lazy-collection.md) instead: each file is collected
+   once, on one worker, on demand.
 3. **Dispatch.** The orchestrator feeds item indices: cached slow tests
    first (individually, so they spread across workers), then contiguous
    chunks that preserve module-fixture locality. Workers run each test
@@ -67,21 +70,13 @@ points and find exactly the classes they expect.
 The protocol deliberately never rides stdin/stdout: those belong to your
 tests (and to pytest itself under `-s`/`--pdb`).
 
-## Byte-exact mode
+## Single-worker mode
 
-[Byte-exact mode](glossary.md#byte-exact-mode) is what `-n 0` and `-n 1`
-run. It skips the scheduling layer entirely: rstest (a Rust binary) still starts one Python
-process in your interpreter, which runs a single pytest session over your
-args, with no dispatch and no `[gwN]` identity. The orchestrator only relays
-that session's reports, or hands it the terminal when a flag needs pytest's
-own terminal: `--co`/`--collect-only`, `-s`, `--capture=...`, `--pdb`,
-`--trace`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
-`--sw-reset`/`--stepwise-reset`, or rstest's `--debug`. Those flags switch
-to this mode automatically. With no `--output` set, the session's own
-terminal output is what you see, and rstest only appends its extras after
-it (see
-[`--output`](../reference/cli.md#-output-dotsverbosebargithubjson)). It is
-the compatibility anchor: byte-exact pytest behavior. One opt-in
-exception: with [`--reruns`](../reference/cli.md#-reruns-n), `-n 0`/`-n 1`
-runs a one-worker pool instead (worker `gw0`, rstest's renderer) so retries
-fire; see [Byte-exact mode](glossary.md#byte-exact-mode).
+`-n 0` and `-n 1` skip the scheduling layer entirely: rstest still starts one
+Python process in your interpreter, which runs a single pytest session over
+your args, and the orchestrator only relays its reports (or hands it the
+terminal when a flag such as `--pdb` or `-s` needs it). This is the
+compatibility anchor, with byte-exact pytest output unless `--output` picks
+rstest's renderer. See
+[Single-worker mode](compatibility.md#single-worker-mode) for the full
+guarantee, the flags that force it, and the `--reruns` exception.

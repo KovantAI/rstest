@@ -61,6 +61,21 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`--durations-regress` keeps firing when the change also edited the test's
+  file.** Saving the duration cache dropped a changed file's entries as stale,
+  including the baseline of a test the gate had just flagged, so the next run
+  had nothing to compare with and passed. A pull request that saves its own
+  cache passed the gate on its second push. A flagged test now keeps its old
+  time.
+- **A bad `--durations-regress` ratio is refused before the run.** A ratio of
+  `1.0` or less used to be rejected only after the whole suite had run.
+- **`--incremental`'s cached tests keep their line in report-json and HTML.**
+  The line was restored only after the reports were written, so cached
+  entries had none.
+- **The `breakpoint()` hint under `--reruns` names a fix that works.** With
+  `--reruns` at `-n 0`/`-n 1` the run uses a one-worker pool, so the hint's
+  "rerun with -n 0" failed the same way. It now says to add `-s` or pass
+  `--reruns 0`.
 - **`--looponfail` no longer hangs the run.** pytest-xdist's loop-on-fail
   flag was forwarded to every worker session, where xdist's loop took the
   session over and the run never finished. On rstest's command line

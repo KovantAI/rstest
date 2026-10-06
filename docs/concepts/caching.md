@@ -9,7 +9,7 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   failed test keeps its previous timing, and so does a test
   [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
   flagged, so the baseline it regressed from stays in place. Drives
-  [long-pole-first scheduling](scheduling.md#dispatch-order) and the
+  [duration-aware scheduling](glossary.md#duration-aware-scheduling) and the
   suite-size heuristic behind `-n auto`. Each entry records its test file's
   path and a sha256 of its contents, so the cache self-heals: an edited test
   re-times on fresh numbers instead of stale ones, and a deleted or renamed
@@ -39,7 +39,7 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   Paths in it are relative to the rootdir, so a run from a subdirectory writes
   the same keys as a run from the root.
 - `last_green.json`: the commit of the last fully green run on a clean
-  working tree, stamped with an environment fingerprint (interpreter and dependency manifests). Read by
+  working tree, stamped with an environment fingerprint (interpreter, dependency manifests and installed distributions). Read by
   [`--since-green`](../reference/cli.md#-since-green); an environment change
   busts it, so the next run selects everything. Safe to delete.
 - `incremental_outcomes.json`: per-test outcomes, source lines and coverage
@@ -54,7 +54,7 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   [`rstest replay`](../reference/cli-commands.md#replay). Local to the
   machine that ran it: keep it **out** of any CI cache and upload
   `latest.json` as a failure artifact instead (see
-  [Replaying a CI-only failure](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)).
+  [Replaying a CI-only failure](../guides/replay.md)).
 - `.lock`: an empty sentinel file. rstest takes an OS advisory lock on it
   around each read-modify-write of the cache files, so concurrent runs or
   shards sharing one cache directory don't lose each other's updates. Never
@@ -84,7 +84,8 @@ line, in `addopts` or in `PYTEST_ADDOPTS`), a run leaves no cache behind,
 as pytest does: `.rstest_cache/` is neither read nor created, and neither is
 `.pytest_cache/`. The run uses a private scratch directory that is removed
 when it ends, so it schedules cold (no saved durations), records no flake
-history and leaves no replay journal for `rstest replay` or `rstest explain`.
+history, leaves no replay journal for `rstest replay`, and adds nothing for
+`rstest explain` to report (durations, flakes, coverage) later.
 An explicit `RSTEST_CACHE` still takes effect.
 
 Writes are atomic (tmp + rename), so a concurrent reader never sees a
@@ -139,7 +140,9 @@ The `s3`/`gs` transports shell out to the cloud CLI already installed and
 authenticated in CI: no SDK, no secrets in the URL. Any other `scheme://` is
 rejected loudly rather than silently written to a junk local directory.
 
-**Permissions.** Every transport needs four operations on the `<root>` prefix:
+### Permissions { #cache-permissions }
+
+Every transport needs four operations on the `<root>` prefix:
 **list** and **read** (pull), **write** (push a segment), and **delete**
 (compaction and retention only, via `cache-compact` or `--cache-compact-threshold`).
 A pull/push-only job that never compacts can drop delete. Least privilege: scope
@@ -154,7 +157,9 @@ the credential to the cache prefix, not the whole bucket. Concretely:
 | dir / mount (`/path`, `file://`) | filesystem read+write+delete on the directory |
 | GitHub artifacts (the action's `artifact` backend) | workflow `permissions: { contents: read, actions: read }`; `actions: read` reaches a prior run's segments |
 
-**HTTP listing contract.** A bare `GET`/`PUT` can't enumerate a collection, so
+### HTTP listing contract { #http-listing-contract }
+
+A bare `GET`/`PUT` can't enumerate a collection, so
 an `http(s)://` remote must answer `GET <root>/segments/` with a JSON array of
 segment names (filenames or full keys/URLs) and support `GET` / `PUT` / `DELETE`
 on the blobs. A static file server with autoindex-as-JSON, an S3 REST bucket, or

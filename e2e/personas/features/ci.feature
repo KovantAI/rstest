@@ -615,13 +615,17 @@ Feature: CI / platform engineer
     Scenario: CI-09 Azure materialize-a-dir: the step fails when a test fails
       # Azure runs `script:` as a file under `bash --noprofile --norc` with no
       # errexit; the agent expands $(Var) macros before bash sees the script.
+      # The test step holds no cloud credentials: it stages its new segment in
+      # ./push, and a separate AzureCLI step uploads it from main only.
       Given the "- script:" literal of the first block in "docs/guides/ci-recipes.md" containing "az storage blob download-batch"
       Then the snippet contains "rstest"
+      And the snippet does not contain "az "
       When the agent expands "$(System.JobPositionInPhase)" and "$(System.TotalJobsInPhase)" in the snippet to "1"
       And I run the snippet with "bash --noprofile --norc" in the suite
       Then stdout contains "1 failed"
-      And the fake CLI log contains "upload-batch"
+      And the project directory "push" holds a "seg-*.json" file
       And the run fails
+      And in the first block of "docs/guides/ci-recipes.md" containing "az storage blob download-batch", the step "publish this shard's new segment" runs only when "refs/heads/main"
 
     Scenario: CI-09 shared-cache retry (reachable remote): rstest ran, the step fails
       # As a GitHub `run:` step (`bash -e {0}`).
@@ -827,3 +831,84 @@ Feature: CI / platform engineer
     Scenario: CI-13 docs: the pre-commit section shows a hook that uses the project interpreter
       Given the level-2 section "## Pre-commit" of "docs/guides/ci-recipes.md"
       Then that level-2 section contains "language: system" or "--python"
+
+  Rule: documented CI setups are safe to copy (CI-14)
+
+    Scenario: CI-14 the doctor-baseline workflow saves its cache only from main
+      # A PR job that can save would read its own earlier baseline back on the
+      # next push, so "vs main" would compare the PR against itself.
+      Then every actions/cache step that can save, in a docs block containing "doctor-baseline", runs only on main
+
+    Scenario: CI-14 the CI recipes install a bare rstest, as their pin tip says
+      Given the "!!! tip" section of "docs/_snippets/ci-pin-tip.md"
+      Then that docs section contains "The recipes use a bare `pip install rstest`"
+      And no fenced block in "docs/guides/ci-*.md" contains "rstest=="
+      And no fenced block in "docs/guides/sharding.md" contains "rstest=="
+
+    Scenario: CI-14 the action README leaves PR suites to the actions-cache backend
+      # actions-cache saves a PR-scoped cache on pull_request (cache-push auto),
+      # so the artifact backend is for shard matrices, not PR suites.
+      Given the table row of ".github/actions/rstest/README.md" starting with "| `cache-push`"
+      Then that docs section contains "`actions-cache` saves only on `push`/`pull_request`"
+      Given the table row of ".github/actions/rstest/README.md" starting with "| `artifact`"
+      Then that docs section does not contain "PR"
+
+    Scenario: CI-14 an artifact uploaded from .rstest_cache is not silently empty
+      # upload-artifact v4.4+ drops hidden files and directories unless told
+      # otherwise, and `if-no-files-found: ignore` hides the empty artifact, so
+      # a failed run's replay journal would never reach the developer.
+      Then every actions/upload-artifact step in the docs that uploads from a dot-directory sets include-hidden-files
+
+    Scenario: CI-14 the warm-run lookup has one source
+      # Copies of this step drifted apart before; the docs include the snippet,
+      # and the action README (rendered by GitHub, no includes) must match it.
+      Then no fenced block in "docs/**/*.md" contains "gh run list"
+      And the ".github/actions/rstest/README.md" step that runs "gh run list" is the step in "docs/_snippets/warm-run-step.md"
+
+    Scenario: CI-14 each provider's basic recipe reads first; its sharded variants are folded
+      # ci-recipes.md is over a thousand lines; a GitLab reader should see the
+      # GitLab basics without scrolling past every provider's shard matrix.
+      Then no paragraph of "docs/guides/ci-recipes.md" matches "^\*\*(Sharding|Shared cache)"
+
+    Scenario: CI-14 the guides index names every CI system the recipes page covers
+      Then the "docs/guides/index.md" entry for "ci-recipes.md" names every level-2 heading of it except "Go deeper"
+
+  Rule: --stream-json is a live side channel (docs/guides/ci-output.md)
+
+    Scenario: CI-15 --stream-json writes live per-phase events and one closing sessionfinish
+      Given a file "tests/test_api.py" containing:
+        """
+        def test_get():
+            assert 200 == 200
+
+        def test_post():
+            print('posting')
+            assert 201 == 200
+        """
+      When I run "rstest -n 2 --stream-json out/events.ndjson"
+      Then the exit code is 1
+      And stdout contains "1 failed, 1 passed"
+      And the event stream "out/events.ndjson" has 6 "testreport" lines
+      And the event stream "out/events.ndjson" reports "tests/test_api.py::test_post" call as "failed"
+      And the last line of the event stream "out/events.ndjson" is a sessionfinish with exitstatus 1
+
+    Scenario: CI-14 the warm-run lookup runs under bash on every runner OS
+      # Windows runners default to PowerShell, where this bash step fails and
+      # continue-on-error hides it: every run would start cold.
+      Then every step in "docs/_snippets/warm-run-step.md" that runs a script sets "shell: bash"
+
+    Scenario: CI-15 under a passthrough flag --stream-json still streams test reports, with no sessionfinish
+      Given a file "tests/test_one.py" containing:
+        """
+        def test_one():
+            pass
+        """
+      When I run "rstest -s --stream-json events.ndjson"
+      Then the exit code is 0
+      And the event stream "events.ndjson" has 3 "testreport" lines
+      And the event stream "events.ndjson" has 0 "sessionfinish" lines
+
+    Scenario: CI-14 the recipes' cache cleanup runs in every agent shell
+      # rm -rf fails in cmd.exe and PowerShell (Windows agents on Azure and
+      # elsewhere); the Python one-liner from ci-shared-cache.md works in all.
+      Then no fenced block in "docs/guides/*.md" contains "rm -rf .rstest_cache"

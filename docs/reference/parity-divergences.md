@@ -261,48 +261,16 @@ worker and httpx runs fully parallel.
 
 ## 8. Plugin controller-hook gating (rstest-side, fixed)
 
-### pytest-retry `server_port` (langgraph `checkpoint-sqlite`)
+Both plugins expect a key that only pytest-xdist's controller sets, and
+crashed with `KeyError` at `-n ≥ 2` until rstest handled them. No upstream
+change is required.
 
-pytest-retry's controller branch is gated on
-`has_plugin("xdist") and getoption("numprocesses")`; it starts a `ReportServer`
-and stashes its port for workers. rstest used to null `numprocesses` to keep
-xdist inert, which sent the plugin down its *worker* branch to read a
-`workerinput["server_port"]` no controller had set → `KeyError`.
-
-**Fix (rstest side, done).** Two paths, depending on whether pytest-xdist is
-installed next to rstest:
-
-- **xdist installed.** xdist's session gates on `dist != "no"`, not
-  `numprocesses`, so rstest forces `dist="no"` and leaves `numprocesses`
-  visible. The plugin's controller branch then fires per worker (each
-  self-provisions an ephemeral `ReportServer`), and `configure_node` hooks
-  that read later-stashed state are retried at `pytest_sessionstart`. See
-  [xdist hooks](../concepts/xdist-hooks.md). The e2e gate covers this path.
-- **xdist not installed** (the langgraph venv, and most rstest users). The
-  controller branch can't fire, so the plugin takes its worker branch. rstest
-  starts pytest-retry's own `ReportServer` inside each worker and seeds
-  `workerinput["server_port"]` with its port before the plugin reads it. If
-  that server API ever drifts, rstest unregisters the plugin and native
-  `--reruns` remain. This is the path langgraph exercises.
-
-No upstream change required.
-
-### pytest-rerunfailures `sock_port`
-
-pytest-rerunfailures with pytest-xdist installed splits controller vs. worker on
-`workerinput` **presence** (not `numprocesses`), so every rstest pool worker
-takes its client branch and reads `workerinput["sock_port"]`: a key only an
-xdist controller sets → `KeyError` at configure under `-n ≥ 2`. Unlike pytest-retry
-there is no knob to flip it to the self-provisioning branch.
-
-**Fix (rstest side, done):** rstest wants the plugin inert under the pool
-anyway (it owns reruns natively, crash-aware and honoring `@mark.flaky`, and an active plugin would double-rerun), so it **unregisters** it in `pytest_cmdline_main`,
-before the historic `pytest_configure` call that would otherwise read the
-missing key. At `-n 0` without rstest's own `--reruns` the plugin is left
-native (a command-line `--reruns` at `-n 0/1` runs rstest's one-worker rerun
-pool, where the plugin is unregistered too). See
-[xdist hooks](../concepts/xdist-hooks.md#when-self-provisioning-cant-apply-pytest-rerunfailures).
-No upstream change required.
+- **pytest-retry** (`server_port`, langgraph `checkpoint-sqlite`): each worker
+  self-provisions its own report server, with or without pytest-xdist
+  installed. How: [xdist hooks](../concepts/xdist-hooks.md#numprocesses-visibility).
+- **pytest-rerunfailures** (`sock_port`): unregistered inside pool workers;
+  rstest's native `--reruns` take over. How:
+  [xdist hooks](../concepts/xdist-hooks.md#when-self-provisioning-cant-apply-pytest-rerunfailures).
 
 ---
 
@@ -311,8 +279,10 @@ No upstream change required.
 ### sqlalchemy: IMV / RETURNING tests
 
 The corpus runs SQLAlchemy (about 25,300 tests) at `-n auto` and measures
-about 99.96% parity (`corpus/results.json`). The gap is 9 IMV/RETURNING tests
-(`test_insert_exec.py` `IMVSentinelTest`, `test_suite.py` `ReturningTest`)
+about 99.96% parity
+(`corpus/bench-results/2026-09-26-sqlalchemy-parity.json`). The gap is 9
+IMV/RETURNING tests (`test_insert_exec.py` `IMVSentinelTest`,
+`test_suite.py` `ReturningTest`)
 that **skip in the serial pytest baseline**, where their outcome depends on
 what ran before them in the full serial order, and **pass under any parallel
 runner**. Real `pytest-xdist -n 2` passes them too, so this is a

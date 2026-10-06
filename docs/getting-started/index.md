@@ -1,27 +1,24 @@
 # Getting started
 
-Three commands cover the basics:
+Pick the page that matches where you are:
 
-```console
-$ pip install rstest
-$ rstest                      # parallel run, pytest config honored
-$ rstest --doctor             # and find out why the suite is slow
-```
+- **Deciding whether to adopt?** [Evaluating rstest](evaluating.md): what it
+  speeds up, when not to adopt, maturity, and the cost of adopting and
+  backing out. `rstest try` gives the one-command answer
+  ([how](evaluating.md#try-it-first)).
+- **Have a pytest suite?** [Install](installation.md), then
+  [run your existing suite](run-your-suite.md). Before relying on it in CI,
+  follow [Migrating from pytest](../guides/migrate-from-pytest.md)
+  (or [from pytest-xdist](../guides/migrate-from-xdist.md)).
+- **Wiring it into CI?** [CI quickstart](../guides/ci-quickstart.md):
+  GitHub Actions with a persisted duration cache, plus Django and monorepo
+  examples.
+- **No suite yet?** [Start from scratch](start-from-scratch.md): from an empty
+  folder to a green run.
+- **Want the feature list?** [Features](features.md): what rstest adds over
+  pytest.
+- **Stuck?** [Troubleshooting](../reference/troubleshooting.md) covers
+  first-run errors; [Getting help](getting-help.md) says where to ask.
 
-(`--doctor` shines on a real suite, not a toy two-test folder; see
-[Suite diagnostics](../guides/doctor.md).)
-
-- [Evaluating rstest](evaluating.md): what it speeds up, when not to adopt, maturity, cost of adopting and backing out
-- [Installation](installation.md): requirements, pip/uv, from source
-- [Start from scratch](your-first-test.md): no suite yet? from an empty folder to a green run
-- [Run your existing suite](first-steps.md): already have a pytest suite? running, reading output, selecting tests
-- [Features](features.md): what rstest adds over pytest
-- [Glossary](../concepts/glossary.md): worker, byte-exact mode, long pole, and the other terms
-- [Troubleshooting](../reference/troubleshooting.md): first-run errors and common fixes
-- [Getting help](getting-help.md)
-
-Coming from pytest? The
-[migration guide](../guides/migrate-from-pytest.md) is the page to read. Or,
-in a project that already has pytest and a suite installed, run `rstest try`
-for a one-command "is it worth switching?" answer (it runs your suite once
-under plain pytest and once under rstest, so it takes as long as both).
+Unfamiliar term (worker, single-worker mode, long pole)? See the
+[Glossary](../concepts/glossary.md).

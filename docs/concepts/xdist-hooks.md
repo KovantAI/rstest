@@ -30,6 +30,15 @@ patterns: SQLAlchemy (self-contained, succeeds at registration) and pytest-retry
 (reads a `config.stash` server port set after it registers its hook, succeeds
 on the sessionstart retry).
 
+For hooks that are **pure functions of the node** (read `node.gateway.id`,
+fill `node.workerinput`, provision a resource derived from them), the
+emulation produces the same observable result as xdist. The call *timing*
+differs: xdist fires in the controller before the worker exists; rstest fires
+inside the worker, before other plugins' `pytest_configure` read
+`workerinput`. SQLAlchemy's uuid-based `follower_ident` is this pattern, and
+runs measured (see
+[compatibility](compatibility.md#measured-at-scale)).
+
 ## `numprocesses` visibility
 
 xdist's own distributed session is kept inert by forcing `dist = "no"` (its
@@ -73,15 +82,6 @@ keeps its native behavior. The exception is rstest's own `--reruns` at
 `-n 0/1`: that runs a one-worker rerun pool, which has a worker id (`gw0`),
 so the plugin is unregistered there too.
 
-For hooks that are **pure functions of the node** (read `node.gateway.id`,
-fill `node.workerinput`, provision a resource derived from them), the
-emulation produces the same observable result as xdist. The call *timing*
-differs: xdist fires in the controller before the worker exists; rstest fires
-inside the worker, before other plugins' `pytest_configure` read
-`workerinput`. SQLAlchemy's uuid-based `follower_ident` is this pattern, and
-runs measured (see
-[compatibility](compatibility.md#measured-at-scale)).
-
 ## Divergences from a single controller
 
 - **Your hook runs N times concurrently, in N processes.** xdist's one controller
@@ -124,7 +124,7 @@ is the same model as xdist, where each worker also runs its own
   the orchestrator assigns files and each worker collects only its assigned
   files on demand, so the hook sees a partial item set. Run at `-n 0` (or
   `--collect full`) if a hook must see the whole suite.
-- **`pytest_collection_modifyitems` reordering is a starting point, not a
+- <span id="modifyitems-ordering"></span>**`pytest_collection_modifyitems` reordering is a starting point, not a
   guarantee, at `-n ≥ 2`.** Deselection is honored (a deselected item won't
   run), and the order you impose is the order the orchestrator dispatches
   from, with two changes: tests whose cached duration is 1s or more are

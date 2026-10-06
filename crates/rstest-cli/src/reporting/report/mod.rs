@@ -576,6 +576,14 @@ impl Run {
         }
     }
 
+    /// Tests `--durations-regress` flagged this run (see
+    /// [`Run::mark_duration_regressed`]).
+    pub fn duration_regressed_nodeids(&self) -> impl Iterator<Item = &String> {
+        self.tests
+            .iter()
+            .filter_map(|(id, e)| e.duration_regressed.then_some(id))
+    }
+
     /// [`Run::failed_nodeids`] minus the tests an interrupt stopped mid-run:
     /// the failures the run history (lastfailed, flakes) records.
     pub fn history_failed_nodeids(&self) -> impl Iterator<Item = &String> {

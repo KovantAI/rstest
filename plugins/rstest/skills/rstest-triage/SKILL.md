@@ -137,15 +137,13 @@ Recommend persisting `.rstest_cache` across CI runs whenever flake history
 matters; without it, `explain` and `--reruns-only-known-flaky` have nothing to
 read on CI.
 
-Two traps to steer around when writing the policy:
+One trap to steer around when writing the policy:
 
-- **Always pass `--reruns N` when relying on `@pytest.mark.flaky`.** With the
-  marker alone, a parallel run retries the test and prints `1 flaky` but
-  still exits 1 (a known rstest bug), so CI goes red on a green-looking
-  summary.
-- **The marker's `only_rerun=`, `condition=` and `reruns_delay=` keywords are
-  ignored.** To retry only transient errors, use the `--only-rerun REGEX`
-  flag, which applies to every rerun in the run.
+- **The marker's `only_rerun=` and `reruns_delay=` keywords are ignored.**
+  `@pytest.mark.flaky(reruns=N)` (or `flaky(N)`) sets a per-test budget on its
+  own, with or without a global `--reruns`, and its `condition=` is honored.
+  To retry only transient errors, use the `--only-rerun REGEX` flag, which
+  applies to every rerun in the run.
 
 ## Report back
 

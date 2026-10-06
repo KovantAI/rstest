@@ -47,7 +47,7 @@ caches (durations, lastfailed) live in each project where they belong (see
 
 Per-project `[tool.rstest]` settings are honored: a project that pins
 `numprocesses` keeps it, `numprocesses = 0` runs that project in
-single-worker [byte-exact mode](glossary.md#byte-exact-mode) (the escape
+[single-worker mode](compatibility.md#single-worker-mode) (the escape
 hatch for order-sensitive suites) while its siblings split the remaining
 budget. `dist`, `reruns`, and `worker-timeout` set in a project apply to that
 project; flags given on the root command line override everywhere.
@@ -66,20 +66,24 @@ project, so a project with its own `pyproject.toml` uses only its own
 ## Worker budget and scheduling
 
 Projects run **concurrently** under one worker budget: your `-n` (or `auto`)
-is split across projects weighted by each project's last-known suite time (its
-duration cache), minimum one worker each. A repo where one package dominates
+is split across projects weighted by each project's last-known cost, minimum
+one worker each. The cost is the suite's last wall-clock time from the
+project's `wall.json` (fixture setup and teardown included), falling back to
+the sum of its per-test times in `durations.json` (see
+[Caching](caching.md)). A repo where one package dominates
 finishes in roughly that package's own wall time: the small ones ride along
 on spare workers.
 
-First runs (no duration caches yet) split the budget evenly; from the second
+First runs (no caches yet) split the budget evenly, and a project with no
+cache yet is weighted at the average of the others; from the second
 run on, the weights kick in. Output is printed per project, in completion
 order, each block whole.
 
 **Scale note:** every project gets at least one worker and all projects launch
 concurrently, so a 40-package repo on a 2-core CI runner means 40 concurrent
-single-worker children, which oversubscribes. On small runners, shard with
-`[tool.rstest] projects` (or path arguments) until a project-level concurrency
-cap exists.
+single-worker children, which oversubscribes. On small runners, narrow each
+job with `[tool.rstest] projects`, or run each package as its own CI job,
+until a project-level concurrency cap exists.
 
 ## Caches per project
 
@@ -106,7 +110,6 @@ flag is silently dropped.
 | `--timeout`, `--collect`, `--incremental`, `--reruns-only-known-flaky`, `--fork-pool` | forwarded to every project |
 | `--fail-on-leak`, `--durations-regress`, `--require-baseline` | forwarded; each gate applies per project, and a project that fails its gate fails the root through the merged exit code |
 | `--shuffle[=SEED]` | resolved once at the root, so every project uses the same seed. A bare `--shuffle` picks one and prints `rstest: shuffle seed <N> for every project (reproduce with --shuffle=<N>)`. Each project still needs `-n 2` or more, so a project whose share is one worker errors |
-| `--instrument-workers` | forwarded to every project. Internal and hidden from `--help`: a parent rstest passes it (for `migrate-check`'s classifier runs) to turn on worker instrumentation without the doctor report |
 | `--junitxml`, `--doctor-json`, `--doctor-md` | one file per project, slug before the extension (see below) |
 | `--html` | one file per project, like `--junitxml`: `out.html` -> `out.libs-core.html` |
 | `--report-json` | one merged document at the requested path (see below) |

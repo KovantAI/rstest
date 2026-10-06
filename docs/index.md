@@ -1,10 +1,9 @@
 # rstest
 
 A fast, pytest-compatible test runner. Rust orchestration; runs most pytest
-suites unchanged, with the same plugins and fixtures: byte-exact per-test
-outcomes at `-n 0`, and in parallel the same caveats as pytest-xdist (see
-[Known gaps](concepts/compatibility.md#known-gaps)). Parallel by design, with
-built-in suite diagnostics (`--doctor`).
+suites unchanged, with the same plugins and fixtures, in parallel by default,
+with built-in suite diagnostics (`--doctor`). The guarantees are in
+[the compatibility contract](#the-compatibility-contract) below.
 
 Evaluating rstest for your team? Start with
 [Evaluating rstest](getting-started/evaluating.md).
@@ -14,6 +13,10 @@ Evaluating rstest for your team? Start with
     related to the Rust fixture crate [`rstest`](https://crates.io/crates/rstest)
     on crates.io.
 
+Illustrative run of rich's 981-test suite at `-n 4`. The wall time is left
+out because it depends on the machine; measured timings, at `-n 8`, are in
+[Benchmarks](reference/benchmarks.md):
+
 ```console
 $ pip install rstest
 $ rstest -n 4      # -n is optional; plain `rstest` picks a worker count
@@ -22,23 +25,21 @@ rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 69%]
 ......................................................                   [100%]
 
-956 passed, 25 skipped in 2.50s
+956 passed, 25 skipped in [...]s
 ```
 
 ## Highlights
 
-- **Your tests, unchanged.** rstest runs your tests through a vendored
-  pytest core (pytest 9.1.1): conftest hierarchies, fixtures, parametrize,
-  marks, and your installed pytest plugins (pytest-django, pytest-asyncio,
-  hypothesis, pytest-mock, ...) load as under pytest. Most pytest flags
-  (`-k`, `-m`, `-x`, `--lf`, plugin flags) forward unchanged; a few names
-  such as `--timeout`, `--reruns` and `--html` are rstest's own, taking the
-same basic syntax as pytest-timeout, pytest-rerunfailures and pytest-html
-(`--timeout SECS`, `--reruns N`, `--html PATH`; the plugins' companion options
-such as `--reruns-delay` are not implemented). In parallel
-  you get xdist's semantics (session fixtures once per worker) plus a
-  [short list of differences](guides/migrate-from-pytest.md#what-changes);
-  at `-n 0` outcomes match pytest exactly.
+- **Your tests, unchanged.** A vendored pytest 9.1.1 core runs your conftest
+  hierarchies, fixtures, parametrize, marks, and installed plugins
+  (pytest-django, pytest-asyncio, hypothesis, pytest-mock, ...) as pytest
+  does. Most pytest flags (`-k`, `-m`, `-x`, `--lf`, plugin flags) forward
+  unchanged; a few, such as `--timeout`, `--reruns` and `--html`, are
+  rstest's own with the same basic syntax as the plugins they replace.
+- **xdist semantics in parallel.** Session fixtures run
+  [once per worker](guides/parallel-safety.md#session-scoped-fixtures-duplicate),
+  as under pytest-xdist, plus a
+  [short list of differences](guides/migrate-from-pytest.md#what-changes).
 - **Parallel by design.** Work distribution across worker processes,
   duration-aware scheduling that starts your slowest tests first (per test,
   or per file when a large suite gets
@@ -48,38 +49,29 @@ such as `--reruns-delay` are not implemented). In parallel
 - **Crash-safe.** A segfaulting test costs you one FAILED line: the worker
   is replaced, its remaining tests redistribute, and the run completes.
 - **`rstest --doctor`.** Tells you *why* the suite is slow: tests that wait
-  instead of compute, the long-pole tests that cap any parallelism, fixture
+  instead of compute, the [long-pole](concepts/glossary.md#long-pole) tests that cap any parallelism, fixture
   hotspots, slowest files.
-- **`rstest --watch`.** Instant reruns on save; changed test files rerun
+- **`rstest --watch`.** Reruns on save; changed test files rerun
   alone, source changes rerun only the tests the import graph says are
   affected.
 
 ## Measured
 
-Outcome parity is measured per-test against pytest baselines across four
-real suites (201,343 tests total):
+Per-test outcome parity against pytest (identical setup/call/teardown
+outcomes, with each suite's real plugins loaded) on four real suites
+(201,343 tests total):
 
 --8<-- "docs/reference/benchmarks.md:suite-table"
 
-Parity means identical per-test setup/call/teardown outcomes, including
-skips, xfails, and expected failures, with the suites' real plugins loaded.
-See [Benchmarks](reference/benchmarks.md) for methodology and caveats.
-
-Reading the speed numbers: the wins come from suite *shape*, not magic.
-Wait-bound suites (aiohttp) gain most, and most of all on a **warm** duration
-cache: the first run is cold, since duration-aware scheduling needs one run of
-timing data (aiohttp's cold run still beats xdist, but the warm one more than
-halves it). CPU-bound suites already split well under xdist, so rstest lands at
-parity there, not a win (sympy, [measured](reference/benchmarks.md#cpu-bound-suites)): see [Already fast under
-xdist?](guides/migrate-from-xdist.md#already-fast-cpu-bound) for what's still
-worth it. In ephemeral CI, cache `.rstest_cache`
-across runs or expect cold-run timing.
+Methodology and caveats: [Benchmarks](reference/benchmarks.md). Speed
+depends on suite *shape* and a warm duration cache:
+[what to expect from yours](getting-started/evaluating.md#what-it-speeds-up).
 
 ## The compatibility contract
 
-- At `-n 0`, rstest runs one pytest session: **per-test outcomes match
-  pytest exactly**, and pytest renders the output itself for `--co`, `-s`,
-  and `--pdb`. The exceptions are the
+- At `-n 0` (single-worker mode), rstest runs one pytest session:
+  **per-test outcomes match pytest exactly**, and pytest renders the output
+  itself for `--co`, `-s`, and `--pdb`. The exceptions are the
   [few flags rstest shares with pytest or a plugin](reference/cli.md#shadowed-flags),
   which rstest handles itself at every worker count; see
   [Compatibility](concepts/compatibility.md#the-contract).
@@ -91,8 +83,7 @@ across runs or expect cold-run timing.
 
 ## Go deeper
 
-- [Installation](getting-started/installation.md)
-- [Start from scratch](getting-started/your-first-test.md): no suite yet? from empty folder to green run
-- [Run your existing suite](getting-started/first-steps.md): already have a pytest suite? run it from your project root
+- [Getting started](getting-started/index.md): pick a starting point by situation
 - [Migrating from pytest](guides/migrate-from-pytest.md)
-- [Glossary](concepts/glossary.md): worker, byte-exact mode, long pole, and the rest
+- [CI quickstart](guides/ci-quickstart.md): run rstest in GitHub Actions with a persisted cache
+- [Glossary](concepts/glossary.md): worker, single-worker mode, long pole, and the rest

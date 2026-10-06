@@ -2,10 +2,10 @@
 
 This is the five-minute path from nothing to a green run, no existing suite
 required. If you already have a pytest project, skip to
-[Run your existing suite](first-steps.md): rstest runs it as-is.
+[Run your existing suite](run-your-suite.md): rstest runs it as-is.
 
 **You need:** Python 3.10+ and a terminal. That's it: no config, no prior
-pytest knowledge. New to the terms below (worker, byte-exact mode, `-n`)? The
+pytest knowledge. New to the terms below (worker, single-worker mode, `-n`)? The
 [glossary](../concepts/glossary.md) defines them.
 
 ## 1. Set up a folder
@@ -13,9 +13,11 @@ pytest knowledge. New to the terms below (worker, byte-exact mode, `-n`)? The
 ```console
 $ mkdir rstest-demo && cd rstest-demo
 $ python3 -m venv .venv && source .venv/bin/activate
-$ # Windows: python -m venv .venv, then .venv\Scripts\activate
 $ pip install rstest
 ```
+
+On Windows, activate with `.venv\Scripts\activate` instead
+([Running on Windows](../guides/windows.md#install)).
 
 rstest discovers the interpreter from the active virtualenv, so activating
 `.venv` is all the configuration this needs.
@@ -41,6 +43,9 @@ def test_add_negative():
 
 ## 3. Run it
 
+A one-file suite runs as a single plain pytest session, so the output looks
+exactly like pytest's:
+
 ```console
 $ rstest
 ============================= test session starts ==============================
@@ -53,18 +58,9 @@ test_first.py ..                                                         [100%]
 ============================== 2 passed in 0.00s ===============================
 ```
 
-That's the whole loop: no config file, no flags. rstest collected both tests,
-ran them, and printed pytest's familiar output. It *is* pytest's output: this
-tiny suite runs on a **single worker**, and on one worker rstest runs one
-plain pytest session and lets it print its own terminal output (pass
-`--output dots` to get rstest's own `dots` view instead).
-It runs on one worker because `-n auto` (the default) deliberately caps
-itself low on tiny suites: it never starts more workers than you have test
-files, and once rstest has timings cached it also caps by how long the suite takes, since
-worker startup isn't worth it for a sub-second run. On a real suite with many
-files, the same command fans out across your cores; rstest is [parallel by
-default](features.md). Force a worker count any time with `-n`, e.g.
-`rstest -n 4`.
+That's the whole loop: no config file, no flags. `-n auto` (the default)
+sized the pool to one worker for one file; a real suite fans out across your
+cores ([how `-n auto` sizes the pool](run-your-suite.md#controlling-parallelism)).
 
 ## 4. See a failure
 
@@ -103,6 +99,7 @@ Full pytest tracebacks, assertion rewriting included: on one worker this is
 exactly what pytest prints. (Across multiple workers rstest renders the
 output itself, and each failure header also carries the `[gwN]` worker that
 hit it.)
+
 Rerun just the failure while you fix it:
 
 ```console
@@ -111,7 +108,8 @@ $ rstest --lf          # --last-failed: only the tests that failed last run
 
 ## 5. Watch it go parallel
 
-Two tests stayed single-worker because there's nothing to parallelize. Give
+So far everything ran on one worker: one small file has nothing to
+parallelize. Give
 rstest real work and it fans out. Drop this in `test_slow.py`:
 
 ```python
@@ -125,11 +123,9 @@ def test_sleepy(i):
     time.sleep(1)  # pretend each test does real work
 ```
 
-This demo folder has only two test files, so `-n auto` would start at most
-two workers: it never starts more workers than test files, and once timings
-are cached it can go lower on a suite that takes only a few seconds. Ask for
-four explicitly. Twelve one-second tests then finish in about
-3 seconds, not 12:
+With one selected file and no timing data yet, `-n auto` would start a
+single worker, so ask for four explicitly. Twelve one-second tests then finish in about 3 seconds,
+not 12:
 
 ```console
 $ rstest -n 4 test_slow.py
@@ -146,7 +142,7 @@ On a real suite you rarely need `-n`: with many test files, the default
 
 ## Go deeper
 
-- [Run your existing suite](first-steps.md): reading the output in depth, selecting
+- [Run your existing suite](run-your-suite.md): reading the output in depth, selecting
   tests, controlling parallelism
 - [Migrating from pytest](../guides/migrate-from-pytest.md): point rstest at
   a real suite; what stays identical and what changes

@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::scheduling::worker::worker_pythonpath;
+use crate::scheduling::worker::{scrub_secrets, worker_pythonpath};
 
 use super::cache::{disk_cache_get, disk_cache_put, file_fingerprint};
 
@@ -65,15 +65,21 @@ print(json.dumps({
 /// Run the probe script in `candidate`. None if it can't run or doesn't speak
 /// our protocol (not a Python interpreter, wrong version of Python, etc.).
 pub(super) fn probe(candidate: &Path) -> Option<Probe> {
-    let out = Command::new(candidate)
-        .args(["-c", PROBE_SCRIPT])
-        .env("PYTHONPATH", worker_pythonpath())
-        .output()
-        .ok()?;
+    let out = probe_command(candidate).output().ok()?;
     if !out.status.success() {
         return None;
     }
     serde_json::from_slice(&out.stdout).ok()
+}
+
+/// The probe child, built without spawning it. Starting the candidate runs its
+/// environment's `.pth` files, so it gets the same secret scrubbing as a worker.
+fn probe_command(candidate: &Path) -> Command {
+    let mut cmd = Command::new(candidate);
+    cmd.args(["-c", PROBE_SCRIPT])
+        .env("PYTHONPATH", worker_pythonpath());
+    scrub_secrets(&mut cmd);
+    cmd
 }
 
 /// [`probe`] memoized in-process, with a disk layer for stable absolute paths.
@@ -116,4 +122,19 @@ pub(super) fn cached_probe(candidate: &Path) -> Option<Probe> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe_command;
+
+    #[test]
+    fn probe_command_scrubs_the_remote_cache_token() {
+        let cmd = probe_command(std::path::Path::new("python"));
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == "RSTEST_CACHE_REMOTE_TOKEN" && v.is_none()),
+            "interpreter probe inherits RSTEST_CACHE_REMOTE_TOKEN"
+        );
+    }
 }

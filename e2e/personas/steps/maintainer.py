@@ -311,6 +311,15 @@ def _docs_section(world, heading, doc):
     world.notes["docs"] = text.split(heading, 1)[-1].split("\n### ", 1)[0]
 
 
+@given(parsers.re(rf"the table row of {q('doc')} starting with {q('cell')}"))
+def _docs_row(world, doc, cell):
+    rows = [
+        ln for ln in (REPO / doc).read_text(encoding="utf-8").splitlines() if ln.startswith(cell)
+    ]
+    assert len(rows) == 1, f"{len(rows)} rows of {doc} start with {cell!r}"
+    world.notes["docs"] = rows[0]
+
+
 @then(parsers.re(rf"that docs section contains {q('text')}"))
 def _docs_contains(world, text):
     assert text in world.notes["docs"], world.notes["docs"][:200]

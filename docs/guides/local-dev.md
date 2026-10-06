@@ -1,172 +1,75 @@
 # Local dev / inner loop
 
-You have a small, fast suite (it finishes in a few seconds) and you run it constantly while you code. This page is about the *loop*, not the clock: how to get from save to green in as few keystrokes as possible, and how to keep the suite trustworthy as it grows.
+You have a small, fast suite and you run it constantly while you code. On a
+suite that finishes in under ~10 seconds, adding workers barely moves the wall
+clock; the wins that matter are *rerunning less* and *rerunning
+automatically*. This page is a playbook: pick the row that matches what you
+are doing, then follow the link for the full behaviour.
 
-## Who this is for
+## Which flag when
 
-Maintainers of a suite small enough that raw parallel throughput is beside the point. On a suite that already runs in under ~10 seconds, adding workers barely moves the wall clock. The wins that matter are *rerunning less* and *rerunning automatically*. So this page skips the parallel-speed pitch entirely and leads with the three flags that tighten the edit-save-test cycle: `--watch`, `--changed`, and `--lf`. Then it covers what [`--doctor`](doctor.md) still buys a fast suite (leaks, fixture hotspots, flaky candidates, not "where does the time go"), and how to keep flakes from eroding trust.
+| You want to... | Run | Full guide |
+|---|---|---|
+| rerun automatically on every save | `rstest --watch` | [Watch mode](watch-mode.md) |
+| rerun only what your edits touch, by hand | `rstest --changed` | [Selecting changed tests](changed.md) |
+| iterate on the failures of the last red run | `rstest --lf` (or `--ff`) | [CLI reference](../reference/cli.md) |
+| get a `(Pdb)` prompt or attach an editor | `-n 0`, `-s`, `--pdb`, `--debug` | [Debugging a test](debugging.md) |
+| reproduce a CI-only parallel failure | `rstest replay` with the CI job's journal | [Replaying a CI failure](replay.md) |
+| tolerate or track an intermittent failure | `--reruns N`, `--quarantine` | [Flaky tests](flaky-tests.md) |
+| find leaks and expensive fixtures | `rstest --doctor` | [Suite diagnostics](doctor.md) |
 
-## The inner-loop trio
+## Notes per row
 
-### 1. Watch mode: `--watch`
+**`--watch`.** Runs the suite once, then reruns on every save of a `.py` or
+pytest config file. A test-file change reruns that file; a source change
+reruns the tests the import graph says are affected. Every cycle spawns fresh
+workers, so an edited module is always re-imported. Flags compose and apply to
+every rerun (`rstest --watch -x -k login`), and reruns default to fail-fast
+ordering. A small suite with a warm cache often reruns on one worker; pass
+`-n 2` to parallelize like CI. Rerun policy, quitting, exit codes and
+per-cycle cost: [Watch mode](watch-mode.md).
 
-Run the suite once, then leave it running; it reruns on every save:
-
-```console
-$ rstest --watch
-```
-
-```text
-rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
-...                                                                      [100%]
-
-3 passed in 0.16s
-
-[watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
-[watch] test_w.py changed; rerunning changed files
-============================= test session starts ==============================
-platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
-rootdir: /Users/me/proj
-collected 2 items
-
-test_w.py ..                                                             [100%]
-
-============================== 2 passed in 0.00s ===============================
-
-[watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
-[watch] helper.py changed; rerunning affected tests
-============================= test session starts ==============================
-platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
-rootdir: /Users/me/proj
-collected 1 item
-
-test_h.py .                                                              [100%]
-
-============================== 1 passed in 0.00s ===============================
-```
-
-Under the default `-n auto` rstest starts about one worker per 2 seconds of
-cached test time, so a quick suite like this one reruns on a single worker and
-prints pytest's own session output; a slower suite reruns in parallel and
-prints rstest's summary.
-
-The rerun-selection policy is import-graph based, so you don't rerun the whole suite on every keystroke:
-
---8<-- "docs/_snippets/watch-rerun-policy.md"
-
-Editor save-bursts are debounced (300ms), and the screen clears between runs on a terminal. Type `q` and Enter between runs, or press `Ctrl+C`, to exit (`q` is not offered under `-s`, `--pdb` and the other flags that hand pytest the terminal; quitting exits 0 whatever the last result; see [Watch mode](watch-mode.md)).
-
-**Every rerun is a clean run.** Each cycle spawns fresh Python worker processes and tears them down when it finishes, at every worker count, including `-n 0`/`-n 1`. Nothing is reused between cycles, so an edited module is always re-imported from scratch; watch mode cannot show a stale-import false green.
-
-Flags compose, and they apply to every rerun:
-
-```console
-$ rstest --watch -x            # stop each run at first failure
-$ rstest --watch -k login      # only the login tests, on every change
-$ rstest --watch -n 2          # bounded parallelism while editing
-```
-
-The duration cache and last-failed state update on every cycle, so `--lf` (below) and slow-test-first scheduling stay warm throughout the session.
-
-**Reruns go fail-fast first.** Watch reruns default to [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast): tests that recently failed or flaked (from `flakes.json`) run first, then the rest in slow-first throughput order, so a red surfaces as early as possible on each save. Pair it with `-x` to stop at that first red; pass `--order throughput` (or set `[tool.rstest] order`) to opt out. Ordering only applies with two or more workers.
-
-**Small suites may run one worker.** Without `-n`, rstest uses `-n auto`, which caps the pool by test-file count and by cached suite time (about one worker per 2s of tests). A small, fast suite with a warm cache therefore often runs a single worker locally: [byte-exact mode](../concepts/glossary.md#byte-exact-mode), no worker identity, and fail-fast ordering has no effect. Parallel-only failures you see in CI won't reproduce that way; pass `-n 2` or more (`rstest --watch -n 2`) when you want local runs to parallelize like CI.
-
-**New test files are picked up.** Saving a brand-new file that matches `python_files` counts as a test-file change and reruns exactly that file, even if it sits outside the path you started the session with: reruns keep your flags (`-k`, `-x`, `-n`, ...) but not your positional paths.
-
-**Per-cycle overhead is roughly 0.4s.** From save to result on a one-test project, a cycle takes about 400ms at both `-n 0` and `-n 2`: the 300ms debounce plus about 100ms to spawn fresh workers and collect. Higher `-n` adds a little worker startup, and large trees add the per-save selection latency (tens of milliseconds; see [`--watch`](../reference/cli.md#-watch)). Everything else is your tests' own time. See [Watch mode](watch-mode.md#per-cycle-cost).
-
-### 2. Run only what changed: `--changed`
-
-When you'd rather drive the loop by hand than leave a watcher running, run only the tests your working-tree changes affect:
-
-```console
-$ rstest --changed
-```
-
-Changes come from git: working tree + untracked vs `HEAD`. Two selection engines back it, and rstest picks the tightest one available:
+**`--changed`.** Diffs the working tree and untracked files against `HEAD`
+and runs only the affected tests:
 
 --8<-- "docs/_snippets/changed-engines.md"
 
-Out of the box you get the import graph, conservative by construction (over-selection is safe, under-selection is not): ambiguous module names select every match, function-local imports count as edges, a changed `conftest.py` selects its whole subtree (so does a change to any module a `conftest.py` imports, directly or through other modules), and any config or non-Python change falls back to a full run. The one documented gap is dynamic imports (`importlib.import_module`), which produce no edges. Use [`--changed-strict`](../reference/cli.md#-changed-strict) for correctness-critical runs.
+Out of the box you get the import graph, which over-selects rather than
+under-selects. Warm the coverage index once (`rstest --cov=src
+--cov-context=test`) for line-level selection. Selection rules, drift, and
+[`--changed-strict`](../reference/cli.md#-changed-strict):
+[Selecting changed tests](changed.md).
 
-If you want tighter selection locally, warm the coverage index once with a coverage run (`rstest --cov=src --cov-context=test`); from then on `--changed` maps *changed lines* to only the tests that executed them. Full mechanics, drift handling, and how to keep the index warm: [Selecting changed tests](changed.md).
+**`--lf`.** `--lf`/`--ff` are forwarded to pytest, but rstest writes the
+last-failed cache from **merged results** across workers, so a follow-up
+`--lf` behaves exactly as after a serial run. Under `--watch` the last-failed
+state refreshes every cycle. `--lf` still reruns
+[quarantined](flaky-tests.md) failures: locally they behave like the failures
+they are.
 
-### 3. Last-failed: `--lf`
+**Debugging.** Pool workers have no terminal, so a `breakpoint()` hit during
+a parallel run fails that test with a hint instead of hanging. Rerun it with
+`-n 0` or `-s` for the `(Pdb)` prompt, or with `--debug` to attach VS Code.
+Both editors' configs and the `--reruns` gotcha:
+[Debugging a test](debugging.md).
 
-After a red run, rerun just the failures until they're green:
+**Parallel-only failures.** Locally a fast suite often runs in
+[single-worker mode](../concepts/glossary.md#single-worker-mode), so a failure
+that only shows up in CI's parallel run won't reproduce until you pass
+`-n 2` or more. To re-run CI's exact schedule, download the failing job's
+journal and [replay it](replay.md). To find the test that pollutes it, follow
+[Diagnosing a parallel-only failure](parallel-safety.md#diagnosing-a-parallel-only-failure).
 
-```console
-$ rstest --lf
-```
+**Flaky tests.** `--reruns N` retries a failure and reports a test that then
+passes as `flaky`; every run records flakes in `.rstest_cache/flakes.json`;
+`--quarantine` ring-fences known offenders while they get fixed. The full
+lifecycle: [Flaky tests](flaky-tests.md).
 
-`--lf`/`--ff` are forwarded to pytest, but the last-failed cache is written by rstest from **merged results** across workers, so a follow-up `--lf` behaves exactly as after a serial run (see [CLI reference](../reference/cli.md)). It composes with watch mode, where the last-failed state refreshes every cycle. Note that `--lf` still reruns [quarantined](flaky-tests.md) failures. Locally they behave like the failures they are.
-
-## Debugging: `breakpoint()` and `--pdb`
-
-Pool workers have no terminal, so a `breakpoint()` (or `pdb.set_trace()`) hit
-during a parallel run fails that test with a hint instead of hanging or
-quitting the worker:
-
-```text
-E       Failed: breakpoint() / pdb.set_trace() needs a terminal, and parallel workers have none: rerun with -n 0 (or -s) to get the (Pdb) prompt
-```
-
-Rerun that test with `-n 0` or `-s` (`rstest -s tests/test_x.py::test_bp`) to
-get the `(Pdb)` prompt. `--pdb` and `--trace` switch to that single-session
-mode by themselves (see [Passthrough-IO flags](../reference/cli.md#passthrough-io-flags)).
-
-## What `--doctor` gives a fast suite
-
-`--doctor` is often pitched at slow suites answering "where does the time go?", but three of its findings matter regardless of how fast your suite is, and they're the reason to run it on a *small* suite too:
-
-```console
-$ rstest --doctor
-```
-
-### Resource leaks: the correctness one
-
-A test that starts a thread it never joins, or opens an fd it never closes, leaves that resource live for the rest of the session. It rarely fails the test that caused it. Instead it becomes **shared state that flakes a later test**. On a small suite this is easy to miss precisely because everything's fast and green. Doctor prints a `RESOURCE LEAKS` section naming the culprit (threads/fds a test created that are still open after its teardown):
-
-```text
-RESOURCE LEAKS (threads/fds a test created, still open after its teardown):
-  +3 threads  tests/test_pool.py::test_executor
-  +5 fds  tests/test_io.py::test_reader
-```
-
-The count is snapshotted before setup and after teardown, so correct cleanup nets zero. The first test each worker runs is skipped as a warm-up. Session/module-scoped fixtures can show a one-time "leak" that's actually the fixture behaving correctly, so the `--doctor` report is advisory. Full model, false-positive cases, and fixes: [Resource leaks](resource-leaks.md). To make it a gate once your suite is clean, use [`--fail-on-leak`](../reference/cli.md#-fail-on-leak).
-
-### Fixture hotspots: keep setup cheap
-
-```text
-FIXTURE HOTSPOTS (setup time across all workers):
-     0.79s   4442x  scope=function blockbuster
-     0.54s    157x  scope=function transport
-```
-
-Total setup time per fixture. A *function-scoped* fixture that runs on every test and costs real time is a candidate for a wider scope: one real-world suite re-parsed the same RSA key 206 times in what could have been a session fixture. This is exactly the kind of drag that a fast suite accumulates silently and that punishes you on every single inner-loop rerun. (See [Suite diagnostics](doctor.md).)
-
-### Flaky candidates
-
-Doctor's leak section is the first place to look for order-dependent flakiness, because leaked state is a leading cause of it. For the flake *signal* itself, see the next section.
-
-Doctor adds only a few cheap measurements and doesn't change outcomes, so it's fine to run on a whim, and it works at any worker count: a fast suite's usual `-n 0`/`-n 1` still runs a real worker process, so leak and fixture-cost instrumentation apply. (One nuance: the first test each worker runs is skipped from leak detection as a warm-up, so at `-n 0` the very first test isn't leak-checked.) There are also `--doctor-json`/`--doctor-md` for CI, but that's a CI concern, not an inner-loop one.
-
-## Flaky-test handling
-
-Even a fast suite gets the occasional intermittent failure, and on a tight loop a spurious red is maximally annoying. Three tools, one lifecycle:
-
-- **Detect within a run**: [`--reruns N`](../reference/cli.md#-reruns-n) retries a failure; a test that then passes is reported `flaky` (the run stays green) and recorded. Works at any worker count, including `-n 0`/`-n 1`, but there it leaves [byte-exact mode](../concepts/glossary.md#byte-exact-mode) and runs a one-worker pool (`RSTEST_WORKER_ID=gw0`), and it is inert under a passthrough flag (`--pdb`, `-s`, `--co`, ...), which rstest warns about; see [`--reruns`](../reference/cli.md#-reruns-n).
-- **Remember across runs**: every run merges events into `.rstest_cache/flakes.json` automatically (no flag). A test with `flaky: 7` is your ranked candidate to fix, and history ages out (default 90 days) so a test you actually fixed goes quiet on its own.
-- **Ring-fence**: [`--quarantine`](../reference/cli.md#-quarantine-file) tolerates a committed list of known offenders (failures on the list don't redden the run; failures off it still fail) while they get fixed.
-
-The full workflow, file formats, and `--reruns-only-known-flaky` targeting: [Flaky tests](flaky-tests.md).
-
-## Go deeper
-
-- [Watch mode](watch-mode.md): rerun policy and flag composition in full.
-- [Selecting changed tests](changed.md): import graph vs coverage index, drift, `--changed-strict`.
-- [Suite diagnostics](doctor.md): every doctor section and the JSON/markdown surfaces.
-- [Resource leaks](resource-leaks.md): what's measured, false positives, fixes, the `--fail-on-leak` gate.
-- [Flaky tests](flaky-tests.md): reruns, flake history, and quarantine as one lifecycle.
-- [CLI reference](../reference/cli.md): every rstest-owned flag; everything else forwards to pytest.
+**`--doctor` on a fast suite.** Skip the "where does the time go" sections and
+read two others. `RESOURCE LEAKS` names tests that leave threads or fds open
+after teardown, the usual source of order-dependent flakes (details:
+[Resource leaks](resource-leaks.md)). `FIXTURE HOTSPOTS` ranks setup time per
+fixture: a function-scoped fixture that costs real time on every test is a
+candidate for a wider scope, and it taxes every inner-loop rerun. Doctor works
+at any worker count and doesn't change outcomes. See
+[Suite diagnostics](doctor.md).

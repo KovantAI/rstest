@@ -154,7 +154,8 @@ after whitespace) and blank lines are skipped. Then:
 $ rstest -n auto --quarantine quarantine.txt
 ```
 
-A **failure** matching the list is demoted to a `quarantined` outcome:
+A **failure** matching the list is demoted to a `quarantined` outcome, and
+with no other failure the run exits 0:
 
 ```text
 =========== quarantined failures (known-flaky, non-fatal) ===========
@@ -163,7 +164,7 @@ A **failure** matching the list is demoted to a `quarantined` outcome:
 ConnectionResetError: [Errno 54] Connection reset by peer
 ...
 
-1 failed, 41 passed, 1 quarantined in 12.31s
+41 passed, 1 quarantined in 12.31s
 ```
 
 The exact semantics:
@@ -218,12 +219,8 @@ run.
    window: if the entry comes back in review, it wasn't.
 
 Before quarantining a test that fails only in some orders or only in
-parallel, check whether it is flaky at all or order-dependent:
-[`--shuffle`](../reference/cli.md#-shuffleseed) reproduces an order,
-[`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) names
-the test that pollutes it, and [`rstest audit`](../reference/cli-commands.md#audit)
-lists the parallel-only failures. An order dependency has a fix; quarantine
-is for real nondeterminism. See
+parallel, check whether it is flaky at all or order-dependent: an order
+dependency has a fix, and quarantine is for real nondeterminism. See
 [Diagnosing a parallel-only failure](parallel-safety.md#diagnosing-a-parallel-only-failure).
 
 The failure mode to avoid is a quarantine list that only ever grows.
