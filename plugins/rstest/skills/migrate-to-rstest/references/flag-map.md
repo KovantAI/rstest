@@ -56,11 +56,11 @@ Set defaults so contributors get the right behavior without remembering flags:
 
 ```toml
 [tool.rstest]
-numprocesses = "auto"   # or an int; "0" forces serial
+numprocesses = "auto"   # or an int; 0 forces serial
 dist = "load"           # load | loadfile | loadscope | loadgroup | each
 # collect: leave unset; auto picks lazy for large warm-cache runs.
 # Set "full" only if the suite needs every test module imported.
-output = "bar"           # dots | verbose | bar | github | json
+output = "bar"           # dots | verbose | bar | tap | json | github | gitlab | buildkite | teamcity | azure
 ```
 
 Use a non-default only when the suite needs it (e.g. `dist = "loadfile"` for an

@@ -13,14 +13,6 @@ own analysis, not as a normal test run. The flags that only apply to a
 subcommand are documented with it; everything else is on
 [CLI flags](cli.md).
 
-After the subcommand, only its own flags and the global ones are accepted.
-The global flags are `--python`, `--cache-remote`, `--cache-compact-threshold`,
-`--migrate-check-json`, `--migrate-allow`, `--audit-json`, `--audit-repeat`
-and `--bisect-json`. Any other rstest flag there is a usage error (exit 2):
-`rstest try --doctor` prints `unexpected argument '--doctor' found`. Put
-rstest flags before the subcommand and it is no longer recognized: `rstest
--n 2 try` is a normal test run with `try` as a test path.
-
 ```text
 rstest <COMMAND> [OPTIONS]
 ```
@@ -30,7 +22,8 @@ small shared set: `--python`, `--cache-remote`, `--cache-compact-threshold`
 and the subcommands' JSON and tuning flags (`--migrate-check-json`,
 `--migrate-allow`, `--xdist-removal-json`, `--xdist-trial`, `--audit-json`,
 `--audit-repeat`, `--bisect-json`). Any other run flag there, such as `-n` or
-`--cache-push`, is a usage error (exit `2`). `rstest <COMMAND> --help` lists
+`--cache-push`, is a usage error (exit `2`): `rstest try --doctor` prints
+`unexpected argument '--doctor' found`. `rstest <COMMAND> --help` lists
 what each one accepts.
 
 - **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`xdist-removal-check`](#xdist-removal-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
@@ -53,7 +46,7 @@ $ rstest try
 ================= rstest try =================
   ✓ parity:  8337 tests — identical outcomes to pytest
   ⚡ speed:   pytest 1m36s  →  rstest 21.0s   (4.6× at -n auto = -n 8)
-  💸 saves   1m15s per run
+  💸 saves   1m15s per run — ≈ 52m30s over your last 30 days (42 commits ≈ CI runs)
 ================================================
   → drop-in ready: `rstest` is `pytest`, in parallel. Switch with confidence.
 ```
@@ -105,26 +98,17 @@ sets; ids present in only one collection are run-to-run unstable. It reports
 each offending parametrize site, classified by why its id is unstable:
 
 - **address / uuid**: a per-process value (a `repr()`-fallback id embedding
-  `0x…`, or a uuid). These differ in *every* worker, so per-worker
-  collections disagree and rstest refuses to dispatch (`workers collected
-  different test sets ...`): nothing runs in parallel until the ids are fixed
-  or you choose `-n 0`. Reported as **WILL bail**, a hard blocker.
-- **time**: a timestamp/date in the id. A coarse one (seconds or dates) is
-  usually stable enough *within* one run, since all workers collect
-  near-simultaneously, so it typically runs at `-n auto`; but a run whose
-  collection crosses a second boundary hits the same refusal, so it fails
-  intermittently, and a sub-second timestamp differs every time. Reported as
-  **may bail**.
+  `0x…`, or a uuid) that differs in every worker. Reported as **WILL bail**, a
+  hard blocker.
+- **time**: a timestamp or date in the id. A coarse one usually matches
+  within a run but fails intermittently; a sub-second one differs every time.
+  Reported as **may bail**.
+- **UNSTABLE ORDER**: the same ids in a different order between the two
+  collections (a `parametrize` over a `set`). Reported as **WILL bail**; in
+  the JSON it is an `unstable_ids` entry with the `order` kind.
 
-The fix for both is a stable `ids=` on the `parametrize`.
-
-It also compares the two collections **in order**. A site whose ids are the
-same but come back in a different order (a `parametrize` over a `set`, whose
-iteration order for strings changes with the per-process `PYTHONHASHSEED`)
-is reported under **UNSTABLE ORDER** as **WILL bail**: every worker must
-collect the identical ordered list. In the JSON it is an `unstable_ids` entry
-with the `order` kind. Fix it with a list or `sorted(...)`; the stopgap is one
-fixed `PYTHONHASHSEED` for the whole run.
+Why each class blocks the pool and how to fix it:
+[Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids).
 
 If a WILL-bail id or order is found, it stops here: nothing runs in parallel
 until collection is stable.
@@ -163,12 +147,12 @@ race rather than state pollution.
 
 Each finding prints the upstream fix and the rstest stopgap. Exits `1` if
 any WILL-bail id or parallelism-specific failure is found, and `2` when it
-couldn't judge: the `-n auto` pass produced no outcomes (`parallel` is
+couldn't judge: the parallel pass produced no outcomes (`parallel` is
 `{"ran": false}` in the JSON), or rstest hit an error (an `Error:` line on
 stderr). `0` means ready. Usable as a CI gate (see `--migrate-check-json` and `--migrate-allow` below for the
 machine-readable form and the known-issue allow-list).
 
-### `--migrate-check-json <path>`
+#### `--migrate-check-json <path>`
 
 Write the migrate-check findings as a single versioned JSON document (schema
 `1`): the machine-readable surface for CI gating and trending. Only read by
@@ -178,14 +162,14 @@ does nothing. The
 document carries the unstable-id sites and the classified parallel findings,
 each with its verdict, fix, allow-list status, and bisected polluter:
 `{meta, ready, tests_collected, will_bail_count, unstable_ids[], parallel{…}}`.
-Field reference: [Migrate-check JSON](report-json.md#migrate-check-json).
+Field reference: [Migrate-check JSON](output-schemas.md#migrate-check).
 
-### `--migrate-allow <SUBSTRING>`
+#### `--migrate-allow <SUBSTRING>`
 
 Accept a known finding so it does not fail the exit code (repeatable). Any
 finding whose nodeid or unstable-id site **contains** SUBSTRING is still
 reported (marked `(allowed)` in the human output and `"allowed": true` in the
-JSON) but excluded from the non-zero gate. This lets CI gate on **new**
+JSON) but excluded from the exit-code gate. This lets CI gate on **new**
 parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
 findings, and the build only goes red when a fresh one appears.
 
@@ -243,7 +227,7 @@ $ rstest xdist-removal-check --xdist-trial tests/
 Session args (paths, `-k`, `-m`, `-p`) are forwarded to the trial runs only.
 The static scan always covers the whole project.
 
-### `--xdist-trial`
+#### `--xdist-trial`
 
 Also run the suite with pytest-xdist hidden from the plugin manager
 (`-p no:xdist`), which drops its options and hook specs as uninstalling it
@@ -255,7 +239,7 @@ error, a plugin validation error), it prints pytest's error. A regression or a
 session that doesn't start fails the gate. Costs one or two full runs; without
 this flag the command runs nothing.
 
-### `--xdist-removal-json <path>`
+#### `--xdist-removal-json <path>`
 
 Write the findings as a versioned JSON document (schema `1`) for CI gating:
 `{meta, ready, xdist_version, findings[], trial}`, each finding carrying its
@@ -311,7 +295,7 @@ them serial wouldn't make them pass. Intrinsic flakes (serial repeats disagree)
 and pre-existing `-n 0` failures are also reported separately; serial won't fix
 those. A test that fails in the parallel pass but is missing from a
 follow-up run (for example an unstable parametrize id) is reported as
-**inconclusive** rather than guessed at. Exits non-zero on any parallel-only
+**inconclusive** rather than guessed at. Exits `1` on any parallel-only
 failure (serial-fixable, order-dependent, intrinsic or inconclusive), so it
 gates CI; pre-existing failures don't fail the audit. A selection that matches
 no tests (for example a `-m` with no matching tests) exits `0` with a "no tests
@@ -319,7 +303,7 @@ were selected" note; exit `2` is kept for a run rstest refused to dispatch or
 an error inside the audit (an `Error:` line on stderr). [`--audit-json`](#-audit-json-path) writes the findings, the serial set,
 and the conftest block for tooling.
 
-### `--audit-json <path>`
+#### `--audit-json <path>`
 
 Write the `audit` findings as a versioned JSON document (schema `1`):
 `{meta, ran, parallel_safe, tests, serial_candidates[], serial_conftest,
@@ -335,7 +319,7 @@ Field reference: [Audit JSON](output-schemas.md#audit).
 Only read by the `audit` subcommand (`rstest audit --audit-json out.json`); on
 its own it is ignored and no file is written.
 
-### `--audit-repeat <N>`
+#### `--audit-repeat <N>`
 
 How many times `audit` reruns the parallel pass (default `1`; `0` is treated
 as `1`). A parallel-only
@@ -438,7 +422,7 @@ a child session (deselected by an option, a collection error), bisect stops
 with an error instead of reading that as a pass. `--bisect-json` writes the
 result.
 
-### `--bisect-json <path>`
+#### `--bisect-json <path>`
 
 Write the `bisect` result as a versioned JSON document (schema `1`):
 `{meta, nodeid, rootdir, cwd, order_dependent, culprits[], reproduce_command}`.
@@ -482,6 +466,7 @@ replays it locally:
   with:
     name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
     path: .rstest_cache/replay/latest.json
+    include-hidden-files: true
     if-no-files-found: ignore
 ```
 
@@ -491,7 +476,7 @@ $ rstest replay --journal ./rstest-replay-tests-0/latest.json
 
 For the full CI-to-local walkthrough (download, portability rules, what to
 read in the output), see
-[Replaying a CI-only failure locally](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally).
+[Replaying a CI-only failure locally](../guides/replay.md).
 
 The journal keys on nodeid, not on the machine-local collection index, so it
 survives the machine hop. Replay collects the suite fresh, re-resolves each
@@ -518,9 +503,8 @@ journal, not from the `replay` invocation, and are printed (`rstest: replay:
 args: ...`) before the run starts. They go to pytest as they are, so replay
 only journals from runs you trust (see
 [Security: replay journals](security.md#replay-journals)). To pick the
-interpreter, put `--python` after the subcommand
-(`rstest replay --journal ci.json --python .venv/bin/python`); before it,
-`replay` is read as a test path.
+interpreter, pass `--python`
+(`rstest replay --journal ci.json --python .venv/bin/python`).
 
 Exit code: the replayed run's own code (`0` all passed, `1` a test failed,
 and so on). A missing or unreadable journal exits `1` with an `Error:` line
@@ -619,7 +603,9 @@ test: tests/test_api.py::test_login
 Add `--json` for a schema-stamped object on stdout (`{meta, nodeid, found,
 duration_seconds, last_outcome, source_line, flakes, coverage}`), suitable for an
 editor or CI step. Absent fields are `null`: a never-flaked test has no `flakes`,
-a cold coverage index yields `null` coverage. Field reference:
+a cold coverage index yields `null` coverage. `source_line` is **1-based**, as
+an editor counts, while report-json's `lineno` is 0-based as pytest reports it:
+the same test reads `15` here and `14` there. Field reference:
 [Explain JSON](output-schemas.md#explain).
 
 It reads only cache files, needs no interpreter, and runs no tests. The data
@@ -641,15 +627,18 @@ Prove the vendored pytest tree in your installed rstest is intact. rstest ships
 an unmodified copy of pytest inside its worker package; this rehashes every
 file under `_vendor/` and compares it to the packaged manifest (`vendor.lock`),
 catching an accidentally-edited, corrupted, or partial install. Run-less: it
-verifies and exits without running your suite.
+verifies and exits without running your suite. It still needs a Python
+interpreter (the check runs under it), so it exits 1 when none is found; pass
+one with `--python`.
 
 ```console
 $ rstest verify-vendor
 vendored pytest 9.1.1: 84 files verified against vendor.lock
 ```
 
-Exit 0 when the tree matches the manifest, non-zero on any drift (each
-offending file is listed). The check is **offline**: it does not contact
+Exit 0 when the tree matches the manifest, 1 on any drift (each
+offending file is listed as `MISSING`, `UNEXPECTED` or `MISMATCH`) or when
+`vendor.lock` or `_vendor/` itself is missing. The check is **offline**: it does not contact
 PyPI. Proving the vendored tree matches *upstream* pytest (not just what
 shipped) is a separate maintainer/CI check (`vendor.yml` provenance job); see
 [Security & supply chain](security.md#verifying-the-vendored-copy-is-unmodified).

@@ -355,7 +355,12 @@ def gate_tool_rstest_config(g, args, binary):
     r = g.run(
         "test_cfg.py", "-n", "0", cwd=g.tmp / "toolcfg", env_extra={"FLAKY_MARKER": str(tmarker)}
     )
-    check("CLI overrides tool.rstest", "single worker" in r.stdout.splitlines()[0], r.stdout[:120])
+    first = r.stdout.splitlines()[0]
+    check(
+        "CLI overrides tool.rstest",
+        "single-worker mode" in first or "single worker (rerun pool" in first,
+        r.stdout[:120],
+    )
     check(
         "tail-batch rerun works (EndSession model)",
         True,  # asserted by 'tool.rstest defaults applied': 1 item, rerun delivered post-drain

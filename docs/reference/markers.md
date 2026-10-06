@@ -103,6 +103,9 @@ marker name; no plugin needed.
 `timeout(0)` or a negative value disables the timeout for that test, even
 when a global `--timeout` is set.
 
+A positive marker value also sizes that test's
+[hang watchdog](../concepts/crash-handling.md#hung-tests-worker-timeout).
+
 The marker arms rstest's own timer at every worker count, including `-n 0`,
 even when you pass no `--timeout` and even with pytest-timeout installed
 (`-p no:timeout` does not turn it off). If pytest-timeout is also installed,
@@ -111,14 +114,9 @@ both honor the marker, so uninstall it rather than run two timers.
 ## A note on `@pytest.mark.parametrize` IDs
 
 Not a marker rstest owns, but the one that most often blocks parallelism:
-parametrize **IDs must be stable across collections**. Under full
-collection (every cold-cache run, and suites below the
-[lazy](../concepts/lazy-collection.md) auto threshold) rstest collects on
-each worker and refuses to dispatch if the id sets disagree, so an id built
-from a memory address (`repr()` fallback), a uuid, or a sub-second timestamp
-stops a parallel run (`workers collected different test sets`) until you fix
-it or run `-n 0`. A second-resolution `now()` id usually matches across
-workers and runs, but can fail intermittently when collection straddles a
-second. Give such a parametrize an explicit stable `ids=` (e.g.
-`ids=[c.name for c in cases]`). [`rstest migrate-check`](cli-commands.md#migrate-check)
-finds these before your first run and names the exact site.
+parametrize **ids must be stable across collections**. An id built from a
+memory address, a uuid or a timestamp can stop a parallel run with
+`workers collected different test sets`; give such a parametrize an explicit
+stable `ids=`. Causes, fixes and how
+[`rstest migrate-check`](cli-commands.md#migrate-check) finds them:
+[Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids).

@@ -141,11 +141,33 @@ fn warn_doctor_gate_passthrough(w: &mut dyn Write, gate_empty: bool, passthrough
 
 /// The `--durations-regress` ratio must be strictly > 1.0: a test is a
 /// regression only when it is *slower* than baseline by that factor.
-fn validate_regress_ratio(ratio: f64) -> Result<()> {
+pub(super) fn validate_regress_ratio(ratio: f64) -> Result<()> {
     if ratio <= 1.0 {
         anyhow::bail!("--durations-regress ratio must be > 1.0, got {ratio}");
     }
     Ok(())
+}
+
+/// Build the covtool [`std::process::Command`] without spawning it. covtool
+/// runs coverage.py, which loads the project's coverage plugins and config, so
+/// it gets the same secret scrubbing as a test worker.
+fn covtool_command(python: &std::path::Path, args: &[String]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(["-m", "rstest_worker.covtool"])
+        .args(args)
+        .env("PYTHONPATH", worker::worker_pythonpath())
+        // Same cache dir the Rust side reads (cache::dir()) so the index
+        // lands where load_coverage_index / --cache-push look for it.
+        .env("RSTEST_CACHE", cache::dir())
+        // Index keys are relative to the rootdir the cache belongs to (as
+        // the nodeids are), so a run from a subdirectory writes the same
+        // keys as one from the root.
+        .env("RSTEST_ROOTDIR", cache::base_dir())
+        // Never reads stdin; inheriting it hangs on Windows under
+        // `--watch`, whose `q` listener holds a blocking read on it.
+        .stdin(std::process::Stdio::null());
+    worker::scrub_secrets(&mut cmd);
+    cmd
 }
 
 /// Reconcile the coverage-reporting subprocess result into the run exit status.
@@ -491,20 +513,7 @@ pub(super) fn run_post_gates(
         } else {
             None
         };
-        let mut cmd = std::process::Command::new(python);
-        cmd.args(["-m", "rstest_worker.covtool"])
-            .args(args)
-            .env("PYTHONPATH", worker::worker_pythonpath())
-            // Same cache dir the Rust side reads (cache::dir()) so the index
-            // lands where load_coverage_index / --cache-push look for it.
-            .env("RSTEST_CACHE", cache::dir())
-            // Index keys are relative to the rootdir the cache belongs to (as
-            // the nodeids are), so a run from a subdirectory writes the same
-            // keys as one from the root.
-            .env("RSTEST_ROOTDIR", cache::base_dir())
-            // Never reads stdin; inheriting it hangs on Windows under
-            // `--watch`, whose `q` listener holds a blocking read on it.
-            .stdin(std::process::Stdio::null());
+        let mut cmd = covtool_command(python, args);
         // The in-process session (-n 0/1, pytest's own terminal) ran pytest-cov
         // in its normal mode, which already combined, reported and gated
         // --cov-fail-under; covtool then only builds the index and scores the
@@ -596,6 +605,12 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // Restore cached (--incremental, not-run) entries' def line from the
+    // baseline before any artifact is written: report-json and the HTML report
+    // read it, and coverage_skip::record below carries it to the next run.
+    if incremental_active {
+        outcome.run.backfill_cached_linenos(&baseline.test_lines);
+    }
     // Both reports get the pre-covtool wall, as they did when they ran first.
     let report_meta = report::RunMeta {
         duration_seconds: suite_wall,
@@ -637,7 +652,7 @@ pub(super) fn run_post_gates(
     // the gate fires again on the next identical run.
     let mut duration_regressions = 0usize;
     if let Some(ratio) = cli.durations_regress {
-        validate_regress_ratio(ratio)?;
+        // Validated before the run (run::resolve_run_config).
         let baseline = durations::load_baseline();
         if baseline.is_empty() {
             sink.warn(
@@ -771,10 +786,6 @@ pub(super) fn run_post_gates(
                 coverage_skip::write_index(&new_index);
             }
         }
-        // Restore cached (not-run) entries' def line from the baseline before
-        // reading it back — so it persists into this run's recorded lines and
-        // every artifact reflects the real line, not a blank.
-        outcome.run.backfill_cached_linenos(&baseline.test_lines);
         coverage_skip::record(
             scope,
             config,
@@ -1095,8 +1106,8 @@ fn strip_quarantine_comment(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, diff_cov_gate,
-        finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
+        apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, covtool_command,
+        diff_cov_gate, finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
         print_warnings_summary, quarantine_matcher, quarantine_note, reconcile_cov_status,
         report_push_result, resolve_compact_threshold, results_bar_line, stopping_banner,
         validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
@@ -1413,6 +1424,17 @@ mod tests {
         assert!(validate_regress_ratio(0.5).is_err());
         let err = validate_regress_ratio(0.9).unwrap_err().to_string();
         assert!(err.contains("must be > 1.0"), "got {err}");
+    }
+
+    #[test]
+    fn covtool_command_scrubs_the_remote_cache_token() {
+        // covtool loads the project's coverage plugins, so a pull request's
+        // code must not be able to read the shared cache's write token.
+        let cmd = covtool_command(std::path::Path::new("python"), &[]);
+        let removed = cmd
+            .get_envs()
+            .any(|(k, v)| k == "RSTEST_CACHE_REMOTE_TOKEN" && v.is_none());
+        assert!(removed, "covtool inherits RSTEST_CACHE_REMOTE_TOKEN");
     }
 
     #[test]

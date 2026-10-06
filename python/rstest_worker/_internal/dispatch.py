@@ -148,9 +148,16 @@ BREAKPOINT_HINT = (
     "breakpoint() / pdb.set_trace() needs a terminal, and parallel workers have "
     "none: rerun with -n 0 (or -s) to get the (Pdb) prompt"
 )
+# A one-worker pool exists only for --reruns at -n 0/1, so "-n 0" is what the
+# user already ran: name what does give a prompt.
+RERUN_POOL_BREAKPOINT_HINT = (
+    "breakpoint() / pdb.set_trace() needs a terminal, and --reruns runs even "
+    "-n 0 in a worker without one: rerun with -s (or --reruns 0) to get the "
+    "(Pdb) prompt"
+)
 
 
-def _no_terminal_set_trace(*args, **kwargs) -> None:
+def _no_terminal_set_trace(hint: str):
     """`pdb.set_trace` (and so `breakpoint()`) in a pool worker.
 
     A pool worker's stdin is /dev/null: a real Pdb would read EOF, quit, and
@@ -158,8 +165,12 @@ def _no_terminal_set_trace(*args, **kwargs) -> None:
     whole session (the test fails with a bare `bdb.BdbQuit`, and the items the
     worker still held are never run). Fail just this test instead, saying how
     to get the prompt."""
-    __tracebackhide__ = True
-    pytest.fail(BREAKPOINT_HINT)
+
+    def set_trace(*args, **kwargs) -> None:
+        __tracebackhide__ = True
+        pytest.fail(hint)
+
+    return set_trace
 
 
 # `stopped` reason for items dropped by a run-wide stop (stop_run).
@@ -192,7 +203,9 @@ class PoolDebuggerGuard:
         # set_trace. Config cleanups run last-in-first-out, so ours restores
         # pytest's before pytest restores the original.
         saved = pdb.set_trace
-        pdb.set_trace = _no_terminal_set_trace  # ty: ignore[invalid-assignment]
+        workers = getattr(config, "workerinput", {}).get("workercount")
+        hint = RERUN_POOL_BREAKPOINT_HINT if workers == 1 else BREAKPOINT_HINT
+        pdb.set_trace = _no_terminal_set_trace(hint)
 
         def restore() -> None:
             pdb.set_trace = saved

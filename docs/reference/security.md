@@ -25,7 +25,7 @@ issue originates in pytest itself, please also report it upstream to the
 
 ## Supported versions
 
-rstest is pre-1.0 (0.x). Security fixes land on the **latest release** only;
+rstest is alpha (0.x). Security fixes land on the **latest release** only;
 there are no long-term-support branches yet. Upgrade to the newest version
 before reporting.
 
@@ -259,7 +259,7 @@ job holds:
 
 ### Replay journals
 
-A [replay journal](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)
+A [replay journal](../guides/replay.md)
 records the run's arguments, and `rstest replay` passes them on to pytest
 as they are. They can include `-p <plugin>`, `-c <file>`, `-o <option>` or
 `--rootdir`, which load code or change configuration on your machine.
@@ -347,6 +347,6 @@ that core's own runtime deps are documented under
 ## Governance
 
 rstest is maintained by Kovant AB under a dual
-[Apache-2.0 / MIT license](license.md). It is pre-1.0 software on a single
+[Apache-2.0 / MIT license](license.md). It is alpha (0.x) software on a single
 vendored pytest core tracked forward; weigh that maturity against your risk
 tolerance for a dependency on the CI critical path.

@@ -6,29 +6,38 @@ rstest uses pytest's exit-code vocabulary:
 |---|---|
 | 0 | All tests passed |
 | 1 | Some tests failed; a gating flag fired (table below); or rstest itself rejected the run before or after dispatch (see below) |
-| 2 | Interrupted (e.g. collection errors abort the run, as in pytest); also a **parse error from rstest's argument parser**: a missing flag value (`--python` with no argument) or an unexpected argument (`-n -5`) |
+| 2 | Interrupted (e.g. collection errors abort the run, as in pytest); also a **parse error from rstest's argument parser**: a missing flag value (`--python` with no argument), an unexpected argument (`-n -5`), or a `-n` value that is not a worker count (`-n logical`, `-n 4.0`) |
 | 3 | Internal error (including a worker lost beyond the restart budget) |
 | 4 | **Usage error from the vendored pytest core**: an unrecognized argument forwarded to it, or a bad pytest option |
 | 5 | No tests collected |
 
 **Exit 1 is not only "tests failed".** On a test run, only syntax errors
 caught by rstest's argument parser exit 2. Every other error rstest raises
-itself exits **1**, the same code as a test failure. (The verdict
-subcommands `try`, `migrate-check`, `xdist-removal-check`, `audit` and
-`bisect` differ: their errors exit 2, see
-[below](#gating-flags-and-their-exit-codes).) That
-includes:
+itself exits **1**, the same code as a test failure. The verdict subcommands
+`try`, `migrate-check`, `xdist-removal-check`, `audit` and `bisect` are the
+exception: their errors exit 2 (see
+[below](#gating-flags-and-their-exit-codes)). Errors that exit 1 include:
 
-- a bad value or combination for an rstest flag: a non-integer `-n`,
-  `--dist no`, `--order bogus`, `--shard 1/2` with `-n 0` (or an `-n auto`
-  that resolves to one worker), `--collect lazy` with `--dist loadscope`,
-  and pytest-xdist's `--looponfail` / `-f` (use `--watch`);
+- a bad value or combination for an rstest flag: `--dist no`,
+  `--order bogus`, `--shard 1/2` with `-n 0` (or an `-n auto` that resolves
+  to one worker), `--collect lazy` with `--dist loadscope`, and
+  pytest-xdist's `--looponfail` / `-f` (use `--watch`);
 - `--cache-pull`/`--cache-push` without `--cache-remote`, `cache-compact`
   without a remote, or a failed cache pull;
 - no usable Python interpreter found;
 - `--require-baseline` with a cold duration cache.
 
-These print an `Error:` line on stderr. If your CI must tell "tests failed"
+These print an `Error:` line on stderr. A bad `-n` value is the exception
+among flag values: the argument parser rejects it, so it exits **2** with
+clap's lowercase `error:` line:
+
+```text
+error: invalid value 'logical' for '--numprocesses <NUMPROCESSES>': expected a non-negative integer or "auto"
+```
+
+The same value in `[tool.rstest] numprocesses` is not an error: it is
+reported as a warning and ignored (see
+[Configuration file](cli.md#configuration-file)). If your CI must tell "tests failed"
 from "rstest refused to run", check for a report file
 ([`--junitxml`](cli.md#-junitxml-path) / [`--report-json`](cli.md#-report-json-path)):
 rejected runs write none.
@@ -65,11 +74,11 @@ A monorepo root reads this table differently:
 
 ## Gating flags and their exit codes
 
-Flags that gate CI have exit semantics beyond the table above:
+Flags and subcommands that gate CI have exit semantics beyond the table above:
 
-| Flag | Exit codes |
+| Flag or subcommand | Exit codes |
 |---|---|
-| [`try`](cli-commands.md#try) | `0` outcomes identical to pytest, `1` they differ, `2` couldn't run pytest, rstest refused to dispatch, or an error |
+| [`try`](cli-commands.md#try) | `0` outcomes identical to pytest, `1` they differ, `2` nothing to compare (either side hit a collection error or ran no tests), couldn't run pytest, rstest refused to dispatch, or an error |
 | [`migrate-check`](cli-commands.md#migrate-check) / `--migrate-check-json` | `0` ready, `1` any WILL-bail unstable id **or** parallel-only failure, `2` the parallel pass produced no outcomes or an error |
 | [`xdist-removal-check`](cli-commands.md#xdist-removal-check) / `--xdist-removal-json` | `0` ready to uninstall pytest-xdist, `1` a blocking finding not allowed by `--migrate-allow`, or a `--xdist-trial` session that didn't start or regressed, `2` an error |
 | [`--durations-regress`](cli.md#-durations-regress-ratio) | `1` on a duration regression over the threshold |
@@ -85,7 +94,8 @@ Flags that gate CI have exit semantics beyond the table above:
 | [`replay`](cli-commands.md#replay) | the replayed run's own code; `1` with an `Error:` line when the journal is missing or unreadable |
 | [`shard-verify`](cli-commands.md#shard-verify) | `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
 | [`explain`](cli-commands.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
-| [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, non-zero on any drift |
+| [`install-skills`](cli-commands.md#install-skills) | `0` every bundled skill installed or already up to date, `1` an installed skill differs from the bundled copy and was left alone (pass `--force` to overwrite it) |
+| [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, `1` on any drift (a changed, missing or extra file), a missing `vendor.lock` or `_vendor/`, or no usable Python interpreter (pass one with `--python`) |
 
 For `try`, `migrate-check`, `xdist-removal-check`, `audit` and `bisect`,
 `1` is always a verdict ("found something"), never an rstest error: an
@@ -94,11 +104,12 @@ prints an `Error:` line on stderr, so a CI gate can treat `1` as "fix the
 suite" and `2` as "fix the job". A parse error from rstest's argument parser also exits `2` (with clap's
 `error:` prefix, lowercase).
 
-Put flags such as `--python` **after** the subcommand
-(`rstest try --python .venv/bin/python`). rstest recognizes a subcommand
-only as the first argument, so in `rstest --python X try` the word `try`
-is read as a test path: that is a plain test run, and its exit codes are
-the test-run ones above.
+rstest's own flags such as `--python` may come before or after the
+subcommand (`rstest --python X try` and `rstest try --python X` are the
+same). A subcommand name after a test path or a pytest option's value
+(`rstest -k foo try`) is a usage error (exit `2`), unless a file or
+directory of that name exists, in which case it is a plain test run with
+the test-run exit codes above.
 
 When several gates fire, the exit is still `1`; each gate only raises a `0`
 to `1`, never lowers a failing code.

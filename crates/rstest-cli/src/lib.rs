@@ -11,6 +11,8 @@ mod config;
 mod cov_scope;
 mod coverage_skip;
 mod discover;
+#[cfg(test)]
+mod doc_pages;
 mod doctor;
 mod explain;
 mod incremental;

@@ -1,15 +1,12 @@
 # Run your existing suite
 
-!!! tip "First time? Run `rstest try`"
-    In a project where plain pytest already works, `rstest try` runs your
-    suite once under pytest and once under rstest, then reports whether the
-    outcomes match and how much faster rstest was. It takes as long as both
-    runs; see [`try`](../reference/cli-commands.md#try).
+New to rstest and only evaluating? [`rstest try`](evaluating.md#try-it-first)
+compares a pytest run and an rstest run of your suite in one command.
 
 Run rstest from your project root, exactly where you would run pytest. This
 sample is one run of django-allauth's 2,050-test suite at `-n 4`, the suite
-measured in [Benchmarks](../reference/benchmarks.md) (the middle lines are
-elided):
+measured in [Benchmarks](../reference/benchmarks.md), which reports 8.4s at
+`-n 4`; single runs vary around that (the middle lines are elided):
 
 ```console
 $ rstest -n 4
@@ -32,11 +29,11 @@ how long (`idle` when it has nothing). Here is a small four-test file at
 
 ```text
 rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
-[gw0] ✓ tests/test_first.py::test_add  0.20s [ 25%]
-[gw1] ✓ tests/test_first.py::test_add_zero  0.21s [ 50%]
-[gw1] s tests/test_first.py::test_skipped [ 75%]
+[gw0] ✓ tests/test_math.py::test_add  0.20s [ 25%]
+[gw1] ✓ tests/test_math.py::test_add_zero  0.21s [ 50%]
+[gw1] s tests/test_math.py::test_skipped [ 75%]
 ██████████████████████░░░░░░░░  75% (3/4) ~0s left
-gw0    0.0s tests/test_first.py::test_add_negative
+gw0    0.0s tests/test_math.py::test_add_negative
 gw1    idle
 ```
 
@@ -45,7 +42,7 @@ yellow segments for passed, failed, and skipped or xfail) and pytest's
 summary line:
 
 ```text
-[gw0] ✓ tests/test_first.py::test_add_negative  0.21s [100%]
+[gw0] ✓ tests/test_math.py::test_add_negative  0.21s [100%]
 
 Results (0.61s):
   ██████████████████████████████ 4/4
@@ -67,9 +64,11 @@ runs through a vendored pytest core.
 On an interactive terminal the default style is **`bar`**: a
 pytest-sugar-style view (a `✓`/`✗` line per test, inline failures, a live
 progress bar). When output is piped or running in CI it falls back to the
-compact **`dots`** style shown above, so logs stay stable. Pick any style
-explicitly with [`--output dots|verbose|bar|github|json`](../reference/cli.md#-output-dotsverbosebargithubjson):
-the rest of this page describes `dots`. On a single worker with no
+compact **`dots`** style shown above, so logs stay stable. Pick a style
+explicitly with `--output`: `dots`, `verbose` or `bar` for terminals,
+`github`, `gitlab`, `buildkite`, `teamcity` or `azure` for CI annotations,
+`tap` or `json` for machine-readable streams (see the
+[CLI reference](../reference/cli.md)). The rest of this page describes `dots`. On a single worker with no
 `--output` set, rstest prints pytest's own terminal output instead
 (see [below](#controlling-parallelism)).
 
@@ -101,10 +100,10 @@ finish:
 ```console
 $ rstest -n 2 -v
 rstest 0.8.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
-[gw0] tests/test_first.py::test_add PASSED [ 16%]
-[gw1] tests/test_first.py::test_add_zero PASSED [ 33%]
-[gw1] tests/test_first.py::test_skipped SKIPPED [ 50%]
-[gw0] tests/test_first.py::test_add_negative PASSED [ 66%]
+[gw0] tests/test_math.py::test_add PASSED [ 16%]
+[gw1] tests/test_math.py::test_add_zero PASSED [ 33%]
+[gw1] tests/test_math.py::test_skipped SKIPPED [ 50%]
+[gw0] tests/test_math.py::test_add_negative PASSED [ 66%]
 [gw1] tests/test_login.py::test_logout PASSED [ 83%]
 [gw0] tests/test_login.py::test_session FAILED [100%]
 ```
@@ -134,8 +133,8 @@ cachedir: .pytest_cache
 rootdir: /path/to/project
 collecting ... collected 6 items
 
-tests/test_first.py::test_add PASSED                                     [ 16%]
-tests/test_first.py::test_add_zero PASSED                                [ 33%]
+tests/test_math.py::test_add PASSED                                      [ 16%]
+tests/test_math.py::test_add_zero PASSED                                 [ 33%]
 ...
 ```
 
@@ -152,42 +151,44 @@ $ rstest --lf                           # only last failures
 $ rstest -x                             # stop at first failure (globally)
 ```
 
-rstest adds one selector of its own (not a pytest flag; needs a git
-checkout):
+rstest adds selectors of its own (not pytest flags):
 
 ```console
 $ rstest --changed                      # only tests affected by your edits
+$ rstest --since-green                  # only what changed since the last all-green run
+$ rstest --incremental                  # skip tests that passed and whose code is unchanged
 ```
 
 `--changed` runs just the tests a change can reach, using the per-test
-coverage index when it is warm and the import graph otherwise.
-See [Watch mode](../guides/watch-mode.md) for the on-save version.
+coverage index when it is warm and the import graph otherwise; for gating CI
+use [`--changed-strict`](../reference/cli.md#-changed-strict), which runs
+everything when it can't connect a change. `--since-green` does the same
+against the commit of the last all-passing run. Both need a git checkout.
+[`--incremental`](../reference/cli.md#-incremental) needs no git but a warm
+coverage index. More in [Selecting changed tests](../guides/changed.md);
+see [Watch mode](../guides/watch-mode.md) for the on-save version.
 
 ## Controlling parallelism
 
 ```console
 $ rstest -n 4      # four workers
 $ rstest -n auto   # the default: logical cores, capped for small suites
-$ rstest -n 0      # byte-exact pytest session (same as -n 1)
+$ rstest -n 0      # single-worker mode: one pytest session (same as -n 1)
 $ rstest -n 1      # identical to -n 0
 ```
 
-On a first run `-n auto` never starts more workers than the test files you
-select (one selected test runs one session). Once timings are cached it caps
-by the cached test count and total time instead, so a tiny suite runs on one
-or two workers while a slow single file still spreads across workers. Pass an
-explicit `-n` to override.
+How `-n auto` sizes the pool: it starts from your logical core count and
+never starts more workers than the work you selected. On a cold cache that
+means one worker per selected test file (one selected test runs one
+session). Once timings are cached it counts tests instead of files, and also
+caps at about one worker per 2 seconds of cached test time, since worker
+startup isn't worth it for a sub-second run. So a tiny suite runs on one or
+two workers while a slow single file still spreads across workers. It only
+ever caps downward; pass an explicit `-n` to override.
 
-`-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
-in a single worker process, pytest's own behavior in every detail. With no
-`--output` or `--reruns` set, the terminal output is pytest's own too, byte
-for byte, and rstest only appends its extras (doctor, coverage, gate
-messages) after pytest's summary line. You will see this one mode under
-three names: *byte-exact* in these docs, *pytest-exact* in its run banner
-(printed only when you pin rstest's renderer with `--output`), and
-*single-worker* in the `-n 0` hint of the parallel banner. See
-[Byte-exact mode](../concepts/glossary.md#byte-exact-mode) for what that
-guarantees and how it differs from pytest-xdist's `-n 1`.
+`-n 0` and `-n 1` are the compatibility escape hatch, **single-worker mode**:
+one pytest session with pytest's own behavior and output
+([what it guarantees](../guides/migrate-from-pytest.md#the-escape-hatch)).
 
 Commit your defaults to `[tool.rstest]` in `pyproject.toml` so you don't
 retype flags:
@@ -205,7 +206,7 @@ Command-line flags override these; full key list in
 !!! tip "When to drop to `-n 0`"
     Under ~10 seconds of serial runtime, parallelism rarely pays: worker
     startup amortizes poorly and `-n auto` already caps itself low on small
-    suites. Reach for `-n 0` deliberately when you want byte-exact pytest
+    suites. Reach for `-n 0` deliberately when you want pytest's exact
     behavior: reproducing a difference from pytest, or running a suite
     whose tests depend on order across files (if the dependency is only
     within a file, `--dist loadfile` keeps each file on one worker).
@@ -218,7 +219,7 @@ rstest records per-test durations in `.rstest_cache/`. From the second run
 on, the scheduler starts your slowest tests first, which is what keeps
 workers busy at the end of the run instead of waiting on one long test.
 On wait-heavy suites this is dramatic: aiohttp's suite more than halves
-between its cold and warm runs (150s to 67s) (see [Benchmarks](../reference/benchmarks.md)).
+between its cold and warm runs (150s to 67s; see [Benchmarks](../reference/benchmarks.md)).
 
 ## When something fails
 
@@ -231,19 +232,9 @@ $ rstest --doctor    # and if the suite feels slow, ask why
     If tests fail *only* under parallelism on a freshly migrated suite, run
     [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) first: it
     classifies each parallel-only failure (for example order dependency,
-    isolation leak, or wall-clock timing) and names the fix, so you don't triage by
-    hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
-
-## Which command when?
-
-Four commands answer four different questions:
-
-| You want to… | Run | It tells you |
-|---|---|---|
-| Check if rstest is worth adopting (before you commit) | [`rstest try`](../reference/cli-commands.md#try) | Runs your suite under pytest **and** rstest, diffs outcomes, reports the speedup: zero risk |
-| Fix tests that fail **only** in parallel after switching | [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) | Onboarding preflight: finds unstable test ids first, then classifies each parallel-only failure (order dependency / isolation leak / timing / unstable id) and names the fix |
-| Quarantine the parallel-unsafe tests in one step | [`rstest audit`](../reference/cli-commands.md#audit) | Focused fix loop: same classification, repeatable to catch intermittent races, plus a ready-to-paste `conftest.py` block marking exactly the serial-fixable tests `@pytest.mark.serial` |
-| Understand why a passing suite is **slow** | [`rstest --doctor`](../guides/doctor.md) | Plain-English breakdown of where test time goes (wait-bound, a long-pole test, poor parallel balance) |
+    wall-clock timing, or an isolation leak, where one test leaves global
+    state behind that breaks a later test on the same worker) and names the
+    fix, so you don't triage by hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
 
 ## A test that isn't parallel-safe
 

@@ -6,17 +6,19 @@ Install rstest from PyPI with pip:
 $ pip install rstest
 ```
 
-Or add it to a uv-managed project (installs alongside your test deps):
+Or add it as a dev dependency with your project tool:
 
 ```console
-$ uv add --dev rstest
+$ uv add --dev rstest           # uv
+$ poetry add --group dev rstest # Poetry
+$ pdm add -dG test rstest       # PDM
 ```
 
 Install rstest into the **same environment as your test dependencies**:
 workers run your tests in that interpreter (see
 [Which Python does rstest use?](#which-python-does-rstest-use)). A
-standalone tool install is covered in
-[Binary vs worker runtime](#binary-vs-worker-runtime-for-tool-scoped-installs).
+`pipx` or `uv tool` install is not a substitute
+([why](#tool-install)).
 
 ## Verify your install
 
@@ -35,6 +37,9 @@ In an empty folder the same `rstest --co -q` prints `no tests collected` and
 exits with code 5. That is expected: the install works, there is just nothing
 to run yet.
 
+To uninstall, run `pip uninstall rstest` (or your tool's `remove`) and
+delete `.rstest_cache/`.
+
 ## Requirements
 
 - Python **3.10 or newer** in the environment whose tests you run. This
@@ -42,12 +47,10 @@ to run yet.
   2025 and no longer receives security fixes, so rstest tracks 3.10+.
 - macOS on Apple silicon (arm64), Linux, or Windows. There is no Intel
   (x86_64) macOS wheel and no source distribution, so `pip install rstest`
-  fails on an Intel Mac. Windows uses an anonymous-pipe transport
-  (Unix uses POSIX pipes); the full test gate runs on `windows-latest`
-  in CI on every commit, and wheels are built and smoke-tested there.
-  The broad public-suite corpus is run on macOS/Linux, so Windows is
-  validated by the gate's end-to-end checks rather than at corpus
-  scale.
+  fails on an Intel Mac; build a wheel [from source](#from-source) there
+  instead. Windows (x86_64 and arm64) is gated in CI on every commit;
+  install notes, platform differences and validation level are in
+  [Running on Windows](../guides/windows.md#install).
 
 rstest installs its own runtime dependencies (`msgpack`, `pluggy`,
 `iniconfig`, `packaging`, `pygments`, plus `exceptiongroup` and `tomli` on
@@ -55,13 +58,31 @@ Python 3.10 and `colorama` on Windows). It does **not** require pytest to be
 installed (it is not a dependency, so installing rstest never installs or
 upgrades pytest), and it does not conflict with an installed pytest either: the
 vendored pytest core lives inside the `rstest_worker` package and never
-touches your `pytest` installation. (One exception: `rstest try` runs your
-suite under plain `pytest` to produce a baseline, so *that* command needs
-pytest installed in the project's environment (`python -m pytest` must work); see [`try`](../reference/cli-commands.md#try).)
+touches your `pytest` installation. The one exception is
+[`rstest try`](../reference/cli-commands.md#try): it runs a plain-pytest
+baseline, so that command needs `python -m pytest` to work in the project
+environment.
 
-Tests always run on the vendored pytest core (currently 9.1.1), whatever
-pytest version your project or its plugins pin. If a plugin still requires
-an older pytest, see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
+The wheel ships a single `rstest` binary (the Rust orchestrator), the
+`rstest_worker` Python package, and the vendored pytest core.
+
+First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
+it covers the common install/first-run failures (no usable interpreter or a
+missing worker shim, rstest picking the wrong Python, `rstest: command not
+found`, and import errors from a Python older than 3.10).
+
+## Your suite runs on pytest 9
+
+Adopting rstest adopts pytest 9. Tests always run on the vendored pytest core
+(currently 9.1.1), whatever pytest version your project or its plugins pin,
+and there is no older-core build. A plugin's `pytest<9` install pin is inert
+at runtime: the plugin loads into the vendored core and must support pytest 9
+itself ([Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core)).
+
+pytest 9 is a cleanup major: it removes APIs that already warned throughout
+8.x. A suite that is warning-clean on a recent pytest 8.x is almost always
+already pytest-9-clean. If it isn't, clear the deprecations first, the same
+upgrade you would owe pytest anyway.
 
 !!! note "Still on pytest 8?"
     Your installed pytest does not need upgrading to install rstest. Your
@@ -77,33 +98,21 @@ an older pytest, see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
     the short list and the `rstest -n 0` backstop in
     [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md#the-method).
 
-First run erroring? See [Troubleshooting](../reference/troubleshooting.md):
-it covers the common install/first-run failures (no usable interpreter or a
-missing worker shim, rstest picking the wrong Python, `rstest: command not
-found`, and import errors from a Python older than 3.10).
+## A global `rstest` command (pipx, uv tool) { #tool-install }
 
-The wheel ships a single `rstest` binary (the Rust orchestrator), the
-`rstest_worker` Python package, and the vendored pytest core.
+<span id="binary-vs-worker-runtime-for-tool-scoped-installs"></span>
+`uv tool install rstest`, `pipx install rstest` or `uvx rstest` gives you an
+`rstest` command on your PATH, so you can type `rstest` in any project
+without activating its virtualenv or prefixing `uv run`. That is all it
+adds. It can't run your tests on its own: the command finds your project's
+interpreter ([Which Python does rstest use?](#which-python-does-rstest-use)),
+and the workers it starts there import the `rstest_worker` package and its
+dependencies (listed [above](#requirements)) from your project environment.
+If the project's virtualenv lacks rstest, the run stops with
+[an error naming that venv](../reference/troubleshooting.md#found-venvbinpython-but-rstest-is-not-installed-in-it).
 
-## Binary vs worker runtime (for tool-scoped installs)
-
-rstest can also be installed as a standalone tool:
-
-```console
-$ uv tool install rstest      # or run ad hoc: uvx rstest --version
-```
-
-A tool-scoped install (`uv tool install rstest`, `uvx rstest`) still runs
-your project's tests: rstest discovers the project interpreter at runtime
-(see [Which Python does rstest use?](#which-python-does-rstest-use)), so the
-tool env and the test env stay separate. Two things therefore live in two
-places: the `rstest` **binary** can live anywhere (tool env, `~/bin`), but the
-**worker** runtime (the `rstest_worker` package and its dependencies:
-`msgpack` for the worker protocol, plus `pluggy`, `iniconfig`, `packaging`
-and `pygments` for the vendored pytest core) must be importable by the *project* interpreter, because workers run your
-tests in your environment. `pip install rstest` / `uv add --dev rstest` into
-the project venv provides both at once; a tool-only install needs rstest in
-the project venv too.
+So install rstest into the project environment in any case. That install
+already provides the `rstest` command, which makes a tool install optional.
 
 ## From a wheel or git
 

@@ -371,13 +371,27 @@ pub fn save(run: &Run, collected: &Collected) {
     // concurrent process/shard sharing this cwd cache can't clobber the merge
     // with a stale snapshot.
     cache::with_lock(|| {
+        let path = cache::file(FILE);
+        let carried = regressed_baselines(&load_raw_from(&path), run);
         persist_to(
-            &cache::file(FILE),
-            run.learned_durations().map(|(id, d)| (id.clone(), d)),
+            &path,
+            run.learned_durations()
+                .map(|(id, d)| (id.clone(), d))
+                .chain(carried),
             collected,
             &project_base(),
         );
     });
+}
+
+/// The recorded time of each test `--durations-regress` flagged, to write back
+/// re-tagged with the file as collected. Leaving them out of the save is not
+/// enough: when the same change edited the test's file, the prune drops the
+/// old entry as stale, the next run has no baseline, and the regression passes.
+fn regressed_baselines(raw: &HashMap<String, Timing>, run: &Run) -> Vec<(String, f64)> {
+    run.duration_regressed_nodeids()
+        .filter_map(|id| raw.get(id).map(|t| (id.clone(), t.secs)))
+        .collect()
 }
 
 /// Land remote-pulled durations into the cache at `path`. The remote stores
@@ -871,6 +885,54 @@ mod tests {
         // Deleted file -> dropped.
         std::fs::remove_file(&file).unwrap();
         assert!(fresh(one(), &root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regressed_baseline_survives_an_edit_to_its_file() {
+        // The change both edited test_a.py and slowed test_a.py::slow down: the
+        // flagged test's old time must be written back under the new hash, not
+        // pruned as stale, or the next --durations-regress run has no baseline.
+        let root = temp_root("regressed");
+        let file = root.join("test_a.py");
+        std::fs::write(&file, b"def test_slow(): pass\n").unwrap();
+        let old = content_hash(&file);
+        let path = root.join("durations.json");
+        let raw = HashMap::from([
+            (
+                "test_a.py::slow".to_string(),
+                tagged(0.1, "test_a.py", old.clone()),
+            ),
+            ("test_a.py::ok".to_string(), tagged(0.2, "test_a.py", old)),
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        std::fs::write(&file, b"# edited\ndef test_slow(): pass\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+
+        let mut run = Run::default();
+        run.record(None, call_report("test_a.py::slow", "passed", 1.2));
+        run.mark_duration_regressed("test_a.py::slow");
+        let ids = ["test_a.py::slow".to_string()];
+        let collected = collected_at(&root, &ids.iter().collect::<Vec<_>>());
+        let carried = regressed_baselines(&load_raw_from(&path), &run);
+        persist_to(
+            &path,
+            run.learned_durations()
+                .map(|(id, d)| (id.clone(), d))
+                .chain(carried),
+            &collected,
+            &root,
+        );
+
+        let after = fresh(load_raw_from(&path), &root);
+        assert_eq!(after.get("test_a.py::slow").map(|t| t.secs), Some(0.1));
+        // An unflagged test in the edited file is still pruned, to be re-timed.
+        assert!(!after.contains_key("test_a.py::ok"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

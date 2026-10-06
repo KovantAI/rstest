@@ -381,6 +381,10 @@ fn resolve_run_config(
     // Validate `--doctor-fail-on` conditions up front: a typo'd metric or a
     // missing operator aborts now, never silently as a gate that can't fire.
     let doctor_gate = doctor::parse_conditions(&cli.doctor_fail_on, sink)?;
+    // Same for the --durations-regress ratio: refuse it before the suite runs.
+    if let Some(ratio) = cli.durations_regress {
+        gates::validate_regress_ratio(ratio)?;
+    }
     let doctor = cli.doctor
         || cli.doctor_json.is_some()
         || cli.doctor_md.is_some()
@@ -1004,6 +1008,9 @@ fn maybe_dispatch_monorepo(
     if let Some(o) = &cli.order {
         o.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?;
     }
+    if let Some(ratio) = cli.durations_regress {
+        gates::validate_regress_ratio(ratio)?;
+    }
     monorepo::execute_monorepo(cli, args, &cwd, projects, run_uid, sink).map(ControlFlow::Break)
 }
 
@@ -1056,7 +1063,7 @@ fn print_run_banner(
     let worker_desc = if single_worker_reruns {
         "single worker (rerun pool; not byte-exact)".to_string()
     } else if n <= 1 {
-        "single worker (pytest-exact mode)".to_string()
+        "single-worker mode".to_string()
     } else {
         format!("{n} workers (parallel by default; -n 0 for single-worker mode)")
     };
@@ -2109,7 +2116,13 @@ fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
     if value == "auto" {
         return Ok(auto_workers(args));
     }
-    Ok(value.parse()?)
+    value.parse().with_context(|| {
+        format!(
+            "invalid worker count {value:?} for -n/--numprocesses or [tool.rstest] \
+             numprocesses (expected {})",
+            config::NUMPROCESSES_EXPECTED
+        )
+    })
 }
 
 /// `auto` = logical cores, capped by what the selected tests can use (worker
@@ -2635,9 +2648,9 @@ mod tests {
         check_order_shuffle, check_require_baseline, collect_lazy, dispatch_command,
         fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
         mark_session_flaky, names_a_selection, names_existing_path, order_ignored_warning,
-        parse_duration_secs, parse_numprocesses, reject_looponfail, requests_doctests,
-        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
-        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        parse_duration_secs, parse_numprocesses, print_run_banner, reject_looponfail,
+        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
+        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
         validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
         warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
@@ -2834,8 +2847,13 @@ mod tests {
     fn parse_numprocesses_parses_and_rejects() {
         assert_eq!(parse_numprocesses("4", &[]).unwrap(), 4);
         assert_eq!(parse_numprocesses("0", &[]).unwrap(), 0);
-        assert!(parse_numprocesses("abc", &[]).is_err());
         assert!(parse_numprocesses("-1", &[]).is_err());
+        // Regression: the error names the bad value and where it comes from,
+        // not just a bare `invalid digit found in string`.
+        let err = format!("{:#}", parse_numprocesses("abc", &[]).unwrap_err());
+        assert!(err.contains("\"abc\""), "{err}");
+        assert!(err.contains("--numprocesses"), "{err}");
+        assert!(err.contains("non-negative integer or \"auto\""), "{err}");
     }
 
     #[test]
@@ -4018,5 +4036,14 @@ mod tests {
         // Nothing was attached, so emitting is a no-op (no panic writing to a
         // closed/absent stream).
         sink.emit_event(serde_json::json!({"event": "sessionfinish"}));
+    }
+
+    #[test]
+    fn banner_names_single_worker_mode() {
+        let (mut sink, cap) = Sink::captured();
+        print_run_banner(progress::Mode::Dots, false, false, 0, &mut sink);
+        let line = cap.out();
+        assert!(line.contains("— single-worker mode"), "got {line}");
+        assert!(!line.contains("pytest-exact"), "got {line}");
     }
 }

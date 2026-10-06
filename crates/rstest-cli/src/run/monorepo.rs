@@ -100,7 +100,7 @@ pub(super) fn execute_monorepo(
         })
         .collect();
     // A project pinning its own numprocesses (e.g. 0 for an
-    // order-sensitive suite that needs pytest-exact mode) keeps it.
+    // order-sensitive suite that needs single-worker mode) keeps it.
     let fixed: Vec<Option<usize>> = projects.iter().map(|p| mono::project_fixed_n(p)).collect();
     let shares = mono::plan_shares_with_fixed(&costs, &fixed, budget);
     sink.out_line(&format!(

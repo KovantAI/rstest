@@ -812,3 +812,24 @@ def test_pool_debugger_guard_fails_breakpoint_with_a_hint():
         for fn in reversed(cleanups):
             fn()
     assert pdb.set_trace is original
+
+
+def test_pool_debugger_guard_hint_in_the_one_worker_rerun_pool():
+    # --reruns at -n 0/1 runs a one-worker pool: "-n 0" is what the user
+    # already ran, so the hint must name -s / --reruns 0 instead.
+    import pdb
+
+    cleanups: list[Any] = []
+    original = pdb.set_trace
+    plugin = ItemDispatchPlugin(FakeConn())
+    config = SimpleNamespace(add_cleanup=cleanups.append, workerinput={"workercount": 1})
+    plugin.pytest_configure_debugger_guard(config)
+    try:
+        with pytest.raises(pytest.fail.Exception) as exc:
+            pdb.set_trace()
+        assert "--reruns 0" in str(exc.value)
+        assert "rerun with -n 0" not in str(exc.value)
+    finally:
+        for fn in reversed(cleanups):
+            fn()
+    assert pdb.set_trace is original

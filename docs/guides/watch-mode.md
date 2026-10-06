@@ -46,13 +46,20 @@ Type `q` (or `quit`) and Enter between runs, or press Ctrl+C, to end the
 session. The `q` option is left out, and the prompt says only `Ctrl+C`, when
 the run hands pytest the terminal (`-s`, `--capture=...`, `--pdb`, `--trace`,
 `--co`/`--collect-only`, `--sw`/`--stepwise`, `--sw-skip`/`--stepwise-skip`,
-`--sw-reset`/`--stepwise-reset`, rstest's `--debug`) or rstest runs as a
-background job (`rstest --watch &`).
+`--sw-reset`/`--stepwise-reset`, rstest's `--debug`): stdin belongs to the
+test process there, so rstest does not read it.
 
-Quitting with `q` exits **0**, whatever the last cycle's result
-was: the `last exit` in the prompt is informational, so don't use `--watch` as
-a pass/fail gate. An rstest-level error (not a test failure), such as an
-invalid `--dist` mode or no usable interpreter, ends the session with exit 1.
+Closing stdin (`nohup`, `< /dev/null`) does not end the session. Started as a
+background job (`rstest --watch &`), rstest leaves stdin alone so the shell
+doesn't suspend it, and `q` is not offered; stop it with `kill` or `fg`. A
+session backgrounded later (Ctrl+Z, then `bg`) may be suspended for tty input;
+`fg` resumes it.
+
+Quitting with `q` exits **0**, whatever the last cycle's result was: the
+`last exit` in the prompt is informational, so don't use `--watch` as a
+pass/fail gate. Ctrl+C ends the process by signal. An rstest-level error (not
+a test failure), such as a bad flag combination, an invalid `--dist` mode, a
+failed `--cache-pull` or no usable interpreter, ends the session with exit 1.
 
 ## Rerun policy
 
@@ -74,19 +81,28 @@ drop (`-k api` keeps `api` even when an `api/` directory exists; see
 
 ## Per-cycle cost
 
-Each cycle spawns fresh workers (nothing is reused between cycles), so a
-rerun has a small fixed cost on top of your tests' own time. Measured from
-save to result on a one-test project on a development laptop:
+Each cycle spawns fresh workers at every worker count (nothing is reused
+between cycles), so an edited module is always re-imported from scratch and a
+rerun cannot show a stale-import false green. The price is a small fixed cost
+on top of your tests' own time. Measured from save to result on a one-test
+project (Apple M4 Max, rstest 0.8.0, CPython 3.13; median of 10 saves, min-max
+in parentheses):
 
-| Worker count | Save to result |
-|---|---|
-| `-n 0` | ~400ms |
-| `-n 2` | ~405ms |
+| Worker count | Save to rerun start | Rerun (spawn, collect, test, report) | Save to result |
+|---|---|---|---|
+| `-n 0` | 314ms (312-317) | 162ms (159-168) | 476ms (472-482) |
+| `-n 2` | 314ms (311-317) | 202ms (181-211) | 517ms (497-523) |
 
-That is the 300ms debounce plus roughly 100ms for worker startup and
-collection. Worker startup grows slightly with `-n`, and on a large tree
-the incremental import-graph reselection adds tens of milliseconds per save
-(see [`--watch`](../reference/cli.md#-watch)).
+The first column is the 300ms debounce plus file-event delivery; the rerun
+itself costs 160-200ms here, growing with `-n`. Reproduce with
+`python3 corpus/watch_cycle.py --out <file>`; the measured run is
+[`corpus/bench-results/2026-10-06-watch-cycle.json`](https://github.com/KovantAI/rstest/tree/main/corpus/bench-results).
+
+Selection is **incremental** across the session: the import graph stays warm,
+and each save re-parses only files whose mtime or size changed (adding or
+deleting a `.py` file rebuilds the graph from cached parses). On a large tree
+that keeps reselection to tens of milliseconds per save, roughly 4x faster
+per save than a full rebuild on a 1,600-file tree.
 
 ## Combining with other flags
 
@@ -102,13 +118,26 @@ The duration cache and last-failed state update on every cycle, so `--lf`
 and slow-test-first scheduling stay warm throughout the session.
 
 `rstest --watch --reruns N` retries failures on every cycle, with two
-catches: at `-n 0`/`-n 1` it leaves byte-exact mode and runs a one-worker
+catches: at `-n 0`/`-n 1` it leaves single-worker mode and runs a one-worker
 pool (`RSTEST_WORKER_ID=gw0`), and it is inert under a passthrough flag
 (`--pdb`, `-s`, `--co`, ...), which rstest warns about. See
 [`--reruns`](../reference/cli.md#-reruns-n).
 
 ### Dispatch order and worker count
 
-Watch reruns default to [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast): tests that recently failed or flaked (from `flakes.json`) run first, then the rest in slow-first throughput order, so a red surfaces as early as possible on each save. Pair it with `-x` to stop at that first red; pass `--order throughput` (or set `[tool.rstest] order`) to opt out. Ordering only applies with two or more workers.
+Watch reruns default to
+[`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast): tests
+that recently failed or flaked (from `flakes.json`) run first, then the rest
+in slow-first throughput order, so a red surfaces as early as possible on each
+save. Pair it with `-x`/`--maxfail=1` to stop at that first red; pass
+`--order throughput` (or set `[tool.rstest] order`) to opt back into packing.
+Ordering only applies with two or more workers.
 
-Without `-n`, rstest uses `-n auto`, which caps the pool by test-file count and by cached suite time (about one worker per 2s of tests). A small, fast suite with a warm cache therefore often runs a single worker locally: [byte-exact mode](../concepts/glossary.md#byte-exact-mode), no worker identity, and fail-fast ordering has no effect. Parallel-only failures you see in CI won't reproduce that way; pass `-n 2` or more (`rstest --watch -n 2`) when you want local runs to parallelize like CI.
+Without `-n`, rstest uses `-n auto`, which caps the pool by test-file count
+and by cached suite time (about one worker per 2s of tests), and sizes it
+again on every cycle. A small, fast suite with a warm cache therefore often
+runs a single worker locally:
+[single-worker mode](../concepts/glossary.md#single-worker-mode), no worker
+identity, and fail-fast ordering has no effect. Parallel-only failures you see
+in CI won't reproduce that way; pass `-n 2` or more (`rstest --watch -n 2`)
+when you want local runs to parallelize like CI.

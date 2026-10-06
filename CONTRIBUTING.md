@@ -9,8 +9,9 @@ Open an issue on the
 [GitHub repository](https://github.com/KovantAI/rstest/issues).
 
 For a **behavioral difference from pytest**, include the `rstest -n 0`
-result. At `-n 0` rstest is pytest-exact: identical behavior there is the
-compatibility contract, so a divergence is a bug we want to hear about.
+result. At `-n 0` (single-worker mode) rstest behaves exactly like pytest:
+that is the compatibility contract, so a divergence is a bug we want to hear
+about.
 
 For **parallel-only failures**, work through the
 [three-run diagnosis](https://python-rstest.readthedocs.io/en/stable/guides/parallel-safety/#diagnosing-a-parallel-only-failure)
@@ -139,7 +140,8 @@ provenance and update procedure.
 
 ## Pull requests
 
-- Keep the compatibility contract intact: `-n 0` stays pytest-exact.
+- Keep the compatibility contract intact: `-n 0` (single-worker mode) stays
+  identical to pytest.
 - Add or update tests for behavior changes.
 - Note user-facing changes in `CHANGELOG.md`.
 - Match the style of the surrounding code.

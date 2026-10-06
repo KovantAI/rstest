@@ -1,0 +1,5711 @@
+{
+ "notes": [
+  "Evidence run for the controller-bound reading, not a timing benchmark: one untimed warm-up per runner, then 3 sampled runs each, psutil sampling every 0.5s (corpus/cpu_sample.py).",
+  "root = the process the command started: pytest-xdist's controller (python -m pytest) or the rstest driver. workers = its descendants.",
+  "rc=1 on every run: pandas 3.0.5 has 679 failing tests on this machine under serial pytest too (same count under both runners).",
+  "Walls run above the published bench medians: a video call (Microsoft Teams, ~1.5 cores of WindowServer/camera/audio load) was active on the machine during these runs.",
+  "rstest commit cd0b03d + uncommitted working tree, rstest 0.8.0; pandas venv: CPython 3.13.13, pytest 9.1.1, pytest-xdist 3.8.0."
+ ],
+ "date": "2026-10-06",
+ "runs": [
+  {
+   "label": "xdist -n 8 (--dist load)",
+   "cmd": [
+    "/Users/drorasaf/code/rstest/corpus/work/pandas/venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "recorder",
+    "-q",
+    "-n",
+    "8",
+    "--pyargs",
+    "pandas",
+    "-m",
+    "not slow and not network and not db"
+   ],
+   "rc": 1,
+   "wall": 97.7,
+   "summary": {
+    "samples": 189,
+    "root_pct_median": 99.8,
+    "root_share_at_or_above_90pct": 0.725,
+    "workers_mean_pct_median": 91.0,
+    "root_cpu_s": 73.8,
+    "workers_cpu_s": 320.6,
+    "workers": 8,
+    "workers_busy_share": 0.41
+   },
+   "series": [
+    {
+     "t": 1.02,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 1.53,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 2.04,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.9
+    },
+    {
+     "t": 2.55,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 3.06,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 98.0
+    },
+    {
+     "t": 3.57,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 97.9
+    },
+    {
+     "t": 4.08,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 4.6,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 95.9
+    },
+    {
+     "t": 5.1,
+     "root_pct": 1.1,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 5.62,
+     "root_pct": 1.3,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 6.13,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 88.9
+    },
+    {
+     "t": 6.64,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 7.15,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 7.66,
+     "root_pct": 0.3,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 8.18,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.6
+    },
+    {
+     "t": 8.69,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 9.2,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.2
+    },
+    {
+     "t": 9.71,
+     "root_pct": 80.0,
+     "workers": 8,
+     "workers_mean_pct": 22.8
+    },
+    {
+     "t": 10.22,
+     "root_pct": 99.8,
+     "workers": 8,
+     "workers_mean_pct": 1.8
+    },
+    {
+     "t": 10.73,
+     "root_pct": 98.2,
+     "workers": 8,
+     "workers_mean_pct": 19.4
+    },
+    {
+     "t": 11.25,
+     "root_pct": 105.3,
+     "workers": 8,
+     "workers_mean_pct": 83.2
+    },
+    {
+     "t": 11.76,
+     "root_pct": 105.0,
+     "workers": 8,
+     "workers_mean_pct": 81.0
+    },
+    {
+     "t": 12.27,
+     "root_pct": 104.9,
+     "workers": 8,
+     "workers_mean_pct": 75.5
+    },
+    {
+     "t": 12.78,
+     "root_pct": 105.3,
+     "workers": 8,
+     "workers_mean_pct": 74.0
+    },
+    {
+     "t": 13.29,
+     "root_pct": 104.0,
+     "workers": 8,
+     "workers_mean_pct": 74.8
+    },
+    {
+     "t": 13.8,
+     "root_pct": 104.1,
+     "workers": 8,
+     "workers_mean_pct": 62.7
+    },
+    {
+     "t": 14.32,
+     "root_pct": 104.3,
+     "workers": 8,
+     "workers_mean_pct": 81.5
+    },
+    {
+     "t": 14.83,
+     "root_pct": 105.2,
+     "workers": 8,
+     "workers_mean_pct": 87.0
+    },
+    {
+     "t": 15.34,
+     "root_pct": 101.9,
+     "workers": 8,
+     "workers_mean_pct": 69.9
+    },
+    {
+     "t": 15.85,
+     "root_pct": 104.7,
+     "workers": 8,
+     "workers_mean_pct": 88.4
+    },
+    {
+     "t": 16.36,
+     "root_pct": 95.9,
+     "workers": 8,
+     "workers_mean_pct": 86.8
+    },
+    {
+     "t": 16.87,
+     "root_pct": 102.2,
+     "workers": 8,
+     "workers_mean_pct": 95.4
+    },
+    {
+     "t": 17.39,
+     "root_pct": 100.2,
+     "workers": 8,
+     "workers_mean_pct": 73.2
+    },
+    {
+     "t": 17.9,
+     "root_pct": 103.3,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 18.41,
+     "root_pct": 86.1,
+     "workers": 8,
+     "workers_mean_pct": 97.5
+    },
+    {
+     "t": 18.92,
+     "root_pct": 106.1,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 19.44,
+     "root_pct": 108.8,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 19.95,
+     "root_pct": 94.6,
+     "workers": 8,
+     "workers_mean_pct": 84.6
+    },
+    {
+     "t": 20.46,
+     "root_pct": 106.0,
+     "workers": 8,
+     "workers_mean_pct": 97.9
+    },
+    {
+     "t": 20.98,
+     "root_pct": 106.0,
+     "workers": 8,
+     "workers_mean_pct": 99.6
+    },
+    {
+     "t": 21.49,
+     "root_pct": 109.1,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 22.0,
+     "root_pct": 98.4,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 22.51,
+     "root_pct": 104.2,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 23.03,
+     "root_pct": 99.3,
+     "workers": 8,
+     "workers_mean_pct": 82.7
+    },
+    {
+     "t": 23.54,
+     "root_pct": 108.3,
+     "workers": 8,
+     "workers_mean_pct": 87.1
+    },
+    {
+     "t": 24.05,
+     "root_pct": 92.6,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 24.56,
+     "root_pct": 94.2,
+     "workers": 8,
+     "workers_mean_pct": 87.9
+    },
+    {
+     "t": 25.07,
+     "root_pct": 110.1,
+     "workers": 8,
+     "workers_mean_pct": 86.9
+    },
+    {
+     "t": 25.59,
+     "root_pct": 104.1,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 26.1,
+     "root_pct": 94.7,
+     "workers": 8,
+     "workers_mean_pct": 95.4
+    },
+    {
+     "t": 26.61,
+     "root_pct": 111.5,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 27.13,
+     "root_pct": 102.8,
+     "workers": 8,
+     "workers_mean_pct": 39.5
+    },
+    {
+     "t": 27.64,
+     "root_pct": 106.6,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 28.15,
+     "root_pct": 105.6,
+     "workers": 8,
+     "workers_mean_pct": 91.4
+    },
+    {
+     "t": 28.66,
+     "root_pct": 105.0,
+     "workers": 8,
+     "workers_mean_pct": 87.5
+    },
+    {
+     "t": 29.17,
+     "root_pct": 104.7,
+     "workers": 8,
+     "workers_mean_pct": 87.7
+    },
+    {
+     "t": 29.68,
+     "root_pct": 105.2,
+     "workers": 8,
+     "workers_mean_pct": 88.5
+    },
+    {
+     "t": 30.19,
+     "root_pct": 102.7,
+     "workers": 8,
+     "workers_mean_pct": 56.8
+    },
+    {
+     "t": 30.71,
+     "root_pct": 105.3,
+     "workers": 8,
+     "workers_mean_pct": 77.5
+    },
+    {
+     "t": 31.22,
+     "root_pct": 108.3,
+     "workers": 8,
+     "workers_mean_pct": 99.5
+    },
+    {
+     "t": 31.73,
+     "root_pct": 75.6,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 32.24,
+     "root_pct": 81.3,
+     "workers": 8,
+     "workers_mean_pct": 96.1
+    },
+    {
+     "t": 32.75,
+     "root_pct": 73.6,
+     "workers": 8,
+     "workers_mean_pct": 77.7
+    },
+    {
+     "t": 33.27,
+     "root_pct": 103.6,
+     "workers": 8,
+     "workers_mean_pct": 97.9
+    },
+    {
+     "t": 33.78,
+     "root_pct": 94.4,
+     "workers": 8,
+     "workers_mean_pct": 88.7
+    },
+    {
+     "t": 34.29,
+     "root_pct": 109.5,
+     "workers": 8,
+     "workers_mean_pct": 99.7
+    },
+    {
+     "t": 34.8,
+     "root_pct": 100.3,
+     "workers": 8,
+     "workers_mean_pct": 93.6
+    },
+    {
+     "t": 35.31,
+     "root_pct": 104.3,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 35.83,
+     "root_pct": 103.0,
+     "workers": 8,
+     "workers_mean_pct": 86.2
+    },
+    {
+     "t": 36.34,
+     "root_pct": 102.0,
+     "workers": 8,
+     "workers_mean_pct": 32.5
+    },
+    {
+     "t": 36.85,
+     "root_pct": 105.3,
+     "workers": 8,
+     "workers_mean_pct": 97.4
+    },
+    {
+     "t": 37.36,
+     "root_pct": 102.2,
+     "workers": 8,
+     "workers_mean_pct": 85.1
+    },
+    {
+     "t": 37.88,
+     "root_pct": 102.5,
+     "workers": 8,
+     "workers_mean_pct": 93.5
+    },
+    {
+     "t": 38.39,
+     "root_pct": 103.2,
+     "workers": 8,
+     "workers_mean_pct": 86.4
+    },
+    {
+     "t": 38.91,
+     "root_pct": 107.8,
+     "workers": 8,
+     "workers_mean_pct": 85.1
+    },
+    {
+     "t": 39.42,
+     "root_pct": 107.8,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 39.93,
+     "root_pct": 100.3,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 40.44,
+     "root_pct": 16.9,
+     "workers": 8,
+     "workers_mean_pct": 82.8
+    },
+    {
+     "t": 40.96,
+     "root_pct": 6.6,
+     "workers": 8,
+     "workers_mean_pct": 90.5
+    },
+    {
+     "t": 41.47,
+     "root_pct": 8.3,
+     "workers": 8,
+     "workers_mean_pct": 64.9
+    },
+    {
+     "t": 41.98,
+     "root_pct": 6.8,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 42.49,
+     "root_pct": 8.3,
+     "workers": 8,
+     "workers_mean_pct": 12.0
+    },
+    {
+     "t": 43.01,
+     "root_pct": 1.5,
+     "workers": 8,
+     "workers_mean_pct": 12.4
+    },
+    {
+     "t": 43.52,
+     "root_pct": 2.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 44.03,
+     "root_pct": 1.3,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 44.54,
+     "root_pct": 2.5,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 45.05,
+     "root_pct": 1.2,
+     "workers": 8,
+     "workers_mean_pct": 12.1
+    },
+    {
+     "t": 45.56,
+     "root_pct": 0.7,
+     "workers": 8,
+     "workers_mean_pct": 12.1
+    },
+    {
+     "t": 46.07,
+     "root_pct": 1.6,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 46.58,
+     "root_pct": 1.7,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 47.1,
+     "root_pct": 1.5,
+     "workers": 8,
+     "workers_mean_pct": 12.4
+    },
+    {
+     "t": 47.61,
+     "root_pct": 1.7,
+     "workers": 8,
+     "workers_mean_pct": 12.6
+    },
+    {
+     "t": 48.12,
+     "root_pct": 1.8,
+     "workers": 8,
+     "workers_mean_pct": 12.2
+    },
+    {
+     "t": 48.63,
+     "root_pct": 1.5,
+     "workers": 8,
+     "workers_mean_pct": 12.3
+    },
+    {
+     "t": 49.14,
+     "root_pct": 1.9,
+     "workers": 8,
+     "workers_mean_pct": 12.7
+    },
+    {
+     "t": 49.65,
+     "root_pct": 1.2,
+     "workers": 8,
+     "workers_mean_pct": 73.2
+    },
+    {
+     "t": 50.16,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 50.68,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.6
+    },
+    {
+     "t": 51.19,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.7
+    },
+    {
+     "t": 51.7,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.0
+    },
+    {
+     "t": 52.21,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 52.73,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 53.24,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.3
+    },
+    {
+     "t": 53.75,
+     "root_pct": 0.2,
+     "workers": 1,
+     "workers_mean_pct": 98.0
+    },
+    {
+     "t": 54.26,
+     "root_pct": 0.0,
+     "workers": 1,
+     "workers_mean_pct": 101.2
+    },
+    {
+     "t": 54.77,
+     "root_pct": 0.0,
+     "workers": 1,
+     "workers_mean_pct": 100.5
+    },
+    {
+     "t": 55.29,
+     "root_pct": 78.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 55.79,
+     "root_pct": 97.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 56.31,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 56.82,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 57.33,
+     "root_pct": 99.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 57.84,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 58.35,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 58.86,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 59.37,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 59.88,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 60.4,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 60.9,
+     "root_pct": 98.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 61.42,
+     "root_pct": 101.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 61.93,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 62.44,
+     "root_pct": 100.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 62.95,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 63.46,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 63.97,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 64.48,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 65.0,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 65.51,
+     "root_pct": 98.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 66.02,
+     "root_pct": 101.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 66.53,
+     "root_pct": 99.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 67.04,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 67.55,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 68.06,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 68.58,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 69.09,
+     "root_pct": 99.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 69.6,
+     "root_pct": 100.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 70.11,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 70.62,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 71.13,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 71.64,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 72.15,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 72.67,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 73.17,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 73.69,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 74.2,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 74.71,
+     "root_pct": 98.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 75.22,
+     "root_pct": 100.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 75.73,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 76.24,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 76.75,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 77.26,
+     "root_pct": 100.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 77.78,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 78.29,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 78.8,
+     "root_pct": 99.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 79.31,
+     "root_pct": 99.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 79.82,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 80.34,
+     "root_pct": 99.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 80.85,
+     "root_pct": 100.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 81.36,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 81.87,
+     "root_pct": 99.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 82.38,
+     "root_pct": 100.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 82.89,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 83.4,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 83.92,
+     "root_pct": 98.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 84.43,
+     "root_pct": 99.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 84.94,
+     "root_pct": 100.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 85.45,
+     "root_pct": 100.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 85.96,
+     "root_pct": 99.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 86.48,
+     "root_pct": 98.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 86.99,
+     "root_pct": 101.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 87.5,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 88.01,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 88.52,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 89.03,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 89.54,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 90.06,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 90.56,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 91.08,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 91.59,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 92.1,
+     "root_pct": 97.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 92.61,
+     "root_pct": 99.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 93.12,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 93.64,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 94.14,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 94.65,
+     "root_pct": 100.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 95.16,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 95.67,
+     "root_pct": 99.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 96.18,
+     "root_pct": 100.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 96.69,
+     "root_pct": 99.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 97.2,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    }
+   ]
+  },
+  {
+   "label": "xdist -n 8 (--dist load)",
+   "cmd": [
+    "/Users/drorasaf/code/rstest/corpus/work/pandas/venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "recorder",
+    "-q",
+    "-n",
+    "8",
+    "--pyargs",
+    "pandas",
+    "-m",
+    "not slow and not network and not db"
+   ],
+   "rc": 1,
+   "wall": 102.0,
+   "summary": {
+    "samples": 197,
+    "root_pct_median": 99.2,
+    "root_share_at_or_above_90pct": 0.635,
+    "workers_mean_pct_median": 92.6,
+    "root_cpu_s": 76.3,
+    "workers_cpu_s": 313.9,
+    "workers": 8,
+    "workers_busy_share": 0.38
+   },
+   "series": [
+    {
+     "t": 1.02,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 1.53,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 2.04,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.7
+    },
+    {
+     "t": 2.56,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 3.07,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 3.58,
+     "root_pct": 0.3,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 4.09,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 96.6
+    },
+    {
+     "t": 4.61,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.4
+    },
+    {
+     "t": 5.12,
+     "root_pct": 1.1,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 5.63,
+     "root_pct": 2.0,
+     "workers": 8,
+     "workers_mean_pct": 98.1
+    },
+    {
+     "t": 6.14,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.0
+    },
+    {
+     "t": 6.65,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 96.4
+    },
+    {
+     "t": 7.17,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 7.68,
+     "root_pct": 0.3,
+     "workers": 8,
+     "workers_mean_pct": 96.6
+    },
+    {
+     "t": 8.19,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.5
+    },
+    {
+     "t": 8.71,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 9.22,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.9
+    },
+    {
+     "t": 9.73,
+     "root_pct": 50.4,
+     "workers": 8,
+     "workers_mean_pct": 46.0
+    },
+    {
+     "t": 10.24,
+     "root_pct": 100.9,
+     "workers": 8,
+     "workers_mean_pct": 1.0
+    },
+    {
+     "t": 10.75,
+     "root_pct": 99.0,
+     "workers": 8,
+     "workers_mean_pct": 1.3
+    },
+    {
+     "t": 11.26,
+     "root_pct": 102.5,
+     "workers": 8,
+     "workers_mean_pct": 77.5
+    },
+    {
+     "t": 11.77,
+     "root_pct": 105.4,
+     "workers": 8,
+     "workers_mean_pct": 85.9
+    },
+    {
+     "t": 12.28,
+     "root_pct": 104.9,
+     "workers": 8,
+     "workers_mean_pct": 71.3
+    },
+    {
+     "t": 12.79,
+     "root_pct": 105.0,
+     "workers": 8,
+     "workers_mean_pct": 74.5
+    },
+    {
+     "t": 13.31,
+     "root_pct": 105.0,
+     "workers": 8,
+     "workers_mean_pct": 74.7
+    },
+    {
+     "t": 13.82,
+     "root_pct": 104.6,
+     "workers": 8,
+     "workers_mean_pct": 64.2
+    },
+    {
+     "t": 14.33,
+     "root_pct": 105.4,
+     "workers": 8,
+     "workers_mean_pct": 76.3
+    },
+    {
+     "t": 14.84,
+     "root_pct": 105.5,
+     "workers": 8,
+     "workers_mean_pct": 85.5
+    },
+    {
+     "t": 15.35,
+     "root_pct": 105.0,
+     "workers": 8,
+     "workers_mean_pct": 72.3
+    },
+    {
+     "t": 15.86,
+     "root_pct": 105.0,
+     "workers": 8,
+     "workers_mean_pct": 90.0
+    },
+    {
+     "t": 16.37,
+     "root_pct": 106.6,
+     "workers": 8,
+     "workers_mean_pct": 96.1
+    },
+    {
+     "t": 16.89,
+     "root_pct": 107.6,
+     "workers": 8,
+     "workers_mean_pct": 93.7
+    },
+    {
+     "t": 17.4,
+     "root_pct": 108.6,
+     "workers": 8,
+     "workers_mean_pct": 82.6
+    },
+    {
+     "t": 17.91,
+     "root_pct": 99.2,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 18.43,
+     "root_pct": 102.6,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 18.94,
+     "root_pct": 105.5,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 19.45,
+     "root_pct": 85.3,
+     "workers": 8,
+     "workers_mean_pct": 81.1
+    },
+    {
+     "t": 19.96,
+     "root_pct": 105.3,
+     "workers": 8,
+     "workers_mean_pct": 82.5
+    },
+    {
+     "t": 20.48,
+     "root_pct": 110.0,
+     "workers": 8,
+     "workers_mean_pct": 100.0
+    },
+    {
+     "t": 20.99,
+     "root_pct": 101.7,
+     "workers": 8,
+     "workers_mean_pct": 96.8
+    },
+    {
+     "t": 21.51,
+     "root_pct": 100.5,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 22.02,
+     "root_pct": 101.0,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 22.53,
+     "root_pct": 79.9,
+     "workers": 8,
+     "workers_mean_pct": 91.9
+    },
+    {
+     "t": 23.05,
+     "root_pct": 98.1,
+     "workers": 8,
+     "workers_mean_pct": 69.9
+    },
+    {
+     "t": 23.56,
+     "root_pct": 94.2,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 24.08,
+     "root_pct": 85.0,
+     "workers": 8,
+     "workers_mean_pct": 87.8
+    },
+    {
+     "t": 24.59,
+     "root_pct": 113.2,
+     "workers": 8,
+     "workers_mean_pct": 89.4
+    },
+    {
+     "t": 25.1,
+     "root_pct": 105.7,
+     "workers": 8,
+     "workers_mean_pct": 96.0
+    },
+    {
+     "t": 25.61,
+     "root_pct": 112.7,
+     "workers": 8,
+     "workers_mean_pct": 96.3
+    },
+    {
+     "t": 26.12,
+     "root_pct": 102.0,
+     "workers": 8,
+     "workers_mean_pct": 94.8
+    },
+    {
+     "t": 26.64,
+     "root_pct": 103.3,
+     "workers": 8,
+     "workers_mean_pct": 44.4
+    },
+    {
+     "t": 27.15,
+     "root_pct": 108.3,
+     "workers": 8,
+     "workers_mean_pct": 92.7
+    },
+    {
+     "t": 27.66,
+     "root_pct": 109.1,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 28.17,
+     "root_pct": 106.7,
+     "workers": 8,
+     "workers_mean_pct": 94.7
+    },
+    {
+     "t": 28.69,
+     "root_pct": 105.4,
+     "workers": 8,
+     "workers_mean_pct": 87.5
+    },
+    {
+     "t": 29.2,
+     "root_pct": 105.0,
+     "workers": 8,
+     "workers_mean_pct": 82.5
+    },
+    {
+     "t": 29.71,
+     "root_pct": 105.7,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 30.22,
+     "root_pct": 103.3,
+     "workers": 8,
+     "workers_mean_pct": 33.8
+    },
+    {
+     "t": 30.73,
+     "root_pct": 104.8,
+     "workers": 8,
+     "workers_mean_pct": 91.8
+    },
+    {
+     "t": 31.25,
+     "root_pct": 85.5,
+     "workers": 8,
+     "workers_mean_pct": 100.1
+    },
+    {
+     "t": 31.77,
+     "root_pct": 74.6,
+     "workers": 8,
+     "workers_mean_pct": 94.8
+    },
+    {
+     "t": 32.28,
+     "root_pct": 83.5,
+     "workers": 8,
+     "workers_mean_pct": 91.2
+    },
+    {
+     "t": 32.79,
+     "root_pct": 83.8,
+     "workers": 8,
+     "workers_mean_pct": 87.3
+    },
+    {
+     "t": 33.3,
+     "root_pct": 86.9,
+     "workers": 8,
+     "workers_mean_pct": 82.1
+    },
+    {
+     "t": 33.81,
+     "root_pct": 106.6,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 34.33,
+     "root_pct": 108.5,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 34.84,
+     "root_pct": 107.0,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 35.35,
+     "root_pct": 103.5,
+     "workers": 8,
+     "workers_mean_pct": 90.6
+    },
+    {
+     "t": 35.86,
+     "root_pct": 102.5,
+     "workers": 8,
+     "workers_mean_pct": 27.8
+    },
+    {
+     "t": 36.37,
+     "root_pct": 106.9,
+     "workers": 8,
+     "workers_mean_pct": 97.9
+    },
+    {
+     "t": 36.89,
+     "root_pct": 104.8,
+     "workers": 8,
+     "workers_mean_pct": 89.6
+    },
+    {
+     "t": 37.4,
+     "root_pct": 105.4,
+     "workers": 8,
+     "workers_mean_pct": 95.4
+    },
+    {
+     "t": 37.91,
+     "root_pct": 106.9,
+     "workers": 8,
+     "workers_mean_pct": 88.8
+    },
+    {
+     "t": 38.43,
+     "root_pct": 107.4,
+     "workers": 8,
+     "workers_mean_pct": 89.1
+    },
+    {
+     "t": 38.94,
+     "root_pct": 107.9,
+     "workers": 8,
+     "workers_mean_pct": 92.6
+    },
+    {
+     "t": 39.45,
+     "root_pct": 94.8,
+     "workers": 8,
+     "workers_mean_pct": 93.6
+    },
+    {
+     "t": 39.96,
+     "root_pct": 15.8,
+     "workers": 8,
+     "workers_mean_pct": 83.5
+    },
+    {
+     "t": 40.48,
+     "root_pct": 6.3,
+     "workers": 8,
+     "workers_mean_pct": 90.4
+    },
+    {
+     "t": 40.99,
+     "root_pct": 8.6,
+     "workers": 8,
+     "workers_mean_pct": 48.2
+    },
+    {
+     "t": 41.5,
+     "root_pct": 8.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 42.01,
+     "root_pct": 6.7,
+     "workers": 8,
+     "workers_mean_pct": 12.4
+    },
+    {
+     "t": 42.52,
+     "root_pct": 0.5,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 43.04,
+     "root_pct": 1.5,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 43.55,
+     "root_pct": 1.7,
+     "workers": 8,
+     "workers_mean_pct": 12.4
+    },
+    {
+     "t": 44.06,
+     "root_pct": 2.2,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 44.57,
+     "root_pct": 2.0,
+     "workers": 8,
+     "workers_mean_pct": 12.3
+    },
+    {
+     "t": 45.08,
+     "root_pct": 1.7,
+     "workers": 8,
+     "workers_mean_pct": 12.7
+    },
+    {
+     "t": 45.59,
+     "root_pct": 1.7,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 46.1,
+     "root_pct": 1.6,
+     "workers": 8,
+     "workers_mean_pct": 12.3
+    },
+    {
+     "t": 46.61,
+     "root_pct": 1.5,
+     "workers": 8,
+     "workers_mean_pct": 12.6
+    },
+    {
+     "t": 47.13,
+     "root_pct": 1.0,
+     "workers": 8,
+     "workers_mean_pct": 12.4
+    },
+    {
+     "t": 47.64,
+     "root_pct": 1.8,
+     "workers": 8,
+     "workers_mean_pct": 12.6
+    },
+    {
+     "t": 48.15,
+     "root_pct": 1.8,
+     "workers": 8,
+     "workers_mean_pct": 12.4
+    },
+    {
+     "t": 48.66,
+     "root_pct": 1.8,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 49.17,
+     "root_pct": 2.8,
+     "workers": 8,
+     "workers_mean_pct": 27.5
+    },
+    {
+     "t": 49.68,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.9
+    },
+    {
+     "t": 50.2,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.5
+    },
+    {
+     "t": 50.71,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.9
+    },
+    {
+     "t": 51.22,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.6
+    },
+    {
+     "t": 51.73,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 101.3
+    },
+    {
+     "t": 52.26,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.5
+    },
+    {
+     "t": 52.77,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 53.28,
+     "root_pct": 0.3,
+     "workers": 1,
+     "workers_mean_pct": 100.3
+    },
+    {
+     "t": 53.79,
+     "root_pct": 0.0,
+     "workers": 1,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 54.3,
+     "root_pct": 0.0,
+     "workers": 1,
+     "workers_mean_pct": 101.1
+    },
+    {
+     "t": 54.81,
+     "root_pct": 93.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 55.32,
+     "root_pct": 97.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 55.83,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 56.34,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 56.85,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 57.36,
+     "root_pct": 98.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 57.87,
+     "root_pct": 101.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 58.38,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 58.89,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 59.4,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 59.91,
+     "root_pct": 99.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 60.42,
+     "root_pct": 99.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 60.93,
+     "root_pct": 100.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 61.44,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 61.95,
+     "root_pct": 98.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 62.46,
+     "root_pct": 100.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 62.97,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 63.48,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 63.99,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 64.5,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 65.02,
+     "root_pct": 99.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 65.53,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 66.04,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 66.55,
+     "root_pct": 99.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 67.06,
+     "root_pct": 101.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 67.57,
+     "root_pct": 98.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 68.08,
+     "root_pct": 101.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 68.59,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 69.1,
+     "root_pct": 98.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 69.62,
+     "root_pct": 98.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 70.13,
+     "root_pct": 89.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 70.64,
+     "root_pct": 85.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 71.16,
+     "root_pct": 93.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 71.67,
+     "root_pct": 88.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 72.19,
+     "root_pct": 69.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 72.72,
+     "root_pct": 86.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 73.23,
+     "root_pct": 87.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 73.75,
+     "root_pct": 87.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 74.27,
+     "root_pct": 88.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 74.78,
+     "root_pct": 85.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 75.3,
+     "root_pct": 92.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 75.81,
+     "root_pct": 82.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 76.34,
+     "root_pct": 87.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 76.85,
+     "root_pct": 85.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 77.37,
+     "root_pct": 76.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 77.89,
+     "root_pct": 92.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 78.41,
+     "root_pct": 93.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 78.93,
+     "root_pct": 85.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 79.44,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 79.96,
+     "root_pct": 93.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 80.48,
+     "root_pct": 81.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 80.99,
+     "root_pct": 85.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 81.51,
+     "root_pct": 88.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 82.02,
+     "root_pct": 91.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 82.54,
+     "root_pct": 97.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 83.05,
+     "root_pct": 101.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 83.56,
+     "root_pct": 99.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 84.07,
+     "root_pct": 100.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 84.58,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 85.09,
+     "root_pct": 99.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 85.61,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 86.11,
+     "root_pct": 100.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 86.63,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 87.14,
+     "root_pct": 100.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 87.65,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 88.16,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 88.67,
+     "root_pct": 100.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 89.18,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 89.69,
+     "root_pct": 99.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 90.2,
+     "root_pct": 101.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 90.71,
+     "root_pct": 98.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 91.22,
+     "root_pct": 101.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 91.74,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 92.25,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 92.76,
+     "root_pct": 98.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 93.27,
+     "root_pct": 101.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 93.78,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 94.29,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 94.81,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 95.32,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 95.83,
+     "root_pct": 96.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 96.34,
+     "root_pct": 99.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 96.85,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 97.36,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 97.87,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 98.38,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 98.89,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 99.4,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 99.91,
+     "root_pct": 101.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 100.42,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 100.94,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 101.45,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    }
+   ]
+  },
+  {
+   "label": "xdist -n 8 (--dist load)",
+   "cmd": [
+    "/Users/drorasaf/code/rstest/corpus/work/pandas/venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "recorder",
+    "-q",
+    "-n",
+    "8",
+    "--pyargs",
+    "pandas",
+    "-m",
+    "not slow and not network and not db"
+   ],
+   "rc": 1,
+   "wall": 118.1,
+   "summary": {
+    "samples": 228,
+    "root_pct_median": 88.6,
+    "root_share_at_or_above_90pct": 0.465,
+    "workers_mean_pct_median": 59.1,
+    "root_cpu_s": 85.1,
+    "workers_cpu_s": 342.7,
+    "workers": 8.0,
+    "workers_busy_share": 0.36
+   },
+   "series": [
+    {
+     "t": 1.02,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 1.53,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 2.04,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.1
+    },
+    {
+     "t": 2.55,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.6
+    },
+    {
+     "t": 3.06,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 98.1
+    },
+    {
+     "t": 3.58,
+     "root_pct": 0.3,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 4.09,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 93.4
+    },
+    {
+     "t": 4.6,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 5.11,
+     "root_pct": 1.1,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 5.62,
+     "root_pct": 1.3,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 6.13,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 94.6
+    },
+    {
+     "t": 6.64,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 7.15,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.5
+    },
+    {
+     "t": 7.66,
+     "root_pct": 0.2,
+     "workers": 8,
+     "workers_mean_pct": 98.0
+    },
+    {
+     "t": 8.18,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 8.69,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.3
+    },
+    {
+     "t": 9.2,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.2
+    },
+    {
+     "t": 9.71,
+     "root_pct": 82.0,
+     "workers": 8,
+     "workers_mean_pct": 25.7
+    },
+    {
+     "t": 10.22,
+     "root_pct": 99.2,
+     "workers": 8,
+     "workers_mean_pct": 1.6
+    },
+    {
+     "t": 10.73,
+     "root_pct": 90.1,
+     "workers": 8,
+     "workers_mean_pct": 11.1
+    },
+    {
+     "t": 11.24,
+     "root_pct": 94.8,
+     "workers": 8,
+     "workers_mean_pct": 75.6
+    },
+    {
+     "t": 11.75,
+     "root_pct": 101.7,
+     "workers": 8,
+     "workers_mean_pct": 86.3
+    },
+    {
+     "t": 12.26,
+     "root_pct": 104.8,
+     "workers": 8,
+     "workers_mean_pct": 72.5
+    },
+    {
+     "t": 12.78,
+     "root_pct": 104.0,
+     "workers": 8,
+     "workers_mean_pct": 77.3
+    },
+    {
+     "t": 13.29,
+     "root_pct": 103.9,
+     "workers": 8,
+     "workers_mean_pct": 75.6
+    },
+    {
+     "t": 13.8,
+     "root_pct": 104.7,
+     "workers": 8,
+     "workers_mean_pct": 65.0
+    },
+    {
+     "t": 14.31,
+     "root_pct": 105.2,
+     "workers": 8,
+     "workers_mean_pct": 76.2
+    },
+    {
+     "t": 14.82,
+     "root_pct": 104.1,
+     "workers": 8,
+     "workers_mean_pct": 83.5
+    },
+    {
+     "t": 15.33,
+     "root_pct": 103.1,
+     "workers": 8,
+     "workers_mean_pct": 65.9
+    },
+    {
+     "t": 15.85,
+     "root_pct": 104.9,
+     "workers": 8,
+     "workers_mean_pct": 88.0
+    },
+    {
+     "t": 16.36,
+     "root_pct": 102.3,
+     "workers": 8,
+     "workers_mean_pct": 92.3
+    },
+    {
+     "t": 16.87,
+     "root_pct": 108.8,
+     "workers": 8,
+     "workers_mean_pct": 95.5
+    },
+    {
+     "t": 17.38,
+     "root_pct": 106.5,
+     "workers": 8,
+     "workers_mean_pct": 80.4
+    },
+    {
+     "t": 17.89,
+     "root_pct": 109.0,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 18.4,
+     "root_pct": 105.4,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 18.91,
+     "root_pct": 89.0,
+     "workers": 8,
+     "workers_mean_pct": 97.8
+    },
+    {
+     "t": 19.42,
+     "root_pct": 88.6,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 19.94,
+     "root_pct": 102.5,
+     "workers": 8,
+     "workers_mean_pct": 77.9
+    },
+    {
+     "t": 20.45,
+     "root_pct": 90.7,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 20.96,
+     "root_pct": 99.6,
+     "workers": 8,
+     "workers_mean_pct": 96.7
+    },
+    {
+     "t": 21.47,
+     "root_pct": 69.7,
+     "workers": 8,
+     "workers_mean_pct": 72.8
+    },
+    {
+     "t": 21.99,
+     "root_pct": 40.4,
+     "workers": 8,
+     "workers_mean_pct": 56.3
+    },
+    {
+     "t": 22.5,
+     "root_pct": 47.1,
+     "workers": 8,
+     "workers_mean_pct": 56.0
+    },
+    {
+     "t": 23.03,
+     "root_pct": 50.6,
+     "workers": 8,
+     "workers_mean_pct": 55.5
+    },
+    {
+     "t": 23.55,
+     "root_pct": 38.5,
+     "workers": 8,
+     "workers_mean_pct": 52.5
+    },
+    {
+     "t": 24.07,
+     "root_pct": 72.5,
+     "workers": 8,
+     "workers_mean_pct": 47.7
+    },
+    {
+     "t": 24.6,
+     "root_pct": 40.1,
+     "workers": 8,
+     "workers_mean_pct": 50.1
+    },
+    {
+     "t": 25.11,
+     "root_pct": 48.3,
+     "workers": 8,
+     "workers_mean_pct": 39.9
+    },
+    {
+     "t": 25.63,
+     "root_pct": 80.1,
+     "workers": 8,
+     "workers_mean_pct": 30.7
+    },
+    {
+     "t": 26.15,
+     "root_pct": 70.5,
+     "workers": 8,
+     "workers_mean_pct": 52.2
+    },
+    {
+     "t": 26.66,
+     "root_pct": 82.0,
+     "workers": 8,
+     "workers_mean_pct": 55.2
+    },
+    {
+     "t": 27.17,
+     "root_pct": 73.6,
+     "workers": 8,
+     "workers_mean_pct": 54.3
+    },
+    {
+     "t": 27.69,
+     "root_pct": 72.6,
+     "workers": 8,
+     "workers_mean_pct": 51.7
+    },
+    {
+     "t": 28.21,
+     "root_pct": 79.7,
+     "workers": 8,
+     "workers_mean_pct": 55.7
+    },
+    {
+     "t": 28.72,
+     "root_pct": 78.7,
+     "workers": 8,
+     "workers_mean_pct": 50.2
+    },
+    {
+     "t": 29.24,
+     "root_pct": 73.0,
+     "workers": 8,
+     "workers_mean_pct": 55.7
+    },
+    {
+     "t": 29.75,
+     "root_pct": 77.1,
+     "workers": 8,
+     "workers_mean_pct": 53.1
+    },
+    {
+     "t": 30.27,
+     "root_pct": 73.5,
+     "workers": 8,
+     "workers_mean_pct": 54.2
+    },
+    {
+     "t": 30.78,
+     "root_pct": 80.8,
+     "workers": 8,
+     "workers_mean_pct": 56.1
+    },
+    {
+     "t": 31.3,
+     "root_pct": 81.4,
+     "workers": 8,
+     "workers_mean_pct": 54.4
+    },
+    {
+     "t": 31.82,
+     "root_pct": 88.7,
+     "workers": 8,
+     "workers_mean_pct": 52.9
+    },
+    {
+     "t": 32.33,
+     "root_pct": 70.0,
+     "workers": 8,
+     "workers_mean_pct": 52.1
+    },
+    {
+     "t": 32.85,
+     "root_pct": 64.1,
+     "workers": 8,
+     "workers_mean_pct": 51.0
+    },
+    {
+     "t": 33.37,
+     "root_pct": 77.7,
+     "workers": 8,
+     "workers_mean_pct": 12.9
+    },
+    {
+     "t": 33.88,
+     "root_pct": 76.9,
+     "workers": 8,
+     "workers_mean_pct": 40.0
+    },
+    {
+     "t": 34.4,
+     "root_pct": 53.0,
+     "workers": 8,
+     "workers_mean_pct": 53.3
+    },
+    {
+     "t": 34.92,
+     "root_pct": 30.0,
+     "workers": 8,
+     "workers_mean_pct": 37.6
+    },
+    {
+     "t": 35.44,
+     "root_pct": 21.8,
+     "workers": 8,
+     "workers_mean_pct": 29.3
+    },
+    {
+     "t": 35.96,
+     "root_pct": 40.5,
+     "workers": 8,
+     "workers_mean_pct": 24.4
+    },
+    {
+     "t": 36.48,
+     "root_pct": 20.0,
+     "workers": 8,
+     "workers_mean_pct": 28.4
+    },
+    {
+     "t": 37.0,
+     "root_pct": 27.7,
+     "workers": 8,
+     "workers_mean_pct": 25.0
+    },
+    {
+     "t": 37.56,
+     "root_pct": 33.0,
+     "workers": 8,
+     "workers_mean_pct": 20.6
+    },
+    {
+     "t": 38.07,
+     "root_pct": 43.0,
+     "workers": 8,
+     "workers_mean_pct": 32.2
+    },
+    {
+     "t": 38.59,
+     "root_pct": 77.3,
+     "workers": 8,
+     "workers_mean_pct": 51.9
+    },
+    {
+     "t": 39.12,
+     "root_pct": 69.4,
+     "workers": 8,
+     "workers_mean_pct": 49.7
+    },
+    {
+     "t": 39.63,
+     "root_pct": 66.2,
+     "workers": 8,
+     "workers_mean_pct": 47.7
+    },
+    {
+     "t": 40.15,
+     "root_pct": 77.9,
+     "workers": 8,
+     "workers_mean_pct": 49.7
+    },
+    {
+     "t": 40.67,
+     "root_pct": 73.5,
+     "workers": 8,
+     "workers_mean_pct": 25.8
+    },
+    {
+     "t": 41.19,
+     "root_pct": 86.4,
+     "workers": 8,
+     "workers_mean_pct": 24.4
+    },
+    {
+     "t": 41.71,
+     "root_pct": 82.5,
+     "workers": 8,
+     "workers_mean_pct": 52.3
+    },
+    {
+     "t": 42.22,
+     "root_pct": 81.2,
+     "workers": 8,
+     "workers_mean_pct": 54.5
+    },
+    {
+     "t": 42.74,
+     "root_pct": 67.9,
+     "workers": 8,
+     "workers_mean_pct": 43.5
+    },
+    {
+     "t": 43.26,
+     "root_pct": 67.6,
+     "workers": 8,
+     "workers_mean_pct": 46.0
+    },
+    {
+     "t": 43.77,
+     "root_pct": 72.0,
+     "workers": 8,
+     "workers_mean_pct": 54.1
+    },
+    {
+     "t": 44.29,
+     "root_pct": 75.9,
+     "workers": 8,
+     "workers_mean_pct": 55.8
+    },
+    {
+     "t": 44.8,
+     "root_pct": 38.5,
+     "workers": 8,
+     "workers_mean_pct": 42.7
+    },
+    {
+     "t": 45.31,
+     "root_pct": 46.3,
+     "workers": 8,
+     "workers_mean_pct": 40.5
+    },
+    {
+     "t": 45.83,
+     "root_pct": 72.0,
+     "workers": 8,
+     "workers_mean_pct": 50.5
+    },
+    {
+     "t": 46.34,
+     "root_pct": 74.7,
+     "workers": 8,
+     "workers_mean_pct": 2.7
+    },
+    {
+     "t": 46.86,
+     "root_pct": 93.1,
+     "workers": 8,
+     "workers_mean_pct": 17.1
+    },
+    {
+     "t": 47.38,
+     "root_pct": 71.6,
+     "workers": 8,
+     "workers_mean_pct": 49.3
+    },
+    {
+     "t": 47.9,
+     "root_pct": 50.7,
+     "workers": 8,
+     "workers_mean_pct": 47.1
+    },
+    {
+     "t": 48.41,
+     "root_pct": 43.2,
+     "workers": 8,
+     "workers_mean_pct": 54.4
+    },
+    {
+     "t": 48.93,
+     "root_pct": 58.9,
+     "workers": 8,
+     "workers_mean_pct": 55.6
+    },
+    {
+     "t": 49.45,
+     "root_pct": 45.5,
+     "workers": 8,
+     "workers_mean_pct": 50.9
+    },
+    {
+     "t": 49.96,
+     "root_pct": 46.0,
+     "workers": 8,
+     "workers_mean_pct": 52.3
+    },
+    {
+     "t": 50.48,
+     "root_pct": 60.5,
+     "workers": 8,
+     "workers_mean_pct": 49.9
+    },
+    {
+     "t": 50.99,
+     "root_pct": 89.4,
+     "workers": 8,
+     "workers_mean_pct": 94.1
+    },
+    {
+     "t": 51.5,
+     "root_pct": 72.0,
+     "workers": 8,
+     "workers_mean_pct": 86.3
+    },
+    {
+     "t": 52.01,
+     "root_pct": 83.7,
+     "workers": 8,
+     "workers_mean_pct": 78.5
+    },
+    {
+     "t": 52.53,
+     "root_pct": 96.0,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 53.04,
+     "root_pct": 107.5,
+     "workers": 8,
+     "workers_mean_pct": 97.3
+    },
+    {
+     "t": 53.55,
+     "root_pct": 111.1,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 54.06,
+     "root_pct": 106.2,
+     "workers": 8,
+     "workers_mean_pct": 96.3
+    },
+    {
+     "t": 54.57,
+     "root_pct": 109.6,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 55.08,
+     "root_pct": 111.8,
+     "workers": 8,
+     "workers_mean_pct": 99.6
+    },
+    {
+     "t": 55.59,
+     "root_pct": 107.6,
+     "workers": 8,
+     "workers_mean_pct": 82.0
+    },
+    {
+     "t": 56.11,
+     "root_pct": 101.4,
+     "workers": 8,
+     "workers_mean_pct": 16.2
+    },
+    {
+     "t": 56.62,
+     "root_pct": 106.7,
+     "workers": 8,
+     "workers_mean_pct": 89.2
+    },
+    {
+     "t": 57.13,
+     "root_pct": 106.1,
+     "workers": 8,
+     "workers_mean_pct": 91.1
+    },
+    {
+     "t": 57.64,
+     "root_pct": 108.8,
+     "workers": 8,
+     "workers_mean_pct": 93.8
+    },
+    {
+     "t": 58.16,
+     "root_pct": 100.3,
+     "workers": 8,
+     "workers_mean_pct": 98.3
+    },
+    {
+     "t": 58.67,
+     "root_pct": 55.5,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 59.18,
+     "root_pct": 1.6,
+     "workers": 8,
+     "workers_mean_pct": 98.0
+    },
+    {
+     "t": 59.69,
+     "root_pct": 1.8,
+     "workers": 8,
+     "workers_mean_pct": 59.1
+    },
+    {
+     "t": 60.2,
+     "root_pct": 1.6,
+     "workers": 8,
+     "workers_mean_pct": 17.3
+    },
+    {
+     "t": 60.71,
+     "root_pct": 1.6,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 61.22,
+     "root_pct": 1.9,
+     "workers": 8,
+     "workers_mean_pct": 12.6
+    },
+    {
+     "t": 61.74,
+     "root_pct": 29.1,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 62.25,
+     "root_pct": 15.0,
+     "workers": 8,
+     "workers_mean_pct": 61.1
+    },
+    {
+     "t": 62.76,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.0
+    },
+    {
+     "t": 63.27,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 63.78,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.3
+    },
+    {
+     "t": 64.29,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.1
+    },
+    {
+     "t": 64.81,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.1
+    },
+    {
+     "t": 65.32,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 72.1
+    },
+    {
+     "t": 65.84,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 60.9
+    },
+    {
+     "t": 66.35,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 59.0
+    },
+    {
+     "t": 66.87,
+     "root_pct": 0.1,
+     "workers": 6,
+     "workers_mean_pct": 61.6
+    },
+    {
+     "t": 67.38,
+     "root_pct": 0.2,
+     "workers": 1,
+     "workers_mean_pct": 78.0
+    },
+    {
+     "t": 67.89,
+     "root_pct": 0.0,
+     "workers": 1,
+     "workers_mean_pct": 92.5
+    },
+    {
+     "t": 68.41,
+     "root_pct": 70.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 68.92,
+     "root_pct": 88.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 69.44,
+     "root_pct": 82.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 69.96,
+     "root_pct": 79.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 70.47,
+     "root_pct": 74.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 70.99,
+     "root_pct": 89.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 71.5,
+     "root_pct": 87.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 72.02,
+     "root_pct": 92.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 72.54,
+     "root_pct": 83.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 73.06,
+     "root_pct": 94.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 73.57,
+     "root_pct": 88.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 74.09,
+     "root_pct": 77.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 74.61,
+     "root_pct": 48.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 75.13,
+     "root_pct": 49.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 75.66,
+     "root_pct": 31.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 76.17,
+     "root_pct": 46.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 76.69,
+     "root_pct": 68.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 77.21,
+     "root_pct": 92.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 77.73,
+     "root_pct": 85.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 78.26,
+     "root_pct": 93.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 78.77,
+     "root_pct": 88.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 79.29,
+     "root_pct": 93.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 79.81,
+     "root_pct": 94.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 80.32,
+     "root_pct": 94.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 80.84,
+     "root_pct": 83.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 81.36,
+     "root_pct": 80.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 81.87,
+     "root_pct": 83.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 82.39,
+     "root_pct": 83.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 82.9,
+     "root_pct": 86.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 83.41,
+     "root_pct": 88.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 83.93,
+     "root_pct": 85.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 84.45,
+     "root_pct": 92.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 84.95,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 85.47,
+     "root_pct": 99.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 85.98,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 86.49,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 87.0,
+     "root_pct": 100.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 87.51,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 88.02,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 88.53,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 89.04,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 89.55,
+     "root_pct": 98.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 90.06,
+     "root_pct": 101.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 90.58,
+     "root_pct": 99.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 91.09,
+     "root_pct": 100.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 91.59,
+     "root_pct": 100.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 92.1,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 92.62,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 93.13,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 93.64,
+     "root_pct": 98.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 94.15,
+     "root_pct": 101.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 94.66,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 95.17,
+     "root_pct": 99.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 95.68,
+     "root_pct": 100.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 96.19,
+     "root_pct": 100.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 96.7,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 97.21,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 97.72,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 98.23,
+     "root_pct": 98.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 98.74,
+     "root_pct": 101.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 99.25,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 99.76,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 100.27,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 100.78,
+     "root_pct": 98.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 101.3,
+     "root_pct": 101.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 101.8,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 102.32,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 102.83,
+     "root_pct": 99.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 103.34,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 103.85,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 104.36,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 104.87,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 105.38,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 105.89,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 106.4,
+     "root_pct": 98.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 106.91,
+     "root_pct": 100.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 107.42,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 107.93,
+     "root_pct": 101.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 108.44,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 108.95,
+     "root_pct": 101.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 109.46,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 109.97,
+     "root_pct": 100.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 110.48,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 110.99,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 111.5,
+     "root_pct": 99.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 112.01,
+     "root_pct": 97.2,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 112.52,
+     "root_pct": 99.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 113.03,
+     "root_pct": 100.0,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 113.54,
+     "root_pct": 100.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 114.05,
+     "root_pct": 97.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 114.56,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 115.07,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 115.57,
+     "root_pct": 99.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 116.09,
+     "root_pct": 100.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 116.6,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 117.11,
+     "root_pct": 100.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 117.62,
+     "root_pct": 100.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    }
+   ]
+  },
+  {
+   "label": "rstest -n 8",
+   "cmd": [
+    "/Users/drorasaf/code/rstest/target/release/rstest",
+    "--report-json",
+    "/Users/drorasaf/code/rstest/corpus/work/pandas/cpu-r.json",
+    "--worker-timeout",
+    "120",
+    "-n",
+    "8",
+    "--pyargs",
+    "pandas",
+    "-m",
+    "not slow and not network and not db"
+   ],
+   "rc": 1,
+   "wall": 52.0,
+   "summary": {
+    "samples": 100,
+    "root_pct_median": 21.2,
+    "root_share_at_or_above_90pct": 0.02,
+    "workers_mean_pct_median": 97.5,
+    "root_cpu_s": 11.3,
+    "workers_cpu_s": 355.6,
+    "workers": 8.0,
+    "workers_busy_share": 0.85
+   },
+   "series": [
+    {
+     "t": 1.01,
+     "root_pct": 99.4,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 1.52,
+     "root_pct": 65.3,
+     "workers": 8,
+     "workers_mean_pct": 96.9
+    },
+    {
+     "t": 2.04,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 98.1
+    },
+    {
+     "t": 2.55,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 89.0
+    },
+    {
+     "t": 3.06,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.5
+    },
+    {
+     "t": 3.57,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 4.09,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 4.6,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.3
+    },
+    {
+     "t": 5.11,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 95.9
+    },
+    {
+     "t": 5.62,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.6
+    },
+    {
+     "t": 6.13,
+     "root_pct": 0.6,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 6.64,
+     "root_pct": 0.3,
+     "workers": 8,
+     "workers_mean_pct": 90.8
+    },
+    {
+     "t": 7.15,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.0
+    },
+    {
+     "t": 7.67,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.6
+    },
+    {
+     "t": 8.18,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 95.0
+    },
+    {
+     "t": 8.69,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 9.2,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 9.71,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.4
+    },
+    {
+     "t": 10.22,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 65.9
+    },
+    {
+     "t": 10.73,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 11.24,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 11.75,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 12.26,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 12.77,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.3
+    },
+    {
+     "t": 13.28,
+     "root_pct": 32.1,
+     "workers": 8,
+     "workers_mean_pct": 32.9
+    },
+    {
+     "t": 13.78,
+     "root_pct": 32.1,
+     "workers": 8,
+     "workers_mean_pct": 94.7
+    },
+    {
+     "t": 14.29,
+     "root_pct": 29.0,
+     "workers": 8,
+     "workers_mean_pct": 98.9
+    },
+    {
+     "t": 14.8,
+     "root_pct": 18.5,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 15.31,
+     "root_pct": 21.9,
+     "workers": 8,
+     "workers_mean_pct": 98.1
+    },
+    {
+     "t": 15.82,
+     "root_pct": 40.1,
+     "workers": 8,
+     "workers_mean_pct": 98.1
+    },
+    {
+     "t": 16.32,
+     "root_pct": 42.4,
+     "workers": 8,
+     "workers_mean_pct": 95.8
+    },
+    {
+     "t": 16.83,
+     "root_pct": 46.5,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 17.34,
+     "root_pct": 53.6,
+     "workers": 8,
+     "workers_mean_pct": 96.7
+    },
+    {
+     "t": 17.84,
+     "root_pct": 51.0,
+     "workers": 8,
+     "workers_mean_pct": 98.1
+    },
+    {
+     "t": 18.35,
+     "root_pct": 47.9,
+     "workers": 8,
+     "workers_mean_pct": 95.2
+    },
+    {
+     "t": 18.86,
+     "root_pct": 81.8,
+     "workers": 8,
+     "workers_mean_pct": 96.3
+    },
+    {
+     "t": 19.37,
+     "root_pct": 52.6,
+     "workers": 8,
+     "workers_mean_pct": 97.5
+    },
+    {
+     "t": 19.88,
+     "root_pct": 20.8,
+     "workers": 8,
+     "workers_mean_pct": 98.9
+    },
+    {
+     "t": 20.39,
+     "root_pct": 14.4,
+     "workers": 8,
+     "workers_mean_pct": 96.4
+    },
+    {
+     "t": 20.9,
+     "root_pct": 29.6,
+     "workers": 8,
+     "workers_mean_pct": 97.3
+    },
+    {
+     "t": 21.41,
+     "root_pct": 35.0,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 21.92,
+     "root_pct": 19.1,
+     "workers": 8,
+     "workers_mean_pct": 99.5
+    },
+    {
+     "t": 22.43,
+     "root_pct": 16.8,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 22.94,
+     "root_pct": 30.0,
+     "workers": 8,
+     "workers_mean_pct": 98.9
+    },
+    {
+     "t": 23.45,
+     "root_pct": 25.7,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 23.95,
+     "root_pct": 17.8,
+     "workers": 8,
+     "workers_mean_pct": 96.5
+    },
+    {
+     "t": 24.46,
+     "root_pct": 25.9,
+     "workers": 8,
+     "workers_mean_pct": 95.5
+    },
+    {
+     "t": 24.97,
+     "root_pct": 28.5,
+     "workers": 8,
+     "workers_mean_pct": 96.2
+    },
+    {
+     "t": 25.48,
+     "root_pct": 21.2,
+     "workers": 8,
+     "workers_mean_pct": 98.3
+    },
+    {
+     "t": 26.0,
+     "root_pct": 29.8,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 26.51,
+     "root_pct": 21.3,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 27.01,
+     "root_pct": 21.8,
+     "workers": 8,
+     "workers_mean_pct": 99.5
+    },
+    {
+     "t": 27.52,
+     "root_pct": 26.2,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 28.03,
+     "root_pct": 33.6,
+     "workers": 8,
+     "workers_mean_pct": 96.0
+    },
+    {
+     "t": 28.54,
+     "root_pct": 33.5,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 29.04,
+     "root_pct": 27.5,
+     "workers": 8,
+     "workers_mean_pct": 97.4
+    },
+    {
+     "t": 29.55,
+     "root_pct": 29.9,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 30.06,
+     "root_pct": 29.2,
+     "workers": 8,
+     "workers_mean_pct": 97.2
+    },
+    {
+     "t": 30.57,
+     "root_pct": 31.8,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 31.08,
+     "root_pct": 61.6,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 31.59,
+     "root_pct": 47.9,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 32.09,
+     "root_pct": 45.9,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 32.6,
+     "root_pct": 25.6,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 33.12,
+     "root_pct": 6.9,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 33.63,
+     "root_pct": 19.1,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 34.14,
+     "root_pct": 15.7,
+     "workers": 8,
+     "workers_mean_pct": 88.4
+    },
+    {
+     "t": 34.64,
+     "root_pct": 20.1,
+     "workers": 8,
+     "workers_mean_pct": 86.4
+    },
+    {
+     "t": 35.16,
+     "root_pct": 17.2,
+     "workers": 8,
+     "workers_mean_pct": 85.8
+    },
+    {
+     "t": 35.67,
+     "root_pct": 8.4,
+     "workers": 8,
+     "workers_mean_pct": 92.6
+    },
+    {
+     "t": 36.19,
+     "root_pct": 2.8,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 36.69,
+     "root_pct": 4.7,
+     "workers": 8,
+     "workers_mean_pct": 96.2
+    },
+    {
+     "t": 37.21,
+     "root_pct": 17.3,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 37.72,
+     "root_pct": 21.0,
+     "workers": 8,
+     "workers_mean_pct": 98.9
+    },
+    {
+     "t": 38.23,
+     "root_pct": 22.2,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 38.74,
+     "root_pct": 23.4,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 39.25,
+     "root_pct": 40.4,
+     "workers": 8,
+     "workers_mean_pct": 96.7
+    },
+    {
+     "t": 39.75,
+     "root_pct": 35.2,
+     "workers": 8,
+     "workers_mean_pct": 92.7
+    },
+    {
+     "t": 40.26,
+     "root_pct": 41.3,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 40.77,
+     "root_pct": 49.0,
+     "workers": 8,
+     "workers_mean_pct": 94.6
+    },
+    {
+     "t": 41.28,
+     "root_pct": 38.7,
+     "workers": 8,
+     "workers_mean_pct": 94.6
+    },
+    {
+     "t": 41.79,
+     "root_pct": 36.8,
+     "workers": 8,
+     "workers_mean_pct": 86.7
+    },
+    {
+     "t": 42.3,
+     "root_pct": 26.0,
+     "workers": 8,
+     "workers_mean_pct": 77.3
+    },
+    {
+     "t": 42.81,
+     "root_pct": 40.8,
+     "workers": 8,
+     "workers_mean_pct": 86.7
+    },
+    {
+     "t": 43.32,
+     "root_pct": 39.0,
+     "workers": 8,
+     "workers_mean_pct": 91.1
+    },
+    {
+     "t": 43.82,
+     "root_pct": 44.8,
+     "workers": 8,
+     "workers_mean_pct": 97.9
+    },
+    {
+     "t": 44.33,
+     "root_pct": 31.7,
+     "workers": 8,
+     "workers_mean_pct": 97.9
+    },
+    {
+     "t": 44.84,
+     "root_pct": 1.5,
+     "workers": 8,
+     "workers_mean_pct": 89.0
+    },
+    {
+     "t": 45.36,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 89.8
+    },
+    {
+     "t": 45.87,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 83.4
+    },
+    {
+     "t": 46.38,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 46.9,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.1
+    },
+    {
+     "t": 47.41,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 47.92,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.0
+    },
+    {
+     "t": 48.43,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.6
+    },
+    {
+     "t": 48.94,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 49.46,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 49.97,
+     "root_pct": 0.0,
+     "workers": 7,
+     "workers_mean_pct": 91.5
+    },
+    {
+     "t": 50.49,
+     "root_pct": 68.1,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 51.0,
+     "root_pct": 99.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 51.51,
+     "root_pct": 88.7,
+     "workers": 0,
+     "workers_mean_pct": null
+    }
+   ]
+  },
+  {
+   "label": "rstest -n 8",
+   "cmd": [
+    "/Users/drorasaf/code/rstest/target/release/rstest",
+    "--report-json",
+    "/Users/drorasaf/code/rstest/corpus/work/pandas/cpu-r.json",
+    "--worker-timeout",
+    "120",
+    "-n",
+    "8",
+    "--pyargs",
+    "pandas",
+    "-m",
+    "not slow and not network and not db"
+   ],
+   "rc": 1,
+   "wall": 54.2,
+   "summary": {
+    "samples": 104,
+    "root_pct_median": 23.1,
+    "root_share_at_or_above_90pct": 0.019,
+    "workers_mean_pct_median": 96.0,
+    "root_cpu_s": 12.2,
+    "workers_cpu_s": 362.4,
+    "workers": 8.0,
+    "workers_busy_share": 0.84
+   },
+   "series": [
+    {
+     "t": 1.02,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 1.53,
+     "root_pct": 88.9,
+     "workers": 8,
+     "workers_mean_pct": 95.8
+    },
+    {
+     "t": 2.04,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 2.56,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 95.3
+    },
+    {
+     "t": 3.07,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 3.58,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 4.09,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 4.6,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 94.1
+    },
+    {
+     "t": 5.11,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 5.62,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 6.13,
+     "root_pct": 0.8,
+     "workers": 8,
+     "workers_mean_pct": 96.5
+    },
+    {
+     "t": 6.64,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 95.7
+    },
+    {
+     "t": 7.15,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 97.0
+    },
+    {
+     "t": 7.67,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 8.18,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 97.5
+    },
+    {
+     "t": 8.69,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 9.2,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 9.72,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.4
+    },
+    {
+     "t": 10.23,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 66.2
+    },
+    {
+     "t": 10.74,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 11.25,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 11.76,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 12.27,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 12.78,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 13.28,
+     "root_pct": 10.6,
+     "workers": 8,
+     "workers_mean_pct": 11.6
+    },
+    {
+     "t": 13.79,
+     "root_pct": 38.3,
+     "workers": 8,
+     "workers_mean_pct": 86.2
+    },
+    {
+     "t": 14.3,
+     "root_pct": 40.3,
+     "workers": 8,
+     "workers_mean_pct": 97.2
+    },
+    {
+     "t": 14.82,
+     "root_pct": 24.1,
+     "workers": 8,
+     "workers_mean_pct": 95.9
+    },
+    {
+     "t": 15.33,
+     "root_pct": 15.8,
+     "workers": 8,
+     "workers_mean_pct": 97.5
+    },
+    {
+     "t": 15.84,
+     "root_pct": 32.9,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 16.35,
+     "root_pct": 36.1,
+     "workers": 8,
+     "workers_mean_pct": 89.1
+    },
+    {
+     "t": 16.85,
+     "root_pct": 47.8,
+     "workers": 8,
+     "workers_mean_pct": 96.5
+    },
+    {
+     "t": 17.36,
+     "root_pct": 49.0,
+     "workers": 8,
+     "workers_mean_pct": 94.6
+    },
+    {
+     "t": 17.87,
+     "root_pct": 56.8,
+     "workers": 8,
+     "workers_mean_pct": 96.5
+    },
+    {
+     "t": 18.38,
+     "root_pct": 54.9,
+     "workers": 8,
+     "workers_mean_pct": 95.9
+    },
+    {
+     "t": 18.89,
+     "root_pct": 58.0,
+     "workers": 8,
+     "workers_mean_pct": 96.1
+    },
+    {
+     "t": 19.39,
+     "root_pct": 82.5,
+     "workers": 8,
+     "workers_mean_pct": 90.6
+    },
+    {
+     "t": 19.9,
+     "root_pct": 54.4,
+     "workers": 8,
+     "workers_mean_pct": 96.2
+    },
+    {
+     "t": 20.41,
+     "root_pct": 28.5,
+     "workers": 8,
+     "workers_mean_pct": 97.2
+    },
+    {
+     "t": 20.92,
+     "root_pct": 17.9,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 21.44,
+     "root_pct": 29.6,
+     "workers": 8,
+     "workers_mean_pct": 96.0
+    },
+    {
+     "t": 21.95,
+     "root_pct": 36.8,
+     "workers": 8,
+     "workers_mean_pct": 96.3
+    },
+    {
+     "t": 22.45,
+     "root_pct": 26.8,
+     "workers": 8,
+     "workers_mean_pct": 96.0
+    },
+    {
+     "t": 22.97,
+     "root_pct": 23.7,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 23.48,
+     "root_pct": 28.3,
+     "workers": 8,
+     "workers_mean_pct": 97.3
+    },
+    {
+     "t": 23.99,
+     "root_pct": 41.2,
+     "workers": 8,
+     "workers_mean_pct": 96.5
+    },
+    {
+     "t": 24.5,
+     "root_pct": 31.9,
+     "workers": 8,
+     "workers_mean_pct": 95.7
+    },
+    {
+     "t": 25.01,
+     "root_pct": 20.1,
+     "workers": 8,
+     "workers_mean_pct": 96.1
+    },
+    {
+     "t": 25.52,
+     "root_pct": 18.9,
+     "workers": 8,
+     "workers_mean_pct": 90.1
+    },
+    {
+     "t": 26.03,
+     "root_pct": 30.8,
+     "workers": 8,
+     "workers_mean_pct": 91.3
+    },
+    {
+     "t": 26.54,
+     "root_pct": 22.6,
+     "workers": 8,
+     "workers_mean_pct": 95.3
+    },
+    {
+     "t": 27.05,
+     "root_pct": 23.8,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 27.56,
+     "root_pct": 31.8,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 28.06,
+     "root_pct": 25.2,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 28.57,
+     "root_pct": 24.7,
+     "workers": 8,
+     "workers_mean_pct": 99.7
+    },
+    {
+     "t": 29.08,
+     "root_pct": 30.4,
+     "workers": 8,
+     "workers_mean_pct": 94.5
+    },
+    {
+     "t": 29.59,
+     "root_pct": 43.2,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 30.1,
+     "root_pct": 44.1,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 30.61,
+     "root_pct": 37.8,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 31.12,
+     "root_pct": 42.1,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 31.63,
+     "root_pct": 27.0,
+     "workers": 8,
+     "workers_mean_pct": 94.4
+    },
+    {
+     "t": 32.14,
+     "root_pct": 42.2,
+     "workers": 8,
+     "workers_mean_pct": 95.2
+    },
+    {
+     "t": 32.64,
+     "root_pct": 60.1,
+     "workers": 8,
+     "workers_mean_pct": 94.3
+    },
+    {
+     "t": 33.15,
+     "root_pct": 43.7,
+     "workers": 8,
+     "workers_mean_pct": 94.0
+    },
+    {
+     "t": 33.67,
+     "root_pct": 39.7,
+     "workers": 8,
+     "workers_mean_pct": 89.4
+    },
+    {
+     "t": 34.18,
+     "root_pct": 31.8,
+     "workers": 8,
+     "workers_mean_pct": 90.6
+    },
+    {
+     "t": 34.7,
+     "root_pct": 5.7,
+     "workers": 8,
+     "workers_mean_pct": 63.4
+    },
+    {
+     "t": 35.22,
+     "root_pct": 8.3,
+     "workers": 8,
+     "workers_mean_pct": 86.6
+    },
+    {
+     "t": 35.73,
+     "root_pct": 10.9,
+     "workers": 8,
+     "workers_mean_pct": 75.5
+    },
+    {
+     "t": 36.25,
+     "root_pct": 4.2,
+     "workers": 8,
+     "workers_mean_pct": 30.8
+    },
+    {
+     "t": 36.77,
+     "root_pct": 12.8,
+     "workers": 8,
+     "workers_mean_pct": 70.3
+    },
+    {
+     "t": 37.28,
+     "root_pct": 21.4,
+     "workers": 8,
+     "workers_mean_pct": 96.7
+    },
+    {
+     "t": 37.79,
+     "root_pct": 14.2,
+     "workers": 8,
+     "workers_mean_pct": 92.3
+    },
+    {
+     "t": 38.3,
+     "root_pct": 4.5,
+     "workers": 8,
+     "workers_mean_pct": 93.2
+    },
+    {
+     "t": 38.81,
+     "root_pct": 4.2,
+     "workers": 8,
+     "workers_mean_pct": 100.5
+    },
+    {
+     "t": 39.32,
+     "root_pct": 6.6,
+     "workers": 8,
+     "workers_mean_pct": 94.0
+    },
+    {
+     "t": 39.84,
+     "root_pct": 19.6,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 40.35,
+     "root_pct": 21.7,
+     "workers": 8,
+     "workers_mean_pct": 94.8
+    },
+    {
+     "t": 40.88,
+     "root_pct": 26.8,
+     "workers": 8,
+     "workers_mean_pct": 94.3
+    },
+    {
+     "t": 41.39,
+     "root_pct": 31.4,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 41.9,
+     "root_pct": 37.3,
+     "workers": 8,
+     "workers_mean_pct": 97.8
+    },
+    {
+     "t": 42.4,
+     "root_pct": 43.2,
+     "workers": 8,
+     "workers_mean_pct": 98.0
+    },
+    {
+     "t": 42.92,
+     "root_pct": 50.9,
+     "workers": 8,
+     "workers_mean_pct": 97.4
+    },
+    {
+     "t": 43.42,
+     "root_pct": 49.9,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 43.93,
+     "root_pct": 45.5,
+     "workers": 8,
+     "workers_mean_pct": 95.6
+    },
+    {
+     "t": 44.44,
+     "root_pct": 32.1,
+     "workers": 8,
+     "workers_mean_pct": 83.3
+    },
+    {
+     "t": 44.96,
+     "root_pct": 45.8,
+     "workers": 8,
+     "workers_mean_pct": 90.3
+    },
+    {
+     "t": 45.46,
+     "root_pct": 42.9,
+     "workers": 8,
+     "workers_mean_pct": 92.9
+    },
+    {
+     "t": 45.97,
+     "root_pct": 42.9,
+     "workers": 8,
+     "workers_mean_pct": 93.7
+    },
+    {
+     "t": 46.48,
+     "root_pct": 27.3,
+     "workers": 8,
+     "workers_mean_pct": 91.8
+    },
+    {
+     "t": 46.99,
+     "root_pct": 3.2,
+     "workers": 8,
+     "workers_mean_pct": 90.8
+    },
+    {
+     "t": 47.5,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 88.4
+    },
+    {
+     "t": 48.01,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 73.2
+    },
+    {
+     "t": 48.52,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 74.9
+    },
+    {
+     "t": 49.03,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 49.54,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 50.06,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.3
+    },
+    {
+     "t": 50.57,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.7
+    },
+    {
+     "t": 51.08,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 81.9
+    },
+    {
+     "t": 51.6,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.3
+    },
+    {
+     "t": 52.11,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.8
+    },
+    {
+     "t": 52.62,
+     "root_pct": 0.1,
+     "workers": 2,
+     "workers_mean_pct": 97.3
+    },
+    {
+     "t": 53.14,
+     "root_pct": 84.8,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 53.64,
+     "root_pct": 98.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    }
+   ]
+  },
+  {
+   "label": "rstest -n 8",
+   "cmd": [
+    "/Users/drorasaf/code/rstest/target/release/rstest",
+    "--report-json",
+    "/Users/drorasaf/code/rstest/corpus/work/pandas/cpu-r.json",
+    "--worker-timeout",
+    "120",
+    "-n",
+    "8",
+    "--pyargs",
+    "pandas",
+    "-m",
+    "not slow and not network and not db"
+   ],
+   "rc": 1,
+   "wall": 52.6,
+   "summary": {
+    "samples": 101,
+    "root_pct_median": 21.9,
+    "root_share_at_or_above_90pct": 0.03,
+    "workers_mean_pct_median": 96.8,
+    "root_cpu_s": 11.5,
+    "workers_cpu_s": 357.6,
+    "workers": 8,
+    "workers_busy_share": 0.85
+   },
+   "series": [
+    {
+     "t": 1.01,
+     "root_pct": 98.5,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 1.53,
+     "root_pct": 87.9,
+     "workers": 8,
+     "workers_mean_pct": 93.7
+    },
+    {
+     "t": 2.04,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.7
+    },
+    {
+     "t": 2.55,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 92.2
+    },
+    {
+     "t": 3.06,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.3
+    },
+    {
+     "t": 3.57,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 4.08,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 97.0
+    },
+    {
+     "t": 4.61,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 92.7
+    },
+    {
+     "t": 5.12,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 84.2
+    },
+    {
+     "t": 5.63,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 89.0
+    },
+    {
+     "t": 6.14,
+     "root_pct": 0.4,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 6.66,
+     "root_pct": 0.4,
+     "workers": 8,
+     "workers_mean_pct": 95.6
+    },
+    {
+     "t": 7.16,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 95.4
+    },
+    {
+     "t": 7.68,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 94.9
+    },
+    {
+     "t": 8.18,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.4
+    },
+    {
+     "t": 8.7,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 9.21,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 94.2
+    },
+    {
+     "t": 9.72,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.1
+    },
+    {
+     "t": 10.23,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 91.0
+    },
+    {
+     "t": 10.74,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 79.7
+    },
+    {
+     "t": 11.25,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 11.77,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 12.28,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.4
+    },
+    {
+     "t": 12.79,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 13.3,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 12.5
+    },
+    {
+     "t": 13.81,
+     "root_pct": 29.0,
+     "workers": 8,
+     "workers_mean_pct": 13.1
+    },
+    {
+     "t": 14.32,
+     "root_pct": 30.6,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 14.83,
+     "root_pct": 30.3,
+     "workers": 8,
+     "workers_mean_pct": 99.0
+    },
+    {
+     "t": 15.34,
+     "root_pct": 17.3,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 15.85,
+     "root_pct": 20.0,
+     "workers": 8,
+     "workers_mean_pct": 98.9
+    },
+    {
+     "t": 16.35,
+     "root_pct": 39.4,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 16.86,
+     "root_pct": 46.0,
+     "workers": 8,
+     "workers_mean_pct": 98.3
+    },
+    {
+     "t": 17.37,
+     "root_pct": 47.2,
+     "workers": 8,
+     "workers_mean_pct": 98.5
+    },
+    {
+     "t": 17.88,
+     "root_pct": 51.7,
+     "workers": 8,
+     "workers_mean_pct": 98.3
+    },
+    {
+     "t": 18.38,
+     "root_pct": 49.5,
+     "workers": 8,
+     "workers_mean_pct": 95.9
+    },
+    {
+     "t": 18.89,
+     "root_pct": 52.5,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 19.4,
+     "root_pct": 79.3,
+     "workers": 8,
+     "workers_mean_pct": 96.0
+    },
+    {
+     "t": 19.91,
+     "root_pct": 54.1,
+     "workers": 8,
+     "workers_mean_pct": 97.8
+    },
+    {
+     "t": 20.42,
+     "root_pct": 17.1,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 20.93,
+     "root_pct": 16.1,
+     "workers": 8,
+     "workers_mean_pct": 99.4
+    },
+    {
+     "t": 21.43,
+     "root_pct": 28.6,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 21.95,
+     "root_pct": 34.6,
+     "workers": 8,
+     "workers_mean_pct": 98.2
+    },
+    {
+     "t": 22.45,
+     "root_pct": 21.9,
+     "workers": 8,
+     "workers_mean_pct": 98.4
+    },
+    {
+     "t": 22.96,
+     "root_pct": 18.1,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 23.47,
+     "root_pct": 32.8,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 23.98,
+     "root_pct": 25.0,
+     "workers": 8,
+     "workers_mean_pct": 98.1
+    },
+    {
+     "t": 24.49,
+     "root_pct": 20.3,
+     "workers": 8,
+     "workers_mean_pct": 97.1
+    },
+    {
+     "t": 25.0,
+     "root_pct": 21.5,
+     "workers": 8,
+     "workers_mean_pct": 95.5
+    },
+    {
+     "t": 25.5,
+     "root_pct": 31.8,
+     "workers": 8,
+     "workers_mean_pct": 98.6
+    },
+    {
+     "t": 26.01,
+     "root_pct": 17.7,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 26.52,
+     "root_pct": 26.7,
+     "workers": 8,
+     "workers_mean_pct": 99.2
+    },
+    {
+     "t": 27.03,
+     "root_pct": 28.4,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 27.54,
+     "root_pct": 18.1,
+     "workers": 8,
+     "workers_mean_pct": 99.3
+    },
+    {
+     "t": 28.05,
+     "root_pct": 24.5,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 28.56,
+     "root_pct": 28.5,
+     "workers": 8,
+     "workers_mean_pct": 99.1
+    },
+    {
+     "t": 29.06,
+     "root_pct": 38.0,
+     "workers": 8,
+     "workers_mean_pct": 96.1
+    },
+    {
+     "t": 29.57,
+     "root_pct": 35.0,
+     "workers": 8,
+     "workers_mean_pct": 98.8
+    },
+    {
+     "t": 30.08,
+     "root_pct": 31.1,
+     "workers": 8,
+     "workers_mean_pct": 93.3
+    },
+    {
+     "t": 30.59,
+     "root_pct": 34.7,
+     "workers": 8,
+     "workers_mean_pct": 97.3
+    },
+    {
+     "t": 31.1,
+     "root_pct": 23.8,
+     "workers": 8,
+     "workers_mean_pct": 94.6
+    },
+    {
+     "t": 31.61,
+     "root_pct": 38.8,
+     "workers": 8,
+     "workers_mean_pct": 90.3
+    },
+    {
+     "t": 32.12,
+     "root_pct": 61.3,
+     "workers": 8,
+     "workers_mean_pct": 96.0
+    },
+    {
+     "t": 32.63,
+     "root_pct": 38.9,
+     "workers": 8,
+     "workers_mean_pct": 91.8
+    },
+    {
+     "t": 33.14,
+     "root_pct": 44.9,
+     "workers": 8,
+     "workers_mean_pct": 96.4
+    },
+    {
+     "t": 33.65,
+     "root_pct": 22.1,
+     "workers": 8,
+     "workers_mean_pct": 86.5
+    },
+    {
+     "t": 34.16,
+     "root_pct": 8.3,
+     "workers": 8,
+     "workers_mean_pct": 98.3
+    },
+    {
+     "t": 34.67,
+     "root_pct": 13.6,
+     "workers": 8,
+     "workers_mean_pct": 90.5
+    },
+    {
+     "t": 35.18,
+     "root_pct": 21.1,
+     "workers": 8,
+     "workers_mean_pct": 94.4
+    },
+    {
+     "t": 35.7,
+     "root_pct": 22.2,
+     "workers": 8,
+     "workers_mean_pct": 91.7
+    },
+    {
+     "t": 36.2,
+     "root_pct": 13.8,
+     "workers": 8,
+     "workers_mean_pct": 87.8
+    },
+    {
+     "t": 36.71,
+     "root_pct": 5.3,
+     "workers": 8,
+     "workers_mean_pct": 96.8
+    },
+    {
+     "t": 37.22,
+     "root_pct": 2.7,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 37.73,
+     "root_pct": 7.6,
+     "workers": 8,
+     "workers_mean_pct": 97.0
+    },
+    {
+     "t": 38.24,
+     "root_pct": 23.6,
+     "workers": 8,
+     "workers_mean_pct": 97.5
+    },
+    {
+     "t": 38.75,
+     "root_pct": 22.6,
+     "workers": 8,
+     "workers_mean_pct": 96.9
+    },
+    {
+     "t": 39.26,
+     "root_pct": 21.9,
+     "workers": 8,
+     "workers_mean_pct": 97.8
+    },
+    {
+     "t": 39.76,
+     "root_pct": 26.2,
+     "workers": 8,
+     "workers_mean_pct": 98.7
+    },
+    {
+     "t": 40.28,
+     "root_pct": 38.3,
+     "workers": 8,
+     "workers_mean_pct": 96.3
+    },
+    {
+     "t": 40.79,
+     "root_pct": 34.0,
+     "workers": 8,
+     "workers_mean_pct": 88.2
+    },
+    {
+     "t": 41.31,
+     "root_pct": 38.6,
+     "workers": 8,
+     "workers_mean_pct": 92.6
+    },
+    {
+     "t": 41.82,
+     "root_pct": 48.0,
+     "workers": 8,
+     "workers_mean_pct": 95.9
+    },
+    {
+     "t": 42.32,
+     "root_pct": 34.7,
+     "workers": 8,
+     "workers_mean_pct": 96.7
+    },
+    {
+     "t": 42.83,
+     "root_pct": 42.8,
+     "workers": 8,
+     "workers_mean_pct": 88.2
+    },
+    {
+     "t": 43.34,
+     "root_pct": 31.6,
+     "workers": 8,
+     "workers_mean_pct": 82.2
+    },
+    {
+     "t": 43.85,
+     "root_pct": 45.7,
+     "workers": 8,
+     "workers_mean_pct": 91.3
+    },
+    {
+     "t": 44.36,
+     "root_pct": 37.8,
+     "workers": 8,
+     "workers_mean_pct": 93.4
+    },
+    {
+     "t": 44.87,
+     "root_pct": 40.9,
+     "workers": 8,
+     "workers_mean_pct": 98.4
+    },
+    {
+     "t": 45.38,
+     "root_pct": 20.4,
+     "workers": 8,
+     "workers_mean_pct": 96.8
+    },
+    {
+     "t": 45.89,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 96.5
+    },
+    {
+     "t": 46.4,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 86.0
+    },
+    {
+     "t": 46.92,
+     "root_pct": 0.1,
+     "workers": 8,
+     "workers_mean_pct": 62.4
+    },
+    {
+     "t": 47.43,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.9
+    },
+    {
+     "t": 47.94,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.7
+    },
+    {
+     "t": 48.45,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.7
+    },
+    {
+     "t": 48.97,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.0
+    },
+    {
+     "t": 49.48,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.8
+    },
+    {
+     "t": 49.99,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 99.7
+    },
+    {
+     "t": 50.5,
+     "root_pct": 0.0,
+     "workers": 8,
+     "workers_mean_pct": 100.6
+    },
+    {
+     "t": 51.01,
+     "root_pct": 42.3,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 51.53,
+     "root_pct": 99.9,
+     "workers": 0,
+     "workers_mean_pct": null
+    },
+    {
+     "t": 52.04,
+     "root_pct": 91.6,
+     "workers": 0,
+     "workers_mean_pct": null
+    }
+   ]
+  }
+ ],
+ "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+ "interval_s": 0.5
+}
