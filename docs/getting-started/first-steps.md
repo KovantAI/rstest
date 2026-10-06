@@ -180,8 +180,8 @@ explicit `-n` to override.
 
 `-n 0` and `-n 1` are the compatibility escape hatch: one pytest session
 in a single worker process, pytest's own behavior in every detail. With no
-`--output` set, the terminal output is pytest's own too, byte for byte,
-and rstest only appends its extras (doctor, coverage, gate
+`--output` or `--reruns` set, the terminal output is pytest's own too, byte
+for byte, and rstest only appends its extras (doctor, coverage, gate
 messages) after pytest's summary line. You will see this one mode under
 three names: *byte-exact* in these docs, *pytest-exact* in its run banner
 (printed only when you pin rstest's renderer with `--output`), and
@@ -230,8 +230,8 @@ $ rstest --doctor    # and if the suite feels slow, ask why
 !!! tip "Coming from pytest or pytest-xdist?"
     If tests fail *only* under parallelism on a freshly migrated suite, run
     [`rstest migrate-check`](../reference/cli-commands.md#migrate-check) first: it
-    classifies each parallel-only failure (order dependency, isolation leak,
-    wall-clock timing, unstable id) and names the fix, so you don't triage by
+    classifies each parallel-only failure (for example order dependency,
+    isolation leak, or wall-clock timing) and names the fix, so you don't triage by
     hand. See [Migrating from pytest](../guides/migrate-from-pytest.md#the-migrate-check-preflight).
 
 ## Which command when?

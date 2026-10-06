@@ -566,8 +566,8 @@ Feature: Suite maintainer
       And stdout contains "5 passed"
       And the report "r.json" has 4 "test_slow" tests
       And the "test_slow" tests in "r.json" each ran on a different worker
-      # One long pole per worker, not two.
-      And the JSON file "r.json" has "meta.duration_seconds" < 1.75
+      # One long pole per worker, not two (two would be >= 2.0s of sleep).
+      And the JSON file "r.json" has "meta.duration_seconds" < 1.95
 
   Rule: an order-dependent failure can be reproduced and pinned on its polluter
 

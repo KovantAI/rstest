@@ -55,6 +55,10 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   machine that ran it: keep it **out** of any CI cache and upload
   `latest.json` as a failure artifact instead (see
   [Replaying a CI-only failure](../guides/ci-quickstart.md#replaying-a-ci-only-failure-locally)).
+- `.lock`: an empty sentinel file. rstest takes an OS advisory lock on it
+  around each read-modify-write of the cache files, so concurrent runs or
+  shards sharing one cache directory don't lose each other's updates. Never
+  read or written; safe to delete when no run is active.
 
 Persist it in CI ([example](../guides/ci-quickstart.md)) to get
 duration-aware scheduling from the second run onward, minus `replay/`.
@@ -166,7 +170,8 @@ or corrupted segment can:
 - make [`--changed`](../guides/changed.md) select **too few tests**, because
   the coverage index is trusted for the lines it records;
 - inflate flake counts in `flakes.json`, so `--reruns-only-known-flaky`
-  retries (and hides) failures it should not;
+  retries (and hides) failures it should not, `--order fail-fast` reorders
+  dispatch around them, and `rstest explain` reports them as genuine history;
 - skew durations, which unbalances shards and can make `--durations-regress`
   pass or fail wrongly.
 

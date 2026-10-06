@@ -28,8 +28,9 @@ usually a randomized or time-based nodeid (see
 [Troubleshooting](../reference/troubleshooting.md)).
 
 **pytest-xdist (xdist)**: the original pytest plugin for running tests in
-parallel across worker processes. rstest replaces it (you don't install or
-configure xdist), but reuses its vocabulary (`gw0`/`gw1` worker names, the
+parallel across worker processes. rstest replaces it (you don't need xdist
+to run in parallel, but you may keep it installed during migration; see
+[Migrating from pytest-xdist](../guides/migrate-from-xdist.md)), but reuses its vocabulary (`gw0`/`gw1` worker names, the
 `-n` flag, `--dist` modes), so xdist users feel at home. See
 [Migrating from xdist](../guides/migrate-from-xdist.md).
 
@@ -66,7 +67,8 @@ for very large suites in CI. See [Sharding](../guides/sharding.md).
 isn't optimal. From the **second** ("warm") run on, it starts the slowest
 tests first and gets faster. **Don't judge rstest's speed on the first run.**
 
-**Byte-exact mode**{#byte-exact-mode}: `-n 0`: one process, runs exactly like plain
+**Byte-exact mode**{#byte-exact-mode}: `-n 0` (or `-n 1`, or `-n auto` when it
+resolves to one worker): one process, runs exactly like plain
 pytest. You get the same per-test outcomes and, with no `--output` set,
 pytest's own terminal output, with rstest's extras (doctor report, coverage
 report, quarantined failures, gate messages) appended after it. An explicit
@@ -86,8 +88,9 @@ pytest's own terminal (`--co`/`--collect-only`, `-s`, `--capture=...`,
 automatically. See [Compatibility](compatibility.md)
 for the guarantee and [Architecture](architecture.md) for how it falls
 back. One opt-in exception: passing [`--reruns`](../reference/cli.md#-reruns-n)
-runs `-n 0`/`-n 1` as a degenerate one-worker pool so retries fire, trading
-byte-exactness for the reruns you asked for.
+runs `-n 0`/`-n 1` as a degenerate one-worker pool (worker `gw0`, rstest's
+renderer) so retries fire, trading byte-exactness for the reruns you asked
+for.
 
 **Vendored core**: the unmodified copy of pytest shipped inside
 `rstest_worker._vendor`; provides all test semantics. Never conflicts with

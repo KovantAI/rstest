@@ -46,8 +46,14 @@ flake first), both read from `.rstest_cache/flakes.json` and each dispatched
 on its own; at most 128 lead, and quarantined tests are never pulled
 forward. The remaining tests follow in throughput order. With neither the
 flag nor `[tool.rstest] order` set, rstest picks `fail-fast` under
-`--watch` and `throughput` otherwise. Affinity modes and `--collect lazy`
-ignore it.
+`--watch` and `throughput` otherwise. It has no effect (and an explicit
+`--order fail-fast` warns) under the affinity modes
+(`loadfile`/`loadscope`/`loadgroup`), `--dist each` (no dispatch queue),
+`--collect lazy`, a single-worker run (`-n 0`/`-n 1`, or `-n auto` resolving
+to one worker), and a passthrough run (`-s`, `--pdb`, `--co`, `--debug`,
+...); in the last two cases the warning fires only when the flag is on the
+command line, not from config. Combining it with `--shuffle` is an error.
+See [`--order`](../reference/cli.md#-order-throughputfail-fast).
 
 ## The nextitem invariant
 

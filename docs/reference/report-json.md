@@ -257,7 +257,9 @@ The stream closes with exactly one `sessionfinish`:
 | `counts` | object | outcome tallies: the same keys and accounting as the snapshot's `meta.counts` |
 
 `exitstatus` reflects the test session only. Post-run gates
-(`--doctor-fail-on`, `--durations-regress`) run **after** this envelope is
+(`--fail-on-leak`, `--durations-regress`, `--doctor-fail-on`,
+`--cov-fail-under`, `--cov-diff-fail-under`; see
+[Exit codes](exit-codes.md#gating-ci-on-exit-code-and-report)) run **after** this envelope is
 streamed, so they cannot change it: a green session that fails a gate still
 reports `"exitstatus": 0` here while the **process** exits non-zero. Key CI
 success off the process exit code, not this field.

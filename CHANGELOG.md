@@ -17,6 +17,10 @@ between 0.x releases and are listed here.
   `/plugin marketplace add KovantAI/rstest` then `/plugin install rstest@rstest`
   makes both skills available in every project. The skills moved from
   `.claude/skills/` to `plugins/rstest/skills/`.
+- **GitHub action: new `warm-run-id` input.** The artifact backend resolves
+  the warm run inside each job, so shards of one matrix could warm from
+  different runs. Pass one run id resolved upstream to every shard to share a
+  snapshot in a gating pipeline.
 
 ### Behavior changes
 
@@ -177,6 +181,32 @@ between 0.x releases and are listed here.
   expands glob `testpaths`, and ignores `.ignore` files.
 - **`@serial` tests share the designated worker's session.** Session fixtures
   were set up again for every serial test.
+- **`--pdb` works with a leftover `addopts = -n N` and pytest-xdist
+  installed.** xdist's own `pytest_cmdline_main` rejected the run with
+  `--pdb is incompatible with distributing tests` before rstest turned xdist
+  off. rstest now switches off xdist's distribution options in a
+  `pytest_cmdline_main` wrapper, which runs before every other impl.
+- **Python 3.9 is rejected up front.** Interpreter discovery accepted 3.9
+  although the vendored pytest core and the worker need 3.10, so a 3.9
+  environment got past discovery and failed later with an obscure
+  `ImportError` (for example `cannot import name 'TypeAlias'`). It is now
+  listed as `older than the required 3.10` like any other rejected
+  candidate.
+- **GitHub action: `changed` no longer passes green without running a test.**
+  On a push with no `base-ref`, the action diffed against `HEAD`, which in a
+  clean checkout selects nothing, so the job passed (or exited 5 under
+  `strict`) without running anything; `base-ref: origin/main` on a push to
+  main did the same. It now diffs a push against `github.event.before`, falls
+  back to that when the base is the pushed commit itself, and with no usable
+  base (a new branch, `schedule`, `workflow_dispatch`) warns and runs the full
+  suite.
+- **GitHub action: a monorepo root is refused with a pointer to the recipe.**
+  At a monorepo root the action cached the wrong directory, uploaded no JUnit
+  (each project writes `junit.<slug>.xml`), left the fail-ratio gate nothing
+  to read, and with `cache-backend: artifact` exited 1 on `--cache-pull`. It
+  now stops before install with an error naming the subprojects, using the
+  same rule rstest uses to enter monorepo mode, and points at the
+  one-job-per-package matrix recipe (`working-directory` set to the package).
 - **Smaller fixes.**
   - `rstest -q try` runs `try`; a subcommand name in a later position gets a
     clear error.

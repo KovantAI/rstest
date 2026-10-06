@@ -99,8 +99,12 @@ Details: [`@pytest.mark.flaky`](../reference/markers.md#pytestmarkflaky).
 rstest workers announce themselves exactly like xdist workers.
 `config.workerinput` carries: `workerid` (`gw0`, `gw1`, ...),
 `workercount`, the run uid as `testrunuid` (xdist's key) and `testrun_uid`
-(one uid per run, shared by all workers), `mainargv`, and the `cov_master_*`
-keys pytest-cov expects. The `PYTEST_XDIST_WORKER`,
+(one uid per run, shared by all workers), `randomly_seed` (pytest-randomly)
+and `random_order_seed` (pytest-random-order), each one run-level value all
+workers share, `mainargv`, and the `cov_master_*` keys pytest-cov expects.
+Two keys are seeded only when their plugin is installed and pytest-xdist is
+not: `server_port` (pytest-retry) and `mypy_config_stash_serialized`
+(pytest-mypy). The `PYTEST_XDIST_WORKER`,
 `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` environment
 variables are set too, so plugins and conftests that grep the
 environment keep working as-is. Plugins keying per-worker resources on
@@ -205,10 +209,7 @@ rstest exits.
 
 `addopts = -n 4` with pytest-xdist installed is neutralized inside rstest
 workers automatically: options parse, the xdist session never engages, no
-nested workers. One exception: `rstest --pdb` fails with xdist's
-`--pdb is incompatible with distributing tests`, because xdist checks before
-rstest neutralizes it, so remove `-n` from `addopts` before debugging with
-`--pdb`. Keep it while a pytest-xdist job is still your fallback, then
+nested workers, and `rstest --pdb` works too. Keep it while a pytest-xdist job is still your fallback, then
 remove it and pass `-n` to rstest. Uninstall pytest-xdist only after that,
 and only once no conftest or plugin implements its hooks (see
 [Controller-side hooks](#controller-side-hooks)).

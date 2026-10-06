@@ -177,8 +177,8 @@ Full methodology:
 
 At `-n 0` (byte-exact mode), per-test outcomes match pytest exactly: one
 vendored-pytest session; any difference at `-n 0` is a bug. The guarantee is
-per-test outcomes (every phase, skips, xfails). With no `--output` set,
-the terminal output at `-n 0` is pytest's own as well, with
+per-test outcomes (every phase, skips, xfails). With no `--output` or
+`--reruns` set, the terminal output at `-n 0` is pytest's own as well, with
 rstest's extras (doctor, coverage, gate messages) appended after it, and
 `--junitxml` is pytest's own document at every worker count. In parallel modes, outcomes are preserved for
 parallel-safe tests; tests with hidden time/ordering/shared-state

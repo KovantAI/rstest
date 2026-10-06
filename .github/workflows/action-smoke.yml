@@ -361,3 +361,38 @@ jobs:
           test "$staged" -eq "$count" \
             || { echo "staged $staged != $count segments; push delta is wrong"; exit 1; }
           echo "OK: $count segment(s), all staged for push"
+
+  monorepo-root-refused:
+    name: monorepo root is refused with a pointer to the matrix recipe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: scaffold a two-project monorepo
+        run: |
+          for p in libs/a libs/b; do
+            mkdir -p "mono/$p"
+            printf '[pytest]\n' > "mono/$p/pytest.ini"
+            printf 'def test_ok():\n    assert True\n' > "mono/$p/test_ok.py"
+          done
+      - uses: ./.github/actions/rstest
+        id: root
+        continue-on-error: true
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: mono
+      - name: assert the root was refused before install
+        env:
+          OUTCOME: ${{ steps.root.outcome }}
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = "failure" || { echo "expected the monorepo root to be refused, got $OUTCOME"; exit 1; }
+          echo "OK: monorepo root refused"
+      # One package of the same monorepo is a normal single-project run.
+      - uses: ./.github/actions/rstest
+        id: pkg
+        with:
+          python-version: "3.13"
+          runner: plain
+          working-directory: mono/libs/a
+          args: "-n 2"
