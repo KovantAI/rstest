@@ -4,6 +4,10 @@
 //! `python3`, and skip when it cannot import what the test needs. With
 //! `RSTEST_TEST_REQUIRE=1` (set in CI) a missing interpreter fails the test
 //! instead, so a CI job that lost its python deps cannot pass by skipping.
+//!
+//! They always skip on Windows: they drive POSIX tooling (`sh -c`,
+//! `:`-joined PATH, `<venv>/bin/python`). A Windows runner can still have a
+//! `python3` with pytest, so the probe alone would not skip them there.
 #![allow(dead_code)]
 
 use std::ffi::OsString;
@@ -13,6 +17,9 @@ use std::process::{Command, Stdio};
 /// The test venv (`Some(Some(venv))`), the ambient `python3` (`Some(None)`),
 /// or `None` to skip. `modules` is a comma-separated import list.
 pub fn pytest_env(modules: &str) -> Option<Option<PathBuf>> {
+    if cfg!(windows) {
+        return posix_only();
+    }
     if let Ok(venv) = std::env::var("RSTEST_TEST_VENV") {
         let py = Path::new(&venv).join("bin").join("python");
         if importable(&py, modules) {
@@ -29,6 +36,9 @@ pub fn pytest_env(modules: &str) -> Option<Option<PathBuf>> {
 /// The interpreter itself rather than its venv, for tests that pass it with
 /// `--python`.
 pub fn python(modules: &str) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return posix_only();
+    }
     let py = match std::env::var("RSTEST_TEST_VENV") {
         Ok(venv) => Path::new(&venv).join("bin").join("python"),
         Err(_) => PathBuf::from("python3"),
@@ -70,6 +80,13 @@ pub fn pythonpath_with_worker(existing: Option<OsString>) -> OsString {
         paths.extend(std::env::split_paths(&existing));
     }
     std::env::join_paths(paths).unwrap_or_default()
+}
+
+/// Skip on Windows even under `RSTEST_TEST_REQUIRE=1`: the harness, not
+/// the interpreter, is what is missing there.
+fn posix_only<T>() -> Option<T> {
+    eprintln!("skipping: POSIX-only end-to-end test");
+    None
 }
 
 fn skip<T>(why: &str) -> Option<T> {

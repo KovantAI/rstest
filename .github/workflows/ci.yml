@@ -127,8 +127,8 @@ jobs:
           python -m pip install -q --group dev
 
       # RSTEST_TEST_REQUIRE=1 makes those tests fail instead of skipping when
-      # the interpreter lacks their deps. Not on Windows: they look for
-      # `python3` and `<venv>/bin/python`, which Windows runners do not have.
+      # the interpreter lacks their deps. Not on Windows: those tests drive
+      # POSIX tooling (`sh -c`, `<venv>/bin/python`) and always skip there.
       - name: cargo test
         run: cargo test --release
         env:

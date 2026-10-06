@@ -40,6 +40,16 @@ fn probe_imports_the_worker_without_an_ambient_pythonpath() {
 }
 
 #[test]
+#[cfg(windows)]
+fn the_e2e_tests_skip_on_windows_even_with_pytest_installed() {
+    // The regression: once CI installed pytest before `cargo test`, the
+    // runner's `python3` passed the probe and the POSIX-only bisect tests ran
+    // (and failed) on Windows.
+    assert_eq!(common::pytest_env("pytest"), None);
+    assert_eq!(common::python("pytest"), None);
+}
+
+#[test]
 fn a_missing_python_skips_when_not_required() {
     assert_eq!(common::skip_or_fail::<()>(false, "no python"), None);
 }

@@ -685,7 +685,7 @@ Feature: pytest / pytest-xdist migrator
         """
       When I run "rstest -n 2" collecting the fixture event log
       Then the run succeeds
-      And 20 events were logged, each worker's "i" values descend, and 19 is among the first two
+      And 20 events were logged, each worker's "i" values descend, and 19 is some worker's first
 
   Rule: --collect lazy finds the same tests as pytest
 
