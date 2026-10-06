@@ -74,6 +74,33 @@ def _run_without_venv(world, command):
     world.run(command, env_extra=world.notes.get("env"), env_drop=("VIRTUAL_ENV",))
 
 
+@then(parsers.re(rf"no page under {q('dir')} links to an absolute site path"))
+def _no_absolute_links(world, dir):
+    # The strict build checks relative links and anchors but not `/...` ones,
+    # which also break on a versioned Read the Docs URL (/en/stable/...).
+    import re
+
+    from _harness import REPO
+
+    bad = [
+        f"{page.relative_to(REPO)}: {m.group(0)}"
+        for page in sorted((REPO / dir).rglob("*.md"))
+        for m in re.finditer(r"\]\(/[^)]*\)", page.read_text(encoding="utf-8"))
+    ]
+    assert not bad, "absolute links:\n" + "\n".join(bad)
+
+
+@then(parsers.re(rf"the docs canonical URLs live under {q('root')}"))
+def _site_url(world, root):
+    import re
+
+    from _harness import REPO
+
+    m = re.search(r"^site_url:\s*(\S+)", (REPO / "mkdocs.yml").read_text(encoding="utf-8"), re.M)
+    got = m and m.group(1)
+    assert got == root, f"site_url is {got}, pages are served under {root}"
+
+
 @then("the output mentions the missing dependency or that rstest is not installed in the .venv")
 def _names_missing(world):
     out = world.output

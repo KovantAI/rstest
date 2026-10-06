@@ -698,3 +698,17 @@ Feature: Suite maintainer
         | n |
         | 2 |
         | 0 |
+
+  Rule: pinned toolchains get dependency updates
+
+    Scenario: MT-15 every pinned requirements file has a Dependabot entry
+      # docs/requirements.txt pins the Read the Docs toolchain (zensical and
+      # friends); without an entry those pins silently go stale.
+      Then Dependabot updates every tracked requirements file
+
+    Scenario: MT-15 uv.lock gets updates without touching the published package's ranges
+      # lockfile-only: the dev/CI environment stays current, but the runtime
+      # `dependencies` users install against keep their wide ranges, and the
+      # dev group's pytest stays equal to the vendored core (python/VENDOR.md).
+      Then the Dependabot "uv" entry for "/" has "versioning-strategy: lockfile-only"
+      And the Dependabot "uv" entry for "/" has "- dependency-name: pytest"

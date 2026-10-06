@@ -217,3 +217,14 @@ Feature: First-time evaluator onboarding
         | workers |
         | 0       |
         | 2       |
+
+  Rule: links survive the strict build and Read the Docs' versioned URLs
+
+    Scenario: EV-48 docs link pages relatively, never by an absolute site path
+      # zensical build --strict checks relative links and anchors, not /... ones.
+      Then no page under "docs" links to an absolute site path
+
+    Scenario: EV-49 canonical URLs point at the published version, not a 404
+      # Read the Docs serves /en/stable/; Zensical can't read the canonical URL
+      # from READTHEDOCS_CANONICAL_URL, so site_url must spell it out.
+      Then the docs canonical URLs live under "https://python-rstest.readthedocs.io/en/stable/"
