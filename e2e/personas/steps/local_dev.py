@@ -225,6 +225,13 @@ def _git_commit_project(world):
     git_init_commit(world.project)
 
 
+@given("I commit all changes")
+def _git_commit_all(world):
+    git = ["git", "-c", "user.email=e2e@rstest", "-c", "user.name=e2e"]
+    subprocess.run([*git, "add", "-A"], cwd=world.project, check=True)
+    subprocess.run([*git, "commit", "-qm", "step"], cwd=world.project, check=True)
+
+
 @then("git status --porcelain -uall shows a clean tree")
 def _porcelain_clean(world):
     out = subprocess.run(

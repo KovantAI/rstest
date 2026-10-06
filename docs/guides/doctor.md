@@ -57,8 +57,8 @@ its test time, worker load, long pole, slowest files and realized speedup
 all include the fixture work. CPU time is measured over the same span. On
 Linux and macOS it includes CPU used by child processes the test waited for (a
 CLI run with `subprocess.run`), so a test that shells out to a CPU-heavy tool
-reads as computing, not waiting. Windows reports no child CPU time, so there
-such a test reads as waiting.
+reads as computing, not waiting. On Windows such a test reads as waiting
+([no child CPU time](windows.md#diagnostics)).
 
 A single-worker run (`-n 0` or `-n 1`) reports `1 worker`.
 
@@ -256,7 +256,8 @@ When that startup is a real fraction of a short multi-worker run on Unix, the
 line suggests [`--fork-pool`](../reference/cli.md#-fork-pool), which imports the
 vendored pytest core once in a zygote and forks the workers off it instead of
 re-importing per worker. The hint is dropped once the run already uses
-`--fork-pool`, on Windows, and on single-worker runs. It's a fixed per-run tax,
+`--fork-pool`, on Windows ([no fork pool](windows.md#worker-startup)), and on
+single-worker runs. It's a fixed per-run tax,
 so it matters most on short / cold suites and is negligible on long ones.
 
 ## JSON output for CI

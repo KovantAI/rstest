@@ -254,3 +254,71 @@ Feature: First-time evaluator onboarding
 
     Scenario: EV-19 the hang-watchdog formula has one home, and restatements link to it
       Then every docs paragraph outside "concepts/crash-handling.md" that matches "timeout \+ 10" links to "crash-handling.md#"
+
+    Scenario: EV-20 only session fixtures are said to run once per worker
+      # A module-scoped fixture runs on every worker that gets tests from its
+      # module, which is not "once per worker".
+      Then no paragraph of "README.md" matches "(?i)module-scoped fixtures? (run|instantiate) \[?once per worker"
+      And no paragraph of "docs/**/*.md" matches "(?i)module-scoped fixtures? (run|instantiate) \[?once per worker"
+
+    Scenario: EV-21 the features page does not claim to list every flag
+      Then no paragraph of "docs/getting-started/features.md" matches "(?i)full surface|every flag|all flags"
+
+    Scenario: EV-22 the first-run page names every selector rstest adds
+      Given the level-2 section "## Selecting tests" of "docs/getting-started/first-steps.md"
+      Then that level-2 section names each of "--changed --changed-strict --since-green --incremental"
+      And no paragraph of "docs/getting-started/first-steps.md" matches "(?i)one selector"
+
+    Scenario: EV-23 --dist each is not sold as heterogeneous-environment testing
+      # Every worker uses the same interpreter; xdist's --tx has no equivalent.
+      Then no paragraph of "docs/**/*.md" matches "(?i)configured differently"
+
+    Scenario: EV-24 path arguments are not offered as a way to split a monorepo
+      # A path argument opts out of monorepo mode: one session from the root,
+      # under the root's config and interpreter.
+      Then no paragraph of "docs/**/*.md" matches "(?i)(split|shard)[^.]*path arguments"
+      And no fenced block in "docs/guides/ci-quickstart.md" contains "its .rstest_cache"
+
+    Scenario: EV-25 sample diff-coverage reports add up
+      Then every diff-coverage report in the docs counts as many uncovered lines as it lists
+
+    Scenario: EV-26 the SQLAlchemy parity figures match the corpus results
+      Then every docs paragraph on "sqlalchemy" parity states the score and mismatch count in "corpus/results.json"
+
+    Scenario: EV-27 the pytest-django SQLite caveat has one home, and restatements link to it
+      Then every docs paragraph outside "reference/corpus-plugins.md" that matches "(?s)pytest-django.*SQLite|SQLite.*pytest-django" links to "corpus-plugins.md#what-pytest-djangos-evidence-covers"
+
+    Scenario: EV-28 the rerun-plugin mechanism has one home, and mentions link to it
+      # pytest-retry's server_port and pytest-rerunfailures' sock_port were
+      # explained in full on several pages; xdist-hooks.md now owns the how.
+      Then every docs paragraph outside "concepts/xdist-hooks.md" that matches "server_port|sock_port|ReportServer" links to "xdist-hooks.md#"
+
+    Scenario: EV-29 one name per concept
+      # Maturity is "alpha (0.x)", as PyPI's classifier says; scheduling by
+      # cached duration is "duration-aware scheduling", as the glossary says.
+      Then no paragraph of "README.md" matches "(?i)pre-1\.0"
+      And no paragraph of "docs/**/*.md" matches "(?i)pre-1\.0|long-pole-first|`RSTEST_RUN_UID` \| the run id\b"
+
+    Scenario: EV-30 the project-status blurb defers to the evaluator's Maturity list
+      Given the level-2 section "## Project status" of "docs/getting-started/getting-help.md"
+      Then that level-2 section names the link "evaluating.md#maturity"
+      And no paragraph of "docs/getting-started/getting-help.md" matches "(?i)two weeks|long-term-support"
+
+    Scenario: EV-31 the README pitch is the docs home page's Highlights
+      # GitHub and PyPI can't include docs snippets, so the README carries a
+      # copy; it drifted from the docs before (and claimed module fixtures run
+      # once per worker).
+      Then the README list under the "docs/index.md" marker is the "## Highlights" list of "docs/index.md", with site links
+
+    Scenario: EV-32 each plugin's verdict lives in one guide table, agreeing with the top-100 matrix
+      Then no plugin has a verdict row on more than one page of "docs/guides/*.md"
+      And every plugin in "docs/guides/plugins.md" has the verdict and V/i mark of "docs/reference/top-100-plugins.md"
+
+    Scenario: EV-33 Windows caveats have one home, and restatements link to it
+      Then every docs paragraph outside "guides/windows.md" that matches "no SIGALRM|no child CPU|Windows-heavy|any test on Windows|anonymous-pipe|On Windows[^.]{0,60}(--timeout|watchdog|fork|journal)" links to "windows.md#"
+
+    Scenario: EV-34 the --since-green fingerprint is described as the code computes it
+      # incremental.rs folds installed distributions into the fingerprint
+      # (unit test env_fingerprint_reflects_dist_info_records), so an in-place
+      # upgrade IS detected.
+      Then no paragraph of "docs/**/*.md" matches "(?i)upgraded in place without a lockfile change is not detected|fingerprint \(interpreter and dependency manifests\)"

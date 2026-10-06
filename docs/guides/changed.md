@@ -213,3 +213,7 @@ a `--changed` run only records durations and coverage for the tests it ran.
   [Monorepo mode](../concepts/monorepo.md).
 - **Watch mode.** [`--watch`](watch-mode.md) uses import-graph selection for
   its targeted reruns.
+- **Since the last green run.** `--since-green` runs this selection against
+  the last fully green commit instead of a base you name, and `--incremental`
+  skips unchanged green tests without git. See
+  [Running only what changed since green](since-green.md).

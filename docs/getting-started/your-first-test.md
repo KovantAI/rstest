@@ -13,9 +13,11 @@ pytest knowledge. New to the terms below (worker, single-worker mode, `-n`)? The
 ```console
 $ mkdir rstest-demo && cd rstest-demo
 $ python3 -m venv .venv && source .venv/bin/activate
-$ # Windows: python -m venv .venv, then .venv\Scripts\activate
 $ pip install rstest
 ```
+
+On Windows, activate with `.venv\Scripts\activate` instead
+([Running on Windows](../guides/windows.md#install)).
 
 rstest discovers the interpreter from the active virtualenv, so activating
 `.venv` is all the configuration this needs.

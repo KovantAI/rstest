@@ -340,13 +340,15 @@ is fully green**, so a failing test keeps being selected until it passes.
   edits keeps the old baseline and says so on stderr. Commit, then run once
   more to advance it.
 - First run (no baseline yet) runs everything.
-- The baseline is keyed to an environment fingerprint (interpreter plus the
-  content of `uv.lock`, `poetry.lock`, `pdm.lock`, `requirements.txt`); a
-  change to any of them runs everything once.
+- The baseline is keyed to an environment fingerprint: the interpreter, the
+  content of `uv.lock`, `poetry.lock`, `pdm.lock` and `requirements.txt`, and
+  the set of installed distributions in the venv (so a `pip install -U` with
+  no lockfile change counts). A change to any of them runs everything once.
 - Ignored when `--changed` is given explicitly. Mutually exclusive with
   `--incremental` (`--since-green` wins, with a warning).
-- Like `--changed`, it sees only git-tracked first-party source: a dependency
-  upgraded in place without a lockfile change is not detected. Delete
+- Like `--changed`, it sees only git-tracked first-party source. Changes the
+  fingerprint can't see (a same-version reinstall, or an interpreter with no
+  discoverable site-packages) are not detected: delete
   `.rstest_cache/last_green.json` (or do one full run) after such a change.
 
 ### `--incremental`
@@ -523,8 +525,8 @@ prints this report itself, exactly as pytest does.
 
 Gate CI on per-test duration regressions. After the run, each test's wall time
 is compared against the duration cache (`.rstest_cache/durations.json`, the
-file scheduling uses; restore it from your CI cache). Any test that grew past
-`RATIO` × its baseline is listed and the run exits 1:
+file scheduling uses; restore it from your CI cache). Any test whose time is
+at least `RATIO` × its baseline is listed and the run exits 1:
 
 ```text
 =========== duration regressions (>= 2x baseline) ===========
@@ -539,7 +541,10 @@ cache is refreshed.
 
 A flagged test's time is kept out of `durations.json` (and any `--cache-push`
 segment), so the regression keeps failing until the test is back under the
-threshold. A failed test's duration is never recorded either, so a fail-fast
+threshold, unless the same run edited the test's file: saving then drops that
+file's entries as stale, and the next run has no baseline for the test
+([Catching slowdowns](../guides/slowdowns.md#where-the-baseline-comes-from)).
+A failed test's duration is never recorded either, so a fail-fast
 run can't shrink the baseline. To accept an intended slowdown, run once
 without `--durations-regress`.
 
@@ -735,7 +740,7 @@ names the uncovered added lines per file:
 
 ```text
 rstest: diff coverage 83.3% (5/6 added lines covered)
-  mymod.py: uncovered added line(s) 7, 12-14
+  mymod.py: uncovered added line(s) 7
 rstest: --cov-diff-fail-under: diff coverage 83.3% is below 90%
 ```
 
@@ -886,7 +891,8 @@ show normal terminal output **and** drive a Test Explorer from the events.
 reading first (opening a fifo for write blocks until a reader is present).
 Lines are flushed as produced. Works in every pooled and single-worker mode;
 under a passthrough-IO flag (`--pdb`, `-s`, `--co`, ...) there is no merged
-run, so no closing `sessionfinish` envelope is written.
+run, so the `testreport` lines are still written but no closing
+`sessionfinish` envelope is.
 
 ## Interpreter, watch mode and debugging
 

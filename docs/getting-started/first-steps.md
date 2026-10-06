@@ -151,16 +151,22 @@ $ rstest --lf                           # only last failures
 $ rstest -x                             # stop at first failure (globally)
 ```
 
-rstest adds one selector of its own (not a pytest flag; needs a git
-checkout):
+rstest adds selectors of its own (not pytest flags):
 
 ```console
 $ rstest --changed                      # only tests affected by your edits
+$ rstest --since-green                  # only what changed since the last all-green run
+$ rstest --incremental                  # skip tests that passed and whose code is unchanged
 ```
 
 `--changed` runs just the tests a change can reach, using the per-test
-coverage index when it is warm and the import graph otherwise.
-See [Watch mode](../guides/watch-mode.md) for the on-save version.
+coverage index when it is warm and the import graph otherwise; for gating CI
+use [`--changed-strict`](../reference/cli.md#-changed-strict), which runs
+everything when it can't connect a change. `--since-green` does the same
+against the commit of the last all-passing run. Both need a git checkout.
+[`--incremental`](../reference/cli.md#-incremental) needs no git but a warm
+coverage index. More in [Selecting changed tests](../guides/changed.md);
+see [Watch mode](../guides/watch-mode.md) for the on-save version.
 
 ## Controlling parallelism
 

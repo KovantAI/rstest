@@ -81,9 +81,9 @@ order, each block whole.
 
 **Scale note:** every project gets at least one worker and all projects launch
 concurrently, so a 40-package repo on a 2-core CI runner means 40 concurrent
-single-worker children, which oversubscribes. On small runners, shard with
-`[tool.rstest] projects` (or path arguments) until a project-level concurrency
-cap exists.
+single-worker children, which oversubscribes. On small runners, narrow each
+job with `[tool.rstest] projects`, or run each package as its own CI job,
+until a project-level concurrency cap exists.
 
 ## Caches per project
 

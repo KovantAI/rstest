@@ -169,7 +169,7 @@ xdist users: **SQLAlchemy** (about 25,300 tests) runs at `-n auto` with its
 controller-side hooks exercised end-to-end: `pytest_configure_node`
 filling `follower_ident`, follower databases provisioned per worker,
 `pytest_testnodedown` dropping them. Parity against its serial pytest run
-is about 99.97%: 7 IMV/RETURNING tests skip in the serial baseline (they
+is about 99.96%: 9 IMV/RETURNING tests skip in the serial baseline (they
 depend on full-suite order) but pass under any parallel runner, real
 pytest-xdist included; see
 [Parity divergences §9](../reference/parity-divergences.md#9-order-dependent-serial-baseline).
@@ -236,10 +236,10 @@ Maintained as things close:
 | Plugins that aggregate worker output into one artifact (pytest-html) | writes nothing at `-n ≥ 2` | [8](#gap-pytest-html) |
 
 1. **Windows at corpus scale.**{ #gap-windows } The full gate runs on
-   `windows-latest` in CI on every commit and wheels are smoke-tested there,
-   but the 33-suite public corpus runs only on macOS/Linux, so
-   large-real-world-suite validation on Windows is lighter than on the other
-   platforms.
+   `windows-latest` in CI on every commit, but the 33-suite public corpus
+   runs only on macOS/Linux, so large-real-world-suite validation on Windows
+   is lighter. What runs where, and what behaves differently:
+   [Running on Windows](../guides/windows.md#validation).
 2. **Terminal-rendering plugins.**{ #gap-terminal } At `-n ≥ 2` rstest owns
    the terminal, so plugin-drawn UIs don't paint. Data-level plugin behavior
    is unaffected.
@@ -270,7 +270,7 @@ Maintained as things close:
    (if that fails, rstest unregisters the plugin and falls back to native
    `--reruns`), and pytest-rerunfailures is neutralized in favor of native
    `--reruns`. Both work at `-n ≥ 2`. See
-   [parity divergences §8](../reference/parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed).
+   [xdist hooks](xdist-hooks.md#numprocesses-visibility).
 7. **Parametrize ids.**{ #gap-parametrize-ids } See
    [Unstable parametrize ids](#unstable-parametrize-ids).
 8. **pytest-html.**{ #gap-pytest-html } pytest-html registers its report

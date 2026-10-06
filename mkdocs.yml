@@ -123,11 +123,15 @@ nav:
           - Wait-bound / IO suites: guides/wait-bound.md
           - Local dev / inner loop: guides/local-dev.md
           - Watch mode: guides/watch-mode.md
+          - Debugging a test: guides/debugging.md
           - Selecting changed tests: guides/changed.md
+          - Running only what changed since green: guides/since-green.md
           - Flaky tests: guides/flaky-tests.md
+          - Catching slowdowns: guides/slowdowns.md
           - Resource leaks: guides/resource-leaks.md
           - Replaying a CI failure locally: guides/replay.md
           - Monorepos: guides/monorepo.md
+          - Running on Windows: guides/windows.md
       - CI:
           - CI quickstart: guides/ci-quickstart.md
           - CI output formats: guides/ci-output.md

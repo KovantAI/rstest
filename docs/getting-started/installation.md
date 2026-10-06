@@ -48,12 +48,9 @@ delete `.rstest_cache/`.
 - macOS on Apple silicon (arm64), Linux, or Windows. There is no Intel
   (x86_64) macOS wheel and no source distribution, so `pip install rstest`
   fails on an Intel Mac; build a wheel [from source](#from-source) there
-  instead. Windows uses an anonymous-pipe transport
-  (Unix uses POSIX pipes); the full test gate runs on `windows-latest`
-  in CI on every commit, and wheels are built and smoke-tested there.
-  The broad public-suite corpus is run on macOS/Linux, so Windows is
-  validated by the gate's end-to-end checks rather than at corpus
-  scale.
+  instead. Windows (x86_64 and arm64) is gated in CI on every commit;
+  install notes, platform differences and validation level are in
+  [Running on Windows](../guides/windows.md#install).
 
 rstest installs its own runtime dependencies (`msgpack`, `pluggy`,
 `iniconfig`, `packaging`, `pygments`, plus `exceptiongroup` and `tomli` on

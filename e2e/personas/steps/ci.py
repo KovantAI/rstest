@@ -985,6 +985,113 @@ def _cache_saves_on_main(world, needle):
     assert saves, f"no cache-saving step in the {needle!r} blocks"
 
 
+def _step_texts(block):
+    """The raw text of each step of a GitHub Actions snippet, nested `with:`
+    mapping included (the same step boundaries `_workflow_steps` uses)."""
+    lines = [ln for ln in block.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    starts = [len(ln) - len(ln.lstrip()) for ln in lines if ln.lstrip().startswith("- ")]
+    if not starts:
+        return []
+    ind, steps = min(starts), []
+    for ln in lines:
+        col = len(ln) - len(ln.lstrip())
+        if col == ind and ln.lstrip().startswith("- "):
+            steps.append([])
+        elif col <= ind:
+            continue
+        if steps:
+            steps[-1].append(ln)
+    return ["\n".join(s) for s in steps]
+
+
+@then(
+    "every actions/upload-artifact step in the docs that uploads from a dot-directory "
+    "sets include-hidden-files"
+)
+def _uploads_include_hidden(world):
+    pages = [*sorted(DOCS.rglob("*.md")), REPO / "README.md", ACTION.parent / "README.md"]
+    hidden = re.compile(r"(?:^|[\s/:|])\.[\w-]")
+    checked, bad = 0, []
+    for page in pages:
+        for block in _doc_blocks(page):
+            for step in _step_texts(block):
+                if "actions/upload-artifact@" not in step:
+                    continue
+                m = re.search(r"\bpath:[ \t]*([^\n,}]*)", step)
+                if not m:
+                    continue
+                paths = [m.group(1).strip()]
+                if paths == ["|"]:
+                    paths = _yaml_literal(step, r"\s*path:").split()
+                if not any(hidden.search(p) for p in paths):
+                    continue
+                checked += 1
+                # upload-artifact v4.4+ skips hidden files and directories,
+                # named paths included, so the artifact comes out empty.
+                if not re.search(r"include-hidden-files:\s*true", step):
+                    bad.append(f"{page.relative_to(REPO)}: {' '.join(paths)}")
+    assert checked, "no docs upload-artifact step uploads from a dot-directory"
+    assert not bad, "upload-artifact skips these hidden paths:\n" + "\n".join(bad)
+
+
+@then(parsers.re(rf"the {q('doc')} step that runs {q('needle')} is the step in {q('snippet')}"))
+def _step_matches_snippet(world, doc, needle, snippet):
+    want = [textwrap.dedent(s) for s in _step_texts((REPO / snippet).read_text(encoding="utf-8"))]
+    block = _doc_block(REPO / doc, needle)
+    assert block, f"no block of {doc} contains {needle!r}"
+    got = [textwrap.dedent(s) for s in _step_texts(block) if needle in s]
+    assert got == want, f"{doc} has drifted from {snippet}:\n{got}\nvs\n{want}"
+
+
+def _events(world, path):
+    text = (world.project / path).read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines()]
+
+
+@then(parsers.re(rf"the event stream {q('path')} has (?P<n>\d+) {q('event')} lines"))
+def _stream_count(world, path, n, event):
+    got = sum(e["event"] == event for e in _events(world, path))
+    assert got == int(n), f"{got} {event} lines\n{world.tail()}"
+
+
+@then(
+    parsers.re(
+        rf"the event stream {q('path')} reports {q('nodeid')} "
+        rf"(?P<when>setup|call|teardown) as {q('outcome')}"
+    )
+)
+def _stream_reports(world, path, nodeid, when, outcome):
+    evs = _events(world, path)
+    assert any(
+        e["event"] == "testreport"
+        and e["nodeid"] == nodeid
+        and e["when"] == when
+        and e["outcome"] == outcome
+        for e in evs
+    ), evs
+
+
+@then(
+    parsers.re(
+        rf"the last line of the event stream {q('path')} is a sessionfinish "
+        r"with exitstatus (?P<code>\d+)"
+    )
+)
+def _stream_finish(world, path, code):
+    evs = _events(world, path)
+    assert [e["event"] for e in evs].count("sessionfinish") == 1, evs
+    assert evs[-1]["event"] == "sessionfinish" and evs[-1]["exitstatus"] == int(code), evs[-1]
+
+
+@then(parsers.re(rf"every step in {q('snippet')} that runs a script sets {q('setting')}"))
+def _steps_set(world, snippet, setting):
+    steps = [s for s in _step_texts((REPO / snippet).read_text(encoding="utf-8")) if "run:" in s]
+    assert steps, f"no run: step in {snippet}"
+    pinned = re.compile(rf"^\s*{re.escape(setting)}\b", re.M)
+    bad = [s.splitlines()[0] for s in steps if not pinned.search(s)]
+    assert not bad, f"steps without {setting!r}: {bad}"
+
+
 @then(parsers.re(rf"no fenced block in {q('glob')} contains {q('text')}"))
 def _no_block_contains(world, glob, text):
     pages = sorted(REPO.glob(glob))

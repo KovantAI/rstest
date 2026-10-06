@@ -600,3 +600,87 @@ Feature: Daily local developer
       And lastfailed lists none of the in-flight tests
       And flakes.json has no entry for any in-flight test
       And durations.json has no 0.0 duration for any in-flight test
+
+  Rule: --debug degrades to a plain run when no debugger can start (docs/guides/debugging.md)
+
+    Scenario: DV-15 --debug without debugpy says how to fix it and still runs the tests
+      Given a file "tests/test_ok.py" containing:
+        """
+        def test_ok():
+            pass
+        """
+      When I run "rstest -n 4 --debug tests/test_ok.py"
+      Then the exit code is 0
+      And stderr contains "the target interpreter has no `debugpy` installed; run `pip install debugpy`"
+      And stderr contains "--debug runs the session in a single process"
+      And stdout contains "1 passed"
+
+  Rule: --since-green and --incremental skip what's unchanged since green (docs/guides/since-green.md)
+
+    Background:
+      Given a file ".gitignore" containing:
+        """
+        __pycache__/
+        *.json
+        """
+      And a file "pyproject.toml" containing:
+        """
+        [tool.pytest.ini_options]
+        testpaths = ['tests']
+        pythonpath = ['.']
+        """
+      And an empty file "app/__init__.py"
+      And a file "app/tax.py" containing:
+        """
+        def vat(amount):
+            return amount * 0.2
+        """
+      And a file "tests/test_tax.py" containing:
+        """
+        from app.tax import vat
+
+        def test_vat():
+            assert vat(100) == 20
+        """
+      And a file "tests/test_plain.py" containing:
+        """
+        def test_plain():
+            pass
+        """
+      And the project is committed to a fresh git repository
+
+    Scenario: DV-16 --since-green runs everything once, then what a commit reaches, then nothing
+      When I run "rstest -n 2 --since-green"
+      Then the run succeeds
+      And stderr contains "no prior green run recorded"
+      And stdout contains "2 passed"
+      Given a file "app/tax.py" containing:
+        """
+        def vat(amount):
+            return amount * 20 / 100
+        """
+      When I run "rstest -n 2 --since-green"
+      Then stderr contains "working tree has uncommitted changes"
+      Given I commit all changes
+      When I run "rstest -n 2 --since-green"
+      Then stderr contains "1 changed file(s)"
+      And stdout contains "1 passed"
+      When I run "rstest -n 2 --since-green"
+      Then stdout contains "no tests affected by 0 changed file(s)"
+
+    Scenario: DV-17 --incremental skips unchanged green tests, and a config change turns skipping off
+      When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental" after clearing stale .coverage files
+      Then the run succeeds
+      When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental" after clearing stale .coverage files
+      Then stderr contains "2 of 2 test(s) unchanged since last green -> skipped (cached)"
+      And stdout contains "(2 cached)"
+      Given a file "pyproject.toml" containing:
+        """
+        # edited
+        [tool.pytest.ini_options]
+        testpaths = ['tests']
+        pythonpath = ['.']
+        """
+      When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental" after clearing stale .coverage files
+      Then the run succeeds
+      And stdout does not contain "cached"

@@ -69,15 +69,17 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
   threshold, and any run pinned to `--collect full`. The fix is stable
   `ids=`, or `-n 0`
   ([Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids)).
-- **Windows-heavy fleets.** Windows is supported and runs the full test gate
-  in CI, but the 33-suite public corpus runs only on macOS/Linux, so
-  real-world validation on Windows is lighter
-  ([Known gaps](../concepts/compatibility.md#known-gaps)).
+- **Windows-heavy fleets.** Windows is supported and gated in CI, but
+  real-world validation there is lighter and `--timeout` can't interrupt a
+  test in-process
+  ([Running on Windows](../guides/windows.md#validation)).
 - **No tolerance for 0.x churn.** rstest is alpha: expect breaking changes
   between minor versions until 1.0.
 
 ## Maturity
 
+- **Status:** alpha (0.x). CLI flags and the report-json schema aim for
+  stability but may change between minor versions until 1.0.
 - **Releases:** first release 0.0.1 on 2026-06-10; 16 releases through 0.8.0
   (2026-09-30), every change listed in the
   [CHANGELOG](https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md).

@@ -109,8 +109,10 @@ long-pole splitting):
 
 `--dist each` is not distribution at all: every worker runs the **full
 suite** (xdist `--dist=each`), so the run legitimately contains each test N
-times. It is for multi-environment validation: run the same suite across N
-workers configured differently. There is no item dispatch queue; each worker
+times. Every worker uses the same interpreter, so it checks that the suite
+passes repeatedly in isolation and shakes out flakiness; xdist's
+heterogeneous `--tx` environments have no rstest equivalent. There is no item
+dispatch queue; each worker
 is seeded with every index, and a crash replacement reruns only the dead
 worker's remaining items.
 

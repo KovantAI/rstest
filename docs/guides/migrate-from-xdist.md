@@ -122,16 +122,15 @@ rstest workers announce themselves exactly like xdist workers.
 and `random_order_seed` (pytest-random-order), each one run-level value all
 workers share, `mainargv`, and the `cov_master_*` keys pytest-cov expects.
 Two keys are seeded only when their plugin is installed and pytest-xdist is
-not: `server_port` (pytest-retry) and `mypy_config_stash_serialized`
+not: `server_port` ([pytest-retry](../concepts/xdist-hooks.md#numprocesses-visibility)) and `mypy_config_stash_serialized`
 (pytest-mypy). The `PYTEST_XDIST_WORKER`,
 `PYTEST_XDIST_WORKER_COUNT` and `PYTEST_XDIST_TESTRUNUID` environment
 variables are set too, so plugins and conftests that grep the
 environment keep working as-is. Plugins keying per-worker resources on
 worker identity work unchanged. The canonical
 case is pytest-django's per-worker test database (`test_<name>_gw0`, ...),
-which follows from the `workerid` above; note that rstest's corpus only
-exercises pytest-django on SQLite `:memory:`, so check a server-backed
-database (Postgres, MySQL) on your own suite.
+which follows from the `workerid` above; with a server-backed database,
+[confirm it on your suite](../reference/corpus-plugins.md#what-pytest-djangos-evidence-covers).
 
 `RSTEST_WORKER_ID` (same `gwN` values) is also set if you want to
 detect rstest specifically.

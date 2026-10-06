@@ -9,7 +9,7 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   failed test keeps its previous timing, and so does a test
   [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
   flagged, so the baseline it regressed from stays in place. Drives
-  [long-pole-first scheduling](scheduling.md#dispatch-order) and the
+  [duration-aware scheduling](glossary.md#duration-aware-scheduling) and the
   suite-size heuristic behind `-n auto`. Each entry records its test file's
   path and a sha256 of its contents, so the cache self-heals: an edited test
   re-times on fresh numbers instead of stale ones, and a deleted or renamed
@@ -39,7 +39,7 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   Paths in it are relative to the rootdir, so a run from a subdirectory writes
   the same keys as a run from the root.
 - `last_green.json`: the commit of the last fully green run on a clean
-  working tree, stamped with an environment fingerprint (interpreter and dependency manifests). Read by
+  working tree, stamped with an environment fingerprint (interpreter, dependency manifests and installed distributions). Read by
   [`--since-green`](../reference/cli.md#-since-green); an environment change
   busts it, so the next run selects everything. Safe to delete.
 - `incremental_outcomes.json`: per-test outcomes, source lines and coverage

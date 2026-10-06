@@ -109,23 +109,8 @@ jobs:
     outputs:
       run-id: ${{ steps.warm.outputs.run-id }}
     steps:
-      # Warm from the latest successful push run on your default branch; its
-      # shard segments union into a full index.
-      - name: resolve warm-cache run
-        id: warm
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Match this workflow by file name, not display name (two workflows
-          # can share a `name:`). GITHUB_WORKFLOW_REF is
-          # owner/repo/.github/workflows/<file>@ref.
-          wf="${GITHUB_WORKFLOW_REF##*/.github/workflows/}"; wf="${wf%%@*}"
-          rid=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                  --workflow "$wf" --branch main --event push \
-                  --status success --limit 1 \
-                  --json databaseId --jq '.[0].databaseId // ""')
-          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
+      # Its shard segments union into a full index.
+      --8<-- "docs/_snippets/warm-run-step.md"
 
   test:
     needs: resolve

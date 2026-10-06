@@ -72,9 +72,12 @@ order-sensitive package; root command-line flags override everywhere.
   `--changed-strict` on gating paths. How the dependency edges are found:
   [Changed-aware runs](../concepts/monorepo.md#changed-aware-runs).
 - **Small CI runners.** Every project gets at least one worker and all start
-  at once, so many packages on a 2-core runner oversubscribe; split them with
-  `projects` globs or path arguments, or make each package its own CI job
-  ([CI quickstart](ci-quickstart.md)).
+  at once, so many packages on a 2-core runner oversubscribe; narrow each job
+  with `projects` globs, or make each package its own CI job
+  ([CI quickstart](ci-quickstart.md)). A path argument (`rstest libs/core`)
+  is not a split: it
+  [opts out of monorepo mode](../concepts/monorepo.md#discovery) and
+  runs one session under the root's config and interpreter.
 
 ## Environments
 

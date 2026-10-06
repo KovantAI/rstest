@@ -38,32 +38,9 @@ single worker.
 
 ## The typical-stack scorecard
 
-The verified column is **V** = runtime-verified (an e2e gate or corpus suite
-exercises it) vs **i** = inferred from category, not yet runtime-verified,
-from the [top-100 matrix](../reference/top-100-plugins.md). **V\*** = partly
-verified: the row's note says which part the corpus or a gate covers and what
-it does not.
-
-| Plugin | Status (verdict) | V/i | Per-plugin caveat |
-|---|---|---|---|
-| pytest-django | ✅ Works | V\* | Per-worker test DB suffixed by `workerid` ([top-100](../reference/top-100-plugins.md)). Verified on SQLite `:memory:` only (django-allauth); a server-backed per-worker DB (Postgres, MySQL) is not in the corpus, so confirm yours with one parallel run. |
-| pytest-asyncio | ✅ Works | V | Per-test event loop; rstest provides the worker context it sniffs ([top-100](../reference/top-100-plugins.md)). |
-| hypothesis | ✅ Works | V | Property-based per worker. Known gap: shared `.hypothesis` example DB untested past `-n 8`. See [known gaps](../concepts/compatibility.md) for the per-worker-DB mitigation. |
-| pytest-cov | 🟦 Native | V | rstest orchestrates the coverage combine across workers via native `--cov`. Pass `--cov` on the rstest command line: from `addopts` alone a parallel run writes no report. See [Coverage](coverage.md). |
-| pytest-mock | ✅ Works | V | Per-test `mocker` fixture; vetted ([top-100](../reference/top-100-plugins.md)). |
-| pytest-html | 🔴 Silent | V | **Writes no report at `-n ≥ 2`**: a silent no-op, not a crash. Use rstest's native `--html`, or a `-n 0` pass for the plugin's own layout ([HTML & aggregated reporting](plugins.md#html-aggregated-reporting-under-parallelism)). |
-| pytest-sugar | 🔶 `-n 0` | V | Terminal-rendering; **not painted at `-n ≥ 2`**: rstest owns the terminal. Non-visual behavior unaffected; run at `-n 0` when you want its rendering. |
-| freezegun | ✅ Works | V | In-process time freezing is per-worker; five corpus suites load it in parallel ([tested compatibility](plugins.md#tested-compatibility)). Keep `now()` out of parametrize IDs unless every worker computes the same string ([unstable parametrize IDs](../concepts/compatibility.md#unstable-parametrize-ids)). |
-| pytest-timeout | 🟦 Native | V | rstest's own `--timeout` and `@pytest.mark.timeout` replace it at every worker count. Uninstall or disable it, moving its ini setting first ([pytest-timeout](plugins.md#pytest-timeout)). |
-| pytest-rerunfailures | 🟦 Native | V | Unregistered in the pool; rstest owns reruns (`--reruns`, `--only-rerun`, `@mark.flaky(reruns=N)`). The mark's budget (`reruns=` or positional) and `condition` are honored; `reruns_delay`, `only_rerun` and `rerun_except` are not carried over ([Flaky tests](flaky-tests.md#detect-reruns)). |
-| pytest-xdist | ➖ N/A | V | Neutralized inside workers: rstest is the parallel runner and xdist's options parse but stay inert. Keep it installed while a conftest implements its hooks ([Controller-side hooks](migrate-from-xdist.md#controller-side-hooks)). |
-
-Notes on freezegun: it is a library, not a pytest plugin, so it has no
-top-100 row; the [tested-compatibility table](plugins.md#tested-compatibility)
-uses the same verdict marks as the top-100 matrix. The pytest-plugin wrappers
-around it, **pytest-freezegun** and **pytest-freezer**
-([top-100](../reference/top-100-plugins.md)), are marked **✅ Works (i,
-inferred)**: same in-process time-freeze model, not yet runtime-verified.
+Each plugin above has a row in the
+[compatibility table](plugins.md#tested-compatibility), with its verdict, how
+it was verified, and its caveat.
 
 Seven of the eleven need no change on your side: five run as-is,
 pytest-rerunfailures is replaced by rstest's own reruns, and pytest-xdist is

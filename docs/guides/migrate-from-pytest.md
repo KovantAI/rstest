@@ -172,9 +172,10 @@ switch.
 tests one at a time; rstest runs them on `auto` workers and says so in its
 header line. Check each item against your suite:
 
-- [ ] *Session/module-scoped fixtures instantiate once per worker*, not
-  once per run, as under pytest-xdist; a session-scoped database or server
-  fixture must tolerate N concurrent instances
+- [ ] *Session-scoped fixtures instantiate once per worker*, not once per
+  run, as under pytest-xdist (and a module-scoped one on every worker that
+  gets tests from its module); a session-scoped database or server fixture
+  must tolerate N concurrent instances
   ([what to check](parallel-safety.md#session-scoped-fixtures-duplicate)).
 - [ ] *`pytest_configure`, `pytest_sessionstart` and `pytest_sessionfinish`
   run in every worker*, concurrently. A conftest hook that creates a shared

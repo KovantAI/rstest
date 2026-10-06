@@ -38,10 +38,10 @@ the same for every test. Otherwise a test that has a timeout
 ([`--timeout`](../reference/cli.md#-timeout-secs) or
 `@pytest.mark.timeout`) gets 3 × that timeout + 10 s, and a test without one
 has no watchdog. The marker value wins over `--timeout`: a test marked
-`timeout(300)` under `--timeout 30` gets 910 s, not 100 s. On Windows, which
-has no SIGALRM to interrupt a test in-process, this watchdog is the only
-timeout enforcement: with `--timeout 30` a 60 s test passes and a hung one is
-killed at 100 s, without a traceback at the stuck line.
+`timeout(300)` under `--timeout 30` gets 910 s, not 100 s. On Windows this
+watchdog is the only timeout enforcement: with `--timeout 30` a 60 s test
+passes and a hung one is killed at 100 s, without a traceback at the stuck
+line ([Running on Windows: timeouts](../guides/windows.md#timeouts)).
 A worker stuck on one test past its limit, in any phase, is
 killed; the test is reported failed with a timeout message
 instead of the crash message, and steps 2 and 3 above follow unchanged.

@@ -135,10 +135,10 @@ you should not hit them on current rstest:
 - **pytest-randomly** (`randomly_seed`): rstest synthesizes one run-level
   seed every worker agrees on.
 - **pytest-rerunfailures** with pytest-xdist installed (`sock_port`): rstest
-  unregisters it inside pool workers (before its configure reads the key) and
-  owns reruns natively.
-- **pytest-retry** (`server_port`): each worker self-provisions its own
-  report server, so the key is set locally.
+  [unregisters it](../concepts/xdist-hooks.md#when-self-provisioning-cant-apply-pytest-rerunfailures)
+  inside pool workers and owns reruns natively.
+- **pytest-retry** (`server_port`): each worker
+  [self-provisions its own report server](../concepts/xdist-hooks.md#numprocesses-visibility).
 
 If a *different* plugin hits this, run it at `-n 0`, or use rstest's native
 equivalent (`--shuffle`, `--reruns`): full per-plugin table in
@@ -198,7 +198,8 @@ you don't need pytest-timeout (and rstest consumes `--timeout`, so the plugin
 never sees it).
 
 For a hang the in-process interrupt can't break (a test blocked inside a C
-extension, or any test on Windows), the per-test
+extension, or any test on Windows, see
+[Running on Windows](../guides/windows.md#timeouts)), the per-test
 [hang watchdog](../concepts/crash-handling.md#hung-tests-worker-timeout)
 kills the worker and reports the test failed;
 [`--worker-timeout 300`](cli.md#-worker-timeout-secs) sets one fixed limit

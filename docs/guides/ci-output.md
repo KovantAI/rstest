@@ -96,3 +96,50 @@ with no banner, footer or summary. For editors and live tooling; event shapes
 in [Streaming JSON](../reference/report-json.md#streaming-json). Unlike
 [`--report-json`](../reference/cli.md#-report-json-path), which writes one end-of-run snapshot
 file.
+
+## Live events on a side channel (`--stream-json`)
+
+`--stream-json FILE` writes the same newline-delimited events as
+`--output json` to `FILE` instead of stdout, so the terminal (or CI log)
+keeps its normal human output while a dashboard, editor or log shipper reads
+results as they happen. It is not an `--output` style and combines with any
+of them, `github` included. Lines are flushed as each phase finishes, so
+`tail -f` or a named pipe sees a test the moment it ends, long before the run
+does.
+
+```console
+$ rstest -n 2 --stream-json events.ndjson
+.F [100%]
+...
+1 failed, 1 passed in 0.16s
+$ cat events.ndjson
+{"duration":0.0001,"event":"testreport","lineno":0,"nodeid":"tests/test_api.py::test_get","outcome":"passed","wasxfail":false,"when":"setup","worker":"gw0"}
+{"cpu":0.0,"duration":0.0001,"event":"testreport","lineno":0,"nodeid":"tests/test_api.py::test_get","outcome":"passed","wasxfail":false,"when":"call","worker":"gw0"}
+{"duration":0.0001,"event":"testreport","lineno":4,"nodeid":"tests/test_api.py::test_post","outcome":"passed","wasxfail":false,"when":"setup","worker":"gw1"}
+{"duration":0.0,"event":"testreport","lineno":0,"nodeid":"tests/test_api.py::test_get","outcome":"passed","wasxfail":false,"when":"teardown","worker":"gw0"}
+{"cpu":0.0001,"duration":0.0002,"event":"testreport","lineno":4,"longrepr":"    def test_post():\n        print(\"posting\")\n>       assert 201 == 200\nE       assert 201 == 200\n\ntests/test_api.py:7: AssertionError","nodeid":"tests/test_api.py::test_post","outcome":"failed","sections":[{"name":"Captured stdout call","text":"posting\n"}],"wasxfail":false,"when":"call","worker":"gw1"}
+{"duration":0.0001,"event":"testreport","lineno":4,"nodeid":"tests/test_api.py::test_post","outcome":"passed","sections":[{"name":"Captured stdout call","text":"posting\n"}],"wasxfail":false,"when":"teardown","worker":"gw1"}
+{"counts":{"collect_errors":0,"errors":0,"failed":1,"flaky":0,"passed":1,"quarantined":0,"skipped":0,"xfailed":0,"xpassed":0},"duration":0.16,"event":"sessionfinish","exitstatus":1}
+```
+
+Each test gets one `testreport` per phase (`setup`, `call`, `teardown`), in
+completion order, so phases from different workers interleave. A module that
+fails to import produces a `collecterror` line, and the stream closes with
+one `sessionfinish` carrying the counts. Consume by the `event` field and
+ignore fields you don't know: the stream is unversioned. Field tables and
+the exit-status caveat: [Streaming JSON](../reference/report-json.md#streaming-json).
+
+Choosing between the three JSON outputs:
+
+| Output | Where | When written | Use it for |
+|---|---|---|---|
+| `--output json` | stdout | live, per phase | a tool that spawns rstest and owns its stdout |
+| `--stream-json FILE` | `FILE` (file or fifo) | live, per phase | live tooling **alongside** human or CI output |
+| [`--report-json FILE`](../reference/cli.md#-report-json-path) | `FILE` | once, at the end | a versioned snapshot for gating, diffing and archiving |
+
+`FILE` is truncated at the start of each run and its parent directories are
+created. If it can't be opened, rstest warns and runs without the side
+channel. Under a [passthrough](../concepts/glossary.md#passthrough) flag (`-s`,
+`--pdb`, `--co`, ...) the `testreport` lines are still written but no
+closing `sessionfinish` is, and a [monorepo](monorepo.md) root refuses the
+flag (run it per project, or use `--report-json` for one merged document).

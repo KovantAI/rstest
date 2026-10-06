@@ -34,13 +34,13 @@ plugin's category, not yet runtime-verified.
 | 4 | pytest-xdist | 177.1M | ➖ N/A | V | Neutralized inside workers: rstest *is* the parallel runner; its options parse but stay inert. |
 | 5 | pytest-mock | 105.0M | ✅ Works | V | Per-test `mocker` fixture; vetted. |
 | 6 | pytest-timeout | 103.1M | 🟦 Native | V | Its ini `timeout =` setting fires in both modes. rstest has a native `--timeout` and honors `@pytest.mark.timeout` itself at every worker count; a command-line `--timeout` is rstest's and never reaches the plugin. To avoid two SIGALRM timers, uninstall the plugin or pass `-p no:timeout`. See [Plugins](../guides/plugins.md#tested-compatibility). |
-| 7 | pytest-rerunfailures | 79.1M | 🟦 Native | V | Unregistered in the pool (its xdist `sock_port` branch would KeyError); rstest owns reruns (`--reruns`, `@mark.flaky`). |
+| 7 | pytest-rerunfailures | 79.1M | 🟦 Native | V | [Unregistered in the pool](../concepts/xdist-hooks.md#when-self-provisioning-cant-apply-pytest-rerunfailures); rstest owns reruns (`--reruns`, `@mark.flaky`). |
 | 8 | hypothesis | 48.3M | ✅ Works | V | Vetted; property-based per worker. Known gap: shared `.hypothesis` DB untested past `-n 8`. |
 | 9 | pytest-metadata | 35.2M | ➖ N/A | V | Session metadata for report plugins; plugin active on workers, no parallel hazard (e2e gate). |
 | 10 | pytest-env | 24.0M | ✅ Works | i | Env vars set on every worker (its hook runs in each worker session). No gate yet. |
 | 11 | pytest-httpx | 22.9M | ✅ Works | V | Per-test httpx mock fixture; works under the pool (e2e gate runs one test at `-n 2`, so per-worker isolation itself isn't exercised). |
 | 12 | pytest-html | 21.8M | 🔴 Silent | V | Writes no report at `-n ≥ 2` (gates on being the xdist controller, which has no `workerinput`); a command-line `--html` is rstest's native report; for the plugin's own, `rstest -n 0 -- --html=...`. |
-| 13 | pytest-django | 21.6M | ✅ Works | V\* | Per-worker test DB suffixed by `workerid`. Verified only on django-allauth, which uses SQLite `:memory:`, so the per-worker database naming path of a server-backed database (Postgres, MySQL) is not exercised; check it on your own suite. |
+| 13 | pytest-django | 21.6M | ✅ Works | V\* | Per-worker test DB suffixed by `workerid`. [Verified on SQLite only](corpus-plugins.md#what-pytest-djangos-evidence-covers). |
 | 14 | pytest-split | 21.0M | 🟦 Native | V | Group selection is deselection (honored under the pool: e2e gate); rstest sharding is native `--shard K/N`. |
 | 15 | pytest-repeat | 15.5M | ✅ Works | i | `@mark.repeat(N)` expands at collection, so the copies distribute across workers. No gate yet. |
 | 16 | pytest-json-report | 15.0M | 🔴 Silent / 🟦 | V | Report aggregator; no file at `-n ≥ 2`, written at `-n 0` (e2e gate). Use native `--report-json`. |
@@ -77,7 +77,7 @@ plugin's category, not yet runtime-verified.
 | 47 | pytest-factoryboy | 2.8M | ✅ Works | V | Fixture generation; registered factory fixture resolves on workers (e2e gate). |
 | 48 | pytest-ordering | 2.8M | ⚠️ Caveat | V | Same as pytest-order: `@mark.run(order=N)` honored at `-n 0` (e2e gate); not gated under the pool, where order isn't guaranteed. |
 | 49 | pytest-snapshot | 2.6M | ✅ Works | V | Asserts parallel-safe; update at `-n 0`, assert under the pool (e2e gate). |
-| 50 | pytest-retry | 2.6M | ✅ Works | V | Each worker plays controller for itself: with pytest-xdist installed, its controller branch self-provisions a report server (e2e gate); without xdist, rstest seeds the `server_port` its worker branch reads (langgraph corpus). Native reruns also available. |
+| 50 | pytest-retry | 2.6M | ✅ Works | V | [Each worker runs its own report server](../concepts/xdist-hooks.md#numprocesses-visibility), with or without pytest-xdist (e2e gate, langgraph corpus). Native reruns also available. |
 | 51 | pytest-docker | 2.4M | ⚠️ Caveat | i | Session docker-compose fixture → one stack **per worker**. Fine if the service is per-worker; for a single shared stack use `--dist loadgroup` or `-n 0`. |
 | 52 | pytest-vcr | 2.3M | ✅ Works | i | Per-test VCR cassette files; record/replay parallel-safe (same class as pytest-recording #32). |
 | 53 | pytest-lazy-fixtures | 2.2M | ➖ N/A | i | Resolves fixture *values* inside `parametrize`; no parallel interaction. |
@@ -133,7 +133,7 @@ plugin's category, not yet runtime-verified.
 the plugin at `-n auto`); `V*` = verified only that the plugin does **not crash**
 under the pool and its artifact lands at `-n 0` (the shared report-aggregator
 gate), not that a usable artifact is produced at `-n ≥ 2`, or, for pytest-django,
-verified only on SQLite `:memory:`; `i` = inferred from
+[verified only on SQLite](corpus-plugins.md#what-pytest-djangos-evidence-covers); `i` = inferred from
 the plugin's category, not yet runtime-verified. The `i` rows of 51–100 are the
 next verification tranche.
 

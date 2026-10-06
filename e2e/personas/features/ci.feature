@@ -848,3 +848,58 @@ Feature: CI / platform engineer
       Then that docs section contains "`actions-cache` saves only on `push`/`pull_request`"
       Given the table row of ".github/actions/rstest/README.md" starting with "| `artifact`"
       Then that docs section does not contain "PR"
+
+    Scenario: CI-14 an artifact uploaded from .rstest_cache is not silently empty
+      # upload-artifact v4.4+ drops hidden files and directories unless told
+      # otherwise, and `if-no-files-found: ignore` hides the empty artifact, so
+      # a failed run's replay journal would never reach the developer.
+      Then every actions/upload-artifact step in the docs that uploads from a dot-directory sets include-hidden-files
+
+    Scenario: CI-14 the warm-run lookup has one source
+      # Copies of this step drifted apart before; the docs include the snippet,
+      # and the action README (rendered by GitHub, no includes) must match it.
+      Then no fenced block in "docs/**/*.md" contains "gh run list"
+      And the ".github/actions/rstest/README.md" step that runs "gh run list" is the step in "docs/_snippets/warm-run-step.md"
+
+    Scenario: CI-14 each provider's basic recipe reads first; its sharded variants are folded
+      # ci-recipes.md is over a thousand lines; a GitLab reader should see the
+      # GitLab basics without scrolling past every provider's shard matrix.
+      Then no paragraph of "docs/guides/ci-recipes.md" matches "^\*\*(Sharding|Shared cache)"
+
+    Scenario: CI-14 the guides index names every CI system the recipes page covers
+      Then the "docs/guides/index.md" entry for "ci-recipes.md" names every level-2 heading of it except "Go deeper"
+
+  Rule: --stream-json is a live side channel (docs/guides/ci-output.md)
+
+    Scenario: CI-15 --stream-json writes live per-phase events and one closing sessionfinish
+      Given a file "tests/test_api.py" containing:
+        """
+        def test_get():
+            assert 200 == 200
+
+        def test_post():
+            print('posting')
+            assert 201 == 200
+        """
+      When I run "rstest -n 2 --stream-json out/events.ndjson"
+      Then the exit code is 1
+      And stdout contains "1 failed, 1 passed"
+      And the event stream "out/events.ndjson" has 6 "testreport" lines
+      And the event stream "out/events.ndjson" reports "tests/test_api.py::test_post" call as "failed"
+      And the last line of the event stream "out/events.ndjson" is a sessionfinish with exitstatus 1
+
+    Scenario: CI-14 the warm-run lookup runs under bash on every runner OS
+      # Windows runners default to PowerShell, where this bash step fails and
+      # continue-on-error hides it: every run would start cold.
+      Then every step in "docs/_snippets/warm-run-step.md" that runs a script sets "shell: bash"
+
+    Scenario: CI-15 under a passthrough flag --stream-json still streams test reports, with no sessionfinish
+      Given a file "tests/test_one.py" containing:
+        """
+        def test_one():
+            pass
+        """
+      When I run "rstest -s --stream-json events.ndjson"
+      Then the exit code is 0
+      And the event stream "events.ndjson" has 3 "testreport" lines
+      And the event stream "events.ndjson" has 0 "sessionfinish" lines

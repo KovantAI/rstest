@@ -26,8 +26,8 @@ here:
   fixture setup and teardown included, and on Linux and macOS CPU time
   includes child processes the test waited for, so a test that runs a
   CPU-heavy CLI through `subprocess.run` counts as computing, not waiting
-  (oversubscribing `-n` will not help it). Windows reports no child CPU
-  time, so there such a test counts as waiting. Doctor prints the share of
+  (oversubscribing `-n` will not help it). On Windows such a test counts
+  as waiting ([no child CPU time](windows.md#diagnostics)). Doctor prints the share of
   test time spent waiting and names the worst offenders. In one real suite
   ([aiohttp]) this was **95% of test time (176.5s) waiting**, almost all
   of it on 10-second proxy timeouts.

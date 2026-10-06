@@ -216,12 +216,10 @@ The 838 tests are `libs/cli` (330), `libs/prebuilt` (228), `libs/checkpoint`
 about 127s serially and has 13 tests that fail under plain pytest; rstest
 reports the same outcomes.
 
-**Policy:** none. `checkpoint-sqlite` pulls in pytest-retry, whose worker
-reporter reads `workerinput["server_port"]`, a key xdist's controller sets.
-rstest has no central controller, so it starts pytest-retry's own report
-server inside each worker and seeds `workerinput["server_port"]`; the package
-runs unmodified at the full worker count (see
-[parity divergences §8](parity-divergences.md#8-plugin-controller-hook-gating-rstest-side-fixed)).
+**Policy:** none. `checkpoint-sqlite` pulls in pytest-retry, which expects
+an xdist controller; rstest gives each worker its own report server, so the
+package runs unmodified at the full worker count (see
+[xdist hooks](../concepts/xdist-hooks.md#numprocesses-visibility)).
 
 ## Reading the numbers
 

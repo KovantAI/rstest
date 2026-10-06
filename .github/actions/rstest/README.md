@@ -99,16 +99,20 @@ permissions: { contents: read, actions: read }
 jobs:
   warm:
     runs-on: ubuntu-latest
-    outputs: { run-id: "${{ steps.r.outputs.run-id }}" }
+    outputs: { run-id: "${{ steps.warm.outputs.run-id }}" }
     steps:
-      - id: r
-        env: { GH_TOKEN: "${{ github.token }}", WF_REF: "${{ github.workflow_ref }}" }
+      # Same step as docs/_snippets/warm-run-step.md (kept identical by a test).
+      - id: warm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash  # bash syntax: Windows runners default to PowerShell
         run: |
-          wf="${WF_REF##*/.github/workflows/}"; wf="${wf%%@*}"
+          wf="${GITHUB_WORKFLOW_REF##*/.github/workflows/}"; wf="${wf%%@*}"
           rid=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
                   --branch main --event push --status success --limit 1 \
                   --json databaseId --jq '.[0].databaseId // ""')
           echo "run-id=$rid" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
   test:
     needs: warm
     strategy: { fail-fast: false, matrix: { shard: [1, 2, 3, 4] } }

@@ -54,8 +54,8 @@ validated at a smaller scale than macOS/Linux). rstest is alpha (0.x): expect
 breaking changes between minor versions until 1.0.
 
 No config and no test changes needed: rstest runs your pytest suite in
-parallel (`-n auto`) out of the box. As with pytest-xdist, session- and
-module-scoped fixtures run
+parallel (`-n auto`) out of the box. As with pytest-xdist, session-scoped
+fixtures run
 [once per worker](https://python-rstest.readthedocs.io/en/stable/guides/parallel-safety/#session-scoped-fixtures-duplicate),
 not once per run.
 
@@ -144,15 +144,27 @@ Full methodology:
 | Suite diagnostics | ❌ | ❌ | ✅ `--doctor` |
 | Watch mode | plugin (pytest-watch) | `--looponfail` (deprecated) | ✅ built-in |
 
-- **pytest underneath.** Forwards the pytest flag surface; runs conftest, fixtures,
-  parametrize, marks, and pytest plugins (pytest-django, pytest-asyncio,
-  hypothesis, …) through a vendored pytest core.
-- **Parallel by design.** Duration-aware work distribution that starts the
-  slowest tests first (per test, or per file when a large suite gets
-  [lazy collection](https://python-rstest.readthedocs.io/en/stable/concepts/lazy-collection/)); `@pytest.mark.serial`
-  and `--dist loadfile` safety rails;
-  crashed workers respawn without losing your run.
-- **`rstest --doctor`.** Wait-bound tests, parallel-floor analysis, fixture
+<!-- SOURCE OF TRUTH: docs/index.md "Highlights" (a persona test keeps them identical) -->
+- **Your tests, unchanged.** A vendored pytest 9.1.1 core runs your conftest
+  hierarchies, fixtures, parametrize, marks, and installed plugins
+  (pytest-django, pytest-asyncio, hypothesis, pytest-mock, ...) as pytest
+  does. Most pytest flags (`-k`, `-m`, `-x`, `--lf`, plugin flags) forward
+  unchanged; a few, such as `--timeout`, `--reruns` and `--html`, are
+  rstest's own with the same basic syntax as the plugins they replace.
+- **xdist semantics in parallel.** Session fixtures run
+  [once per worker](https://python-rstest.readthedocs.io/en/stable/guides/parallel-safety/#session-scoped-fixtures-duplicate),
+  as under pytest-xdist, plus a
+  [short list of differences](https://python-rstest.readthedocs.io/en/stable/guides/migrate-from-pytest/#what-changes).
+- **Parallel by design.** Work distribution across worker processes,
+  duration-aware scheduling that starts your slowest tests first (per test,
+  or per file when a large suite gets
+  [lazy collection](https://python-rstest.readthedocs.io/en/stable/concepts/lazy-collection/)), and safety rails for
+  tests that can't parallelize
+  (`@pytest.mark.serial`, `--dist loadfile`).
+- **Crash-safe.** A segfaulting test costs you one FAILED line: the worker
+  is replaced, its remaining tests redistribute, and the run completes.
+- **`rstest --doctor`.** Tells you *why* the suite is slow: tests that wait
+  instead of compute, the [long-pole](https://python-rstest.readthedocs.io/en/stable/concepts/glossary/#long-pole) tests that cap any parallelism, fixture
   hotspots, slowest files.
 - **`rstest --watch`.** Reruns on save; changed test files rerun
   alone, source changes rerun only the tests the import graph says are

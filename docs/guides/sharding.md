@@ -175,18 +175,9 @@ jobs:
   warm:
     runs-on: ubuntu-latest
     outputs:
-      run-id: ${{ steps.r.outputs.run-id }}
+      run-id: ${{ steps.warm.outputs.run-id }}
     steps:
-      - id: r
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WF_REF: ${{ github.workflow_ref }}
-        run: |
-          wf="${WF_REF##*/.github/workflows/}"; wf="${wf%%@*}"
-          rid=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
-                  --branch main --event push --status success --limit 1 \
-                  --json databaseId --jq '.[0].databaseId // ""')
-          echo "run-id=$rid" >> "$GITHUB_OUTPUT"
+      --8<-- "docs/_snippets/warm-run-step.md"
 
   test:
     needs: warm

@@ -54,7 +54,7 @@ root.
 
 | Variable | Effect |
 |---|---|
-| `RSTEST_RUN_UID` | the run id to use instead of generating one. Every worker sees it as `RSTEST_RUN_UID` and `workerinput["testrun_uid"]`. Set the same value on every CI shard to give them one shared run id (for example `RSTEST_RUN_UID=${{ github.run_id }}-${{ github.run_attempt }}`). A monorepo run passes its own to each project's rstest this way |
+| `RSTEST_RUN_UID` | the [run uid](../concepts/glossary.md#run-uid) to use instead of generating one. Every worker sees it as `RSTEST_RUN_UID` and `workerinput["testrun_uid"]`. Set the same value on every CI shard to give them one shared run uid (for example `RSTEST_RUN_UID=${{ github.run_id }}-${{ github.run_attempt }}`). A monorepo run passes its own to each project's rstest this way |
 | `VIRTUAL_ENV` | worker interpreter discovery (first after `--python`) |
 | `NO_COLOR` | a non-empty value turns color off, and with it the live footer, so a terminal gets no escape sequences (see [Color precedence](#color-precedence)) |
 | `FORCE_COLOR` | a non-empty value colors the output even when piped, matching the workers' colored assertion diffs (pytest reads it too). `NO_COLOR` wins over it. Color alone never brings back the live footer off a terminal |

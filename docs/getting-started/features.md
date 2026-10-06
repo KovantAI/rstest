@@ -5,8 +5,9 @@ Everything pytest does (via a vendored pytest core), plus:
 !!! tip "New here? Start with three"
     `rstest` (parallel by default), `rstest --doctor` (why the suite is slow),
     and `rstest --watch` (reruns on save). Evaluating a switch?
-    See [`rstest try`](evaluating.md#try-it-first). The tables below list
-    the full surface.
+    See [`rstest try`](evaluating.md#try-it-first). The tables below cover
+    the main features; the [CLI reference](../reference/cli.md) documents
+    each flag.
 
 ## Day one
 

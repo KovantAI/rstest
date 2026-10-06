@@ -32,6 +32,7 @@ With the bundled action, give it an `id` and add one step after it:
         with:
           name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
           path: .rstest_cache/replay/latest.json
+          include-hidden-files: true
           if-no-files-found: ignore
 ```
 
@@ -39,6 +40,9 @@ The condition reads the action's `exit-code` output, not `failure()`. With
 `fail-under-ratio` set, the action's step can pass while tests failed, and
 `failure()` would then skip the upload. `if-no-files-found: ignore` covers a
 run that recorded nothing (for example `-n auto` resolving to one worker).
+`include-hidden-files: true` is required: `upload-artifact` (v4.4 and later)
+skips anything under a dot-directory such as `.rstest_cache`, even a path
+named in full, and without it the artifact would be empty.
 
 The job name and matrix index in the artifact name keep the uploads apart
 when a matrix (Python versions, OSes) fails in several jobs at once:
@@ -56,9 +60,8 @@ save `junit.xml`.
   (`libs/core/.rstest_cache/replay/latest.json`).
 - **At a monorepo root**, each project records its own journal inside the
   project directory. Upload them all with a glob and keep the directory
-  layout, so you know which project each came from. `upload-artifact`
-  skips dot-directories such as `.rstest_cache` when it expands a glob, so
-  turn that off, or the step uploads nothing:
+  layout, so you know which project each came from. Keep
+  `include-hidden-files: true` here too:
 
     ```yaml
           path: "**/.rstest_cache/replay/latest.json"

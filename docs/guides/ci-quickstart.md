@@ -132,10 +132,9 @@ databases**. Both are handled below.
 rstest supplies each worker the xdist-style worker identity pytest-django
 keys off, so with a server database every worker should create its own test
 DB (`test_app_gw0`, `test_app_gw1`, …) with no extra flags, as under xdist.
-pytest-django is exercised continuously in rstest's battery, but on SQLite
-`:memory:` only (see [Plugins](plugins.md)): the per-worker server-database
-naming is not exercised yet, so confirm it with one parallel run against your
-database before you rely on it.
+rstest's own pytest-django coverage is
+[SQLite only](../reference/corpus-plugins.md#what-pytest-djangos-evidence-covers), so confirm this with one
+parallel run against your database before you rely on it.
 
 ```yaml
 # .github/workflows/tests.yml
@@ -262,8 +261,8 @@ jobs:
         with:
           python-version: "3.13"
           # Run inside the package, not `rstest libs/core` from the root:
-          # a root-relative path would skip the package's own [tool.rstest],
-          # its .venv, and its .rstest_cache.
+          # a root-relative path would skip the package's own [tool.rstest]
+          # and its .venv.
           working-directory: ${{ matrix.project }}
           # Per-package segment-merge shared cache over GitHub artifacts.
           # Artifact names carry the package (artifact-suffix defaults to
@@ -350,11 +349,10 @@ refuses a monorepo root with an error that names the subprojects.
   exits 2.
 - **Colors** are disabled automatically when output is not a terminal;
   force with `--color=yes` (or `FORCE_COLOR=1`) if your CI renders ANSI.
-- **Platform.** These recipes work unchanged on `windows-latest` and
-  `macos-latest`. On Windows [`--timeout`](../reference/cli.md#-timeout-secs)
-  is enforced only by the
-  [hang watchdog](../concepts/crash-handling.md#hung-tests-worker-timeout), and
-  fd-leak tracking is unavailable ([Resource leaks](resource-leaks.md)).
+- **Platform.** These recipes work on `macos-latest` and `windows-latest`.
+  On Windows, `--timeout` is enforced only by the hang watchdog, a cancelled
+  job writes no journal or reports, and bash-syntax `run:` steps need
+  `shell: bash` ([Running on Windows: CI tips](windows.md#ci)).
 
 ## Go deeper
 

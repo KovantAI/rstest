@@ -466,6 +466,7 @@ replays it locally:
   with:
     name: rstest-replay-${{ github.job }}-${{ strategy.job-index }}
     path: .rstest_cache/replay/latest.json
+    include-hidden-files: true
     if-no-files-found: ignore
 ```
 

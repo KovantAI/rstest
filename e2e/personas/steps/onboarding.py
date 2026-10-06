@@ -1,5 +1,6 @@
 """Steps for features/onboarding.feature: the first-time evaluator."""
 
+import json
 import os
 import re
 import subprocess
@@ -284,3 +285,170 @@ def _canonical_home(world, home, pattern, link):
     assert (docs / home).is_file(), home
     assert re.search(pattern, (docs / home).read_text(encoding="utf-8")), f"{home} lacks it"
     assert not bad, "restated without linking the canonical page:\n" + "\n".join(bad)
+
+
+@then(parsers.re(rf"no paragraph of {q('glob')} matches {q('pattern')}"))
+def _no_paragraph_matches(world, glob, pattern):
+    pages = sorted(REPO.glob(glob))
+    assert pages, f"{glob} matches no file"
+    bad = [
+        f"{page.relative_to(REPO)}: {' '.join(para.split())[:160]}"
+        for page in pages
+        for para in re.split(r"\n\s*\n", page.read_text(encoding="utf-8"))
+        if re.search(pattern, " ".join(para.split()))
+    ]
+    assert not bad, f"matches {pattern!r}:\n" + "\n".join(bad)
+
+
+@then(parsers.re(rf"that level-2 section names the link {q('target')}"))
+def _section_links(world, target):
+    assert f"]({target})" in world.notes["section"], world.notes["section"][:200]
+
+
+@then(parsers.re(rf"that level-2 section names each of {q('flags')}"))
+def _section_names(world, flags):
+    sec = world.notes["section"]
+    missing = [f for f in flags.split() if not re.search(rf"`[^`]*{re.escape(f)}\b", sec)]
+    assert not missing, f"not named in the section: {missing}"
+
+
+def _line_count(ranges):
+    """How many lines `7, 12-14` names (4)."""
+    n = 0
+    for part in ranges.split(","):
+        lo, _, hi = part.strip().partition("-")
+        n += int(hi or lo) - int(lo) + 1
+    return n
+
+
+@then("every diff-coverage report in the docs counts as many uncovered lines as it lists")
+def _diff_cov_examples(world):
+    seen = 0
+    for page in sorted((REPO / "docs").rglob("*.md")):
+        text = page.read_text(encoding="utf-8")
+        for m in re.finditer(r"\((\d+)/(\d+) added lines covered\)\n((?:  .+\n)+)", text):
+            seen += 1
+            covered, total = int(m.group(1)), int(m.group(2))
+            lists = re.findall(r"uncovered added line\(s\) ([\d, -]+)", m.group(3))
+            listed = sum(_line_count(r) for r in lists)
+            assert total - covered == listed, (
+                f"{page.relative_to(REPO)}: {covered}/{total} covered leaves "
+                f"{total - covered} uncovered, but the report lists {listed}"
+            )
+    assert seen, "no diff-coverage report in the docs"
+
+
+@then(
+    parsers.re(
+        rf"every docs paragraph on {q('suite')} parity states the score and mismatch count "
+        rf"in {q('results')}"
+    )
+)
+def _parity_figures(world, suite, results):
+    row = next(r for r in json.loads((REPO / results).read_text()) if r["suite"] == suite)
+    seen = 0
+    for page in sorted((REPO / "docs").rglob("*.md")):
+        for para in re.split(r"\n\s*\n", page.read_text(encoding="utf-8")):
+            para = " ".join(para.split())
+            pcts = re.findall(r"(\d+\.\d+)%", para)
+            if not (re.search(suite, para, re.I) and pcts):
+                continue
+            seen += 1
+            where = f"{page.relative_to(REPO)}: {para[:120]}"
+            assert all(float(p) == row["score"] for p in pcts), f"{pcts} vs {row['score']}: {where}"
+            for n in re.findall(r"(\d+) IMV", para):
+                assert int(n) == row["mismatch_count"], f"{n} vs {row['mismatch_count']}: {where}"
+    assert seen, f"no docs paragraph states {suite} parity"
+
+
+SITE = "https://python-rstest.readthedocs.io/en/stable/"
+
+
+def _site_links(md):
+    """Relative `.md` links rewritten to the published site's URLs, as the
+    README (rendered on GitHub and PyPI) has to spell them."""
+
+    def url(m):
+        path, _, frag = m.group(2).partition("#")
+        page = re.sub(r"(/?index)?\.md$", "/", path)
+        return f"[{m.group(1)}]({SITE}{page}{'#' + frag if frag else ''})"
+
+    return re.sub(r"\[([^\]]+)\]\((?!https?:)([^)]+\.md(?:#[^)]*)?)\)", url, md)
+
+
+@then(
+    parsers.re(
+        rf"the README list under the {q('marker')} marker is the {q('heading')} list "
+        rf"of {q('doc')}, with site links"
+    )
+)
+def _readme_mirrors(world, marker, heading, doc):
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    tag = f"<!-- SOURCE OF TRUTH: {marker}"
+    assert tag in readme, f"README has no {tag!r} marker"
+    got = readme.split(tag, 1)[1].split("-->\n", 1)[1].split("\n\n", 1)[0]
+    text = (REPO / doc).read_text(encoding="utf-8")
+    assert f"\n{heading}\n" in text, f"{doc} has no {heading!r}"
+    want = text.split(f"\n{heading}\n", 1)[1].strip().split("\n\n", 1)[0]
+    assert got.strip() == _site_links(want), f"README drifted from {doc} {heading}"
+
+
+def _verdict_rows(page):
+    """{plugin: [cells]} for each table of `page` whose header has a verdict
+    column (`Tier`, `Status (verdict)` or `Verdict`)."""
+    rows, in_table = {}, False
+    for ln in page.read_text(encoding="utf-8").splitlines():
+        if not ln.startswith("|"):
+            in_table = False
+            continue
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        if not in_table:
+            in_table = any(re.match(r"(Tier|Status|Verdict)\b", c) for c in cells)
+            continue
+        if in_table and not set(cells[0]) <= set("-: "):
+            rows.setdefault(cells[0], []).append(cells)
+    return rows
+
+
+@then(parsers.re(rf"no plugin has a verdict row on more than one page of {q('glob')}"))
+def _one_verdict_row(world, glob):
+    seen = {}
+    for page in sorted(REPO.glob(glob)):
+        for plugin in _verdict_rows(page):
+            seen.setdefault(plugin, []).append(page.name)
+    dup = {p: pages for p, pages in seen.items() if len(pages) > 1}
+    assert seen, f"no verdict table in {glob}"
+    assert not dup, f"verdict rows repeated across pages: {dup}"
+
+
+@then(parsers.re(rf"every plugin in {q('doc')} has the verdict and V/i mark of {q('matrix')}"))
+def _verdicts_agree(world, doc, matrix):
+    mine = _verdict_rows(REPO / doc)
+    # The matrix's columns: rank | plugin | downloads | verdict | V/i | note.
+    ref = {r[1]: (r[3], r[4]) for rows in _verdict_rows(REPO / matrix).values() for r in rows}
+    checked, bad = 0, []
+    for plugin, rows in mine.items():
+        if plugin in ref:
+            checked += 1
+            got = (rows[0][1], rows[0][2])
+            if got != ref[plugin]:
+                bad.append(f"{plugin}: {got} vs {ref[plugin]}")
+    assert checked, f"no plugin of {doc} is in {matrix}"
+    assert not bad, "\n".join(bad)
+
+
+@then(
+    parsers.re(
+        rf"the {q('index')} entry for {q('page')} names every level-2 heading of it "
+        rf"except {q('skip')}"
+    )
+)
+def _index_names_sections(world, index, page, skip):
+    base = (REPO / index).parent
+    entry = next(
+        ln for ln in (REPO / index).read_text(encoding="utf-8").splitlines() if f"]({page})" in ln
+    )
+    heads = re.findall(r"^## (.+)$", (base / page).read_text(encoding="utf-8"), re.M)
+    missing = [h for h in heads if h not in skip.split(", ") and h.lower() not in entry.lower()]
+    assert heads, f"{page} has no level-2 headings"
+    assert not missing, f"{index} entry for {page} leaves out: {missing}"

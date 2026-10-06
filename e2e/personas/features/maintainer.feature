@@ -211,6 +211,24 @@ Feature: Suite maintainer
       Then the exit code is 1
       And the output contains "test_poll"
 
+    Scenario: MT-05 a cold cache with --require-baseline refuses before any test runs
+      # docs/guides/slowdowns.md: a dead gate is an error, not a silent pass.
+      When I run "rstest -n 2 -q --durations-regress 2 --require-baseline --report-json r.json"
+      Then the exit code is 1
+      And stdout does not contain " passed"
+      And stderr contains "--require-baseline"
+      And "r.json" does not exist
+
+    Scenario: MT-05 the regression row shows baseline -> current; the test session itself passed
+      # docs/guides/slowdowns.md: exit 1 from the gate, meta.exitstatus 0.
+      Given I have run "rstest -n 2 -q" with environment "MT_D=0.1"
+      When I run "rstest -n 2 -q --durations-regress 2 --report-json r.json" with environment "MT_D=1.2"
+      Then the exit code is 1
+      And the stdout line containing "test_p.py::test_poll" matches "\d+\.\d\ds ->\s+\d+\.\d\ds"
+      And stdout does not contain "test_other"
+      And stderr contains "1 duration regression vs baseline"
+      And the JSON file "r.json" has "meta.exitstatus" == 0
+
   Rule: --fail-on-leak blames the test that leaked
 
     # --dist loadfile keeps the file on one worker in file order, so the

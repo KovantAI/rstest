@@ -13,7 +13,7 @@ are doing, then follow the link for the full behaviour.
 | rerun automatically on every save | `rstest --watch` | [Watch mode](watch-mode.md) |
 | rerun only what your edits touch, by hand | `rstest --changed` | [Selecting changed tests](changed.md) |
 | iterate on the failures of the last red run | `rstest --lf` (or `--ff`) | [CLI reference](../reference/cli.md) |
-| get a `(Pdb)` prompt or attach an editor | `-n 0`, `-s`, `--pdb`, `--debug` | [Passthrough-IO flags](../reference/cli.md#passthrough-io-flags) |
+| get a `(Pdb)` prompt or attach an editor | `-n 0`, `-s`, `--pdb`, `--debug` | [Debugging a test](debugging.md) |
 | reproduce a CI-only parallel failure | `rstest replay` with the CI job's journal | [Replaying a CI failure](replay.md) |
 | tolerate or track an intermittent failure | `--reruns N`, `--quarantine` | [Flaky tests](flaky-tests.md) |
 | find leaks and expensive fixtures | `rstest --doctor` | [Suite diagnostics](doctor.md) |
@@ -47,17 +47,11 @@ state refreshes every cycle. `--lf` still reruns
 [quarantined](flaky-tests.md) failures: locally they behave like the failures
 they are.
 
-**Debugging.** Pool workers have no terminal, so a `breakpoint()` (or
-`pdb.set_trace()`) hit during a parallel run fails that test with a hint
-instead of hanging:
-
-```text
-E       Failed: breakpoint() / pdb.set_trace() needs a terminal, and parallel workers have none: rerun with -n 0 (or -s) to get the (Pdb) prompt
-```
-
-Rerun that test with `-n 0` or `-s` (`rstest -s tests/test_x.py::test_bp`) to
-get the prompt. `--pdb`, `--trace` and `--debug` switch to that single-session
-mode by themselves.
+**Debugging.** Pool workers have no terminal, so a `breakpoint()` hit during
+a parallel run fails that test with a hint instead of hanging. Rerun it with
+`-n 0` or `-s` for the `(Pdb)` prompt, or with `--debug` to attach VS Code.
+Both editors' configs and the `--reruns` gotcha:
+[Debugging a test](debugging.md).
 
 **Parallel-only failures.** Locally a fast suite often runs in
 [single-worker mode](../concepts/glossary.md#single-worker-mode), so a failure
