@@ -116,16 +116,23 @@ jobs:
       - name: build
         run: cargo build --release
 
-      - name: cargo test
-        run: cargo test --release
-
-      # gate.py's `personas` section runs the Gherkin persona specs
-      # (e2e/personas) under pytest-bdd in this interpreter; the dev group
-      # carries pytest + pytest-bdd. --group needs pip >= 25.1.
-      - name: install persona spec deps
+      # Installed before `cargo test`: the end-to-end Rust tests (interrupt,
+      # replay, audit, bisect, migrate_check, xdist_removal) need pytest and
+      # msgpack in this interpreter, and gate.py's `personas` section runs the
+      # Gherkin persona specs (e2e/personas) under pytest-bdd. The dev group
+      # carries all of them. --group needs pip >= 25.1.
+      - name: install python test deps
         run: |
           python -m pip install -q --upgrade pip
           python -m pip install -q --group dev
+
+      # RSTEST_TEST_REQUIRE=1 makes those tests fail instead of skipping when
+      # the interpreter lacks their deps. Not on Windows: they look for
+      # `python3` and `<venv>/bin/python`, which Windows runners do not have.
+      - name: cargo test
+        run: cargo test --release
+        env:
+          RSTEST_TEST_REQUIRE: ${{ matrix.os != 'windows-latest' && '1' || '' }}
 
       - name: test gate
         run: python e2e/gate.py
@@ -345,6 +352,8 @@ jobs:
       # build and binary inherit, so gate.py's subprocess runs land in the
       # profile set too. `clean` between runs keeps the two profile sets apart.
       - name: collect rust unit coverage
+        env:
+          RSTEST_TEST_REQUIRE: "1"
         run: |
           export RSTEST_TEST_PYTHON="$(command -v python)"
           source <(cargo llvm-cov show-env --export-prefix)

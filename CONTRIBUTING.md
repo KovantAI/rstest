@@ -50,6 +50,15 @@ cargo test --release                                     # Rust tests
 uv run python e2e/gate.py                                # end-to-end test gate (+ persona specs)
 ```
 
+The end-to-end Rust tests (`crates/rstest-cli/tests/`) need a python with
+pytest and msgpack. They use `python3` from `PATH`, or the venv in
+`RSTEST_TEST_VENV`, and skip with a `skipping:` line when it lacks them. To
+run them against the project venv and fail instead of skipping, as CI does:
+
+```sh
+RSTEST_TEST_VENV=$PWD/.venv RSTEST_TEST_REQUIRE=1 cargo test --release
+```
+
 The Python worker has its own checks (Linux in CI):
 
 ```sh

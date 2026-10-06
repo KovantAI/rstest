@@ -482,7 +482,12 @@ pub(super) fn run_post_gates(
     let mut fresh_index = false;
     if !passthrough && has_cov {
         let before = index_mtime();
-        sink.out_line("");
+        // JSON and TAP keep stdout a pure machine stream, so covtool's table
+        // and notices go to stderr there instead.
+        let machine_out = matches!(mode, progress::Mode::Json | progress::Mode::Tap);
+        if !machine_out {
+            sink.out_line("");
+        }
         // Diff-coverage gate: hand covtool the diff's added lines + a result
         // path when --cov-diff-fail-under is set; covtool scores them and we
         // gate on the percentage below.
@@ -518,7 +523,17 @@ pub(super) fn run_post_gates(
                 .arg("--rstest-diff-out")
                 .arg(op);
         }
-        let cov_status = cmd.status().map(|s| s.success()).map_err(|e| e.to_string());
+        let cov_status = if machine_out {
+            cmd.stderr(std::process::Stdio::inherit())
+                .output()
+                .map(|o| {
+                    let _ = sink.err().write_all(&o.stdout);
+                    o.status.success()
+                })
+        } else {
+            cmd.status().map(|s| s.success())
+        }
+        .map_err(|e| e.to_string());
         // Freshness is "covtool replaced the file", not "covtool exited 0": a
         // missed --cov-fail-under exits 1 but still writes this run's index.
         let after = index_mtime();

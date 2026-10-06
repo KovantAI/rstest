@@ -90,6 +90,12 @@ pub(crate) fn git_stdout_in(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The git work tree's top directory containing `dir`, or `None` outside git.
+pub fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = git_stdout_in(dir, &["rev-parse", "--show-toplevel"]).ok()?;
+    Some(PathBuf::from(out.trim()))
+}
+
 /// Resolve the `--changed` base rev, PR-aware. Bare `--changed` diffs vs HEAD,
 /// which silently skips everything on a CI PR checkout; auto-target the merge-base
 /// with the detected PR base. An unresolvable base is an error, not a HEAD fallback.
