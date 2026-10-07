@@ -516,7 +516,6 @@ mod tests {
     /// force a SPECIFIC git subcommand to fail while its siblings still succeed.
     #[cfg(unix)]
     fn shim_git(held: &Held, dir: &Path, fail_arg: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let git = bin.join("git");
@@ -524,8 +523,7 @@ mod tests {
             "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"{fail_arg}\" ]; then\n    echo \"shim: forced failure on {fail_arg}\" >&2\n    exit 1\n  fi\ndone\nexec \"{real}\" \"$@\"\n",
             real = real_git(held).display(),
         );
-        std::fs::write(&git, script).unwrap();
-        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_env::write_executable(&git, &script);
         bin
     }
 
