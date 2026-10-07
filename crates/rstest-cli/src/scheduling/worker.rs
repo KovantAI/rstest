@@ -1849,17 +1849,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_worker_that_dies_at_startup_names_its_error() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("rstest-dead-worker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("python");
-        std::fs::write(
+        crate::test_env::write_executable(
             &fake,
             "#!/bin/sh\necho 'Traceback (most recent call last):' >&2\n\
              echo \"ModuleNotFoundError: No module named 'exceptiongroup'\" >&2\nexit 3\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut worker = Worker::spawn(&fake, None, &base_env()).expect("spawn");
         let err = format!("{:#}", worker.recv().unwrap_err());
         worker.reap();

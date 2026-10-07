@@ -90,9 +90,77 @@ pub(crate) fn set_cwd<'a>(_held: &'a Held, dir: &Path) -> CwdGuard<'a> {
     }
 }
 
+/// Write `contents` to `path` as an executable (0755) stand-in script.
+///
+/// Open file descriptors are process-global too: `std::fs::write` holds a
+/// writable fd on the script, and a sibling test that spawns a process in that
+/// window hands its child a copy until the child execs. Exec'ing the script
+/// while any process holds it open for writing fails on Linux with ETXTBSY
+/// ("Text file busy"), which once failed CI on a worker stand-in. Writing
+/// through a short-lived `sh` keeps the only writable fd in that child, so no
+/// sibling fork can inherit it.
+#[cfg(unix)]
+pub(crate) fn write_executable(path: &Path, contents: &str) {
+    let status = std::process::Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$2" && chmod 755 "$2""#, "sh"])
+        .arg(contents)
+        .arg(path)
+        .status()
+        .expect("run /bin/sh to write the stand-in");
+    assert!(
+        status.success(),
+        "writing {} failed: {status}",
+        path.display()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exec a freshly written script while sibling threads keep spawning
+    /// processes (the setup that failed CI with ETXTBSY). A script written
+    /// with `std::fs::write` loses this race within a few hundred rounds on
+    /// Linux; `write_executable` never exposes a writable fd to inherit.
+    #[cfg(unix)]
+    #[test]
+    fn write_executable_survives_concurrent_spawns() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("rstest-write-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let spawners: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("/bin/sh")
+                            .args(["-c", "exit 0"])
+                            .status();
+                    }
+                })
+            })
+            .collect();
+        let result = std::panic::catch_unwind(|| {
+            for i in 0..300 {
+                let script = dir.join(format!("s{i}.sh"));
+                write_executable(&script, "#!/bin/sh\nexit 7\n");
+                let status = std::process::Command::new(&script)
+                    .status()
+                    .unwrap_or_else(|e| panic!("exec round {i}: {e}"));
+                assert_eq!(status.code(), Some(7));
+            }
+        });
+        stop.store(true, Ordering::Relaxed);
+        for t in spawners {
+            t.join().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
 
     #[test]
     fn var_guard_restores_previous_value_and_absence() {
