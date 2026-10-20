@@ -49,6 +49,28 @@ updates:
       - documentation
       - dependencies
 
+  # CI tool pins (bench drivers, pre-commit), hash-locked from the .in files.
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      ci-tools:
+        patterns:
+          - "*"
+    ignore:
+      # Pinned to the vendored pytest core (python/VENDOR.md).
+      - dependency-name: pytest
+    labels:
+      - ci
+      - dependencies
+
   # uv.lock: the dev environment (`uv sync --group dev`: coverage, pytest-bdd,
   # psutil and the worker's runtime deps as resolved). lockfile-only keeps
   # pyproject.toml untouched, so the published package's `dependencies`

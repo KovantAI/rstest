@@ -133,7 +133,7 @@ jobs:
       - name: install python test deps
         run: |
           uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
-          python -m pip install -q -r "${{ runner.temp }}/dev-requirements.txt"
+          python -m pip install -q --require-hashes -r "${{ runner.temp }}/dev-requirements.txt"
 
       # RSTEST_TEST_REQUIRE=1 makes those tests fail instead of skipping when
       # the interpreter lacks their deps. Not on Windows: those tests drive
@@ -222,7 +222,7 @@ jobs:
       - name: install persona spec deps
         run: |
           uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
-          python -m pip install -q -r "${{ runner.temp }}/dev-requirements.txt"
+          python -m pip install -q --require-hashes -r "${{ runner.temp }}/dev-requirements.txt"
 
       - name: test gate
         run: python e2e/gate.py --binary target/release/rstest
@@ -231,11 +231,17 @@ jobs:
       # conditional deps, so a runtime dep missing from pyproject.toml (e.g.
       # exceptiongroup/tomli below 3.11) passes there. Install the package
       # alone into a clean venv and run a real test through the vendored core.
+  # Its runtime deps come hash-pinned from uv.lock (the wheel goes in
+  # --no-deps); `pip check` confirms they satisfy what the wheel declares.
       - name: declared deps suffice
         shell: bash
         run: |
           python -m venv /tmp/bare
-          /tmp/bare/bin/pip install -q .
+          uv export --frozen --no-dev --no-emit-project -o /tmp/bare-requirements.txt
+          /tmp/bare/bin/pip install -q --require-hashes -r /tmp/bare-requirements.txt
+          /tmp/bare/bin/pip wheel -q --no-deps -w /tmp/bare-wheel .
+          /tmp/bare/bin/pip install -q --no-deps /tmp/bare-wheel/*.whl
+          /tmp/bare/bin/pip check
           if /tmp/bare/bin/python -c "import pytest" 2>/dev/null; then
             echo "pytest leaked into the bare venv" && exit 1
           fi
@@ -369,7 +375,7 @@ jobs:
       - name: install worker + persona spec deps
         run: |
           uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
-          python -m pip install -q -r "${{ runner.temp }}/dev-requirements.txt"
+          python -m pip install -q --require-hashes -r "${{ runner.temp }}/dev-requirements.txt"
 
       # Two separate instrumented runs so unit and e2e coverage upload under
       # distinct flags. `show-env` exports the RUSTFLAGS / LLVM_PROFILE_FILE the
@@ -418,7 +424,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: install docs toolchain
-        run: pip install -r docs/requirements.txt
+        run: pip install --require-hashes -r docs/requirements.txt
       - name: build (strict)
         # Fails on broken links and anchors, as on Read the Docs.
         run: zensical build --strict

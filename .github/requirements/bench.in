@@ -1,0 +1,5 @@
+# Bench driver tools (corpus-bench, example-bench). pytest is pinned to the
+# vendored version (python/VENDOR.md). Compile to bench.txt with hashes:
+#   uv pip compile --universal --python-version 3.13 --generate-hashes .github/requirements/bench.in -o .github/requirements/bench.txt
+maturin==1.15.0
+pytest==9.1.1

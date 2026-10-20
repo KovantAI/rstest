@@ -32,7 +32,7 @@ jobs:
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install pre-commit
-        run: pip install pre-commit==4.7.0
+        run: pip install --require-hashes -r .github/requirements/pre-commit.txt
 
       - name: Run pre-commit
         run: pre-commit run --all-files --show-diff-on-failure

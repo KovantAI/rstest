@@ -1,0 +1,2 @@
+#   uv pip compile --universal --python-version 3.13 --generate-hashes .github/requirements/pre-commit.in -o .github/requirements/pre-commit.txt
+pre-commit==4.7.0

@@ -1,0 +1,5 @@
+# example-cpu-bench: the bench tools plus the xdist baseline and numpy.
+#   uv pip compile --universal --python-version 3.13 --generate-hashes .github/requirements/bench-cpu.in -o .github/requirements/bench-cpu.txt
+-r bench.in
+pytest-xdist==3.8.0
+numpy==2.5.4

@@ -156,8 +156,13 @@ jobs:
           # Every platform wheel declares the same deps, so install the one that
           # matches this linux x86_64 runner (an arbitrary wheel like the macOS
           # one is rejected by pip as "not a supported wheel on this platform").
+          # Runtime deps come hash-pinned from uv.lock; `pip check` confirms they
+          # satisfy what the wheel declares.
           python -m venv /tmp/sbom-venv
-          /tmp/sbom-venv/bin/pip install --quiet "$(ls wheels/*manylinux*x86_64*.whl | head -1)"
+          uv export --frozen --no-dev --no-emit-project -o /tmp/sbom-requirements.txt
+          /tmp/sbom-venv/bin/pip install --quiet --require-hashes -r /tmp/sbom-requirements.txt
+          /tmp/sbom-venv/bin/pip install --quiet --no-deps wheels/*manylinux*x86_64*.whl
+          /tmp/sbom-venv/bin/pip check
           uvx --from cyclonedx-bom@4.6.1 cyclonedx-py environment /tmp/sbom-venv \
             --outfile sbom.python.cdx.json
 
