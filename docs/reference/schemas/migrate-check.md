@@ -8,7 +8,7 @@ The `--migrate-check-json` document (schema 1). Field order is alphabetical to m
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `meta` | MigrateMeta | yes |  |
+| `meta` | MigrateMeta | yes | Envelope: `kind` is `"migrate-check"`. |
 | `parallel` | ParallelReport or null | yes | Parallel-phase result: `null` when the phase was skipped (WILL-bail ids force `-n 0`); `{"ran": false}` when it started but captured no outcomes. |
 | `ready` | boolean | yes | Whether the suite is parallel-ready (no blocking findings). |
 | `tests_collected` | integer | yes | Tests collected (union across the two collection runs). |

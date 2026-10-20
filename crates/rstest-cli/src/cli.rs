@@ -1623,6 +1623,70 @@ mod tests {
     }
 
     #[test]
+    fn every_visible_flag_is_documented() {
+        // The reference pages were complete only by hand: a new flag could
+        // ship with nothing in docs/reference/ to say it exists (replay's
+        // --journal was only ever shown inside an example). Run flags belong
+        // in cli.md; a subcommand's flags, including the global ones only
+        // subcommands read, in cli-commands.md. Each is written as inline
+        // code (`--flag`, `--flag=VALUE`, `-n, --flag`, ...).
+        use clap::CommandFactory;
+        fn visible(cmd: &clap::Command, global: bool) -> Vec<String> {
+            cmd.get_arguments()
+                .filter(|a| !a.is_hide_set() && a.is_global_set() == global)
+                .flat_map(|a| {
+                    let aliases = a.get_visible_aliases().unwrap_or_default();
+                    a.get_long().into_iter().chain(aliases)
+                })
+                .map(|l| format!("--{l}"))
+                .collect()
+        }
+        let page = |name: &str| {
+            crate::doc_pages::pages()
+                .into_iter()
+                .find(|(p, _)| p == name)
+                .unwrap_or_else(|| panic!("{name} not found"))
+                .1
+        };
+        let documented = |text: &str, flag: &str| {
+            let pat = format!(r"`(?:-[a-zA-Z], )?{}(?:[^a-z0-9-]|$)", regex::escape(flag));
+            regex::Regex::new(&pat).unwrap().is_match(text)
+        };
+        let cli = Cli::command();
+        let run_flags = visible(&cli, false);
+        assert!(run_flags.contains(&"--doctor".to_string()));
+        let (cli_md, commands_md) = (
+            page("docs/reference/cli.md"),
+            page("docs/reference/cli-commands.md"),
+        );
+        let mut missing: Vec<String> = run_flags
+            .iter()
+            .filter(|f| !documented(&cli_md, f))
+            .map(|f| format!("docs/reference/cli.md: {f}"))
+            .collect();
+        for flag in visible(&cli, true) {
+            if !documented(&commands_md, &flag) {
+                missing.push(format!("docs/reference/cli-commands.md: {flag}"));
+            }
+        }
+        for sub in cli.get_subcommands() {
+            for flag in visible(sub, false) {
+                if !documented(&commands_md, &flag) {
+                    missing.push(format!(
+                        "docs/reference/cli-commands.md: {} {flag}",
+                        sub.get_name()
+                    ));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "flags in --help with no reference entry:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    #[test]
     fn misplaced_subcommand_is_a_clear_usage_error() {
         // Selected subcommands and flag values are not misplaced.
         assert_eq!(misplaced_subcommand(&v(&["-q", "try"])), None);

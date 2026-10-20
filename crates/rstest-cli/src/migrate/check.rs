@@ -30,6 +30,7 @@ use crate::reporting::sink::Sink;
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct MigrateCheckDoc {
+    /// Envelope: `kind` is `"migrate-check"`.
     pub meta: MigrateMeta,
     /// Parallel-phase result: `null` when the phase was skipped (WILL-bail ids
     /// force `-n 0`); `{"ran": false}` when it started but captured no outcomes.

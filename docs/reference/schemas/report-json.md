@@ -9,7 +9,7 @@ The `--report-json` document (schema 5). Fields are declared alphabetically to m
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `collect_errors` | array of string | yes | Paths of collectors that failed to import/collect. |
-| `meta` | SnapshotMeta | yes |  |
+| `meta` | SnapshotMeta | yes | Run metadata: argv, counts, exit status, schema version, shard. |
 | `tests` | object of TestEntry | yes | Per-test outcomes, keyed by node id. |
 
 ### ShardJson
@@ -46,17 +46,17 @@ Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-re
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `cached` | boolean | no | Not executed this run: unchanged since the last green run, so its prior pass was carried forward (`--incremental`). Still counts as passed. |
-| `call` | string | no |  |
+| `call` | string | no | Call-phase outcome: `"passed"`, `"failed"` or `"skipped"`. Absent when the test was skipped at setup; an xfail test records `"skipped"` with `wasxfail`. |
 | `cpu` | number | no | Call-phase CPU time (process_time plus reaped child processes), present only when measured (`--doctor` or a live-stream run). Serialized when present so a report-json consumer can spot wait-bound tests (wall ≫ cpu); omitted on a plain run so the snapshot stays byte-comparable to the pytest baseline. |
 | `crashed` | boolean | no | The outcome was fabricated because the worker died on this test (crash or --worker-timeout kill), or the test was running when SIGINT/SIGTERM stopped the run; not produced by pytest. |
-| `duration` | number | no |  |
+| `duration` | number | no | Call-phase wall time in seconds, 4 decimal places. |
 | `flaky` | boolean | no | Passed only after one or more reruns (--reruns or @pytest.mark.flaky). |
 | `lineno` | integer | no | Source line of the test (0-based, from pytest's report.location), for editor mapping. Absent when pytest reports no location. |
 | `longrepr` | string | no | Failure text (assertion repr / traceback), failures only. |
 | `quarantined` | boolean | no | Failed, but matched the --quarantine list: reported distinctly, never fatal to the run. |
-| `setup` | string | no |  |
-| `skip_reason` | string | no |  |
+| `setup` | string | no | Setup-phase outcome: `"passed"`, `"failed"` or `"skipped"`. |
+| `skip_reason` | string | no | pytest's skip message (first 200 characters), keeping its `Skipped: ` prefix. |
 | `subtests_failed` | integer | no | Failed subtests (unittest `subTest` / the `subtests` fixture). Any makes `call` "failed"; each also counts as one `failed`, as in pytest. |
-| `teardown` | string | no |  |
-| `wasxfail` | boolean | no |  |
+| `teardown` | string | no | Teardown-phase outcome: `"passed"`, `"failed"` or `"skipped"`. |
+| `wasxfail` | boolean | no | `true` when the test was an expected failure (xfail or xpass); absent otherwise. |
 | `worker` | string | no | Worker that produced the final outcome (pool runs only). |

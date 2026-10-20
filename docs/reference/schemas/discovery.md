@@ -9,7 +9,7 @@ The `--collect-only --report-json` discovery document (schema 1). Field order is
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `collect_errors` | array of CollectError | yes | Per-collector import/collection errors (empty on a clean collection). |
-| `meta` | DiscoveryMeta | yes |  |
+| `meta` | DiscoveryMeta | yes | Envelope: producer, document kind, schema version, rootdir and test count. |
 | `tests` | array of DiscoveredTest | yes | One entry per collected test item, in collection order. |
 
 ### CollectError

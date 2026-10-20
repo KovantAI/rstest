@@ -43,7 +43,7 @@ jobs:
         run: |
           python -m venv .bench-venv
           . .bench-venv/bin/activate
-          pip install --quiet maturin "pytest==9.1.1" pytest-xdist numpy
+          pip install --quiet maturin==1.15.0 pytest==9.1.1 pytest-xdist==3.8.0 numpy==2.5.4
           maturin build --release --manifest-path crates/rstest-cli/Cargo.toml --out dist
           pip install --quiet dist/rstest-*.whl
 
@@ -71,7 +71,7 @@ jobs:
 
       - name: upload results.json
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cpu-bench
           path: examples/cpu-bench/results.json

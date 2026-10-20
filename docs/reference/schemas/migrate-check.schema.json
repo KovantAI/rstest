@@ -5,7 +5,12 @@
   "type": "object",
   "properties": {
     "meta": {
-      "$ref": "#/definitions/MigrateMeta"
+      "description": "Envelope: `kind` is `\"migrate-check\"`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/MigrateMeta"
+        }
+      ]
     },
     "parallel": {
       "description": "Parallel-phase result: `null` when the phase was skipped (WILL-bail ids\nforce `-n 0`); `{\"ran\": false}` when it started but captured no outcomes.",

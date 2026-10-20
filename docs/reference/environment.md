@@ -71,8 +71,8 @@ root.
 | `RSTEST_CACHE_MAX_AGE` | retention by age: keep segments younger than this loose, e.g. `30d` (default for `--max-age`) |
 | `RSTEST_CACHE_COMPACT_THRESHOLD` | default for [`--cache-compact-threshold`](cli.md#-cache-compact-threshold-n); an unparseable value is reported, not ignored |
 | `RSTEST_WORKER_PATH` | extra directory prepended to the workers' `PYTHONPATH` to locate the `rstest_worker` package (for unusual installs where the project interpreter can't import it) |
-| `RSTEST_MAX_MESSAGE_BYTES` | Cap on one worker-to-orchestrator message (default 256 MiB); raise it only if a huge suite hits the limit |
-| `RSTEST_WALL_TTL_DAYS` | How long a project's recorded wall time (`.rstest_cache/wall.json`, used by the monorepo planner to weight projects) stays valid. Default `30`; `0` keeps it forever |
+| `RSTEST_MAX_MESSAGE_BYTES` | cap on one worker-to-orchestrator message (default 256 MiB); raise it only if a huge suite hits the limit |
+| `RSTEST_WALL_TTL_DAYS` | how long a project's recorded wall time (`.rstest_cache/wall.json`, used by the monorepo planner to weight projects) stays valid. Default `30`; `0` keeps it forever |
 | `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache only, not `.rstest_cache/`; see [Interpreter-probe cache](#interpreter-probe-cache) |
 | `RSTEST_FLAKE_RETENTION_DAYS` | how long a test's flake/failure history (`.rstest_cache/flakes.json`) stays relevant. A test with no flake or failure inside this window reads as fixed: its entry is dropped and it stops carrying "flaked _N_x before" annotations. Defaults to `90`; `0` keeps history forever |
 | `COVERAGE_CORE` | coverage.py's measurement core; set to `ctrace` in workers under `--cov-context` unless you set it; see [Coverage core](#coverage-core) |
