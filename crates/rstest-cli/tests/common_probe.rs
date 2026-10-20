@@ -100,7 +100,7 @@ fn ci_installs_python_deps_before_cargo_test_and_requires_them() {
     // which then refuses to skip on Linux and macOS.
     let (install_at, install) = step(&ci, "install python test deps");
     let (test_at, test) = step(&ci, "cargo test");
-    assert!(install.contains("--group dev"), "{install}");
+    assert!(install.contains("--only-group dev"), "{install}");
     assert!(
         install_at < test_at,
         "deps must be installed before cargo test"
@@ -111,12 +111,9 @@ fn ci_installs_python_deps_before_cargo_test_and_requires_them() {
     );
 
     // Coverage job: same contract for its instrumented `cargo test`.
-    let (deps_at, deps) = step(&ci, "install worker deps for live serve tests");
+    let (deps_at, deps) = step(&ci, "install worker + persona spec deps");
     let (cov_at, cov) = step(&ci, "collect rust unit coverage");
-    assert!(
-        deps.contains("pytest") && deps.contains("msgpack"),
-        "{deps}"
-    );
+    assert!(deps.contains("--only-group dev"), "{deps}");
     assert!(deps_at < cov_at, "deps must be installed before cargo test");
     assert!(cov.contains("RSTEST_TEST_REQUIRE: \"1\""), "{cov}");
 }

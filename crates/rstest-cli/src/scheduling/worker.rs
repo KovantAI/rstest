@@ -2281,16 +2281,17 @@ mod tests {
             assert_eq!(pids.len(), n, "forked worker pids must be distinct");
 
             // Clean shutdown: each worker blocks on its first command, so Shutdown
-            // ends it. shutdown() waits until the pid is gone, so it must already be
-            // absent on return — a lingering pid would mean wait() returned early or
-            // a leaked/zombied worker.
+            // ends it. shutdown() waits until the worker has exited, so it must not
+            // be running on return. A not-yet-reaped zombie counts as exited:
+            // init reaps it on its own schedule, so `kill(pid, 0)` (which still
+            // answers for a zombie) raced init and flaked on CI.
             for w in workers {
                 w.shutdown().expect("shutdown forked worker");
             }
             for pid in pids {
                 assert!(
-                    !alive(pid),
-                    "forked worker pid {pid} still alive after shutdown"
+                    !matches!(super::probe(pid), super::Probe::Alive { .. }),
+                    "forked worker pid {pid} still running after shutdown"
                 );
             }
         });
