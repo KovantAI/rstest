@@ -8,7 +8,9 @@ Checks every .github/workflows/*.yml for:
   - `uvx` tools without `@version` and `--with`/`--from` packages without a pin,
   - taiki-e/install-action `tool:` without `@version`,
   - astral-sh/setup-uv without a `version:` input,
-  - no top-level `permissions:` (the job token would get the repo default).
+  - no top-level `permissions:` (the job token would get the repo default),
+  - release.yml not signing its assets (Sigstore bundle on the GitHub
+    release, PEP 740 attestations on every PyPI publish).
 
 Line-based on purpose (no PyYAML on a bare runner). Usage:
   python .github/scripts/check_workflow_pins.py [workflows_dir]
@@ -123,9 +125,22 @@ def check_file(path: Path) -> list[str]:
     return errors
 
 
+def check_release_signing(path: Path) -> list[str]:
+    text = path.read_text()
+    errors = []
+    if not re.search(r"gh release create[^\n]*(\\\n[^\n]*)*\.sigstore\.json", text):
+        errors.append(f"{path}: GitHub release does not attach a .sigstore.json bundle")
+    publishes = text.count("pypa/gh-action-pypi-publish@")
+    if text.count("attestations: true") < publishes:
+        errors.append(f"{path}: a PyPI publish step lacks `attestations: true`")
+    return errors
+
+
 def main() -> int:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".github/workflows")
     errors = [e for f in sorted(root.glob("*.yml")) for e in check_file(f)]
+    if (root / "release.yml").exists():
+        errors += check_release_signing(root / "release.yml")
     print("\n".join(errors) or f"all workflow dependencies pinned ({root})")
     return 1 if errors else 0
 

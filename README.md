@@ -1,6 +1,7 @@
 # rstest
 
 [![CI](https://github.com/KovantAI/rstest/actions/workflows/ci.yml/badge.svg)](https://github.com/KovantAI/rstest/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/KovantAI/rstest/badge)](https://scorecard.dev/viewer/?uri=github.com/KovantAI/rstest)
 [![codecov](https://codecov.io/gh/KovantAI/rstest/graph/badge.svg)](https://codecov.io/gh/KovantAI/rstest)
 [![PyPI](https://img.shields.io/pypi/v/rstest)](https://pypi.org/project/rstest/)
 [![Python versions](https://img.shields.io/pypi/pyversions/rstest)](https://pypi.org/project/rstest/)

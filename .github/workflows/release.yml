@@ -89,6 +89,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist
+          attestations: true # PEP 740, signed via Trusted Publishing OIDC
 
   publish-testpypi:
     name: Publish to TestPyPI (manual)
@@ -108,6 +109,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist
+          attestations: true # PEP 740, signed via Trusted Publishing OIDC
           repository-url: https://test.pypi.org/legacy/
 
   release:
@@ -116,6 +118,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and upload assets
+      id-token: write # Sigstore keyless signing (OIDC)
+      attestations: write # GitHub attestation store
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -168,19 +172,36 @@ jobs:
         run: sha256sum sbom.python.cdx.json sbom.rust.cdx.json >> wheels/SHA256SUMS
       # ---------------------------------------------------------------------
 
+      # One Sigstore-signed provenance attestation over every release asset.
+      # The bundle is attached to the release so assets verify offline, e.g.
+      #   gh attestation verify sbom.rust.cdx.json --repo <repo> \
+      #     --bundle rstest-<tag>.sigstore.json
+      - name: attest release assets
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            wheels/*.whl
+            wheels/SHA256SUMS
+            sbom.python.cdx.json
+            sbom.rust.cdx.json
+
       # Draft release: assets are staged for review; nothing is public
       # until the release is manually published.
       - name: create draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             TAG="manual-$(date +%Y%m%d)-${GITHUB_RUN_NUMBER}"
             git tag "$TAG" && git push origin "$TAG"
           fi
+          cp "$BUNDLE" "rstest-$TAG.sigstore.json"
           gh release create "$TAG" \
             --draft \
             --title "rstest $TAG" \
-            --notes "Wheels are signed with GitHub artifact attestations. Verify: \`gh attestation verify <wheel> --repo ${GITHUB_REPOSITORY}\`. CycloneDX SBOMs (\`sbom.python.cdx.json\`, \`sbom.rust.cdx.json\`) are attached. See CHANGELOG.md." \
-            wheels/*.whl wheels/SHA256SUMS sbom.python.cdx.json sbom.rust.cdx.json
+            --notes "All assets are signed with GitHub artifact attestations (Sigstore). Verify: \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`, or offline with \`--bundle rstest-$TAG.sigstore.json\`. PyPI files carry PEP 740 attestations. CycloneDX SBOMs (\`sbom.python.cdx.json\`, \`sbom.rust.cdx.json\`) are attached. See CHANGELOG.md." \
+            wheels/*.whl wheels/SHA256SUMS sbom.python.cdx.json sbom.rust.cdx.json \
+            "rstest-$TAG.sigstore.json"
