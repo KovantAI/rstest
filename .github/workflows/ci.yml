@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -82,6 +85,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.7"
 
       # Mirrors cargo-deny's advisories check for the Python side: audit the
       # LOCKED runtime dependency tree (from uv.lock) against the PyPI/OSV
@@ -116,15 +121,19 @@ jobs:
       - name: build
         run: cargo build --release
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.7"
+
       # Installed before `cargo test`: the end-to-end Rust tests (interrupt,
       # replay, audit, bisect, migrate_check, xdist_removal) need pytest and
       # msgpack in this interpreter, and gate.py's `personas` section runs the
       # Gherkin persona specs (e2e/personas) under pytest-bdd. The dev group
-      # carries all of them. --group needs pip >= 25.1.
+      # carries all of them, installed from uv.lock.
       - name: install python test deps
         run: |
-          python -m pip install -q --upgrade pip
-          python -m pip install -q --group dev
+          uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
+          python -m pip install -q -r "${{ runner.temp }}/dev-requirements.txt"
 
       # RSTEST_TEST_REQUIRE=1 makes those tests fail instead of skipping when
       # the interpreter lacks their deps. Not on Windows: those tests drive
@@ -144,9 +153,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.7"
 
       - name: uv lock --check
         run: uv lock --check
+
+      - name: workflow dependencies pinned
+        run: python3 .github/scripts/check_workflow_pins.py
 
       - name: ruff check
         run: uvx ruff@0.16.5 check python/rstest_worker python/tests
@@ -155,14 +169,14 @@ jobs:
         run: uvx ruff@0.16.5 format --check python/rstest_worker python/tests
 
       - name: ty (type check worker)
-        run: uvx --with msgpack --with pytest --with coverage ty@0.0.75 check python/rstest_worker
+        run: uvx --with msgpack==1.2.3 --with pytest==9.1.1 --with coverage==7.16.2 ty@0.0.75 check python/rstest_worker
 
       - name: worker unit tests (with coverage)
-        run: uvx --with msgpack --with coverage --with pytest-cov pytest python/tests --cov --cov-report=xml
+        run: uvx --with msgpack==1.2.3 --with coverage==7.16.2 --with pytest-cov==7.1.0 pytest@9.1.1 python/tests --cov --cov-report=xml
 
       # corpus gate-classification tests: pure logic, no venvs/network needed.
       - name: corpus bench unit tests
-        run: uvx --python 3.13 --with pytest pytest corpus/test_bench.py corpus/test_plugin_versions.py
+        run: uvx --python 3.13 pytest@9.1.1 corpus/test_bench.py corpus/test_plugin_versions.py
 
       - name: upload python coverage
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
@@ -196,15 +210,19 @@ jobs:
       - name: build
         run: cargo build --release
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.7"
+
       # e2e gate: drives the built binary, which spawns the worker under this
       # python. The real cross-version compatibility signal.
       # gate.py's `personas` section runs the Gherkin persona specs
       # (e2e/personas) under pytest-bdd in this interpreter; the dev group
-      # carries pytest + pytest-bdd. --group needs pip >= 25.1.
+      # carries pytest + pytest-bdd, installed from uv.lock.
       - name: install persona spec deps
         run: |
-          python -m pip install -q --upgrade pip
-          python -m pip install -q --group dev
+          uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
+          python -m pip install -q -r "${{ runner.temp }}/dev-requirements.txt"
 
       - name: test gate
         run: python e2e/gate.py --binary target/release/rstest
@@ -227,10 +245,9 @@ jobs:
           cd /tmp/bare-suite && rstest -n 2 -q
 
       # Worker unit tests under the matrix interpreter (pure-python helpers).
+      # msgpack/coverage/pytest come from the dev group installed above.
       - name: worker unit tests
-        run: |
-          python -m pip install -q msgpack coverage pytest pytest-cov
-          python -m pytest python/tests
+        run: python -m pytest python/tests
 
   # Service-backed plugin gates: the three top-50 plugins that need an external
   # resource (postgres, a playwright browser, the Home Assistant stack) and so
@@ -339,13 +356,20 @@ jobs:
 
       - uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.7"
 
       # The serve.rs live-worker tests need a python that can host the worker
       # (pytest for the probe, msgpack for the worker's protocol). Without it
-      # they skip, leaving the warm-worker branches uncovered.
-      - name: install worker deps for live serve tests
-        run: pip install pytest msgpack
+      # they skip, leaving the warm-worker branches uncovered. The dev group
+      # also carries pytest-bdd for gate.py's `personas` section below.
+      - name: install worker + persona spec deps
+        run: |
+          uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
+          python -m pip install -q -r "${{ runner.temp }}/dev-requirements.txt"
 
       # Two separate instrumented runs so unit and e2e coverage upload under
       # distinct flags. `show-env` exports the RUSTFLAGS / LLVM_PROFILE_FILE the
@@ -360,14 +384,6 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo test --release
           cargo llvm-cov report --release --lcov --output-path unit.lcov
-
-      # gate.py's `personas` section runs the Gherkin persona specs
-      # (e2e/personas) under pytest-bdd in this interpreter; the dev group
-      # carries pytest + pytest-bdd. --group needs pip >= 25.1.
-      - name: install persona spec deps
-        run: |
-          python -m pip install -q --upgrade pip
-          python -m pip install -q --group dev
 
       - name: collect rust e2e coverage
         run: |

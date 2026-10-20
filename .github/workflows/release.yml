@@ -5,14 +5,17 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Read-only by default; each job opts into the write scopes it needs.
 permissions:
-  contents: write # create the release and upload assets
-  id-token: write # Sigstore keyless signing (OIDC)
-  attestations: write # GitHub attestation store
+  contents: read
 
 jobs:
   build:
     name: build + attest (${{ matrix.build.id }})
+    permissions:
+      contents: read
+      id-token: write # Sigstore keyless signing (OIDC)
+      attestations: write # GitHub attestation store
     strategy:
       fail-fast: false
       matrix:
@@ -111,6 +114,8 @@ jobs:
     name: draft GitHub release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -136,6 +141,8 @@ jobs:
           python-version: "3.13"
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.7"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
