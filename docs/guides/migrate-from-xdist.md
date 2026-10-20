@@ -85,19 +85,23 @@ your fallback, it needs them (see
 
 pytest-rerunfailures maps: `--reruns N`,
 `@pytest.mark.flaky(reruns=N)`, and `--only-rerun REGEX` work natively
-in parallel modes (and crash-aware: a test that kills its worker
-retries on the replacement). The plugin itself is unregistered inside
-pool workers so nothing double-reruns. A command-line `--reruns` is always
-rstest's own, at every worker count: at `-n 0/1` it switches to a one-worker
-rerun pool, so the plugin is unregistered there too. Only at `-n 0` *without*
-rstest's `--reruns` (for example with `--reruns` in `addopts`, or after `--`)
-does the plugin keep its native behavior. In the pool, a `--reruns` in
-`addopts` does nothing, silently; pass it on the rstest command line instead
-([why](migrate-from-pytest.md#addopts-and-pytest_addopts)). rstest's
-`--reruns` are rejected under `--dist each` (rstest reruns a failure on
-another worker, which has no meaning when every worker runs the full suite;
-see
-[`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
+in parallel modes. Reruns are crash-aware: a test that kills its worker
+retries on the replacement. Where each side's reruns apply:
+
+- **In the pool**, the plugin is unregistered inside every worker, so
+  nothing double-reruns.
+- **A command-line `--reruns`** is always rstest's own, at every worker
+  count. At `-n 0/1` it switches to a one-worker rerun pool, so the plugin
+  is unregistered there too.
+- **Only at `-n 0` without rstest's `--reruns`** (for example with
+  `--reruns` in `addopts`, or after `--`) does the plugin keep its native
+  behavior.
+- **A `--reruns` in `addopts` does nothing in the pool**, silently; pass it
+  on the rstest command line instead
+  ([why](migrate-from-pytest.md#addopts-and-pytest_addopts)).
+- **`--dist each` rejects rstest's `--reruns`**: rstest reruns a failure on
+  another worker, which has no meaning when every worker runs the full suite
+  ([`--dist each`](../reference/cli.md#-dist-loadloadfileloadscopeloadgroupeach)).
 
 Not carried over from pytest-rerunfailures when rstest owns the retry (the
 pool, or any run with rstest's own `--reruns`):

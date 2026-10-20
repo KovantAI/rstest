@@ -20,7 +20,12 @@
       "type": "string"
     },
     "meta": {
-      "$ref": "#/definitions/BisectMeta"
+      "description": "Envelope: producer, document kind and schema version.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/BisectMeta"
+        }
+      ]
     },
     "nodeid": {
       "description": "The victim test's node id, relative to `rootdir`.",

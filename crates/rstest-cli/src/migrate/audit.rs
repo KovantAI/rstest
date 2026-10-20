@@ -344,6 +344,7 @@ pub struct AuditDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "Vec<String>"))]
     pub intrinsic_flakes: Option<Vec<String>>,
+    /// Envelope: producer, document kind and schema version.
     pub meta: AuditMeta,
     /// Tests that pass under `--dist loadfile`: they depend on a sibling in
     /// their file running first, so keep the file together rather than serial.

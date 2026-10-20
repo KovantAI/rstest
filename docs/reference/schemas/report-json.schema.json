@@ -12,7 +12,12 @@
       }
     },
     "meta": {
-      "$ref": "#/definitions/SnapshotMeta"
+      "description": "Run metadata: argv, counts, exit status, schema version, shard.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/SnapshotMeta"
+        }
+      ]
     },
     "tests": {
       "description": "Per-test outcomes, keyed by node id.",
@@ -143,6 +148,7 @@
           "type": "boolean"
         },
         "call": {
+          "description": "Call-phase outcome: `\"passed\"`, `\"failed\"` or `\"skipped\"`. Absent when\nthe test was skipped at setup; an xfail test records `\"skipped\"` with\n`wasxfail`.",
           "type": "string"
         },
         "cpu": {
@@ -155,6 +161,7 @@
           "type": "boolean"
         },
         "duration": {
+          "description": "Call-phase wall time in seconds, 4 decimal places.",
           "type": "number",
           "format": "double"
         },
@@ -177,9 +184,11 @@
           "type": "boolean"
         },
         "setup": {
+          "description": "Setup-phase outcome: `\"passed\"`, `\"failed\"` or `\"skipped\"`.",
           "type": "string"
         },
         "skip_reason": {
+          "description": "pytest's skip message (first 200 characters), keeping its `Skipped: `\nprefix.",
           "type": "string"
         },
         "subtests_failed": {
@@ -189,9 +198,11 @@
           "minimum": 0
         },
         "teardown": {
+          "description": "Teardown-phase outcome: `\"passed\"`, `\"failed\"` or `\"skipped\"`.",
           "type": "string"
         },
         "wasxfail": {
+          "description": "`true` when the test was an expected failure (xfail or xpass); absent\notherwise.",
           "type": "boolean"
         },
         "worker": {

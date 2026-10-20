@@ -39,7 +39,7 @@ The zero-config "should I switch?" proof. Runs your suite once under plain
 `pytest` and once under `rstest -n auto`, then prints the only two things that
 matter: whether the outcomes are **identical** (your real pytest against
 `rstest -n auto`, so a difference is a parallel-safety issue or a parity gap) and how much **faster** rstest is, with a
-rough CI-time saving. No flags, no config.
+rough CI-time saving. No config needed; flags such as `--python` are optional.
 
 ```console
 $ rstest try
@@ -453,6 +453,12 @@ $ rstest replay                     # replay the most recent local run
 $ rstest replay <run-uid>           # replay a specific journaled run
 $ rstest replay --journal ci.json   # replay a downloaded CI journal
 ```
+
+#### `--journal <FILE>`
+
+Replay the journal at `FILE` (typically a downloaded CI artifact) instead of
+one from the local `.rstest_cache/replay/`. Takes precedence over a
+`<run-uid>` argument.
 
 The primary flow is CI to local. The failing CI run journals without foresight,
 CI uploads `.rstest_cache/replay/latest.json` as an artifact, and a developer

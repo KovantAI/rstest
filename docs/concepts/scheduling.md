@@ -5,9 +5,11 @@ mode.
 
 ## Collection and verification
 
-With full collection (the default for small suites and cold caches), every
-worker collects the identical session (same args, same ini, same
-conftest semantics). Large suites on a warm cache use
+With full collection (the default whenever
+[lazy collection's auto-default](lazy-collection.md#auto-default) doesn't
+pick lazy, which includes small suites and cold caches), every worker
+collects the identical session (same args, same ini, same conftest
+semantics). Large suites on a warm cache use
 [lazy collection](lazy-collection.md) instead, where each file is collected
 on one worker; the rest of this section describes full collection.
 Workers verify agreement by item count + hash of the nodeid list; worker

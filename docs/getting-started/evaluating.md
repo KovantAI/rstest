@@ -69,10 +69,11 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
   uuids or timestamps make workers collect different test sets, and when
   rstest sees that it refuses to dispatch rather than run the wrong tests.
   It can only see it under full collection, when every worker collects the
-  whole suite: the first, cold-cache run of any suite, every run of a suite
-  below the [lazy collection](../concepts/lazy-collection.md#auto-default)
-  threshold, and any run pinned to `--collect full`. Such a suite will hit
-  it. The fix is stable `ids=`, or `-n 0`
+  whole suite: any run that
+  [lazy collection's auto-default](../concepts/lazy-collection.md#auto-default)
+  doesn't pick (including the first, cold-cache run of any suite and every
+  run of a suite below the size threshold) and any run pinned to
+  `--collect full`. Such a suite will hit it. The fix is stable `ids=`, or `-n 0`
   ([Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids)).
 - **Windows-heavy fleets.** Windows is supported and gated in CI, but
   real-world validation there is lighter and `--timeout` can't interrupt a

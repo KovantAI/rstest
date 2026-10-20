@@ -46,7 +46,12 @@
       ]
     },
     "meta": {
-      "$ref": "#/definitions/Meta"
+      "description": "Envelope: producer, document kind, schema version and rstest version.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Meta"
+        }
+      ]
     },
     "nodeid": {
       "description": "The node id that was explained, as given.",
