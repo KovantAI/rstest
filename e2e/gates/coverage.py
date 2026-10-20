@@ -46,6 +46,40 @@ def gate_coverage(g, args, binary):
         r.returncode == 1 and "FAIL Required" in r.stdout,
         r.stdout[-200:],
     )
+    # --output json / tap keep stdout a pure machine stream: the coverage
+    # table goes to stderr instead of landing between the events.
+    for n in ("0", "2"):
+        r = g.run(
+            "test_cov.py",
+            "-n",
+            n,
+            "--cov=mypkg",
+            "--output",
+            "json",
+            cwd=covdir,
+            env_extra={"PYTHONPATH": str(covdir)},
+        )
+        stray = [ln for ln in r.stdout.splitlines() if ln.strip() and not ln.startswith("{")]
+        check(
+            f"--output json --cov keeps stdout NDJSON (-n {n})",
+            r.returncode == 0 and not stray and "TOTAL" in r.stderr,
+            f"stray={stray[:3]} stderr={r.stderr[-200:]}",
+        )
+    r = g.run(
+        "test_cov.py",
+        "-n",
+        "2",
+        "--cov=mypkg",
+        "--output",
+        "tap",
+        cwd=covdir,
+        env_extra={"PYTHONPATH": str(covdir)},
+    )
+    check(
+        "--output tap --cov keeps the table off stdout",
+        r.returncode == 0 and "TOTAL" not in r.stdout and "TOTAL" in r.stderr,
+        r.stdout[-200:],
+    )
 
 
 def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
@@ -373,7 +407,7 @@ def gate_changed_import_forms(g, args, binary):
 
 def gate_changed_from_subdir(g, args, binary):
     print("== --changed: started from a subdirectory ==")
-    # The project (app/) sits below the git toplevel, like a monorepo child:
+    # The project (app/) sits below the git toplevel, like a monocfg child:
     # changes outside it (other/) are not its changes.
     repo = g.tmp / "subdirrepo"
     sp = repo / "app"
@@ -405,6 +439,40 @@ def gate_changed_from_subdir(g, args, binary):
             f"rc={r.returncode} " + r.stderr[-300:] + r.stdout[-300:],
         )
     git(repo, "checkout", "-q", ".")
+
+    # No config file: rootdir follows pytest's rule for the args (their common
+    # ancestor with the cwd), not the cwd, so `cd q && rstest ../tests` still
+    # sees the change under q/.
+    nocfg = g.tmp / "subdirnocfg"
+    g.write("subdirnocfg/q/__init__.py", "")
+    g.write("subdirnocfg/q/mod.py", "def v():\n    return 4\n")
+    g.write(
+        "subdirnocfg/tests/test_q.py",
+        "from q.mod import v\n\ndef test_q(): assert v() == 4\n",
+    )
+    g.write("subdirnocfg/tests/test_other.py", "def test_other(): assert True\n")
+    git_init_commit(nocfg, "init")
+    with open(nocfg / "q" / "mod.py", "a") as f:
+        f.write("# touched\n")
+    env = {"PYTHONPATH": str(nocfg)}
+    r = g.run("--changed", "-v", "../tests", cwd=nocfg / "q", env_extra=env)
+    check(
+        "--changed from q/ with ../tests and no config selects the importer",
+        r.returncode == 0
+        and "1 changed file(s) -> 1 affected test target(s)" in r.stderr
+        and "test_q PASSED" in r.stdout
+        and "test_other" not in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-300:] + r.stdout[-300:],
+    )
+    # From tests/ with no args pytest's rootdir is tests/ itself, so the
+    # change is out of reach: rstest must say so, not pass quietly.
+    r = g.run("--changed", cwd=nocfg / "tests", env_extra=env)
+    check(
+        "--changed below the repo with no config warns the diff is limited",
+        "no pytest config file" in r.stderr and "not seen" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    git(nocfg, "checkout", "-q", ".")
 
 
 def gate_coverage_based_selection_changed_uses_th(g, args, binary):

@@ -1849,17 +1849,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_worker_that_dies_at_startup_names_its_error() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("rstest-dead-worker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("python");
-        std::fs::write(
+        crate::test_env::write_executable(
             &fake,
             "#!/bin/sh\necho 'Traceback (most recent call last):' >&2\n\
              echo \"ModuleNotFoundError: No module named 'exceptiongroup'\" >&2\nexit 3\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut worker = Worker::spawn(&fake, None, &base_env()).expect("spawn");
         let err = format!("{:#}", worker.recv().unwrap_err());
         worker.reap();
@@ -2284,16 +2281,17 @@ mod tests {
             assert_eq!(pids.len(), n, "forked worker pids must be distinct");
 
             // Clean shutdown: each worker blocks on its first command, so Shutdown
-            // ends it. shutdown() waits until the pid is gone, so it must already be
-            // absent on return — a lingering pid would mean wait() returned early or
-            // a leaked/zombied worker.
+            // ends it. shutdown() waits until the worker has exited, so it must not
+            // be running on return. A not-yet-reaped zombie counts as exited:
+            // init reaps it on its own schedule, so `kill(pid, 0)` (which still
+            // answers for a zombie) raced init and flaked on CI.
             for w in workers {
                 w.shutdown().expect("shutdown forked worker");
             }
             for pid in pids {
                 assert!(
-                    !alive(pid),
-                    "forked worker pid {pid} still alive after shutdown"
+                    !matches!(super::probe(pid), super::Probe::Alive { .. }),
+                    "forked worker pid {pid} still running after shutdown"
                 );
             }
         });

@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
         with:
           python-version: "3.13"
           args: "-n auto"
@@ -257,7 +257,7 @@ jobs:
         project: ${{ fromJSON(needs.discover.outputs.projects) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
         with:
           python-version: "3.13"
           # Run inside the package, not `rstest libs/core` from the root:

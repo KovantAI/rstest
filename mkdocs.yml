@@ -1,6 +1,8 @@
 site_name: rstest
 site_description: A fast, pytest-compatible test runner, parallel by design, with built-in suite diagnostics
-site_url: https://python-rstest.readthedocs.io/
+# The published root, version included: it makes every page's canonical URL.
+# Without /en/stable/ the canonical links pointed at pages that 404.
+site_url: https://python-rstest.readthedocs.io/en/stable/
 repo_url: https://github.com/KovantAI/rstest
 repo_name: KovantAI/rstest
 edit_uri: edit/main/docs/
@@ -75,36 +77,25 @@ markdown_extensions:
   - pymdownx.tasklist:
       custom_checkbox: true
 
-exclude_docs: |
-  # Generated schema partials: embedded via pymdownx snippets into
-  # reference/output-schemas.md, not standalone pages. The .schema.json files
-  # are kept (copied as static assets) so they are directly downloadable.
-  reference/schemas/*.md
-  # Shared partials embedded via pymdownx snippets (--8<--), one canonical
-  # copy for content that appears on several pages.
-  _snippets/
-
 plugins:
   - search
+  # Files that are not pages (Zensical's equivalent of exclude_docs, which it
+  # ignores). Built as pages, the partials would be published on their own and
+  # their relative links checked from the wrong directory.
+  - exclude:
+      glob:
+        # Generated schema partials: embedded via pymdownx snippets into
+        # reference/output-schemas.md. The .schema.json files are kept (copied
+        # as static assets) so they are directly downloadable.
+        - "reference/schemas/*.md"
+        # Shared partials embedded via pymdownx snippets (--8<--), one
+        # canonical copy for content that appears on several pages.
+        - "_snippets/*"
   # Renamed pages keep their old URLs working.
   - redirects:
       redirect_maps:
         getting-started/first-steps.md: getting-started/run-your-suite.md
         getting-started/your-first-test.md: getting-started/start-from-scratch.md
-
-# Every link problem is a warning, so `mkdocs build --strict` (CI's docs job)
-# fails on it. mkdocs only reports broken #anchors at info level by default,
-# which let a link to a renamed heading ship silently.
-validation:
-  nav:
-    omitted_files: warn
-    not_found: warn
-    absolute_links: warn
-  links:
-    not_found: warn
-    anchors: warn
-    absolute_links: warn
-    unrecognized_links: warn
 
 nav:
   - Introduction: index.md

@@ -6,24 +6,14 @@
 //! Local: `RSTEST_TEST_VENV=/path/to/venv cargo test -p rstest-cli --test interrupt`
 #![cfg(unix)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn pytest_env() -> Option<Option<PathBuf>> {
-    if let Ok(venv) = std::env::var("RSTEST_TEST_VENV") {
-        let py = Path::new(&venv).join("bin").join("python");
-        return import_worker(&py).then(|| Some(PathBuf::from(venv)));
-    }
-    import_worker(Path::new("python3")).then_some(None)
-}
+mod common;
 
-fn import_worker(py: &Path) -> bool {
-    Command::new(py)
-        .args(["-c", "import pytest, rstest_worker"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn pytest_env() -> Option<Option<PathBuf>> {
+    common::pytest_env("pytest, rstest_worker")
 }
 
 fn fresh_dir(tag: &str) -> PathBuf {

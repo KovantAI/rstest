@@ -90,6 +90,12 @@ pub(crate) fn git_stdout_in(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The git work tree's top directory containing `dir`, or `None` outside git.
+pub fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = git_stdout_in(dir, &["rev-parse", "--show-toplevel"]).ok()?;
+    Some(PathBuf::from(out.trim()))
+}
+
 /// Resolve the `--changed` base rev, PR-aware. Bare `--changed` diffs vs HEAD,
 /// which silently skips everything on a CI PR checkout; auto-target the merge-base
 /// with the detected PR base. An unresolvable base is an error, not a HEAD fallback.
@@ -510,7 +516,6 @@ mod tests {
     /// force a SPECIFIC git subcommand to fail while its siblings still succeed.
     #[cfg(unix)]
     fn shim_git(held: &Held, dir: &Path, fail_arg: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let git = bin.join("git");
@@ -518,8 +523,7 @@ mod tests {
             "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"{fail_arg}\" ]; then\n    echo \"shim: forced failure on {fail_arg}\" >&2\n    exit 1\n  fi\ndone\nexec \"{real}\" \"$@\"\n",
             real = real_git(held).display(),
         );
-        std::fs::write(&git, script).unwrap();
-        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_env::write_executable(&git, &script);
         bin
     }
 

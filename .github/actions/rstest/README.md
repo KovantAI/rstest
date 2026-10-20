@@ -23,7 +23,7 @@ already does natively, it just wires it into GitHub Actions:
 ## Usage
 
 ```yaml
-- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
   with:
     python-version: "3.13"
     args: "-n auto"
@@ -41,7 +41,7 @@ default when the project has a `uv.lock` or `[tool.uv]`) the action runs
 - uses: actions/checkout@v7
   with:
     fetch-depth: 0            # --changed needs history to diff the base
-- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
   with:
     changed: strict          # full run on unconnectable files; exit 5 on nothing-affected
     base-ref: origin/main
@@ -60,7 +60,7 @@ which in a clean checkout selects nothing and passes green (or exits 5 under
 ### Real-LLM / nondeterministic suite (fail-ratio gate)
 
 ```yaml
-- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
   with:
     args: "-m acceptance -n 2"
     reruns: "2"
@@ -73,7 +73,7 @@ which in a clean checkout selects nothing and passes green (or exits 5 under
 ### Gate on suite health (doctor metrics)
 
 ```yaml
-- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
   with:
     args: "-n auto"
     doctor-fail-on: "parallel_efficiency<25, imbalance_pct>70"
@@ -119,7 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
         with:
           args: "-n 4"            # explicit: -n auto can resolve to 1 worker, which --shard rejects
           cache-backend: artifact
@@ -150,7 +150,7 @@ jobs:
         project: [libs/core, libs/cli, services/api]
     steps:
       - uses: actions/checkout@v7
-      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
         with:
           python-version: "3.13"
           working-directory: ${{ matrix.project }}
@@ -199,7 +199,7 @@ permissions: { contents: read, actions: read }
 strategy: { matrix: { shard: [1, 2, 3, 4] } }
 steps:
   - uses: actions/checkout@v7
-  - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+  - uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
     with:
       python-version: "3.13"
       cache-backend: artifact
@@ -225,7 +225,7 @@ permissions: { id-token: write, contents: read }
 steps:
   - uses: aws-actions/configure-aws-credentials@v4
     with: { role-to-assume: arn:aws:iam::…:role/ci, aws-region: us-east-1 }
-  - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+  - uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
     with:
       python-version: "3.13"
       cache-remote: s3://ci-cache/rstest        # gs://… or https://… too

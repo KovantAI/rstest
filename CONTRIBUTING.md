@@ -51,6 +51,15 @@ cargo test --release                                     # Rust tests
 uv run python e2e/gate.py                                # end-to-end test gate (+ persona specs)
 ```
 
+The end-to-end Rust tests (`crates/rstest-cli/tests/`) need a python with
+pytest and msgpack. They use `python3` from `PATH`, or the venv in
+`RSTEST_TEST_VENV`, and skip with a `skipping:` line when it lacks them. To
+run them against the project venv and fail instead of skipping, as CI does:
+
+```sh
+RSTEST_TEST_VENV=$PWD/.venv RSTEST_TEST_REQUIRE=1 cargo test --release
+```
+
 The Python worker has its own checks (Linux in CI):
 
 ```sh
@@ -102,9 +111,12 @@ lockstep with the code automatically.
 
 ### Writing docs
 
-The site is built with MkDocs Material from `docs/` (nav in `mkdocs.yml`).
-Check a docs change with `mkdocs build --strict` (install the tools from
-`docs/requirements.txt`).
+The site is built with [Zensical](https://zensical.org/) from `docs/` (nav
+in `mkdocs.yml`, which Zensical reads). Check a docs change with
+`zensical build --strict`, which fails on broken links and anchors (install the
+tools from `docs/requirements.txt`; `zensical serve` previews it). Link pages
+relatively (`../guides/replay.md`), never by an absolute `/...` URL: the strict
+build doesn't check those, and a persona spec rejects them.
 
 - **Where a page goes.** Getting started is for first contact, Playbooks for a
   whole persona's path (wait-bound suites, the inner loop, a plugin stack),

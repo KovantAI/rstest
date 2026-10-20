@@ -22,7 +22,7 @@ download it next to a checkout of the failing commit, and replay it.
 With the bundled action, give it an `id` and add one step after it:
 
 ```yaml
-      - uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
         id: rstest
         with:
           python-version: "3.13"
@@ -89,7 +89,7 @@ if you're unsure of the name.
 
 ```console
 $ rstest replay --journal ci-replay/latest.json
-rstest: replay: run 18d93d9429580fb015f7d (0.8.0 recorded), 4 worker(s), 22 test(s) across 4 slot(s)
+rstest: replay: run 18d93d9429580fb015f7d (0.9.0 recorded), 4 worker(s), 22 test(s) across 4 slot(s)
 rstest: replay: args: tests -k 'not slow'
 ...
 --- FAILED [gw0] tests/test_m2.py::test_victim ---

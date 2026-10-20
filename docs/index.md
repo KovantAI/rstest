@@ -20,7 +20,7 @@ out because it depends on the machine; measured timings, at `-n 8`, are in
 ```console
 $ pip install rstest
 $ rstest -n 4      # -n is optional; plain `rstest` picks a worker count
-rstest 0.8.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.9.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [ 34%]
 ........................................................................ [ 69%]
 ......................................................                   [100%]

@@ -46,7 +46,7 @@ the files rstest ships and keeps any files you added to the skill directory.
 $ rstest install-skills
   migrate-to-rstest: installed
   rstest-triage: installed
-rstest 0.8.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
+rstest 0.9.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
 ```
 
 ## Option 2: the Claude Code plugin

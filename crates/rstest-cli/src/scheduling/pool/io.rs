@@ -175,14 +175,11 @@ mod tests {
     /// orchestrator's side, a worker busy running a long list). An unbounded
     /// write to it blocks once the pipe buffer fills.
     fn silent_worker(tag: &str) -> (WorkerState, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let script = std::env::temp_dir().join(format!(
             "rstest-silent-worker-{}-{tag}.sh",
             std::process::id()
         ));
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").expect("write stand-in");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod stand-in");
+        crate::test_env::write_executable(&script, "#!/bin/sh\nexec sleep 60\n");
         let env = WorkerEnv {
             run_uid: "uid-feed".into(),
             doctor: false,

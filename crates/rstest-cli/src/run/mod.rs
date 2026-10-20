@@ -88,7 +88,29 @@ fn apply_selection(
     if let Some(rev) = &effective_changed {
         let rev = head_to_none(rev);
         let cwd = std::env::current_dir()?;
-        let project = config::discover(&cwd, sink.err());
+        let mut project = config::discover(&cwd, sink.err());
+        // With no config file, discover() falls back to the cwd, which from a
+        // subdirectory (`cd q && rstest --changed ../tests`) limits the diff
+        // to that subtree. Use pytest's rootdir for the args instead, the one
+        // the cache is anchored at.
+        if project.inifile.is_none() {
+            project.rootdir = crate::cache::base_dir();
+            // Run from below the repo with no config (`cd tests && rstest
+            // --changed`), pytest's rootdir is that subdirectory too and a
+            // change outside it is invisible. Say so rather than report a
+            // quiet "no tests affected".
+            let below_toplevel = select::git_toplevel(&project.rootdir)
+                .and_then(|top| crate::cache::relative_to(&project.rootdir, &top))
+                .is_some_and(|rel| !rel.as_os_str().is_empty());
+            if below_toplevel {
+                sink.warn(&format!(
+                    "rstest: --changed: no pytest config file, so the rootdir is {} and \
+                     changes outside it are not seen; add a pytest.ini or pyproject.toml \
+                     at the project root",
+                    project.rootdir.display()
+                ));
+            }
+        }
         // Coverage-aware selection: uses the line->test index when it is warm
         // (any --cov-context=test run writes it), else falls back per-file to
         // import-graph reachability, so --changed only ever gets tighter.

@@ -100,7 +100,7 @@ On GitHub, prefer the bundled action over hand-written steps. It defaults
 history), and writes `junit.xml`:
 
 ```yaml
-- uses: KovantAI/rstest/.github/actions/rstest@v0.8.0
+- uses: KovantAI/rstest/.github/actions/rstest@v0.9.0
   id: rstest
   with:
     python-version: "3.13"
