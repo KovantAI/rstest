@@ -14,12 +14,17 @@ parallel pool and its vendored pytest 9 core?*
 
 The one-line reassurance: **every plugin in this stack either works as-is or
 is replaced by an rstest-native equivalent (coverage, timeouts, reruns,
-parallelism), and nothing needs porting**. The adjustments are two
-report/terminal plugins you move to `-n 0`, pytest-timeout, which rstest
-replaces ([pytest-timeout](plugins.md#pytest-timeout)), and pytest-cov's
-`--cov`, which belongs on the rstest command line rather than in `addopts`.
-xdist's `--dist` mode moves to `[tool.rstest] dist`. Plugins load
-through the standard `pytest11` entry points against a real
+parallelism), and nothing needs porting**. The adjustments:
+
+- **pytest-html**: rstest's native merged report replaces its `--html`.
+- **pytest-sugar**: its terminal UI needs a `-n 0` run.
+- **pytest-timeout**: rstest replaces it
+  ([pytest-timeout](plugins.md#pytest-timeout)).
+- **pytest-cov**: `--cov` belongs on the rstest command line rather than in
+  `addopts`.
+- **pytest-xdist**: its `--dist` mode moves to `[tool.rstest] dist`.
+
+Plugins load through the standard `pytest11` entry points against a real
 [pluggy](https://github.com/pytest-dev/pluggy), as under pytest
 ([Plugins](plugins.md)). The one thing to watch is flag names rstest owns,
 such as `--timeout` and `--html`
@@ -45,9 +50,11 @@ it was verified, and its caveat.
 Seven of the eleven need no change on your side: five run as-is,
 pytest-rerunfailures is replaced by rstest's own reruns, and pytest-xdist is
 neutralized. Four need one: pytest-cov needs `--cov` on the rstest command
-line (from `addopts` alone a parallel run writes no report), pytest-html and
-pytest-sugar need a `-n 0` run for their own output, and pytest-timeout must
-be uninstalled or disabled with `-p no:timeout`.
+line (from `addopts` alone a parallel run writes no report), pytest-html's
+`--html` becomes rstest's native report (pytest-html's own layout needs
+`rstest -n 0 -- --html=...`), pytest-sugar needs a `-n 0` run for its
+rendering, and pytest-timeout must be uninstalled or disabled with
+`-p no:timeout`.
 
 ## Plugin versions vs the vendored pytest 9
 
@@ -97,7 +104,11 @@ check: it either passes, or fails the same way a real pytest 9 upgrade would.
 
 pytest-html and pytest-sugar go quiet under the pool because rstest owns a
 single merged terminal and runs no Python controller to aggregate worker
-output. The parallel-safe report paths and the `-n 0` fallback are in
+output. For HTML, a command-line `--html` is rstest's own merged report at
+every worker count, so nothing moves. Only a workflow that needs
+pytest-html's exact layout runs a `-n 0` pass, and it must pass the flag
+after `--` (`rstest -n 0 -- --html=report.html`) or rstest takes it. The
+parallel-safe report paths are in
 [HTML & aggregated reporting](plugins.md#html-aggregated-reporting-under-parallelism).
 
 ## Go deeper

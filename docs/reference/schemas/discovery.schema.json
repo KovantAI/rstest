@@ -12,7 +12,12 @@
       }
     },
     "meta": {
-      "$ref": "#/definitions/DiscoveryMeta"
+      "description": "Envelope: producer, document kind, schema version, rootdir and test\ncount.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/DiscoveryMeta"
+        }
+      ]
     },
     "tests": {
       "description": "One entry per collected test item, in collection order.",

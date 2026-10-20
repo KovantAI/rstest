@@ -37,10 +37,13 @@ const FLOOR_SLACK: f64 = 1.1;
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DoctorReport {
+    /// Document schema version, bumped when the shape changes incompatibly.
     schema: u32,
+    /// The rstest version that wrote the report.
     rstest_version: &'static str,
     /// Workers that ran tests: 1 for a single-worker (`-n 0` / `-n 1`) run.
     workers: usize,
+    /// Wall-clock time of the whole run, in seconds.
     wall_seconds: f64,
     /// Wall from pool spawn to every worker's first event (imported core +
     /// started collecting), part of `wall_seconds`. A fixed per-run tax that
@@ -50,6 +53,8 @@ pub struct DoctorReport {
     /// Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates
     /// the "try --fork-pool" hint so it isn't suggested when already on.
     fork_prewarm: bool,
+    /// Tests with a recorded call duration (tests skipped before their call
+    /// phase drop out): the population every time figure is computed over.
     tests: usize,
     /// Sum of each test's whole protocol (setup + call + teardown), so time
     /// spent in function fixtures counts.
@@ -69,9 +74,16 @@ pub struct DoctorReport {
     /// the JSON carries it under `parallel_efficiency` on pool runs.
     #[serde(skip)]
     long_pole_seconds: Option<f64>,
+    /// Present only when the longest test outlasts both a worker's even share
+    /// of the test time and 1 second, plus 10%: no worker count can finish
+    /// faster than that test.
     parallel_floor: Option<ParallelFloor>,
+    /// Realized speedup and worker load balance; present only on multi-worker
+    /// pool runs.
     parallel_efficiency: Option<ParallelEfficiency>,
+    /// Fixture setup cost summed across all workers, costliest first (top 50).
     fixtures: Vec<FixtureEntry>,
+    /// Test time per file, slowest first (top 20).
     slowest_files: Vec<FileEntry>,
     /// Slow tests whose every covered line is also covered by another test -
     /// delete/merge candidates. `None` unless a per-test coverage index was
@@ -102,7 +114,9 @@ struct CoverageWaste {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WasteTest {
+    /// The redundant test.
     nodeid: String,
+    /// Its whole-protocol time (setup + call + teardown), in seconds.
     duration: f64,
     /// Lines this test covered, all shared with at least one other test.
     covered_lines: u64,
@@ -115,6 +129,7 @@ struct WasteTest {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Leak {
+    /// The test that leaked.
     pub nodeid: String,
     /// Threads the test created that outlived its teardown (0 if only fds
     /// leaked).
@@ -127,31 +142,45 @@ pub struct Leak {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WaitBound {
+    /// Test time spent waiting rather than on CPU (`test_time_seconds -
+    /// cpu_time_seconds`).
     wait_seconds: f64,
+    /// `wait_seconds` as a percentage of `test_time_seconds`.
     wait_pct: f64,
+    /// The biggest waiters, most waiting first (top 50): tests of at least
+    /// 0.2s that spent 60% or more of their time waiting.
     tests: Vec<WaitTest>,
 }
 
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WaitTest {
+    /// The waiting test.
     nodeid: String,
+    /// Its whole-protocol time (setup + call + teardown), in seconds.
     duration: f64,
+    /// The part of `duration` not spent on CPU, in seconds.
     wait: f64,
 }
 
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct ParallelFloor {
+    /// The longest single test (setup + call + teardown), in seconds.
     longest_seconds: f64,
+    /// A worker's even share of the test time (`test_time_seconds /
+    /// workers`), in seconds.
     ideal_share_seconds: f64,
+    /// The tests that exceed the floor, longest first (at most 10).
     gate_tests: Vec<GateTest>,
 }
 
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct GateTest {
+    /// The test that gates the wall time.
     nodeid: String,
+    /// Its whole-protocol time (setup + call + teardown), in seconds.
     duration: f64,
 }
 
@@ -181,17 +210,25 @@ struct ParallelEfficiency {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct WorkerLoad {
+    /// Worker id (`gw0`, `gw1`, ...), or `serial` for tests with no
+    /// recorded worker.
     worker: String,
+    /// Test time this worker spent running tests, in seconds.
     busy_seconds: f64,
+    /// Tests this worker ran.
     tests: usize,
 }
 
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct FixtureEntry {
+    /// Fixture name.
     name: String,
+    /// pytest scope: `function`, `class`, `module`, `package` or `session`.
     scope: String,
+    /// Setups across all workers.
     count: u64,
+    /// Setup time summed across all workers, in seconds.
     total_seconds: f64,
     /// Scope-promotion advisor: a function-scoped fixture that produced the
     /// same immutable builtin value on every call in every worker, with no
@@ -214,8 +251,11 @@ fn is_zero(v: &f64) -> bool {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 struct FileEntry {
+    /// Test file, the path part of its tests' nodeids.
     file: String,
+    /// Summed whole-protocol time of the file's tests, in seconds.
     total_seconds: f64,
+    /// `total_seconds` as a percentage of `test_time_seconds`.
     pct: f64,
 }
 

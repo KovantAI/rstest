@@ -765,6 +765,7 @@ pub struct BisectDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "String"))]
     pub error: Option<String>,
+    /// Envelope: producer, document kind and schema version.
     pub meta: BisectMeta,
     /// The victim test's node id, relative to `rootdir`.
     pub nodeid: String,
