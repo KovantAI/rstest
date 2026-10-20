@@ -60,7 +60,7 @@ jobs:
         run: |
           python -m venv .bench-venv
           . .bench-venv/bin/activate
-          pip install --quiet maturin==1.15.0 pytest==9.1.1
+          pip install --quiet --require-hashes -r .github/requirements/bench.txt
           maturin build --release --manifest-path crates/rstest-cli/Cargo.toml --out target/wheels
           pip install --quiet target/wheels/rstest-*.whl
 

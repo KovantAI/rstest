@@ -3,8 +3,10 @@
 
 Checks every .github/workflows/*.yml for:
   - `uses:` actions not pinned to a full commit SHA (local `./` actions exempt),
-  - `pip install <pkg>` without `==` (paths, wheels, `-r`/`-c` files exempt)
-    and `pip install --group` (resolves ranges, bypassing uv.lock),
+  - `pip install` not hash-pinned, as OpenSSF Scorecard reads it: needs
+    `--require-hashes` unless every argument is a `.whl` (`==` pins, `-r`
+    files without hashes and `pip install .` all fail), and
+    `pip install --group` (resolves ranges, bypassing uv.lock),
   - `uvx` tools without `@version` and `--with`/`--from` packages without a pin,
   - taiki-e/install-action `tool:` without `@version`,
   - astral-sh/setup-uv without a `version:` input,
@@ -41,29 +43,31 @@ def _is_pinned_pkg(tok: str) -> bool:
     return "==" in tok or "@" in tok
 
 
-def _is_local(tok: str) -> bool:
-    # A path, a wheel, `.`, or a shell/pwsh expression resolving to one.
-    return tok == "." or any(c in tok for c in "/\\$(") or tok.endswith(".whl")
+def _is_wheel(tok: str) -> bool:
+    # A wheel path, or the pwsh `(Get-Item ...whl).FullName` resolving to one.
+    return tok.endswith(".whl") or tok == "(Get-Item" or tok.endswith(".whl).FullName")
 
 
 def check_pip(cmd: str) -> list[str]:
     toks = _tokens(cmd)
     if "install" not in toks:
         return []
+    args = toks[toks.index("install") + 1 :]
+    if "--group" in args:
+        # Resolves pyproject ranges fresh; install from `uv export` instead.
+        return ["--group (use uv export --frozen)"]
+    if "--require-hashes" in args:
+        return []
+    # Without hashes only bare wheels count as pinned (Scorecard's rule).
     bad, skip = [], False
-    for tok in toks[toks.index("install") + 1 :]:
+    for tok in args:
         if skip:
+            bad.append(f"{tok} (add --require-hashes)")
             skip = False
-        elif tok == "--group":
-            # Resolves pyproject ranges fresh; install from `uv export` instead.
-            bad.append("--group (use uv export --frozen)")
-            skip = True
         elif tok in PIP_VALUE_OPTS:
             skip = True
-        elif tok.startswith("-") or _is_local(tok):
-            continue
-        elif "==" not in tok:
-            bad.append(tok)
+        elif not tok.startswith("-") and not _is_wheel(tok):
+            bad.append(f"{tok} (add --require-hashes)")
     return bad
 
 
