@@ -608,9 +608,9 @@ mod tests {
     fn report_part_path_names_a_json_file_for_slug() {
         let p = report_part_path("collect", "testuid");
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("rstest-mono-"), "got {name}");
-        assert!(name.contains("collect"), "got {name}");
-        assert!(name.ends_with(".json"), "got {name}");
+        assert!(name.starts_with("rstest-mono-"));
+        assert!(name.contains("collect"));
+        assert!(name.ends_with(".json"));
     }
 
     #[test]

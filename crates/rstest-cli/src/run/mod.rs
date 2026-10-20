@@ -2691,10 +2691,12 @@ mod tests {
         let b = super::new_run_uid();
         assert_ne!(a, b, "each run gets its own uid");
         for u in [&a, &b] {
-            assert_eq!(u.len(), 32, "{u}");
-            assert!(u.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')), "{u}");
-            assert_eq!(&u[12..13], "4", "uuid4 version nibble: {u}");
-            assert!("89ab".contains(&u[16..17]), "RFC 4122 variant: {u}");
+            // No `{u}` in the messages: CodeQL flags printing a `*uid*` as
+            // cleartext logging of sensitive data.
+            assert!(u.len() == 32);
+            assert!(u.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
+            assert!(u.as_bytes()[12] == b'4', "uuid4 version nibble");
+            assert!(b"89ab".contains(&u.as_bytes()[16]), "RFC 4122 variant");
         }
         assert_eq!(super::format_uuid4(0), "00000000000040008000000000000000");
         assert_eq!(
