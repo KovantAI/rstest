@@ -34,6 +34,30 @@ fn write_cache(dir: &Path, name: &str, doc: &Value) {
     .unwrap();
 }
 
+/// `history.msgpack` from a JSON-shaped doc (structs read back from maps).
+fn write_history(dir: &Path, doc: &Value) {
+    std::fs::write(
+        dir.join(".rstest_cache").join("history.msgpack"),
+        rmp_serde::to_vec_named(doc).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Three runs of `ID`: pass at c0, fail at c1 and c2. A neighbour's entries
+/// must not leak into `ID`'s strip.
+fn history_doc(epoch: u64) -> Value {
+    let run = |seq: u32, c: &str| json!({ "seq": seq, "id": format!("r{seq}"), "epoch": epoch, "commit": c, "env": "fp", "workers": 2 });
+    let e = |seq: u32, outcome: &str, call: f64| json!({ "run": seq, "outcome": outcome, "call": call, "setup": 0.0 });
+    json!({
+        "schema": 1,
+        "runs": [run(0, "c0aaaaaaaaaaaa"), run(1, "c1bbbbbbbbbbbb"), run(2, "c2cccccccccccc")],
+        "tests": {
+            ID: [e(0, "passed", 0.25), e(1, "failed", 0.0), e(2, "failed", 0.0)],
+            "tests/test_x.py::test_other": [e(2, "passed", 9.0)],
+        },
+    })
+}
+
 fn write_raw(dir: &Path, name: &str, bytes: &str) {
     std::fs::write(dir.join(".rstest_cache").join(name), bytes).unwrap();
 }
@@ -113,6 +137,7 @@ fn populate_all(dir: &Path) {
             },
         }),
     );
+    write_history(dir, &history_doc(now()));
 }
 
 #[test]
@@ -125,6 +150,10 @@ fn human_report_merges_every_cache() {
         "test: {ID}\n  tests/test_x.py:18\n\n  duration   0.2500s (last recorded)\n  \
          outcome    passed last incremental run\n  \
          flakes     flaked 2x, failed 1x (last 2d ago)\n  \
+         history    ✓✗✗ (3 runs, oldest first)\n             \
+         call median 0.2500s, p95 0.2500s\n             \
+         last passed at c0aaaaaaaa\n             \
+         failing since c1bbbbbbbb\n  \
          coverage   covers 2 file(s), 3 line(s):\n               src/a.py\n               src/b.py\n"
     );
     assert_eq!(o.stdout, expected);
@@ -150,6 +179,31 @@ fn json_report_merges_every_cache() {
     assert_eq!(v["coverage"]["file_count"], 2);
     assert_eq!(v["coverage"]["line_count"], 3);
     assert_eq!(v["coverage"]["files"], json!(["src/a.py", "src/b.py"]));
+    assert_eq!(v["history"]["runs"], 3);
+    assert_eq!(
+        v["history"]["outcomes"],
+        json!(["passed", "failed", "failed"])
+    );
+    assert_eq!(v["history"]["call_median"], 0.25);
+    assert_eq!(v["history"]["last_pass_commit"], "c0aaaaaaaaaaaa");
+    assert_eq!(v["history"]["first_fail_commit"], "c1bbbbbbbbbbbb");
+}
+
+#[test]
+fn history_alone_marks_found_and_ages_out() {
+    let dir = fresh_dir("history-alone");
+    write_history(&dir, &history_doc(now()));
+    let v = run_json(&dir, ID);
+    assert_eq!(v["found"], true);
+    assert_eq!(v["history"]["runs"], 3);
+
+    // Runs past RSTEST_FLAKE_RETENTION_DAYS are dropped on read.
+    let dir = fresh_dir("history-aged");
+    write_history(&dir, &history_doc(now() - 200 * 24 * 60 * 60));
+    let o = run(&dir, &[ID, "--json"]);
+    let v: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(v["found"], false);
+    assert!(v["history"].is_null());
 }
 
 #[test]

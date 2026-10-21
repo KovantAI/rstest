@@ -9,10 +9,9 @@
 //!
 //! What the local caches can source today: the last recorded call-phase
 //! duration, flake/fail counts + last-event epoch, whether the test was green on
-//! the last incremental run (plus its source line), and its coverage footprint
-//! (which files it covered). Not persisted locally yet — duration *history* /
-//! variance, an ordered last-N-outcomes series, and per-test fixture cost — so
-//! `explain` reports what exists and grows richer as more per-test data accrues.
+//! the last incremental run (plus its source line), its coverage footprint
+//! (which files it covered), and its recent run history (outcome series,
+//! duration spread, the commit it last passed and first failed at).
 
 use std::collections::BTreeSet;
 
@@ -21,6 +20,7 @@ use serde::Serialize;
 
 use crate::reporting::color::Palette;
 use crate::reporting::flakes::FlakeStats;
+use crate::reporting::history::{Entry, RunMeta};
 use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
@@ -53,6 +53,27 @@ struct Coverage {
     files: Vec<String>,
 }
 
+/// The test's recent runs from the per-test history (oldest first).
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct HistorySummary {
+    /// Number of recorded runs.
+    runs: usize,
+    /// Outcome per run, oldest first: `passed`, `failed`, `errors`, `skipped`,
+    /// `xfailed`, `xpassed`, `quarantined`, `flaky` or `crashed`.
+    outcomes: Vec<String>,
+    /// Median call-phase seconds over passing runs.
+    call_median: Option<f64>,
+    /// 95th percentile (nearest rank) call-phase seconds over passing runs.
+    call_p95: Option<f64>,
+    /// Median setup-phase seconds over passing runs.
+    setup_median: Option<f64>,
+    /// Commit of the most recent passing run.
+    last_pass_commit: Option<String>,
+    /// When the latest run failed: commit of the first run in that failing streak.
+    first_fail_commit: Option<String>,
+}
+
 /// The merged per-nodeid dossier. `null` fields are simply absent from every
 /// cache (e.g. a never-flaked test has no `flakes` entry). `found` is false when
 /// the nodeid appears in no cache at all.
@@ -65,8 +86,8 @@ pub(crate) struct ExplainReport {
     nodeid: String,
     /// Whether the node id appears in any cache.
     found: bool,
-    /// Last recorded call-phase duration in seconds (latest value only; local
-    /// caches keep no history).
+    /// Last recorded call-phase duration in seconds (see `history` for the
+    /// spread).
     duration_seconds: Option<f64>,
     /// `"passed"` if the test was green on the last incremental run; `null`
     /// otherwise (absence is not proof of failure; see `flakes` for fail
@@ -78,6 +99,87 @@ pub(crate) struct ExplainReport {
     flakes: Option<FlakeStats>,
     /// Files this test covered, if a warm coverage index has it.
     coverage: Option<Coverage>,
+    /// Recent runs, if the per-test history has any.
+    history: Option<HistorySummary>,
+}
+
+fn is_pass(outcome: &str) -> bool {
+    matches!(outcome, "passed" | "flaky")
+}
+
+fn is_fail(outcome: &str) -> bool {
+    matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
+}
+
+/// Middle value (mean of the two middles for an even count). `v` sorted.
+fn median(v: &[f64]) -> Option<f64> {
+    let n = v.len();
+    match n {
+        0 => None,
+        _ if n % 2 == 1 => Some(v[n / 2]),
+        _ => Some((v[n / 2 - 1] + v[n / 2]) / 2.0),
+    }
+}
+
+/// Nearest-rank 95th percentile. `v` sorted.
+fn p95(v: &[f64]) -> Option<f64> {
+    let rank = (v.len() as f64 * 0.95).ceil() as usize;
+    v.get(rank.checked_sub(1)?).copied()
+}
+
+/// Seconds rounded to 4 places (the report's precision; drops f32 noise).
+fn round4(x: f32) -> f64 {
+    (f64::from(x) * 1e4).round() / 1e4
+}
+
+fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
+    if series.is_empty() {
+        return None;
+    }
+    let passing: Vec<&Entry> = series
+        .iter()
+        .map(|(_, e)| *e)
+        .filter(|e| is_pass(&e.outcome))
+        .collect();
+    let mut call: Vec<f64> = passing.iter().filter_map(|e| e.call.map(round4)).collect();
+    let mut setup: Vec<f64> = passing.iter().map(|e| round4(e.setup)).collect();
+    call.sort_by(f64::total_cmp);
+    setup.sort_by(f64::total_cmp);
+    let last_pass_commit = series
+        .iter()
+        .rev()
+        .find(|(_, e)| is_pass(&e.outcome))
+        .and_then(|(r, _)| r.commit.clone());
+    let first_fail_commit = series
+        .iter()
+        .rev()
+        .take_while(|(_, e)| is_fail(&e.outcome))
+        .last()
+        .and_then(|(r, _)| r.commit.clone());
+    Some(HistorySummary {
+        runs: series.len(),
+        outcomes: series.iter().map(|(_, e)| e.outcome.clone()).collect(),
+        call_median: median(&call),
+        call_p95: p95(&call),
+        setup_median: median(&setup),
+        last_pass_commit,
+        first_fail_commit,
+    })
+}
+
+/// One character per run for the human strip.
+fn glyph(outcome: &str) -> char {
+    if is_pass(outcome) {
+        if outcome == "flaky" {
+            '~'
+        } else {
+            '✓'
+        }
+    } else if is_fail(outcome) {
+        '✗'
+    } else {
+        '-'
+    }
 }
 
 /// Read the coverage index straight from the cache dir (schema-checked). `None`
@@ -125,12 +227,14 @@ fn gather(nodeid: &str) -> ExplainReport {
     // 1-based like every other human-facing surface (e.g. CI annotations).
     let source_line = lines.get(nodeid).map(|l| l + 1);
     let coverage = load_coverage_index().and_then(|idx| footprint(&idx, nodeid));
+    let history = summarize(&crate::reporting::history::load().series(nodeid));
 
     let found = duration_seconds.is_some()
         || flakes.is_some()
         || last_outcome.is_some()
         || source_line.is_some()
-        || coverage.is_some();
+        || coverage.is_some()
+        || history.is_some();
 
     ExplainReport {
         meta: Meta {
@@ -146,6 +250,7 @@ fn gather(nodeid: &str) -> ExplainReport {
         source_line,
         flakes,
         coverage,
+        history,
     }
 }
 
@@ -249,6 +354,32 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
             "  flakes     {}",
             pal.dim("no flake/fail history")
         )),
+    }
+
+    // Recent runs.
+    match &r.history {
+        Some(h) => {
+            let strip: String = h.outcomes.iter().map(|o| glyph(o)).collect();
+            sink.out_line(&format!(
+                "  history    {strip} ({} runs, oldest first)",
+                h.runs
+            ));
+            if let (Some(m), Some(p)) = (h.call_median, h.call_p95) {
+                sink.out_line(&format!("             call median {m:.4}s, p95 {p:.4}s"));
+            }
+            let short = |c: &str| c.chars().take(10).collect::<String>();
+            if let Some(c) = &h.last_pass_commit {
+                sink.out_line(&format!("             last passed at {}", short(c)));
+            }
+            if let Some(c) = &h.first_fail_commit {
+                sink.out_line(&format!(
+                    "             {} since {}",
+                    pal.red("failing"),
+                    short(c)
+                ));
+            }
+        }
+        None => sink.out_line(&format!("  history    {}", pal.dim("no recorded runs"))),
     }
 
     // Coverage footprint.
@@ -413,6 +544,7 @@ mod tests {
             source_line: None,
             flakes: None,
             coverage: None,
+            history: None,
         }
     }
 
@@ -432,6 +564,17 @@ mod tests {
                 file_count: 2,
                 line_count: 7,
                 files: vec!["src/a.py".to_string(), "src/b.py".to_string()],
+            }),
+            history: Some(HistorySummary {
+                runs: 4,
+                outcomes: ["passed", "flaky", "failed", "failed"]
+                    .map(String::from)
+                    .to_vec(),
+                call_median: Some(0.1),
+                call_p95: Some(0.3),
+                setup_median: Some(0.0),
+                last_pass_commit: Some("0123456789abcdef".into()),
+                first_fail_commit: Some("fedcba9876543210".into()),
             }),
             ..report("tests/test_x.py::TestC::test_m[a::b]")
         }
@@ -455,10 +598,14 @@ mod tests {
         assert_eq!(lines[3], "  duration   0.1235s (last recorded)");
         assert_eq!(lines[4], "  outcome    passed last incremental run");
         assert_eq!(lines[5], "  flakes     flaked 2x, failed 1x (last 3h ago)");
-        assert_eq!(lines[6], "  coverage   covers 2 file(s), 7 line(s):");
-        assert_eq!(lines[7], "               src/a.py");
-        assert_eq!(lines[8], "               src/b.py");
-        assert_eq!(lines.len(), 9, "out={out}");
+        assert_eq!(lines[6], "  history    ✓~✗✗ (4 runs, oldest first)");
+        assert_eq!(lines[7], "             call median 0.1000s, p95 0.3000s");
+        assert_eq!(lines[8], "             last passed at 0123456789");
+        assert_eq!(lines[9], "             failing since fedcba9876");
+        assert_eq!(lines[10], "  coverage   covers 2 file(s), 7 line(s):");
+        assert_eq!(lines[11], "               src/a.py");
+        assert_eq!(lines[12], "               src/b.py");
+        assert_eq!(lines.len(), 13, "out={out}");
     }
 
     #[test]
@@ -476,9 +623,10 @@ mod tests {
         assert_eq!(lines[2], "  duration   1.0000s (last recorded)");
         assert_eq!(lines[3], "  outcome    no last-green record");
         assert_eq!(lines[4], "  flakes     no flake/fail history");
-        assert!(lines[5].starts_with("  coverage   cold"), "{}", lines[5]);
-        assert!(lines[5].contains("--cov-context=test"));
-        assert_eq!(lines.len(), 6, "out={out}");
+        assert_eq!(lines[5], "  history    no recorded runs");
+        assert!(lines[6].starts_with("  coverage   cold"), "{}", lines[6]);
+        assert!(lines[6].contains("--cov-context=test"));
+        assert_eq!(lines.len(), 7, "out={out}");
     }
 
     #[test]
@@ -556,6 +704,12 @@ mod tests {
         assert_eq!(v["coverage"]["file_count"], 2);
         assert_eq!(v["coverage"]["line_count"], 7);
         assert_eq!(v["coverage"]["files"][1], "src/b.py");
+        assert_eq!(v["history"]["runs"], 4);
+        assert_eq!(v["history"]["outcomes"][1], "flaky");
+        assert_eq!(v["history"]["call_median"], 0.1);
+        assert_eq!(v["history"]["call_p95"], 0.3);
+        assert_eq!(v["history"]["last_pass_commit"], "0123456789abcdef");
+        assert_eq!(v["history"]["first_fail_commit"], "fedcba9876543210");
     }
 
     #[test]
@@ -573,9 +727,109 @@ mod tests {
             "source_line",
             "flakes",
             "coverage",
+            "history",
         ] {
             assert!(obj.get(k).is_some_and(|x| x.is_null()), "{k}: {v}");
         }
         assert_eq!(v["found"], false);
+    }
+
+    fn run(seq: u32, commit: Option<&str>) -> RunMeta {
+        RunMeta {
+            seq,
+            id: format!("r{seq}"),
+            epoch: 0,
+            commit: commit.map(String::from),
+            env: String::new(),
+            workers: 1,
+        }
+    }
+
+    fn ent(outcome: &str, call: Option<f32>) -> Entry {
+        Entry {
+            run: 0,
+            outcome: outcome.into(),
+            call,
+            setup: 0.01,
+        }
+    }
+
+    #[test]
+    fn summarize_empty_is_none() {
+        assert!(summarize(&[]).is_none());
+    }
+
+    #[test]
+    fn summarize_stats_use_passing_runs_only() {
+        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, Some(&format!("c{i}")))).collect();
+        let es = [
+            ent("passed", Some(0.1)),
+            ent("passed", Some(0.3)),
+            // A fail-fast call's time must not drag the median down.
+            ent("failed", Some(0.0001)),
+            ent("flaky", Some(0.2)),
+            ent("skipped", None),
+        ];
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        let h = summarize(&series).unwrap();
+        assert_eq!(h.runs, 5);
+        assert_eq!(
+            h.outcomes,
+            ["passed", "passed", "failed", "flaky", "skipped"]
+        );
+        assert_eq!(h.call_median, Some(0.2));
+        assert_eq!(h.call_p95, Some(0.3));
+        assert_eq!(h.setup_median, Some(0.01));
+        assert_eq!(h.last_pass_commit.as_deref(), Some("c3"));
+        // Latest run is not a failure: no failing streak.
+        assert_eq!(h.first_fail_commit, None);
+    }
+
+    #[test]
+    fn summarize_finds_start_of_trailing_failure_streak() {
+        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, Some(&format!("c{i}")))).collect();
+        let es = [
+            ent("failed", None),
+            ent("passed", Some(0.1)),
+            ent("errors", None),
+            ent("crashed", None),
+            ent("failed", None),
+        ];
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        let h = summarize(&series).unwrap();
+        assert_eq!(h.last_pass_commit.as_deref(), Some("c1"));
+        assert_eq!(h.first_fail_commit.as_deref(), Some("c2"));
+        // Never passed: no call stats, no last pass.
+        let h = summarize(&series[2..]).unwrap();
+        assert_eq!(h.call_median, None);
+        assert_eq!(h.call_p95, None);
+        assert_eq!(h.last_pass_commit, None);
+        assert_eq!(h.first_fail_commit.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn median_and_p95() {
+        assert_eq!(median(&[]), None);
+        assert_eq!(median(&[1.0, 2.0, 4.0, 8.0]), Some(3.0));
+        assert_eq!(p95(&[]), None);
+        assert_eq!(p95(&[5.0]), Some(5.0));
+        let v: Vec<f64> = (1..=20).map(f64::from).collect();
+        assert_eq!(p95(&v), Some(19.0));
+    }
+
+    #[test]
+    fn glyphs() {
+        let s: String = [
+            "passed",
+            "flaky",
+            "failed",
+            "quarantined",
+            "skipped",
+            "xfailed",
+        ]
+        .iter()
+        .map(|o| glyph(o))
+        .collect();
+        assert_eq!(s, "✓~✗✗--");
     }
 }

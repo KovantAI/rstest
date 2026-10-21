@@ -600,4 +600,30 @@ mod tests {
         assert!(rc_to_result(0).is_ok());
         assert!(rc_to_result(-1).is_err());
     }
+
+    /// Every file a run persists under `.rstest_cache/` must be in the docs'
+    /// file list and the CI "cache only the files that matter" list, or users
+    /// who copy that list silently drop it.
+    #[test]
+    fn docs_name_every_persisted_cache_file() {
+        let files = [
+            crate::scheduling::durations::FILE,
+            crate::scheduling::durations::WALL_FILE,
+            crate::reporting::flakes::FILE,
+            crate::reporting::history::FILE,
+            crate::incremental::FILE,
+            crate::coverage_skip::FILE,
+            crate::select::COVERAGE_INDEX_FILE,
+        ];
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+        for page in ["concepts/caching.md", "guides/ci-shared-cache.md"] {
+            let text = std::fs::read_to_string(docs.join(page)).unwrap();
+            for f in files {
+                assert!(
+                    text.contains(&format!("`{f}`")),
+                    "{page} does not mention `{f}`"
+                );
+            }
+        }
+    }
 }

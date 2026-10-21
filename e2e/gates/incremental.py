@@ -763,7 +763,8 @@ def gate_explain(g, args, binary):
         "explain: failing test shows fail history, no last-green",
         r.returncode == 0
         and doc.get("last_outcome") is None
-        and (doc.get("flakes") or {}).get("failed") == 1,
+        and (doc.get("flakes") or {}).get("failed") == 1
+        and (doc.get("history") or {}).get("outcomes") == ["failed"],
         f"rc={r.returncode} out={r.stdout[-600:]}",
     )
 
@@ -783,4 +784,17 @@ def gate_explain(g, args, binary):
         "explain: partial id exits 1 and suggests the full nodeid",
         r.returncode == 1 and "no cached data" in r.stderr and "test_e.py::test_green" in r.stderr,
         f"rc={r.returncode} err={r.stderr[-400:]}",
+    )
+
+    # A second run appends to the per-test history instead of overwriting it.
+    g.run("test_e.py", "-n", "2", cwd=sp, env_extra=env)
+    r = explain("test_e.py::test_red", "--json")
+    try:
+        doc = json.loads(r.stdout)
+    except ValueError:
+        doc = {}
+    check(
+        "explain: history keeps one entry per run",
+        (doc.get("history") or {}).get("outcomes") == ["failed", "failed"],
+        f"rc={r.returncode} out={r.stdout[-600:]}",
     )

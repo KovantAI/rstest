@@ -29,6 +29,14 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   Entries with no event inside `RSTEST_FLAKE_RETENTION_DAYS` (default 90,
   `0` keeps history forever) are ignored on read. Auto-written, safe to
   delete, persisted the same way as `durations.json`.
+- `history.msgpack`: each test's last runs (default 50, set with
+  `RSTEST_HISTORY_RUNS`): outcome, call and setup time, plus the run's commit,
+  environment fingerprint and worker count. Read by
+  [`rstest explain`](../reference/cli-commands.md#explain) for the outcome
+  strip, the duration spread and the commit a test started failing at. Runs
+  older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped on read. Not written by
+  `rstest replay` or `--dist each`, and not shared through `--cache-push` /
+  `--cache-pull`. Safe to delete.
 - `coverage_index.json`: line→test index (which tests' coverage executed
   each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting

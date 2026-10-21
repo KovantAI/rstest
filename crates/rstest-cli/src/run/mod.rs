@@ -619,14 +619,10 @@ pub(crate) fn execute_inner(
     // last green run's commit. An explicit --changed always wins. `head` is
     // captured up front (it can't change mid-run) so a green run can record it.
     let since_green = cli.since_green && cli.changed.is_none();
-    // Only shell out to git / hash the env when --since-green is actually
-    // active, so the default run path pays nothing.
-    let head = since_green.then(incremental::head_sha).flatten();
-    let env_fp = if since_green {
-        incremental::env_fingerprint(&scope, &python)
-    } else {
-        String::new()
-    };
+    // Computed on every run: the per-test history stamps each run with its
+    // commit and environment. --since-green consumers gate on `since_green`.
+    let head = incremental::head_sha();
+    let env_fp = incremental::env_fingerprint(&scope, &python);
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
     // Resolved once: selection and the post-run diff-coverage gate share it, so
