@@ -41,6 +41,12 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+# The per-worker resource fixtures (rstest_free_port, rstest_worker_name,
+# rstest_home) as a regular pytest plugin, so they also work under plain
+# pytest and pytest-xdist while rstest is installed.
+[project.entry-points.pytest11]
+rstest_resources = "rstest_worker.resources"
+
 [project.urls]
 Documentation = "https://python-rstest.readthedocs.io/en/stable/"
 Homepage = "https://python-rstest.readthedocs.io/en/stable/"

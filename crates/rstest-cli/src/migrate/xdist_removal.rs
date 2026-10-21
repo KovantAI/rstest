@@ -1815,6 +1815,7 @@ def pytest_configure(config):
                         phase: *phase,
                         wall: 0.0,
                         cpu: None,
+                        resource: None,
                     },
                 )
             })

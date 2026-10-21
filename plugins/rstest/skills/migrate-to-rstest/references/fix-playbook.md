@@ -151,9 +151,16 @@ clash/hang. Usually shows up as a hang or a bind error in the longrepr. A hang
 only becomes a failure with a hang backstop: pass `--worker-timeout SECS` (off
 by default), or `--timeout SECS`, which also arms it.
 
-**Upstream fix.** Bind an **ephemeral** port (`port=0`, then read back the
-assigned port), the standard xdist-safe pattern. Then the fixture duplicates
-safely per worker.
+**Upstream fix.** Take the port from the built-in **`rstest_free_port`**
+fixture (an OS-assigned free port per test), or bind port `0` and read back the
+assigned port yourself. Then the fixture duplicates safely per worker. The same
+family covers the other two classic collisions: one shared Postgres test
+database -> `rstest_postgres_url` (a per-worker clone of the migrated base
+database, from `RSTEST_POSTGRES_URL` / `DATABASE_URL`), any other shared name
+(schema, Redis prefix, queue) -> `rstest_worker_name("app")` (`app_gw3`), a
+shared `~/.config` / `HOME` -> `rstest_home`. `audit` and `migrate-check` print a `CAUSE:` line naming the
+fixture when the error text shows the collision. The fixtures also work under
+plain pytest while rstest is installed.
 
 **Stopgap.** `@pytest.mark.serial` if the resource is truly single-instance, or
 `--dist loadgroup` + `@pytest.mark.xdist_group("name")` to keep all tests using

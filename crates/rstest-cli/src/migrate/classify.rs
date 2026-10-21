@@ -445,6 +445,7 @@ mod tests {
                     phase: Phase::Pass,
                     wall: 0.0,
                     cpu: None,
+                    resource: None,
                 };
                 (format!("{f}::test_x"), rec)
             })

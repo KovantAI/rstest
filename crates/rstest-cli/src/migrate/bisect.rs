@@ -1034,6 +1034,7 @@ mod tests {
             phase,
             wall: 0.0,
             cpu: None,
+            resource: None,
         }
     }
 

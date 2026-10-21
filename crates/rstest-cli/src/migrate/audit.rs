@@ -41,6 +41,9 @@ struct Buckets {
     /// serial fix-list, but still fails the gate (safety is unknown).
     inconclusive: Vec<String>,
     preexisting: usize,
+    /// Failures whose error text names a shared resource (fixed port, one
+    /// database, one home directory), with the fixture that fixes it.
+    resources: std::collections::BTreeMap<String, super::Resource>,
 }
 
 impl Buckets {
@@ -81,6 +84,7 @@ fn partition(verdicts: &[(String, Verdict)]) -> Buckets {
         intrinsic: ids(Verdict::IntrinsicFlake),
         inconclusive: ids(Verdict::Inconclusive),
         preexisting,
+        resources: Default::default(),
     }
 }
 
@@ -201,7 +205,8 @@ pub fn run_audit(
     // against fixed single-shot discriminators would misclassify intermittent
     // failures more often the higher N goes.
     let verdicts = classify_failures(python, args, &par, runs, sink)?;
-    let b = partition(&verdicts);
+    let mut b = partition(&verdicts);
+    b.resources = super::resources(&par);
 
     if let Some(path) = json_path {
         let doc = audit_doc(par.len(), &b);
@@ -220,6 +225,7 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
         intrinsic,
         inconclusive,
         preexisting,
+        resources,
     } = b;
     let preexisting = *preexisting;
 
@@ -245,6 +251,9 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
         ));
         for (nodeid, v) in serial {
             sink.out_line(&format!("    {nodeid}   [{}]", v.title()));
+            if let Some(r) = resources.get(nodeid) {
+                sink.out_line(&format!("      CAUSE: {}", r.hint()));
+            }
         }
         let ids: Vec<String> = serial.iter().map(|(n, _)| n.clone()).collect();
         sink.out_line(
@@ -267,6 +276,11 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
                 sink.out_line(&format!("    {}: {}", v.title(), v.advice().1));
             }
         }
+        for r in serial.iter().filter_map(|(n, _)| resources.get(n)) {
+            if seen.insert(r.hint()) {
+                sink.out_line(&format!("    {}", r.hint()));
+            }
+        }
     }
 
     if !order.is_empty() {
@@ -278,6 +292,11 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
         ));
         for nodeid in order.iter().take(8) {
             sink.out_line(&format!("    {nodeid}"));
+            // A same-file collision on a shared resource looks order-dependent
+            // (loadfile keeps the file on one worker); name the real fix.
+            if let Some(r) = resources.get(nodeid) {
+                sink.out_line(&format!("      CAUSE: {}", r.hint()));
+            }
         }
         if order.len() > 8 {
             sink.out_line(&format!("    … and {} more", order.len() - 8));
@@ -411,7 +430,7 @@ fn audit_doc(tests: usize, b: &Buckets) -> AuditDoc {
         .serial
         .iter()
         .map(|(nodeid, v)| SerialCandidate {
-            fix: v.advice().1,
+            fix: b.resources.get(nodeid).map_or(v.advice().1, |r| r.hint()),
             nodeid: nodeid.clone(),
             verdict: v.title(),
         })
@@ -457,6 +476,7 @@ mod tests {
             phase,
             wall: 0.0,
             cpu: None,
+            resource: None,
         }
     }
 
@@ -476,6 +496,7 @@ mod tests {
             intrinsic,
             inconclusive,
             preexisting,
+            ..
         } = partition(&verdicts);
         // serial-fixable sorted by nodeid.
         assert_eq!(
@@ -540,6 +561,7 @@ mod tests {
             intrinsic: vec!["f.py::flake".to_string()],
             inconclusive: vec!["q.py::gone".to_string()],
             preexisting: 2,
+            resources: Default::default(),
         };
         let doc = serde_json::to_value(audit_doc(10, &b)).unwrap();
         assert_eq!(doc["ran"], true);
@@ -583,6 +605,40 @@ mod tests {
         let (mut sink, cap) = Sink::captured();
         let code = report(tests, b, &mut sink);
         (code, cap.out())
+    }
+
+    #[test]
+    fn report_names_the_shared_resource_and_its_fixture() {
+        let mut b = partition(&[
+            ("a.py::server".to_string(), Verdict::Isolation),
+            ("a.py::other".to_string(), Verdict::Isolation),
+        ]);
+        b.resources
+            .insert("a.py::server".into(), crate::migrate::Resource::Port);
+        let (code, out) = render(2, &b);
+        assert_eq!(code, 1);
+        let hint = crate::migrate::Resource::Port.hint();
+        assert!(
+            out.contains(&format!(
+                "    a.py::server   [ISOLATION / CO-LOCATION]\n      CAUSE: {hint}"
+            )),
+            "{out}"
+        );
+        assert!(
+            !out.contains("a.py::other   [ISOLATION / CO-LOCATION]\n      CAUSE"),
+            "{out}"
+        );
+        // Listed once among the underlying fixes.
+        assert_eq!(out.matches(&format!("    {hint}\n")).count(), 1, "{out}");
+        // The JSON fix-list carries the specific fix for that test only.
+        let doc = serde_json::to_value(audit_doc(2, &b)).unwrap();
+        let fixes: Vec<&str> = doc["serial_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["fix"].as_str().unwrap())
+            .collect();
+        assert_eq!(fixes, [Verdict::Isolation.advice().1, hint]);
     }
 
     #[test]
@@ -647,6 +703,7 @@ mod tests {
             intrinsic: Vec::new(),
             inconclusive: ids("q", 10),
             preexisting: 2,
+            resources: Default::default(),
         };
         let (code, out) = render(30, &b);
         assert_eq!(code, 1);
@@ -673,6 +730,7 @@ mod tests {
             intrinsic: ids("f", 8),
             inconclusive: ids("q", 8),
             preexisting: 0,
+            resources: Default::default(),
         };
         let (code, out) = render(24, &b);
         assert_eq!(code, 1);

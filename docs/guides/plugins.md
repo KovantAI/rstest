@@ -12,6 +12,13 @@ classes live at their usual `_pytest.*` import paths, so plugins that
 `isinstance`-check or import internals find what they expect. No plugin
 re-installation, configuration, or porting.
 
+Installing rstest also installs one pytest plugin of its own,
+`rstest_resources`, which provides the
+[per-worker resource fixtures](../reference/fixtures.md#per-worker-resources)
+(`rstest_free_port`, `rstest_postgres_url`, ...). It is an ordinary `pytest11`
+plugin, so plain `pytest` in the same environment loads it too: the fixtures
+are there, nothing else changes. Disable it with `-p no:rstest_resources`.
+
 Plugin command-line flags forward like any pytest flag, except the
 [few flag names rstest owns](../reference/cli.md#shadowed-flags) (such as
 `--timeout` and `--reruns`): on the command line rstest takes those and the

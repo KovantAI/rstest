@@ -288,7 +288,12 @@ silently stop running.
 
 Only ISOLATION and WALL-CLOCK failures go in the block. Serial is a **stopgap**
 for those; the report also names the real fix (reset leaked state, mock the
-clock). ORDER-DEPENDENCY failures are listed separately with a `--dist loadfile`
+clock). When a failure's error text names a shared resource, a `CAUSE:` line
+under the test names it and the built-in fixture that fixes it: a fixed port
+(`rstest_free_port`), one shared database (`rstest_postgres_url` or
+`rstest_worker_name`) or one shared home directory (`rstest_home`); see
+[Built-in per-worker resources](../guides/parallel-safety.md#built-in-per-worker-resources).
+`--audit-json` carries that fix in the test's `fix` field. ORDER-DEPENDENCY failures are listed separately with a `--dist loadfile`
 recommendation instead: they depend on tests that run before them in the same
 file, and the serial phase would run them apart from those tests, so marking
 them serial wouldn't make them pass. Intrinsic flakes (serial repeats disagree)
