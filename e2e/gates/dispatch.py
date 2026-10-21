@@ -549,6 +549,22 @@ def gate_duration_regression_gate(g, args, binary):
         r.returncode == 0 and "no regressions" in r.stderr,
         f"rc={r.returncode} " + r.stderr[-200:],
     )
+    # With 5+ passing runs in the history, the baseline is their median. The
+    # flagged 1.2s run above kept its time out of the history, so this is
+    # 0.1s runs only, and a regression run keeps flagging until accepted.
+    for _ in range(2):
+        g.run(".", "-n", "2", cwd=ddir, env_extra={"DREG_SLEEP": "0.1"})
+    for attempt in ("first", "repeat"):
+        r = g.run(
+            ".", "-n", "2", "--durations-regress", "2.0", cwd=ddir, env_extra={"DREG_SLEEP": "1.2"}
+        )
+        check(
+            f"durations-regress: history median baseline ({attempt} slow run flags)",
+            r.returncode == 1
+            and "test_variable" in r.stdout
+            and "(median of 5 runs, normal up to" in r.stdout,
+            f"rc={r.returncode} " + r.stdout[-300:],
+        )
 
 
 def gate_native_timeout(g, args, binary):

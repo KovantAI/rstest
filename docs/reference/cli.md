@@ -556,24 +556,38 @@ prints this report itself, exactly as pytest does.
 
 ### `--durations-regress <RATIO>`
 
-Gate CI on per-test duration regressions. After the run, each test's wall time
-is compared against the duration cache (`.rstest_cache/durations.json`, the
-file scheduling uses; restore it from your CI cache). Any test whose time is
-at least `RATIO` × its baseline is listed and the run exits 1:
+Gate CI on per-test duration regressions. After the run, each test's call
+time is compared against its baseline, and any test whose time is at least
+`RATIO` × that baseline is listed and the run exits 1:
 
 ```text
 =========== duration regressions (>= 2x baseline) ===========
-     0.10s ->    1.21s  tests/test_api.py::test_poll
+     0.10s ->    1.21s  tests/test_api.py::test_poll  (median of 12 runs, normal up to 0.14s)
+     0.30s ->    0.95s  tests/test_new.py::test_import
 ```
 
-Jitter-floored: baselines under 50 ms and absolute growth under 0.5 s never
-count, and tests absent from the baseline (new or renamed) are skipped. A
+The baseline is the test's recent distribution when there is one:
+
+- **5 or more passing runs** in the per-test run history
+  (`.rstest_cache/history.msgpack`): the baseline is the **median** of their
+  call times, and the time must also clear the test's own noise band (median
+  plus 3 scaled median absolute deviations, the "normal up to" figure). A
+  test that is always noisy doesn't fail the gate on a normal slow run, and
+  one slow outlier in the past doesn't raise the bar.
+- **Less history**: the baseline is the last recorded time in the duration
+  cache (`.rstest_cache/durations.json`, the file scheduling uses).
+
+Restore `.rstest_cache` from your CI cache, or share it with
+[`--cache-pull`](#-cache-remote-urldir-cache-pull-cache-push), so the
+baseline exists on CI. Jitter-floored: baselines under 50 ms and absolute
+growth under 0.5 s never count, and tests absent from both (new or renamed)
+are skipped. A
 missing baseline file skips the comparison (first run, cold cache; see
 [`--require-baseline`](#-require-baseline)). The comparison runs before the
 cache is refreshed.
 
-A flagged test's time is kept out of `durations.json` (and any `--cache-push`
-segment), so the regression keeps failing until the test is back under the
+A flagged test's time is kept out of `durations.json`, the run history (and
+any `--cache-push` segment), so the regression keeps failing until the test is back under the
 threshold, even when the same change edited the test's file. A failed test's duration is never recorded either, so a fail-fast
 run can't shrink the baseline. To accept an intended slowdown, run once
 without `--durations-regress`.

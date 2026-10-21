@@ -674,7 +674,7 @@ pub(super) fn run_post_gates(
                  (.rstest_cache/durations.json); comparison skipped",
             );
         } else {
-            let rows = durations::regressions(&outcome.run, &baseline, ratio);
+            let rows = durations::regressions(&outcome.run, &baseline, &history::load(), ratio);
             if rows.is_empty() {
                 sink.warn(&format!(
                     "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
@@ -686,9 +686,18 @@ pub(super) fn run_post_gates(
                         "=========== duration regressions (>= {ratio}x baseline) ==========="
                     ))
                 ));
-                for (nodeid, old, new) in &rows {
-                    sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
-                    outcome.run.mark_duration_regressed(nodeid);
+                for r in &rows {
+                    let basis = match r.history {
+                        Some((n, ceiling)) => palette.dim(&format!(
+                            "  (median of {n} runs, normal up to {ceiling:.2}s)"
+                        )),
+                        None => String::new(),
+                    };
+                    sink.out_line(&format!(
+                        "  {:7.2}s -> {:7.2}s  {}{basis}",
+                        r.baseline, r.new, r.nodeid
+                    ));
+                    outcome.run.mark_duration_regressed(&r.nodeid);
                 }
                 duration_regressions = rows.len();
             }

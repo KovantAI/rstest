@@ -45,11 +45,13 @@ The test's recent runs from the per-test history (oldest first).
 |---|---|---|---|
 | `call_median` | number or null | yes | Median call-phase seconds over passing runs. |
 | `call_p95` | number or null | yes | 95th percentile (nearest rank) call-phase seconds over passing runs. |
+| `env_changed` | boolean or null | yes | When the latest run failed: whether the environment fingerprint (interpreter, lockfiles, installed packages) differs between the last passing run and the first failing one. |
 | `first_fail_commit` | string or null | yes | When the latest run failed: commit of the first run in that failing streak. |
 | `last_pass_commit` | string or null | yes | Commit of the most recent passing run. |
 | `outcomes` | array of string | yes | Outcome per run, oldest first: `passed`, `failed`, `errors`, `skipped`, `xfailed`, `xpassed`, `quarantined`, `flaky` or `crashed`. |
 | `runs` | integer | yes | Number of recorded runs. |
 | `setup_median` | number or null | yes | Median setup-phase seconds over passing runs. |
+| `suspect_commits` | array of SuspectCommit or null | yes | When the latest run failed: the commits after `last_pass_commit` up to `first_fail_commit` (`git log last..first`), newest first. Empty when both are the same commit; null when git can't resolve them here. |
 
 ### Meta (Explain)
 
@@ -61,3 +63,13 @@ Envelope metadata for the explain document.
 | `rstest_version` | string | yes | The rstest version that wrote the document. |
 | `runner` | string | yes | Constant producer tag: always `"rstest"`. |
 | `schema` | integer | yes | Document schema version. |
+
+### SuspectCommit
+
+A commit between the test's last pass and its first failure.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `author` | string | yes | Author name. |
+| `sha` | string | yes | Abbreviated commit hash. |
+| `subject` | string | yes | First line of the commit message. |

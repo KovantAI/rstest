@@ -605,6 +605,10 @@ test: tests/test_api.py::test_login
              call median 1.7930s, p95 2.1004s
              last passed at 3f9c2a1b7e
              failing since 8d04e6c2aa
+             2 commit(s) in between:
+               8d04e6c bump httpx to 0.28 (Ada)
+               51be0a2 move session refresh into middleware (Bo)
+             environment changed too (interpreter, lockfile or installed packages)
   coverage   covers 2 file(s), 47 line(s):
                src/api/auth.py
                src/api/session.py
@@ -631,8 +635,16 @@ cold are shown as unavailable rather than omitted. In human mode an unknown
 nodeid exits `1` and prints substring suggestions; with `--json` it exits `0`
 with `"found": false` so tooling can probe nodeids cheaply.
 
-The range between "last passed at" and "failing since" often names the commit
-that broke the test; `git log <last>..<first>` lists the candidates.
+When the test is failing now, `explain` lists the commits between the last
+pass and the first failure (`git log <last>..<first>`, newest first, up to 10;
+`--json` has all of them under `history.suspect_commits`). That range often
+names the commit that broke the test without running
+[`bisect`](#bisect-nodeid). It also says whether the environment fingerprint
+(interpreter, lockfiles, installed packages) changed between those two runs
+(`history.env_changed`): a red test with no commits in between and a changed
+environment points at a dependency bump, not a code change. When git can't
+resolve the commits (not a checkout, a shallow clone, or a CI commit this
+clone hasn't fetched), it says so and `suspect_commits` is `null`.
 
 ### `flaky`
 

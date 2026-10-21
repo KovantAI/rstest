@@ -179,6 +179,13 @@
           ],
           "format": "double"
         },
+        "env_changed": {
+          "description": "When the latest run failed: whether the environment fingerprint\n(interpreter, lockfiles, installed packages) differs between the last\npassing run and the first failing one.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "first_fail_commit": {
           "description": "When the latest run failed: commit of the first run in that failing streak.",
           "type": [
@@ -213,6 +220,16 @@
             "null"
           ],
           "format": "double"
+        },
+        "suspect_commits": {
+          "description": "When the latest run failed: the commits after `last_pass_commit` up to\n`first_fail_commit` (`git log last..first`), newest first. Empty when\nboth are the same commit; null when git can't resolve them here.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/SuspectCommit"
+          }
         }
       },
       "required": [
@@ -222,7 +239,9 @@
         "call_p95",
         "setup_median",
         "last_pass_commit",
-        "first_fail_commit"
+        "first_fail_commit",
+        "env_changed",
+        "suspect_commits"
       ]
     },
     "Meta": {
@@ -253,6 +272,29 @@
         "kind",
         "schema",
         "rstest_version"
+      ]
+    },
+    "SuspectCommit": {
+      "description": "A commit between the test's last pass and its first failure.",
+      "type": "object",
+      "properties": {
+        "author": {
+          "description": "Author name.",
+          "type": "string"
+        },
+        "sha": {
+          "description": "Abbreviated commit hash.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "First line of the commit message.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "author",
+        "subject"
       ]
     }
   }

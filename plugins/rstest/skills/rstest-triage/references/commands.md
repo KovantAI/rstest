@@ -130,8 +130,11 @@ $ rstest explain "tests/test_api.py::test_login" --json
   outcome, the coverage footprint (needs a prior `--cov-context=test` run),
   and the run history: the last 50 outcomes as a strip (`✓` passed, `~`
   passed on rerun, `✗` failed, `-` skipped), call-time median and p95, the
-  commit it last passed at and the commit its current failing streak began
-  at (`git log <last>..<first>` lists suspects).
+  commit it last passed at, the commit its current failing streak began at,
+  the commits in between (`history.suspect_commits`, from `git log`; `null`
+  when this clone lacks them, so `git fetch` and retry), and whether the
+  environment changed across the break (`history.env_changed`: no commits
+  and a changed environment means a dependency bump).
 - Unknown nodeid: human mode exits `1` with substring suggestions; `--json`
   exits `0` with `"found": false`.
 - On a fresh CI runner the caches are empty unless `.rstest_cache` is

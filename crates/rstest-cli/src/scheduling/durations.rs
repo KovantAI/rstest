@@ -29,6 +29,8 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+use crate::reporting::history::History;
+
 use crate::cache;
 use crate::reporting::flakes::FlakeStats;
 use crate::reporting::report::Run;
@@ -413,22 +415,80 @@ pub fn overlay_remote_in(path: &Path, remote: &HashMap<String, f64>) {
 /// Items with a cached duration above this run first, longest first.
 pub const SLOW_THRESHOLD_SECS: f64 = 1.0;
 
-/// --durations-regress rows: (nodeid, baseline, current), worst absolute
-/// growth first. Flags when new >= ratio*baseline AND baseline >= 50ms AND
-/// growth >= 0.5s (jitter floors). Tests absent from baseline never flag.
+/// Passing runs with a call time a test needs in the run history before
+/// `--durations-regress` judges it against its distribution instead of its
+/// last recorded time.
+pub const HISTORY_MIN_RUNS: usize = 5;
+/// Noise band: a time within `NOISE_MADS` scaled MADs of the median is normal.
+const NOISE_MADS: f64 = 3.0;
+/// Scales the MAD to a standard deviation for normally distributed times.
+const MAD_SCALE: f64 = 1.4826;
+
+/// One `--durations-regress` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Regression {
+    pub nodeid: String,
+    /// What the test was compared against: the median of its passing runs in
+    /// the history, or its last recorded time when the history is too short.
+    pub baseline: f64,
+    pub new: f64,
+    /// `(runs, normal up to)` when `baseline` is a history median: the passing
+    /// runs it came from and the top of the noise band.
+    pub history: Option<(usize, f64)>,
+}
+
+/// A test's passing call times in the history as `(median, noise ceiling,
+/// runs)`, or `None` under [`HISTORY_MIN_RUNS`].
+fn history_baseline(h: &History, nodeid: &str) -> Option<(f64, f64, usize)> {
+    let mut calls: Vec<f64> = h
+        .series(nodeid)
+        .iter()
+        .filter(|(_, e)| matches!(e.outcome.as_str(), "passed" | "flaky"))
+        .filter_map(|(_, e)| e.call.map(f64::from))
+        .collect();
+    if calls.len() < HISTORY_MIN_RUNS {
+        return None;
+    }
+    calls.sort_by(f64::total_cmp);
+    let med = crate::explain::median(&calls)?;
+    let mut dev: Vec<f64> = calls.iter().map(|x| (x - med).abs()).collect();
+    dev.sort_by(f64::total_cmp);
+    let mad = crate::explain::median(&dev)? * MAD_SCALE;
+    Some((med, med + NOISE_MADS * mad, calls.len()))
+}
+
+/// --durations-regress rows, worst absolute growth first. A test regresses
+/// when new >= ratio*baseline AND baseline >= 50ms AND growth >= 0.5s (jitter
+/// floors). The baseline is the median of the test's passing runs in the
+/// history once it has [`HISTORY_MIN_RUNS`] of them, and then the time must
+/// also clear the test's own noise band (median + 3 scaled MADs), so a test
+/// that is always noisy doesn't flag on a normal slow run. With less history
+/// the baseline is the last recorded time in `baseline`. Tests in neither
+/// never flag.
 pub fn regressions(
     run: &Run,
     baseline: &HashMap<String, f64>,
+    history: &History,
     ratio: f64,
-) -> Vec<(String, f64, f64)> {
-    let mut rows: Vec<(String, f64, f64)> = run
+) -> Vec<Regression> {
+    let mut rows: Vec<Regression> = run
         .durations()
         .filter_map(|(id, new)| {
-            let &old = baseline.get(id)?;
-            (old >= 0.05 && new >= old * ratio && new - old >= 0.5).then(|| (id.clone(), old, new))
+            let (old, ceiling, hist) = match history_baseline(history, id) {
+                Some((med, ceiling, n)) => (med, ceiling, Some((n, ceiling))),
+                None => (*baseline.get(id)?, 0.0, None),
+            };
+            (old >= 0.05 && new >= old * ratio && new - old >= 0.5 && new > ceiling).then(|| {
+                Regression {
+                    nodeid: id.clone(),
+                    baseline: old,
+                    new,
+                    history: hist,
+                }
+            })
         })
         .collect();
-    rows.sort_by(|a, b| (b.2 - b.1).total_cmp(&(a.2 - a.1)));
+    rows.sort_by(|a, b| (b.new - b.baseline).total_cmp(&(a.new - a.baseline)));
     rows
 }
 
@@ -561,10 +621,11 @@ mod tests {
         base.insert("t/a.py::slow".to_string(), 0.5);
         base.insert("t/a.py::micro".to_string(), 0.005);
         base.insert("t/a.py::small_growth".to_string(), 0.42);
-        let rows = regressions(&run, &base, 2.0);
+        let rows = regressions(&run, &base, &History::default(), 2.0);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "t/a.py::slow");
-        assert_eq!(rows[0].1, 0.5);
+        assert_eq!(rows[0].nodeid, "t/a.py::slow");
+        assert_eq!(rows[0].baseline, 0.5);
+        assert_eq!(rows[0].history, None);
     }
 
     fn call_report(id: &str, outcome: &str, d: f64) -> crate::scheduling::proto::Report {
@@ -585,6 +646,94 @@ mod tests {
         }
     }
 
+    /// One recorded run of a test: (outcome, call seconds).
+    type Run1<'a> = (&'a str, Option<f32>);
+
+    /// History where each test has the given runs.
+    fn history_of(tests: &[(&str, &[Run1])]) -> History {
+        use crate::reporting::history::{Entry, RunMeta};
+        let mut h = History::default();
+        let n = tests.iter().map(|(_, r)| r.len()).max().unwrap_or(0);
+        for seq in 0..n as u32 {
+            h.runs.push(RunMeta {
+                seq,
+                id: format!("r{seq}"),
+                epoch: u64::from(seq),
+                commit: None,
+                env: String::new(),
+                workers: 1,
+            });
+        }
+        for (id, runs) in tests {
+            let series = runs
+                .iter()
+                .enumerate()
+                .map(|(i, (o, call))| Entry {
+                    run: i as u32,
+                    outcome: o.to_string(),
+                    call: *call,
+                    setup: 0.0,
+                })
+                .collect();
+            h.tests.insert(id.to_string(), series);
+        }
+        h
+    }
+
+    #[test]
+    fn regressions_judge_against_the_history_distribution() {
+        let p = |c: f32| ("passed", Some(c));
+        let noisy: &[Run1] = &[p(1.0), p(1.0), p(1.0), p(3.0), p(3.0), p(3.0), p(2.0)];
+        let stable: &[Run1] = &[
+            p(0.2),
+            p(0.2),
+            p(0.2),
+            // Failed and regressed runs carry no usable call time.
+            ("failed", Some(0.0001)),
+            ("passed", None),
+            p(0.2),
+            p(0.2),
+        ];
+        let short: &[Run1] = &[p(0.2), p(0.2), p(0.2), p(0.2)];
+        let h = history_of(&[
+            ("t::noisy", noisy),
+            ("t::stable", stable),
+            ("t::short", short),
+        ]);
+        // Last recorded values: noisy's last fast run, an old slow outlier
+        // for stable, and short's only signal.
+        let base = HashMap::from([
+            ("t::noisy".to_string(), 1.0),
+            ("t::stable".to_string(), 0.8),
+            ("t::short".to_string(), 0.2),
+        ]);
+        let mut run = Run::default();
+        // noisy: median 2.0, normal up to 2 + 3 * 1.4826 = 6.45. 4.5s is 2x
+        // the median and 4.5x its last run, but inside its usual spread.
+        run.record(None, call_report("t::noisy", "passed", 4.5));
+        // stable: median 0.2 flags 0.9s, which 2x the 0.8 outlier would miss.
+        run.record(None, call_report("t::stable", "passed", 0.9));
+        // short: 4 runs, under HISTORY_MIN_RUNS: judged on the last value.
+        run.record(None, call_report("t::short", "passed", 0.8));
+        let rows = regressions(&run, &base, &h, 2.0);
+        let ids: Vec<&str> = rows.iter().map(|r| r.nodeid.as_str()).collect();
+        assert_eq!(ids, ["t::stable", "t::short"]);
+        assert_eq!(rows[0].baseline, 0.2_f32 as f64);
+        assert_eq!(rows[0].history.map(|(n, _)| n), Some(5));
+        assert_eq!(rows[1].history, None);
+        assert_eq!(rows[1].baseline, 0.2);
+
+        // Past the noise band, the noisy test flags too.
+        let mut run = Run::default();
+        run.record(None, call_report("t::noisy", "passed", 7.0));
+        let rows = regressions(&run, &base, &h, 2.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].baseline, 2.0);
+        let (n, ceiling) = rows[0].history.unwrap();
+        assert_eq!(n, 7);
+        assert!((ceiling - 6.4478).abs() < 1e-3, "{ceiling}");
+    }
+
     #[test]
     fn learned_durations_skip_failed_and_regressed() {
         let mut run = Run::default();
@@ -596,10 +745,10 @@ mod tests {
         base.insert("t/a.py::red".to_string(), 0.3);
         // The gate still sees every measured duration...
         assert_eq!(run.durations().count(), 3);
-        let rows = regressions(&run, &base, 2.0);
+        let rows = regressions(&run, &base, &History::default(), 2.0);
         assert_eq!(rows.len(), 1);
-        for (id, _, _) in &rows {
-            run.mark_duration_regressed(id);
+        for r in &rows {
+            run.mark_duration_regressed(&r.nodeid);
         }
         // ...but only the passing, non-regressed one is learned.
         let learned: Vec<(&String, f64)> = run.learned_durations().collect();

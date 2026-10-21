@@ -25,6 +25,8 @@ use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
 const SCHEMA: u32 = 1;
+/// Suspect commits listed in the human report (`--json` carries all).
+const SUSPECTS_SHOWN: usize = 10;
 
 /// Envelope metadata for the explain document.
 #[derive(Serialize)]
@@ -53,6 +55,18 @@ struct Coverage {
     files: Vec<String>,
 }
 
+/// A commit between the test's last pass and its first failure.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct SuspectCommit {
+    /// Abbreviated commit hash.
+    sha: String,
+    /// Author name.
+    author: String,
+    /// First line of the commit message.
+    subject: String,
+}
+
 /// The test's recent runs from the per-test history (oldest first).
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -72,6 +86,14 @@ struct HistorySummary {
     last_pass_commit: Option<String>,
     /// When the latest run failed: commit of the first run in that failing streak.
     first_fail_commit: Option<String>,
+    /// When the latest run failed: whether the environment fingerprint
+    /// (interpreter, lockfiles, installed packages) differs between the last
+    /// passing run and the first failing one.
+    env_changed: Option<bool>,
+    /// When the latest run failed: the commits after `last_pass_commit` up to
+    /// `first_fail_commit` (`git log last..first`), newest first. Empty when
+    /// both are the same commit; null when git can't resolve them here.
+    suspect_commits: Option<Vec<SuspectCommit>>,
 }
 
 /// The merged per-nodeid dossier. `null` fields are simply absent from every
@@ -112,7 +134,7 @@ fn is_fail(outcome: &str) -> bool {
 }
 
 /// Middle value (mean of the two middles for an even count). `v` sorted.
-fn median(v: &[f64]) -> Option<f64> {
+pub(crate) fn median(v: &[f64]) -> Option<f64> {
     let n = v.len();
     match n {
         0 => None,
@@ -150,12 +172,17 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
         .rev()
         .find(|(_, e)| is_pass(&e.outcome))
         .and_then(|(r, _)| r.commit.clone());
-    let first_fail_commit = series
+    let last_pass = series.iter().rev().find(|(_, e)| is_pass(&e.outcome));
+    let first_fail = series
         .iter()
         .rev()
         .take_while(|(_, e)| is_fail(&e.outcome))
-        .last()
-        .and_then(|(r, _)| r.commit.clone());
+        .last();
+    let first_fail_commit = first_fail.and_then(|(r, _)| r.commit.clone());
+    let env_changed = match (last_pass, first_fail) {
+        (Some((p, _)), Some((f, _))) => Some(p.env != f.env),
+        _ => None,
+    };
     Some(HistorySummary {
         runs: series.len(),
         outcomes: series.iter().map(|(_, e)| e.outcome.clone()).collect(),
@@ -164,7 +191,32 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
         setup_median: median(&setup),
         last_pass_commit,
         first_fail_commit,
+        env_changed,
+        suspect_commits: None,
     })
+}
+
+/// The commits that could have broken the test: `git log last..first`.
+/// `None` when git fails (not a checkout, or a commit this clone lacks).
+fn suspects(
+    last: &str,
+    first: &str,
+    git: impl Fn(&[&str]) -> Result<String>,
+) -> Option<Vec<SuspectCommit>> {
+    let range = format!("{last}..{first}");
+    let out = git(&["log", "--format=%h%x1f%an%x1f%s", &range]).ok()?;
+    Some(
+        out.lines()
+            .filter_map(|l| {
+                let mut f = l.splitn(3, '\x1f');
+                Some(SuspectCommit {
+                    sha: f.next()?.to_string(),
+                    author: f.next()?.to_string(),
+                    subject: f.next()?.to_string(),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// One character per run for the human strip.
@@ -227,7 +279,12 @@ fn gather(nodeid: &str) -> ExplainReport {
     // 1-based like every other human-facing surface (e.g. CI annotations).
     let source_line = lines.get(nodeid).map(|l| l + 1);
     let coverage = load_coverage_index().and_then(|idx| footprint(&idx, nodeid));
-    let history = summarize(&crate::reporting::history::load().series(nodeid));
+    let mut history = summarize(&crate::reporting::history::load().series(nodeid));
+    if let Some(h) = &mut history {
+        if let (Some(last), Some(first)) = (&h.last_pass_commit, &h.first_fail_commit) {
+            h.suspect_commits = suspects(last, first, crate::select::git_stdout);
+        }
+    }
 
     let found = duration_seconds.is_some()
         || flakes.is_some()
@@ -376,6 +433,43 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
                     "             {} since {}",
                     pal.red("failing"),
                     short(c)
+                ));
+            }
+            match &h.suspect_commits {
+                Some(cs) if cs.is_empty() => sink.out_line(&format!(
+                    "             {}",
+                    pal.dim("same commit as the last pass: not a code change")
+                )),
+                Some(cs) => {
+                    sink.out_line(&format!("             {} commit(s) in between:", cs.len()));
+                    for c in cs.iter().take(SUSPECTS_SHOWN) {
+                        sink.out_line(&format!(
+                            "               {} {} ({})",
+                            c.sha, c.subject, c.author
+                        ));
+                    }
+                    if cs.len() > SUSPECTS_SHOWN {
+                        sink.out_line(&pal.dim(&format!(
+                            "               ... {} more (--json lists all)",
+                            cs.len() - SUSPECTS_SHOWN
+                        )));
+                    }
+                }
+                None if h.first_fail_commit.is_some() && h.last_pass_commit.is_some() => sink
+                    .out_line(&format!(
+                        "             {}",
+                        pal.dim(
+                            "commits in between: unknown here (not a git checkout, or not fetched)"
+                        )
+                    )),
+                None => {}
+            }
+            if h.env_changed == Some(true) {
+                sink.out_line(&format!(
+                    "             {}",
+                    pal.yellow(
+                        "environment changed too (interpreter, lockfile or installed packages)"
+                    )
                 ));
             }
         }
@@ -575,6 +669,12 @@ mod tests {
                 setup_median: Some(0.0),
                 last_pass_commit: Some("0123456789abcdef".into()),
                 first_fail_commit: Some("fedcba9876543210".into()),
+                env_changed: Some(true),
+                suspect_commits: Some(vec![SuspectCommit {
+                    sha: "fedcba9".into(),
+                    author: "Ada".into(),
+                    subject: "rework parser".into(),
+                }]),
             }),
             ..report("tests/test_x.py::TestC::test_m[a::b]")
         }
@@ -602,10 +702,16 @@ mod tests {
         assert_eq!(lines[7], "             call median 0.1000s, p95 0.3000s");
         assert_eq!(lines[8], "             last passed at 0123456789");
         assert_eq!(lines[9], "             failing since fedcba9876");
-        assert_eq!(lines[10], "  coverage   covers 2 file(s), 7 line(s):");
-        assert_eq!(lines[11], "               src/a.py");
-        assert_eq!(lines[12], "               src/b.py");
-        assert_eq!(lines.len(), 13, "out={out}");
+        assert_eq!(lines[10], "             1 commit(s) in between:");
+        assert_eq!(lines[11], "               fedcba9 rework parser (Ada)");
+        assert_eq!(
+            lines[12],
+            "             environment changed too (interpreter, lockfile or installed packages)"
+        );
+        assert_eq!(lines[13], "  coverage   covers 2 file(s), 7 line(s):");
+        assert_eq!(lines[14], "               src/a.py");
+        assert_eq!(lines[15], "               src/b.py");
+        assert_eq!(lines.len(), 16, "out={out}");
     }
 
     #[test]
@@ -706,6 +812,13 @@ mod tests {
         assert_eq!(v["coverage"]["files"][1], "src/b.py");
         assert_eq!(v["history"]["runs"], 4);
         assert_eq!(v["history"]["outcomes"][1], "flaky");
+        assert_eq!(v["history"]["env_changed"], true);
+        assert_eq!(v["history"]["suspect_commits"][0]["sha"], "fedcba9");
+        assert_eq!(v["history"]["suspect_commits"][0]["author"], "Ada");
+        assert_eq!(
+            v["history"]["suspect_commits"][0]["subject"],
+            "rework parser"
+        );
         assert_eq!(v["history"]["call_median"], 0.1);
         assert_eq!(v["history"]["call_p95"], 0.3);
         assert_eq!(v["history"]["last_pass_commit"], "0123456789abcdef");
@@ -743,6 +856,73 @@ mod tests {
             env: String::new(),
             workers: 1,
         }
+    }
+
+    #[test]
+    fn env_changed_compares_last_pass_with_first_fail() {
+        let mut runs: Vec<RunMeta> = (0..4).map(|i| run(i, Some("c"))).collect();
+        runs[2].env = "new".into();
+        runs[3].env = "new".into();
+        let es = [
+            ent("passed", Some(0.1)),
+            ent("passed", Some(0.1)),
+            ent("failed", None),
+            ent("failed", None),
+        ];
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        assert_eq!(summarize(&series).unwrap().env_changed, Some(true));
+        // Same env on both sides of the break.
+        assert_eq!(summarize(&series[..2]).unwrap().env_changed, None); // not failing
+        runs[2].env = String::new();
+        runs[3].env = String::new();
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        assert_eq!(summarize(&series).unwrap().env_changed, Some(false));
+    }
+
+    #[test]
+    fn suspects_parse_git_log_and_tolerate_git_errors() {
+        let git = |args: &[&str]| -> Result<String> {
+            assert_eq!(args, ["log", "--format=%h%x1f%an%x1f%s", "aaa..bbb"]);
+            Ok("bbb\x1fAda\x1ffix: a \x1f in subject\nccc\x1fBo\x1finit\n".into())
+        };
+        let cs = suspects("aaa", "bbb", git).unwrap();
+        assert_eq!(cs.len(), 2);
+        assert_eq!((cs[0].sha.as_str(), cs[0].author.as_str()), ("bbb", "Ada"));
+        assert_eq!(cs[0].subject, "fix: a \x1f in subject");
+        assert_eq!(cs[1].subject, "init");
+        // Unknown commit (shallow clone, CI-only sha): None, not an error.
+        assert!(suspects("a", "b", |_| anyhow::bail!("bad revision")).is_none());
+        // Same commit: an empty range.
+        assert!(suspects("a", "a", |_| Ok(String::new()))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn render_suspect_edge_cases() {
+        let with = |cs: Option<Vec<SuspectCommit>>| {
+            let mut r = full_report();
+            let h = r.history.as_mut().unwrap();
+            h.suspect_commits = cs;
+            h.env_changed = Some(false);
+            rendered(&r).0
+        };
+        assert!(with(Some(vec![])).contains("same commit as the last pass: not a code change"));
+        assert!(with(None)
+            .contains("commits in between: unknown here (not a git checkout, or not fetched)"));
+        let many: Vec<SuspectCommit> = (0..12)
+            .map(|i| SuspectCommit {
+                sha: format!("s{i}"),
+                author: "A".into(),
+                subject: "x".into(),
+            })
+            .collect();
+        let out = with(Some(many));
+        assert!(out.contains("12 commit(s) in between:"));
+        assert!(out.contains("               s9 x (A)"));
+        assert!(!out.contains("s10 x"));
+        assert!(out.contains("... 2 more (--json lists all)"));
+        assert!(!out.contains("environment changed"));
     }
 
     fn ent(outcome: &str, call: Option<f32>) -> Entry {
