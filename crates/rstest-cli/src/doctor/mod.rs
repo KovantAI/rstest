@@ -96,6 +96,9 @@ pub struct DoctorReport {
     /// Tests whose typical call time crept up across their recorded runs, in
     /// steps too small for `--durations-regress`. `null` unless one did.
     drift: Option<Drift>,
+    /// Tests that opened outbound network connections (outside loopback and
+    /// `[tool.rstest] network-allow`). `null` when none did.
+    network: Option<NetworkAccess>,
     /// Tests that leaked threads / fds (created by the test, still open after
     /// its teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
@@ -188,6 +191,52 @@ struct DriftTest {
     newer_median: f64,
     /// Passing runs the medians come from.
     runs: usize,
+}
+
+/// Tests that reached the network, from the worker's network guard.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct NetworkAccess {
+    /// Tests that connected outside loopback and the allowlist.
+    tests_with_network: usize,
+    /// Those tests, most destinations first (top 20).
+    tests: Vec<NetworkTest>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct NetworkTest {
+    /// The test.
+    nodeid: String,
+    /// Destinations it connected to, as `host:port` (with the IP when it was
+    /// resolved from a name).
+    destinations: Vec<String>,
+}
+
+fn network_access(run: &Run) -> Option<NetworkAccess> {
+    if run.network.is_empty() {
+        return None;
+    }
+    let mut tests: Vec<NetworkTest> = run
+        .network
+        .iter()
+        .map(|(id, d)| NetworkTest {
+            nodeid: id.clone(),
+            destinations: d.clone(),
+        })
+        .collect();
+    tests.sort_by(|a, b| {
+        b.destinations
+            .len()
+            .cmp(&a.destinations.len())
+            .then_with(|| a.nodeid.cmp(&b.nodeid))
+    });
+    let tests_with_network = tests.len();
+    tests.truncate(20);
+    Some(NetworkAccess {
+        tests_with_network,
+        tests,
+    })
 }
 
 /// Passing runs a test needs before its trend is judged (three per window).
@@ -663,6 +712,7 @@ pub fn analyze(
         coverage_waste,
         timeouts: None,
         drift: None,
+        network: network_access(run),
         leaks,
     }
 }
@@ -1075,6 +1125,13 @@ pub(crate) mod testutil {
                     runs: 30,
                 }],
             }),
+            network: Some(NetworkAccess {
+                tests_with_network: 1,
+                tests: vec![NetworkTest {
+                    nodeid: "tests/test_a.py::test_fetch".into(),
+                    destinations: vec!["api.example.com:443 (93.184.215.14)".into()],
+                }],
+            }),
             leaks: Vec::new(),
         }
     }
@@ -1097,6 +1154,7 @@ pub(crate) mod testutil {
             lineno: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -1125,6 +1183,7 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -1171,6 +1230,7 @@ mod tests {
                     lineno: None,
                     subtest: false,
                     crash: None,
+                    network: Vec::new(),
                 },
             );
         }
@@ -1536,6 +1596,7 @@ mod tests {
                     lineno: None,
                     subtest: false,
                     crash: None,
+                    network: Vec::new(),
                 },
             );
         }

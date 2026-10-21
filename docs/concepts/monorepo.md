@@ -109,7 +109,7 @@ flag is silently dropped.
 | Flag | At a monorepo root |
 |---|---|
 | `-n` | split into per-project shares (see [Worker budget](#worker-budget-and-scheduling)) |
-| `--python`, `--dist`, `--order`, `--output` (except `json`/`tap`), `--reruns`, `--only-rerun`, `--quarantine`, `--auto-quarantine`, `--auto-quarantine-max`, `--worker-timeout`, `--doctor`, `--doctor-fail-on` | forwarded to every project |
+| `--python`, `--dist`, `--order`, `--output` (except `json`/`tap`), `--reruns`, `--only-rerun`, `--quarantine`, `--auto-quarantine`, `--auto-quarantine-max`, `--block-network`, `--worker-timeout`, `--doctor`, `--doctor-fail-on` | forwarded to every project |
 | `--changed[=REV]`, `--changed-strict` | classified once at the root, then forwarded to the directly changed projects (see [Changed-aware runs](#changed-aware-runs)) |
 | `--timeout`, `--collect`, `--incremental`, `--reruns-only-known-flaky`, `--fork-pool` | forwarded to every project |
 | `--fail-on-leak`, `--durations-regress`, `--require-baseline` | forwarded; each gate applies per project, and a project that fails its gate fails the root through the merged exit code |

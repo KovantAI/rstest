@@ -60,6 +60,16 @@ those. If one file is a huge share and its tests are independent, the default
 (it pins the file to one worker); only use loadfile when the file is
 order-dependent.
 
+## NETWORK ACCESS: hidden outbound calls
+
+Tests that connected outside loopback and `[tool.rstest] network-allow`, with
+each destination.
+
+**Action:** mock the call, or mark a test that needs the network on purpose
+with `@pytest.mark.network`, or allow intended hosts (CI service containers)
+in `network-allow`. Then add `--block-network` to CI so new ones fail with the
+line that connected.
+
 ## TIMEOUTS: cap hangs without killing slow tests
 
 Appears once tests have 5 passing runs in the run history

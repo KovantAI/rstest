@@ -17,6 +17,7 @@ from _pytest.fixtures import is_visibility_more_specific
 from rstest_worker._internal import junit
 from rstest_worker._internal import messages as m
 from rstest_worker._internal.leakcheck import LeakTracker
+from rstest_worker._internal.netguard import NetGuard
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
@@ -281,6 +282,9 @@ class StreamPlugin:
         # the counts ride the teardown report.
         self._leakcheck = os.environ.get("RSTEST_LEAKCHECK") == "1"
         self._leaks = LeakTracker() if self._leakcheck else None
+        # Outbound-network guard (--block-network / doctor): installed at
+        # configure time, once the rootdir is known.
+        self._net: NetGuard | None = None
         # A live JSON consumer (--output json / --stream-json) is attached, so
         # ship captured stdout/stderr/log sections on every report, not only
         # failures (editors show per-passing-test output).
@@ -450,6 +454,9 @@ class StreamPlugin:
         self._register_markers(config)
         _warn_pytest_pins(config)
         junit.maybe_register(config, self._conn)
+        self._net = NetGuard.from_env(config)
+        if self._net is not None:
+            self._net.install()
         if self._leaks is not None and not config.pluginmanager.is_registered(self._leaks):
             config.pluginmanager.register(self._leaks, "rstest-leakcheck")
         worker_id = os.environ.get("RSTEST_WORKER_ID")
@@ -504,6 +511,11 @@ class StreamPlugin:
             "markers",
             "timeout(seconds): rstest - fail this test if its call phase runs "
             "longer than N seconds (per-test override of --timeout)",
+        )
+        config.addinivalue_line(
+            "markers",
+            "network: rstest - this test may open outbound network connections "
+            "(exempt from --block-network)",
         )
 
     @staticmethod
@@ -738,6 +750,17 @@ class StreamPlugin:
         return cancel
 
     @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_protocol(self, item, nextitem):
+        # Connections are checked only while a test runs (setup to teardown).
+        if self._net is None:
+            return (yield)
+        self._net.start(item)
+        try:
+            return (yield)
+        finally:
+            self._net.stop()
+
+    @pytest.hookimpl(wrapper=True)
     def pytest_runtest_makereport(self, item, call):
         # The exception is only reachable here; the report logged next carries
         # its crash info to pytest_runtest_logreport.
@@ -918,6 +941,10 @@ class StreamPlugin:
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
+        if self._net is not None and report.when == "teardown":
+            dests = self._net.pop(report.nodeid)
+            if dests:
+                payload["network"] = dests
         crash = getattr(report, "_rstest_crash", None)
         if crash is not None and not is_subtest_report(report):
             payload["crash"] = crash

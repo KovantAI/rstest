@@ -253,6 +253,7 @@ mod tests {
             lineno: Some(12),
             subtest: false,
             crash: None,
+            network: Vec::new(),
         }
     }
 

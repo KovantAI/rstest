@@ -281,7 +281,7 @@ alternative, or keep the plugin that provides it under pytest.
 | `RSTEST_WORKER_ID`, `RSTEST_WORKER_COUNT`, `RSTEST_RUN_UID` in code | Never set | Read `PYTEST_XDIST_WORKER` / `PYTEST_XDIST_WORKER_COUNT` or the `worker_id` fixture, which work under both runners |
 | xdist hooks in `conftest.py` (`pytest_configure_node`, ...) | `unknown hook` error without pytest-xdist | Keep pytest-xdist installed, or mark the impls `@pytest.hookimpl(optionalhook=True)` |
 | `[tool.rstest]` settings (`numprocesses`, `dist`, `reruns`, ...) | Ignored | Move the xdist equivalents (`-n`, `--dist`) back to `addopts` |
-| rstest-only flags in CI (`--doctor*`, `--changed`, `--watch`, `--shard`, `--cache-*`, `--quarantine`, `--auto-quarantine`, `--report-json`, `--fail-on-leak`) and subcommands (`try`, `migrate-check`, ...) | Usage error (`unrecognized arguments`) | Remove them from CI scripts; the features (doctor gates, changed-test selection, shared durations cache, quarantine) have no pytest equivalent |
+| rstest-only flags in CI (`--doctor*`, `--changed`, `--watch`, `--shard`, `--cache-*`, `--quarantine`, `--auto-quarantine`, `--block-network`, `--report-json`, `--fail-on-leak`) and subcommands (`try`, `migrate-check`, ...) | Usage error (`unrecognized arguments`) | Remove them from CI scripts; the features (doctor gates, changed-test selection, shared durations cache, quarantine) have no pytest equivalent |
 | The rstest GitHub Action | Not applicable | Replace with a plain `pytest` step |
 
 ## The escape hatch

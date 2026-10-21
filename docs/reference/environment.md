@@ -33,7 +33,9 @@ the real values.
 session's own `-x` / `--maxfail` doesn't count failed attempts the orchestrator
 may retry) and `RSTEST_QUARANTINE` (the `--quarantine` patterns and the auto-quarantined
 nodeids, one anchored regex per line, exempt from `-x` / `--maxfail` the same
-way) coordinate
+way), plus `RSTEST_NETWORK` (`block` under `--block-network`, `record` under
+`--doctor`) and `RSTEST_NETWORK_ALLOW` (the `network-allow` entries, one per
+line) coordinate
 workers and may change between versions. Don't depend on them. rstest clears
 them before starting each worker and sets only the ones the run needs (for
 example `RSTEST_DOCTOR` only under `--doctor`, `--doctor-json`, `--doctor-md` or

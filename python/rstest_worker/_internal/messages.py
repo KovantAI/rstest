@@ -70,6 +70,7 @@ class ReportPayload(_ReportRequired, total=False):
     skip_reason: str
     subtest: bool  # a subtest's report (shares the parent's nodeid/phase)
     crash: CrashInfo  # failed reports: what raised and where (grouping by cause)
+    network: list[str]  # teardown: outbound destinations ("host:port") the test reached
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------

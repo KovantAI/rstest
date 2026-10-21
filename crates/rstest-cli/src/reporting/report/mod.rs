@@ -336,6 +336,8 @@ pub struct Run {
     /// Each failed test's exception and project frame, from its failing
     /// report (for [`Run::failure_groups`]).
     crashes: std::collections::HashMap<String, proto::Crash>,
+    /// Outbound destinations each test reached (network guard), by nodeid.
+    pub network: BTreeMap<String, Vec<String>>,
     /// Tests in this run that `--auto-quarantine` quarantined (passing ones
     /// included); empty when it was off or over its cap.
     pub auto_quarantined: std::collections::BTreeSet<String>,
@@ -384,6 +386,12 @@ impl Interruption {
 
 impl Run {
     pub fn record(&mut self, worker: Option<usize>, r: proto::Report) {
+        if !r.network.is_empty() {
+            self.network
+                .entry(r.nodeid.clone())
+                .or_default()
+                .extend(r.network.iter().cloned());
+        }
         if r.outcome == "failed" && !r.subtest {
             if let Some(c) = &r.crash {
                 self.crashes.insert(r.nodeid.clone(), c.clone());
@@ -987,6 +995,7 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         }
     }
 
@@ -1285,6 +1294,7 @@ mod tests {
         proto::Report {
             subtest: true,
             crash: None,
+            network: Vec::new(),
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1531,6 +1541,7 @@ mod tests {
                 lineno: None,
                 subtest: false,
                 crash: None,
+                network: Vec::new(),
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1552,6 +1563,7 @@ mod tests {
                 lineno: None,
                 subtest: false,
                 crash: None,
+                network: Vec::new(),
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

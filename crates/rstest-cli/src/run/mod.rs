@@ -436,6 +436,7 @@ fn resolve_run_config(
         reruns: reruns > 0,
         // Filled in once the --quarantine list is loaded (before dispatch).
         quarantine: None,
+        network: network_guard(cli, settings, instrument),
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -1359,6 +1360,21 @@ fn resolve_incremental(
         prev_index,
         baseline,
         skip_ids,
+    })
+}
+
+/// The outbound-network guard for this run's workers: blocking under
+/// `--block-network` (or `[tool.rstest] block-network = true`), recording
+/// only under doctor instrumentation, else off.
+fn network_guard(
+    cli: &Cli,
+    settings: &config::RstestSettings,
+    record: bool,
+) -> Option<worker::NetworkGuard> {
+    let block = cli.block_network || settings.block_network.unwrap_or(false);
+    (block || record).then(|| worker::NetworkGuard {
+        block,
+        allow: settings.network_allow.clone().unwrap_or_default(),
     })
 }
 
@@ -3748,6 +3764,39 @@ mod tests {
     }
 
     #[test]
+    fn network_guard_blocks_on_flag_or_config_and_records_under_doctor() {
+        use clap::Parser;
+        let cli = |args: &[&str]| {
+            crate::cli::Cli::parse_from(std::iter::once("rstest").chain(args.iter().copied()))
+        };
+        let off = crate::config::RstestSettings::default();
+        assert_eq!(super::network_guard(&cli(&[]), &off, false), None);
+        // Doctor alone: record, don't block.
+        assert_eq!(
+            super::network_guard(&cli(&[]), &off, true),
+            Some(crate::scheduling::worker::NetworkGuard {
+                block: false,
+                allow: Vec::new()
+            })
+        );
+        let configured = crate::config::RstestSettings {
+            block_network: Some(true),
+            network_allow: Some(vec!["redis".into()]),
+            ..Default::default()
+        };
+        for (args, settings) in [(&["--block-network"][..], &off), (&[][..], &configured)] {
+            let g = super::network_guard(&cli(args), settings, false).unwrap();
+            assert!(g.block);
+        }
+        assert_eq!(
+            super::network_guard(&cli(&[]), &configured, false)
+                .unwrap()
+                .allow,
+            ["redis"]
+        );
+    }
+
+    #[test]
     fn warn_quarantine_passthrough_writes_the_note() {
         let mut buf = Vec::new();
         warn_quarantine_passthrough(&mut buf);
@@ -3851,6 +3900,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         }
     }
 

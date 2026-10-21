@@ -110,6 +110,10 @@ pub struct Report {
     /// for grouping failures by cause. Absent when the worker couldn't tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crash: Option<Crash>,
+    /// Teardown report under the network guard: outbound destinations
+    /// (`host:port`, with the IP when resolved from a name) the test reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network: Vec<String>,
 }
 
 /// What a failure raised and where (see [`Report::crash`]).
@@ -537,6 +541,7 @@ mod property {
                 skip_reason, cpu, thread_delta, fd_delta, sections, lineno,
                 subtest: false,
                 crash: None,
+                network: Vec::new(),
             }
         }
     }

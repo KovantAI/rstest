@@ -442,6 +442,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         }
     }
 

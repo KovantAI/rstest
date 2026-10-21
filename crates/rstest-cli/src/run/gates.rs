@@ -1296,6 +1296,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1329,6 +1330,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
@@ -1582,6 +1584,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);

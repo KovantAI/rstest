@@ -285,7 +285,7 @@ def test_configure_registers_markers_and_neutralizes_dist(monkeypatch):
     assert config.option.dist == "no"  # xdist kept inert
     assert config.option.numprocesses is None  # not a worker -> disengaged
     names = [line.split("(")[0].split(":")[0].strip() for _, line in markers]
-    assert names == ["serial", "flaky", "xdist_group", "timeout"]
+    assert names == ["serial", "flaky", "xdist_group", "timeout", "network"]
     assert p._xdist_node is None  # worker branch skipped
 
 

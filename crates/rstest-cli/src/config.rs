@@ -562,6 +562,9 @@ pub struct RstestSettings {
     pub auto_quarantine: Option<u32>,
     /// Percent, 0 to 100.
     pub auto_quarantine_max: Option<u32>,
+    pub block_network: Option<bool>,
+    /// Hostnames and CIDRs tests may connect to, beyond loopback.
+    pub network_allow: Option<Vec<String>>,
 }
 
 /// Every key `[tool.rstest]` reads; anything else is warned about as unknown.
@@ -578,6 +581,8 @@ const SETTINGS_KEYS: &[&str] = &[
     "quarantine",
     "auto-quarantine",
     "auto-quarantine-max",
+    "block-network",
+    "network-allow",
 ];
 
 /// Typed reads of one `[tool.rstest]` table: a wrong-typed or out-of-range
@@ -699,6 +704,21 @@ pub fn rstest_settings(start: &Path, err: &mut dyn Write) -> RstestSettings {
             output: check.string(tool, "output"),
             quarantine: check.string(tool, "quarantine").map(|q| dir.join(q)),
             auto_quarantine: check.uint(tool, "auto-quarantine"),
+            block_network: match tool.get("block-network") {
+                None => None,
+                Some(toml::Value::Boolean(b)) => Some(*b),
+                Some(v) => check.invalid("block-network", v, "true or false"),
+            },
+            network_allow: match tool.get("network-allow") {
+                None => None,
+                Some(toml::Value::Array(items)) if items.iter().all(|i| i.is_str()) => Some(
+                    items
+                        .iter()
+                        .filter_map(|i| i.as_str().map(String::from))
+                        .collect(),
+                ),
+                Some(v) => check.invalid("network-allow", v, "a list of hostnames or CIDRs"),
+            },
             auto_quarantine_max: match tool.get("auto-quarantine-max") {
                 Some(v @ toml::Value::Integer(n)) if !(0..=100).contains(n) => {
                     check.invalid("auto-quarantine-max", v, "a percent from 0 to 100")
@@ -747,6 +767,38 @@ worker-timeout = 120
         assert_eq!(s.dist.as_deref(), Some("loadfile"));
         assert_eq!(s.reruns, Some(2));
         assert_eq!(s.worker_timeout, Some(120));
+    }
+
+    #[test]
+    fn settings_network_keys() {
+        let d = tmpdir("network-keys");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nblock-network = true\nnetwork-allow = [\"postgres\", \"10.0.0.0/8\"]\n",
+        )
+        .unwrap();
+        let mut err = Vec::new();
+        let s = rstest_settings(&d, &mut err);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        assert_eq!(s.block_network, Some(true));
+        assert_eq!(s.network_allow.unwrap(), ["postgres", "10.0.0.0/8"]);
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nblock-network = \"yes\"\nnetwork-allow = \"postgres\"\n",
+        )
+        .unwrap();
+        let mut err = Vec::new();
+        let s = rstest_settings(&d, &mut err);
+        let err = String::from_utf8_lossy(&err);
+        assert_eq!((s.block_network, s.network_allow), (None, None));
+        assert!(
+            err.contains("block-network = \"yes\" (expected true or false)"),
+            "{err}"
+        );
+        assert!(
+            err.contains("(expected a list of hostnames or CIDRs)"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -286,6 +286,7 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            network: Vec::new(),
         }
     }
 
