@@ -761,7 +761,8 @@ rstest: changed since the last green run (3f9c2a1b7e, 6h ago):
 Every full run that exits 0 (no `-k`, sub-path, nodeid, `--lf`, `--changed`,
 `--shard` or similar narrowing; see the
 [guide](../guides/since-green.md#what-changed-since-green)) records the state
-compared against (`.rstest_cache/green_env.json`), and a run with failing tests prints the
+compared against (`.rstest_cache/green_env.json`; a sharded run counts once
+every shard is green, through the shared cache), and a run with failing tests prints the
 same block on stderr when anything differs. When nothing differs this
 command says so: the break is in the tests or what they call, not in the
 environment. Without a recorded green run it says that instead.

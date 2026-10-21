@@ -64,18 +64,85 @@ pub fn capture(scope: &Path, python: &Path, commit: Option<&str>, epoch: u64) ->
 
 /// Save `snap` as the last green state. Best-effort.
 pub fn record(snap: &Snapshot) {
+    record_to(&cache::file(FILE), snap);
+}
+
+/// [`record`] to an explicit path.
+pub fn record_to(path: &Path, snap: &Snapshot) {
     if let Ok(bytes) = serde_json::to_vec(snap) {
-        let _ = cache::write_atomic(&cache::file(FILE), &bytes);
+        let _ = cache::write_atomic(path, &bytes);
     }
 }
 
 /// The last green state, or `None` when no run has been green yet (or the
 /// file is from another schema).
 pub fn load() -> Option<Snapshot> {
-    let bytes = std::fs::read(cache::file(FILE)).ok()?;
+    load_from(&cache::file(FILE))
+}
+
+/// [`load`] from an explicit path.
+pub fn load_from(path: &Path) -> Option<Snapshot> {
+    let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice::<Snapshot>(&bytes)
         .ok()
         .filter(|s| s.schema == SCHEMA)
+}
+
+/// A green run's snapshot as it travels through the shared cache: a full
+/// green run (`shard: None`), or one green shard `(k, n)` of a sharded run.
+/// A sharded run counts as green once every shard `1..=n` of the same commit
+/// has a part (see [`newest_complete`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GreenPart {
+    pub snapshot: Snapshot,
+    pub shard: Option<(usize, usize)>,
+}
+
+/// The newest green snapshot the parts prove: a full green run, or a sharded
+/// run whose every shard (same commit, same shard count) went green, which
+/// counts at its last shard's time. Returns it with the parts still waiting
+/// for the rest of their run (the caller keeps those for a later merge):
+/// shards of a newer run than the snapshot returned, at most `keep` of them.
+pub fn newest_complete(parts: Vec<GreenPart>, keep: usize) -> (Option<Snapshot>, Vec<GreenPart>) {
+    let mut best: Option<Snapshot> = None;
+    let mut sets: BTreeMap<(String, usize), Vec<GreenPart>> = BTreeMap::new();
+    for p in parts {
+        match (p.shard, &p.snapshot.commit) {
+            (None, _) => {
+                if best.as_ref().is_none_or(|b| p.snapshot.epoch > b.epoch) {
+                    best = Some(p.snapshot);
+                }
+            }
+            // A shard without a commit can't be matched with its siblings.
+            (Some(_), None) => {}
+            (Some((_, n)), Some(c)) => sets.entry((c.clone(), n)).or_default().push(p),
+        }
+    }
+    let mut pending: Vec<GreenPart> = Vec::new();
+    for ((_, n), mut set) in sets {
+        set.sort_by_key(|p| p.shard.map(|(k, _)| k));
+        set.dedup_by_key(|p| p.shard);
+        let complete = (1..=n).all(|k| set.iter().any(|p| p.shard == Some((k, n))));
+        if complete {
+            let last = set
+                .into_iter()
+                .max_by_key(|p| p.snapshot.epoch)
+                .map(|p| p.snapshot);
+            if let Some(l) = last {
+                if best.as_ref().is_none_or(|b| l.epoch > b.epoch) {
+                    best = Some(l);
+                }
+            }
+        } else {
+            pending.extend(set);
+        }
+    }
+    // Shards older than the green we have can't improve on it.
+    let since = best.as_ref().map_or(0, |b| b.epoch);
+    pending.retain(|p| p.snapshot.epoch > since);
+    pending.sort_by_key(|p| std::cmp::Reverse(p.snapshot.epoch));
+    pending.truncate(keep);
+    (best, pending)
 }
 
 /// One value that differs: `None` on a side means absent there.
@@ -526,6 +593,86 @@ mod tests {
         assert!(narrows(&[p("tests")], &project));
         assert!(!narrows(&[p(".")], &project));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn part(commit: Option<&str>, epoch: u64, shard: Option<(usize, usize)>) -> GreenPart {
+        GreenPart {
+            snapshot: Snapshot {
+                commit: commit.map(String::from),
+                epoch,
+                ..snap("x", "3.12", &[], &[])
+            },
+            shard,
+        }
+    }
+
+    #[test]
+    fn a_sharded_run_is_green_once_every_shard_is() {
+        // Two of three shards: not green yet; both wait for the third.
+        let (best, pending) = newest_complete(
+            vec![
+                part(Some("c1"), 10, Some((1, 3))),
+                part(Some("c1"), 12, Some((2, 3))),
+            ],
+            50,
+        );
+        assert_eq!(best, None);
+        assert_eq!(pending.len(), 2);
+
+        // All three (one pushed twice): green, at the last shard's time.
+        let (best, pending) = newest_complete(
+            vec![
+                part(Some("c1"), 10, Some((1, 3))),
+                part(Some("c1"), 12, Some((2, 3))),
+                part(Some("c1"), 11, Some((3, 3))),
+                part(Some("c1"), 10, Some((1, 3))),
+            ],
+            50,
+        );
+        assert_eq!(best.map(|b| b.epoch), Some(12));
+        assert!(pending.is_empty());
+
+        // Shards of different shard counts or commits never add up.
+        let (best, _) = newest_complete(
+            vec![
+                part(Some("c1"), 10, Some((1, 2))),
+                part(Some("c1"), 11, Some((2, 3))),
+                part(Some("c2"), 12, Some((2, 2))),
+                // No commit: can't be matched with its siblings.
+                part(None, 13, Some((1, 1))),
+            ],
+            50,
+        );
+        assert_eq!(best, None);
+    }
+
+    #[test]
+    fn newest_green_wins_and_stale_waiting_shards_go() {
+        let complete = || {
+            vec![
+                part(Some("c2"), 50, Some((1, 2))),
+                part(Some("c2"), 51, Some((2, 2))),
+            ]
+        };
+        // A newer complete sharded run beats an older full run...
+        let mut parts = complete();
+        parts.push(part(Some("c1"), 40, None));
+        assert_eq!(newest_complete(parts, 50).0.map(|b| b.epoch), Some(51));
+        // ...and a newer full run beats it.
+        let mut parts = complete();
+        parts.push(part(Some("c3"), 60, None));
+        assert_eq!(newest_complete(parts, 50).0.map(|b| b.epoch), Some(60));
+        // Waiting shards older than the green can't improve on it; newer
+        // ones keep waiting, capped, newest first.
+        let mut parts = complete();
+        parts.push(part(Some("c0"), 30, Some((1, 2))));
+        for e in 70..75 {
+            parts.push(part(Some(&format!("n{e}")), e, Some((1, 2))));
+        }
+        let (best, pending) = newest_complete(parts, 3);
+        assert_eq!(best.map(|b| b.epoch), Some(51));
+        let epochs: Vec<u64> = pending.iter().map(|p| p.snapshot.epoch).collect();
+        assert_eq!(epochs, [74, 73, 72]);
     }
 
     #[test]

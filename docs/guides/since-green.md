@@ -241,6 +241,17 @@ fine when it covers the suite (the rootdir, or one that contains every
 `testpaths` entry, like CI's `rstest tests/`). A green run over part of the
 suite proves nothing about the rest, so it leaves the snapshot alone.
 
+**Sharded CI.** One shard is part of the suite, so on its own it doesn't
+count. With the [shared cache](ci-shared-cache.md), a green shard
+(`--shard K/N`, with no other narrowing) pushes its snapshot as a *part*, and
+once every shard `1..N` of the same commit has pushed one, the run counts as
+green. The next `--cache-pull` writes that snapshot to `green_env.json`
+(when it is newer than the local one), so a red shard after it prints what
+changed. A shard that went red pushes no part, so a run with any red shard
+never counts; parts of an incomplete run wait in the remote's `base.json`
+until the rest arrive (the shards are matched by commit, so this needs a git
+checkout).
+
 When a later run has failing tests, rstest prints what differs on stderr:
 
 ```text

@@ -27,6 +27,10 @@ use serde::{Deserialize, Serialize};
 use crate::cache;
 use crate::reporting::flakes::FlakeStats;
 use crate::reporting::history::{self, History, RunSlice};
+use crate::since_green::{GreenPart, Snapshot};
+
+/// Green shards kept in the base while their run's other shards are missing.
+const GREEN_PARTS_KEPT: usize = 256;
 use crate::reporting::report::Run;
 use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
@@ -56,6 +60,10 @@ pub struct Segment {
     /// before history was shared, or when no test produced a real result.
     #[serde(default)]
     pub history: Option<RunSlice>,
+    /// This run's environment snapshot when its tests passed over the whole
+    /// suite or one whole shard (see [`GreenPart`]); `None` otherwise.
+    #[serde(default)]
+    pub green: Option<GreenPart>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +110,12 @@ pub struct Base {
         skip_serializing_if = "History::is_empty"
     )]
     pub history: History,
+    /// The newest green run the folded segments prove (full, or every shard).
+    #[serde(default)]
+    pub green: Option<Snapshot>,
+    /// Green shards of runs whose other shards haven't arrived yet.
+    #[serde(default)]
+    pub green_parts: Vec<GreenPart>,
     /// Segment ids already accumulated into this base.
     #[serde(default)]
     pub absorbed: HashSet<String>,
@@ -114,6 +128,10 @@ pub struct Merged {
     pub flakes: HashMap<String, FlakeStats>,
     pub cov_index: CoverageIndex,
     pub history: History,
+    /// The newest proven green run (see [`crate::since_green::newest_complete`]).
+    pub green: Option<Snapshot>,
+    /// Green shards still waiting for the rest of their run.
+    pub green_parts: Vec<GreenPart>,
 }
 
 /// Merge a base (optional) and a set of segments into the local cache shape.
@@ -137,6 +155,11 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
     let mut cov = base.cov_index;
     let mut cov_ts = base.cov_ts;
     let mut runs = base.history.into_slices();
+    let mut green: Vec<GreenPart> = base.green_parts;
+    green.extend(base.green.map(|snapshot| GreenPart {
+        snapshot,
+        shard: None,
+    }));
     // Any base file lacking a recorded timestamp defaults to 0 (pre-cov_ts base).
     for k in cov.files.keys() {
         cov_ts.entry(k.clone()).or_insert(0);
@@ -157,6 +180,7 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
 
     for seg in fresh {
         runs.extend(seg.history);
+        green.extend(seg.green);
         for (nodeid, secs) in seg.durations {
             durations.insert(nodeid, secs); // oldest→newest order => newest wins
         }
@@ -173,6 +197,7 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
         }
         merge_cov_slice(&mut cov, &mut cov_ts, seg.cov_index, seg.generated_at);
     }
+    let newest = crate::since_green::newest_complete(green, GREEN_PARTS_KEPT);
     // Stamp the schema so a written merge loads back as a valid index (the base
     // may have carried schema 0 when no coverage segment ever contributed).
     if !cov.files.is_empty() {
@@ -184,6 +209,8 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
             flakes,
             cov_index: cov,
             history: History::merged(runs, history::cap()),
+            green: newest.0,
+            green_parts: newest.1,
         },
         cov_ts,
     )
@@ -258,6 +285,8 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
             flakes,
             cov_index,
             history,
+            green,
+            green_parts,
         },
         cov_ts,
     ) = merge_inner(base, segments);
@@ -270,6 +299,8 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
         cov_index,
         cov_ts,
         history,
+        green,
+        green_parts,
         absorbed,
     }
 }
@@ -323,6 +354,7 @@ pub fn segment_from_run(
     run: &Run,
     cov_index: CoverageIndex,
     history: Option<RunSlice>,
+    green: Option<GreenPart>,
 ) -> Segment {
     let durations = run
         .learned_durations()
@@ -350,6 +382,7 @@ pub fn segment_from_run(
         flake_events,
         cov_index,
         history,
+        green,
     }
 }
 
@@ -403,6 +436,14 @@ fn write_local_in(dir: &Path, merged: &Merged) {
         // Runs already in the local history (this machine's own, pushed
         // earlier) dedupe by run id.
         history::overlay_in(&dir.join(history::FILE), merged.history.clone());
+        // The shared green snapshot replaces the local one only when newer:
+        // a local full green run since then stays the baseline.
+        if let Some(g) = &merged.green {
+            let path = dir.join(crate::since_green::FILE);
+            if crate::since_green::load_from(&path).is_none_or(|l| l.epoch < g.epoch) {
+                crate::since_green::record_to(&path, g);
+            }
+        }
     });
     // The coverage index is regenerated each run and drives selection off the
     // merged view, so it is replaced (not overlaid) with the pulled union.
@@ -1265,6 +1306,7 @@ mod tests {
                 .collect(),
             cov_index: CoverageIndex::default(),
             history: None,
+            green: None,
         }
     }
 
@@ -1298,6 +1340,7 @@ mod tests {
             flake_events: Vec::new(),
             cov_index: idx,
             history: None,
+            green: None,
         }
     }
 
@@ -1347,6 +1390,8 @@ mod tests {
             ]),
             cov_index: CoverageIndex::default(),
             history: History::default(),
+            green: None,
+            green_parts: Vec::new(),
         };
         write_local_in(&dir, &merged);
 
@@ -1378,6 +1423,8 @@ mod tests {
             flakes: HashMap::new(),
             cov_index: cov.clone(),
             history: History::default(),
+            green: None,
+            green_parts: Vec::new(),
         };
         write_local_in(&dir, &merged);
         assert!(
@@ -1699,6 +1746,56 @@ mod tests {
             .iter()
             .map(|(_, e)| e.outcome.clone())
             .collect()
+    }
+
+    fn green_seg(id: &str, at: u64, shard: Option<(usize, usize)>) -> Segment {
+        let snapshot: crate::since_green::Snapshot = serde_json::from_value(serde_json::json!({
+            "schema": 1, "commit": "c1", "epoch": at, "python": "3.12.4",
+            "packages": {"httpx": "0.28.1"}, "env": {}
+        }))
+        .unwrap();
+        Segment {
+            green: Some(GreenPart { snapshot, shard }),
+            ..seg(id, at, &[], &[])
+        }
+    }
+
+    #[test]
+    fn a_sharded_green_run_completes_across_compaction() {
+        let root = tmp_dir("green-shards");
+        let t = DirTransport::new(&root);
+        push(&t, &green_seg("run-a-1of2", 100, Some((1, 2)))).unwrap();
+        assert_eq!(pull(&t, &mut Sink::captured().0).unwrap().green, None);
+        // Compacted while its sibling is missing: the shard waits in the base.
+        compact_all(&t, &mut Sink::captured().0).unwrap();
+        let base: Base = serde_json::from_slice(&t.read_base().unwrap().unwrap()).unwrap();
+        assert_eq!((base.green.is_none(), base.green_parts.len()), (true, 1));
+        // The other shard arrives in a later CI job: the run is green.
+        push(&t, &green_seg("run-b-2of2", 105, Some((2, 2)))).unwrap();
+        let m = pull(&t, &mut Sink::captured().0).unwrap();
+        assert_eq!(m.green.as_ref().map(|g| g.epoch), Some(105));
+        assert!(m.green_parts.is_empty());
+
+        // Pulled into a cache: written when newer than the local snapshot,
+        // left alone when the local one is newer.
+        let dir = tmp_dir("green-local");
+        std::fs::create_dir_all(&dir).unwrap();
+        let local = dir.join(crate::since_green::FILE);
+        write_local_in(&dir, &m);
+        assert_eq!(
+            crate::since_green::load_from(&local).map(|g| g.epoch),
+            Some(105)
+        );
+        let mut newer = m.green.clone().unwrap();
+        newer.epoch = 200;
+        crate::since_green::record_to(&local, &newer);
+        write_local_in(&dir, &m);
+        assert_eq!(
+            crate::since_green::load_from(&local).map(|g| g.epoch),
+            Some(200)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

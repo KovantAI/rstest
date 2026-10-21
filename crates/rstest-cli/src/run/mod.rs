@@ -3449,6 +3449,7 @@ mod tests {
             flake_events: Vec::new(),
             cov_index: Default::default(),
             history: None,
+            green: None,
         }
     }
 

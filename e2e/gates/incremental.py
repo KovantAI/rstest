@@ -858,3 +858,69 @@ def gate_what_changed_since_green(g, args, binary):
         and {"name": "TZ", "green": "Asia/Tokyo", "now": "Europe/Paris"} in doc.get("env", []),
         f"rc={r.returncode} " + r2.stdout[-300:],
     )
+
+
+def gate_since_green_sharded(g, args, binary):
+    print("== since green: sharded runs through the shared cache ==")
+    # Two CI runners (separate caches), one shard each, push to one remote. A
+    # sharded run is green only once every shard of the same commit is.
+    sh = g.tmp / "since_green_shards"
+    remote = g.tmp / "since_green_shards_remote"
+    g.write(
+        "since_green_shards/test_s.py",
+        "import os\n\n"
+        + "".join(
+            f"def test_{i}(): assert os.environ.get('SG_FAIL') != '{i % 2}'\n" for i in range(6)
+        ),
+    )
+    git_init_commit(sh)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=sh, capture_output=True, text=True
+    ).stdout.strip()
+
+    def shard(k, cache, fail=""):
+        return g.run(
+            ".",
+            "-n",
+            "2",
+            "--shard",
+            f"{k}/2",
+            "--cache-remote",
+            str(remote),
+            "--cache-push",
+            cwd=sh,
+            env_extra={"RSTEST_CACHE": str(g.tmp / cache), "SG_FAIL": fail},
+        )
+
+    def pulled(cache):
+        # A run that selects nothing: it pulls, then records nothing of its own.
+        g.run(
+            ".",
+            "-k",
+            "no_such_test",
+            "--cache-remote",
+            str(remote),
+            "--cache-pull",
+            cwd=sh,
+            env_extra={"RSTEST_CACHE": str(g.tmp / cache)},
+        )
+        r = g.run("since-green", "--json", cwd=sh, env_extra={"RSTEST_CACHE": str(g.tmp / cache)})
+        return json.loads(r.stdout) if r.returncode == 0 else {}
+
+    r1 = shard(1, "sgs_runner1")
+    # Shard 2 fails on its runner: the run isn't green.
+    r2 = shard(2, "sgs_runner2", fail="1")
+    doc = pulled("sgs_puller1")
+    check(
+        "since-green sharded: a red shard means no green run",
+        r1.returncode == 0 and r2.returncode == 1 and doc.get("found") is False,
+        f"rc={r1.returncode},{r2.returncode} doc={str(doc)[:200]}",
+    )
+    # Re-run shard 2 green: every shard of the commit is green now.
+    r2 = shard(2, "sgs_runner2b")
+    doc = pulled("sgs_puller2")
+    check(
+        "since-green sharded: every shard green -> the pull records it",
+        r2.returncode == 0 and doc.get("found") is True and doc.get("green_commit") == head,
+        f"rc={r2.returncode} doc={str(doc)[:300]}",
+    )

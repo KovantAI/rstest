@@ -187,6 +187,13 @@ between 0.x releases and are listed here.
 - **Behavior change: a session-scoped fixture's resources are never charged
   to a test by the leak check.** See the leak check entry below.
 
+- **Sharded CI gets a green baseline.** Each green shard (`--shard K/N`, no
+  other narrowing) pushes its environment snapshot through the shared cache;
+  once every shard of the same commit has, the run counts as green and the
+  next `--cache-pull` writes it to `green_env.json`, so a red shard prints
+  what changed since. A red shard pushes nothing, and shards of an
+  incomplete run wait in `base.json` across compactions.
+
 ### Fixes
 
 - **`--durations-regress` keeps firing when the change also edited the test's
