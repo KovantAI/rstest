@@ -782,6 +782,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         }
         Command::Explain { nodeid, json } => crate::explain::run_explain(&mut sink, nodeid, *json),
         Command::Flaky { top, json } => crate::flaky::run_flaky(&mut sink, *top, *json),
+        Command::Report { out } => crate::dashboard::run_report(&mut sink, out.as_deref()),
         // Needs the interpreter's path (its venv's packages), not a session.
         Command::SinceGreen { json } => {
             python().and_then(|py| crate::since_green::run_since_green(&mut sink, &py, *json))

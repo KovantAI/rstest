@@ -481,6 +481,18 @@ def gate_quarantine(g, args, binary):
         and "[auto-quarantined]" not in row("test_a.py::test_broke"),
         f"rc={r.returncode} " + r.stdout[-500:],
     )
+    report = g.tmp / "autoq_report.html"
+    r = g.run("report", "--out", str(report), cwd=adir)
+    page = report.read_text(encoding="utf-8") if report.exists() else ""
+    check(
+        "report: writes the history dashboard with the flaky table",
+        r.returncode == 0
+        and "rstest: report: wrote" in r.stdout
+        and "<h2>Failing and flaky tests per run</h2>" in page
+        and "test_a.py::test_flap" in page
+        and "auto-quarantined</span>" in page,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
     r = g.run("flaky", "--json", "--top", "1", cwd=adir)
     fj = json.loads(r.stdout)
     check(

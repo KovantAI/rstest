@@ -268,7 +268,7 @@ const AUTO_BADGE: &str =
      and fail in recent runs\">auto</span>";
 
 /// HTML-escape text that may contain arbitrary test output.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -283,7 +283,7 @@ fn esc(s: &str) -> String {
     o
 }
 
-const CSS: &str = r#"
+pub(crate) const CSS: &str = r#"
 :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e2e2e2; --card:#fafafa;
   --g:#1a7f37; --r:#cf222e; --y:#9a6700; --accent:#0969da; }
 @media (prefers-color-scheme: dark) {
