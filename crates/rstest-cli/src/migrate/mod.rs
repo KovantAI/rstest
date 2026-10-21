@@ -41,8 +41,8 @@ pub(super) struct Rec {
 }
 
 /// A resource parallel workers commonly fight over, recognized from a
-/// failure's error text, with the built-in fixture that gives each worker
-/// its own.
+/// failure's error text, with the established pytest plugin (and the
+/// no-plugin fallback) that gives each worker its own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Resource {
     /// A fixed port another worker already bound.
@@ -82,19 +82,20 @@ impl Resource {
             .map(|(r, _)| *r)
     }
 
-    /// One line naming the cause and the fixture that fixes it.
+    /// One line naming the cause and the fix.
     pub(super) fn hint(self) -> &'static str {
         match self {
             Resource::Port => {
-                "a fixed port: workers collide on it; take one from the rstest_free_port fixture"
+                "a fixed port: workers collide on it; bind port 0 instead \
+                 (pytest-asyncio's unused_tcp_port fixture does it)"
             }
             Resource::Database => {
-                "one shared database: give each worker its own: rstest_postgres_url \
-                 (Postgres, cloned from your migrated test database) or \
-                 rstest_worker_name(\"<base>\") (myapp_gw3, ...)"
+                "one shared database: give each worker its own (pytest-postgresql and \
+                 pytest-django do it per worker; or suffix the name with the worker_id fixture)"
             }
             Resource::Home => {
-                "one shared home directory: isolate it per test with the rstest_home fixture"
+                "one shared home directory: isolate it per test (pytest-home's tmp_home_dir \
+                 fixture, or monkeypatch HOME to tmp_path)"
             }
         }
     }
@@ -371,10 +372,10 @@ mod tests {
         );
         assert_eq!(Resource::of("assert 1 == 2"), None);
         // Each hint names its fixture.
-        assert!(Resource::Port.hint().contains("rstest_free_port"));
-        assert!(Resource::Database.hint().contains("rstest_postgres_url"));
-        assert!(Resource::Database.hint().contains("rstest_worker_name"));
-        assert!(Resource::Home.hint().contains("rstest_home"));
+        assert!(Resource::Port.hint().contains("unused_tcp_port"));
+        assert!(Resource::Database.hint().contains("pytest-postgresql"));
+        assert!(Resource::Database.hint().contains("worker_id"));
+        assert!(Resource::Home.hint().contains("tmp_home_dir"));
     }
 
     #[test]

@@ -19,7 +19,6 @@ Everything pytest does (via a vendored pytest core), plus:
 | Failure reruns cache | `--lf`, `--ff` | merged across workers |
 | Global fail-fast | `-x`, `--maxfail=N` | coordinated across all workers |
 | Serial escape hatch | `@pytest.mark.serial` | exclusive, after the parallel phase |
-| Per-worker resources | `rstest_free_port`, `rstest_postgres_url`, `rstest_worker_name`, `rstest_home` fixtures | a free port, a Postgres database per worker (cloned from your migrated one), a per-worker name, a private home dir; also work under plain pytest and xdist ([guide](../guides/parallel-safety.md#built-in-per-worker-resources)) |
 | Migration check | `try`, `migrate-check` | `try` runs pytest vs `rstest -n auto` and prints the "should I switch?" verdict; `migrate-check` classifies parallel-only failures |
 
 ## Advanced / CI

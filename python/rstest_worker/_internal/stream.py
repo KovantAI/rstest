@@ -454,13 +454,6 @@ class StreamPlugin:
         self._register_markers(config)
         _warn_pytest_pins(config)
         junit.maybe_register(config, self._conn)
-        # The per-worker resource fixtures ship as a pytest11 plugin; the dev
-        # layout (worker loaded from the repo, not an installed wheel) has no
-        # entry point, so register it here when pytest didn't.
-        if config.pluginmanager.get_plugin("rstest_resources") is None:
-            from rstest_worker import resources
-
-            config.pluginmanager.register(resources, "rstest_resources")
         self._net = NetGuard.from_env(config)
         if self._net is not None:
             self._net.install()
