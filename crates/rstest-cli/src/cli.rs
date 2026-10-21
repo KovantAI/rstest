@@ -150,7 +150,7 @@ pub(crate) enum Command {
 
     /// What changed since the last green run, without running tests: commits,
     /// interpreter version, installed packages and a few test-relevant
-    /// environment variables. Every run that exits 0 records the state it
+    /// environment variables. Every full run that exits 0 records the state it
     /// compares against (`.rstest_cache/green_env.json`).
     SinceGreen {
         /// Emit the diff as JSON (schema-stamped) to stdout.

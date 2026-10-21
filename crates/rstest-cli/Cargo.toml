@@ -24,6 +24,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+# Pack the run history inside the shared cache's base.json (gzip + base64).
+# Both already ship in default builds through ureq.
+base64 = "0.23"
+flate2 = "1"
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 rmp-serde = "1"

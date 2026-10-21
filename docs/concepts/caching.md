@@ -44,7 +44,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
 - `report.html`: the history dashboard [`rstest report`](../reference/cli-commands.md#report)
   writes by default. Output, not input: no run reads it; leave it out of a
   CI cache.
-- `green_env.json`: what the last run that exited 0 ran with: its commit,
+- `green_env.json`: what the last full run that exited 0 ran with (a run
+  that selected part of the suite doesn't count): its commit,
   the interpreter version, installed third-party packages (read from the
   venv's `site-packages`, the project's own editable install excluded) and a
   few test-relevant environment variables (`PYTEST_ADDOPTS`, `PYTHONPATH`,
@@ -154,8 +155,10 @@ clobber each other.
   them; a segment already folded is recorded in the base's absorbed-id set, so
   compaction is safe against concurrent pushes. Compaction also drops history
   runs older than `RSTEST_FLAKE_RETENTION_DAYS`, so a deleted test's runs
-  leave the base. The history makes `base.json` grow with the suite (up to
-  `RSTEST_HISTORY_RUNS` small entries per test).
+  leave the base. The history is stored in `base.json` as one compressed
+  field (base64 of gzipped msgpack), a few MB at 10k tests and 50 runs
+  instead of tens of MB as plain JSON; releases that predate it ignore the
+  field.
 
 ### Transports
 

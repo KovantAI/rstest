@@ -879,8 +879,18 @@ pub(super) fn run_post_gates(
     // a gate that turned the run red counts. Not on `replay`: a diagnostic
     // re-run of an old schedule is no baseline.
     if !replay {
+        // Only a run over the whole suite is a green baseline: rstest's own
+        // selection (--changed, --since-green, --shard, --incremental's
+        // carried-forward passes) or pytest's (-k, a sub-path, --lf, ...)
+        // proves nothing about the rest.
+        let project = crate::config::discover(scope, &mut std::io::sink());
+        let full = changed_base.is_none()
+            && !since_green
+            && shard.is_none()
+            && !incremental_active
+            && !crate::since_green::narrows_selection(args, &project);
         let now = crate::since_green::capture(scope, python, head.as_deref(), started_epoch);
-        crate::since_green::after_run(sink, exitstatus, &now);
+        crate::since_green::after_run(sink, exitstatus, full, &now);
     }
     Ok(exitstatus)
 }

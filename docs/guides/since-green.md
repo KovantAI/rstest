@@ -231,12 +231,15 @@ if you'd rather not commit to advance anything.
 
 ## What changed since green
 
-Every run that exits 0 records what it ran with in
+Every full run that exits 0 records what it ran with in
 `.rstest_cache/green_env.json`: the commit, the interpreter version, the
 installed third-party packages, and a few environment variables that change
 how tests behave (`PYTEST_ADDOPTS`, `PYTHONPATH`, `PYTHONHASHSEED`,
-`PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`). This happens on every
-run, with or without `--since-green`.
+`PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`). This happens with or
+without `--since-green`. "Full" means a run over the whole suite: no `-k`, `-m`, nodeid, sub-path, `--lf`, `--deselect`, `--ignore` or stepwise, and no `--changed`, `--since-green`, `--shard` or `--incremental`. A path argument is
+fine when it covers the suite (the rootdir, or one that contains every
+`testpaths` entry, like CI's `rstest tests/`). A green run over part of the
+suite proves nothing about the rest, so it leaves the snapshot alone.
 
 When a later run has failing tests, rstest prints what differs on stderr:
 

@@ -35,7 +35,7 @@ Everything pytest does (via a vendored pytest core), plus:
 | Flaky report | `rstest flaky` | ranks tests that flip between pass and fail, with trend and the auto-quarantine set; `--json` for dashboards |
 | History dashboard | `rstest report` | self-contained HTML across recorded runs: failing and flaky tests per run, test time per run, flaky ranking, slowest tests, drift |
 | Test dossier | `rstest explain NODEID` | one test's timing, flakes, outcome strip, the commits between its last pass and first failure, and whether the environment changed |
-| What changed since green | `rstest since-green`, automatic on a red run | commits, interpreter, package and environment changes since the last run that exited 0 ([guide](../guides/since-green.md#what-changed-since-green)) |
+| What changed since green | `rstest since-green`, automatic on a red run | commits, interpreter, package and environment changes since the last full run that exited 0 ([guide](../guides/since-green.md#what-changed-since-green)) |
 | Duration regression gate | `--durations-regress RATIO` | fails the run when a test got slower than its history median (or last time) beyond its usual noise ([Catching slowdowns](../guides/slowdowns.md)) |
 | Live status footer | automatic on a terminal | per-worker current test + elapsed, progress + ETA |
 | Output styles | `--output dots/verbose/bar/github/json` (+ `gitlab/buildkite/teamcity/azure/tap`; see [CLI](../reference/cli.md)) | `bar` (the TTY default) = pytest-sugar-style per-test lines, inline failures, progress bar; works under the parallel pool. `github` emits CI annotations; `json` is a live NDJSON event stream. With no `--output` set, single-worker mode prints pytest's own terminal output instead |

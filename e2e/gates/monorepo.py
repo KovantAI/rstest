@@ -440,6 +440,20 @@ def gate_shared_cache_backend(g, args, binary):
         and "compacted" in r.stderr,
         f"rc={r.returncode} left={leftover}",
     )
+    # The folded history rides base.json packed (one string, not a JSON tree
+    # that grows with the suite), and a fresh project pulls it back.
+    base = json.loads((remote / "base.json").read_text(encoding="utf-8"))
+    g.write("scproj_c/test_s.py", "def test_a(): assert True\n")
+    scc = g.tmp / "scproj_c"
+    r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=scc)
+    ex = json.loads(g.run("explain", "test_s.py::test_slow", "--json", cwd=scc).stdout)
+    check(
+        "shared-cache: compacted history is packed in base.json and pulls back",
+        isinstance(base.get("history"), str)
+        and r.returncode == 0
+        and (ex["history"] or {}).get("runs") == 1,
+        f"history={str(base.get('history'))[:60]} {ex['history']} {r.stderr[-200:]}",
+    )
 
     # Coverage index rides the shared cache: two shards each push their PARTIAL
     # coverage slice; a pull unions them into a full line->test index. This is
