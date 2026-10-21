@@ -374,6 +374,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 

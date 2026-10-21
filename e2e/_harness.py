@@ -316,6 +316,9 @@ SCOPE_C = fx("scope_c.py")
 
 
 SECTIONS = fx("sections.py")
+# R23: every short-summary category (pass/fail with teardown errors, setup
+# error, skip, xfail, xpass).
+SHORT_SUMMARY = fx("short_summary.py")
 
 
 REPLAY_CRASH = fx("replay_crash.py")

@@ -436,6 +436,9 @@ mod tests {
             sections: Vec::new(),
             lineno,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 
