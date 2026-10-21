@@ -94,6 +94,15 @@ struct HistorySummary {
     /// `first_fail_commit` (`git log last..first`), newest first. Empty when
     /// both are the same commit; null when git can't resolve them here.
     suspect_commits: Option<Vec<SuspectCommit>>,
+    /// Flips in the recorded runs: a pass only on rerun, or a failure right
+    /// after a pass (the `--auto-quarantine` rule).
+    flips: usize,
+    /// Flips at which `--auto-quarantine` catches a test (`[tool.rstest]
+    /// auto-quarantine` or the default; `0` = off).
+    auto_quarantine_at: u32,
+    /// Whether the next run auto-quarantines this test (`flips` reached
+    /// `auto_quarantine_at`), unless the `--auto-quarantine-max` cap trips.
+    auto_quarantined_next_run: bool,
 }
 
 /// The merged per-nodeid dossier. `null` fields are simply absent from every
@@ -193,6 +202,9 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
         first_fail_commit,
         env_changed,
         suspect_commits: None,
+        flips: crate::reporting::history::flip_positions(series.iter().map(|(_, e)| *e)).len(),
+        auto_quarantine_at: 0,
+        auto_quarantined_next_run: false,
     })
 }
 
@@ -284,6 +296,12 @@ fn gather(nodeid: &str) -> ExplainReport {
         if let (Some(last), Some(first)) = (&h.last_pass_commit, &h.first_fail_commit) {
             h.suspect_commits = suspects(last, first, crate::select::git_stdout);
         }
+        // Config warnings belong to a run, not to this read-only view.
+        h.auto_quarantine_at = crate::config::rstest_settings(&scope, &mut std::io::sink())
+            .auto_quarantine
+            .unwrap_or(crate::cli::AUTO_QUARANTINE);
+        h.auto_quarantined_next_run =
+            h.auto_quarantine_at > 0 && h.flips >= h.auto_quarantine_at as usize;
     }
 
     let found = duration_seconds.is_some()
@@ -463,6 +481,20 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
                         )
                     )),
                 None => {}
+            }
+            if h.auto_quarantined_next_run {
+                sink.out_line(&format!(
+                    "             {}",
+                    pal.yellow(&format!(
+                        "flipped {}x: auto-quarantined on the next run (at {}+ flips)",
+                        h.flips, h.auto_quarantine_at
+                    ))
+                ));
+            } else if h.flips > 0 && h.auto_quarantine_at > 0 {
+                sink.out_line(&format!(
+                    "             flipped {}x (auto-quarantine at {})",
+                    h.flips, h.auto_quarantine_at
+                ));
             }
             if h.env_changed == Some(true) {
                 sink.out_line(&format!(
@@ -675,6 +707,9 @@ mod tests {
                     author: "Ada".into(),
                     subject: "rework parser".into(),
                 }]),
+                flips: 2,
+                auto_quarantine_at: 3,
+                auto_quarantined_next_run: false,
             }),
             ..report("tests/test_x.py::TestC::test_m[a::b]")
         }
@@ -704,14 +739,15 @@ mod tests {
         assert_eq!(lines[9], "             failing since fedcba9876");
         assert_eq!(lines[10], "             1 commit(s) in between:");
         assert_eq!(lines[11], "               fedcba9 rework parser (Ada)");
+        assert_eq!(lines[12], "             flipped 2x (auto-quarantine at 3)");
         assert_eq!(
-            lines[12],
+            lines[13],
             "             environment changed too (interpreter, lockfile or installed packages)"
         );
-        assert_eq!(lines[13], "  coverage   covers 2 file(s), 7 line(s):");
-        assert_eq!(lines[14], "               src/a.py");
-        assert_eq!(lines[15], "               src/b.py");
-        assert_eq!(lines.len(), 16, "out={out}");
+        assert_eq!(lines[14], "  coverage   covers 2 file(s), 7 line(s):");
+        assert_eq!(lines[15], "               src/a.py");
+        assert_eq!(lines[16], "               src/b.py");
+        assert_eq!(lines.len(), 17, "out={out}");
     }
 
     #[test]
@@ -813,6 +849,9 @@ mod tests {
         assert_eq!(v["history"]["runs"], 4);
         assert_eq!(v["history"]["outcomes"][1], "flaky");
         assert_eq!(v["history"]["env_changed"], true);
+        assert_eq!(v["history"]["flips"], 2);
+        assert_eq!(v["history"]["auto_quarantine_at"], 3);
+        assert_eq!(v["history"]["auto_quarantined_next_run"], false);
         assert_eq!(v["history"]["suspect_commits"][0]["sha"], "fedcba9");
         assert_eq!(v["history"]["suspect_commits"][0]["author"], "Ada");
         assert_eq!(
@@ -896,6 +935,35 @@ mod tests {
         assert!(suspects("a", "a", |_| Ok(String::new()))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn render_auto_quarantine_line() {
+        let with = |flips: usize, at: u32, next: bool| {
+            let mut r = full_report();
+            let h = r.history.as_mut().unwrap();
+            (h.flips, h.auto_quarantine_at, h.auto_quarantined_next_run) = (flips, at, next);
+            rendered(&r).0
+        };
+        assert!(with(4, 3, true)
+            .contains("             flipped 4x: auto-quarantined on the next run (at 3+ flips)"));
+        // Never flipped, or auto-quarantine off: no line at all.
+        assert!(!with(0, 3, false).contains("flipped"));
+        assert!(!with(5, 0, false).contains("flipped"));
+    }
+
+    #[test]
+    fn summarize_counts_flips() {
+        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, None)).collect();
+        let es = [
+            ent("passed", None),
+            ent("failed", None),
+            ent("flaky", None),
+            ent("failed", None),
+            ent("failed", None),
+        ];
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        assert_eq!(summarize(&series).unwrap().flips, 3);
     }
 
     #[test]

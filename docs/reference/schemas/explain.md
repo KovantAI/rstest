@@ -43,10 +43,13 @@ The test's recent runs from the per-test history (oldest first).
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `auto_quarantine_at` | integer | yes | Flips at which `--auto-quarantine` catches a test (`[tool.rstest] auto-quarantine` or the default; `0` = off). |
+| `auto_quarantined_next_run` | boolean | yes | Whether the next run auto-quarantines this test (`flips` reached `auto_quarantine_at`), unless the `--auto-quarantine-max` cap trips. |
 | `call_median` | number or null | yes | Median call-phase seconds over passing runs. |
 | `call_p95` | number or null | yes | 95th percentile (nearest rank) call-phase seconds over passing runs. |
 | `env_changed` | boolean or null | yes | When the latest run failed: whether the environment fingerprint (interpreter, lockfiles, installed packages) differs between the last passing run and the first failing one. |
 | `first_fail_commit` | string or null | yes | When the latest run failed: commit of the first run in that failing streak. |
+| `flips` | integer | yes | Flips in the recorded runs: a pass only on rerun, or a failure right after a pass (the `--auto-quarantine` rule). |
 | `last_pass_commit` | string or null | yes | Commit of the most recent passing run. |
 | `outcomes` | array of string | yes | Outcome per run, oldest first: `passed`, `failed`, `errors`, `skipped`, `xfailed`, `xpassed`, `quarantined`, `flaky` or `crashed`. |
 | `runs` | integer | yes | Number of recorded runs. |

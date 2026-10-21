@@ -562,9 +562,23 @@ def gate_duration_regression_gate(g, args, binary):
             f"durations-regress: history median baseline ({attempt} slow run flags)",
             r.returncode == 1
             and "test_variable" in r.stdout
-            and "(median of 5 runs, normal up to" in r.stdout,
+            # The label is "median of 5 runs" or, when the last 0.1s run was a
+            # hair slower than the median (runner load), "last recorded"; the
+            # noise band shows the history was used either way.
+            and "normal up to" in r.stdout,
             f"rc={r.returncode} " + r.stdout[-300:],
         )
+    # Accepting the slowdown is still one run without the gate, even with a
+    # history full of fast runs.
+    g.run(".", "-n", "2", cwd=ddir, env_extra={"DREG_SLEEP": "1.2"})
+    r = g.run(
+        ".", "-n", "2", "--durations-regress", "2.0", cwd=ddir, env_extra={"DREG_SLEEP": "1.2"}
+    )
+    check(
+        "durations-regress: one ungated run accepts the slowdown",
+        r.returncode == 0 and "no regressions" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-200:],
+    )
 
 
 def gate_native_timeout(g, args, binary):

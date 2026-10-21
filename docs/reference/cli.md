@@ -570,10 +570,12 @@ The baseline is the test's recent distribution when there is one:
 
 - **5 or more passing runs** in the per-test run history
   (`.rstest_cache/history.msgpack`): the baseline is the **median** of their
-  call times, and the time must also clear the test's own noise band (median
-  plus 3 scaled median absolute deviations, the "normal up to" figure). A
-  test that is always noisy doesn't fail the gate on a normal slow run, and
-  one slow outlier in the past doesn't raise the bar.
+  call times, or the last recorded time in the duration cache when that is
+  higher (an accepted slowdown, below). The time must also clear the test's
+  own noise band (median plus 3 scaled median absolute deviations, the
+  "normal up to" figure), so a test that is always noisy doesn't fail the
+  gate on a normal slow run. The row says which baseline it used:
+  `median of N runs` or `last recorded`.
 - **Less history**: the baseline is the last recorded time in the duration
   cache (`.rstest_cache/durations.json`, the file scheduling uses).
 
@@ -914,6 +916,12 @@ works under the parallel pool, where pytest-html writes nothing at `-n 2` or
 more (it only writes from a non-worker node). rstest owns the flag:
 pytest-html never receives it, and the layout is rstest's. Not written under a
 passthrough-IO flag (`--pdb`, `-s`, `--co`, ...), which has no merged run.
+
+The test table has an **earlier runs** column: each test's last 20 outcomes
+from the run history, oldest first (`✓` passed, `~` passed on rerun, `✗`
+failed, `-` skipped), not counting this run. Tests this run
+[auto-quarantined](#-auto-quarantinen) carry an `auto` badge (passing ones
+included), and the header says how many there were.
 
 ### `--report-json <path>`
 

@@ -163,6 +163,16 @@
       "description": "The test's recent runs from the per-test history (oldest first).",
       "type": "object",
       "properties": {
+        "auto_quarantine_at": {
+          "description": "Flips at which `--auto-quarantine` catches a test (`[tool.rstest]\nauto-quarantine` or the default; `0` = off).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "auto_quarantined_next_run": {
+          "description": "Whether the next run auto-quarantines this test (`flips` reached\n`auto_quarantine_at`), unless the `--auto-quarantine-max` cap trips.",
+          "type": "boolean"
+        },
         "call_median": {
           "description": "Median call-phase seconds over passing runs.",
           "type": [
@@ -192,6 +202,12 @@
             "string",
             "null"
           ]
+        },
+        "flips": {
+          "description": "Flips in the recorded runs: a pass only on rerun, or a failure right\nafter a pass (the `--auto-quarantine` rule).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
         },
         "last_pass_commit": {
           "description": "Commit of the most recent passing run.",
@@ -241,7 +257,10 @@
         "last_pass_commit",
         "first_fail_commit",
         "env_changed",
-        "suspect_commits"
+        "suspect_commits",
+        "flips",
+        "auto_quarantine_at",
+        "auto_quarantined_next_run"
       ]
     },
     "Meta": {

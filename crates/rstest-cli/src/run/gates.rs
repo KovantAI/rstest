@@ -51,7 +51,7 @@ fn write_run_reports(
         junit::write(path, run, suite_seconds)?;
     }
     if let Some(path) = html {
-        html::write(path, run, meta)?;
+        html::write(path, run, meta, &history::load())?;
     }
     Ok(())
 }
@@ -687,11 +687,14 @@ pub(super) fn run_post_gates(
                     ))
                 ));
                 for r in &rows {
-                    let basis = match r.history {
-                        Some((n, ceiling)) => palette.dim(&format!(
-                            "  (median of {n} runs, normal up to {ceiling:.2}s)"
-                        )),
-                        None => String::new(),
+                    let basis = match (r.median_runs, r.ceiling) {
+                        (Some(n), Some(c)) => {
+                            palette.dim(&format!("  (median of {n} runs, normal up to {c:.2}s)"))
+                        }
+                        (None, Some(c)) => {
+                            palette.dim(&format!("  (last recorded, normal up to {c:.2}s)"))
+                        }
+                        _ => String::new(),
                     };
                     sink.out_line(&format!(
                         "  {:7.2}s -> {:7.2}s  {}{basis}",
@@ -1103,11 +1106,16 @@ pub(super) struct Quarantine {
 }
 
 impl Quarantine {
-    /// Matcher for the post-run demotion. When more auto-set tests failed
+    /// Matcher for the post-run demotion, and whether it includes the auto
+    /// set. When more auto-set tests failed
     /// this run than `max_pct` percent of the run's tests (at least one),
     /// the environment is the likelier culprit: warn and demote only the
     /// file's tests, so those failures count as usual.
-    pub(super) fn demotion_matcher(&self, run: &report::Run, sink: &mut Sink) -> &regex::RegexSet {
+    pub(super) fn demotion_matcher(
+        &self,
+        run: &report::Run,
+        sink: &mut Sink,
+    ) -> (&regex::RegexSet, bool) {
         let failed = run
             .tests()
             .iter()
@@ -1118,7 +1126,7 @@ impl Quarantine {
         let total = run.tests().len();
         let cap = (total * self.max_pct as usize).div_ceil(100).max(1);
         if failed <= cap {
-            return &self.all;
+            return (&self.all, true);
         }
         sink.warn(&format!(
             "rstest: --auto-quarantine: {failed} auto-quarantined test(s) failed, over the cap \
@@ -1126,7 +1134,12 @@ impl Quarantine {
              environment looks broken (raise the cap with --auto-quarantine-max=PCT)",
             self.max_pct
         ));
-        &self.file
+        (&self.file, false)
+    }
+
+    /// The auto-quarantined nodeids (from the history; empty when off).
+    pub(super) fn auto(&self) -> &std::collections::HashSet<String> {
+        &self.auto
     }
 }
 
@@ -1566,16 +1579,16 @@ mod tests {
         // f1 is in the file and never counts toward the cap.
         let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 37);
         let (mut sink, cap) = Sink::captured();
-        let m = q.demotion_matcher(&run, &mut sink);
-        assert!(m.is_match("t.py::f2") && m.is_match("t.py::f3"));
+        let (m, auto) = q.demotion_matcher(&run, &mut sink);
+        assert!(auto && m.is_match("t.py::f2") && m.is_match("t.py::f3"));
         assert_eq!(cap.err(), "");
 
         // Same failures in a 20-test run: cap = 1, over it -> none of the auto
         // set is demoted, the file's test still is.
         let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 17);
         let (mut sink, cap) = Sink::captured();
-        let m = q.demotion_matcher(&run, &mut sink);
-        assert!(m.is_match("t.py::f1"));
+        let (m, auto) = q.demotion_matcher(&run, &mut sink);
+        assert!(!auto && m.is_match("t.py::f1"));
         assert!(!m.is_match("t.py::f2") && !m.is_match("t.py::f3"));
         let err = cap.err();
         assert!(
@@ -1588,6 +1601,7 @@ mod tests {
         let run = run_of(&["t.py::f2"], 1);
         assert!(q
             .demotion_matcher(&run, &mut Sink::captured().0)
+            .0
             .is_match("t.py::f2"));
         std::fs::remove_file(&path).ok();
     }

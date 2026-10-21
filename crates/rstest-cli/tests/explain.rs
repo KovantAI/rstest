@@ -154,7 +154,8 @@ fn human_report_merges_every_cache() {
          call median 0.2500s, p95 0.2500s\n             \
          last passed at c0aaaaaaaa\n             \
          failing since c1bbbbbbbb\n             \
-         commits in between: unknown here (not a git checkout, or not fetched)\n  \
+         commits in between: unknown here (not a git checkout, or not fetched)\n             \
+         flipped 1x (auto-quarantine at 3)\n  \
          coverage   covers 2 file(s), 3 line(s):\n               src/a.py\n               src/b.py\n"
     );
     assert_eq!(o.stdout, expected);
@@ -227,6 +228,28 @@ fn history_lists_suspect_commits_from_git() {
         .starts_with(&short(&shas[2])));
 }
 
+/// `explain` reads the auto-quarantine threshold from `[tool.rstest]`.
+#[test]
+fn auto_quarantine_threshold_comes_from_config() {
+    let dir = fresh_dir("autoq");
+    write_history(&dir, &history_doc(now())); // 1 flip
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        "[tool.rstest]\nauto-quarantine = 1\n",
+    )
+    .unwrap();
+    let o = run(&dir, &[ID]);
+    assert!(
+        o.stdout
+            .contains("flipped 1x: auto-quarantined on the next run (at 1+ flips)"),
+        "{}",
+        o.stdout
+    );
+    let v = run_json(&dir, ID);
+    assert_eq!(v["history"]["auto_quarantine_at"], 1);
+    assert_eq!(v["history"]["auto_quarantined_next_run"], true);
+}
+
 #[test]
 fn json_report_merges_every_cache() {
     let dir = fresh_dir("json-all");
@@ -254,6 +277,8 @@ fn json_report_merges_every_cache() {
     assert_eq!(v["history"]["call_median"], 0.25);
     assert_eq!(v["history"]["last_pass_commit"], "c0aaaaaaaaaaaa");
     assert_eq!(v["history"]["first_fail_commit"], "c1bbbbbbbbbbbb");
+    assert_eq!(v["history"]["flips"], 1);
+    assert_eq!(v["history"]["auto_quarantined_next_run"], false);
 }
 
 #[test]

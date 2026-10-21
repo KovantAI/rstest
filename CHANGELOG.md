@@ -53,10 +53,19 @@ between 0.x releases and are listed here.
   across the break (`history.env_changed`).
 - **`--durations-regress` judges a test against its own history.** With 5 or
   more passing runs in the run history, the baseline is the median of their
-  call times instead of the last recorded time, and a time inside the test's
-  usual spread (median plus 3 scaled MADs) no longer fails the gate. Rows say
-  which baseline they used. A flagged run's time is also kept out of the
-  history, so the gate keeps firing until the slowdown is accepted.
+  call times (or the last recorded time, if higher), and a time inside the
+  test's usual spread (median plus 3 scaled MADs) no longer fails the gate.
+  Rows say which baseline they used. A flagged run's time is also kept out of
+  the history, so the gate keeps firing until the slowdown is accepted, which
+  is still one run without `--durations-regress`.
+
+- **The HTML report shows each test's history.** A new "earlier runs" column
+  shows each test's last 20 outcomes from the run history, tests the run
+  auto-quarantined carry an `auto` badge, and the header counts them.
+- **`explain` says whether a test will be auto-quarantined.** It shows the
+  test's flip count and whether the next run auto-quarantines it (`--json`:
+  `history.flips`, `history.auto_quarantine_at`,
+  `history.auto_quarantined_next_run`).
 
 ### Fixes
 

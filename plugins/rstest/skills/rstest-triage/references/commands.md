@@ -134,7 +134,9 @@ $ rstest explain "tests/test_api.py::test_login" --json
   the commits in between (`history.suspect_commits`, from `git log`; `null`
   when this clone lacks them, so `git fetch` and retry), and whether the
   environment changed across the break (`history.env_changed`: no commits
-  and a changed environment means a dependency bump).
+  and a changed environment means a dependency bump), and its flip count
+  with whether the next run auto-quarantines it
+  (`history.auto_quarantined_next_run`).
 - Unknown nodeid: human mode exits `1` with substring suggestions; `--json`
   exits `0` with `"found": false`.
 - On a fresh CI runner the caches are empty unless `.rstest_cache` is

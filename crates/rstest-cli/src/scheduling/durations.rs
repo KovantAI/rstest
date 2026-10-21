@@ -428,13 +428,14 @@ const MAD_SCALE: f64 = 1.4826;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Regression {
     pub nodeid: String,
-    /// What the test was compared against: the median of its passing runs in
-    /// the history, or its last recorded time when the history is too short.
+    /// What the test was compared against (see [`regressions`]).
     pub baseline: f64,
     pub new: f64,
-    /// `(runs, normal up to)` when `baseline` is a history median: the passing
-    /// runs it came from and the top of the noise band.
-    pub history: Option<(usize, f64)>,
+    /// Passing runs `baseline` is the median of, when the history median
+    /// was the baseline; `None` when it is the last recorded time.
+    pub median_runs: Option<usize>,
+    /// Top of the test's noise band, when the history had enough runs.
+    pub ceiling: Option<f64>,
 }
 
 /// A test's passing call times in the history as `(median, noise ceiling,
@@ -459,11 +460,16 @@ fn history_baseline(h: &History, nodeid: &str) -> Option<(f64, f64, usize)> {
 
 /// --durations-regress rows, worst absolute growth first. A test regresses
 /// when new >= ratio*baseline AND baseline >= 50ms AND growth >= 0.5s (jitter
-/// floors). The baseline is the median of the test's passing runs in the
-/// history once it has [`HISTORY_MIN_RUNS`] of them, and then the time must
-/// also clear the test's own noise band (median + 3 scaled MADs), so a test
-/// that is always noisy doesn't flag on a normal slow run. With less history
-/// the baseline is the last recorded time in `baseline`. Tests in neither
+/// floors).
+///
+/// With [`HISTORY_MIN_RUNS`] passing runs in the history, the baseline is the
+/// larger of their median and the last recorded time in `baseline`, and the
+/// time must also clear the test's noise band (median + 3 scaled MADs), so a
+/// test that is always noisy doesn't flag on a normal slow run. The median
+/// shrugs off old outliers; the last recorded time keeps the documented way
+/// to accept an intended slowdown working: one run without the gate records
+/// the new time, and the next gated run compares against it. With less
+/// history the baseline is the last recorded time alone. Tests in neither
 /// never flag.
 pub fn regressions(
     run: &Run,
@@ -474,17 +480,24 @@ pub fn regressions(
     let mut rows: Vec<Regression> = run
         .durations()
         .filter_map(|(id, new)| {
-            let (old, ceiling, hist) = match history_baseline(history, id) {
-                Some((med, ceiling, n)) => (med, ceiling, Some((n, ceiling))),
-                None => (*baseline.get(id)?, 0.0, None),
+            let last = baseline.get(id).copied();
+            let (old, median_runs, ceiling) = match history_baseline(history, id) {
+                Some((med, ceiling, n)) => match last {
+                    Some(l) if l > med => (l, None, Some(ceiling)),
+                    _ => (med, Some(n), Some(ceiling)),
+                },
+                None => (last?, None, None),
             };
-            (old >= 0.05 && new >= old * ratio && new - old >= 0.5 && new > ceiling).then(|| {
-                Regression {
-                    nodeid: id.clone(),
-                    baseline: old,
-                    new,
-                    history: hist,
-                }
+            (old >= 0.05
+                && new >= old * ratio
+                && new - old >= 0.5
+                && ceiling.is_none_or(|c| new > c))
+            .then(|| Regression {
+                nodeid: id.clone(),
+                baseline: old,
+                new,
+                median_runs,
+                ceiling,
             })
         })
         .collect();
@@ -625,7 +638,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].nodeid, "t/a.py::slow");
         assert_eq!(rows[0].baseline, 0.5);
-        assert_eq!(rows[0].history, None);
+        assert_eq!((rows[0].median_runs, rows[0].ceiling), (None, None));
     }
 
     fn call_report(id: &str, outcome: &str, d: f64) -> crate::scheduling::proto::Report {
@@ -700,18 +713,18 @@ mod tests {
             ("t::stable", stable),
             ("t::short", short),
         ]);
-        // Last recorded values: noisy's last fast run, an old slow outlier
-        // for stable, and short's only signal.
+        // Last recorded values: noisy's last fast run, stable's usual time,
+        // and short's only signal.
         let base = HashMap::from([
             ("t::noisy".to_string(), 1.0),
-            ("t::stable".to_string(), 0.8),
+            ("t::stable".to_string(), 0.2),
             ("t::short".to_string(), 0.2),
         ]);
         let mut run = Run::default();
         // noisy: median 2.0, normal up to 2 + 3 * 1.4826 = 6.45. 4.5s is 2x
         // the median and 4.5x its last run, but inside its usual spread.
         run.record(None, call_report("t::noisy", "passed", 4.5));
-        // stable: median 0.2 flags 0.9s, which 2x the 0.8 outlier would miss.
+        // stable: median 0.2; the failed and time-less runs don't count.
         run.record(None, call_report("t::stable", "passed", 0.9));
         // short: 4 runs, under HISTORY_MIN_RUNS: judged on the last value.
         run.record(None, call_report("t::short", "passed", 0.8));
@@ -719,8 +732,8 @@ mod tests {
         let ids: Vec<&str> = rows.iter().map(|r| r.nodeid.as_str()).collect();
         assert_eq!(ids, ["t::stable", "t::short"]);
         assert_eq!(rows[0].baseline, 0.2_f32 as f64);
-        assert_eq!(rows[0].history.map(|(n, _)| n), Some(5));
-        assert_eq!(rows[1].history, None);
+        assert_eq!(rows[0].median_runs, Some(5));
+        assert_eq!(rows[1].median_runs, None);
         assert_eq!(rows[1].baseline, 0.2);
 
         // Past the noise band, the noisy test flags too.
@@ -729,9 +742,32 @@ mod tests {
         let rows = regressions(&run, &base, &h, 2.0);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].baseline, 2.0);
-        let (n, ceiling) = rows[0].history.unwrap();
-        assert_eq!(n, 7);
+        assert_eq!(rows[0].median_runs, Some(7));
+        let ceiling = rows[0].ceiling.unwrap();
         assert!((ceiling - 6.4478).abs() < 1e-3, "{ceiling}");
+    }
+
+    #[test]
+    fn regressions_accept_a_slowdown_recorded_by_an_ungated_run() {
+        // Five fast runs, then one run without --durations-regress at 1.2s:
+        // its time is in durations.json (and one slow sample in history).
+        let p = |c: f32| ("passed", Some(c));
+        let runs: &[Run1] = &[p(0.1), p(0.1), p(0.1), p(0.1), p(0.1), p(1.2)];
+        let h = history_of(&[("t::poll", runs)]);
+        let base = HashMap::from([("t::poll".to_string(), 1.2)]);
+        let mut run = Run::default();
+        run.record(None, call_report("t::poll", "passed", 1.25));
+        // The documented way to accept an intended slowdown must still work:
+        // the next gated run at the new speed passes.
+        assert!(regressions(&run, &base, &h, 2.0).is_empty());
+        // A further real regression past the accepted time still flags,
+        // against the accepted value.
+        let mut run = Run::default();
+        run.record(None, call_report("t::poll", "passed", 3.0));
+        let rows = regressions(&run, &base, &h, 2.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].baseline, 1.2);
+        assert_eq!(rows[0].median_runs, None);
     }
 
     #[test]

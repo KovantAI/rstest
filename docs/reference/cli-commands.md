@@ -608,6 +608,7 @@ test: tests/test_api.py::test_login
              2 commit(s) in between:
                8d04e6c bump httpx to 0.28 (Ada)
                51be0a2 move session refresh into middleware (Bo)
+             flipped 1x (auto-quarantine at 3)
              environment changed too (interpreter, lockfile or installed packages)
   coverage   covers 2 file(s), 47 line(s):
                src/api/auth.py
@@ -634,6 +635,15 @@ started at). Fields whose cache is
 cold are shown as unavailable rather than omitted. In human mode an unknown
 nodeid exits `1` and prints substring suggestions; with `--json` it exits `0`
 with `"found": false` so tooling can probe nodeids cheaply.
+
+It also counts the test's **flips** (a pass only on rerun, or a failure right
+after a pass) and says whether the next run will
+[auto-quarantine](cli.md#-auto-quarantinen) it, at the `[tool.rstest]
+auto-quarantine` threshold (`flipped 4x: auto-quarantined on the next run`).
+`--json` carries `history.flips`, `history.auto_quarantine_at` and
+`history.auto_quarantined_next_run`. The run can still skip the auto set if
+too many of its tests fail at once
+([`--auto-quarantine-max`](cli.md#-auto-quarantine-max-pct)).
 
 When the test is failing now, `explain` lists the commits between the last
 pass and the first failure (`git log <last>..<first>`, newest first, up to 10;
