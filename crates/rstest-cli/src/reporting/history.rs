@@ -98,6 +98,22 @@ impl History {
             .collect()
     }
 
+    /// Tests whose recorded series flipped at least `min` times, sorted. A
+    /// flip is a run rescued by `--reruns` (`flaky`) or a failure right after
+    /// a pass (non-pass/non-fail outcomes like `skipped` are stepped over).
+    /// A test that broke and stays broken flips once, so a real regression is
+    /// never auto-quarantined at the default `min`.
+    pub fn flippers(&self, min: u32) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .tests
+            .iter()
+            .filter(|(_, s)| flips(s) >= min)
+            .map(|(id, _)| id.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Add one run. Each test's series is trimmed to the newest `cap` entries
     /// and runs no entry points at any more are dropped.
     fn append(&mut self, mut meta: RunMeta, entries: Vec<(String, Entry)>, cap: usize) {
@@ -140,6 +156,26 @@ impl History {
         let live: HashSet<u64> = self.tests.values().flatten().map(|e| e.run).collect();
         self.runs.retain(|r| live.contains(&r.seq));
     }
+}
+
+fn flips(series: &VecDeque<Entry>) -> u32 {
+    let mut n = 0;
+    let mut last_pass = false;
+    for e in series {
+        match e.outcome.as_str() {
+            "flaky" => {
+                n += 1;
+                last_pass = true;
+            }
+            "passed" => last_pass = true,
+            "failed" | "errors" | "crashed" | "quarantined" => {
+                n += u32::from(last_pass);
+                last_pass = false;
+            }
+            _ => {}
+        }
+    }
+    n
 }
 
 /// Entries kept per test. `RSTEST_HISTORY_RUNS`, default 50, minimum 1.
@@ -391,6 +427,40 @@ mod tests {
         std::fs::write(&path, rmp_serde::to_vec(&h).unwrap()).unwrap();
         assert_eq!(load_from(&path), History::default());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flippers_catch_intermittent_not_steadily_broken() {
+        let mut h = History::default();
+        let series = |s: &str| {
+            s.chars()
+                .map(|c| match c {
+                    'p' => "passed",
+                    'f' => "failed",
+                    '~' => "flaky",
+                    'q' => "quarantined",
+                    _ => "skipped",
+                })
+                .collect::<Vec<_>>()
+        };
+        let tests = [
+            ("broke", "ppppffff"),    // 1 flip: a real regression
+            ("flap", "pfpfpf"),       // 3 flips
+            ("rescued", "p~p~p~"),    // 3 reruns rescued it
+            ("skips", "pfsfpsf"),     // skip between fails is stepped over: 2
+            ("quar", "pqpqpq"),       // quarantined failures still count
+            ("born_red", "ffffffff"), // never passed: 0
+        ];
+        for i in 0..8 {
+            let es = tests
+                .iter()
+                .filter_map(|(id, s)| series(s).get(i).map(|o| (id.to_string(), entry(o))))
+                .collect();
+            h.append(meta(i as u64), es, 50);
+        }
+        assert_eq!(h.flippers(3), ["flap", "quar", "rescued"]);
+        assert_eq!(h.flippers(2), ["flap", "quar", "rescued", "skips"]);
+        assert_eq!(h.flippers(1).len(), 5);
     }
 
     #[test]

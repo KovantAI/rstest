@@ -180,7 +180,7 @@
           "type": "string"
         },
         "quarantined": {
-          "description": "Failed, but matched the --quarantine list: reported distinctly,\nnever fatal to the run.",
+          "description": "Failed, but matched the --quarantine list or the --auto-quarantine\nset: reported distinctly, never fatal to the run.",
           "type": "boolean"
         },
         "setup": {

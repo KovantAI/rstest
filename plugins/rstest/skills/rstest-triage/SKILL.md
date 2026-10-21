@@ -9,10 +9,11 @@ description: >-
   journal, `rstest bisect` to find the polluting test, `rstest audit` to sweep
   for parallel-only failures, `rstest explain` for one test's history) and the
   flaky-test controls (`--reruns`, `--reruns-only-known-flaky`, `--quarantine`,
-  `--shuffle`). Use it whenever the user has an rstest failure to explain or fix,
-  mentions a replay journal, `latest.json`, a polluter, order dependence,
-  `flakes.json`, quarantine, or asks "why does this only fail on CI / in
-  parallel", even if they don't name the command. Not for first-time migration
+  `--auto-quarantine`, `--shuffle`). Use it whenever the user has an rstest
+  failure to explain or fix, mentions a replay journal, `latest.json`, a
+  polluter, order dependence, `flakes.json`, quarantine, asks why a test was
+  quarantined or why a failing test didn't fail the run, or asks "why does
+  this only fail on CI / in parallel", even if they don't name the command. Not for first-time migration
   from pytest or for speed tuning (use migrate-to-rstest), and not for plain
   test failures that also fail under ordinary pytest.
 ---
@@ -117,7 +118,7 @@ Two judgment calls that come up often:
 
 ## Step 4: flaky-test policy (when the user asks for one)
 
-The three controls form a lifecycle, and mixing them up is the common mistake:
+The four controls form a lifecycle, and mixing them up is the common mistake:
 
 1. `--reruns N` rescues a flake within one run and records it in
    `.rstest_cache/flakes.json`.
@@ -126,16 +127,31 @@ The three controls form a lifecycle, and mixing them up is the common mistake:
    50 tests) fails fast instead of retrying 50 times. It **spends** history but
    never **builds** it, so pair it with a separate learning run (plain
    `--reruns`, nightly or pre-merge) and persist `.rstest_cache` in CI.
-3. `--quarantine quarantine.txt` demotes failures of listed tests to a
-   non-fatal `quarantined` outcome. The file is committed, so each entry
-   should carry a comment linking its tracking issue, **on its own line
-   above the entry**: a trailing `# comment` on the same line becomes part of
-   the pattern and the entry silently stops matching. New failures outside the
-   list still fail the run.
+3. `--quarantine quarantine.txt` (or `[tool.rstest] quarantine =
+   "quarantine.txt"`) demotes failures of listed tests to a non-fatal
+   `quarantined` outcome. The file is committed, so each entry should carry a
+   comment linking its tracking issue (a whole-line `#` comment, or a
+   trailing one after whitespace: `test_a  # JIRA-1`). New failures outside
+   the list still fail the run.
+4. `--auto-quarantine` is **on by default**: every run quarantines the tests
+   whose run history (`.rstest_cache/history.msgpack`) flipped between pass
+   and fail 3+ times (a failure right after a pass, or a pass only on
+   rerun), and prints that set on stderr. A test that broke and stays broken
+   flips once and still fails. `--auto-quarantine-max` (default 5%) is a
+   safety cap: when more auto-quarantined tests fail than that share of the
+   run, none of them is quarantined, since the environment is the likelier
+   cause. `--auto-quarantine=0` (or `auto-quarantine = 0` in
+   `[tool.rstest]`) turns it off.
+
+When a user asks why a failing test didn't fail the run, look for the
+`--auto-quarantine:` line on stderr and run `rstest explain <nodeid>` for the
+outcome strip that put it there. The auto set can't tell real nondeterminism
+from an order dependency, so check for a polluter (`bisect`) before treating
+an auto-quarantined test as plain flaky.
 
 Recommend persisting `.rstest_cache` across CI runs whenever flake history
-matters; without it, `explain` and `--reruns-only-known-flaky` have nothing to
-read on CI.
+matters; without it, `explain`, `--reruns-only-known-flaky` and
+`--auto-quarantine` have nothing to read on CI.
 
 One trap to steer around when writing the policy:
 

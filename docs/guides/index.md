@@ -18,7 +18,7 @@ Task-oriented how-tos. Start with the one that matches what you are doing.
 - [Debugging a test](debugging.md): `breakpoint()`/pdb, attaching VS Code or PyCharm with `--debug`
 - [Selecting changed tests](changed.md): `--changed` via import graph or coverage index
 - [Running only what changed since green](since-green.md): `--since-green` (diff against the last green commit) and `--incremental` (skip unchanged green tests, no git)
-- [Flaky tests](flaky-tests.md): reruns, flake history, quarantine
+- [Flaky tests](flaky-tests.md): reruns, flake history, quarantine, auto-quarantine
 - [Catching slowdowns](slowdowns.md): fail CI when a test or the whole suite gets slower
 - [Resource leaks](resource-leaks.md): detecting and gating tests that leak threads and file descriptors
 - [Replaying a CI failure locally](replay.md): re-run a failed CI job's per-worker schedule with `rstest replay`

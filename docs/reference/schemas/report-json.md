@@ -53,7 +53,7 @@ Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-re
 | `flaky` | boolean | no | Passed only after one or more reruns (--reruns or @pytest.mark.flaky). |
 | `lineno` | integer | no | Source line of the test (0-based, from pytest's report.location), for editor mapping. Absent when pytest reports no location. |
 | `longrepr` | string | no | Failure text (assertion repr / traceback), failures only. |
-| `quarantined` | boolean | no | Failed, but matched the --quarantine list: reported distinctly, never fatal to the run. |
+| `quarantined` | boolean | no | Failed, but matched the --quarantine list or the --auto-quarantine set: reported distinctly, never fatal to the run. |
 | `setup` | string | no | Setup-phase outcome: `"passed"`, `"failed"` or `"skipped"`. |
 | `skip_reason` | string | no | pytest's skip message (first 200 characters), keeping its `Skipped: ` prefix. |
 | `subtests_failed` | integer | no | Failed subtests (unittest `subTest` / the `subtests` fixture). Any makes `call` "failed"; each also counts as one `failed`, as in pytest. |

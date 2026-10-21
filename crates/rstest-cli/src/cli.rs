@@ -307,6 +307,22 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub(crate) quarantine: Option<PathBuf>,
 
+    /// Quarantine tests whose recent history (`.rstest_cache/
+    /// history.msgpack`) flipped at least N times: a failure right after a
+    /// pass, or a pass only on rerun. On by default (N=3); =0 turns it off.
+    /// A test that broke and stays broken flips once and still fails the
+    /// run. Unions with --quarantine; a test is released once its flips age
+    /// out.
+    #[arg(long, num_args = 0..=1, default_missing_value = "3", value_name = "N")]
+    pub(crate) auto_quarantine: Option<u32>,
+
+    /// Ceiling for --auto-quarantine: when more auto-quarantined tests fail
+    /// than PCT percent of this run's tests (default 5, at least one test),
+    /// none of them is quarantined and the run warns: that many flappers
+    /// failing at once points at a broken environment, not flaky tests.
+    #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u32).range(0..=100))]
+    pub(crate) auto_quarantine_max: Option<u32>,
+
     /// With reruns active, retry only failures whose error text matches
     /// this regex (repeatable). pytest-rerunfailures' --only-rerun.
     #[arg(long = "only-rerun", value_name = "REGEX")]
@@ -851,10 +867,14 @@ fn numprocesses_arg(s: &str) -> Result<String, String> {
     }
 }
 
+/// `--auto-quarantine` / `--auto-quarantine-max` defaults.
+pub(crate) const AUTO_QUARANTINE: u32 = 3;
+pub(crate) const AUTO_QUARANTINE_MAX: u32 = 5;
+
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
 /// the following argv item (that item is a path / pytest flag).
-const OPT_FLAGS: &[&str] = &["--changed", "--shuffle", "--debug"];
+const OPT_FLAGS: &[&str] = &["--changed", "--shuffle", "--debug", "--auto-quarantine"];
 
 /// Flags that take a value: either the following argv item (`--dist load`) or
 /// `=`-joined (`--dist=load`). `-n` also accepts the attached short forms
@@ -881,6 +901,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--reruns",
     "--doctor-json",
     "--quarantine",
+    "--auto-quarantine-max",
     "--doctor-md",
     "--doctor-fail-on",
     "--junitxml",

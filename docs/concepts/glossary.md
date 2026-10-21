@@ -153,11 +153,14 @@ but reuses its vocabulary (`gw0`/`gw1` worker names, the `-n` flag, `--dist`
 modes), so xdist users feel at home. See
 [Migrating from pytest-xdist](../guides/migrate-from-xdist.md).
 
-**Quarantine**{ #quarantine }: a list of known-flaky tests
-([`--quarantine FILE`](../reference/cli.md#-quarantine-file)) whose failures
+**Quarantine**{ #quarantine }: a set of known-flaky tests whose failures
 are reported (counted, printed, flagged in junit and report-json) but never
-fail the run. Unlike `--reruns`, nothing is retried; the failure is just
-made non-fatal.
+fail the run. The set is a committed list
+([`--quarantine FILE`](../reference/cli.md#-quarantine-file)) plus, by
+default, the tests the run history shows flipping between pass and fail
+([`--auto-quarantine`](../reference/cli.md#-auto-quarantinen)). Unlike
+`--reruns`, nothing is retried; the failure is just made non-fatal. See
+[Flaky tests](../guides/flaky-tests.md).
 
 **Replay**{ #replay }: [`rstest replay`](../reference/cli-commands.md#replay)
 re-runs a recorded [journal](#journal), pinning every test to the same worker
