@@ -25,6 +25,7 @@ mod run;
 mod scheduling;
 #[cfg(test)]
 mod schema;
+mod scratch;
 mod select;
 mod shardverify;
 mod skills;
@@ -51,6 +52,10 @@ pub use scheduling::proto;
 pub fn run() -> Result<i32> {
     let (own_args, args) = cli::split_argv();
     let cli = Cli::parse_from(&own_args);
+    // Clear what killed runs left in the temp dir, then hold this run's folder
+    // until return (subcommands too: bisect and migrate-check use it).
+    scratch::sweep();
+    let _scratch = scratch::claim();
     // Anchor `.rstest_cache` at pytest's rootdir before anything reads it, so
     // a run from a subdirectory shares the project's cache (as `.pytest_cache`).
     if let Ok(cwd) = std::env::current_dir() {
@@ -65,11 +70,13 @@ pub fn run() -> Result<i32> {
     // `-p no:cacheprovider` (argv or addopts) keeps pytest from writing
     // `.pytest_cache`; keep `.rstest_cache` out of the project too, for the
     // runs only (the subcommands above exist to read an existing cache).
-    let _scratch_cache = std::env::current_dir()
+    if std::env::current_dir()
         .ok()
         .map(|cwd| cov_scope::effective_pytest_args(&cwd, &args))
-        .filter(|eff| cache::cacheprovider_disabled(eff))
-        .and_then(|_| cache::disable_for_run());
+        .is_some_and(|eff| cache::cacheprovider_disabled(&eff))
+    {
+        cache::disable_for_run();
+    }
     if cli.watch {
         watch::watch_loop(&cli, &args)?;
         return Ok(0);

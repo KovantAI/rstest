@@ -197,8 +197,9 @@ Move once-per-run setup into a session fixture that the workers coordinate
 through a file lock, the pattern
 [xdist documents](https://pytest-xdist.readthedocs.io/en/stable/how-to.html#making-session-scoped-fixtures-execute-only-once)
 for the same problem. `tmp_path_factory.getbasetemp().parent` is shared by
-every worker in a run, and `testrun_uid` is the same in every worker, so the
-first worker produces the data and the rest reuse it:
+every worker in a run (and deleted when the run ends), and `testrun_uid` is
+the same in every worker, so the first worker produces the data and the rest
+reuse it:
 
 ```python
 import json

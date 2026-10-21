@@ -136,15 +136,11 @@ pub(super) fn run_session_capture(
 ) -> Result<(Option<Outcomes>, String)> {
     let exe = std::env::current_exe()?;
     let seq = run_session_seq();
-    let tmp =
-        std::env::temp_dir().join(format!("rstest-migrate-{}-{seq}.json", std::process::id()));
+    let tmp = crate::scratch::dir().join(format!("migrate-{seq}.json"));
     // stderr goes to a file, not a pipe: a pipe is only drained at EOF, which a
     // leaked grandchild (a server a test never stopped) holding the inherited
     // fd would never send, hanging the call after the child itself exited.
-    let err_path = std::env::temp_dir().join(format!(
-        "rstest-migrate-{}-{seq}.stderr",
-        std::process::id()
-    ));
+    let err_path = crate::scratch::dir().join(format!("migrate-{seq}.stderr"));
     let err_file = std::fs::File::create(&err_path)?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--python")

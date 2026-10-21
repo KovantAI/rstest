@@ -167,8 +167,10 @@ can still run parallel in a separate step.
 ## Where did my `tmp_path` go?
 
 Each worker uses a disjoint temp root (`$TMPDIR/rstest-<pid>/gwN/...`),
-like pytest-xdist. With a user-provided `--basetemp`, each worker uses
-`<basetemp>/gwN` (xdist's layout); with `-n 0` it is used as given.
+like pytest-xdist, and rstest deletes `$TMPDIR/rstest-<pid>/` when the run
+ends. To look at `tmp_path` contents afterwards, pass your own `--basetemp`:
+rstest never deletes it, and each worker uses `<basetemp>/gwN` (xdist's
+layout). With `-n 0` it is used as given.
 
 ## `rstest` runs the wrong Python / can't find my venv
 

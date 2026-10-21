@@ -99,33 +99,18 @@ pub fn cacheprovider_disabled(args: &[String]) -> bool {
 
 /// Keeps the run's cache out of the project, as `-p no:cacheprovider` keeps
 /// `.pytest_cache` out: `.rstest_cache` is never created and an existing one
-/// is neither read nor written. The run uses a private, empty scratch dir that
-/// this guard removes on drop, so everything that needs the cache degrades to
-/// a cold run (durations scheduling, flake history) instead of failing, and
-/// nothing is left for `rstest replay`/`explain` afterwards. An explicit
-/// `RSTEST_CACHE` still wins: that is a request for a cache at that path.
-pub struct ScratchCache(PathBuf);
-
-/// Redirect this process's cache to a scratch dir for a run that disabled
-/// pytest's cacheprovider. `None` (and no effect) when `RSTEST_CACHE` is set
-/// or the cache was already redirected.
-pub fn disable_for_run() -> Option<ScratchCache> {
+/// is neither read nor written. The run uses a private, empty scratch dir in
+/// the run's temp folder (deleted with it, see [`crate::scratch`]), so
+/// everything that needs the cache degrades to a cold run (durations
+/// scheduling, flake history) instead of failing, and nothing is left for
+/// `rstest replay`/`explain` afterwards. An explicit `RSTEST_CACHE` still
+/// wins: that is a request for a cache at that path. No effect either when the
+/// cache was already redirected.
+pub fn disable_for_run() {
     if std::env::var_os("RSTEST_CACHE").is_some() {
-        return None;
+        return;
     }
-    let dir = std::env::temp_dir().join(format!(
-        "rstest-nocache-{}-{:x}",
-        std::process::id(),
-        crate::time::now_epoch_nanos()
-    ));
-    SCRATCH.set(dir.clone()).ok()?;
-    Some(ScratchCache(dir))
-}
-
-impl Drop for ScratchCache {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+    let _ = SCRATCH.set(crate::scratch::dir().join("nocache"));
 }
 
 /// The cache directory for this run.
@@ -310,6 +295,15 @@ fn lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
     rc_to_result(rc)
 }
 
+/// [`lock_exclusive`] that fails at once instead of waiting when the lock is held.
+#[cfg(unix)]
+pub(crate) fn try_lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `f` owns a valid fd for the duration of the call.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    rc_to_result(rc)
+}
+
 /// Map a libc-style return code (0 = success) to `io::Result`, reading errno
 /// on failure. Split out so the error arm is testable without a failing flock.
 #[cfg(unix)]
@@ -323,6 +317,20 @@ fn rc_to_result(rc: libc::c_int) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
+    lock_file_ex(f, 0)
+}
+
+/// [`lock_exclusive`] that fails at once instead of waiting when the lock is held.
+#[cfg(windows)]
+pub(crate) fn try_lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
+    lock_file_ex(
+        f,
+        windows_sys::Win32::Storage::FileSystem::LOCKFILE_FAIL_IMMEDIATELY,
+    )
+}
+
+#[cfg(windows)]
+fn lock_file_ex(f: &std::fs::File, extra_flags: u32) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
     use windows_sys::Win32::System::IO::OVERLAPPED;
@@ -332,7 +340,7 @@ fn lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
     let ok = unsafe {
         LockFileEx(
             f.as_raw_handle() as _,
-            LOCKFILE_EXCLUSIVE_LOCK,
+            LOCKFILE_EXCLUSIVE_LOCK | extra_flags,
             0,
             u32::MAX,
             u32::MAX,
@@ -353,6 +361,11 @@ fn lock_exclusive(_f: &std::fs::File) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "file locking unsupported on this platform",
     ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn try_lock_exclusive(f: &std::fs::File) -> std::io::Result<()> {
+    lock_exclusive(f)
 }
 
 /// Write `bytes` to `path` and flush data+metadata to disk before returning, so
