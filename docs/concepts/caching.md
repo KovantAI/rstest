@@ -219,8 +219,10 @@ Recipes: [Shared cache across CI jobs](../guides/ci-shared-cache.md).
 
 Workers read it normally (`--lf`/`--ff` deselection happens inside the
 vendored core). Writes to the run-level keys (`lastfailed`, `nodeids`,
-`stepwise`) are blocked in workers (each worker sees only its own slice)
-and the orchestrator writes the merged truth after the run. `lastfailed` is
+`stepwise`) are blocked in workers (each worker sees only its own slice).
+After the run the orchestrator writes the merged `lastfailed`; nothing
+writes `nodeids` in a parallel run, and `--sw` runs as a single session, so
+pytest's own stepwise plugin keeps `stepwise`. `lastfailed` is
 updated the way pytest updates it: this run's failures are added, tests that
 passed or were skipped are removed, and the failures of tests the run did not
 execute stay, so a passing subset run keeps the rest. A test that was running
