@@ -237,7 +237,7 @@ a test and isn't restarted. The failure shows its exit code and the last
 lines of its stderr, which is usually the actual error, for example:
 
 ```text
---- FAILED <worker gw0> ---
+--- ERROR <worker gw0> ---
 worker terminated unexpectedly: exited during startup, before sending any event
   exited with code 1
   last lines of its stderr:

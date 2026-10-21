@@ -117,6 +117,12 @@ pub struct TestEntry {
     /// "failed"): pytest counts the parent by it, apart from its subtests.
     #[serde(skip)]
     pub(crate) own_call: Option<String>,
+    /// Short test summary only: the xfail/xpass reason and where a skip
+    /// happened (see [`proto::Report`]). Not serialized.
+    #[serde(skip)]
+    pub(crate) xfail_reason: Option<String>,
+    #[serde(skip)]
+    pub(crate) skip_location: Option<(String, Option<u64>)>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -211,8 +217,19 @@ pub struct ShardJson<'a> {
     pub n: usize,
 }
 
-/// A recorded failure: (nodeid, longrepr, sections of (header, body)).
-type Failure = (Option<usize>, String, String, Vec<(String, String)>);
+/// One failed phase report, in arrival order.
+#[derive(Debug)]
+struct Failure {
+    worker: Option<usize>,
+    nodeid: String,
+    /// `setup`, `call` or `teardown`: a setup/teardown failure is an error.
+    when: String,
+    longrepr: String,
+    /// Captured output sections, (header, body).
+    sections: Vec<(String, String)>,
+    /// The short test summary's message (see [`proto::Report::crash`]).
+    crash: Option<String>,
+}
 
 /// Byte cap on any failure/collection-error text we persist. junit/html embed
 /// it and the console failures block prints it, so an uncapped copy would let a
@@ -266,6 +283,55 @@ impl TbStyle {
         }
         style
     }
+}
+
+/// pytest's resolved `-r` chars (`getreportopt`) from `opts` in precedence
+/// order (ini `addopts`, `PYTEST_ADDOPTS`, argv; the last `-r` wins):
+/// `a`/`A` expanded, `N` resets, `F`/`S` lowered. `w` is left out: the
+/// warnings summary is its own block. Default `fE`.
+pub fn report_chars<'a>(opts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut raw = "fE";
+    let mut opts = opts.into_iter();
+    while let Some(a) = opts.next() {
+        let value = if a == "--report-chars" {
+            opts.next()
+        } else if let Some(v) = a.strip_prefix("--report-chars=") {
+            Some(v)
+        } else {
+            // `-r X`, `-rX` or a cluster ending in it (`-vrA`).
+            let switches = crate::cli::short_switches(a);
+            if switches.last() == Some(&'r') {
+                let rest = &a[1 + switches.len()..];
+                if rest.is_empty() {
+                    opts.next()
+                } else {
+                    Some(rest)
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(v) = value {
+            raw = v;
+        }
+    }
+    let mut chars = String::new();
+    for c in raw.chars() {
+        let c = match c {
+            'F' => 'f',
+            'S' => 's',
+            c => c,
+        };
+        match c {
+            'a' => chars = "sxXEf".into(),
+            'A' => chars = "PpsxXEf".into(),
+            'N' => chars.clear(),
+            'w' => {}
+            c if !chars.contains(c) => chars.push(c),
+            _ => {}
+        }
+    }
+    chars
 }
 
 #[derive(Debug, Default)]
@@ -357,8 +423,14 @@ impl Run {
                 .or_insert(self.failures.len());
             let mut repr = r.longrepr.clone().unwrap_or_default();
             crate::text::truncate_on_boundary(&mut repr, FAILURE_TEXT_CAP);
-            self.failures
-                .push((worker, r.nodeid.clone(), repr.clone(), r.sections.clone()));
+            self.failures.push(Failure {
+                worker,
+                nodeid: r.nodeid.clone(),
+                when: r.when.clone(),
+                longrepr: repr.clone(),
+                sections: r.sections.clone(),
+                crash: r.crash.clone(),
+            });
             r.longrepr.as_ref().map(|_| repr)
         } else {
             None
@@ -421,6 +493,12 @@ impl Run {
         }
         if entry.skip_reason.is_none() {
             entry.skip_reason = r.skip_reason;
+        }
+        if entry.xfail_reason.is_none() {
+            entry.xfail_reason = r.xfail_reason;
+        }
+        if entry.skip_location.is_none() {
+            entry.skip_location = r.skip_location;
         }
     }
 
@@ -614,7 +692,7 @@ impl Run {
     /// (nodeid, longrepr) pairs for failed tests (junit rendering).
     pub fn failure_text(&self, nodeid: &str) -> Option<&str> {
         let idx = *self.failure_by_id.get(nodeid)?;
-        Some(self.failures[idx].2.as_str())
+        Some(self.failures[idx].longrepr.as_str())
     }
 
     pub fn all_passed(&self) -> bool {
@@ -881,6 +959,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn report_chars_resolve_like_pytest_getreportopt() {
+        let r = |opts: &[&str]| super::report_chars(opts.iter().copied());
+        assert_eq!(r(&[]), "fE");
+        assert_eq!(r(&["-rA"]), "PpsxXEf");
+        assert_eq!(r(&["-r", "a"]), "sxXEf");
+        assert_eq!(r(&["-vrA"]), "PpsxXEf", "a cluster ending in -r");
+        assert_eq!(r(&["--report-chars=fs"]), "fs");
+        assert_eq!(r(&["--report-chars", "FS"]), "fs", "old aliases lowered");
+        assert_eq!(r(&["-rN"]), "");
+        assert_eq!(r(&["-rNf"]), "f", "N resets what came before");
+        assert_eq!(
+            r(&["-rffw"]),
+            "f",
+            "deduped, w left to the warnings summary"
+        );
+        assert_eq!(r(&["-rA", "-k", "x", "-rs"]), "s", "the last -r wins");
+        assert_eq!(r(&["-ksmoke"]), "fE", "-k's value is not -r");
+    }
+
+    #[test]
     fn tb_style_last_flag_wins_in_both_forms() {
         assert_eq!(TbStyle::from_opts([]), TbStyle::Full);
         assert_eq!(TbStyle::from_opts(["--tb=line"]), TbStyle::Line);
@@ -905,6 +1003,9 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 
@@ -1346,6 +1447,9 @@ mod tests {
                 sections: Vec::new(),
                 lineno: None,
                 subtest: false,
+                crash: None,
+                xfail_reason: None,
+                skip_location: None,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1366,6 +1470,9 @@ mod tests {
                 sections: Vec::new(),
                 lineno: None,
                 subtest: false,
+                crash: None,
+                xfail_reason: None,
+                skip_location: None,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

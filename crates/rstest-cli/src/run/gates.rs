@@ -922,6 +922,14 @@ pub(super) fn finalize_output(
         if let Some((dn, dmin)) = durations {
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
+        // pytest prints messages whole on CI and at -vv, else trimmed to the
+        // terminal (compat.running_on_ci: CI or BUILD_NUMBER non-empty).
+        let on_ci = ["CI", "BUILD_NUMBER"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
+        let msg_width = (!very_verbose && !on_ci).then(crate::reporting::status::terminal_width);
+        let chars = sink.report_chars().to_string();
+        outcome.run.print_short_summary(sink, &chars, msg_width);
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
@@ -1162,6 +1170,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1194,6 +1205,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
