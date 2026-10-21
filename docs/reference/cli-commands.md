@@ -679,9 +679,10 @@ honors `--top`, so pass `--top 0` for every test. Field reference:
 
 It reads only `.rstest_cache/history.msgpack` (the last `RSTEST_HISTORY_RUNS`
 runs of each test, aged by `RSTEST_FLAKE_RETENTION_DAYS`), needs no
-interpreter, runs no tests, and exits `0`. A history that only CI runs build
-(sharded or ephemeral runners) is not merged through `--cache-push` yet, so
-run it where the history accumulates, or restore `.rstest_cache` first.
+interpreter, runs no tests, and exits `0`. To see a history that CI builds on
+sharded or ephemeral runners, pull it first: any run with `--cache-pull`
+merges the pushed runs into the local file
+([`--cache-remote`](cli.md#-cache-remote-urldir-cache-pull-cache-push)).
 
 ### `verify-vendor`
 

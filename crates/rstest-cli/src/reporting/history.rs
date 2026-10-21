@@ -6,6 +6,10 @@
 //! Run-level context (commit, env fingerprint, worker count) is stored once per
 //! run; each test entry points at its run by `seq`. Aged by the same
 //! `RSTEST_FLAKE_RETENTION_DAYS` window as `flakes.json`.
+//!
+//! `--cache-push` publishes each run as a [`RunSlice`]; pull and compaction
+//! fold slices back with [`History::merged`], which dedupes by run id, so the
+//! same run arriving from the local file, a segment and the base lands once.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -40,6 +44,14 @@ pub struct Entry {
     /// Call-phase seconds; `None` when the call phase never ran.
     pub call: Option<f32>,
     pub setup: f32,
+}
+
+/// One run's contribution: what `record` adds locally and what a shared-cache
+/// segment carries. `tests[..].run` is ignored; the run is `run`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunSlice {
+    pub run: RunMeta,
+    pub tests: HashMap<String, Entry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +100,54 @@ impl History {
         out
     }
 
+    /// Every run with its entries: the inverse of `append`.
+    pub fn into_slices(self) -> Vec<RunSlice> {
+        let mut by_seq: HashMap<u32, RunSlice> = self
+            .runs
+            .into_iter()
+            .map(|r| {
+                (
+                    r.seq,
+                    RunSlice {
+                        run: r,
+                        tests: HashMap::new(),
+                    },
+                )
+            })
+            .collect();
+        for (id, series) in self.tests {
+            for e in series {
+                if let Some(s) = by_seq.get_mut(&e.run) {
+                    s.tests.insert(id.clone(), e);
+                }
+            }
+        }
+        by_seq.into_values().collect()
+    }
+
+    /// Build a history from runs gathered from several places (local file,
+    /// shared-cache base, segments): the first copy of each run id wins, runs
+    /// are replayed oldest first (`epoch`, then id, so every reader merges the
+    /// same way), and each test keeps its newest `cap` entries.
+    pub fn merged(slices: impl IntoIterator<Item = RunSlice>, cap: usize) -> History {
+        let mut seen = HashSet::new();
+        let mut runs: Vec<RunSlice> = slices
+            .into_iter()
+            .filter(|s| seen.insert(s.run.id.clone()))
+            .collect();
+        runs.sort_by(|a, b| {
+            a.run
+                .epoch
+                .cmp(&b.run.epoch)
+                .then_with(|| a.run.id.cmp(&b.run.id))
+        });
+        let mut h = History::default();
+        for s in runs {
+            h.append(s.run, s.tests.into_iter().collect(), cap);
+        }
+        h
+    }
+
     /// Add one run. Each test's series is trimmed to the newest `cap` entries
     /// and runs no entry points at any more are dropped.
     fn append(&mut self, mut meta: RunMeta, entries: Vec<(String, Entry)>, cap: usize) {
@@ -106,7 +166,7 @@ impl History {
 
     /// Drop entries from runs older than `max_age` (`0` keeps everything).
     /// `saturating_sub`: a future epoch (clock skew) is kept, never wiped.
-    fn age(&mut self, now: u64, max_age: u64) {
+    pub fn age(&mut self, now: u64, max_age: u64) {
         if max_age == 0 {
             return;
         }
@@ -161,7 +221,7 @@ pub fn flip_positions<'a>(series: impl IntoIterator<Item = &'a Entry>) -> Vec<us
 }
 
 /// Entries kept per test. `RSTEST_HISTORY_RUNS`, default 50, minimum 1.
-fn cap() -> usize {
+pub fn cap() -> usize {
     parse_cap(std::env::var("RSTEST_HISTORY_RUNS").ok())
 }
 
@@ -212,33 +272,65 @@ pub fn load_from(path: &std::path::Path) -> History {
     h
 }
 
-/// Append this run to the stored history. Best-effort: IO errors are ignored.
-pub fn record(run: &Run, id: &str, epoch: u64, commit: Option<&str>, env: &str, workers: usize) {
-    let entries: Vec<(String, Entry)> = run
+/// This run's slice, or `None` when no test produced a real result.
+pub fn slice(
+    run: &Run,
+    id: &str,
+    epoch: u64,
+    commit: Option<&str>,
+    env: &str,
+    workers: usize,
+) -> Option<RunSlice> {
+    let tests: HashMap<String, Entry> = run
         .tests()
         .iter()
         .filter_map(|(id, e)| entry_for(e).map(|en| (id.clone(), en)))
         .collect();
-    if entries.is_empty() {
-        return;
+    if tests.is_empty() {
+        return None;
     }
-    let meta = RunMeta {
-        seq: 0,
-        id: id.to_string(),
-        epoch,
-        commit: commit.map(str::to_string),
-        env: env.to_string(),
-        workers,
-    };
+    Some(RunSlice {
+        run: RunMeta {
+            seq: 0,
+            id: id.to_string(),
+            epoch,
+            commit: commit.map(str::to_string),
+            env: env.to_string(),
+            workers,
+        },
+        tests,
+    })
+}
+
+/// Append this run to the stored history. Best-effort: IO errors are ignored.
+pub fn record(slice: RunSlice) {
     // Locked load→append→write: two concurrent sessions in one cwd would
     // otherwise drop one run's entries.
     cache::with_lock(|| {
         let mut h = load();
-        h.append(meta, entries, cap());
-        if let Ok(bytes) = rmp_serde::to_vec(&h) {
-            let _ = cache::write_atomic(&cache::file(FILE), &bytes);
-        }
+        h.append(slice.run, slice.tests.into_iter().collect(), cap());
+        save_to(&cache::file(FILE), &h);
     });
+}
+
+/// Fold runs pulled from the shared cache into the history file at `path`
+/// (the caller holds the cache lock). Runs the file already has are kept
+/// as they are.
+pub fn overlay_in(path: &std::path::Path, pulled: History) {
+    if pulled.runs.is_empty() {
+        return;
+    }
+    let local = load_from(path).into_slices();
+    save_to(
+        path,
+        &History::merged(local.into_iter().chain(pulled.into_slices()), cap()),
+    );
+}
+
+fn save_to(path: &std::path::Path, h: &History) {
+    if let Ok(bytes) = rmp_serde::to_vec(h) {
+        let _ = cache::write_atomic(path, &bytes);
+    }
 }
 
 #[cfg(test)]
@@ -416,6 +508,102 @@ mod tests {
         assert_eq!(h.flippers(3), ["flap", "quar", "rescued"]);
         assert_eq!(h.flippers(2), ["flap", "quar", "rescued", "skips"]);
         assert_eq!(h.flippers(1).len(), 5);
+    }
+
+    fn slice(id: &str, epoch: u64, tests: &[(&str, &str)]) -> RunSlice {
+        RunSlice {
+            run: RunMeta {
+                id: id.into(),
+                ..meta(epoch)
+            },
+            tests: tests
+                .iter()
+                .map(|(t, o)| (t.to_string(), entry(o)))
+                .collect(),
+        }
+    }
+
+    fn outcomes(h: &History, id: &str) -> Vec<String> {
+        h.series(id)
+            .iter()
+            .map(|(_, e)| e.outcome.clone())
+            .collect()
+    }
+
+    #[test]
+    fn merged_dedupes_runs_by_id_and_replays_oldest_first() {
+        // Two machines' views: `b` is in both; `c` arrives out of epoch order.
+        let mine = [
+            slice("a", 1, &[("t", "passed")]),
+            slice("b", 2, &[("t", "failed")]),
+        ];
+        let theirs = [
+            slice("c", 3, &[("t", "passed"), ("u", "passed")]),
+            // Same run id: the first copy (mine) wins, never counted twice.
+            slice("b", 2, &[("t", "passed")]),
+        ];
+        let h = History::merged(mine.into_iter().chain(theirs), 50);
+        assert_eq!(outcomes(&h, "t"), ["passed", "failed", "passed"]);
+        assert_eq!(outcomes(&h, "u"), ["passed"]);
+        let ids: Vec<&str> = h.runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+
+        // Same-epoch runs order by id, whatever order they arrive in.
+        let x = History::merged(
+            [
+                slice("z", 5, &[("t", "failed")]),
+                slice("y", 5, &[("t", "passed")]),
+            ],
+            50,
+        );
+        assert_eq!(outcomes(&x, "t"), ["passed", "failed"]);
+
+        // The cap keeps each test's newest runs.
+        let capped = History::merged(
+            (0..5).map(|i| slice(&format!("r{i}"), i, &[("t", "passed")])),
+            2,
+        );
+        let kept: Vec<u64> = capped.series("t").iter().map(|(r, _)| r.epoch).collect();
+        assert_eq!(kept, [3, 4]);
+    }
+
+    #[test]
+    fn into_slices_round_trips_through_merged() {
+        let mut h = History::default();
+        h.append(
+            meta(1),
+            vec![("a".into(), entry("passed")), ("b".into(), entry("failed"))],
+            50,
+        );
+        h.append(meta(2), vec![("a".into(), entry("flaky"))], 50);
+        let back = History::merged(h.clone().into_slices(), 50);
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn overlay_in_keeps_local_runs_and_adds_pulled_ones() {
+        let dir =
+            std::env::temp_dir().join(format!("rstest-history-overlay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(FILE);
+        let now = crate::time::now_epoch_secs();
+        let local = History::merged([slice("mine", now - 10, &[("t", "failed")])], 50);
+        save_to(&path, &local);
+        // The pull carries this machine's own pushed run plus a CI run.
+        let pulled = History::merged(
+            [
+                slice("mine", now - 10, &[("t", "failed")]),
+                slice("ci", now - 5, &[("t", "passed")]),
+            ],
+            50,
+        );
+        overlay_in(&path, pulled);
+        let h = load_from(&path);
+        assert_eq!(outcomes(&h, "t"), ["failed", "passed"]);
+        // Empty pull: file untouched.
+        overlay_in(&path, History::default());
+        assert_eq!(load_from(&path), h);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

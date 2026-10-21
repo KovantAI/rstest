@@ -706,7 +706,7 @@ pub(super) fn run_post_gates(
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);
-        history::record(
+        let history_slice = history::slice(
             &outcome.run,
             run_uid,
             started_epoch,
@@ -714,6 +714,9 @@ pub(super) fn run_post_gates(
             env_fp,
             n,
         );
+        if let Some(slice) = &history_slice {
+            history::record(slice.clone());
+        }
         // --cache-push: publish THIS run's contribution as one immutable
         // segment (from the in-memory Run, not the merged local cache). A push
         // failure warns but never fails an otherwise-green run.
@@ -729,6 +732,7 @@ pub(super) fn run_post_gates(
                 started_epoch,
                 &outcome.run,
                 cov,
+                history_slice,
             );
             // Build the transport once and reuse it for an optional inline
             // auto-compaction after a successful push.
@@ -1824,6 +1828,7 @@ mod tests {
                 })
                 .collect(),
             cov_index: Default::default(),
+            history: None,
         }
     }
 

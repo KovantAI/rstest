@@ -993,9 +993,10 @@ fn pull_shared_cache(cli: &Cli, cache_remote: &Option<String>, sink: &mut Sink) 
     let merged = remote::pull(t.as_ref(), sink)
         .with_context(|| format!("pulling shared cache from {remote}"))?;
     sink.warn(&format!(
-        "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
+        "rstest: cache: pulled {} duration(s), {} flake record(s), {} history run(s) from {remote}",
         merged.durations.len(),
-        merged.flakes.len()
+        merged.flakes.len(),
+        merged.history.runs.len()
     ));
     remote::write_local(&merged);
     Ok(())
@@ -3415,6 +3416,7 @@ mod tests {
             durations: [(format!("{id}::t"), 0.1)].into_iter().collect(),
             flake_events: Vec::new(),
             cov_index: Default::default(),
+            history: None,
         }
     }
 

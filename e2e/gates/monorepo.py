@@ -396,6 +396,18 @@ def gate_shared_cache_backend(g, args, binary):
         and "pulled" in r.stderr,
         r.stderr[-200:],
     )
+    # The pushed run's history rides the segment: project b's test_a now has
+    # project a's run plus its own, and test_slow (only ever run in a) is known.
+    pull_err = r.stderr
+    ex = json.loads(g.run("explain", "test_s.py::test_a", "--json", cwd=scb).stdout)
+    ex2 = json.loads(g.run("explain", "test_s.py::test_slow", "--json", cwd=scb).stdout)
+    check(
+        "shared-cache: pull merges the pushed run history",
+        "1 history run(s)" in pull_err
+        and (ex["history"] or {}).get("runs") == 2
+        and (ex2["history"] or {}).get("runs") == 1,
+        f"{ex['history']} {ex2['history']} {pull_err[-200:]}",
+    )
     # require-baseline against a cold remote is a hard error, not a silent skip.
     # RSTEST_CACHE points at an empty dir so a prior local cache can't satisfy it.
     cold = g.tmp / "cold-remote"
