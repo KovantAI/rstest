@@ -10,6 +10,7 @@ triaging.
 - bisect
 - audit
 - explain
+- flaky
 - --shuffle
 - Hangs: --timeout and --worker-timeout
 - Flaky controls: --reruns, --reruns-only-known-flaky, --quarantine, --auto-quarantine
@@ -126,13 +127,34 @@ $ rstest explain "tests/test_api.py::test_login" --json
 
 - Reads only `.rstest_cache/`, runs nothing, needs no interpreter.
 - Shows last duration, flake/fail counts with last-event age, last-green
-  outcome, and the coverage footprint (needs a prior `--cov-context=test` run).
-- Caches keep only the latest duration, so there is no variance or
-  last-N-outcomes history.
+  outcome, the coverage footprint (needs a prior `--cov-context=test` run),
+  and the run history: the last 50 outcomes as a strip (`✓` passed, `~`
+  passed on rerun, `✗` failed, `-` skipped), call-time median and p95, the
+  commit it last passed at and the commit its current failing streak began
+  at (`git log <last>..<first>` lists suspects).
 - Unknown nodeid: human mode exits `1` with substring suggestions; `--json`
   exits `0` with `"found": false`.
 - On a fresh CI runner the caches are empty unless `.rstest_cache` is
   persisted; run `explain` where the history lives.
+
+## flaky
+
+```console
+$ rstest flaky                # top 20 tests by flips, as a table
+$ rstest flaky --top 0 --json # every flipping test, for a dashboard
+```
+
+- Suite-wide view of `.rstest_cache/history.msgpack`; runs nothing, needs no
+  interpreter, exits `0`.
+- Lists tests with at least one flip (a pass only on rerun, or a failure
+  right after a pass), ranked by flips. Columns: flips, trend, the last 20
+  outcomes, flaky and failed counts, age of the last flip, and
+  `[auto-quarantined]` for tests the next run will quarantine.
+- Trend: `failing` = last 3 results all failed (it broke, stop treating it
+  as flaky); `worse` / `better` = the newer half of the history has 2+ more /
+  fewer flips than the older half; else `steady`.
+- Use it to answer "which tests are flaky?" or to review the auto-quarantine
+  set; then `explain` one test, and `bisect` it before calling it flaky.
 
 ## --shuffle
 

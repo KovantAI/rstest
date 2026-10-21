@@ -451,6 +451,34 @@ def gate_quarantine(g, args, binary):
         and "test_a.py::test_broke" not in r.stderr,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
     )
+    # `rstest flaky` reads the same history: flap ranked first and marked,
+    # broke shown as failing (broke and stays broken), not auto-quarantined.
+    r = g.run("flaky", cwd=adir)
+    lines = r.stdout.splitlines()
+
+    def row(nodeid):
+        return next((ln for ln in lines if nodeid in ln), "")
+
+    check(
+        "flaky: ranks flapper first, marks it, broke reads failing",
+        r.returncode == 0
+        and "2 flaky test(s) of 2 in the history" in r.stdout
+        and lines.index(row("test_a.py::test_flap")) < lines.index(row("test_a.py::test_broke"))
+        and "[auto-quarantined]" in row("test_a.py::test_flap")
+        and " failing " in row("test_a.py::test_broke")
+        and "[auto-quarantined]" not in row("test_a.py::test_broke"),
+        f"rc={r.returncode} " + r.stdout[-500:],
+    )
+    r = g.run("flaky", "--json", "--top", "1", cwd=adir)
+    fj = json.loads(r.stdout)
+    check(
+        "flaky --json: schema-stamped, --top cuts, total kept",
+        fj["meta"]["kind"] == "flaky"
+        and fj["flaky_tests"] == 2
+        and [t["nodeid"] for t in fj["tests"]] == ["test_a.py::test_flap"]
+        and fj["tests"][0]["auto_quarantined"] is True,
+        r.stdout[-400:],
+    )
     for flag, why in (
         ("--auto-quarantine=9", "threshold above the flips"),
         ("--auto-quarantine=0", "=0 turns it off"),

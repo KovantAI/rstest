@@ -133,23 +133,31 @@ impl History {
 }
 
 fn flips(series: &VecDeque<Entry>) -> u32 {
-    let mut n = 0;
+    flip_positions(series).len() as u32
+}
+
+/// Indices (oldest first) of the entries that are flips: a `flaky` pass, or a
+/// failure right after a pass. Skips, xfails etc. are stepped over.
+pub fn flip_positions<'a>(series: impl IntoIterator<Item = &'a Entry>) -> Vec<usize> {
+    let mut out = Vec::new();
     let mut last_pass = false;
-    for e in series {
+    for (i, e) in series.into_iter().enumerate() {
         match e.outcome.as_str() {
             "flaky" => {
-                n += 1;
+                out.push(i);
                 last_pass = true;
             }
             "passed" => last_pass = true,
             "failed" | "errors" | "crashed" | "quarantined" => {
-                n += u32::from(last_pass);
+                if last_pass {
+                    out.push(i);
+                }
                 last_pass = false;
             }
             _ => {}
         }
     }
-    n
+    out
 }
 
 /// Entries kept per test. `RSTEST_HISTORY_RUNS`, default 50, minimum 1.

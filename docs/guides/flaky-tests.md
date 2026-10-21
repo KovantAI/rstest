@@ -252,6 +252,12 @@ auto-quarantine-max = 5
 tests the team has decided to tolerate (with an owner and a tracking issue),
 and the auto set as the safety net for flakes nobody has triaged yet.
 
+**See the whole suite.** `rstest flaky` ranks every test that flipped, with
+its recent outcome strip, whether it is getting worse, and which ones the
+next run will auto-quarantine
+([`rstest flaky`](../reference/cli-commands.md#flaky)). `--json` feeds a
+dashboard.
+
 **On CI**, persist `.rstest_cache` between runs (see
 [CI quickstart](ci-quickstart.md)). A runner that starts with no history has
 an empty auto set, so auto-quarantine does nothing there.
@@ -316,5 +322,5 @@ The failure mode to avoid is a quarantine list that only ever grows.
 committed and hand-curated on purpose. Treat an addition like a TODO with an
 owner, and audit the list periodically. An entry whose test no longer
 appears in the flake history is either fixed (remove it) or abandoned (fix
-the test). The auto set is printed every run: a test that stays on it for
-weeks needs an owner too.
+the test). The auto set is printed every run, and `rstest flaky` lists it with
+trends: a test that stays on it for weeks needs an owner too.
