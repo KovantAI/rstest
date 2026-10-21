@@ -90,7 +90,8 @@ restored. The bundled action already leaves them out. Wherever you persist
 - **Cache only the files that matter** where the provider takes file paths:
   `durations.json`, `flakes.json`, `coverage_index.json`, `wall.json`,
   `last_green.json`, `incremental_outcomes.json` and `history.msgpack` under
-  `.rstest_cache/`.
+  `.rstest_cache/`. Without `history.msgpack`, auto-quarantine has no history
+  to work from and quarantines nothing.
 - **Turn journaling off** with `RSTEST_NO_REPLAY_JOURNAL=1` if you won't
   replay CI failures.
 

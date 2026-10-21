@@ -74,7 +74,16 @@ def gate_flaky_reruns(g, args, binary):
     )
     # No --reruns at -n 1 stays byte-exact single session: the flake fails.
     swm.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "1", cwd=fdir, env_extra={"FLAKY_MARKER": str(swm)})
+    # --auto-quarantine=0 here and below: earlier sections rescued this test
+    # by rerun often enough that its history would auto-quarantine it.
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "1",
+        "--auto-quarantine=0",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(swm)},
+    )
     check(
         "no-reruns at -n 1 stays byte-exact (flake fails)",
         r.returncode == 1
@@ -100,7 +109,14 @@ def gate_flaky_reruns(g, args, binary):
         f"rc={r.returncode} " + r.stderr[-200:],
     )
     marker.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "2", cwd=fdir, env_extra={"FLAKY_MARKER": str(marker)})
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--auto-quarantine=0",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
     check(
         "flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:]
     )
@@ -133,6 +149,8 @@ def gate_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
             "--reruns",
             "2",
             "--reruns-only-known-flaky",
+            # Rerun history from earlier sections would auto-quarantine it.
+            "--auto-quarantine=0",
             *extra,
             cwd=fdir,
             env_extra={"FLAKY_MARKER": str(m)},
@@ -237,6 +255,7 @@ def gate_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
             "--reruns",
             "2",
             "--reruns-only-known-flaky",
+            "--auto-quarantine=0",
             cwd=fdir,
             env_extra={"FLAKY_MARKER": str(m)},
         )
@@ -403,6 +422,86 @@ def gate_quarantine(g, args, binary):
         "--quarantine has no effect in passthrough mode" in r.stderr
         and "quarantined" not in r.stdout,
         f"rc={r.returncode} " + (r.stderr[-300:] or r.stdout[-300:]),
+    )
+
+    # --auto-quarantine: `test_flap` alternates pass/fail run to run (a counter
+    # file), `test_broke` passes once then fails for good. After 6 runs flap has
+    # flipped 3x and gets quarantined; broke flipped once and still fails.
+    g.write(
+        "autoq/test_a.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_flap(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_broke(): assert int(N.read_text()) == 0\n",
+    )
+    adir = g.tmp / "autoq"
+    cnt = g.tmp / "autoq_count"
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "2", cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    # On by default: no flag needed.
+    r = g.run(".", "-n", "2", cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
+    check(
+        "auto-quarantine (default on): flapping test demoted, steady regression still fails",
+        r.returncode == 1
+        and "1 failed, 1 quarantined" in r.stdout
+        and "QUARANTINED test_a.py::test_flap" in r.stdout
+        and "--auto-quarantine: 1 test(s)" in r.stderr
+        and "test_a.py::test_broke" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    for flag, why in (
+        ("--auto-quarantine=9", "threshold above the flips"),
+        ("--auto-quarantine=0", "=0 turns it off"),
+    ):
+        r = g.run(".", "-n", "2", flag, cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
+        check(
+            f"auto-quarantine: {why} quarantines nothing",
+            r.returncode == 1 and "2 failed" in r.stdout and "quarantined" not in r.stdout,
+            f"rc={r.returncode} " + r.stdout[-300:],
+        )
+    # [tool.rstest]: the file path resolves against the pyproject's dir (run
+    # from a subdir), and auto-quarantine = 0 turns the auto set off.
+    g.write(
+        "autoq/pyproject.toml",
+        '[tool.rstest]\nquarantine = "q.txt"\nauto-quarantine = 0\n',
+    )
+    g.write("autoq/q.txt", "test_a.py::test_broke\n")
+    g.write("autoq/sub/.keep", "")
+    r = g.run("..", "-n", "2", cwd=adir / "sub", env_extra={"AQ_COUNT": str(cnt)})
+    check(
+        "auto-quarantine: [tool.rstest] quarantine + auto-quarantine = 0",
+        r.returncode == 1
+        and "1 failed, 1 quarantined" in r.stdout
+        and "QUARANTINED test_a.py::test_broke" in r.stdout
+        and "--auto-quarantine:" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Cap: a fresh project where both tests flap. A 10% cap of 2 tests rounds
+    # up to 1, so 2 flippers are over it and nothing is quarantined.
+    g.write(
+        "autoq_cap/test_c.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n",
+    )
+    cdir = g.tmp / "autoq_cap"
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "2", "--auto-quarantine=0", cwd=cdir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".", "-n", "2", "--auto-quarantine-max", "10", cwd=cdir, env_extra={"AQ_COUNT": str(cnt)}
+    )
+    check(
+        "auto-quarantine: over the cap quarantines nothing and warns",
+        r.returncode == 1
+        and "2 failed" in r.stdout
+        and "quarantined" not in r.stdout
+        and "over the cap of 1 (10% of 2 tests in this run)" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
     )
 
 

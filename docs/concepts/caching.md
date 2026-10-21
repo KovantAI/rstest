@@ -33,7 +33,10 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   `RSTEST_HISTORY_RUNS`): outcome, call and setup time, plus the run's commit,
   environment fingerprint and worker count. Read by
   [`rstest explain`](../reference/cli-commands.md#explain) for the outcome
-  strip, the duration spread and the commit a test started failing at. Runs
+  strip, the duration spread and the commit a test started failing at, and
+  at the start of every run by
+  [`--auto-quarantine`](../reference/cli.md#-auto-quarantinen) to find the
+  tests that keep flipping. Deleting it empties the auto-quarantine set. Runs
   older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped on read. Not written by
   `rstest replay` or `--dist each`, and not shared through `--cache-push` /
   `--cache-pull`. Safe to delete.

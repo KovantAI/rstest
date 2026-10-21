@@ -101,8 +101,8 @@ pub struct TestEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, schemars(with = "u64"))]
     pub lineno: Option<u64>,
-    /// Failed, but matched the --quarantine list: reported distinctly,
-    /// never fatal to the run.
+    /// Failed, but matched the --quarantine list or the --auto-quarantine
+    /// set: reported distinctly, never fatal to the run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quarantined: bool,
     /// Not executed this run: unchanged since the last green run, so its prior

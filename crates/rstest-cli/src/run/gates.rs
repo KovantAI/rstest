@@ -1078,13 +1078,90 @@ fn print_warnings_summary(
     );
 }
 
-/// Compile the --quarantine file into one matcher: exact nodeids or `*`
-/// globs, one per line, `#` comments and blanks skipped. A trailing
-/// comment (whitespace then `#`, e.g. `test_a  # JIRA-1`) is stripped too.
-pub(super) fn quarantine_matcher(
-    path: &std::path::Path,
+/// The run's quarantine policy: the `--quarantine` file plus every test the
+/// history shows flipping at least `auto` times (`0` = off).
+pub(super) struct Quarantine {
+    /// File patterns and auto ids together: what dispatch ordering and the
+    /// workers' `-x` / `--maxfail` count treat as quarantined.
+    pub all: regex::RegexSet,
+    file: regex::RegexSet,
+    auto: std::collections::HashSet<String>,
+    max_pct: u32,
+}
+
+impl Quarantine {
+    /// Matcher for the post-run demotion. When more auto-set tests failed
+    /// this run than `max_pct` percent of the run's tests (at least one),
+    /// the environment is the likelier culprit: warn and demote only the
+    /// file's tests, so those failures count as usual.
+    pub(super) fn demotion_matcher(&self, run: &report::Run, sink: &mut Sink) -> &regex::RegexSet {
+        let failed = run
+            .tests()
+            .iter()
+            .filter(|(id, e)| {
+                e.any_phase_failed() && self.auto.contains(*id) && !self.file.is_match(id)
+            })
+            .count();
+        let total = run.tests().len();
+        let cap = (total * self.max_pct as usize).div_ceil(100).max(1);
+        if failed <= cap {
+            return &self.all;
+        }
+        sink.warn(&format!(
+            "rstest: --auto-quarantine: {failed} auto-quarantined test(s) failed, over the cap \
+             of {cap} ({}% of {total} tests in this run); quarantining none of them, the \
+             environment looks broken (raise the cap with --auto-quarantine-max=PCT)",
+            self.max_pct
+        ));
+        &self.file
+    }
+}
+
+/// Build the run's [`Quarantine`], announcing the auto set on stderr (the run
+/// log is the audit trail, there is no committed list). `None` when nothing
+/// can be quarantined.
+pub(super) fn quarantine_set(
+    file: Option<&std::path::Path>,
+    auto: u32,
+    max_pct: u32,
+    history: &crate::reporting::history::History,
     sink: &mut Sink,
-) -> Result<regex::RegexSet> {
+) -> Result<Option<Quarantine>> {
+    let file_patterns = match file {
+        Some(p) => quarantine_patterns(p, sink)?,
+        None => Vec::new(),
+    };
+    let ids = if auto == 0 {
+        Vec::new()
+    } else {
+        history.flippers(auto)
+    };
+    if file.is_none() && ids.is_empty() {
+        return Ok(None);
+    }
+    if !ids.is_empty() {
+        sink.warn(&format!(
+            "rstest: --auto-quarantine: {} test(s) flipped pass/fail {auto}+ times in recent history:\n  {}",
+            ids.len(),
+            ids.join("\n  ")
+        ));
+    }
+    let all = file_patterns
+        .iter()
+        .cloned()
+        .chain(ids.iter().map(|id| format!("^{}$", regex::escape(id))));
+    Ok(Some(Quarantine {
+        all: regex::RegexSet::new(all)?,
+        file: regex::RegexSet::new(file_patterns)?,
+        auto: ids.into_iter().collect(),
+        max_pct,
+    }))
+}
+
+/// The --quarantine file as anchored regexes: exact nodeids or `*` globs,
+/// one per line, `#` comments and blanks skipped. A trailing comment
+/// (whitespace then `#`, e.g. `test_a  # JIRA-1`) is stripped too.
+fn quarantine_patterns(path: &std::path::Path, sink: &mut Sink) -> Result<Vec<String>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
     let patterns: Vec<String> = text
@@ -1107,7 +1184,7 @@ pub(super) fn quarantine_matcher(
             path.display()
         ));
     }
-    Ok(regex::RegexSet::new(patterns)?)
+    Ok(patterns)
 }
 
 /// One quarantine line without its comment: a leading `#` blanks the line,
@@ -1130,7 +1207,7 @@ mod tests {
     use super::{
         apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, covtool_command,
         diff_cov_gate, finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
-        print_warnings_summary, quarantine_matcher, quarantine_note, reconcile_cov_status,
+        print_warnings_summary, quarantine_note, quarantine_set, reconcile_cov_status,
         report_push_result, resolve_compact_threshold, results_bar_line, stopping_banner,
         validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
         write_teamcity_flaky,
@@ -1361,6 +1438,145 @@ mod tests {
         ));
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    fn quarantine_matcher(
+        path: &std::path::Path,
+        sink: &mut Sink,
+    ) -> anyhow::Result<regex::RegexSet> {
+        let none = crate::reporting::history::History::default();
+        quarantine_set(Some(path), 0, 5, &none, sink).map(|s| s.unwrap().all)
+    }
+
+    /// History where `id` has outcomes `outcomes`, one run each.
+    fn history_of(tests: &[(&str, &[&str])]) -> crate::reporting::history::History {
+        use crate::reporting::history::{Entry, History, RunMeta};
+        let mut h = History::default();
+        let runs = tests.iter().map(|(_, o)| o.len()).max().unwrap_or(0);
+        for seq in 0..runs as u32 {
+            h.runs.push(RunMeta {
+                seq,
+                id: format!("r{seq}"),
+                epoch: 0,
+                commit: None,
+                env: String::new(),
+                workers: 1,
+            });
+        }
+        for (id, outcomes) in tests {
+            h.tests.insert(
+                id.to_string(),
+                outcomes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, o)| Entry {
+                        run: i as u32,
+                        outcome: o.to_string(),
+                        call: None,
+                        setup: 0.0,
+                    })
+                    .collect(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn quarantine_set_unions_file_with_auto_flippers() {
+        let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
+        let broke: &[&str] = &["passed", "failed", "failed", "failed"];
+        // `[1]` would be a regex class if the nodeid were not escaped.
+        let h = history_of(&[("a.py::flap[1]", flap), ("a.py::broke", broke)]);
+        let path = write_quarantine("auto", "b.py::*\n");
+
+        let (mut sink, cap) = Sink::captured();
+        let set = quarantine_set(Some(&path), 3, 100, &h, &mut sink)
+            .unwrap()
+            .unwrap()
+            .all;
+        assert!(set.is_match("a.py::flap[1]"));
+        assert!(!set.is_match("a.py::flap1"));
+        assert!(!set.is_match("a.py::broke")); // steady regression still fails
+        assert!(set.is_match("b.py::test_x")); // file patterns kept
+        let err = cap.err();
+        assert!(err.contains("--auto-quarantine: 1 test(s)"), "{err}");
+        assert!(err.contains("a.py::flap[1]"), "{err}");
+
+        // Auto alone, below threshold or off: nothing to match, no banner.
+        for auto in [4, 0] {
+            let (mut sink, cap) = Sink::captured();
+            assert!(quarantine_set(None, auto, 100, &h, &mut sink)
+                .unwrap()
+                .is_none());
+            assert_eq!(cap.err(), "");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn auto_quarantine_cap_counts_this_runs_failures() {
+        use crate::reporting::report::Run;
+        use crate::scheduling::proto::Report;
+        let rep = |nodeid: &str, when: &str, outcome: &str| Report {
+            nodeid: nodeid.into(),
+            when: when.into(),
+            outcome: outcome.into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+            subtest: false,
+        };
+        let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
+        let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);
+        let path = write_quarantine("capfile", "t.py::f1\n");
+        let q = quarantine_set(Some(&path), 3, 5, &h, &mut Sink::captured().0)
+            .unwrap()
+            .unwrap();
+        let run_of = |failing: &[&str], passing: usize| {
+            let mut run = Run::default();
+            for id in failing {
+                run.record(None, rep(id, "call", "failed"));
+            }
+            for i in 0..passing {
+                run.record(None, rep(&format!("t.py::ok{i}"), "call", "passed"));
+            }
+            run
+        };
+
+        // 40 tests, 5% cap = 2: f2 + f3 failing is at the cap -> all demoted.
+        // f1 is in the file and never counts toward the cap.
+        let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 37);
+        let (mut sink, cap) = Sink::captured();
+        let m = q.demotion_matcher(&run, &mut sink);
+        assert!(m.is_match("t.py::f2") && m.is_match("t.py::f3"));
+        assert_eq!(cap.err(), "");
+
+        // Same failures in a 20-test run: cap = 1, over it -> none of the auto
+        // set is demoted, the file's test still is.
+        let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 17);
+        let (mut sink, cap) = Sink::captured();
+        let m = q.demotion_matcher(&run, &mut sink);
+        assert!(m.is_match("t.py::f1"));
+        assert!(!m.is_match("t.py::f2") && !m.is_match("t.py::f3"));
+        let err = cap.err();
+        assert!(
+            err.contains("2 auto-quarantined test(s) failed, over the cap of 1 (5% of 20"),
+            "{err}"
+        );
+
+        // Passing auto-set tests don't count: a tiny run with one failure is
+        // under the floor of one test.
+        let run = run_of(&["t.py::f2"], 1);
+        assert!(q
+            .demotion_matcher(&run, &mut Sink::captured().0)
+            .is_match("t.py::f2"));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
