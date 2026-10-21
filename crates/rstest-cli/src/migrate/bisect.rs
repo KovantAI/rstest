@@ -116,11 +116,7 @@ impl Drop for TempDir {
 /// sessions' cache (`cache/`) and, when needed, the stand-in config there;
 /// the parallel classifier uses it for the stand-in config only.
 pub(super) fn workdir() -> Result<TempDir> {
-    let dir = std::env::temp_dir().join(format!(
-        "rstest-bisect-{}-{}",
-        std::process::id(),
-        run_session_seq()
-    ));
+    let dir = crate::scratch::dir().join(format!("bisect-{}", run_session_seq()));
     std::fs::create_dir_all(&dir)?;
     Ok(TempDir(dir))
 }
@@ -204,11 +200,7 @@ fn run_selection(
     pytest_args: &[String],
     sel: &[String],
 ) -> Result<Outcomes> {
-    let file = std::env::temp_dir().join(format!(
-        "rstest-bisect-sel-{}-{}.txt",
-        std::process::id(),
-        run_session_seq()
-    ));
+    let file = crate::scratch::dir().join(format!("bisect-sel-{}.txt", run_session_seq()));
     std::fs::write(&file, argsfile_body(rootdir, sel))?;
     let mut args = pytest_args.to_vec();
     args.push(format!("@{}", file.display()));

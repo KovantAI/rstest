@@ -1146,10 +1146,7 @@ fn build_worker_command(
             // Workers get disjoint tmp roots (xdist popen-gwN pattern):
             // pytest's numbered-dir cleanup races when siblings share
             // a basetemp parent.
-            .env(
-                "RSTEST_BASETEMP",
-                std::env::temp_dir().join(format!("rstest-{}", std::process::id())),
-            );
+            .env("RSTEST_BASETEMP", crate::scratch::dir());
     }
     command
 }
@@ -1381,10 +1378,7 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
         .env("PYTHONPATH", worker_pythonpath())
         .env("RSTEST_RUN_UID", &env.run_uid)
         .env("RSTEST_WORKER_COUNT", n.to_string())
-        .env(
-            "RSTEST_BASETEMP",
-            std::env::temp_dir().join(format!("rstest-{}", std::process::id())),
-        );
+        .env("RSTEST_BASETEMP", crate::scratch::dir());
     if env.doctor {
         command.env("RSTEST_DOCTOR", "1");
     }

@@ -221,9 +221,8 @@ fn build_diff_lines(
 ) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     match changed {
         Ok(map) => {
-            let pid = std::process::id();
-            let lines_path = std::env::temp_dir().join(format!("rstest-difflines-{pid}.json"));
-            let out_path = std::env::temp_dir().join(format!("rstest-diffcov-{pid}.json"));
+            let lines_path = crate::scratch::dir().join("difflines.json");
+            let out_path = crate::scratch::dir().join("diffcov.json");
             // JSON object keys are strings; POSIX-normalize the paths.
             let smap: std::collections::BTreeMap<String, Vec<u32>> = map
                 .into_iter()

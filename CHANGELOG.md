@@ -3,6 +3,23 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Fixes
+
+- **Parallel runs no longer leave a temp folder behind
+  ([#173](https://github.com/KovantAI/rstest/issues/173)).** Every run with
+  2 or more workers left `$TMPDIR/rstest-<pid>/` (the workers' `tmp_path`
+  roots) in place, often hundreds of MB per run, until the disk filled.
+  rstest now deletes it when the run ends, together with the other temp
+  files it keeps there (the no-cacheprovider scratch cache, bisect,
+  migrate-check, `rstest try`, diff-coverage and monorepo report files).
+  Each run holds a lock on its folder, so a run killed too hard to clean up
+  (SIGKILL, out of memory) has its folder deleted by the next rstest run.
+  The first run after upgrading also deletes the folders older releases left
+  behind (any `rstest-<pid>` folder more than an hour old). A user-provided
+  `--basetemp` is never deleted.
+
 ## 0.9.0 (2026-10-06)
 
 ### Features

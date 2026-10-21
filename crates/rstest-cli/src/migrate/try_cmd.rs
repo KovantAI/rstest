@@ -189,10 +189,9 @@ fn compute_parity(py: &Outcomes, rs: &Outcomes) -> Parity {
 /// report whether outcomes are identical and the speedup. The 30-second
 /// "should I switch?" proof.
 pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
-    let tmpdir = std::env::temp_dir();
-    let pid = std::process::id();
-    let py_json = tmpdir.join(format!("rstest-try-pytest-{pid}.json"));
-    let rs_json = tmpdir.join(format!("rstest-try-rstest-{pid}.json"));
+    let tmpdir = crate::scratch::dir();
+    let py_json = tmpdir.join("try-pytest.json");
+    let rs_json = tmpdir.join("try-rstest.json");
 
     sink.warn("rstest try: running your suite under pytest…");
     let mut py = std::process::Command::new(python);
