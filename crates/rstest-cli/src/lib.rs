@@ -15,6 +15,7 @@ mod discover;
 mod doc_pages;
 mod doctor;
 mod explain;
+mod flaky;
 mod incremental;
 mod migrate;
 mod mono;

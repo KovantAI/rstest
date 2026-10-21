@@ -123,6 +123,21 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Rank the suite's flaky tests from the per-test run history
+    /// (`.rstest_cache/history.msgpack`) without running anything: flips
+    /// (a pass only on rerun, or a failure right after a pass), the recent
+    /// outcome strip, whether it is getting worse, and which tests
+    /// `--auto-quarantine` catches on the next run. Needs no interpreter.
+    Flaky {
+        /// Show the N most-flipping tests; 0 shows all.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        top: usize,
+        /// Emit the ranking as JSON (schema-stamped) to stdout for
+        /// dashboards, instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Install the rstest agent skills (`migrate-to-rstest`, `rstest-triage`)
     /// bundled with this binary, so they match its flags and subcommands.
     /// Writes `.claude/skills/` in the current directory by default (commit it
@@ -811,6 +826,7 @@ const SUBCOMMANDS: &[&str] = &[
     "shard-verify",
     "replay",
     "explain",
+    "flaky",
     "install-skills",
 ];
 
@@ -1094,7 +1110,7 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     // its real session args from the journal, not argv.
     let consumes_all = matches!(
         sub.as_str(),
-        "shard-verify" | "replay" | "bisect" | "explain" | "install-skills"
+        "shard-verify" | "replay" | "bisect" | "explain" | "flaky" | "install-skills"
     );
     own.push(sub);
     if consumes_all {
@@ -1212,6 +1228,29 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Explain { ref nodeid, json: true }) if nodeid == "t/x.py::test_a"
+        ));
+    }
+
+    #[test]
+    fn flaky_routes_its_flags_to_clap() {
+        use clap::Parser;
+        // `--top` is in no flag table: without `flaky` consuming its tail it
+        // would leak to a pytest session.
+        let (own, session) = split_args(v(&["flaky", "--top", "5", "--json"]));
+        assert_eq!(own, v(&["rstest", "flaky", "--top", "5", "--json"]));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Flaky { top: 5, json: true })
+        ));
+        let cli = Cli::parse_from(v(&["rstest", "flaky"]));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Flaky {
+                top: 20,
+                json: false
+            })
         ));
     }
 

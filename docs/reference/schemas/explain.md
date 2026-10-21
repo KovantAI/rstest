@@ -51,7 +51,7 @@ The test's recent runs from the per-test history (oldest first).
 | `runs` | integer | yes | Number of recorded runs. |
 | `setup_median` | number or null | yes | Median setup-phase seconds over passing runs. |
 
-### Meta
+### Meta (Explain)
 
 Envelope metadata for the explain document.
 
