@@ -22,8 +22,11 @@ other worker's session has fully finished, fixtures torn down, ports and
 databases released. The marker is registered automatically (no
 `--strict-markers` complaints).
 
-Use it for: tests binding fixed ports, tests asserting on global process
-state, tests measuring wall-clock timing tightly.
+Use it for: tests that truly need a single instance of something, tests
+asserting on global process state, tests measuring wall-clock timing tightly.
+For a fixed port, a shared database or a shared home directory, the
+[built-in per-worker resources](#built-in-per-worker-resources) are the real
+fix and keep the tests parallel.
 
 Serial tests run in the **designated worker's own session**, not a fresh one:
 they reuse the session-scoped fixtures that worker already built during its
@@ -103,7 +106,9 @@ workers means N databases, N servers, N expensive setups. This is identical
 to xdist semantics. Two consequences:
 
 - The fixture must be safe to duplicate: unique ports (bind port 0),
-  per-worker database names, per-worker directories.
+  per-worker database names, per-worker directories. The
+  [built-in per-worker resources](#built-in-per-worker-resources) do each in
+  one line.
 - For pytest-django users this already works: rstest announces itself
   exactly like an xdist worker (`gw0`, `gw1`, ...), so the test database
   per worker is suffixed automatically.
@@ -215,7 +220,101 @@ def pg_url():
 The rule generalizes: any fixed name or port a serial suite hard-coded (a
 database, a schema, a bound port, a temp directory) must become per-worker
 under parallelism. Bind port `0` to let the OS assign one, or key the name on
-`RSTEST_WORKER_ID`.
+the worker id; the built-in fixtures below do both.
+
+## Built-in per-worker resources
+
+Four fixtures for the most common parallel-safety fixes, so the change is
+one line in the fixture that hard-coded the resource:
+
+| Fixture | Gives you | Replaces |
+|---|---|---|
+| `rstest_free_port` | a TCP port on `127.0.0.1` the OS reported free (bind to port 0), never repeated within a worker | a hard-coded `port=8000` |
+| `rstest_postgres_url` | a Postgres database of the worker's own, cloned from your migrated test database, dropped at the end ([below](#a-postgres-database-per-worker)) | one test database every worker shares |
+| `rstest_worker_name` | `name(base)` -> `"<base>_gw3"` (`"<base>_master"` without workers): lowercase, a valid Postgres name | a shared schema, Redis prefix, queue or any other named resource |
+| `rstest_home` | a fresh home directory per test: `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` point inside it, restored after | tests writing `~/.config` or reading `Path.home()` |
+
+```python
+import pytest
+from sqlalchemy import create_engine
+
+
+@pytest.fixture(scope="session")
+def db_engine(rstest_worker_name):
+    engine = create_engine(f"postgresql+psycopg://ci:ci@localhost/{rstest_worker_name('app')}")
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def api_server(rstest_free_port):
+    server = start_server(port=rstest_free_port)
+    yield f"http://127.0.0.1:{rstest_free_port}"
+    server.stop()
+
+
+def test_writes_settings(rstest_home):
+    save_settings({"theme": "dark"})  # lands in rstest_home/.config/...
+```
+
+### A Postgres database per worker
+
+`rstest_postgres_url` (session scope, so once per worker) takes the base URL
+from `RSTEST_POSTGRES_URL`, else `DATABASE_URL`, and gives the worker its own
+database next to it:
+
+```console
+$ export DATABASE_URL=postgresql+psycopg://ci:ci@localhost:5432/app_test
+$ alembic upgrade head          # migrate app_test once, before the run
+$ rstest -n auto
+```
+
+```python
+import pytest
+from sqlalchemy import create_engine
+
+
+@pytest.fixture(scope="session")
+def db_engine(rstest_postgres_url):
+    engine = create_engine(rstest_postgres_url)  # .../app_test_gw3
+    yield engine
+    engine.dispose()
+```
+
+- The worker's database is named `<base>_<worker>` (`app_test_gw3`;
+  `app_test_master` without workers).
+- When the base database exists, it is cloned with `CREATE DATABASE ...
+  TEMPLATE app_test`: a copy of the migrated schema (and any seed data) in
+  milliseconds, instead of running the migrations once per worker. When it
+  doesn't exist, the worker gets an empty database to migrate itself.
+- Postgres refuses to clone a template while any session is connected to it,
+  so don't connect to the base database during the run; workers cloning at the
+  same moment retry automatically.
+- A leftover from a crashed run is dropped first, and the database is dropped
+  when the worker's session ends (`WITH (FORCE)` on Postgres 13+).
+- The URL keeps the base URL's scheme, so `postgresql+psycopg://` goes
+  straight to SQLAlchemy; `postgresql://` works with psycopg directly.
+- Needs psycopg 3 or psycopg2 installed, and a role allowed to create
+  databases.
+
+`rstest_free_port` closes its probe socket before returning, so another
+process could in principle take the port in between; binding to port 0 makes
+that rare, and it is the same trade-off every "free port" helper makes. A
+server that can bind port 0 itself and report the port back avoids even that.
+
+All rstest fixtures are listed in the [fixtures reference](../reference/fixtures.md).
+
+**They work under plain pytest too.** The fixtures ship in the rstest package
+as an ordinary pytest plugin (`rstest_resources`), so a suite using them also
+runs under `pytest` and `pytest -n` (pytest-xdist) while rstest is installed;
+the worker name then follows xdist's `worker_id`. Disable the plugin with
+`-p no:rstest_resources` if a name clashes with one of your own fixtures.
+
+[`rstest audit`](../reference/cli-commands.md#audit) and
+[`rstest migrate-check`](../reference/cli-commands.md#migrate-check) point at
+these fixtures when a parallel-only failure's error names the resource
+("Address already in use", "database ... already exists", a path under
+`~/.config`).
 
 ## Time-sensitive tests at high concurrency
 

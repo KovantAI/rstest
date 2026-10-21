@@ -266,7 +266,11 @@ def _config(**option_kwargs):
     """Duck-typed pytest config recording addinivalue_line + marker lines."""
     markers = []
     option = SimpleNamespace(**option_kwargs)
-    pluginmanager = SimpleNamespace(get_plugins=lambda: [], get_plugin=lambda name: None)
+    pluginmanager = SimpleNamespace(
+        get_plugins=lambda: [],
+        get_plugin=lambda name: None,
+        register=lambda plugin, name=None: None,
+    )
     return SimpleNamespace(
         option=option,
         addinivalue_line=lambda kind, line: markers.append((kind, line)),

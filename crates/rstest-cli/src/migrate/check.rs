@@ -365,6 +365,7 @@ pub fn run_migrate_check(
         }
     }
 
+    let resources = super::resources(&par);
     let mut by_verdict: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut advice: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
     for (nodeid, v) in &migration {
@@ -395,6 +396,9 @@ pub fn run_migrate_check(
                 )),
                 None => sink.out_line(&format!("      {t}{tag}")),
             }
+            if let Some(r) = resources.get(*t) {
+                sink.out_line(&format!("        CAUSE: {}", r.hint()));
+            }
         }
         if tests.len() > 8 {
             sink.out_line(&format!("      … and {} more", tests.len() - 8));
@@ -407,7 +411,7 @@ pub fn run_migrate_check(
         ));
     }
 
-    let json_findings = findings_json(&migration, &polluter, allowed);
+    let json_findings = findings_json(&migration, &polluter, &resources, allowed);
     // Gate: fail only on findings that aren't allow-listed.
     let blocking = migration.iter().filter(|(n, _)| !allowed(n)).count();
     if blocking == 0 {
@@ -620,12 +624,16 @@ fn polluter_json(p: Option<&Polluter>) -> Option<PolluterJson> {
 fn findings_json(
     migration: &[&(String, Verdict)],
     polluter: &BTreeMap<&str, Polluter>,
+    resources: &BTreeMap<String, super::Resource>,
     allowed: impl Fn(&str) -> bool,
 ) -> Vec<Finding> {
     migration
         .iter()
         .map(|(nodeid, v)| {
             let (why, fix) = v.advice();
+            // A named shared resource has a specific fix; it beats the
+            // verdict's generic advice.
+            let fix = resources.get(nodeid).map_or(fix, |r| r.hint());
             Finding {
                 allowed: allowed(nodeid),
                 fix: fix.to_string(),
@@ -799,9 +807,13 @@ mod tests {
         let migration: Vec<&(String, Verdict)> = migration_owned.iter().collect();
         let mut polluter: BTreeMap<&str, Polluter> = BTreeMap::new();
         polluter.insert("a.py::victim", Polluter::OtherFile("c.py".into()));
-        let docs =
-            serde_json::to_value(findings_json(&migration, &polluter, |n| n == "b.py::order"))
-                .unwrap();
+        let docs = serde_json::to_value(findings_json(
+            &migration,
+            &polluter,
+            &BTreeMap::new(),
+            |n| n == "b.py::order",
+        ))
+        .unwrap();
         let docs = docs.as_array().unwrap();
 
         let v = &docs[0];

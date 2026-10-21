@@ -156,6 +156,7 @@ nav:
       - CLI flags: reference/cli.md
       - CLI subcommands: reference/cli-commands.md
       - Markers: reference/markers.md
+      - Fixtures: reference/fixtures.md
       - Environment variables: reference/environment.md
       - Exit codes: reference/exit-codes.md
       - Report JSON: reference/report-json.md

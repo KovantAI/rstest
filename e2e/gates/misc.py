@@ -231,3 +231,53 @@ def gate_network_guard(g, args, binary):
         r.returncode == 0 and "3 passed" in r.stdout,
         f"rc={r.returncode} " + r.stdout[-400:],
     )
+
+
+RESOURCE_TESTS = """import os
+import re
+import socket
+import threading
+from pathlib import Path
+
+import pytest
+
+
+def serve_once(port):
+    srv = socket.create_server(("127.0.0.1", port))
+    t = threading.Thread(target=lambda: srv.accept()[0].close())
+    t.start()
+    socket.create_connection(("127.0.0.1", port)).close()
+    t.join()
+    srv.close()
+
+
+@pytest.mark.parametrize("i", range(6))
+def test_server_on_its_own_port(rstest_free_port, i):
+    serve_once(rstest_free_port)
+
+
+@pytest.mark.parametrize("i", range(6))
+def test_home_is_private(rstest_home, i):
+    # Exclusive create: a home shared across tests or workers would collide.
+    state = Path("~/.config/app/state.json").expanduser()
+    state.parent.mkdir(parents=True)
+    with open(state, "x") as f:
+        f.write(str(i))
+
+
+def test_worker_name(rstest_worker_name):
+    assert re.fullmatch(os.environ["EXPECT_NAME"], rstest_worker_name("MyApp"))
+"""
+
+
+def gate_worker_resources(g, args, binary):
+    print("== per-worker resource fixtures ==")
+    g.write("resources/test_res.py", RESOURCE_TESTS)
+    rdir = g.tmp / "resources"
+    for n, expect in (("2", r"myapp_gw\d+"), ("0", "myapp_master")):
+        r = g.run(".", "-n", n, cwd=rdir, env_extra={"EXPECT_NAME": expect})
+        check(
+            f"resource fixtures: ports, private home, worker name (-n {n})",
+            r.returncode == 0 and "13 passed" in r.stdout,
+            f"rc={r.returncode} " + r.stdout[-600:],
+        )

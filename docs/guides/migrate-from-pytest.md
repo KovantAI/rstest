@@ -277,6 +277,7 @@ alternative, or keep the plugin that provides it under pytest.
 | `@pytest.mark.flaky(reruns=N)`, `--reruns` | Needs pytest-rerunfailures | Keep pytest-rerunfailures installed; it reads the same `reruns=` kwarg |
 | `@pytest.mark.timeout(N)`, `--timeout` | Needs pytest-timeout | Keep pytest-timeout installed |
 | `--html` | Needs pytest-html | Keep pytest-html installed |
+| `rstest_free_port`, `rstest_worker_name`, `rstest_home`, `rstest_postgres_url` fixtures | Work while rstest is installed (they ship as a pytest plugin); "fixture not found" once it is uninstalled | Keep rstest installed, or copy the fixtures you use into `conftest.py` ([source](https://github.com/KovantAI/rstest/blob/main/python/rstest_worker/resources.py)) |
 | `worker_id` / `testrun_uid` fixtures | Fixture not found without pytest-xdist | Keep pytest-xdist installed, or define the fixtures in `conftest.py` |
 | `RSTEST_WORKER_ID`, `RSTEST_WORKER_COUNT`, `RSTEST_RUN_UID` in code | Never set | Read `PYTEST_XDIST_WORKER` / `PYTEST_XDIST_WORKER_COUNT` or the `worker_id` fixture, which work under both runners |
 | xdist hooks in `conftest.py` (`pytest_configure_node`, ...) | `unknown hook` error without pytest-xdist | Keep pytest-xdist installed, or mark the impls `@pytest.hookimpl(optionalhook=True)` |

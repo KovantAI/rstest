@@ -113,6 +113,56 @@ def test_needs_serial():
     assert 'RSTEST_WORKER_ID' not in os.environ
 ";
 
+/// Each test holds one fixed port for a second: in parallel, the others get
+/// EADDRINUSE; serially they take turns.
+fn port_holder(port: u32) -> String {
+    format!(
+        "import socket, time\n\n\
+         def test_holds_port():\n    \
+         s = socket.socket()\n    \
+         s.bind((\"127.0.0.1\", {port}))\n    \
+         s.listen()\n    \
+         time.sleep(1.0)\n    \
+         s.close()\n"
+    )
+}
+
+#[test]
+fn fixed_port_collision_names_rstest_free_port() {
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("port");
+    let port = 40_000 + std::process::id() % 20_000;
+    for i in 0..3 {
+        std::fs::write(dir.join(format!("test_port_{i}.py")), port_holder(port)).unwrap();
+    }
+    let jpath = dir.join("audit.json");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &["audit", "--audit-json", jpath.to_str().unwrap()],
+    );
+    let doc = read_json(&jpath);
+    let _ = std::fs::remove_dir_all(&dir);
+    if !out.contains("fail in parallel") {
+        return; // a box that can't run two workers never collides
+    }
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("CAUSE: a fixed port: workers collide on it; take one from the rstest_free_port fixture"),
+        "{out}"
+    );
+    let fixes: Vec<&str> = doc["serial_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["fix"].as_str())
+        .collect();
+    assert!(
+        fixes.iter().any(|f| f.contains("rstest_free_port")),
+        "{doc}"
+    );
+}
+
 #[test]
 fn parallel_only_failure_gets_a_serial_fix_list() {
     // Several failing files: the parallel pass and the scoped loadfile run use a
