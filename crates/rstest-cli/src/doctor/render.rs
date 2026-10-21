@@ -219,6 +219,27 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         }
         md.push('\n');
     }
+    if let Some(t) = &r.timeouts {
+        let _ = writeln!(
+            md,
+            "### Timeouts\n\n> `--timeout {}` covers {} of the {} test(s) with 5+ recorded \
+             passing runs (a test's limit: 3x its slowest run, at least +1s).\n",
+            t.suite_timeout,
+            t.tests_judged - t.override_count,
+            t.tests_judged
+        );
+        if !t.overrides.is_empty() {
+            md.push_str("| Timeout | Slowest | Runs | Test |\n|---:|---:|---:|---|\n");
+            for o in &t.overrides {
+                let _ = writeln!(
+                    md,
+                    "| `@pytest.mark.timeout({})` | {:.2}s | {} | `{}` |",
+                    o.timeout, o.slowest_seconds, o.runs, o.nodeid
+                );
+            }
+            md.push('\n');
+        }
+    }
     if !r.leaks.is_empty() {
         md.push_str("### Resource leaks\n\n> Threads/fds a test created that are still open after its teardown.\n\n");
         md.push_str("| Leaked | Test |\n|---|---|\n");
@@ -477,6 +498,31 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         }
     }
 
+    if let Some(t) = &r.timeouts {
+        sink.out_line(&format!(
+            "\nTIMEOUTS (a test's limit: 3x its slowest recorded passing run, at least +1s):\n  \
+             --timeout {} covers {} of the {} test(s) with 5+ recorded runs",
+            t.suite_timeout,
+            t.tests_judged - t.override_count,
+            t.tests_judged
+        ));
+        if !t.overrides.is_empty() {
+            sink.out_line("  these need their own limit:");
+            for o in &t.overrides {
+                sink.out_line(&format!(
+                    "  {:4}s  slowest {:.2}s of {} runs  {}  <- @pytest.mark.timeout({})",
+                    o.timeout, o.slowest_seconds, o.runs, o.nodeid, o.timeout
+                ));
+            }
+            if t.override_count > t.overrides.len() {
+                sink.out_line(&format!(
+                    "  ... and {} more",
+                    t.override_count - t.overrides.len()
+                ));
+            }
+        }
+    }
+
     if !r.leaks.is_empty() {
         sink.out_line(
             "\nRESOURCE LEAKS (threads/fds a test created, still open after its teardown):",
@@ -653,6 +699,40 @@ mod tests {
             "{out}"
         );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
+    }
+
+    #[test]
+    fn timeouts_section_in_terminal_and_markdown() {
+        let r = report(12);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(
+            out.contains("  --timeout 3 covers 39 of the 40 test(s) with 5+ recorded runs"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "    26s  slowest 8.40s of 12 runs  tests/test_a.py::test_long  \
+                 <- @pytest.mark.timeout(26)"
+            ),
+            "{out}"
+        );
+        let md = render_markdown(&r);
+        assert!(md.contains("### Timeouts"), "{md}");
+        assert!(
+            md.contains(
+                "| `@pytest.mark.timeout(26)` | 8.40s | 12 | `tests/test_a.py::test_long` |"
+            ),
+            "{md}"
+        );
+        // No history: no section anywhere.
+        let mut r = report(12);
+        r.timeouts = None;
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(!cap.out().contains("TIMEOUTS"));
+        assert!(!render_markdown(&r).contains("Timeouts"));
     }
 
     #[test]

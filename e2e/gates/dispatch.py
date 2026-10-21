@@ -579,6 +579,16 @@ def gate_duration_regression_gate(g, args, binary):
         r.returncode == 0 and "no regressions" in r.stderr,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-200:],
     )
+    # The doctor reads the same history for timeout advice: both tests have
+    # 5+ passing runs, so it suggests a suite --timeout covering them.
+    r = g.run(".", "-n", "2", "--doctor", cwd=ddir, env_extra={"DREG_SLEEP": "0.1"})
+    check(
+        "doctor: suggests a --timeout from the run history",
+        r.returncode == 0
+        and "TIMEOUTS (a test's limit: 3x its slowest recorded passing run" in r.stdout
+        and re.search(r"--timeout \d+ covers 2 of the 2 test\(s\)", r.stdout) is not None,
+        r.stdout[-600:],
+    )
 
 
 def gate_native_timeout(g, args, binary):

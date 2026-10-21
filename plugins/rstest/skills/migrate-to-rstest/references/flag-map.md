@@ -159,4 +159,6 @@ project has its own cache).
 Set `--timeout SECS` so a stuck test fails with a traceback at the stuck line
 instead of timing out the whole job. It also arms a hang backstop for code
 that never returns to Python; `--worker-timeout SECS` sets that backstop
-explicitly.
+explicitly. To pick SECS, run `rstest --doctor` once the suite has a few runs
+of history: its TIMEOUTS section suggests a suite value and per-test
+`@pytest.mark.timeout` overrides for the slow tests.
