@@ -1,0 +1,449 @@
+//! "What changed since green?": every run that exits 0 snapshots what git
+//! can't see about it (interpreter version, installed packages, a few
+//! environment variables) plus its commit, in `.rstest_cache/green_env.json`.
+//! A red run diffs the current state against that snapshot, so a CI break
+//! caused by a transitive dependency bump or an interpreter change names
+//! itself; `rstest since-green` shows the same diff without running tests.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+use crate::cache;
+use crate::explain::SuspectCommit;
+use crate::reporting::sink::Sink;
+
+pub const FILE: &str = "green_env.json";
+const SCHEMA: u32 = 1;
+
+/// Environment variables that change how tests behave and carry no secrets.
+const ENV_VARS: [&str; 8] = [
+    "PYTEST_ADDOPTS",
+    "PYTHONPATH",
+    "PYTHONHASHSEED",
+    "PYTHONWARNINGS",
+    "PYTHONUTF8",
+    "TZ",
+    "LANG",
+    "LC_ALL",
+];
+
+/// Commits listed in the human block (`--json` carries all).
+const COMMITS_SHOWN: usize = 10;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Snapshot {
+    schema: u32,
+    /// `HEAD` when the snapshot was taken; `None` outside a git checkout.
+    pub commit: Option<String>,
+    pub epoch: u64,
+    /// Interpreter version from the venv's `pyvenv.cfg`.
+    pub python: Option<String>,
+    /// Installed third-party packages, normalized name -> version.
+    pub packages: BTreeMap<String, String>,
+    /// The [`ENV_VARS`] that were set, name -> value.
+    pub env: BTreeMap<String, String>,
+}
+
+/// The current state, for `scope`'s interpreter `python`.
+pub fn capture(scope: &Path, python: &Path, commit: Option<&str>, epoch: u64) -> Snapshot {
+    Snapshot {
+        schema: SCHEMA,
+        commit: commit.map(str::to_string),
+        epoch,
+        python: crate::incremental::python_version(python),
+        packages: crate::incremental::installed_packages(scope, python),
+        env: ENV_VARS
+            .iter()
+            .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+            .collect(),
+    }
+}
+
+/// Save `snap` as the last green state. Best-effort.
+pub fn record(snap: &Snapshot) {
+    if let Ok(bytes) = serde_json::to_vec(snap) {
+        let _ = cache::write_atomic(&cache::file(FILE), &bytes);
+    }
+}
+
+/// The last green state, or `None` when no run has been green yet (or the
+/// file is from another schema).
+pub fn load() -> Option<Snapshot> {
+    let bytes = std::fs::read(cache::file(FILE)).ok()?;
+    serde_json::from_slice::<Snapshot>(&bytes)
+        .ok()
+        .filter(|s| s.schema == SCHEMA)
+}
+
+/// One value that differs: `None` on a side means absent there.
+#[derive(Debug, PartialEq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct Change {
+    /// Package name, environment variable, or `python`.
+    name: String,
+    /// Value at the last green run; `null` when it was absent (added since).
+    green: Option<String>,
+    /// Value now; `null` when it is gone (removed since).
+    now: Option<String>,
+}
+
+/// Envelope metadata for the since-green document.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct Meta {
+    /// Constant producer tag: always `"rstest"`.
+    runner: &'static str,
+    /// Constant discriminator: always `"since-green"`.
+    kind: &'static str,
+    /// Document schema version.
+    schema: u32,
+    /// The rstest version that wrote the document.
+    rstest_version: &'static str,
+}
+
+/// What differs between the last green run and now.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub(crate) struct SinceGreen {
+    /// Envelope metadata.
+    meta: Meta,
+    /// Whether a green run was ever recorded here; every other field is
+    /// empty or null when it wasn't.
+    found: bool,
+    /// Commit of the last green run.
+    green_commit: Option<String>,
+    /// Epoch seconds of the last green run.
+    green_epoch: Option<u64>,
+    /// Current `HEAD`.
+    commit: Option<String>,
+    /// Commits after the green commit up to `HEAD` (`git log green..HEAD`),
+    /// newest first. Null when there is no commit on either side or git
+    /// can't resolve the range here.
+    commits: Option<Vec<SuspectCommit>>,
+    /// Interpreter version change, if any.
+    python: Option<Change>,
+    /// Packages added, removed or at another version, by name.
+    packages: Vec<Change>,
+    /// Watched environment variables set, unset or changed.
+    env: Vec<Change>,
+}
+
+impl SinceGreen {
+    fn is_empty(&self) -> bool {
+        // Unknown commits (git couldn't resolve the range) only count as "no
+        // commits" when both sides are the same commit.
+        let no_commits = match &self.commits {
+            Some(cs) => cs.is_empty(),
+            None => self.green_commit == self.commit,
+        };
+        no_commits && self.python.is_none() && self.packages.is_empty() && self.env.is_empty()
+    }
+}
+
+fn diff_maps(green: &BTreeMap<String, String>, now: &BTreeMap<String, String>) -> Vec<Change> {
+    let mut names: Vec<&String> = green.keys().chain(now.keys()).collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter(|n| green.get(*n) != now.get(*n))
+        .map(|n| Change {
+            name: n.clone(),
+            green: green.get(n).cloned(),
+            now: now.get(n).cloned(),
+        })
+        .collect()
+}
+
+/// Diff `now` against the last green snapshot. `git` runs `git <args>` (the
+/// commit range); injectable for tests.
+fn compare(
+    green: Option<&Snapshot>,
+    now: &Snapshot,
+    git: impl Fn(&[&str]) -> Result<String>,
+) -> SinceGreen {
+    let meta = Meta {
+        runner: "rstest",
+        kind: "since-green",
+        schema: SCHEMA,
+        rstest_version: env!("CARGO_PKG_VERSION"),
+    };
+    let Some(g) = green else {
+        return SinceGreen {
+            meta,
+            found: false,
+            green_commit: None,
+            green_epoch: None,
+            commit: now.commit.clone(),
+            commits: None,
+            python: None,
+            packages: Vec::new(),
+            env: Vec::new(),
+        };
+    };
+    let commits = match (&g.commit, &now.commit) {
+        (Some(a), Some(b)) => crate::explain::suspects(a, b, git),
+        _ => None,
+    };
+    SinceGreen {
+        meta,
+        found: true,
+        green_commit: g.commit.clone(),
+        green_epoch: Some(g.epoch),
+        commit: now.commit.clone(),
+        commits,
+        python: (g.python != now.python).then(|| Change {
+            name: "python".into(),
+            green: g.python.clone(),
+            now: now.python.clone(),
+        }),
+        packages: diff_maps(&g.packages, &now.packages),
+        env: diff_maps(&g.env, &now.env),
+    }
+}
+
+fn change_line(c: &Change) -> String {
+    match (&c.green, &c.now) {
+        (Some(a), Some(b)) => format!("{} {a} -> {b}", c.name),
+        (None, Some(b)) => format!("{} {b} (added)", c.name),
+        (Some(a), None) => format!("{} {a} (removed)", c.name),
+        (None, None) => c.name.clone(),
+    }
+}
+
+/// The human block. `red` words it for a failing run.
+fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
+    let out = |sink: &mut Sink, s: &str| {
+        if red {
+            sink.warn(s)
+        } else {
+            sink.out_line(s)
+        }
+    };
+    if !d.found {
+        out(
+            sink,
+            "rstest: since green: no green run recorded here yet (every run that exits 0 records one)",
+        );
+        return;
+    }
+    let short = |c: &Option<String>| {
+        c.as_deref()
+            .map_or("no commit".to_string(), |c| c.chars().take(10).collect())
+    };
+    out(
+        sink,
+        &format!(
+            "rstest: changed since the last green run ({}, {}):",
+            short(&d.green_commit),
+            crate::explain::ago(d.green_epoch.unwrap_or(0), now_epoch)
+        ),
+    );
+    if d.is_empty() {
+        out(
+            sink,
+            "  nothing: same commit, interpreter, packages and environment. \
+             Suspect the tests themselves (`rstest flaky`, `rstest explain <nodeid>`).",
+        );
+        return;
+    }
+    match &d.commits {
+        Some(cs) if !cs.is_empty() => {
+            out(sink, &format!("  {} commit(s):", cs.len()));
+            for c in cs.iter().take(COMMITS_SHOWN) {
+                out(sink, &format!("    {} {} ({})", c.sha, c.subject, c.author));
+            }
+            if cs.len() > COMMITS_SHOWN {
+                out(sink, &format!("    ... {} more", cs.len() - COMMITS_SHOWN));
+            }
+        }
+        Some(_) => {}
+        None if d.green_commit.is_some() && d.commit.is_some() => out(
+            sink,
+            "  commits: unknown here (not a git checkout, or the green commit isn't fetched)",
+        ),
+        None => {}
+    }
+    if let Some(p) = &d.python {
+        out(sink, &format!("  interpreter: {}", change_line(p)));
+    }
+    if !d.packages.is_empty() {
+        out(sink, &format!("  {} package(s):", d.packages.len()));
+        for c in &d.packages {
+            out(sink, &format!("    {}", change_line(c)));
+        }
+    }
+    if !d.env.is_empty() {
+        out(sink, "  environment:");
+        for c in &d.env {
+            out(sink, &format!("    {}", change_line(c)));
+        }
+    }
+}
+
+/// After a run: a green run (exit 0) records the snapshot; a run with failed
+/// tests (exit 1) prints what changed since the last green one, when anything
+/// did.
+pub fn after_run(sink: &mut Sink, exitstatus: i32, now: &Snapshot) {
+    match exitstatus {
+        0 => record(now),
+        1 => {
+            if let Some(g) = load() {
+                let d = compare(Some(&g), now, crate::select::git_stdout);
+                // Silent when nothing differs: a red cycle in a local edit
+                // loop (or `--watch`) shouldn't repeat "nothing changed".
+                if !d.is_empty() {
+                    render(sink, &d, now.epoch, true);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `rstest since-green [--json]`: the diff against the last green run, no
+/// tests run.
+pub fn run_since_green(sink: &mut Sink, python: &Path, json: bool) -> Result<i32> {
+    let scope = std::env::current_dir()?;
+    let epoch = crate::time::now_epoch_secs();
+    let now = capture(
+        &scope,
+        python,
+        crate::incremental::head_sha().as_deref(),
+        epoch,
+    );
+    let d = compare(load().as_ref(), &now, crate::select::git_stdout);
+    if json {
+        let mut bytes = serde_json::to_vec_pretty(&d)?;
+        bytes.push(b'\n');
+        std::io::Write::write_all(sink.out(), &bytes)?;
+    } else {
+        render(sink, &d, epoch, false);
+    }
+    Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(commit: &str, python: &str, pkgs: &[(&str, &str)], env: &[(&str, &str)]) -> Snapshot {
+        Snapshot {
+            schema: SCHEMA,
+            commit: Some(commit.into()),
+            epoch: 1000,
+            python: Some(python.into()),
+            packages: pkgs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    fn no_git(_: &[&str]) -> Result<String> {
+        Ok(String::new())
+    }
+
+    #[test]
+    fn compare_finds_package_interpreter_and_env_changes() {
+        let green = snap(
+            "aaa",
+            "3.12.1",
+            &[("httpx", "0.27.0"), ("gone", "1.0"), ("same", "2.0")],
+            &[("TZ", "UTC"), ("LANG", "C")],
+        );
+        let now = snap(
+            "bbb",
+            "3.12.4",
+            &[("httpx", "0.28.1"), ("new-dep", "0.1"), ("same", "2.0")],
+            &[("TZ", "UTC"), ("PYTHONHASHSEED", "0")],
+        );
+        let git = |args: &[&str]| -> Result<String> {
+            assert_eq!(args[2], "aaa..bbb");
+            Ok("bbb\x1fAda\x1fbump httpx\n".into())
+        };
+        let d = compare(Some(&green), &now, git);
+        assert!(d.found && !d.is_empty());
+        assert_eq!(d.commits.as_ref().unwrap()[0].subject, "bump httpx");
+        let p = d.python.as_ref().unwrap();
+        assert_eq!(
+            (p.green.as_deref(), p.now.as_deref()),
+            (Some("3.12.1"), Some("3.12.4"))
+        );
+        let lines: Vec<String> = d.packages.iter().map(change_line).collect();
+        assert_eq!(
+            lines,
+            [
+                "gone 1.0 (removed)",
+                "httpx 0.27.0 -> 0.28.1",
+                "new-dep 0.1 (added)"
+            ]
+        );
+        let env: Vec<String> = d.env.iter().map(change_line).collect();
+        assert_eq!(env, ["LANG C (removed)", "PYTHONHASHSEED 0 (added)"]);
+    }
+
+    #[test]
+    fn render_red_block_goes_to_stderr() {
+        let green = snap("aaa", "3.12.1", &[("httpx", "0.27.0")], &[]);
+        let now = snap("aaa", "3.12.1", &[("httpx", "0.28.1")], &[]);
+        let d = compare(Some(&green), &now, no_git);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &d, 1000 + 7200, true);
+        assert_eq!(cap.out(), "", "stdout stays a clean stream");
+        let err = cap.err();
+        assert!(
+            err.contains("rstest: changed since the last green run (aaa, 2h ago):"),
+            "{err}"
+        );
+        assert!(
+            err.contains("  1 package(s):\n    httpx 0.27.0 -> 0.28.1\n"),
+            "{err}"
+        );
+        // Same commit: an empty range, so no commit line at all.
+        assert!(!err.contains("commit(s)"), "{err}");
+    }
+
+    #[test]
+    fn render_nothing_changed_and_no_green_yet() {
+        let s = snap("aaa", "3.12.1", &[("x", "1")], &[]);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &compare(Some(&s), &s, no_git), 1000, false);
+        assert!(cap
+            .out()
+            .contains("nothing: same commit, interpreter, packages and environment"));
+
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &compare(None, &s, no_git), 1000, false);
+        assert!(cap.out().contains("no green run recorded here yet"));
+
+        // git can't resolve the range: say so instead of "no commits".
+        let other = snap("bbb", "3.12.1", &[("x", "1")], &[]);
+        let d = compare(Some(&s), &other, |_| anyhow::bail!("bad revision"));
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &d, 1000, false);
+        assert!(cap.out().contains("commits: unknown here"), "{}", cap.out());
+    }
+
+    #[test]
+    fn json_shape() {
+        let green = snap("aaa", "3.12.1", &[("httpx", "0.27.0")], &[]);
+        let now = snap("aaa", "3.12.1", &[], &[]);
+        let v = serde_json::to_value(compare(Some(&green), &now, no_git)).unwrap();
+        assert_eq!(v["meta"]["kind"], "since-green");
+        assert_eq!(v["found"], true);
+        assert_eq!(v["green_commit"], "aaa");
+        assert_eq!(v["packages"][0]["name"], "httpx");
+        assert!(v["packages"][0]["now"].is_null());
+        assert!(v["python"].is_null());
+        let v = serde_json::to_value(compare(None, &now, no_git)).unwrap();
+        assert_eq!(v["found"], false);
+    }
+}

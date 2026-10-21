@@ -8,6 +8,7 @@ Source: `--doctor-json`
 |---|---|---|---|
 | `coverage_waste` | CoverageWaste or null | yes | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
 | `cpu_time_seconds` | number | yes | Sum of whole-protocol CPU time (the worker process plus child processes it waited for), over tests where it was measured. |
+| `drift` | Drift or null | yes | Tests whose typical call time crept up across their recorded runs, in steps too small for `--durations-regress`. `null` unless one did. |
 | `fixtures` | array of FixtureEntry | yes | Fixture setup cost summed across all workers, costliest first (top 50). |
 | `fork_prewarm` | boolean | yes | Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates the "try --fork-pool" hint so it isn't suggested when already on. |
 | `leaks` | array of Leak | no | Tests that leaked threads / fds (created by the test, still open after its teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
@@ -33,6 +34,25 @@ Slow tests that add no unique coverage: every line each one executes is also exe
 | `redundant_tests` | integer | yes | Count of redundant slow tests found (`tests` shows the slowest of them). |
 | `tests` | array of WasteTest | yes | The slowest redundant tests, worst first (capped). |
 | `wasted_seconds` | number | yes | Sum of the durations of every redundant slow test (not just the shown ones) - the time reclaimable by pruning them. |
+
+### Drift
+
+Slow creep: a test whose median call time rose from the older third of its recorded passing runs to the middle third to the newest, by at least 1.5x and 0.2s overall.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `drifting_tests` | integer | yes | Tests in this run that drift. |
+| `tests` | array of DriftTest | yes | The largest rises, worst first (top 10). |
+
+### DriftTest
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `middle_median` | number | yes | Median over the middle third. |
+| `newer_median` | number | yes | Median over the newest third. |
+| `nodeid` | string | yes | The test. |
+| `older_median` | number | yes | Median call-phase seconds over the oldest third of its passing runs. |
+| `runs` | integer | yes | Passing runs the medians come from. |
 
 ### FileEntry
 

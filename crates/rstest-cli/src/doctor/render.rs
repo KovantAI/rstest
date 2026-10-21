@@ -240,6 +240,23 @@ pub fn render_markdown(r: &DoctorReport) -> String {
             md.push('\n');
         }
     }
+    if let Some(d) = &r.drift {
+        let _ = writeln!(
+            md,
+            "### Duration drift\n\n> {} test(s) whose median call time rose across their \
+             recorded runs, in steps too small for `--durations-regress`.\n",
+            d.drifting_tests
+        );
+        md.push_str("| Older | Middle | Newer | Runs | Test |\n|---:|---:|---:|---:|---|\n");
+        for t in &d.tests {
+            let _ = writeln!(
+                md,
+                "| {:.2}s | {:.2}s | {:.2}s | {} | `{}` |",
+                t.older_median, t.middle_median, t.newer_median, t.runs, t.nodeid
+            );
+        }
+        md.push('\n');
+    }
     if !r.leaks.is_empty() {
         md.push_str("### Resource leaks\n\n> Threads/fds a test created that are still open after its teardown.\n\n");
         md.push_str("| Leaked | Test |\n|---|---|\n");
@@ -523,6 +540,30 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         }
     }
 
+    if let Some(d) = &r.drift {
+        sink.out_line(&format!(
+            "\nDURATION DRIFT ({} test(s) creeping slower across their recorded runs; \
+             median of the older, middle and newer third):",
+            d.drifting_tests
+        ));
+        for t in &d.tests {
+            sink.out_line(&format!(
+                "  {:6.2}s -> {:6.2}s -> {:6.2}s  ({} runs)  {}",
+                t.older_median, t.middle_median, t.newer_median, t.runs, t.nodeid
+            ));
+        }
+        if d.drifting_tests > d.tests.len() {
+            sink.out_line(&format!(
+                "  ... and {} more",
+                d.drifting_tests - d.tests.len()
+            ));
+        }
+        sink.out_line(
+            "  each step is too small for --durations-regress; `rstest explain <nodeid>` \
+             shows the runs",
+        );
+    }
+
     if !r.leaks.is_empty() {
         sink.out_line(
             "\nRESOURCE LEAKS (threads/fds a test created, still open after its teardown):",
@@ -726,13 +767,27 @@ mod tests {
             ),
             "{md}"
         );
+        assert!(
+            out.contains("DURATION DRIFT (1 test(s) creeping slower across their recorded runs"),
+            "{out}"
+        );
+        assert!(
+            out.contains("    0.40s ->   0.55s ->   0.70s  (30 runs)  tests/test_a.py::test_creep"),
+            "{out}"
+        );
+        assert!(
+            md.contains("| 0.40s | 0.55s | 0.70s | 30 | `tests/test_a.py::test_creep` |"),
+            "{md}"
+        );
         // No history: no section anywhere.
         let mut r = report(12);
         r.timeouts = None;
+        r.drift = None;
         let (mut sink, cap) = Sink::captured();
         render(&mut sink, &r);
-        assert!(!cap.out().contains("TIMEOUTS"));
+        assert!(!cap.out().contains("TIMEOUTS") && !cap.out().contains("DRIFT"));
         assert!(!render_markdown(&r).contains("Timeouts"));
+        assert!(!render_markdown(&r).contains("drift"));
     }
 
     #[test]

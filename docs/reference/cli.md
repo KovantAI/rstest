@@ -332,7 +332,9 @@ such modules from a test file, or keep full runs on the gating path.
 
 ### `--since-green`
 
-Incremental testing against the last green run. rstest records the git commit
+Incremental testing against the last green run. (To see what changed since
+the last green run instead, use [`rstest since-green`](cli-commands.md#since-green).)
+rstest records the git commit
 of the last fully-passing run in the cache (`last_green.json`) and uses it as
 the [`--changed`](#-changedrev) base. The baseline advances **only when a run
 is fully green**, so a failing test keeps being selected until it passes.

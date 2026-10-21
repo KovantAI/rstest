@@ -235,6 +235,71 @@ fn file_url_path(url: &str) -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
+/// Installed third-party distributions for `python`, as normalized name ->
+/// version, read from the `*.dist-info` (and legacy `*.egg-info`) directory
+/// names, so no interpreter is started. First-party dists (the project's own
+/// editable install, see [`is_first_party_dist`]) are left out: their version
+/// often moves with every commit. Empty when `python` has no venv layout.
+pub fn installed_packages(
+    scope: &Path,
+    python: &Path,
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for sp in site_packages_dirs(python) {
+        let Ok(rd) = std::fs::read_dir(&sp) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(stem) = name
+                .strip_suffix(".dist-info")
+                .or_else(|| name.strip_suffix(".egg-info"))
+            else {
+                continue;
+            };
+            if name.ends_with(".dist-info") && is_first_party_dist(scope, &e.path()) {
+                continue;
+            }
+            // `name-version` (wheel) or `name-version-pyX.Y` (egg-info).
+            let mut parts = stem.splitn(3, '-');
+            let (Some(pkg), Some(version)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            out.insert(normalize_dist_name(pkg), version.to_string());
+        }
+    }
+    out
+}
+
+/// PEP 503 name normalization: lowercase, runs of `-`, `_`, `.` become `-`.
+fn normalize_dist_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+        } else {
+            out.push(c.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// The interpreter version from the venv's `pyvenv.cfg` (`version_info` or
+/// `version`), or `None` without a venv.
+pub fn python_version(python: &Path) -> Option<String> {
+    let venv = python.parent()?.parent()?;
+    let cfg = std::fs::read_to_string(venv.join("pyvenv.cfg")).ok()?;
+    let get = |key: &str| {
+        cfg.lines().find_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            (k.trim() == key).then(|| v.trim().to_string())
+        })
+    };
+    get("version_info").or_else(|| get("version"))
+}
+
 /// Fold every installed distribution's identity into `h`, order-stable: the
 /// `*.dist-info` dir NAME (which encodes package + version) plus its RECORD file
 /// SIZE (legacy `*.egg-info` / `*.egg-link` entries likewise, see
@@ -636,5 +701,60 @@ mod tests {
         let sha = head_sha().expect("HEAD sha inside the repo");
         assert_eq!(sha.len(), 40, "sha={sha}");
         assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()), "sha={sha}");
+    }
+
+    #[test]
+    fn installed_packages_and_python_version_from_the_venv() {
+        let venv = tmp("pkgs");
+        let sp = venv.join("lib/python3.12/site-packages");
+        std::fs::create_dir_all(&sp).unwrap();
+        std::fs::create_dir_all(venv.join("bin")).unwrap();
+        std::fs::write(
+            venv.join("pyvenv.cfg"),
+            "home = /usr/bin\nversion_info = 3.12.4.final.0\n",
+        )
+        .unwrap();
+        for d in [
+            "httpx-0.28.1.dist-info",
+            "Typing_Extensions-4.12.2.dist-info",
+            "pytz-2024.1-py3.12.egg-info",
+        ] {
+            std::fs::create_dir_all(sp.join(d)).unwrap();
+        }
+        // The project's own editable install is left out.
+        let mine = sp.join("myproj-0.1.dev3.dist-info");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(
+            mine.join("direct_url.json"),
+            r#"{"url": "file:///anywhere", "dir_info": {"editable": true}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(sp.join("not_a_dist")).unwrap();
+        let python = venv.join("bin/python");
+        let pkgs = installed_packages(&venv, &python);
+        let got: Vec<(&str, &str)> = pkgs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("httpx", "0.28.1"),
+                ("pytz", "2024.1"),
+                ("typing-extensions", "4.12.2")
+            ]
+        );
+        assert_eq!(python_version(&python).as_deref(), Some("3.12.4.final.0"));
+        // No venv: nothing, not an error.
+        assert!(installed_packages(&venv, std::path::Path::new("python")).is_empty());
+        assert_eq!(python_version(std::path::Path::new("/python")), None);
+        let _ = std::fs::remove_dir_all(&venv);
+    }
+
+    #[test]
+    fn dist_names_normalize_per_pep_503() {
+        assert_eq!(
+            normalize_dist_name("Typing_Extensions"),
+            "typing-extensions"
+        );
+        assert_eq!(normalize_dist_name("zope.interface"), "zope-interface");
+        assert_eq!(normalize_dist_name("a__b--c"), "a-b-c");
     }
 }

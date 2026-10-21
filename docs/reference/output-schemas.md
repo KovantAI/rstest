@@ -96,6 +96,14 @@ snapshot's prose walkthrough and examples, see [Shape](report-json.md#shape).
     --8<-- "docs/reference/schemas/flaky.schema.json"
     ```
 
+--8<-- "docs/reference/schemas/since-green.md"
+
+??? note "Since green: full JSON Schema (draft-07)"
+
+    ```json
+    --8<-- "docs/reference/schemas/since-green.schema.json"
+    ```
+
 --8<-- "docs/reference/schemas/flake-log.md"
 
 ??? note "Flake log: full JSON Schema (draft-07)"

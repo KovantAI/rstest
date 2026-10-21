@@ -55,16 +55,16 @@ struct Coverage {
     files: Vec<String>,
 }
 
-/// A commit between the test's last pass and its first failure.
+/// A commit in a suspect range (`git log <good>..<bad>`).
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
-struct SuspectCommit {
+pub(crate) struct SuspectCommit {
     /// Abbreviated commit hash.
-    sha: String,
+    pub(crate) sha: String,
     /// Author name.
-    author: String,
+    pub(crate) author: String,
     /// First line of the commit message.
-    subject: String,
+    pub(crate) subject: String,
 }
 
 /// The test's recent runs from the per-test history (oldest first).
@@ -210,7 +210,7 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
 
 /// The commits that could have broken the test: `git log last..first`.
 /// `None` when git fails (not a checkout, or a commit this clone lacks).
-fn suspects(
+pub(crate) fn suspects(
     last: &str,
     first: &str,
     git: impl Fn(&[&str]) -> Result<String>,

@@ -269,6 +269,27 @@ Only tests in this run with at least 5 passing runs in the history count
 (failed runs never set the limit), so the section appears once the history
 has built up. This run's own times aren't included yet.
 
+### DURATION DRIFT
+
+Tests whose call time is creeping up across their recorded runs (the per-test
+run history), in steps each too small for
+[`--durations-regress`](slowdowns.md) to flag:
+
+```text
+DURATION DRIFT (2 test(s) creeping slower across their recorded runs; median of the older, middle and newer third):
+    0.41s ->   0.58s ->   0.79s  (30 runs)  tests/test_search.py::test_ranked_query
+    1.10s ->   1.42s ->   1.81s  (18 runs)  tests/test_sync.py::test_backfill
+  each step is too small for --durations-regress; `rstest explain <nodeid>` shows the runs
+```
+
+A test is listed when it has at least 9 passing runs in the history, the
+medians of the oldest, middle and newest third of them rise step by step, and
+the newest is at least 1.5 times and 0.2 seconds above the oldest. A one-off
+jump doesn't qualify (that is what `--durations-regress` catches), and
+neither does a noisy but flat test. Typical causes: a table or fixture file
+that grows every run, a cache that is never cleared, a dependency that got
+slower over several releases. Top 10, largest rise first.
+
 ### startup
 
 A one-line summary under the header reports how long spawning the worker pool
@@ -301,8 +322,8 @@ parallel-efficiency (realized speedup and per-worker load), fixture timings
 (each with `constant` and `projected_saving_seconds` for the scope-promotion
 advisor), slowest files, and the coverage-waste list (`coverage_waste`, `null`
 unless the same run collected per-test coverage with `--cov --cov-context=test`),
-and the timeout advice (`timeouts`, `null` until tests have 5 passing runs in
-the run history).
+the timeout advice (`timeouts`, `null` until tests have 5 passing runs in
+the run history), and duration drift (`drift`, `null` unless a test drifts).
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.

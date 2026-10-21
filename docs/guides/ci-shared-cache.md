@@ -89,8 +89,8 @@ restored. The bundled action already leaves them out. Wherever you persist
   works in bash, PowerShell and cmd.exe alike.
 - **Cache only the files that matter** where the provider takes file paths:
   `durations.json`, `flakes.json`, `coverage_index.json`, `wall.json`,
-  `last_green.json`, `incremental_outcomes.json` and `history.msgpack` under
-  `.rstest_cache/`. Without `history.msgpack`, auto-quarantine has no history
+  `last_green.json`, `incremental_outcomes.json`, `history.msgpack` and
+  `green_env.json` under `.rstest_cache/`. Without `history.msgpack`, auto-quarantine has no history
   to work from and quarantines nothing. (With `--cache-pull`, the history
   arrives through the shared cache instead.)
 - **Turn journaling off** with `RSTEST_NO_REPLAY_JOURNAL=1` if you won't

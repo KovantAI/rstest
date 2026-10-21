@@ -874,6 +874,14 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // What changed since green: a green run records its environment, a red
+    // one says what differs from the last green. On the final exit code, so
+    // a gate that turned the run red counts. Not on `replay`: a diagnostic
+    // re-run of an old schedule is no baseline.
+    if !replay {
+        let now = crate::since_green::capture(scope, python, head.as_deref(), started_epoch);
+        crate::since_green::after_run(sink, exitstatus, &now);
+    }
     Ok(exitstatus)
 }
 

@@ -1,0 +1,173 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SinceGreen",
+  "description": "What differs between the last green run and now.",
+  "type": "object",
+  "properties": {
+    "commit": {
+      "description": "Current `HEAD`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "commits": {
+      "description": "Commits after the green commit up to `HEAD` (`git log green..HEAD`),\nnewest first. Null when there is no commit on either side or git\ncan't resolve the range here.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/SuspectCommit"
+      }
+    },
+    "env": {
+      "description": "Watched environment variables set, unset or changed.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Change"
+      }
+    },
+    "found": {
+      "description": "Whether a green run was ever recorded here; every other field is\nempty or null when it wasn't.",
+      "type": "boolean"
+    },
+    "green_commit": {
+      "description": "Commit of the last green run.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "green_epoch": {
+      "description": "Epoch seconds of the last green run.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "meta": {
+      "description": "Envelope metadata.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Meta"
+        }
+      ]
+    },
+    "packages": {
+      "description": "Packages added, removed or at another version, by name.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Change"
+      }
+    },
+    "python": {
+      "description": "Interpreter version change, if any.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Change"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "meta",
+    "found",
+    "green_commit",
+    "green_epoch",
+    "commit",
+    "commits",
+    "python",
+    "packages",
+    "env"
+  ],
+  "definitions": {
+    "Change": {
+      "description": "One value that differs: `None` on a side means absent there.",
+      "type": "object",
+      "properties": {
+        "green": {
+          "description": "Value at the last green run; `null` when it was absent (added since).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Package name, environment variable, or `python`.",
+          "type": "string"
+        },
+        "now": {
+          "description": "Value now; `null` when it is gone (removed since).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "green",
+        "now"
+      ]
+    },
+    "Meta": {
+      "description": "Envelope metadata for the since-green document.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Constant discriminator: always `\"since-green\"`.",
+          "type": "string"
+        },
+        "rstest_version": {
+          "description": "The rstest version that wrote the document.",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "runner",
+        "kind",
+        "schema",
+        "rstest_version"
+      ]
+    },
+    "SuspectCommit": {
+      "description": "A commit in a suspect range (`git log <good>..<bad>`).",
+      "type": "object",
+      "properties": {
+        "author": {
+          "description": "Author name.",
+          "type": "string"
+        },
+        "sha": {
+          "description": "Abbreviated commit hash.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "First line of the commit message.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "author",
+        "subject"
+      ]
+    }
+  }
+}
