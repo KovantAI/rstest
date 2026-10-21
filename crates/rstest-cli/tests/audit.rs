@@ -128,7 +128,7 @@ fn port_holder(port: u32) -> String {
 }
 
 #[test]
-fn fixed_port_collision_names_rstest_free_port() {
+fn fixed_port_collision_names_the_fix() {
     let Some(venv) = pytest_env() else { return };
     let dir = fresh_dir("port");
     let port = 40_000 + std::process::id() % 20_000;
@@ -148,7 +148,7 @@ fn fixed_port_collision_names_rstest_free_port() {
     }
     assert_eq!(code, 1, "{out}");
     assert!(
-        out.contains("CAUSE: a fixed port: workers collide on it; take one from the rstest_free_port fixture"),
+        out.contains("CAUSE: a fixed port: workers collide on it; bind port 0 instead"),
         "{out}"
     );
     let fixes: Vec<&str> = doc["serial_candidates"]
@@ -157,10 +157,7 @@ fn fixed_port_collision_names_rstest_free_port() {
         .iter()
         .filter_map(|c| c["fix"].as_str())
         .collect();
-    assert!(
-        fixes.iter().any(|f| f.contains("rstest_free_port")),
-        "{doc}"
-    );
+    assert!(fixes.iter().any(|f| f.contains("unused_tcp_port")), "{doc}");
 }
 
 #[test]

@@ -111,20 +111,14 @@ between 0.x releases and are listed here.
   `--doctor-json`) listing every test's outbound connections without
   blocking.
 
-- **Built-in per-worker resources.** Four fixtures fix the most common
-  parallel-safety blockers in one line: `rstest_free_port` (an OS-assigned
-  free port), `rstest_postgres_url` (a Postgres database per worker, cloned
-  from the migrated test database named by `RSTEST_POSTGRES_URL` /
-  `DATABASE_URL`, dropped at the end), `rstest_worker_name("app")`
-  (`app_gw3`, any other per-worker name) and `rstest_home` (a private `HOME`
-  and XDG dirs per test).
-  They ship as a pytest plugin (`rstest_resources`), so suites using them
-  also run under plain pytest and pytest-xdist while rstest is installed.
-  `audit` and `migrate-check` now print a `CAUSE:` line naming the fixture
-  when a parallel-only failure's error shows a port, database or home
-  directory collision.
-
-### Fixes
+- **`audit` and `migrate-check` name the shared resource behind a
+  parallel-only failure.** When the error text shows a fixed port
+  ("Address already in use"), one shared database ("database ... already
+  exists", "database is locked") or a shared home directory, a `CAUSE:`
+  line under the test names it and the fix, pointing at the established
+  plugins (pytest-asyncio's `unused_tcp_port`, pytest-postgresql or
+  pytest-django, pytest-home's `tmp_home_dir`). `--audit-json` carries the
+  same fix.
 
 - **Parallel runs no longer leave a temp folder behind
   ([#173](https://github.com/KovantAI/rstest/issues/173)).** Every run with
