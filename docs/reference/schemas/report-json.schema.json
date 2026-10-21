@@ -11,6 +11,13 @@
         "type": "string"
       }
     },
+    "failure_groups": {
+      "description": "Failures that share a cause (same exception, message and project\nframe), largest group first. Only groups of two or more; absent when\nthere are none.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FailureGroup"
+      }
+    },
     "meta": {
       "description": "Run metadata: argv, counts, exit status, schema version, shard.",
       "allOf": [
@@ -33,6 +40,47 @@
     "tests"
   ],
   "definitions": {
+    "FailureGroup": {
+      "description": "Failures with one cause: the same exception type, message (numbers and\naddresses masked) and deepest project frame.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "`path:line` of the deepest traceback frame in project code, or null\nwhen every frame was outside the project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "description": "Number of failed tests in the group.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "exception": {
+          "description": "Exception type name.",
+          "type": "string"
+        },
+        "message": {
+          "description": "The first member's exception message (first line).",
+          "type": "string"
+        },
+        "nodeids": {
+          "description": "The failed tests, sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "exception",
+        "message",
+        "at",
+        "count",
+        "nodeids"
+      ]
+    },
     "ShardJson": {
       "description": "Sharding identity block (only under `--shard`).",
       "type": "object",

@@ -10,8 +10,9 @@ follows [Exit codes](../reference/exit-codes.md).
 ## GitHub Actions (`github`)
 
 Prints the `dots` log plus a [GitHub Actions](https://docs.github.com/actions)
-`::error` workflow command per failing test, shown as inline annotations on
-the PR diff:
+`::error` workflow command per failing test (one per group when failures
+[share a cause](#failures-by-cause)), shown as inline annotations on the PR
+diff:
 
 ```text
 ::error file=<path>,title=<nodeid>,line=<n>::<traceback>
@@ -32,12 +33,20 @@ the PR diff:
   emits `::warning` (`flaky: passed only after N reruns`), and a
   [quarantined](../reference/cli.md#-quarantine-file) failure emits `::warning`
   (`quarantined (non-fatal): <traceback>`) instead of `::error`.
+- Failures that [share a cause](#failures-by-cause) get **one** `::error`
+  for the whole group, titled `N tests, one cause` and placed on the project
+  line they all went through, with the member tests and one example traceback
+  in its body. Their individual annotations are dropped, so one broken
+  dependency doesn't fill the PR (GitHub shows only the first few error
+  annotations of a step).
 
 ## Azure Pipelines (`azure`)
 
 Prints the `dots` log plus an [Azure Pipelines logging
 command](https://learn.microsoft.com/azure/devops/pipelines/scripts/logging-commands)
-per failing test, shown as an inline issue on the file in the PR:
+per failing test (one per group when failures
+[share a cause](#failures-by-cause)), shown as an inline issue on the file in
+the PR:
 
 ```text
 ##vso[task.logissue type=error;sourcepath=<path>;linenumber=<n>]<nodeid>: <message>
@@ -48,7 +57,39 @@ The message is the exception line (`AssertionError: x mismatch`), the first
 line of the traceback's last `E` block, since logissue is single-line. A
 collection error also emits `type=error` (`<path> (collection error):
 <exception>`); flaky passes and quarantined failures emit `type=warning`,
-never `type=error`.
+never `type=error`. Failures that [share a cause](#failures-by-cause) emit
+one `type=error` line for the group (`N tests, one cause: <exception>`) on
+their shared project line.
+
+## Failures by cause
+
+When several failures share a cause, every human output format ends with one
+block per cause, just above the summary line:
+
+```text
+=========== failures by cause ===========
+38 tests: ConnectionRefusedError: [Errno 111] Connection refused
+  at app/db.py:12
+    tests/test_orders.py::test_create
+    tests/test_orders.py::test_cancel
+    tests/test_users.py::test_signup
+    tests/test_users.py::test_login
+    tests/test_users.py::test_logout
+    ... and 33 more
+```
+
+Two failures share a cause when they raised the same exception type with the
+same message (numbers and hex addresses masked, so a different port or object
+id still matches) through the same **project frame**: the deepest traceback
+line inside the rootdir and outside `site-packages`. An exception a library
+raises is attributed to the project line that called it. A failing assertion
+in a test body has its own frame, so it stays a single failure; failures
+through one shared helper or fixture group. Only groups of two or more are
+shown, quarantined and flaky tests don't count, and every traceback still
+prints in the failures block above. `--report-json` carries the same groups
+as [`failure_groups`](../reference/report-json.md), and the
+[`github`](#github-actions-github) and [`azure`](#azure-pipelines-azure)
+annotations collapse each group into one.
 
 ## GitLab CI (`gitlab`)
 

@@ -106,6 +106,14 @@ covered the whole suite.
 
 `collect_errors` lists the file paths of collectors that failed outright.
 
+`failure_groups` is present when two or more failed tests share a cause (see
+[Failures by cause](../guides/ci-output.md#failures-by-cause)), largest group
+first: `{ "exception", "message", "at", "count", "nodeids" }`, where `at` is
+the shared project frame as `path:line` (or `null` when every frame was
+outside the project) and `message` is the first member's. A run with no
+shared cause leaves the key out, so earlier consumers see the same document
+as before.
+
 At a [monorepo](../guides/monorepo.md) root, the document is the **merged**
 result of every project: test keys are root-relative nodeids
 (`libs/core/tests/test_x.py::test_y`), collect-error paths are prefixed

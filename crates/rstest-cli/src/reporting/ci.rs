@@ -133,8 +133,44 @@ fn print_annotations(
         };
         sink.out_line(&a.error_line(&title, &file, None, msg));
     }
+    // Failures sharing a cause get ONE annotation, on the project frame they
+    // share: a broken dependency failing 38 tests would otherwise flood the
+    // PR (and GitHub shows only the first few error annotations per step).
+    let groups = run.failure_groups();
+    let mut grouped = std::collections::HashSet::new();
+    for g in &groups {
+        let (file, lineno) = match g.at.as_deref().and_then(|at| at.rsplit_once(':')) {
+            Some((path, line)) => (
+                source_path(path, &prefix),
+                line.parse::<u64>().ok().map(|l| l.saturating_sub(1)),
+            ),
+            None => (String::new(), None),
+        };
+        let cause = if g.message.is_empty() {
+            g.exception.clone()
+        } else {
+            format!("{}: {}", g.exception, g.message)
+        };
+        let example = &g.nodeids[0];
+        let traceback = run
+            .tests()
+            .get(example)
+            .and_then(|e| e.longrepr.as_deref())
+            .unwrap_or("");
+        let msg = format!(
+            "{} tests failed with the same cause: {cause}\n\n{}\n\nExample ({example}):\n{traceback}",
+            g.count,
+            g.nodeids.join("\n")
+        );
+        // Azure's single-line form is `<title>: <exception line>`, and the
+        // exception line comes from the example's traceback, so the title
+        // must not repeat it.
+        let title = format!("{} tests, one cause", g.count);
+        sink.out_line(&a.error_line(&title, &file, lineno, &msg));
+        grouped.extend(g.nodeids.iter().cloned());
+    }
     for (nodeid, entry) in run.tests() {
-        if !entry.any_phase_failed() {
+        if !entry.any_phase_failed() || grouped.contains(nodeid) {
             continue;
         }
         let file = source_path(nodeid, &prefix);
@@ -436,6 +472,7 @@ mod tests {
             sections: Vec::new(),
             lineno,
             subtest: false,
+            crash: None,
         }
     }
 
@@ -470,6 +507,77 @@ mod tests {
         );
         run.quarantine(|id| id == "d.py::test_q");
         run
+    }
+
+    #[test]
+    fn failures_sharing_a_cause_get_one_annotation() {
+        let mut run = report::Run::default();
+        for (i, id) in ["t/a.py::x", "t/b.py::y", "t/c.py::z"].iter().enumerate() {
+            let mut r = report_of(
+                id,
+                "call",
+                "failed",
+                Some(3),
+                Some("Traceback ...\nConnectionRefusedError"),
+            );
+            r.crash = Some(crate::scheduling::proto::Crash {
+                exc: "ConnectionRefusedError".into(),
+                message: format!("port {}", 5000 + i),
+                at: Some("app/db.py:12".into()),
+            });
+            run.record(Some(0), r);
+        }
+        // A failure with its own cause keeps its per-test annotation.
+        run.record(
+            Some(0),
+            report_of(
+                "t/d.py::w",
+                "call",
+                "failed",
+                Some(7),
+                Some("assert 1 == 2"),
+            ),
+        );
+        let (mut sink, cap) = Sink::captured();
+        print_annotations(&mut sink, &run, &Github, &Some("proj".into()));
+        let out = cap.out();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert!(
+            lines[0].starts_with(
+                "::error file=proj/app/db.py,title=3 tests%2C one cause,line=12::\
+                 3 tests failed with the same cause: ConnectionRefusedError: port 5000"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("t/c.py::z") && lines[0].contains("Example (t/a.py::x)"));
+        assert!(lines[1].starts_with("::error file=proj/t/d.py,title=t/d.py%3A%3Aw,line=8::"));
+
+        // Azure: one line per group, cause from the example's E line.
+        let mut run = report::Run::default();
+        for id in ["t/a.py::x", "t/b.py::y"] {
+            let mut r = report_of(
+                id,
+                "call",
+                "failed",
+                Some(3),
+                Some("    connect()\nE   ConnectionRefusedError: [Errno 111] refused"),
+            );
+            r.crash = Some(crate::scheduling::proto::Crash {
+                exc: "ConnectionRefusedError".into(),
+                message: "[Errno 111] refused".into(),
+                at: Some("app/db.py:12".into()),
+            });
+            run.record(Some(0), r);
+        }
+        let (mut sink, cap) = Sink::captured();
+        print_annotations(&mut sink, &run, &Azure, &None);
+        assert_eq!(
+            cap.out().trim_end(),
+            "##vso[task.logissue type=error;sourcepath=app/db.py;linenumber=12]\
+             2 tests, one cause: ConnectionRefusedError: [Errno 111] refused"
+        );
     }
 
     #[test]

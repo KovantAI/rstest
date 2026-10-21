@@ -844,8 +844,9 @@ goes to the pytest session unchanged, so a plugin's own `--output`
     own terminal output, on a TTY or not: header, FAILURES and ERRORS
     sections, warnings summary, `-r` and `--durations` sections, plugin lines,
     and the final `= N passed in Xs =` line. rstest adds no banner or summary;
-    it appends only its extras (quarantined failures, the `--doctor` report,
-    the coverage report, gate messages) and still writes `--junitxml`,
+    it appends only its extras (quarantined failures,
+    [failures by cause](../guides/ci-output.md#failures-by-cause), the
+    `--doctor` report, the coverage report, gate messages) and still writes `--junitxml`,
     `--report-json`, `--html` and `--stream-json` (see
     [`--junitxml`](#-junitxml-path)). An explicit `--output` style keeps
     rstest's own renderer, under a `single-worker mode` banner.

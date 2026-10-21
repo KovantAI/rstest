@@ -252,6 +252,7 @@ mod tests {
             sections: vec![],
             lineno: Some(12),
             subtest: false,
+            crash: None,
         }
     }
 

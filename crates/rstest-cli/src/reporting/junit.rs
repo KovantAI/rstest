@@ -535,6 +535,7 @@ mod tests {
                     sections: Vec::new(),
                     lineno: None,
                     subtest: false,
+                    crash: None,
                 },
             );
         }
@@ -573,6 +574,7 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
         }
     }
 

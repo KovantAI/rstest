@@ -46,6 +46,12 @@ class FixtureStat(TypedDict):
     fingerprint: str | None
 
 
+class CrashInfo(TypedDict):
+    exc: str  # exception type name
+    message: str  # first line of the exception message (<= 300 chars)
+    at: str | None  # "path:line" of the deepest rootdir frame outside site-packages
+
+
 class _ReportRequired(TypedDict):
     nodeid: str
     when: str  # "setup" | "call" | "teardown"
@@ -63,6 +69,7 @@ class ReportPayload(_ReportRequired, total=False):
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
     subtest: bool  # a subtest's report (shares the parent's nodeid/phase)
+    crash: CrashInfo  # failed reports: what raised and where (grouping by cause)
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------

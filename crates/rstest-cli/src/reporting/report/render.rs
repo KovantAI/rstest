@@ -122,6 +122,40 @@ impl Run {
         }
     }
 
+    /// The "failures by cause" block: failures sharing an exception, message
+    /// and project frame, one entry per group (see [`Run::failure_groups`]),
+    /// so a broken dependency failing dozens of tests reads as one cause.
+    /// Nothing when no two failures share a cause.
+    pub fn print_failure_groups(&self, sink: &mut Sink) {
+        const SHOWN: usize = 5;
+        let groups = self.failure_groups();
+        if groups.is_empty() {
+            return;
+        }
+        let palette = sink.palette();
+        sink.out_line(&format!(
+            "\n{}",
+            palette.bold_red("=========== failures by cause ===========")
+        ));
+        for g in &groups {
+            let cause = if g.message.is_empty() {
+                g.exception.clone()
+            } else {
+                format!("{}: {}", g.exception, g.message)
+            };
+            sink.out_line(&format!("{} tests: {cause}", g.count));
+            if let Some(at) = &g.at {
+                sink.out_line(&format!("  at {at}"));
+            }
+            for id in g.nodeids.iter().take(SHOWN) {
+                sink.out_line(&format!("    {id}"));
+            }
+            if g.count > SHOWN {
+                sink.out_line(&palette.dim(&format!("    ... and {} more", g.count - SHOWN)));
+            }
+        }
+    }
+
     /// The failures block, with each failure optionally wrapped in a CI
     /// log-folding construct so the job UI collapses tracebacks per test.
     /// `--tb=no` prints nothing (pytest drops its FAILURES and ERRORS
@@ -251,6 +285,7 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
         }
     }
 
@@ -407,6 +442,40 @@ mod tests {
         assert!(out.contains("slowest durations ="), "n==0 header:\n{out}");
         assert!(!out.contains("hidden"), "vv shows everything:\n{out}");
         assert!(out.contains("0.50s"), "prints the row:\n{out}");
+    }
+
+    #[test]
+    fn print_failure_groups_lists_each_cause_once() {
+        let mut run = Run::default();
+        for i in 0..7 {
+            let mut r = report(&format!("t.py::test_{i}"), "call", "failed");
+            r.crash = Some(proto::Crash {
+                exc: "ConnectionRefusedError".into(),
+                message: "[Errno 111] Connection refused".into(),
+                at: Some("app/db.py:12".into()),
+            });
+            run.record(None, r);
+        }
+        run.record(None, report("t.py::alone", "call", "failed"));
+        let (mut sink, cap) = Sink::captured();
+        run.print_failure_groups(&mut sink);
+        let out = cap.out();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[1], "=========== failures by cause ===========");
+        assert_eq!(
+            lines[2],
+            "7 tests: ConnectionRefusedError: [Errno 111] Connection refused"
+        );
+        assert_eq!(lines[3], "  at app/db.py:12");
+        assert_eq!(lines[4], "    t.py::test_0");
+        assert_eq!(lines[9], "    ... and 2 more");
+        assert_eq!(lines.len(), 10, "{out}");
+        // No shared cause: nothing at all.
+        let mut run = Run::default();
+        run.record(None, report("t.py::alone", "call", "failed"));
+        let (mut sink, cap) = Sink::captured();
+        run.print_failure_groups(&mut sink);
+        assert_eq!(cap.out(), "");
     }
 
     // ---- print_failures ----

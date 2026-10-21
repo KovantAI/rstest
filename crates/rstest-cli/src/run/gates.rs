@@ -940,6 +940,7 @@ pub(super) fn finalize_output(
         if let Some(note) = quarantine_note(outcome.run.counts()["quarantined"]) {
             sink.out_line(&palette.yellow(&note));
         }
+        outcome.run.print_failure_groups(sink);
     } else if !passthrough && mode == progress::Mode::Tap {
         // Pure TAP: close the stream with the trailing plan. Failure text
         // already rode along as `#` diagnostics; no human summary.
@@ -965,6 +966,8 @@ pub(super) fn finalize_output(
         if let Some((dn, dmin)) = durations {
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
+        // Last block above the summary: one line per shared cause.
+        outcome.run.print_failure_groups(sink);
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
@@ -1292,6 +1295,7 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1324,6 +1328,7 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
@@ -1576,6 +1581,7 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);

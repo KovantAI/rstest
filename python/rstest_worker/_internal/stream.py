@@ -206,6 +206,34 @@ def _crashline(report: Any) -> str:
             return ""
 
 
+def crash_of(excinfo: Any, rootpath: Any) -> m.CrashInfo | None:
+    """What a failure raised and where, for grouping failures by cause: the
+    exception type, the first line of its message, and the deepest traceback
+    frame inside the rootdir and outside site-packages (`path:line`, 1-based,
+    rootdir-relative). A ConnectionRefusedError raised in socket.py is thus
+    attributed to the project's own db.py line that made the call. Read from
+    the exception itself, so it doesn't depend on --tb. Best-effort: None on
+    any surprise."""
+    try:
+        from pathlib import Path
+
+        root = Path(rootpath).resolve()
+        at = None
+        for entry in reversed(excinfo.traceback):
+            try:
+                rel = Path(entry.path).resolve().relative_to(root)
+            except (TypeError, ValueError, OSError):
+                continue
+            if "site-packages" in rel.parts:
+                continue
+            at = f"{rel.as_posix()}:{entry.lineno + 1}"
+            break
+        message = str(excinfo.value).strip().split("\n", 1)[0]
+        return {"exc": excinfo.typename, "message": message[:300], "at": at}
+    except Exception:
+        return None
+
+
 def longrepr_text(report: Any, tbstyle: str = "auto") -> str | None:
     """A report's failure text exactly as pytest's terminal prints it.
 
@@ -710,6 +738,15 @@ class StreamPlugin:
         return cancel
 
     @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_makereport(self, item, call):
+        # The exception is only reachable here; the report logged next carries
+        # its crash info to pytest_runtest_logreport.
+        report = yield
+        if call.excinfo is not None and report.failed:
+            report._rstest_crash = crash_of(call.excinfo, item.config.rootpath)
+        return report
+
+    @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item):
         # Layers two per-call-phase concerns: the --timeout interrupt (outer)
         # and doctor's cpu-vs-wall measurement (inner). wall >> cpu = the test
@@ -881,6 +918,9 @@ class StreamPlugin:
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
+        crash = getattr(report, "_rstest_crash", None)
+        if crash is not None and not is_subtest_report(report):
+            payload["crash"] = crash
         self._conn.send("report", payload)
         if self._cpu_mark is not None:
             self._cpu_mark = _cpu_now()

@@ -108,8 +108,9 @@ jobs:
           path: junit.xml
 ```
 
-`--output github` emits an `::error` annotation per failure and a `::warning`
-per flaky rerun. Add `--doctor` to also publish
+`--output github` emits an `::error` annotation per failure (one per group
+when several [share a cause](ci-output.md#failures-by-cause)) and a
+`::warning` per flaky rerun. Add `--doctor` to also publish
 [suite diagnostics](doctor.md) to the job summary.
 
 Run from a monorepo root, the same steps need two changes: each project keeps

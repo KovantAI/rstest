@@ -441,6 +441,7 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
         }
     }
 

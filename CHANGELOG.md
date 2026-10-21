@@ -93,6 +93,14 @@ between 0.x releases and are listed here.
   slowest tests, duration drift and the runs table. Written to
   `.rstest_cache/report.html` (or `--out PATH`); opens from disk, no server.
 
+- **Failures are grouped by cause.** Failed tests that raised the same
+  exception, with the same message (numbers and addresses masked), through
+  the same project frame (the deepest traceback line outside `site-packages`)
+  print as one "failures by cause" block above the summary
+  (`38 tests: ConnectionRefusedError ... at app/db.py:12`). The `github` and
+  `azure` output emit one annotation per group instead of one per test, and
+  `--report-json` adds `failure_groups`. Every traceback still prints.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind

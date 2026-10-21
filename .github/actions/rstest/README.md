@@ -10,7 +10,7 @@ already does natively, it just wires it into GitHub Actions:
 
 | Concern | Handled by |
 |---|---|
-| `::error` per failed test, `::warning` for flaky reruns | rstest `--output github` (this action defaults to it) |
+| `::error` per failed test (one per group when failures share a cause), `::warning` for flaky reruns | rstest `--output github` (this action defaults to it) |
 | Doctor diagnostics → job summary | rstest `--doctor` (auto-publishes to `$GITHUB_STEP_SUMMARY`) |
 | Machine-readable diagnostics | rstest `--doctor-json` / `--doctor-md` (pass via `args`) |
 | Fail CI on a doctor metric threshold | rstest `--doctor-fail-on` (this action's `doctor-fail-on` forwards to it) |
