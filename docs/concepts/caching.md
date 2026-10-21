@@ -236,3 +236,9 @@ from its `popen-gwN` roots), preventing numbered-directory cleanup races
 between sibling workers. A user-provided `--basetemp` becomes the shared
 parent instead: each worker uses `<basetemp>/gwN`, as under xdist. With
 `-n 0` it is used as given.
+
+`$TMPDIR/rstest-<pid>/` is deleted when the run ends, with everything else
+rstest keeps in the temp dir for that run. A run killed too hard to clean up
+(SIGKILL, out of memory) leaves its folder behind, and the next rstest run on
+the machine deletes it. A user-provided `--basetemp` is never deleted, so pass
+one to inspect `tmp_path` contents after a run.

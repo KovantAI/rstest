@@ -243,7 +243,7 @@ pub(super) fn execute_monorepo(
 
 /// Temp location for one project's report part during a monorepo run.
 fn report_part_path(slug: &str, run_uid: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("rstest-mono-{run_uid}-{slug}.json"))
+    crate::scratch::dir().join(format!("mono-{run_uid}-{slug}.json"))
 }
 
 /// Reject flags that can't be honored at a monorepo root. `--watch` needs a
@@ -608,7 +608,8 @@ mod tests {
     fn report_part_path_names_a_json_file_for_slug() {
         let p = report_part_path("collect", "testuid");
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("rstest-mono-"));
+        assert!(name.starts_with("mono-"));
+        assert_eq!(p.parent(), Some(crate::scratch::dir().as_path()));
         assert!(name.contains("collect"));
         assert!(name.ends_with(".json"));
     }
