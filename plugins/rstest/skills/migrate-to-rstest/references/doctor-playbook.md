@@ -65,10 +65,11 @@ order-dependent.
 Tests that connected outside loopback and `[tool.rstest] network-allow`, with
 each destination.
 
-**Action:** mock the call, or mark a test that needs the network on purpose
-with `@pytest.mark.network`, or allow intended hosts (CI service containers)
-in `network-allow`. Then add `--block-network` to CI so new ones fail with the
-line that connected.
+**Action:** mock the call, or allow intended hosts (CI service containers)
+in `network-allow`. To fail new ones in CI, add pytest-socket and pass
+`-- --allow-hosts=127.0.0.1,::1,<intended hosts>` (its
+`@pytest.mark.allow_hosts([...])` widens it for a test that needs the network
+on purpose).
 
 ## TIMEOUTS: cap hangs without killing slow tests
 
@@ -127,8 +128,10 @@ Often a bigger lever than any scheduling flag, for local loops and PR jobs:
 
 ## Keep it fast: CI gates
 
-- `--durations-regress 2` fails the run when any test takes more than 2× its
-  cached duration (restore `.rstest_cache` in CI so there is a baseline).
+- `--durations-regress 2` fails the run when any test takes 2× its baseline:
+  the median of its last passing runs once it has 5, above its own noise
+  band, else its cached duration (restore `.rstest_cache` in CI so there is
+  a baseline).
 - `--doctor-fail-on 'parallel_efficiency<30'` or `'wait_pct>50'` turns a
   doctor metric into a gate; repeatable, any breach fails.
 

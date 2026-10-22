@@ -374,14 +374,6 @@ pub struct Cli {
     #[arg(long = "reruns-only-known-flaky")]
     pub(crate) reruns_only_known_flaky: bool,
 
-    /// Fail any test that opens a network connection outside loopback and
-    /// `[tool.rstest] network-allow` (hostnames or CIDRs). The test fails with
-    /// the destination and the line that connected; `@pytest.mark.network`
-    /// exempts a test. `--doctor` lists every test's connections without
-    /// blocking.
-    #[arg(long)]
-    pub(crate) block_network: bool,
-
     /// Kill a worker stuck on ONE test longer than this many seconds
     /// (hang backstop; the test is reported failed, the worker replaced).
     /// Off by default; catches what in-process timeouts can't (blocked C exts).
@@ -818,7 +810,6 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
 /// `BOOL_FLAGS`: switches that consume no value.
 const BOOL_FLAGS: &[&str] = &[
     "--doctor",
-    "--block-network",
     "--xdist-trial",
     "--fork-pool",
     "--watch",

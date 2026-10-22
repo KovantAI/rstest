@@ -95,6 +95,9 @@ Flags and subcommands that gate CI have exit semantics beyond the table above:
 | [`replay`](cli-commands.md#replay) | the replayed run's own code; `1` with an `Error:` line when the journal is missing or unreadable |
 | [`shard-verify`](cli-commands.md#shard-verify) | `0` shards agree and cover the suite, `1` any drop, overlap, missing/duplicate shard, or divergent collection |
 | [`explain`](cli-commands.md#explain) | human mode: `1` for an unknown nodeid; with `--json`: always `0` |
+| [`flaky`](cli-commands.md#flaky) | `0`, also with no history or no flaky test |
+| [`report`](cli-commands.md#report) | `0`, also with no history yet (it says so and writes nothing); `1` with an `Error:` line when it can't write the file |
+| [`since-green`](cli-commands.md#since-green) | `0`, whether or not anything changed or a green run was recorded; `1` with an `Error:` line when no interpreter can be resolved |
 | [`install-skills`](cli-commands.md#install-skills) | `0` every bundled skill installed or already up to date, `1` an installed skill differs from the bundled copy and was left alone (pass `--force` to overwrite it) |
 | [`verify-vendor`](cli-commands.md#verify-vendor) | `0` vendored tree matches its manifest, `1` on any drift (a changed, missing or extra file), a missing `vendor.lock` or `_vendor/`, or no usable Python interpreter (pass one with `--python`) |
 

@@ -440,20 +440,13 @@ impl Run {
             entry.longrepr = capped_longrepr;
         }
         let outcome = Some(r.outcome);
+        // Any phase but setup/teardown is the test itself, as pytest counts it:
+        // pytest-forked reports a crashed child as `when="???"`.
         match r.when.as_str() {
             "setup" => {
                 entry.setup = outcome;
                 entry.setup_seconds = r.duration;
                 entry.setup_cpu = r.cpu;
-            }
-            "call" => {
-                if entry.subtests_failed > 0 {
-                    entry.own_call = outcome;
-                } else {
-                    entry.call = outcome;
-                }
-                entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
-                entry.cpu = r.cpu;
             }
             "teardown" => {
                 entry.teardown = outcome;
@@ -467,7 +460,15 @@ impl Run {
                     entry.fd_delta = r.fd_delta;
                 }
             }
-            _ => {}
+            _ => {
+                if entry.subtests_failed > 0 {
+                    entry.own_call = outcome;
+                } else {
+                    entry.call = outcome;
+                }
+                entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
+                entry.cpu = r.cpu;
+            }
         }
         entry.wasxfail |= r.wasxfail;
         if entry.lineno.is_none() {
@@ -997,6 +998,16 @@ mod tests {
             crash: None,
             network: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_plugin_phase_failure_is_a_failure_not_an_error() {
+        // pytest-forked reports a crashed child as one `when="???"` report
+        // (no setup/teardown); pytest counts it as failed, so must rstest.
+        let mut run = Run::default();
+        run.record(None, report("t.py::test_segv", "???", "failed"));
+        let c = run.counts();
+        assert_eq!((c["failed"], c["errors"]), (1, 0));
     }
 
     fn full(run: &mut Run, nodeid: &str, outcome: &str) {

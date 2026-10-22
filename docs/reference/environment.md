@@ -33,8 +33,7 @@ the real values.
 session's own `-x` / `--maxfail` doesn't count failed attempts the orchestrator
 may retry) and `RSTEST_QUARANTINE` (the `--quarantine` patterns and the auto-quarantined
 nodeids, one anchored regex per line, exempt from `-x` / `--maxfail` the same
-way), plus `RSTEST_NETWORK` (`block` under `--block-network`, `record` under
-`--doctor`) and `RSTEST_NETWORK_ALLOW` (the `network-allow` entries, one per
+way), plus `RSTEST_NETWORK` (`record` under `--doctor`) and `RSTEST_NETWORK_ALLOW` (the `network-allow` entries, one per
 line) coordinate
 workers and may change between versions. Don't depend on them. rstest clears
 them before starting each worker and sets only the ones the run needs (for
@@ -78,7 +77,7 @@ root.
 | `RSTEST_WALL_TTL_DAYS` | how long a project's recorded wall time (`.rstest_cache/wall.json`, used by the monorepo planner to weight projects) stays valid. Default `30`; `0` keeps it forever |
 | `RSTEST_CACHE_DIR` | base dir for the interpreter-probe cache only, not `.rstest_cache/`; see [Interpreter-probe cache](#interpreter-probe-cache) |
 | `RSTEST_FLAKE_RETENTION_DAYS` | how long a test's flake/failure history (`.rstest_cache/flakes.json`) stays relevant. A test with no flake or failure inside this window reads as fixed: its entry is dropped and it stops carrying "flaked _N_x before" annotations. Defaults to `90`; `0` keeps history forever. Also ages the per-test run history (`.rstest_cache/history.msgpack`) |
-| `RSTEST_HISTORY_RUNS` | how many runs of each test `.rstest_cache/history.msgpack` keeps for [`rstest explain`](cli-commands.md#explain) and [`--auto-quarantine`](cli.md#-auto-quarantinen) (the window flips are counted in). Default `50`, minimum `1` |
+| `RSTEST_HISTORY_RUNS` | how many runs of each test `.rstest_cache/history.msgpack` keeps. Everything history-based reads that window: [`--auto-quarantine`](cli.md#-auto-quarantinen) (the flips), [`--durations-regress`](cli.md#-durations-regress-ratio) (the median baseline), [`rstest explain`](cli-commands.md#explain), [`rstest flaky`](cli-commands.md#flaky), [`rstest report`](cli-commands.md#report), the `--html` strip and `--doctor`'s TIMEOUTS and DURATION DRIFT. Default `50`, minimum `1` |
 | `COVERAGE_CORE` | coverage.py's measurement core; set to `ctrace` in workers under `--cov-context` unless you set it; see [Coverage core](#coverage-core) |
 
 ### Color precedence
@@ -90,8 +89,8 @@ forwarded to pytest) beats every variable, then `PY_COLORS`, then
 ### Cache location
 
 `.rstest_cache` sits at the pytest rootdir, so a run from a subdirectory
-shares the project's cache. It holds durations, flakes, the coverage index,
-the last-green baseline and [replay journals](../guides/replay.md)
+shares the project's cache. It holds durations, flakes, the run history, the coverage index,
+the last-green baseline, the green snapshot (`green_env.json`) and [replay journals](../guides/replay.md)
 (`replay/`). At a [monorepo](../concepts/monorepo.md#caches-per-project)
 root with `RSTEST_CACHE` set, each project gets `<RSTEST_CACHE>/<slug>` (a
 relative value resolves against the monorepo root); unset, each project

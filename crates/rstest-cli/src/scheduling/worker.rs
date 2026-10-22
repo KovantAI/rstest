@@ -93,16 +93,14 @@ pub struct WorkerEnv {
     /// `--quarantine` patterns (anchored regexes, one per line): failures of
     /// matching tests never count toward a session's `-x` / `--maxfail`.
     pub quarantine: Option<String>,
-    /// Outbound-network guard: block (`--block-network`) or only record
-    /// (doctor) connections outside loopback and the allowlist. None = off.
+    /// Outbound-network recorder (doctor): lists connections outside loopback
+    /// and the allowlist. None = off.
     pub network: Option<NetworkGuard>,
 }
 
 /// See [`WorkerEnv::network`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetworkGuard {
-    /// Fail a test that connects outside the allowlist (else just record).
-    pub block: bool,
     /// Hostnames and CIDRs a test may reach, beyond loopback.
     pub allow: Vec<String>,
 }
@@ -110,7 +108,7 @@ pub struct NetworkGuard {
 /// Set the network guard's variables on a worker command.
 fn apply_network_env(command: &mut Command, env: &WorkerEnv) {
     if let Some(g) = &env.network {
-        command.env("RSTEST_NETWORK", if g.block { "block" } else { "record" });
+        command.env("RSTEST_NETWORK", "record");
         command.env("RSTEST_NETWORK_ALLOW", g.allow.join("\n"));
     }
 }
@@ -1909,19 +1907,13 @@ mod tests {
         };
         assert!(envs(None).is_empty());
         let e = envs(Some(super::NetworkGuard {
-            block: true,
             allow: vec!["postgres".into(), "10.0.0.0/8".into()],
         }));
-        assert_eq!(e["RSTEST_NETWORK"].as_deref(), Some("block"));
+        assert_eq!(e["RSTEST_NETWORK"].as_deref(), Some("record"));
         assert_eq!(
             e["RSTEST_NETWORK_ALLOW"].as_deref(),
             Some("postgres\n10.0.0.0/8")
         );
-        let e = envs(Some(super::NetworkGuard {
-            block: false,
-            allow: Vec::new(),
-        }));
-        assert_eq!(e["RSTEST_NETWORK"].as_deref(), Some("record"));
         // Never inherited from the caller's environment.
         assert!(super::INTERNAL_ENV.contains(&"RSTEST_NETWORK"));
         assert!(super::INTERNAL_ENV.contains(&"RSTEST_NETWORK_ALLOW"));

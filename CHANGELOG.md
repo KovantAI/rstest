@@ -101,13 +101,11 @@ between 0.x releases and are listed here.
   `azure` output emit one annotation per group instead of one per test, and
   `--report-json` adds `failure_groups`. Every traceback still prints.
 
-- **`--block-network` keeps tests offline.** A test that connects outside
-  loopback and `[tool.rstest] network-allow` (hostnames or CIDRs) fails with
-  the destination and the line that connected; `@pytest.mark.network`
-  exempts a test, and `block-network = true` turns it on from config.
-  `--doctor` gains a NETWORK ACCESS section (and `network` in
-  `--doctor-json`) listing every test's outbound connections without
-  blocking.
+- **`--doctor` finds hidden network calls.** A new NETWORK ACCESS section
+  (and `network` in `--doctor-json`) lists every test that connected outside
+  loopback and `[tool.rstest] network-allow` (hostnames or CIDRs), with the
+  host it reached. It only reports; pytest-socket (`--allow-hosts=...`)
+  fails such tests.
 
 - **`audit` and `migrate-check` name the shared resource behind a
   parallel-only failure.** When the error text shows a fixed port
@@ -130,6 +128,14 @@ between 0.x releases and are listed here.
   The first run after upgrading also deletes the folders older releases left
   behind (any `rstest-<pid>` folder more than an hour old). A user-provided
   `--basetemp` is never deleted.
+
+### Fixes
+
+- **A test that a plugin reports in a phase of its own counts as failed,
+  not as an error.** pytest-forked reports a crashed child as one
+  `when="???"` report; rstest dropped it, so the test showed no progress
+  line and the summary counted an error. Any phase but setup and teardown
+  now counts as the test itself, as in pytest.
 
 ## 0.9.0 (2026-10-06)
 

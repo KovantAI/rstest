@@ -127,7 +127,8 @@ $ rstest explain "tests/test_api.py::test_login"
 $ rstest explain "tests/test_api.py::test_login" --json
 ```
 
-- Reads only `.rstest_cache/`, runs nothing, needs no interpreter.
+- Reads only `.rstest_cache/` (plus `git log` for suspect commits), runs
+  nothing, needs no interpreter.
 - Shows last duration, flake/fail counts with last-event age, last-green
   outcome, the coverage footprint (needs a prior `--cov-context=test` run),
   and the run history: the last 50 outcomes as a strip (`✓` passed, `~`

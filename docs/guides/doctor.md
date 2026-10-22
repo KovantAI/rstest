@@ -252,15 +252,29 @@ Tests that opened outbound connections, outside loopback and
 NETWORK ACCESS (2 test(s) opened outbound connections, outside loopback and network-allow):
   tests/test_rates.py::test_convert  -> api.exchangerate.host:443 (104.21.4.48)
   tests/test_signup.py::test_welcome_mail  -> smtp.mailgun.org:587 (34.111.20.5)
-  hidden network calls flake and hit rate limits: mock them, mark the test @pytest.mark.network, or allow the host in [tool.rstest] network-allow; --block-network fails them
+  hidden network calls flake and hit rate limits: mock them, or allow the host in [tool.rstest] network-allow; to fail them, use pytest-socket (-- --allow-hosts=127.0.0.1,...)
 ```
 
 Hidden network calls are a leading source of flaky tests: the service is slow,
-rate-limits CI, or is down. Mock the call, mark a test that needs the network
-on purpose with `@pytest.mark.network`, or allow an intended host (a CI service
-container) in `network-allow`. Then [`--block-network`](../reference/cli.md#-block-network)
-keeps new ones out. Destinations name the host when the test resolved one,
-with the address it connected to. Top 20 tests, most destinations first.
+rate-limits CI, or is down. Mock the call, or allow an intended host (a CI
+service container) in `network-allow`: hostnames (`"postgres"`) or CIDRs
+(`"10.0.0.0/8"`); loopback, `0.0.0.0` and Unix sockets never count. The
+section only reports; to fail new ones in CI, install
+[pytest-socket](https://github.com/miketheman/pytest-socket) and pass
+`-- --allow-hosts=127.0.0.1,::1,postgres,10.0.0.0/8`, which fails any
+connection outside that list (its `@pytest.mark.allow_hosts([...])` widens it
+for one test).
+
+```toml
+[tool.rstest]
+network-allow = ["postgres", "redis", "10.0.0.0/8"]
+```
+
+Destinations name the host when the test resolved one, with the address it
+connected to. Top 20 tests, most destinations first. Only tests are watched
+(setup, call and teardown), not collection or session-level code. It patches
+`socket.connect`, so it sees every Python client (`requests`, `httpx`,
+database drivers); a C extension that opens its own sockets is not seen.
 
 ### TIMEOUTS
 

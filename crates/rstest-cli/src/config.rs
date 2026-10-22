@@ -562,8 +562,8 @@ pub struct RstestSettings {
     pub auto_quarantine: Option<u32>,
     /// Percent, 0 to 100.
     pub auto_quarantine_max: Option<u32>,
-    pub block_network: Option<bool>,
-    /// Hostnames and CIDRs tests may connect to, beyond loopback.
+    /// Hostnames and CIDRs the doctor's network report leaves out, beyond
+    /// loopback.
     pub network_allow: Option<Vec<String>>,
 }
 
@@ -581,7 +581,6 @@ const SETTINGS_KEYS: &[&str] = &[
     "quarantine",
     "auto-quarantine",
     "auto-quarantine-max",
-    "block-network",
     "network-allow",
 ];
 
@@ -704,11 +703,6 @@ pub fn rstest_settings(start: &Path, err: &mut dyn Write) -> RstestSettings {
             output: check.string(tool, "output"),
             quarantine: check.string(tool, "quarantine").map(|q| dir.join(q)),
             auto_quarantine: check.uint(tool, "auto-quarantine"),
-            block_network: match tool.get("block-network") {
-                None => None,
-                Some(toml::Value::Boolean(b)) => Some(*b),
-                Some(v) => check.invalid("block-network", v, "true or false"),
-            },
             network_allow: match tool.get("network-allow") {
                 None => None,
                 Some(toml::Value::Array(items)) if items.iter().all(|i| i.is_str()) => Some(
@@ -774,25 +768,25 @@ worker-timeout = 120
         let d = tmpdir("network-keys");
         std::fs::write(
             d.join("pyproject.toml"),
-            "[tool.rstest]\nblock-network = true\nnetwork-allow = [\"postgres\", \"10.0.0.0/8\"]\n",
+            "[tool.rstest]\nnetwork-allow = [\"postgres\", \"10.0.0.0/8\"]\n",
         )
         .unwrap();
         let mut err = Vec::new();
         let s = rstest_settings(&d, &mut err);
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
-        assert_eq!(s.block_network, Some(true));
         assert_eq!(s.network_allow.unwrap(), ["postgres", "10.0.0.0/8"]);
+        // The blocking mode is gone (pytest-socket does it): its key is unknown.
         std::fs::write(
             d.join("pyproject.toml"),
-            "[tool.rstest]\nblock-network = \"yes\"\nnetwork-allow = \"postgres\"\n",
+            "[tool.rstest]\nblock-network = true\nnetwork-allow = \"postgres\"\n",
         )
         .unwrap();
         let mut err = Vec::new();
         let s = rstest_settings(&d, &mut err);
         let err = String::from_utf8_lossy(&err);
-        assert_eq!((s.block_network, s.network_allow), (None, None));
+        assert_eq!(s.network_allow, None);
         assert!(
-            err.contains("block-network = \"yes\" (expected true or false)"),
+            err.contains("ignoring unknown [tool.rstest] key `block-network`"),
             "{err}"
         );
         assert!(

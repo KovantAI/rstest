@@ -276,18 +276,19 @@ an empty auto set, so auto-quarantine does nothing there.
 
 A test that quietly calls a real service flakes whenever that service is slow,
 rate-limits CI, or is down, and no amount of reruns fixes it. `--doctor` lists
-every test's outbound connections (NETWORK ACCESS), and
-[`--block-network`](../reference/cli.md#-block-network) fails them, naming the
-host and the line that connected:
+every test's outbound connections
+([NETWORK ACCESS](doctor.md#network-access)), and
+[pytest-socket](https://github.com/miketheman/pytest-socket) fails them:
 
 ```console
-$ rstest -n auto --doctor          # see what the suite reaches
-$ rstest -n auto --block-network   # then keep it offline
+$ rstest -n auto --doctor                      # see what the suite reaches
+$ rstest -n auto -- \
+    --allow-hosts=127.0.0.1,::1,10.0.0.0/8     # then keep it offline
 ```
 
 Mock the call, mark a test that needs the network on purpose with
-`@pytest.mark.network`, or allow intended hosts (CI service containers) in
-`[tool.rstest] network-allow`.
+pytest-socket's `@pytest.mark.allow_hosts([...])`, or allow intended hosts
+(CI service containers) in `--allow-hosts` and `[tool.rstest] network-allow`.
 
 ## What CI consumers see
 

@@ -228,7 +228,8 @@ they are your code or your commands, not rstest's:
 A shared cache (`--cache-remote`, or the GitHub action's `cache-backend`)
 feeds data from earlier runs into test selection, rerun policy, and shard
 balancing. Whoever can push segments can make a later `--changed` run skip
-tests or make `--reruns-only-known-flaky` hide failures. Only trusted
+tests or make `--reruns-only-known-flaky` or auto-quarantine (fed by the shared run
+history) hide failures. Only trusted
 default-branch runs should push; PR jobs (especially from forks) should pull
 only. See [Caching: trust boundary](../concepts/caching.md#trust-boundary).
 

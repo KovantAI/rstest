@@ -143,7 +143,10 @@ For ORDER-DEPENDENCY and ISOLATION findings it then **bisects the polluter**
 serially before the victim, reproduce the failure, and reports `POLLUTED BY:
 <file>` (cross-file), `SAME-FILE co-location (inspect <file>)`, or (when no
 serial ordering reproduces) that the failure is likely a concurrent-resource
-race rather than state pollution.
+race rather than state pollution. When a finding's error text names a shared
+resource (a fixed port, one shared database, one shared home directory), a
+`CAUSE:` line under it names the resource and the per-worker fix, as in
+[`audit`](#audit).
 
 Each finding prints the upstream fix and the rstest stopgap. Exits `1` if
 any WILL-bail id or parallelism-specific failure is found, and `2` when it
@@ -561,8 +564,9 @@ See [Verify no test was dropped](../guides/sharding.md#verify-no-test-was-droppe
 
 ### `cache-compact`
 
-Maintenance: fold remote segments into a fresh `base.json` and prune them, then
-exit without running tests. Keeps the segment count (and pull size) down;
+Maintenance: fold remote segments (durations, flakes, coverage, run history and
+green snapshots) into a fresh `base.json` and prune them, then exit without
+running tests. Keeps the segment count (and pull size) down;
 optional: pull/push work without it. Run occasionally (nightly, or on merge to
 main). Needs `--cache-remote`. It is **run-less**: it exits before the run, so
 `--cache-pull`/`--cache-push` aren't accepted after it: like any run flag
@@ -629,7 +633,8 @@ an editor counts, while report-json's `lineno` is 0-based as pytest reports it:
 the same test reads `15` here and `14` there. Field reference:
 [Explain JSON](output-schemas.md#explain).
 
-It reads only cache files, needs no interpreter, and runs no tests. The data
+It reads only cache files (plus `git log` for suspect commits), needs no
+interpreter, and runs no tests. The data
 comes from `.rstest_cache/`: `durations.json` (last recorded call time),
 `flakes.json` (flake/fail counts and last-event age), `incremental_outcomes.json`
 (last-green outcome and source line), and `coverage_index.json` (the coverage

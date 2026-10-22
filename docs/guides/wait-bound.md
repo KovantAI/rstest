@@ -152,7 +152,8 @@ time.
 ## Go deeper
 
 - [Suite diagnostics](doctor.md): every doctor section (WAIT-BOUND,
-  PARALLEL FLOOR, PARALLEL EFFICIENCY, fixture hotspots, resource leaks)
+  PARALLEL FLOOR, PARALLEL EFFICIENCY, fixture hotspots, slowest files,
+  coverage waste, resource leaks, network access, timeouts, duration drift)
   and the JSON/markdown/CI-gate outputs.
 - [Scheduling](../concepts/scheduling.md): slow-tests-first dispatch and
   why it beats collection-order schedulers on wait-heavy suites.

@@ -218,9 +218,9 @@ if you'd rather not commit to advance anything.
 - Persist `.rstest_cache` as a directory, as the
   [CI quickstart](ci-quickstart.md#github-actions) recipe and the bundled
   action's default `actions/cache` backend do. The `--cache-remote`
-  [shared cache backend](ci-shared-cache.md) merges durations, flakes and the
-  coverage index only; it does not carry `last_green.json` or
-  `incremental_outcomes.json`. If you cache individual files, include them
+  [shared cache backend](ci-shared-cache.md) merges durations, flakes, the run
+  history, the coverage index and the green snapshot (`green_env.json`); it
+  does not carry `last_green.json` or `incremental_outcomes.json`. If you cache individual files, include them
   ([Rules for every CI cache](ci-shared-cache.md#ci-cache-rules)).
 - For `--since-green`, check out with full history (`fetch-depth: 0`) so the
   recorded commit exists, and keep report files out of the tree (see above).

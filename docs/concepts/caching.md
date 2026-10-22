@@ -222,8 +222,13 @@ or corrupted segment can:
 - inflate flake counts in `flakes.json`, so `--reruns-only-known-flaky`
   retries (and hides) failures it should not, `--order fail-fast` reorders
   dispatch around them, and `rstest explain` reports them as genuine history;
-- skew durations, which unbalances shards and can make `--durations-regress`
-  pass or fail wrongly.
+- fabricate flips in the run history, so
+  [auto-quarantine](../guides/flaky-tests.md) (on by default) turns real
+  failures non-fatal and `rstest flaky` ranks the wrong tests;
+- skew durations or the history's per-run times, which unbalances shards and
+  shifts the `--durations-regress` median, so it passes or fails wrongly;
+- publish a fake green snapshot, so `--since-green` diffs against a commit
+  that never passed.
 
 Recommended setup:
 

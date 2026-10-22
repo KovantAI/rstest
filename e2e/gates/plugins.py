@@ -682,6 +682,103 @@ def gate_pytest_httpx(g, args, binary):
     check("httpx: per-test mock works under pool", "1 passed" in r.stdout, r.stdout[-300:])
 
 
+SOCKET_TESTS = """
+import socket
+
+import pytest
+
+
+def reach():
+    s = socket.socket()
+    s.settimeout(0.2)
+    try:
+        s.connect(("192.0.2.1", 80))
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+
+def test_external():
+    reach()
+
+
+@pytest.mark.allow_hosts(["192.0.2.1"])
+def test_allowed():
+    reach()
+
+
+def test_local():
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    socket.create_connection(srv.getsockname()).close()
+    srv.close()
+"""
+
+
+def gate_pytest_socket(g, args, binary):
+    print("== pytest-socket (--allow-hosts under the pool) ==")
+    # The docs send users from doctor's NETWORK ACCESS to pytest-socket's
+    # --allow-hosts to fail hidden calls: it must hold on every worker, and
+    # coexist with the doctor's own connect patch.
+    gs = _plugin_gate(binary, args, "-socket", ["pytest-socket"])
+    gs.write("so/test_so.py", SOCKET_TESTS)
+    for extra in ([], ["--doctor"]):
+        r = gs.run("so", "-n", "2", *extra, "--", "--allow-hosts=127.0.0.1,::1")
+        label = " with --doctor" if extra else ""
+        check(
+            f"pytest-socket: --allow-hosts fails the hidden call under the pool{label}",
+            r.returncode == 1
+            and "1 failed, 2 passed" in r.stdout
+            and "test_external" in r.stdout
+            and "SocketConnectBlockedError" in r.stdout,
+            f"rc={r.returncode} " + r.stdout[-600:],
+        )
+
+
+FORKED_TESTS = """
+import ctypes
+
+import pytest
+
+STATE = []
+
+
+def test_leak_a():
+    STATE.append(1)
+
+
+def test_leak_b():
+    assert STATE == []
+
+
+@pytest.mark.forked
+def test_segv():
+    ctypes.string_at(0)
+"""
+
+
+def gate_pytest_forked(g, args, binary):
+    print("== pytest-forked (per-test fork under the pool) ==")
+    if WINDOWS:
+        return  # fork() only
+    # A crashed forked child comes back as one `when="???"` report; pytest
+    # counts it failed, not as a setup/teardown error.
+    gf = _plugin_gate(binary, args, "-forked", ["pytest-forked"])
+    gf.write("fk/test_fk.py", FORKED_TESTS)
+    r = gf.run("fk", "-n", "2", "--dist", "loadfile", "--output", "verbose", "--", "--forked")
+    check(
+        "pytest-forked: a crashed child counts as failed, state stays isolated",
+        r.returncode == 1
+        and "1 failed, 2 passed" in r.stdout
+        and "error" not in r.stdout.splitlines()[-1]
+        and "test_fk.py::test_segv FAILED" in r.stdout
+        and "CRASHED with signal" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-600:],
+    )
+
+
 def gate_pytest_dotenv(g, args, binary):
     print("== pytest-dotenv (.env applied per worker) ==")
     # Every worker process must load the .env, so env-dependent tests pass on

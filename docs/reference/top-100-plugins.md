@@ -45,7 +45,7 @@ plugin's category, not yet runtime-verified.
 | 15 | pytest-repeat | 15.5M | ✅ Works | i | `@mark.repeat(N)` expands at collection, so the copies distribute across workers. No gate yet. |
 | 16 | pytest-json-report | 15.0M | 🔴 Silent / 🟦 | V | Report aggregator; no file at `-n ≥ 2`, written at `-n 0` (e2e gate). Use native `--report-json`. |
 | 17 | pytest-benchmark | 14.2M | 🔶 `-n 0` | V | Auto-disables at `-n ≥ 2` (sees the pool as xdist); benchmark at `-n 0`, read `--benchmark-json`. e2e gate: no `--benchmark-json` written at `-n ≥ 2`, measured + written at `-n 0`. |
-| 18 | pytest-socket | 13.9M | ✅ Works | V | Loads under the pool in the langchain and urllib3 corpus suites at `-n auto`; neither passes `--disable-socket`, so the blocking itself is not exercised. |
+| 18 | pytest-socket | 13.9M | ✅ Works | V | Loads under the pool in the langchain and urllib3 corpus suites at `-n auto`; `--allow-hosts` fails a hidden call on every worker, alongside `--doctor` (e2e `pytest-socket` gate); `--disable-socket` is not exercised. The recommended way to fail the calls doctor's NETWORK ACCESS lists. |
 | 19 | syrupy | 13.4M | ✅ Works | V | Snapshot asserts are per-test; run `--snapshot-update` at `-n 0` to avoid same-file write races. Corpus: langchain (`libs/core`) + langgraph snapshot asserts at `-n auto`. |
 | 20 | pytest-unordered | 11.0M | ➖ N/A | V | Assertion helper; works under the pool (e2e gate). |
 | 21 | pytest-base-url | 10.2M | ✅ Works | V | Config/fixture only; `--base-url` reaches the fixture under the pool (e2e gate with one test, so one worker). |

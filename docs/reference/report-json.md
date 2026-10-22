@@ -440,7 +440,10 @@ reference doesn't spell out:
 per-fixture `constant` / `projected_saving_seconds` scope-promotion fields,
 the `coverage_waste` object, and the `startup_seconds` / `fork_prewarm`
 fields. The `leaks` array is a conditional, no-bump
-addition (omitted when empty); read a missing key as no leaks.
+addition (omitted when empty); read a missing key as no leaks. The
+`timeouts`, `drift` and `network` objects are no-bump additions too: a
+current document always carries them (`null` when they don't apply), and an
+older one lacks them; read a missing key as `null`.
 
 `schema` aside, all times are raw seconds (no rounding): round in your
 consumer. Increment-only: incompatible changes bump `schema`.
@@ -543,9 +546,9 @@ the parallel pass produced no outcomes (`parallel` is `{"ran": false}`) or
 rstest hit an error.
 Increment-only: incompatible changes bump `meta.schema`.
 
-## Audit, bisect, explain and xdist-removal-check JSON
+## Audit, bisect, explain, flaky, since-green and xdist-removal-check JSON
 
-These four documents have no walkthrough on this page. Their field
+These six documents have no walkthrough on this page. Their field
 references and JSON Schemas are generated from the code on
 [Output schemas](output-schemas.md), and each subcommand's page covers when
 it writes the document and what its exit codes mean:
@@ -555,6 +558,8 @@ it writes the document and what its exit codes mean:
 | audit | `rstest audit --audit-json FILE` | [`audit`](cli-commands.md#audit) |
 | bisect | `rstest bisect <nodeid> --bisect-json FILE` | [`bisect`](cli-commands.md#bisect-nodeid) |
 | explain | `rstest explain <nodeid> --json` (stdout) | [`explain`](cli-commands.md#explain) |
+| flaky | `rstest flaky --json` (stdout) | [`flaky`](cli-commands.md#flaky) |
+| since-green | `rstest since-green --json` (stdout) | [`since-green`](cli-commands.md#since-green) |
 | xdist-removal-check | `rstest xdist-removal-check --xdist-removal-json FILE` | [`xdist-removal-check`](cli-commands.md#xdist-removal-check) |
 
 As with migrate-check, the exit code is not in the document. Two cases to
