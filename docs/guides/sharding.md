@@ -67,8 +67,9 @@ and the GitHub recipes are [below](#github-actions).
 
 !!! note "Requirements & limits"
     - Needs the parallel pool: `-n ≥ 2`. Prefer an explicit `-n 2` or higher
-      over `-n auto` with `--shard`: `auto` is capped by the number of test
-      files and by the cached suite time (about one worker per 2s of tests),
+      over `-n auto` with `--shard`: `auto` is capped by the selected work
+      (test files on a cold cache, tests once timings are cached) and by the
+      cached suite time (about one worker per 2s of tests),
       so on a 1-vCPU runner, a one-file suite, or a warm cache under ~2s it
       resolves to one worker and the run fails with `--shard needs the
       parallel pool` (exit 1). A cold first run can pass and the next, warm

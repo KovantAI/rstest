@@ -117,9 +117,6 @@ pub fn render_markdown(r: &DoctorReport) -> String {
             pe.long_pole_seconds,
             pe.imbalance_pct
         );
-        if pe.efficiency_pct > 105.0 {
-            md.push_str("> Over 100% means tests overlap beyond core count (wait-bound).\n\n");
-        }
         if !pe.workers_busy.is_empty() {
             md.push_str("| Worker | Busy | Tests |\n|---|---:|---:|\n");
             for w in pe.workers_busy.iter().take(8) {
@@ -370,12 +367,6 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
             "\nPARALLEL EFFICIENCY: {:.1}x realized of {}x possible ({:.0}%).",
             pe.realized_speedup, pe.ideal_speedup, pe.efficiency_pct
         ));
-        if pe.efficiency_pct > 105.0 {
-            sink.out_line(
-                "  over 100%: tests overlap beyond core count \
-                 (wait-bound; see WAIT-BOUND above).",
-            );
-        }
         sink.out_line(&format!(
             "  long pole: {:.1}s (no worker count finishes faster)",
             pe.long_pole_seconds

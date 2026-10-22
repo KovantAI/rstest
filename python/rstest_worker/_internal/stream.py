@@ -9,10 +9,12 @@ import io
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 from _pytest.fixtures import is_visibility_more_specific
+from _pytest.terminal import _folded_skips
 
 from rstest_worker._internal import junit
 from rstest_worker._internal import messages as m
@@ -881,6 +883,22 @@ class StreamPlugin:
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
+        # What the orchestrator's short test summary needs, taken the way
+        # pytest's terminal reporter takes it.
+        if report.failed:
+            if isinstance(report.longrepr, str):
+                payload["crash"] = report.longrepr[:1000]
+            else:
+                message = getattr(getattr(report.longrepr, "reprcrash", None), "message", None)
+                if message is not None:
+                    payload["crash"] = str(message)[:1000]
+        reason = getattr(report, "wasxfail", None)
+        if reason:
+            payload["xfail_reason"] = str(reason)[:200]
+        if report.skipped and isinstance(report.longrepr, tuple) and len(report.longrepr) == 3:
+            start = self._config.invocation_params.dir if self._config is not None else Path.cwd()
+            for _, fspath, lineno, _ in _folded_skips(start, [report]):
+                payload["skip_location"] = [fspath, lineno]
         self._conn.send("report", payload)
         if self._cpu_mark is not None:
             self._cpu_mark = _cpu_now()

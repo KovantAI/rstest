@@ -519,19 +519,24 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     execute_inner(cli, args, None)
 }
 
-/// pytest's effective `--tb` style: ini `addopts`, then `PYTEST_ADDOPTS`,
-/// then the command line, the last one winning (pytest's own order).
-fn tb_style(args: &[String]) -> report::TbStyle {
+/// pytest's effective `--tb` style and `-r` chars: ini `addopts`, then
+/// `PYTEST_ADDOPTS`, then the command line, the last one winning (pytest's
+/// own order).
+fn output_opts(args: &[String]) -> (report::TbStyle, String) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = config::discover(&cwd, &mut std::io::sink());
     let env_addopts = std::env::var("PYTEST_ADDOPTS").unwrap_or_default();
-    report::TbStyle::from_opts(
+    let opts = || {
         project
             .addopts
             .iter()
             .map(String::as_str)
             .chain(env_addopts.split_whitespace())
-            .chain(args.iter().map(String::as_str)),
+            .chain(args.iter().map(String::as_str))
+    };
+    (
+        report::TbStyle::from_opts(opts()),
+        report::report_chars(opts()),
     )
 }
 
@@ -548,7 +553,9 @@ pub(crate) fn execute_inner(
     // selection, banner) flows through it. `--color` resolution matches
     // `resolve_run_config`'s (both call `Palette::detect`).
     let mut sink = Sink::stdio(color::Palette::detect(&args));
-    sink.set_tb_style(tb_style(&args));
+    let (tb, report_chars) = output_opts(&args);
+    sink.set_tb_style(tb);
+    sink.set_report_chars(report_chars);
     // `--stream-json FILE`: attach the live per-test NDJSON side channel. FILE
     // may be a regular file or a named pipe the editor already opened for
     // reading (opening a fifo for write blocks until that reader is present).
@@ -3830,6 +3837,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 

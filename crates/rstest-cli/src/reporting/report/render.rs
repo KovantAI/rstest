@@ -127,20 +127,20 @@ impl Run {
     /// `--tb=no` prints nothing (pytest drops its FAILURES and ERRORS
     /// sections); `--tb=line` prints pytest's headerless form: the failure
     /// text, its captured output, then the `path:line: message` crash line
-    /// the worker appended to the text.
+    /// the worker appended to the text. Headers name the phase as pytest
+    /// does: `FAILED` for a test, `ERROR at setup of` / `ERROR at teardown
+    /// of` for a fixture error, `ERROR collecting` for a collection error.
     pub fn print_failures(&self, sink: &mut Sink, wrap: FailureWrap) {
         let palette = sink.palette();
         let tb = sink.tb_style();
         if tb == TbStyle::No {
             return;
         }
+        // `header` is the whole headline, e.g. `FAILED [gw0] a.py::t`.
         let open = |header: &str, idx: usize| -> String {
             match wrap {
                 FailureWrap::Plain => {
-                    format!(
-                        "\n{}",
-                        palette.bold_red(&format!("--- FAILED {header} ---"))
-                    )
+                    format!("\n{}", palette.bold_red(&format!("--- {header} ---")))
                 }
                 FailureWrap::GitlabSection => {
                     // Section ids must be unique within the job log; the
@@ -150,13 +150,13 @@ impl Run {
                     format!(
                         "\n\x1b[0Ksection_start:{}:{id}[collapsed=true]\r\x1b[0K{}",
                         crate::time::now_epoch_secs(),
-                        palette.bold_red(&format!("--- FAILED {header} ---"))
+                        palette.bold_red(&format!("--- {header} ---"))
                     )
                 }
                 // The `+++` group header IS the headline in the Buildkite log
                 // UI - no extra dashes.
                 FailureWrap::BuildkiteGroup => {
-                    format!("\n+++ {}", palette.bold_red(&format!("FAILED {header}")))
+                    format!("\n+++ {}", palette.bold_red(header))
                 }
             }
         };
@@ -170,20 +170,22 @@ impl Run {
             })
         };
         let mut idx = 0usize;
-        for (worker, nodeid, longrepr, sections) in &self.failures {
+        for f in &self.failures {
+            let (nodeid, longrepr) = (&f.nodeid, &f.longrepr);
             // Quarantined failures print in their own section instead.
             if self.tests.get(nodeid).is_some_and(|e| e.quarantined) {
                 continue;
             }
-            let attribution = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
+            let attribution = f.worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
+            let label = match f.when.as_str() {
+                "setup" => "ERROR at setup of",
+                "teardown" => "ERROR at teardown of",
+                _ => "FAILED",
+            };
             // Only a call-phase failure carries the crash line (pytest's
             // FAILURES section); setup/teardown errors keep their header,
             // as in pytest's ERRORS section.
-            let line_form = tb == TbStyle::Line
-                && self
-                    .tests
-                    .get(nodeid)
-                    .is_some_and(|e| e.call.as_deref() == Some("failed"));
+            let line_form = tb == TbStyle::Line && f.when == "call";
             let (body, crash) = if line_form {
                 match longrepr.rsplit_once('\n') {
                     Some((body, crash)) => (body, Some(crash)),
@@ -193,7 +195,7 @@ impl Run {
                 (longrepr.as_str(), None)
             };
             if !line_form || wrap != FailureWrap::Plain {
-                sink.out_line(&open(&format!("{attribution}{nodeid}"), idx));
+                sink.out_line(&open(&format!("{label} {attribution}{nodeid}"), idx));
             } else if idx == 0 {
                 // The blank line a header would have opened with.
                 sink.out_line("");
@@ -201,7 +203,7 @@ impl Run {
             if !body.is_empty() || crash.is_none() {
                 sink.out_line(body);
             }
-            for (name, content) in sections {
+            for (name, content) in &f.sections {
                 sink.out_line(&format!(
                     "{}\n{}",
                     palette.yellow(&format!("--------- {name} ---------")),
@@ -217,7 +219,13 @@ impl Run {
             idx += 1;
         }
         for (nodeid, longrepr) in &self.collect_errors {
-            sink.out_line(&open(nodeid, idx));
+            // Synthetic `<...>` entries are orchestrator notes, not modules.
+            let header = if nodeid.starts_with('<') {
+                format!("ERROR {nodeid}")
+            } else {
+                format!("ERROR collecting {nodeid}")
+            };
+            sink.out_line(&open(&header, idx));
             sink.out_line(longrepr);
             if let Some(c) = close(idx) {
                 sink.out_line(&c);
@@ -225,6 +233,160 @@ impl Run {
             idx += 1;
         }
     }
+
+    /// pytest's "short test summary info" block, driven by the resolved `-r`
+    /// chars: one line per report in the chars' order (`FAILED`, `ERROR`,
+    /// `PASSED`, `XFAIL`, `XPASS`, folded `SKIPPED [N]`). `msg_width` trims
+    /// each failure message to its first line within that many columns, as
+    /// pytest does off CI; `None` prints it whole (CI, `-vv`). Tests are
+    /// listed in file and line order, so a parallel run prints a stable list.
+    pub fn print_short_summary(&self, sink: &mut Sink, chars: &str, msg_width: Option<usize>) {
+        let palette = sink.palette();
+        let order = |nodeid: &str| {
+            let file = nodeid.split("::").next().unwrap_or(nodeid);
+            let line = self.tests.get(nodeid).and_then(|e| e.lineno);
+            (file.to_string(), line, nodeid.to_string())
+        };
+        let mut failures: Vec<&super::Failure> = self
+            .failures
+            .iter()
+            .filter(|f| !self.tests.get(&f.nodeid).is_some_and(|e| e.quarantined))
+            .collect();
+        failures.sort_by_cached_key(|f| order(&f.nodeid));
+        let mut tests: Vec<(&String, &TestEntry)> =
+            self.tests.iter().filter(|(_, e)| !e.cached).collect();
+        tests.sort_by_cached_key(|(id, _)| order(id));
+
+        let mut lines: Vec<String> = Vec::new();
+        let with_message = |word: String, nodeid: &str, msg: Option<&str>| -> String {
+            let line = format!("{word} {nodeid}");
+            let Some(msg) = msg else { return line };
+            match msg_width {
+                None => format!("{line} - {msg}"),
+                Some(width) => {
+                    let used = word_width(&line);
+                    match trim_message(msg, width.saturating_sub(used)) {
+                        Some(msg) => format!("{line} - {msg}"),
+                        None => line,
+                    }
+                }
+            }
+        };
+        for c in chars.chars() {
+            match c {
+                'f' | 'E' => {
+                    if c == 'E' {
+                        for (path, _) in &self.collect_errors {
+                            lines.push(format!("{} {path}", palette.red("ERROR")));
+                        }
+                    }
+                    for f in failures.iter().filter(|f| (f.when == "call") == (c == 'f')) {
+                        let word = if c == 'f' { "FAILED" } else { "ERROR" };
+                        let msg = f
+                            .crash
+                            .as_deref()
+                            .or_else(|| f.longrepr.lines().find(|l| !l.trim().is_empty()));
+                        lines.push(with_message(palette.red(word), &f.nodeid, msg));
+                    }
+                }
+                'p' => {
+                    for (id, e) in &tests {
+                        if !e.wasxfail && e.call.as_deref() == Some("passed") {
+                            lines.push(format!("{} {id}", palette.green("PASSED")));
+                        }
+                    }
+                }
+                'x' | 'X' => {
+                    let word = if c == 'x' { "XFAIL" } else { "XPASS" };
+                    for (id, e) in &tests {
+                        let skipped = e.setup.as_deref() == Some("skipped")
+                            || e.call.as_deref() == Some("skipped");
+                        let passed = e.call.as_deref() == Some("passed");
+                        if e.wasxfail && (if c == 'x' { skipped } else { passed }) {
+                            let mut line = format!("{} {id}", palette.yellow(word));
+                            if let Some(reason) = &e.xfail_reason {
+                                line.push_str(&format!(" - {reason}"));
+                            }
+                            lines.push(line);
+                        }
+                    }
+                }
+                's' => {
+                    // pytest folds skips sharing a location and reason.
+                    // (path, line, reason, count), in first-seen order.
+                    let mut folds = Vec::new();
+                    for (_, e) in &tests {
+                        let Some((path, line)) = &e.skip_location else {
+                            continue;
+                        };
+                        let reason = e.skip_reason.as_deref().unwrap_or("");
+                        match folds
+                            .iter_mut()
+                            .find(|(p, l, r, _)| *p == path && *l == line && *r == reason)
+                        {
+                            Some((_, _, _, n)) => *n += 1,
+                            None => folds.push((path, line, reason, 1)),
+                        }
+                    }
+                    for (path, line, reason, n) in folds {
+                        let reason = reason.strip_prefix("Skipped: ").unwrap_or(reason);
+                        let word = palette.yellow("SKIPPED");
+                        lines.push(match line {
+                            Some(l) => format!("{word} [{n}] {path}:{l}: {reason}"),
+                            None => format!("{word} [{n}] {path}: {reason}"),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if lines.is_empty() {
+            return;
+        }
+        sink.out_line(&format!(
+            "\n{}",
+            palette.yellow("=========== short test summary info ===========")
+        ));
+        for line in lines {
+            sink.out_line(&line);
+        }
+    }
+}
+
+/// Visible width of a line that may carry color codes.
+fn word_width(line: &str) -> usize {
+    let mut width = 0;
+    let mut in_escape = false;
+    for c in line.chars() {
+        match (in_escape, c) {
+            (false, '\x1b') => in_escape = true,
+            (true, 'm') => in_escape = false,
+            (true, _) => {}
+            (false, _) => width += 1,
+        }
+    }
+    width
+}
+
+/// pytest's `_format_trimmed(" - {}", msg, available)`: the message's first
+/// line, ellipsized to fit after the ` - ` separator; `None` when not even
+/// the ellipsis fits. Width counts chars.
+// ponytail: chars, not wcswidth; wide (CJK/emoji) messages may overrun a column or two.
+fn trim_message(msg: &str, available: usize) -> Option<String> {
+    let first = msg.lines().next().unwrap_or("");
+    const SEP: usize = 3; // " - "
+    const ELLIPSIS: &str = "...";
+    if SEP + ELLIPSIS.len() > available {
+        return None;
+    }
+    if SEP + first.chars().count() <= available {
+        return Some(first.to_string());
+    }
+    let keep = available - ELLIPSIS.len() - SEP;
+    Some(format!(
+        "{}{ELLIPSIS}",
+        first.chars().take(keep).collect::<String>()
+    ))
 }
 
 #[cfg(test)]
@@ -251,6 +413,9 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 
@@ -498,8 +663,249 @@ mod tests {
         let crash = out.find("/abs/a.py:3: AssertionError: no").unwrap();
         assert!(e < captured && captured < crash, "pytest's order:\n{out}");
         assert!(
-            out.contains("--- FAILED a.py::err ---"),
+            out.contains("--- ERROR at setup of a.py::err ---"),
             "error keeps header:\n{out}"
         );
+    }
+
+    #[test]
+    fn print_failures_heads_errors_by_phase_like_pytest() {
+        let mut run = Run::default();
+        run.record(Some(0), report("a.py::t", "setup", "passed"));
+        run.record(Some(0), report("a.py::t", "call", "failed"));
+        run.record(Some(0), report("a.py::t", "teardown", "failed"));
+        run.record(Some(1), report("a.py::s", "setup", "failed"));
+        run.collect_error("c.py".into(), "ImportError: boom".into());
+        run.collect_error("<worker gw1>".into(), "crashed".into());
+        let (mut sink, cap) = Sink::captured();
+        run.print_failures(&mut sink, FailureWrap::Plain);
+        let out = cap.out();
+        assert!(out.contains("--- FAILED [gw0] a.py::t ---"), "{out}");
+        assert!(
+            out.contains("--- ERROR at teardown of [gw0] a.py::t ---"),
+            "{out}"
+        );
+        assert!(
+            out.contains("--- ERROR at setup of [gw1] a.py::s ---"),
+            "{out}"
+        );
+        assert!(out.contains("--- ERROR collecting c.py ---"), "{out}");
+        assert!(out.contains("--- ERROR <worker gw1> ---"), "{out}");
+        let (mut sink, cap) = Sink::captured();
+        run.print_failures(&mut sink, FailureWrap::BuildkiteGroup);
+        assert!(
+            cap.out().contains("+++ ERROR at teardown of [gw0] a.py::t"),
+            "{}",
+            cap.out()
+        );
+    }
+
+    #[test]
+    fn print_failures_tb_line_keeps_the_teardown_error_header_after_a_call_failure() {
+        // The call failed AND teardown errored: only the call report carries
+        // the `--tb=line` crash line, so the teardown error stays headed.
+        let mut run = Run::default();
+        let mut call = report("a.py::t", "call", "failed");
+        call.longrepr = Some("E   assert 1 == 2\n/abs/a.py:3: assert 1 == 2".into());
+        let mut td = report("a.py::t", "teardown", "failed");
+        td.longrepr = Some("E   RuntimeError: teardown boom".into());
+        run.record(None, report("a.py::t", "setup", "passed"));
+        run.record(None, call);
+        run.record(None, td);
+        let (mut sink, cap) = Sink::captured();
+        sink.set_tb_style(TbStyle::Line);
+        run.print_failures(&mut sink, FailureWrap::Plain);
+        let out = cap.out();
+        assert!(!out.contains("FAILED a.py::t"), "{out}");
+        assert!(
+            out.contains("--- ERROR at teardown of a.py::t ---\nE   RuntimeError"),
+            "{out}"
+        );
+    }
+
+    // ---- print_short_summary ----
+
+    /// A report carrying the short-summary fields.
+    fn rep(nodeid: &str, when: &str, outcome: &str, crash: Option<&str>) -> proto::Report {
+        let mut r = report(nodeid, when, outcome);
+        r.crash = crash.map(Into::into);
+        r
+    }
+
+    /// The `-rA` suite from R23: pass + teardown error, fail + teardown
+    /// error, setup error, pass, skip, xfail, xpass.
+    fn r23_run() -> Run {
+        let mut run = Run::default();
+        let lineno = |mut r: proto::Report, l: u64| {
+            r.lineno = Some(l);
+            r
+        };
+        // Recorded out of file order, as two workers would.
+        run.record(
+            Some(1),
+            lineno(
+                rep(
+                    "t.py::setup_err",
+                    "setup",
+                    "failed",
+                    Some("ValueError: setup boom"),
+                ),
+                17,
+            ),
+        );
+        run.record(
+            Some(0),
+            lineno(rep("t.py::pass_td", "setup", "passed", None), 11),
+        );
+        run.record(Some(0), rep("t.py::pass_td", "call", "passed", None));
+        run.record(
+            Some(0),
+            rep(
+                "t.py::pass_td",
+                "teardown",
+                "failed",
+                Some("RuntimeError: teardown boom"),
+            ),
+        );
+        run.record(
+            Some(0),
+            lineno(rep("t.py::fail_td", "setup", "passed", None), 14),
+        );
+        run.record(
+            Some(0),
+            rep("t.py::fail_td", "call", "failed", Some("assert 1 == 2")),
+        );
+        run.record(
+            Some(0),
+            rep(
+                "t.py::fail_td",
+                "teardown",
+                "failed",
+                Some("RuntimeError: teardown boom"),
+            ),
+        );
+        run.record(Some(1), lineno(report("t.py::ok", "setup", "passed"), 20));
+        run.record(Some(1), report("t.py::ok", "call", "passed"));
+        let mut skip = lineno(rep("t.py::skip", "setup", "skipped", None), 23);
+        skip.skip_reason = Some("Skipped: nope".into());
+        skip.skip_location = Some(("t.py".into(), Some(24)));
+        run.record(Some(1), skip);
+        for (id, outcome, reason) in [
+            ("t.py::xf", "skipped", "known"),
+            ("t.py::xp", "passed", "lucky"),
+        ] {
+            run.record(Some(1), report(id, "setup", "passed"));
+            let mut call = report(id, "call", outcome);
+            call.wasxfail = true;
+            call.xfail_reason = Some(reason.into());
+            run.record(Some(1), call);
+        }
+        run
+    }
+
+    fn summary(run: &Run, chars: &str, width: Option<usize>) -> String {
+        let (mut sink, cap) = Sink::captured();
+        run.print_short_summary(&mut sink, chars, width);
+        cap.out()
+    }
+
+    #[test]
+    fn short_summary_default_lists_failures_then_errors_in_file_order() {
+        let out = summary(&r23_run(), "fE", None);
+        assert_eq!(
+            out,
+            "\n=========== short test summary info ===========\n\
+             FAILED t.py::fail_td - assert 1 == 2\n\
+             ERROR t.py::pass_td - RuntimeError: teardown boom\n\
+             ERROR t.py::fail_td - RuntimeError: teardown boom\n\
+             ERROR t.py::setup_err - ValueError: setup boom\n"
+        );
+    }
+
+    #[test]
+    fn short_summary_all_chars_match_pytest_ra() {
+        let out = summary(
+            &r23_run(),
+            &crate::reporting::report::report_chars(["-rA"]),
+            None,
+        );
+        let lines: Vec<&str> = out.lines().skip(2).collect();
+        assert_eq!(
+            lines,
+            [
+                "PASSED t.py::pass_td",
+                "PASSED t.py::ok",
+                "SKIPPED [1] t.py:24: nope",
+                "XFAIL t.py::xf - known",
+                "XPASS t.py::xp - lucky",
+                "ERROR t.py::pass_td - RuntimeError: teardown boom",
+                "ERROR t.py::fail_td - RuntimeError: teardown boom",
+                "ERROR t.py::setup_err - ValueError: setup boom",
+                "FAILED t.py::fail_td - assert 1 == 2",
+            ],
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn short_summary_folds_skips_and_skips_quarantined_cached_and_empty() {
+        let mut run = Run::default();
+        for id in ["a.py::one", "a.py::two"] {
+            let mut r = report(id, "setup", "skipped");
+            r.skip_reason = Some("Skipped: slow".into());
+            r.skip_location = Some(("a.py".into(), None));
+            run.record(None, r);
+        }
+        full(&mut run, "a.py::flake", "failed");
+        run.quarantine(|id| id == "a.py::flake");
+        run.record_cached("a.py::cached".into());
+        run.collect_error("c.py".into(), "ImportError: boom".into());
+        let out = summary(&run, "sfEp", None);
+        assert_eq!(
+            out.lines().skip(2).collect::<Vec<_>>(),
+            ["SKIPPED [2] a.py: slow", "ERROR c.py"],
+            "{out}"
+        );
+        assert_eq!(
+            summary(&Run::default(), "fE", None),
+            "",
+            "nothing to list, no header"
+        );
+        assert_eq!(summary(&r23_run(), "", None), "", "-rN prints nothing");
+    }
+
+    #[test]
+    fn short_summary_trims_messages_to_the_terminal_like_pytest() {
+        let mut run = Run::default();
+        run.record(
+            None,
+            rep(
+                "t.py::a",
+                "setup",
+                "failed",
+                Some("RuntimeError: teardown boom\nmore"),
+            ),
+        );
+        // Without a crash message the first text line of the failure stands in.
+        let mut crashed = report("t.py::b", "call", "failed");
+        crashed.longrepr = Some("\nworker crashed\ndetails".into());
+        run.record(None, crashed);
+        // pytest's `_format_trimmed`: 36 columns leave 23 after the nodeid,
+        // so 17 chars of the message, then the ellipsis.
+        let out = summary(&run, "fE", Some(36));
+        assert!(
+            out.contains("ERROR t.py::a - RuntimeError: tea...\n"),
+            "{out}"
+        );
+        assert!(out.contains("FAILED t.py::b - worker crashed\n"), "{out}");
+        // Not even the ellipsis fits: no message at all.
+        assert!(summary(&run, "E", Some(18)).contains("ERROR t.py::a\n"));
+        // Untrimmed (CI, -vv): the whole message, every line.
+        assert!(summary(&run, "E", None).contains("teardown boom\nmore"));
+    }
+
+    #[test]
+    fn word_width_ignores_color_codes() {
+        assert_eq!(super::word_width("\x1b[31mERROR\x1b[0m t.py::a"), 13);
     }
 }

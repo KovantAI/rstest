@@ -44,6 +44,15 @@ between 0.x releases and are listed here.
   The first run after upgrading also deletes the folders older releases left
   behind (any `rstest-<pid>` folder more than an hour old). A user-provided
   `--basetemp` is never deleted.
+- **Parallel runs print pytest's short test summary and head errors by
+  phase.** With 2 or more workers there was no `short test summary info`
+  block, even with `-rA`, and a setup or teardown error was headed
+  `--- FAILED ... ---`. rstest now prints the block for the `-r` chars in
+  effect (`fE` by default; `-r` from `addopts` and `PYTEST_ADDOPTS` counts
+  too), with the same lines pytest prints: messages trimmed to the terminal,
+  or whole on CI and at `-vv`. Lines follow file and line order, so they
+  don't change between runs. Errors are headed `ERROR at setup of`,
+  `ERROR at teardown of` and `ERROR collecting`, as in pytest.
 
 ## 0.9.0 (2026-10-06)
 

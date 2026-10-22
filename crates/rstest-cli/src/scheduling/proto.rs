@@ -106,6 +106,18 @@ pub struct Report {
     /// for the parent's own call outcome.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subtest: bool,
+    /// A failure's one-line cause for the short test summary (pytest's
+    /// `reprcrash.message`, or the text of a plain-string longrepr).
+    #[serde(default)]
+    pub crash: Option<String>,
+    /// An xfail/xpass report's reason (pytest's `report.wasxfail`), when set.
+    #[serde(default)]
+    pub xfail_reason: Option<String>,
+    /// A skip's `(path, line)` in the short test summary, as pytest folds
+    /// skips (`SKIPPED [N] path:line: reason`); the line is absent for a
+    /// skip marker pytest folds per file.
+    #[serde(default)]
+    pub skip_location: Option<(String, Option<u64>)>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -520,6 +532,9 @@ mod property {
                 nodeid, when, outcome, duration, longrepr, wasxfail,
                 skip_reason, cpu, thread_delta, fd_delta, sections, lineno,
                 subtest: false,
+                crash: None,
+                xfail_reason: None,
+                skip_location: None,
             }
         }
     }
