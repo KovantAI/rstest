@@ -91,7 +91,8 @@ restored. The bundled action already leaves them out. Wherever you persist
   `durations.json`, `flakes.json`, `coverage_index.json`, `wall.json`,
   `last_green.json`, `incremental_outcomes.json` and `history.msgpack` under
   `.rstest_cache/`. Without `history.msgpack`, auto-quarantine has no history
-  to work from and quarantines nothing.
+  to work from and quarantines nothing. (With `--cache-pull`, the history
+  arrives through the shared cache instead.)
 - **Turn journaling off** with `RSTEST_NO_REPLAY_JOURNAL=1` if you won't
   replay CI failures.
 
@@ -197,8 +198,8 @@ jobs:
 ```
 
 No refresh job, no `run_id`/`restore-keys` dance, no single writer: each shard
-contributes its segment (durations, flake events, **and** its share of the
-coverage index). The `resolve` job and pull step above warm from the latest
+contributes its segment (durations, flake events, its run history, **and**
+its share of the coverage index). The `resolve` job and pull step above warm from the latest
 successful default-branch run, whose shard segments union into a whole
 `--changed` index (no dedicated unsharded job), so run this workflow on full
 pushes to your default branch too

@@ -38,8 +38,9 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   [`--auto-quarantine`](../reference/cli.md#-auto-quarantinen) to find the
   tests that keep flipping. Deleting it empties the auto-quarantine set. Runs
   older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped on read. Not written by
-  `rstest replay` or `--dist each`, and not shared through `--cache-push` /
-  `--cache-pull`. Safe to delete.
+  `rstest replay` or `--dist each`. Shared through `--cache-push` /
+  `--cache-pull` (each pushed run carries its own entries; see
+  [Shared cache](#shared-cache-backend)). Safe to delete.
 - `coverage_index.json`: line→test index (which tests' coverage executed
   each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
@@ -129,11 +130,20 @@ clobber each other.
       slices **union into a full index**; if a file's content differs between
       segments the newer wins and `--changed` falls back to the import graph for
       that file: still correct, only coarser.
+    - *run history*: each segment carries its run (commit, environment
+      fingerprint, worker count) and one entry per test. Runs are unioned by
+      run id, so a run that arrives from the base, a segment and the local
+      `history.msgpack` lands once, then replayed oldest first; each test keeps
+      its newest `RSTEST_HISTORY_RUNS` runs. Every shard of a sharded run is
+      its own run, and each test appears in the shard that ran it.
 - **Push** writes just this run's segment (`--cache-push`): its *slice* of the
-  durations, flake events, and coverage index this run measured.
+  durations, flake events, coverage index and run history this run measured.
 - **Compact** (`cache-compact`) folds segments into a new base and prunes
   them; a segment already folded is recorded in the base's absorbed-id set, so
-  compaction is safe against concurrent pushes.
+  compaction is safe against concurrent pushes. Compaction also drops history
+  runs older than `RSTEST_FLAKE_RETENTION_DAYS`, so a deleted test's runs
+  leave the base. The history makes `base.json` grow with the suite (up to
+  `RSTEST_HISTORY_RUNS` small entries per test).
 
 ### Transports
 
