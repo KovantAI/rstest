@@ -28,7 +28,7 @@ what each one accepts.
 
 - **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`xdist-removal-check`](#xdist-removal-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
 - **CI and the shared cache:** [`shard-verify`](#shard-verify), [`cache-compact`](#cache-compact)
-- **Inspection and integrity:** [`explain`](#explain), [`flaky`](#flaky), [`verify-vendor`](#verify-vendor)
+- **Inspection and integrity:** [`explain`](#explain), [`flaky`](#flaky), [`since-green`](#since-green), [`verify-vendor`](#verify-vendor)
 - **Agent skills:** [`install-skills`](#install-skills)
 
 ## Adoption and parallel safety
@@ -705,6 +705,37 @@ interpreter, runs no tests, and exits `0`. To see a history that CI builds on
 sharded or ephemeral runners, pull it first: any run with `--cache-pull`
 merges the pushed runs into the local file
 ([`--cache-remote`](cli.md#-cache-remote-urldir-cache-pull-cache-push)).
+
+### `since-green`
+
+What changed since the last green run, without running tests: the commits
+since its commit (`git log <green>..HEAD`), and changes to the interpreter
+version, the installed third-party packages and a few test-relevant
+environment variables.
+
+```console
+$ rstest since-green
+rstest: changed since the last green run (3f9c2a1b7e, 6h ago):
+  1 package(s):
+    httpx 0.27.2 -> 0.28.1
+```
+
+Every run that exits 0 records the state compared against
+(`.rstest_cache/green_env.json`), and a run with failing tests prints the
+same block on stderr when anything differs. When nothing differs this
+command says so: the break is in the tests or what they call, not in the
+environment. Without a recorded green run it says that instead.
+
+`--json` writes a schema-stamped object on stdout (`{meta, found,
+green_commit, green_epoch, commit, commits, python, packages, env}`); each
+change is `{name, green, now}`, with `null` for the side where it is absent.
+`commits` is `null` when git can't resolve the range (not a checkout, or the
+green commit isn't fetched). Field reference:
+[Since green JSON](output-schemas.md#since-green). It resolves the
+interpreter (to find its packages) but starts no session, and exits `0`.
+Not to be confused with the [`--since-green`](cli.md#-since-green) flag,
+which selects tests; this command explains a red run. Details:
+[What changed since green](../guides/since-green.md#what-changed-since-green).
 
 ### `verify-vendor`
 

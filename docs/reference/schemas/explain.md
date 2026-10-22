@@ -67,9 +67,9 @@ Envelope metadata for the explain document.
 | `runner` | string | yes | Constant producer tag: always `"rstest"`. |
 | `schema` | integer | yes | Document schema version. |
 
-### SuspectCommit
+### SuspectCommit (Explain)
 
-A commit between the test's last pass and its first failure.
+A commit in a suspect range (`git log <good>..<bad>`).
 
 | Field | Type | Required | Description |
 |---|---|---|---|

@@ -229,6 +229,43 @@ if you'd rather not commit to advance anything.
 - Keep the default-branch runs that warm the cache **full**, for the reasons
   in [Warm from full default-branch runs](ci-shared-cache.md#warm-from-full-default-branch-runs).
 
+## What changed since green
+
+Every run that exits 0 records what it ran with in
+`.rstest_cache/green_env.json`: the commit, the interpreter version, the
+installed third-party packages, and a few environment variables that change
+how tests behave (`PYTEST_ADDOPTS`, `PYTHONPATH`, `PYTHONHASHSEED`,
+`PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`). This happens on every
+run, with or without `--since-green`.
+
+When a later run has failing tests, rstest prints what differs on stderr:
+
+```text
+rstest: changed since the last green run (3f9c2a1b7e, 6h ago):
+  2 commit(s):
+    8d04e6c bump the clock config (Ada)
+    51be0a2 move session refresh into middleware (Bo)
+  interpreter: python 3.12.1 -> 3.12.4
+  1 package(s):
+    httpx 0.27.2 -> 0.28.1
+  environment:
+    TZ UTC -> Asia/Tokyo
+```
+
+Many CI breaks are a transitive dependency bump or an interpreter change, not
+a code change; this names them without digging through the logs of two runs.
+The block is skipped when nothing differs, so a red cycle in a local edit loop
+stays quiet. `rstest since-green` shows the same diff without running tests,
+including the "nothing changed" verdict that points back at the tests
+themselves; `--json` for tooling
+([`since-green`](../reference/cli-commands.md#since-green)).
+
+Packages are read from the venv's `site-packages` directory names, so no
+interpreter is started; the project's own editable install is left out (its
+version often moves with every commit). A system interpreter without a venv
+records no packages. On CI, persist `.rstest_cache` so the snapshot from the
+last green run on the default branch is there when a later run goes red.
+
 ## Interactions
 
 - **Monorepo root.** `--since-green` is refused at a monorepo root unless

@@ -8,12 +8,14 @@ description: >-
   diagnostic commands (`rstest replay` to re-run a CI schedule locally from its
   journal, `rstest bisect` to find the polluting test, `rstest audit` to sweep
   for parallel-only failures, `rstest explain` for one test's history,
-  `rstest flaky` for the suite's ranked flaky tests) and the
+  `rstest flaky` for the suite's ranked flaky tests, `rstest since-green` for
+  what changed since the last green run) and the
   flaky-test controls (`--reruns`, `--reruns-only-known-flaky`, `--quarantine`,
   `--auto-quarantine`, `--shuffle`). Use it whenever the user has an rstest
   failure to explain or fix, mentions a replay journal, `latest.json`, a
   polluter, order dependence, `flakes.json`, quarantine, asks why a test was
-  quarantined or why a failing test didn't fail the run, or asks "why does
+  quarantined or why a failing test didn't fail the run, asks why CI broke
+  when their diff can't explain it, or asks "why does
   this only fail on CI / in parallel", even if they don't name the command. Not for first-time migration
   from pytest or for speed tuning (use migrate-to-rstest), and not for plain
   test failures that also fail under ordinary pytest.
@@ -59,6 +61,7 @@ after spending runs to find out.
 | "Which of our tests aren't parallel-safe?" | `rstest audit` (add `--audit-repeat 5` for races) | Sweeps the suite in parallel (at least two workers) against a serial oracle, classifies each parallel-only failure, emits a paste-ready `serial` block |
 | A suspicion of order dependence, no victim yet | `rstest --shuffle` | A seeded random order flushes it out; the printed seed reproduces it |
 | "Is this test flaky, and how often?" | `rstest explain <nodeid>` | Reads the caches (duration, flake/fail counts, recent outcome strip, the commit it broke at, coverage) without running anything |
+| "CI went red but nothing in our diff explains it" | `rstest since-green` (a red run also prints it on stderr) | Lists the commits, interpreter, package and environment changes since the last run that exited 0: a transitive dependency bump names itself |
 | "Which of our tests are flaky? Is it getting worse?" | `rstest flaky` | Ranks every test that flipped between pass and fail from the run history, with trend and which ones the next run auto-quarantines |
 | A hang (run never finishes, or a worker stalls) | `--timeout SECS` on the command line, plus `--stream-json` | Fails the stuck test in-process with a traceback at the stuck line and arms a backstop; the stream names the test even if the job is killed. See "Hangs" in `references/commands.md` |
 | A crashed worker | the run's own report | rstest names the test that was running, the worker's exit code or signal, and its last stderr lines |

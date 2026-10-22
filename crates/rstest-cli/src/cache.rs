@@ -611,6 +611,7 @@ mod tests {
             crate::scheduling::durations::WALL_FILE,
             crate::reporting::flakes::FILE,
             crate::reporting::history::FILE,
+            crate::since_green::FILE,
             crate::incremental::FILE,
             crate::coverage_skip::FILE,
             crate::select::COVERAGE_INDEX_FILE,

@@ -294,7 +294,7 @@
       ]
     },
     "SuspectCommit": {
-      "description": "A commit between the test's last pass and its first failure.",
+      "description": "A commit in a suspect range (`git log <good>..<bad>`).",
       "type": "object",
       "properties": {
         "author": {

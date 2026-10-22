@@ -99,6 +99,12 @@ fn outputs() -> Vec<Output> {
             schema: schema_of::<crate::flaky::FlakyReport>(),
         },
         Output {
+            name: "since-green",
+            title: "Since green",
+            source: "`since-green --json`",
+            schema: schema_of::<crate::since_green::SinceGreen>(),
+        },
+        Output {
             name: "flake-log",
             title: "Flake log",
             source: "`.rstest_cache/flakes.json`",
