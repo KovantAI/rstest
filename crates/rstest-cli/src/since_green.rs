@@ -1,4 +1,4 @@
-//! "What changed since green?": every run that exits 0 snapshots what git
+//! "What changed since green?": every full run that exits 0 snapshots what git
 //! can't see about it (interpreter version, installed packages, a few
 //! environment variables) plus its commit, in `.rstest_cache/green_env.json`.
 //! A red run diffs the current state against that snapshot, so a CI break
@@ -226,7 +226,7 @@ fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
     if !d.found {
         out(
             sink,
-            "rstest: since green: no green run recorded here yet (every run that exits 0 records one)",
+            "rstest: since green: no green run recorded here yet (every full run that exits 0 records one)",
         );
         return;
     }
@@ -284,12 +284,64 @@ fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
     }
 }
 
-/// After a run: a green run (exit 0) records the snapshot; a run with failed
+/// pytest flags that select a subset of the suite (with their `=`/attached
+/// forms): a run using one says nothing about the whole suite being green.
+const SELECTION_FLAGS: [&str; 11] = [
+    "-k",
+    "-m",
+    "--lf",
+    "--last-failed",
+    "--deselect",
+    "--ignore",
+    "--ignore-glob",
+    "--sw",
+    "--stepwise",
+    "--sw-skip",
+    "--stepwise-skip",
+];
+
+/// Whether the session args select only part of the suite: a nodeid, a
+/// selection flag, or a path that doesn't cover the suite. A path covers it
+/// when it is the rootdir (or above it) or contains every `testpaths` entry,
+/// so CI's `rstest tests/` still counts as a full run.
+pub fn narrows_selection(args: &[String], project: &crate::config::ProjectConfig) -> bool {
+    let flag = args.iter().any(|a| {
+        SELECTION_FLAGS.iter().any(|f| {
+            a == f
+                || a.strip_prefix(f)
+                    .is_some_and(|rest| rest.starts_with('=') || (f.len() == 2 && !rest.is_empty()))
+        })
+    });
+    let nodeid = args
+        .iter()
+        .zip(crate::cli::positional_mask(args))
+        .any(|(a, pos)| pos && a.contains("::"));
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let root = canon(&project.rootdir);
+    let roots: Vec<std::path::PathBuf> = if project.testpaths.is_empty() {
+        vec![root.clone()]
+    } else {
+        project
+            .testpaths
+            .iter()
+            .map(|t| canon(&root.join(t)))
+            .collect()
+    };
+    let partial_path = crate::cli::path_args(args).iter().any(|p| {
+        let p = canon(Path::new(p.strip_prefix('@').unwrap_or(p)));
+        !(root.starts_with(&p) || roots.iter().all(|r| r.starts_with(&p)))
+    });
+    flag || nodeid || partial_path
+}
+
+/// After a run: a green run (exit 0) over the whole suite records the
+/// snapshot (`full` is false for a run that selected only part of it: the
+/// caller's selection flags plus [`narrows_selection`]); a run with failed
 /// tests (exit 1) prints what changed since the last green one, when anything
 /// did.
-pub fn after_run(sink: &mut Sink, exitstatus: i32, now: &Snapshot) {
+pub fn after_run(sink: &mut Sink, exitstatus: i32, full: bool, now: &Snapshot) {
     match exitstatus {
-        0 => record(now),
+        0 if full => record(now),
         1 => {
             if let Some(g) = load() {
                 let d = compare(Some(&g), now, crate::select::git_stdout);
@@ -430,6 +482,50 @@ mod tests {
         let (mut sink, cap) = Sink::captured();
         render(&mut sink, &d, 1000, false);
         assert!(cap.out().contains("commits: unknown here"), "{}", cap.out());
+    }
+
+    #[test]
+    fn narrowed_selections_never_count_as_green() {
+        let root = std::env::temp_dir().join(format!("rstest-sg-narrow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tests/unit")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("tests/unit/test_a.py"), "").unwrap();
+        let mut project = crate::config::ProjectConfig {
+            rootdir: root.clone(),
+            testpaths: vec!["tests".into()],
+            ..Default::default()
+        };
+        let p = |rel: &str| root.join(rel).display().to_string();
+        let narrows = |args: &[String], project: &crate::config::ProjectConfig| {
+            narrows_selection(args, project)
+        };
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Full: no args, the testpaths dir itself, the rootdir, plain flags.
+        assert!(!narrows(&v(&[]), &project));
+        assert!(!narrows(&[p("tests")], &project));
+        assert!(!narrows(&[p(".")], &project));
+        assert!(!narrows(&v(&["-x", "-v", "--durations=5"]), &project));
+        // Narrowed: a sub-dir, a file, a nodeid, selection flags in every form.
+        assert!(narrows(&[p("tests/unit")], &project));
+        assert!(narrows(&[p("tests/unit/test_a.py")], &project));
+        assert!(narrows(&v(&["tests/unit/test_a.py::test_x"]), &project));
+        for args in [
+            v(&["-k", "slow"]),
+            v(&["-kslow"]),
+            v(&["-m=integration"]),
+            v(&["--lf"]),
+            v(&["--deselect", "t.py::x"]),
+            v(&["--ignore=tests/unit"]),
+            v(&["--sw"]),
+        ] {
+            assert!(narrows(&args, &project), "{args:?}");
+        }
+        // Without testpaths, only the rootdir (or above) is the whole suite.
+        project.testpaths.clear();
+        assert!(narrows(&[p("tests")], &project));
+        assert!(!narrows(&[p(".")], &project));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

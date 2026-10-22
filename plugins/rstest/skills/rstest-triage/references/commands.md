@@ -182,7 +182,8 @@ $ rstest since-green          # what changed since the last green run
 $ rstest since-green --json
 ```
 
-- Every run that exits 0 records its commit, interpreter version, installed
+- Every full run that exits 0 (not `-k`, a sub-path, a nodeid, `--lf`,
+  `--changed`, `--shard`, ...) records its commit, interpreter version, installed
   third-party packages and a few env vars (`PYTEST_ADDOPTS`, `PYTHONPATH`,
   `PYTHONHASHSEED`, `PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`) in
   `.rstest_cache/green_env.json`. A run with failing tests prints the diff on

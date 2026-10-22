@@ -924,8 +924,10 @@ name = "rstest-cli"
 version = "0.9.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "criterion",
+ "flate2",
  "ignore",
  "libc",
  "notify",

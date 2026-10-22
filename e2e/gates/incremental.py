@@ -847,3 +847,14 @@ def gate_what_changed_since_green(g, args, binary):
         r.returncode == 1 and "changed since the last green run" not in r.stderr,
         f"rc={r.returncode} " + r.stderr[-300:],
     )
+    # A green run over part of the suite (-k) is no baseline: it must not
+    # overwrite the snapshot, so the TZ change still shows against Tokyo.
+    r = g.run(".", "-n", "2", "-k", "test_tz", cwd=sg, env_extra={"TZ": "Europe/Paris"})
+    r2 = g.run("since-green", "--json", cwd=sg, env_extra={"TZ": "Europe/Paris"})
+    doc = json.loads(r2.stdout) if r2.returncode == 0 else {}
+    check(
+        "since-green: a narrowed green run (-k) doesn't move the baseline",
+        r.returncode == 0
+        and {"name": "TZ", "green": "Asia/Tokyo", "now": "Europe/Paris"} in doc.get("env", []),
+        f"rc={r.returncode} " + r2.stdout[-300:],
+    )

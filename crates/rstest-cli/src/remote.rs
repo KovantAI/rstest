@@ -92,7 +92,15 @@ pub struct Base {
     #[serde(default)]
     pub cov_ts: HashMap<String, u64>,
     /// Run history folded into this base (newest N runs per test, aged).
-    #[serde(default)]
+    /// Written as one string, base64 of gzipped msgpack: as plain JSON it
+    /// grows to tens of MB on a large suite. Releases that predate the field
+    /// ignore it; a damaged value reads as an empty history, never a failed
+    /// pull.
+    #[serde(
+        default,
+        with = "packed_history",
+        skip_serializing_if = "History::is_empty"
+    )]
     pub history: History,
     /// Segment ids already accumulated into this base.
     #[serde(default)]
@@ -263,6 +271,43 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
         cov_ts,
         history,
         absorbed,
+    }
+}
+
+/// `Base::history` as base64(gzip(msgpack)).
+mod packed_history {
+    use std::io::{Read, Write};
+
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::History;
+
+    pub fn encode(h: &History) -> Option<String> {
+        let raw = rmp_serde::to_vec(h).ok()?;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&raw).ok()?;
+        Some(base64::engine::general_purpose::STANDARD.encode(gz.finish().ok()?))
+    }
+
+    pub fn decode(s: &str) -> Option<History> {
+        let gz = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(gz.as_slice())
+            .read_to_end(&mut raw)
+            .ok()?;
+        rmp_serde::from_slice(&raw).ok()
+    }
+
+    pub fn serialize<S: Serializer>(h: &History, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&encode(h).unwrap_or_default())
+    }
+
+    /// Lenient: anything but a decodable string is an empty history, so a
+    /// damaged field never fails the whole pull.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<History, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(v.as_str().and_then(decode).unwrap_or_default())
     }
 }
 
@@ -1654,6 +1699,70 @@ mod tests {
             .iter()
             .map(|(_, e)| e.outcome.clone())
             .collect()
+    }
+
+    #[test]
+    fn base_history_is_packed_small_and_read_leniently() {
+        // 200 tests x 50 runs, the shape a real base holds.
+        let slices = (0..50u64).map(|r| RunSlice {
+            run: crate::reporting::history::RunMeta {
+                seq: 0,
+                id: format!("run-{r}"),
+                epoch: 1_000 + r,
+                commit: Some(format!("{r:040x}")),
+                env: "f".repeat(64),
+                workers: 8,
+            },
+            tests: (0..200)
+                .map(|t| {
+                    (
+                        format!("tests/pkg/test_mod{}.py::test_case_{t}[p]", t % 20),
+                        crate::reporting::history::Entry {
+                            run: 0,
+                            outcome: if (r + t) % 17 == 0 {
+                                "failed"
+                            } else {
+                                "passed"
+                            }
+                            .into(),
+                            call: Some(0.01 * (t % 9) as f32),
+                            setup: 0.001,
+                        },
+                    )
+                })
+                .collect(),
+        });
+        let history = History::merged(slices, 50);
+        let base = Base {
+            schema: BASE_SCHEMA,
+            history: history.clone(),
+            ..Base::default()
+        };
+        let json = serde_json::to_string(&base).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["history"].is_string(), "packed as one string");
+        let plain = serde_json::to_string(&history).unwrap();
+        assert!(
+            json.len() * 4 < plain.len(),
+            "packed {} bytes vs plain JSON {} bytes",
+            json.len(),
+            plain.len()
+        );
+        let back: Base = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.history, history);
+
+        // No history: the field is left out.
+        let empty = serde_json::to_value(Base::default()).unwrap();
+        assert!(empty.get("history").is_none(), "{empty}");
+
+        // A damaged or foreign value reads as an empty history; the rest of
+        // the base still loads, so the pull never fails over it.
+        for bad in [r#""not base64!""#, r#""aGVsbG8=""#, r#"{"runs": []}"#, "42"] {
+            let doc = format!(r#"{{"schema":1,"durations":{{"t::a":1.5}},"history":{bad}}}"#);
+            let b: Base = serde_json::from_str(&doc).unwrap();
+            assert!(b.history.is_empty(), "{bad}");
+            assert_eq!(b.durations["t::a"], 1.5);
+        }
     }
 
     #[test]

@@ -44,7 +44,9 @@ between 0.x releases and are listed here.
   folds them into `base.json`, dropping runs past
   `RSTEST_FLAKE_RETENTION_DAYS`. Sharded and ephemeral CI runners now build
   one history, so `explain`, `rstest flaky` and auto-quarantine see every run.
-  Older segments without history still merge.
+  Older segments without history still merge. In `base.json` the history is
+  one compressed field (base64 of gzipped msgpack), a few MB on a large suite
+  instead of tens of MB, which releases that predate it ignore.
 
 - **`explain` names the commits that broke a test.** For a failing test it
   lists the commits between its last pass and its first failure (`git log`,
@@ -74,8 +76,9 @@ between 0.x releases and are listed here.
   `@pytest.mark.timeout(N)` to paste (a test's limit: 3x its slowest run, at
   least +1s). Appears once tests have 5 passing runs in the history.
 
-- **A red run says what changed since the last green one.** Every run that
-  exits 0 records its commit, interpreter version, installed packages and a
+- **A red run says what changed since the last green one.** Every full run
+  that exits 0 (no `-k`, sub-path, nodeid, `--lf`, `--changed`, `--shard` or
+  other narrowing) records its commit, interpreter version, installed packages and a
   few test-relevant environment variables (`.rstest_cache/green_env.json`).
   A run with failing tests then prints the commits since, and any
   interpreter, package or environment change, on stderr. `rstest
