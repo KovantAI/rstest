@@ -798,3 +798,35 @@ def gate_explain(g, args, binary):
         (doc.get("history") or {}).get("outcomes") == ["failed", "failed"],
         f"rc={r.returncode} out={r.stdout[-600:]}",
     )
+
+    # The history stamps each run with HEAD, `-dirty` only when the tree had
+    # uncommitted changes before the run: a report the run itself writes into
+    # the checkout (--junitxml) must not mark it dirty.
+    gp = g.tmp / "explaingit"
+    g.write("explaingit/test_g.py", "def test_g():\n    pass\n")
+    git_init_commit(gp, "init")
+    sha = _head_sha(gp)
+
+    def last_pass_commit():
+        r = g.run(
+            "explain", "test_g.py::test_g", "--json", cwd=gp, env_extra={"PYTHONPATH": str(gp)}
+        )
+        try:
+            return (json.loads(r.stdout).get("history") or {}).get("last_pass_commit")
+        except ValueError:
+            return f"rc={r.returncode} out={r.stdout[-300:]}"
+
+    g.run("test_g.py", "--junitxml=report.xml", cwd=gp, env_extra={"PYTHONPATH": str(gp)})
+    got = last_pass_commit()
+    check(
+        "explain: clean run records plain HEAD despite its own junit report",
+        got == sha,
+        f"{got} != {sha}",
+    )
+
+    # Drop run 1's untracked report so only the tracked edit can dirty the tree.
+    (gp / "report.xml").unlink()
+    g.write("explaingit/test_g.py", "def test_g():\n    assert True\n")
+    g.run("test_g.py", cwd=gp, env_extra={"PYTHONPATH": str(gp)})
+    got = last_pass_commit()
+    check("explain: run with uncommitted edits records HEAD-dirty", got == f"{sha}-dirty", f"{got}")

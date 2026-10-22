@@ -34,28 +34,33 @@ fn write_cache(dir: &Path, name: &str, doc: &Value) {
     .unwrap();
 }
 
-/// `history.msgpack` from a JSON-shaped doc (structs read back from maps).
+/// `history.msgpack` in the positional (array) encoding `rmp_serde::to_vec`
+/// writes in production, so a field reorder or type change breaks this test.
 fn write_history(dir: &Path, doc: &Value) {
     std::fs::write(
         dir.join(".rstest_cache").join("history.msgpack"),
-        rmp_serde::to_vec_named(doc).unwrap(),
+        rmp_serde::to_vec(doc).unwrap(),
     )
     .unwrap();
 }
 
 /// Three runs of `ID`: pass at c0, fail at c1 and c2. A neighbour's entries
-/// must not leak into `ID`'s strip.
+/// must not leak into `ID`'s strip. Layouts: `History` = [schema, runs, tests],
+/// `RunMeta` = [seq, epoch, commit], `Entry` = [run, outcome, call, setup] with
+/// outcome 0 = passed, 1 = failed.
 fn history_doc(epoch: u64) -> Value {
-    let run = |seq: u32, c: &str| json!({ "seq": seq, "id": format!("r{seq}"), "epoch": epoch, "commit": c, "env": "fp", "workers": 2 });
-    let e = |seq: u32, outcome: &str, call: f64| json!({ "run": seq, "outcome": outcome, "call": call, "setup": 0.0 });
-    json!({
-        "schema": 1,
-        "runs": [run(0, "c0aaaaaaaaaaaa"), run(1, "c1bbbbbbbbbbbb"), run(2, "c2cccccccccccc")],
-        "tests": {
-            ID: [e(0, "passed", 0.25), e(1, "failed", 0.0), e(2, "failed", 0.0)],
-            "tests/test_x.py::test_other": [e(2, "passed", 9.0)],
+    const PASSED: u8 = 0;
+    const FAILED: u8 = 1;
+    let run = |seq: u64, c: &str| json!([seq, epoch, c]);
+    let e = |seq: u64, outcome: u8, call: f64| json!([seq, outcome, call, 0.0]);
+    json!([
+        1,
+        [run(0, "c0aaaaaaaaaaaa"), run(1, "c1bbbbbbbbbbbb"), run(2, "c2cccccccccccc")],
+        {
+            ID: [e(0, PASSED, 0.25), e(1, FAILED, 0.0), e(2, FAILED, 0.0)],
+            "tests/test_x.py::test_other": [e(2, PASSED, 9.0)],
         },
-    })
+    ])
 }
 
 fn write_raw(dir: &Path, name: &str, bytes: &str) {

@@ -626,13 +626,15 @@ footprint, populated by a prior `--cov-context=test` run), and `history.msgpack`
 (the last runs of the test: `✓` passed, `~` flaky, `✗` failed or errored, `-`
 skipped or xfail; call-time median and p95 over passing runs; the commit of the
 last pass and, when the test is failing now, the commit its failing streak
-started at). Fields whose cache is
+started at, skips ignored; a commit reads `<sha>-dirty` when that run had
+uncommitted changes). Fields whose cache is
 cold are shown as unavailable rather than omitted. In human mode an unknown
 nodeid exits `1` and prints substring suggestions; with `--json` it exits `0`
 with `"found": false` so tooling can probe nodeids cheaply.
 
 The range between "last passed at" and "failing since" often names the commit
-that broke the test; `git log <last>..<first>` lists the candidates.
+that broke the test; `git log <last>..<first>` (without any `-dirty`
+suffix) lists the candidates.
 
 ### `verify-vendor`
 

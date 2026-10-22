@@ -3,8 +3,8 @@
 //! series (the last `RSTEST_HISTORY_RUNS` runs, default 50) so `explain` can
 //! show an outcome strip, duration spread and the commit a test broke at.
 //!
-//! Run-level context (commit, env fingerprint, worker count) is stored once per
-//! run; each test entry points at its run by `seq`. Aged by the same
+//! Run-level context (epoch, commit) is stored once per run; each test entry
+//! points at its run by `seq`. Aged by the same
 //! `RSTEST_FLAKE_RETENTION_DAYS` window as `flakes.json`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,26 +17,38 @@ use crate::reporting::report::{Run, TestEntry};
 pub const FILE: &str = "history.msgpack";
 const SCHEMA: u32 = 1;
 
+/// Outcome names, indexed by [`Entry::outcome`]. Append only: the index is
+/// what's on disk.
+const OUTCOMES: [&str; 9] = [
+    "passed",
+    "failed",
+    "errors",
+    "skipped",
+    "xfailed",
+    "xpassed",
+    "quarantined",
+    "flaky",
+    "crashed",
+];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunMeta {
-    /// Monotonic id within this file; entries reference it.
-    pub seq: u32,
-    /// The run's uid (same id as the replay journal / cache segment).
-    pub id: String,
+    /// Monotonic id within this file; entries reference it. `u64` so it never
+    /// wraps into a still-referenced id.
+    pub seq: u64,
     pub epoch: u64,
-    /// `git rev-parse HEAD` at run start; `None` outside a git checkout.
+    /// `git rev-parse HEAD` at run start, suffixed `-dirty` when the working
+    /// tree had uncommitted changes then; `None` outside a git checkout.
     pub commit: Option<String>,
-    /// [`crate::incremental::env_fingerprint`] at run start.
-    pub env: String,
-    pub workers: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// [`RunMeta::seq`] of the run that produced this entry.
-    pub run: u32,
-    /// [`TestEntry::outcome`] bucket, or `"flaky"` / `"crashed"`.
-    pub outcome: String,
+    pub run: u64,
+    /// Index into [`OUTCOMES`]: a [`TestEntry::outcome`] bucket, or `flaky` /
+    /// `crashed`. A byte, not the name: this file holds tests x runs entries.
+    pub outcome: u8,
     /// Call-phase seconds; `None` when the call phase never ran.
     pub call: Option<f32>,
     pub setup: f32,
@@ -60,10 +72,24 @@ impl Default for History {
     }
 }
 
+/// The [`Entry::outcome`] byte for an outcome name.
+pub fn outcome_code(name: &str) -> Option<u8> {
+    OUTCOMES.iter().position(|o| *o == name).map(|i| i as u8)
+}
+
+impl Entry {
+    pub fn outcome_name(&self) -> &'static str {
+        OUTCOMES
+            .get(usize::from(self.outcome))
+            .copied()
+            .unwrap_or("unknown")
+    }
+}
+
 impl History {
     /// `nodeid`'s entries paired with their run, oldest first.
     pub fn series(&self, nodeid: &str) -> Vec<(&RunMeta, &Entry)> {
-        let runs: HashMap<u32, &RunMeta> = self.runs.iter().map(|r| (r.seq, r)).collect();
+        let runs: HashMap<u64, &RunMeta> = self.runs.iter().map(|r| (r.seq, r)).collect();
         self.tests
             .get(nodeid)
             .into_iter()
@@ -75,7 +101,7 @@ impl History {
     /// Add one run. Each test's series is trimmed to the newest `cap` entries
     /// and runs no entry points at any more are dropped.
     fn append(&mut self, mut meta: RunMeta, entries: Vec<(String, Entry)>, cap: usize) {
-        meta.seq = self.runs.last().map_or(0, |r| r.seq.wrapping_add(1));
+        meta.seq = self.runs.last().map_or(0, |r| r.seq + 1);
         for (id, mut e) in entries {
             e.run = meta.seq;
             let s = self.tests.entry(id).or_default();
@@ -94,7 +120,7 @@ impl History {
         if max_age == 0 {
             return;
         }
-        let expired: HashSet<u32> = self
+        let expired: HashSet<u64> = self
             .runs
             .iter()
             .filter(|r| now.saturating_sub(r.epoch) > max_age)
@@ -111,7 +137,7 @@ impl History {
     }
 
     fn gc_runs(&mut self) {
-        let live: HashSet<u32> = self.tests.values().flatten().map(|e| e.run).collect();
+        let live: HashSet<u64> = self.tests.values().flatten().map(|e| e.run).collect();
         self.runs.retain(|r| live.contains(&r.seq));
     }
 }
@@ -143,7 +169,7 @@ fn entry_for(e: &TestEntry) -> Option<Entry> {
     };
     Some(Entry {
         run: 0,
-        outcome: outcome.to_string(),
+        outcome: outcome_code(outcome)?,
         call: e.duration.map(|d| d as f32),
         setup: e.setup_seconds as f32,
     })
@@ -169,7 +195,7 @@ pub fn load_from(path: &std::path::Path) -> History {
 }
 
 /// Append this run to the stored history. Best-effort: IO errors are ignored.
-pub fn record(run: &Run, id: &str, epoch: u64, commit: Option<&str>, env: &str, workers: usize) {
+pub fn record(run: &Run, epoch: u64, commit: Option<&str>) {
     let entries: Vec<(String, Entry)> = run
         .tests()
         .iter()
@@ -180,11 +206,8 @@ pub fn record(run: &Run, id: &str, epoch: u64, commit: Option<&str>, env: &str, 
     }
     let meta = RunMeta {
         seq: 0,
-        id: id.to_string(),
         epoch,
         commit: commit.map(str::to_string),
-        env: env.to_string(),
-        workers,
     };
     // Locked load→append→write: two concurrent sessions in one cwd would
     // otherwise drop one run's entries.
@@ -204,18 +227,15 @@ mod tests {
     fn meta(epoch: u64) -> RunMeta {
         RunMeta {
             seq: 0,
-            id: format!("run{epoch}"),
             epoch,
             commit: Some(format!("c{epoch}")),
-            env: "fp".into(),
-            workers: 4,
         }
     }
 
     fn entry(outcome: &str) -> Entry {
         Entry {
             run: 0,
-            outcome: outcome.into(),
+            outcome: outcome_code(outcome).unwrap(),
             call: Some(0.5),
             setup: 0.1,
         }
@@ -241,7 +261,7 @@ mod tests {
         // Run 0 still held by `b`; run 1 referenced by nobody -> gone.
         let epochs: Vec<u64> = h.runs.iter().map(|r| r.epoch).collect();
         assert_eq!(epochs, vec![0, 2, 3, 4]);
-        assert_eq!(h.series("b")[0].1.outcome, "failed");
+        assert_eq!(h.series("b")[0].1.outcome_name(), "failed");
     }
 
     #[test]
@@ -254,6 +274,39 @@ mod tests {
         h.append(meta(3), vec![("a".into(), entry("failed"))], 1);
         assert_eq!(h.runs[0].seq, 2);
         assert_eq!(h.series("a")[0].0.epoch, 3);
+    }
+
+    #[test]
+    fn seq_past_u32_does_not_collide_with_live_run() {
+        let mut h = History::default();
+        h.append(meta(1), vec![("b".into(), entry("passed"))], 50);
+        h.runs.push(RunMeta {
+            seq: u64::from(u32::MAX),
+            ..meta(2)
+        });
+        h.tests.entry("a".into()).or_default().push_back(Entry {
+            run: u64::from(u32::MAX),
+            ..entry("passed")
+        });
+        h.append(meta(3), vec![("a".into(), entry("failed"))], 50);
+        // A wrapped seq would be 0, already owned by `b`'s run (epoch 1).
+        assert_eq!(h.series("a").last().unwrap().0.epoch, 3);
+        assert_eq!(h.series("b")[0].0.epoch, 1);
+    }
+
+    /// The file holds tests x runs entries and is rewritten every run, so an
+    /// entry must stay small (a 10k-test suite at 50 runs is 500k entries).
+    #[test]
+    fn entries_encode_compactly() {
+        let mut h = History::default();
+        let tests: Vec<String> = (0..100).map(|i| format!("t{i}")).collect();
+        for r in 0..50u64 {
+            let es = tests.iter().map(|t| (t.clone(), entry("passed"))).collect();
+            h.append(meta(r), es, 50);
+        }
+        let bytes = rmp_serde::to_vec(&h).unwrap().len();
+        let per_entry = bytes / (100 * 50);
+        assert!(per_entry <= 14, "{per_entry} bytes/entry");
     }
 
     #[test]
@@ -300,7 +353,7 @@ mod tests {
         })
         .is_none());
         let e = entry_for(&base()).unwrap();
-        assert_eq!(e.outcome, "passed");
+        assert_eq!(e.outcome_name(), "passed");
         assert_eq!(e.call, Some(0.25));
         assert_eq!(e.setup, 0.5);
         let f = entry_for(&TestEntry {
@@ -308,14 +361,14 @@ mod tests {
             ..base()
         })
         .unwrap();
-        assert_eq!(f.outcome, "flaky");
+        assert_eq!(f.outcome_name(), "flaky");
         let c = entry_for(&TestEntry {
             crashed: true,
             call: Some("failed".into()),
             ..base()
         })
         .unwrap();
-        assert_eq!(c.outcome, "crashed");
+        assert_eq!(c.outcome_name(), "crashed");
     }
 
     #[test]

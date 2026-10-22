@@ -30,8 +30,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   `0` keeps history forever) are ignored on read. Auto-written, safe to
   delete, persisted the same way as `durations.json`.
 - `history.msgpack`: each test's last runs (default 50, set with
-  `RSTEST_HISTORY_RUNS`): outcome, call and setup time, plus the run's commit,
-  environment fingerprint and worker count. Read by
+  `RSTEST_HISTORY_RUNS`): outcome, call and setup time, plus the run's commit
+  (`<sha>-dirty` when the tree had uncommitted changes). Read by
   [`rstest explain`](../reference/cli-commands.md#explain) for the outcome
   strip, the duration spread and the commit a test started failing at. Runs
   older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped on read. Not written by
