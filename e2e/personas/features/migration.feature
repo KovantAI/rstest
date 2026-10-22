@@ -578,11 +578,16 @@ Feature: pytest / pytest-xdist migrator
       Given the fixture event logger in "conftest.py"
       And 4 files "test_u{i}.py" each containing:
         """
-        import os, uuid
+        import glob, os, time, uuid
         from conftest import _log
 
         def test_shape(testrun_uid):
             _log(uid=testrun_uid, env=os.environ.get('PYTEST_XDIST_TESTRUNUID'))
+            # Hold until a second worker logs: these tests are instant, so a
+            # worker that starts late would find every file already drained.
+            deadline = time.time() + 30
+            while len(glob.glob(os.environ['MG_LOG'] + '.*')) < 2 and time.time() < deadline:
+                time.sleep(0.01)
 
         def test_uuid(testrun_uid):
             uuid.UUID(testrun_uid)

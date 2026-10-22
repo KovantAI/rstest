@@ -213,6 +213,9 @@ pub(crate) fn fabricate_crash_report(
         sections: Vec::new(),
         lineno: None,
         subtest: false,
+        crash: None,
+        xfail_reason: None,
+        skip_location: None,
     }
 }
 
@@ -235,6 +238,9 @@ pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Repo
         sections: Vec::new(),
         lineno: None,
         subtest: false,
+        crash: None,
+        xfail_reason: None,
+        skip_location: None,
     }
 }
 
@@ -417,6 +423,9 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 
