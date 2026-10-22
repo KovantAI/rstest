@@ -1458,17 +1458,14 @@ mod tests {
 
     /// History where `id` has outcomes `outcomes`, one run each.
     fn history_of(tests: &[(&str, &[&str])]) -> crate::reporting::history::History {
-        use crate::reporting::history::{Entry, History, RunMeta};
+        use crate::reporting::history::{outcome_code, Entry, History, RunMeta};
         let mut h = History::default();
         let runs = tests.iter().map(|(_, o)| o.len()).max().unwrap_or(0);
-        for seq in 0..runs as u32 {
+        for seq in 0..runs as u64 {
             h.runs.push(RunMeta {
                 seq,
-                id: format!("r{seq}"),
                 epoch: 0,
                 commit: None,
-                env: String::new(),
-                workers: 1,
             });
         }
         for (id, outcomes) in tests {
@@ -1478,8 +1475,8 @@ mod tests {
                     .iter()
                     .enumerate()
                     .map(|(i, o)| Entry {
-                        run: i as u32,
-                        outcome: o.to_string(),
+                        run: i as u64,
+                        outcome: outcome_code(o).unwrap(),
                         call: None,
                         setup: 0.0,
                     })
@@ -1539,6 +1536,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);

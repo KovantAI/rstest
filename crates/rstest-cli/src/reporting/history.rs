@@ -162,7 +162,7 @@ fn flips(series: &VecDeque<Entry>) -> u32 {
     let mut n = 0;
     let mut last_pass = false;
     for e in series {
-        match e.outcome.as_str() {
+        match e.outcome_name() {
             "flaky" => {
                 n += 1;
                 last_pass = true;
