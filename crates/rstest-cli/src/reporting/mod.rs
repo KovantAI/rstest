@@ -8,6 +8,7 @@
 pub mod ci;
 pub mod color;
 pub mod flakes;
+pub mod history;
 pub mod html;
 pub mod junit;
 pub mod progress;

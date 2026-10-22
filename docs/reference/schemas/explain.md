@@ -9,9 +9,10 @@ The merged per-nodeid dossier. `null` fields are simply absent from every cache 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `coverage` | Coverage or null | yes | Files this test covered, if a warm coverage index has it. |
-| `duration_seconds` | number or null | yes | Last recorded call-phase duration in seconds (latest value only; local caches keep no history). |
+| `duration_seconds` | number or null | yes | Last recorded call-phase duration in seconds (see `history` for the spread). |
 | `flakes` | FlakeStats or null | yes | Cross-run flake/fail counts + last-event epoch, if the test has any. |
 | `found` | boolean | yes | Whether the node id appears in any cache. |
+| `history` | HistorySummary or null | yes | Recent runs, if the per-test history has any. |
 | `last_outcome` | string or null | yes | `"passed"` if the test was green on the last incremental run; `null` otherwise (absence is not proof of failure; see `flakes` for fail history). |
 | `meta` | Meta | yes | Envelope: producer, document kind, schema version and rstest version. |
 | `nodeid` | string | yes | The node id that was explained, as given. |
@@ -35,6 +36,20 @@ The coverage footprint of one test: the source files it covered and the total nu
 | `flaky` | integer | yes | Runs where the test passed only after rerun(s). |
 | `last_epoch` | integer | yes | Unix epoch of the last recorded event (flake or failure). |
 | `last_failed_epoch` | integer | yes | Unix epoch of the last hard failure. 0 = none, or a cache written before this field existed (readers then fall back to `last_epoch` when `failed` is non-zero). |
+
+### HistorySummary
+
+The test's recent runs from the per-test history (oldest first).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `call_median` | number or null | yes | Median call-phase seconds over passing runs. |
+| `call_p95` | number or null | yes | 95th percentile (nearest rank) call-phase seconds over passing runs. |
+| `first_fail_commit` | string or null | yes | When the latest run failed: commit of the first run in that failing streak. |
+| `last_pass_commit` | string or null | yes | Commit of the most recent passing run. |
+| `outcomes` | array of string | yes | Outcome per run, oldest first: `passed`, `failed`, `errors`, `skipped`, `xfailed`, `xpassed`, `quarantined`, `flaky` or `crashed`. |
+| `runs` | integer | yes | Number of recorded runs. |
+| `setup_median` | number or null | yes | Median setup-phase seconds over passing runs. |
 
 ### Meta
 

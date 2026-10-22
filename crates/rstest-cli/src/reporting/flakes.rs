@@ -46,7 +46,7 @@ impl FlakeStats {
 /// this window reads as fixed and its entry is dropped, so long-green tests
 /// stop carrying "flaked Nx before" annotations. Override with
 /// `RSTEST_FLAKE_RETENTION_DAYS`; `0` disables aging (keep forever).
-fn retention_secs() -> u64 {
+pub(crate) fn retention_secs() -> u64 {
     parse_retention(std::env::var("RSTEST_FLAKE_RETENTION_DAYS").ok())
 }
 
