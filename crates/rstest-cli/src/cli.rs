@@ -138,6 +138,16 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Write a self-contained HTML dashboard of the per-test run history
+    /// (`.rstest_cache/history.msgpack`) without running anything: failing and
+    /// flaky tests per run, test time per run, the flaky ranking, the slowest
+    /// tests, duration drift and the runs. Needs no interpreter.
+    Report {
+        /// Where to write it (default `.rstest_cache/report.html`).
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+
     /// What changed since the last green run, without running tests: commits,
     /// interpreter version, installed packages and a few test-relevant
     /// environment variables. Every run that exits 0 records the state it
@@ -838,6 +848,7 @@ const SUBCOMMANDS: &[&str] = &[
     "explain",
     "flaky",
     "since-green",
+    "report",
     "install-skills",
 ];
 
@@ -1127,6 +1138,7 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
             | "explain"
             | "flaky"
             | "since-green"
+            | "report"
             | "install-skills"
     );
     own.push(sub);
@@ -1268,6 +1280,20 @@ mod tests {
                 top: 20,
                 json: false
             })
+        ));
+    }
+
+    #[test]
+    fn report_routes_out_to_clap() {
+        use clap::Parser;
+        // `--out` is in no flag table: `report` consumes its tail.
+        let (own, session) = split_args(v(&["report", "--out", "r.html"]));
+        assert_eq!(own, v(&["rstest", "report", "--out", "r.html"]));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Report { out: Some(ref p) }) if p == std::path::Path::new("r.html")
         ));
     }
 

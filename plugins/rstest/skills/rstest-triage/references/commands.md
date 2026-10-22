@@ -12,6 +12,7 @@ triaging.
 - explain
 - flaky
 - since-green
+- report
 - --shuffle
 - Hangs: --timeout and --worker-timeout
 - Flaky controls: --reruns, --reruns-only-known-flaky, --quarantine, --auto-quarantine
@@ -161,6 +162,18 @@ $ rstest flaky --top 0 --json # every flipping test, for a dashboard
   fewer flips than the older half; else `steady`.
 - Use it to answer "which tests are flaky?" or to review the auto-quarantine
   set; then `explain` one test, and `bisect` it before calling it flaky.
+
+## report
+
+```console
+$ rstest report                    # .rstest_cache/report.html
+$ rstest report --out history.html
+```
+
+- One self-contained HTML page over the run history, nothing run: failing
+  and flaky tests per run, test time per run, the flaky ranking, slowest
+  tests, duration drift, every run. Hand it to the user when they want the
+  trend rather than one test (`explain`) or a list (`flaky`).
 
 ## since-green
 

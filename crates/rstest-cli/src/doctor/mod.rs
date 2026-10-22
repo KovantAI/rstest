@@ -196,7 +196,7 @@ const DRIFT_SHOWN: usize = 10;
 
 /// Older/middle/newer medians of `calls` (oldest first) when they rise step
 /// by step, at least 1.5x and 0.2s overall.
-fn drift_of(calls: &[f64]) -> Option<(f64, f64, f64)> {
+pub(crate) fn drift_of(calls: &[f64]) -> Option<(f64, f64, f64)> {
     if calls.len() < DRIFT_MIN_RUNS {
         return None;
     }

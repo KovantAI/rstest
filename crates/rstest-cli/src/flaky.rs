@@ -31,28 +31,28 @@ struct Meta {
 /// One test that flipped at least once in its recorded history.
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
-struct FlakyTest {
+pub(crate) struct FlakyTest {
     /// The test's nodeid.
-    nodeid: String,
+    pub(crate) nodeid: String,
     /// Flips in the recorded history: a `flaky` pass, or a failure right
     /// after a pass.
-    flips: usize,
+    pub(crate) flips: usize,
     /// `failing` when the last 3 pass/fail results all failed; otherwise
     /// `worse` / `better` when the newer half of the history has at least 2
     /// more / fewer flips than the older half, else `steady`.
-    trend: &'static str,
+    pub(crate) trend: &'static str,
     /// Runs that passed only on rerun.
-    flaky: usize,
+    pub(crate) flaky: usize,
     /// Runs that failed (`failed`, `errors`, `crashed` or `quarantined`).
-    failed: usize,
+    pub(crate) failed: usize,
     /// Recorded runs of this test.
-    runs: usize,
+    pub(crate) runs: usize,
     /// Outcome per run, oldest first (same values as `explain`'s history).
-    outcomes: Vec<String>,
+    pub(crate) outcomes: Vec<String>,
     /// Epoch seconds of the newest flip.
-    last_flip_epoch: u64,
+    pub(crate) last_flip_epoch: u64,
     /// Whether `--auto-quarantine` quarantines it at the current threshold.
-    auto_quarantined: bool,
+    pub(crate) auto_quarantined: bool,
 }
 
 /// The ranked flake view. Tests are sorted by flips (most first), then by
@@ -64,13 +64,13 @@ pub(crate) struct FlakyReport {
     meta: Meta,
     /// Flips at which `--auto-quarantine` catches a test (`0` = off), from
     /// `[tool.rstest] auto-quarantine` or the default.
-    auto_quarantine: u32,
+    pub(crate) auto_quarantine: u32,
     /// Tests with any recorded run.
-    tests_in_history: usize,
+    pub(crate) tests_in_history: usize,
     /// Tests with at least one flip, before `--top` cut the list.
-    flaky_tests: usize,
+    pub(crate) flaky_tests: usize,
     /// The ranked tests, at most `--top` of them.
-    tests: Vec<FlakyTest>,
+    pub(crate) tests: Vec<FlakyTest>,
 }
 
 fn is_fail(outcome: &str) -> bool {
@@ -103,7 +103,7 @@ fn trend(outcomes: &[String], flips: &[usize]) -> &'static str {
     }
 }
 
-fn gather(h: &History, auto: u32, top: usize) -> FlakyReport {
+pub(crate) fn gather(h: &History, auto: u32, top: usize) -> FlakyReport {
     let mut tests: Vec<FlakyTest> = h
         .tests
         .keys()

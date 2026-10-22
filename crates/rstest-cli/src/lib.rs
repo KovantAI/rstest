@@ -10,6 +10,7 @@ mod collect; // D5: single-point collection
 mod config;
 mod cov_scope;
 mod coverage_skip;
+mod dashboard;
 mod discover;
 #[cfg(test)]
 mod doc_pages;
