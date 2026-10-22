@@ -1384,8 +1384,19 @@ fn apply_quarantine(
     let Some(q) = quarantine else {
         return Ok(());
     };
-    let matcher = q.demotion_matcher(&outcome.run, sink);
+    let (matcher, auto_applied) = q.demotion_matcher(&outcome.run, sink);
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
+    if auto_applied {
+        // The run's auto-quarantined tests (passing ones included), for the
+        // HTML report.
+        let ran: std::collections::BTreeSet<String> = q
+            .auto()
+            .iter()
+            .filter(|id| outcome.run.tests().contains_key(*id))
+            .cloned()
+            .collect();
+        outcome.run.auto_quarantined = ran;
+    }
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
     // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
     // A run -x / --maxfail cut short stays failed: quarantined failures never

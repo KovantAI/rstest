@@ -163,6 +163,16 @@
       "description": "The test's recent runs from the per-test history (oldest first).",
       "type": "object",
       "properties": {
+        "auto_quarantine_at": {
+          "description": "Flips at which `--auto-quarantine` catches a test (`[tool.rstest]\nauto-quarantine` or the default; `0` = off).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "auto_quarantined_next_run": {
+          "description": "Whether the next run auto-quarantines this test (`flips` reached\n`auto_quarantine_at`), unless the `--auto-quarantine-max` cap trips.",
+          "type": "boolean"
+        },
         "call_median": {
           "description": "Median call-phase seconds over passing runs.",
           "type": [
@@ -179,12 +189,25 @@
           ],
           "format": "double"
         },
+        "env_changed": {
+          "description": "When the latest run failed: whether the environment fingerprint\n(interpreter, lockfiles, installed packages) differs between the last\npassing run and the first failing one.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "first_fail_commit": {
           "description": "When the latest run failed: commit of the first run in that failing streak.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "flips": {
+          "description": "Flips in the recorded runs: a pass only on rerun, or a failure right\nafter a pass (the `--auto-quarantine` rule).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
         },
         "last_pass_commit": {
           "description": "Commit of the most recent passing run.",
@@ -213,6 +236,16 @@
             "null"
           ],
           "format": "double"
+        },
+        "suspect_commits": {
+          "description": "When the latest run failed: the commits after `last_pass_commit` up to\n`first_fail_commit` (`git log last..first`), newest first. Empty when\nboth are the same commit; null when git can't resolve them here.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/SuspectCommit"
+          }
         }
       },
       "required": [
@@ -222,7 +255,12 @@
         "call_p95",
         "setup_median",
         "last_pass_commit",
-        "first_fail_commit"
+        "first_fail_commit",
+        "env_changed",
+        "suspect_commits",
+        "flips",
+        "auto_quarantine_at",
+        "auto_quarantined_next_run"
       ]
     },
     "Meta": {
@@ -253,6 +291,29 @@
         "kind",
         "schema",
         "rstest_version"
+      ]
+    },
+    "SuspectCommit": {
+      "description": "A commit between the test's last pass and its first failure.",
+      "type": "object",
+      "properties": {
+        "author": {
+          "description": "Author name.",
+          "type": "string"
+        },
+        "sha": {
+          "description": "Abbreviated commit hash.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "First line of the commit message.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "author",
+        "subject"
       ]
     }
   }

@@ -5,7 +5,8 @@ rstest has two [CI gates](../concepts/glossary.md#ci-gate) for that:
 
 - [`--durations-regress RATIO`](../reference/cli.md#-durations-regress-ratio)
   is **per test**: it fails the run when a test got `RATIO` times slower than
-  its [baseline](../concepts/glossary.md#baseline) in the
+  its [baseline](../concepts/glossary.md#baseline): the median of its recent
+  runs, or its time in the
   [duration cache](../concepts/glossary.md#duration-cache).
 - [`--doctor-fail-on COND`](../reference/cli.md#-doctor-fail-on-cond) is
   **suite level**: it fails the run when a [doctor](doctor.md) metric such as
@@ -19,15 +20,15 @@ Both raise a passing run's exit code to `1` and leave the test outcomes alone.
 $ rstest -n auto --durations-regress 2
 ```
 
-After the run, each test's time is compared with the time the cache recorded
-for it, before this run's times are saved. The second run below made
-`test_poll` sleep 1.2s instead of 0.1s:
+After the run, each test's time is compared with its baseline, before this
+run's times are saved. The last run below made `test_poll` sleep 1.2s instead
+of its usual 0.1s:
 
 ```text
 3 passed in 1.42s
 
 =========== duration regressions (>= 2x baseline) ===========
-     0.11s ->    1.20s  test_api.py::test_poll
+     0.11s ->    1.20s  test_api.py::test_poll  (median of 12 runs, normal up to 0.14s)
 rstest: 1 duration regression vs baseline (--durations-regress)
 ```
 
@@ -37,16 +38,22 @@ code is the tests' own.
 
 ### What counts as a regression
 
-A test is flagged when **all three** hold:
+A test is flagged when **all** of these hold:
 
 - its time this run is at least `RATIO` × its baseline;
 - the baseline is at least **50 ms**;
-- it grew by at least **0.5 s**.
+- it grew by at least **0.5 s**;
+- once it has 5 or more recorded passing runs, its time is also above its
+  **noise band**: the median of those runs plus 3 scaled median absolute
+  deviations (the "normal up to" figure in the row).
 
 The two floors absorb runner jitter: a 20 ms test that takes 600 ms, or a
-0.3s test that takes 0.75s, is not flagged at `--durations-regress 2`. Pick
-the ratio for your runners' noise; `2` is a safe start, `1.5` is tighter. It
-must be greater than `1.0` (`--durations-regress 1` is an error, exit `1`).
+0.3s test that takes 0.75s, is not flagged at `--durations-regress 2`. The
+noise band absorbs a test's own variance: a test that usually takes between
+1s and 3s isn't flagged for a 4.5s run, even though that is twice its median.
+Pick the ratio for your runners' noise; `2` is a safe start, `1.5` is
+tighter. It must be greater than `1.0` (`--durations-regress 1` is an error,
+exit `1`).
 
 What is timed is the **call phase** only: fixture setup and teardown are not
 part of a test's duration. A function fixture that went from 0.1s to 2s does
@@ -55,21 +62,36 @@ baseline entry (new or renamed) are skipped, never flagged.
 
 ## Where the baseline comes from
 
-The baseline is `.rstest_cache/durations.json`, the same file
-[duration-aware scheduling](../concepts/glossary.md#duration-aware-scheduling)
-uses. Every run, gated or not, refreshes it (`--dist each` and
-`rstest replay` runs write nothing), with two exceptions that keep the old
-value:
+Two files under `.rstest_cache/` feed it:
+
+- **The run history** (`history.msgpack`): each test's last 50 runs. Once a
+  test has **5 or more passing runs** with a call time, the baseline is
+  their **median**, so one unusually fast or slow run in the past doesn't
+  move it, and the noise band above comes from the same runs.
+- **The duration cache** (`durations.json`): the test's last recorded time,
+  the same file
+  [duration-aware scheduling](../concepts/glossary.md#duration-aware-scheduling)
+  uses. It is the baseline while the history is shorter than 5 runs, and it
+  wins over the median when it is higher, which is how an accepted slowdown
+  (below) takes effect at once.
+
+The row says which one it used: `median of N runs` or `last recorded`, with
+the noise band when there is one, and no note when only the duration cache
+was available.
+
+Every run, gated or not, refreshes both (`--dist each` and `rstest replay`
+runs write nothing), with two exceptions that keep a test's time out:
 
 - a **failed** test's time is not recorded, so a fail-fast `0.0002s` can't
   shrink its baseline;
-- a test the gate **flagged** keeps its old time (and is not pushed with
-  `--cache-push`), so the next identical run fails again instead of adopting
-  the slow time, even when the same change edited the test's file.
+- a test the gate **flagged** keeps its old time in the duration cache and
+  records no time in the history (and is not pushed with `--cache-push`), so
+  the next identical run fails again instead of adopting the slow time, even
+  when the same change edited the test's file.
 
-The comparison reads the cache as recorded, so a test in a file your change
-edited is still compared with its old time. `rstest explain` shows the value
-a test will be compared with:
+The comparison reads the caches as recorded, so a test in a file your change
+edited is still compared with its old times. `rstest explain` shows both: the
+last recorded time and the median of the recorded runs.
 
 ```console
 $ rstest explain test_api.py::test_poll
@@ -77,19 +99,25 @@ test: test_api.py::test_poll
 
   duration   0.1052s (last recorded)
   ...
+  history    ✓✓✓✓✓✓✓✓✓✓✓✓ (12 runs, oldest first)
+             call median 0.1080s, p95 0.1310s
 ```
 
-Three consequences worth knowing:
+Consequences worth knowing:
 
-- **The baseline is the last good run, not an average.** A test that grows
-  1.8× on each of two runs passes both and ends up 3.3× slower. Keep the
-  baseline pinned to your default branch (next section) so a pull request
-  is always compared with main.
+- **A slow creep can slip through.** Each run is compared with the median of
+  the recent ones, so a test that gets 20% slower every week stays inside its
+  band and drifts upward without the gate firing. Keep the baseline pinned
+  to your default branch (next section) so a pull request is always compared
+  with main.
 - **Accepting an intended slowdown** means one run without
-  `--durations-regress`: it records the new time as the baseline.
+  `--durations-regress`: it records the new time in the duration cache, and
+  the next gated run compares against it even though the history median is
+  still the old, faster time.
 - **Editing a file re-times its other tests.** The save drops a changed
-  file's entries so they are timed afresh; a flagged test is the exception
-  and keeps its old baseline, so the gate fires again on the next push.
+  file's entries from the duration cache so they are timed afresh; a flagged
+  test is the exception and keeps its old baseline, so the gate fires again
+  on the next push.
 
 ## Don't let a cold cache pass green
 
@@ -153,7 +181,7 @@ The full metric list and the parse-time checks are in
 | | `--durations-regress` | `--doctor-fail-on` |
 |---|---|---|
 | Unit | one test | the whole run |
-| Compared with | that test's cached time | a fixed threshold |
+| Compared with | that test's recent median or cached time | a fixed threshold |
 | Fixture time | not counted | counted (`test_time_seconds`, `wall_seconds`) |
 | Needs a cache | yes | no |
 
@@ -194,7 +222,8 @@ $ rstest -n auto --durations-regress 2 --require-baseline \
    and the doctor gate lines are on stderr.
 2. **Check it is real.** Re-run the test locally, before and after the
    change. A one-off spike on a shared runner is noise; raise the ratio if it
-   keeps happening.
+   keeps happening. `rstest explain <nodeid>` shows the test's recent runs
+   and its call-time median and p95.
 3. **Find where the time went.** `rstest --doctor` on the slow file splits
    waiting from computing and names fixture hotspots
    ([Suite diagnostics](doctor.md)). Waiting on a sleep or timeout is the

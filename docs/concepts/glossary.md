@@ -11,7 +11,8 @@ The terms you actually hit first coming from pytest.
 different things in different places: the plain-pytest run in
 [`rstest try`](../reference/cli-commands.md#try); the last fully green commit
 for [`--since-green`](../reference/cli.md#-since-green); and the
-[duration cache](#duration-cache) for
+[duration cache](#duration-cache), or the median of the test's recorded
+runs once it has five, for
 [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
 (which [`--require-baseline`](../reference/cli.md#-require-baseline) makes
 mandatory).

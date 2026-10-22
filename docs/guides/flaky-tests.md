@@ -217,8 +217,14 @@ stored history is auto-quarantined:
 Everything else matches `--quarantine`: a failure of an auto-quarantined test
 is demoted to `quarantined` (same section, counts, JUnit property and exit
 code), a pass is a plain pass, `--reruns` still retries it first, and it never
-counts toward `-x` / `--maxfail`. Check one test's strip with
-`rstest explain <nodeid>`.
+counts toward `-x` / `--maxfail`. `rstest explain <nodeid>` shows a test's
+strip, its flip count, and whether the next run auto-quarantines it:
+
+```text
+  history    ✓✗✓✗✓✗ (6 runs, oldest first)
+             ...
+             flipped 3x: auto-quarantined on the next run (at 3+ flips)
+```
 
 **Release is automatic.** The set is recomputed every run, so a fixed test
 drops out once enough of its flips leave the history window (the last
@@ -270,6 +276,8 @@ an empty auto set, so auto-quarantine does nothing there.
   run summary is green when nothing outside the quarantine set failed.
   The auto set and any cap warning go to stderr, so the CI log records
   what was quarantined and why.
+- **HTML** (`--html`): auto-quarantined tests carry an `auto` badge, every
+  test shows its earlier runs as a strip, and the header counts the auto set.
 - **JUnit** (`--junitxml`): the testcase carries a
   `quarantined="true"` property and **no `<failure>` element**, so
   JUnit-gating CI (and dashboards that count failures) stays green

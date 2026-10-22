@@ -248,7 +248,13 @@ fn entry_for(e: &TestEntry) -> Option<Entry> {
     Some(Entry {
         run: 0,
         outcome: outcome.to_string(),
-        call: e.duration.map(|d| d as f32),
+        // A run --durations-regress flagged keeps its time out of the
+        // history, as out of durations.json: the gate's baseline must not
+        // drift toward the regression and silence it.
+        call: e
+            .duration
+            .filter(|_| !e.duration_regressed)
+            .map(|d| d as f32),
         setup: e.setup_seconds as f32,
     })
 }
@@ -445,6 +451,13 @@ mod tests {
         })
         .unwrap();
         assert_eq!(f.outcome, "flaky");
+        // A --durations-regress flagged run keeps its time out.
+        let r = entry_for(&TestEntry {
+            duration_regressed: true,
+            ..base()
+        })
+        .unwrap();
+        assert_eq!((r.outcome.as_str(), r.call), ("passed", None));
         let c = entry_for(&TestEntry {
             crashed: true,
             call: Some("failed".into()),

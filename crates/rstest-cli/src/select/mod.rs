@@ -23,6 +23,7 @@ pub use git::{
 pub use graph::{affected_tests_cached, CollectionCache};
 // pub(crate) helpers reused elsewhere in the crate (not part of the public API).
 pub(crate) use coverage::current_sha256;
+pub(crate) use git::git_stdout;
 pub(crate) use graph::{import_closures, imports_of};
 
 /// Why a full run is required instead of a selection.

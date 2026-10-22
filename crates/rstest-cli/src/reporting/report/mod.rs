@@ -364,6 +364,9 @@ pub struct Run {
     pub interruption: Option<Interruption>,
     /// Set when a test called `pytest.exit()`, which stops the whole run.
     pub session_exit: Option<SessionExit>,
+    /// Tests in this run that `--auto-quarantine` quarantined (passing ones
+    /// included); empty when it was off or over its cap.
+    pub auto_quarantined: std::collections::BTreeSet<String>,
 }
 
 /// A `pytest.exit(reason, returncode)` that stopped the run.

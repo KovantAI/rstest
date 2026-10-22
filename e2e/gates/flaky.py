@@ -441,7 +441,8 @@ def gate_quarantine(g, args, binary):
         g.run(".", "-n", "2", cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
     cnt.write_text("1")
     # On by default: no flag needed.
-    r = g.run(".", "-n", "2", cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
+    aq_html = g.tmp / "autoq.html"
+    r = g.run(".", "-n", "2", "--html", str(aq_html), cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
     check(
         "auto-quarantine (default on): flapping test demoted, steady regression still fails",
         r.returncode == 1
@@ -450,6 +451,17 @@ def gate_quarantine(g, args, binary):
         and "--auto-quarantine: 1 test(s)" in r.stderr
         and "test_a.py::test_broke" not in r.stderr,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    doc = aq_html.read_text(encoding="utf-8")
+    flap_row = next(
+        (ln for ln in doc.splitlines() if 'data-nodeid="test_a.py::test_flap"' in ln), ""
+    )
+    check(
+        "auto-quarantine: HTML report shows the auto badge, summary and strip",
+        "1 test auto-quarantined" in doc
+        and 'class="badge auto"' in flap_row
+        and '<td class="strip">\u2713\u2717\u2713\u2717\u2713\u2717</td>' in flap_row,
+        flap_row[:400],
     )
     # `rstest flaky` reads the same history: flap ranked first and marked,
     # broke shown as failing (broke and stays broken), not auto-quarantined.

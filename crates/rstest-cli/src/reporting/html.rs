@@ -19,7 +19,11 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::reporting::history::History;
 use crate::reporting::report::{Run, RunMeta};
+
+/// Earlier runs shown per test in the "earlier runs" column.
+const STRIP: usize = 20;
 
 /// How many slowest passing tests to surface as static rows (the rest ride the
 /// embedded JSON and render on demand).
@@ -28,7 +32,7 @@ const SLOWEST_PASSED: usize = 10;
 // Trailing `\n`s in the format strings are deliberate — they keep the emitted
 // HTML source line-broken and readable, not a missing-writeln mistake.
 #[allow(clippy::write_with_newline)]
-pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
+pub fn write(path: &Path, run: &Run, meta: &RunMeta, history: &History) -> Result<()> {
     let counts = run.counts();
     // Tests, not reports: `counts` follows pytest's per-report accounting, so a
     // test with a teardown error appears in two buckets there.
@@ -71,11 +75,46 @@ pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
         if meta.workers == 1 { "" } else { "s" },
         meta.exitstatus,
     );
+    if !run.auto_quarantined.is_empty() {
+        let _ = write!(
+            html,
+            "<p class=\"meta\">{} test{} auto-quarantined (flipped between pass and fail \
+             in recent runs)</p>\n",
+            run.auto_quarantined.len(),
+            if run.auto_quarantined.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+        );
+    }
     let _ = write!(
         html,
         "<p class=\"argv\"><code>{}</code></p>\n</header>\n",
         esc(&meta.argv.join(" "))
     );
+    // Each test's earlier outcomes (this run is not in the history yet).
+    let strips: std::collections::BTreeMap<&str, String> = run
+        .tests()
+        .keys()
+        .filter_map(|id| {
+            let series = history.series(id);
+            let strip: String = series
+                .iter()
+                .skip(series.len().saturating_sub(STRIP))
+                .map(|(_, e)| crate::explain::glyph(&e.outcome))
+                .collect();
+            (!strip.is_empty()).then_some((id.as_str(), strip))
+        })
+        .collect();
+    let row = |nodeid: &str, entry| {
+        row(
+            nodeid,
+            entry,
+            strips.get(nodeid).map_or("", String::as_str),
+            run.auto_quarantined.contains(nodeid),
+        )
+    };
 
     // ---- Collection errors ----------------------------------------------
     if !run.collect_errors().is_empty() {
@@ -155,6 +194,7 @@ pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
          <th data-sort=\"nodeid\">node id</th>\
          <th data-sort=\"outcome\">outcome</th>\
          <th data-sort=\"duration\" class=\"num\">seconds</th>\
+         <th title=\"oldest first: \u{2713} passed, ~ passed on rerun, \u{2717} failed, - skipped\">earlier runs</th>\
          <th>worker</th></tr></thead>\n<tbody>\n",
     );
     // Interesting rows now: everything not a plain pass, plus the slowest passes.
@@ -180,9 +220,16 @@ pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
     let json = serde_json::to_string(&run.snapshot_value(meta)).unwrap_or_else(|_| "{}".into());
     // Escape `<` so the payload can never close this <script> (or open a comment).
     let json = json.replace('<', "\\u003c");
+    let hist = serde_json::json!({
+        "strips": strips,
+        "auto": run.auto_quarantined,
+    })
+    .to_string()
+    .replace('<', "\\u003c");
     let _ = write!(
         html,
-        "<script type=\"application/json\" id=\"data\">{json}</script>\n<script>\n{JS}\n</script>\n"
+        "<script type=\"application/json\" id=\"data\">{json}</script>\n\
+         <script type=\"application/json\" id=\"hist\">{hist}</script>\n<script>\n{JS}\n</script>\n"
     );
     html.push_str("</body>\n</html>\n");
 
@@ -190,22 +237,35 @@ pub fn write(path: &Path, run: &Run, meta: &RunMeta) -> Result<()> {
 }
 
 /// One `<tr>` for the grid, carrying data-* attributes the JS filters/sorts on.
-fn row(nodeid: &str, entry: &crate::reporting::report::TestEntry) -> String {
+/// `strip` is the test's earlier outcomes; `auto` marks it auto-quarantined.
+fn row(
+    nodeid: &str,
+    entry: &crate::reporting::report::TestEntry,
+    strip: &str,
+    auto: bool,
+) -> String {
     let outcome = entry.outcome();
     let dur = entry.duration.unwrap_or(0.0);
     let mut badges = format!("<span class=\"badge {outcome}\">{outcome}</span>");
     if entry.flaky {
         badges.push_str(" <span class=\"badge flaky\">flaky</span>");
     }
+    if auto {
+        badges.push_str(AUTO_BADGE);
+    }
     format!(
         "<tr data-outcome=\"{outcome}\" data-duration=\"{dur}\" data-nodeid=\"{nidl}\">\
          <td class=\"nid\">{nid}</td><td>{badges}</td>\
-         <td class=\"num\">{dur:.4}</td><td>{worker}</td></tr>\n",
+         <td class=\"num\">{dur:.4}</td><td class=\"strip\">{strip}</td><td>{worker}</td></tr>\n",
         nidl = esc(&nodeid.to_lowercase()),
         nid = esc(nodeid),
         worker = entry.worker.as_deref().map(esc).unwrap_or_default(),
     )
 }
+
+const AUTO_BADGE: &str =
+    " <span class=\"badge auto\" title=\"auto-quarantined: flipped between pass \
+     and fail in recent runs\">auto</span>";
 
 /// HTML-escape text that may contain arbitrary test output.
 fn esc(s: &str) -> String {
@@ -252,6 +312,9 @@ pre { overflow-x:auto; background:var(--bg); border:1px solid var(--line); borde
 .badge.passed{background:var(--g)} .badge.failed,.badge.errors{background:var(--r)}
 .badge.skipped,.badge.xfailed,.badge.xpassed,.badge.quarantined{background:var(--y)}
 .badge.flaky{background:var(--accent)} .badge.cached{background:var(--muted)}
+.badge.auto{background:transparent; color:var(--y); border:1px solid var(--y)}
+td.strip { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap;
+  color:var(--muted); letter-spacing:1px; }
 .controls { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; margin:.5rem 0; }
 #q { flex:1; min-width:180px; padding:.35rem .5rem; border:1px solid var(--line);
   border-radius:6px; background:var(--bg); color:var(--fg); }
@@ -268,6 +331,9 @@ const JS: &str = r#"
 (function(){
   var data = JSON.parse(document.getElementById('data').textContent);
   var tests = data.tests || {};
+  var hist = JSON.parse(document.getElementById('hist').textContent);
+  var strips = hist.strips || {}, auto = {};
+  (hist.auto || []).forEach(function(n){ auto[n] = 1; });
   var grid = document.getElementById('grid');
   var tbody = grid.querySelector('tbody');
   var q = document.getElementById('q');
@@ -305,8 +371,9 @@ const JS: &str = r#"
       tr.setAttribute('data-duration', dur);
       tr.setAttribute('data-nodeid', nid.toLowerCase());
       tr.innerHTML = '<td class="nid">'+esc(nid)+'</td>'+
-        '<td><span class="badge passed">passed</span>'+(e.cached?' <span class="badge cached">cached</span>':'')+'</td>'+
-        '<td class="num">'+dur.toFixed(4)+'</td><td>'+esc(e.worker||'')+'</td>';
+        '<td><span class="badge passed">passed</span>'+(e.cached?' <span class="badge cached">cached</span>':'')+
+        (auto[nid]?' <span class="badge auto" title="auto-quarantined: flipped between pass and fail in recent runs">auto</span>':'')+'</td>'+
+        '<td class="num">'+dur.toFixed(4)+'</td><td class="strip">'+esc(strips[nid]||'')+'</td><td>'+esc(e.worker||'')+'</td>';
       frag.appendChild(tr);
     });
     tbody.appendChild(frag);
@@ -408,7 +475,7 @@ mod tests {
         run.record(None, rep("t.py::bad", "call", "failed", Some(evil)));
 
         let out = std::env::temp_dir().join(format!("rstest-html-{}.html", std::process::id()));
-        write(&out, &run, &meta()).unwrap();
+        write(&out, &run, &meta(), &History::default()).unwrap();
         let doc = std::fs::read_to_string(&out).unwrap();
         let _ = std::fs::remove_file(&out);
 
@@ -436,7 +503,7 @@ mod tests {
         let mut run = Run::default();
         run.record(None, rep("t.py::a", "call", "passed", None));
         let out = std::env::temp_dir().join(format!("rstest-html-ok-{}.html", std::process::id()));
-        write(&out, &run, &meta()).unwrap();
+        write(&out, &run, &meta(), &History::default()).unwrap();
         let doc = std::fs::read_to_string(&out).unwrap();
         let _ = std::fs::remove_file(&out);
         assert!(doc.contains("summary ok"));
@@ -451,7 +518,7 @@ mod tests {
 
         let out =
             std::env::temp_dir().join(format!("rstest-html-collect-{}.html", std::process::id()));
-        write(&out, &run, &meta()).unwrap();
+        write(&out, &run, &meta(), &History::default()).unwrap();
         let doc = std::fs::read_to_string(&out).unwrap();
         let _ = std::fs::remove_file(&out);
 
@@ -471,7 +538,7 @@ mod tests {
 
         let out =
             std::env::temp_dir().join(format!("rstest-html-flaky-{}.html", std::process::id()));
-        write(&out, &run, &meta()).unwrap();
+        write(&out, &run, &meta(), &History::default()).unwrap();
         let doc = std::fs::read_to_string(&out).unwrap();
         let _ = std::fs::remove_file(&out);
 
@@ -481,5 +548,86 @@ mod tests {
         assert!(doc.contains("(2 reruns)"));
         // Flaky badge in the grid row (html.rs 197).
         assert!(doc.contains("<span class=\"badge flaky\">flaky</span>"));
+    }
+
+    #[test]
+    fn renders_history_strip_and_auto_quarantine_badge() {
+        use crate::reporting::history::{Entry, RunMeta as HistRun};
+        let mut h = History::default();
+        for (seq, o) in ["passed", "failed", "flaky", "passed"].iter().enumerate() {
+            h.runs.push(HistRun {
+                seq: seq as u32,
+                id: format!("r{seq}"),
+                epoch: seq as u64,
+                commit: None,
+                env: String::new(),
+                workers: 1,
+            });
+            for id in ["t.py::flap", "t.py::steady"] {
+                let outcome = if id == "t.py::flap" { o } else { "passed" };
+                h.tests.entry(id.into()).or_default().push_back(Entry {
+                    run: seq as u32,
+                    outcome: outcome.to_string(),
+                    call: None,
+                    setup: 0.0,
+                });
+            }
+        }
+        let mut run = Run::default();
+        run.record(None, rep("t.py::flap", "call", "failed", Some("boom")));
+        run.record(None, rep("t.py::steady", "call", "passed", None));
+        run.record(None, rep("t.py::new", "call", "passed", None));
+        run.quarantine(|id| id == "t.py::flap");
+        run.auto_quarantined = ["t.py::flap".to_string()].into();
+        let out =
+            std::env::temp_dir().join(format!("rstest-html-hist-{}.html", std::process::id()));
+        write(&out, &run, &meta(), &h).unwrap();
+        let doc = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+
+        assert!(
+            doc.contains("<th title=\"oldest first"),
+            "strip column header"
+        );
+        assert!(
+            doc.contains("1 test auto-quarantined (flipped between pass and fail in recent runs)")
+        );
+        // The quarantined row is static: strip and badge in the markup.
+        let flap = doc
+            .lines()
+            .find(|l| l.contains("data-nodeid=\"t.py::flap\""))
+            .expect("flap row");
+        assert!(
+            flap.contains("<td class=\"strip\">\u{2713}\u{2717}~\u{2713}</td>"),
+            "{flap}"
+        );
+        assert!(flap.contains("class=\"badge auto\""), "{flap}");
+        // Passing rows ride the embedded data for the JS: strips for tests
+        // with history only, and the auto list.
+        let hist = doc
+            .split("id=\"hist\">")
+            .nth(1)
+            .and_then(|s| s.split("</script>").next())
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(hist).unwrap();
+        assert_eq!(
+            v["strips"]["t.py::steady"],
+            "\u{2713}\u{2713}\u{2713}\u{2713}"
+        );
+        assert!(v["strips"].get("t.py::new").is_none());
+        assert_eq!(v["auto"], serde_json::json!(["t.py::flap"]));
+    }
+
+    #[test]
+    fn no_auto_line_when_nothing_was_auto_quarantined() {
+        let mut run = Run::default();
+        run.record(None, rep("t.py::a", "call", "passed", None));
+        let out =
+            std::env::temp_dir().join(format!("rstest-html-noauto-{}.html", std::process::id()));
+        write(&out, &run, &meta(), &History::default()).unwrap();
+        let doc = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        assert!(!doc.contains("auto-quarantined (flipped"));
+        assert!(doc.contains("\"auto\":[]"));
     }
 }
