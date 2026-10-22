@@ -243,6 +243,32 @@ flakiness. Full model, false-positive cases, and fixes:
 [Resource leaks](resource-leaks.md). To make it a CI gate, use
 [`--fail-on-leak`](../reference/cli.md#-fail-on-leak).
 
+### TIMEOUTS
+
+A [`--timeout`](../reference/cli.md#-timeout-secs) for the suite, and the
+tests that need their own, read from the per-test run history
+(`.rstest_cache/history.msgpack`):
+
+```text
+TIMEOUTS (a test's limit: 3x its slowest recorded passing run, at least +1s):
+  --timeout 3 covers 412 of the 415 test(s) with 5+ recorded runs
+  these need their own limit:
+    26s  slowest 8.40s of 12 runs  tests/test_report.py::test_full_export  <- @pytest.mark.timeout(26)
+    15s  slowest 4.92s of 30 runs  tests/test_sync.py::test_backfill  <- @pytest.mark.timeout(15)
+```
+
+Each test's own limit is the larger of 3 times its slowest recorded passing
+run (call phase, the part `--timeout` limits) and that run plus 1 second, rounded up to whole seconds: room for a slow
+runner, still short enough that a hang fails fast instead of eating the job's
+timeout. The suite `--timeout` is the limit that covers 95% of those tests; the
+tests above it are listed slowest first (top 20) with a marker to paste onto
+them, since one global value would either kill them or be too loose to catch
+a hang anywhere else.
+
+Only tests in this run with at least 5 passing runs in the history count
+(failed runs never set the limit), so the section appears once the history
+has built up. This run's own times aren't included yet.
+
 ### startup
 
 A one-line summary under the header reports how long spawning the worker pool
@@ -274,7 +300,9 @@ The document holds totals (tests, test time, CPU time, wall, workers, pool
 parallel-efficiency (realized speedup and per-worker load), fixture timings
 (each with `constant` and `projected_saving_seconds` for the scope-promotion
 advisor), slowest files, and the coverage-waste list (`coverage_waste`, `null`
-unless the same run collected per-test coverage with `--cov --cov-context=test`).
+unless the same run collected per-test coverage with `--cov --cov-context=test`),
+and the timeout advice (`timeouts`, `null` until tests have 5 passing runs in
+the run history).
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.

@@ -334,6 +334,14 @@ It is a **separate document** from the run snapshot above; combine with
     "tests": [
       { "nodeid": "tests/test_api.py::test_end_to_end_slow", "duration": 12.1, "covered_lines": 240, "also_covered_by": 4 }
     ]
+  },
+  "timeouts": {
+    "suite_timeout": 3,
+    "tests_judged": 1980,
+    "override_count": 4,
+    "overrides": [
+      { "nodeid": "tests/test_e2e.py::test_full_flow", "slowest_seconds": 83.2, "runs": 41, "timeout": 250 }
+    ]
   }
 }
 ```
@@ -349,7 +357,10 @@ reference doesn't spell out:
   worker-count-independent and is the stable metric to trend. Every per-test
   time in the document (`test_time_seconds`, worker load, long pole, slowest
   files, wait-bound and coverage-waste durations) is the whole protocol:
-  setup + call + teardown, so fixture time counts.
+  setup + call + teardown, so fixture time counts. The exception is
+  `timeouts`: its `slowest_seconds` is the call phase, read from the run
+  history across recent runs (not this run), because the call phase is what
+  `--timeout` limits.
   `cpu_time_seconds` sums CPU time over the same span (including child
   processes the test waited for) over the tests where it was measured;
   `tests` counts tests with a recorded call duration.
@@ -367,7 +378,10 @@ reference doesn't spell out:
     - `parallel_efficiency` unless the run used more than one worker
       (`workers > 1`);
     - `coverage_waste` unless this run collected per-test coverage
-      (`--cov --cov-context=test`) and at least one slow test qualified.
+      (`--cov --cov-context=test`) and at least one slow test qualified;
+    - `timeouts` until at least one test in this run has 5 passing runs in
+      the run history (`.rstest_cache/history.msgpack`). `overrides` is empty
+      when every judged test fits under `suite_timeout`.
 - **`leaks`** (`{nodeid, threads, fds}`) is omitted when empty, and empty
   unless leak checking ran (`--doctor` or
   [`--fail-on-leak`](cli.md#-fail-on-leak)).

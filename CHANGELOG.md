@@ -67,6 +67,13 @@ between 0.x releases and are listed here.
   `history.flips`, `history.auto_quarantine_at`,
   `history.auto_quarantined_next_run`).
 
+- **`--doctor` suggests a `--timeout`.** A new TIMEOUTS section (also in
+  `--doctor-json` as `timeouts` and in `--doctor-md`) reads each test's
+  slowest recorded passing run from the run history, suggests a suite
+  `--timeout` that covers 95% of the tests, and lists the slower tests with a
+  `@pytest.mark.timeout(N)` to paste (a test's limit: 3x its slowest run, at
+  least +1s). Appears once tests have 5 passing runs in the history.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind
