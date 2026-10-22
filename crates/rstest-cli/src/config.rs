@@ -557,6 +557,11 @@ pub struct RstestSettings {
     /// Output style, same values as `--output` (dots, verbose, bar, github,
     /// gitlab, buildkite, teamcity, azure, tap, json).
     pub output: Option<String>,
+    /// `--quarantine` file, resolved against the pyproject's dir.
+    pub quarantine: Option<PathBuf>,
+    pub auto_quarantine: Option<u32>,
+    /// Percent, 0 to 100.
+    pub auto_quarantine_max: Option<u32>,
 }
 
 /// Every key `[tool.rstest]` reads; anything else is warned about as unknown.
@@ -570,6 +575,9 @@ const SETTINGS_KEYS: &[&str] = &[
     "collect",
     "order",
     "output",
+    "quarantine",
+    "auto-quarantine",
+    "auto-quarantine-max",
 ];
 
 /// Typed reads of one `[tool.rstest]` table: a wrong-typed or out-of-range
@@ -689,6 +697,14 @@ pub fn rstest_settings(start: &Path, err: &mut dyn Write) -> RstestSettings {
             collect: check.string(tool, "collect"),
             order: check.string(tool, "order"),
             output: check.string(tool, "output"),
+            quarantine: check.string(tool, "quarantine").map(|q| dir.join(q)),
+            auto_quarantine: check.uint(tool, "auto-quarantine"),
+            auto_quarantine_max: match tool.get("auto-quarantine-max") {
+                Some(v @ toml::Value::Integer(n)) if !(0..=100).contains(n) => {
+                    check.invalid("auto-quarantine-max", v, "a percent from 0 to 100")
+                }
+                _ => check.uint(tool, "auto-quarantine-max"),
+            },
         };
     }
     RstestSettings::default()
@@ -731,6 +747,42 @@ worker-timeout = 120
         assert_eq!(s.dist.as_deref(), Some("loadfile"));
         assert_eq!(s.reruns, Some(2));
         assert_eq!(s.worker_timeout, Some(120));
+    }
+
+    #[test]
+    fn settings_quarantine_keys() {
+        let d = tmpdir("quarantine-keys");
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nquarantine = \"ci/quarantine.txt\"\nauto-quarantine = 0\n\
+             auto-quarantine-max = 10\n",
+        )
+        .unwrap();
+        let mut err = Vec::new();
+        let s = rstest_settings(&d, &mut err);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        // Relative to the pyproject's dir, not the cwd.
+        assert_eq!(
+            s.quarantine,
+            Some(d.canonicalize().unwrap().join("ci/quarantine.txt"))
+        );
+        assert_eq!(s.auto_quarantine, Some(0));
+        assert_eq!(s.auto_quarantine_max, Some(10));
+
+        std::fs::write(
+            d.join("pyproject.toml"),
+            "[tool.rstest]\nauto-quarantine-max = 101\nauto-quarantine = -1\n",
+        )
+        .unwrap();
+        let mut err = Vec::new();
+        let s = rstest_settings(&d, &mut err);
+        let err = String::from_utf8_lossy(&err);
+        assert_eq!((s.auto_quarantine, s.auto_quarantine_max), (None, None));
+        assert!(
+            err.contains("auto-quarantine-max = 101 (expected a percent from 0 to 100)"),
+            "{err}"
+        );
+        assert!(err.contains("auto-quarantine = -1"), "{err}");
     }
 
     #[test]

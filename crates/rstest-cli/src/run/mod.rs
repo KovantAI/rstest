@@ -680,14 +680,26 @@ pub(crate) fn execute_inner(
     // Load the --quarantine list once, before dispatch: fail-fast ordering needs
     // it (a quarantined test must not lead the queue and trip -x), and the
     // post-run demotion reuses it. Inert under passthrough.
-    let quarantine = match &cli.quarantine {
-        Some(p) if !passthrough => Some(gates::quarantine_matcher(p, &mut sink)?),
-        _ => None,
+    let quarantine = if passthrough {
+        None
+    } else {
+        gates::quarantine_set(
+            cli.quarantine.as_deref().or(settings.quarantine.as_deref()),
+            cli.auto_quarantine
+                .or(settings.auto_quarantine)
+                .unwrap_or(crate::cli::AUTO_QUARANTINE),
+            cli.auto_quarantine_max
+                .or(settings.auto_quarantine_max)
+                .unwrap_or(crate::cli::AUTO_QUARANTINE_MAX),
+            &crate::reporting::history::load(),
+            &mut sink,
+        )?
     };
     // Sessions keep quarantined failures out of their own -x / --maxfail count
     // (the pool's count skips them too), so a quarantined test can't stop the run.
     cfg.worker_env.quarantine = quarantine
         .as_ref()
+        .map(|q| &q.all)
         .filter(|q| !q.is_empty())
         .map(|q| q.patterns().join("\n"));
     let mut outcome = dispatch_run(
@@ -700,7 +712,7 @@ pub(crate) fn execute_inner(
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
             lazy: inc.lazy,
-            quarantine: quarantine.as_ref(),
+            quarantine: quarantine.as_ref().map(|q| &q.all),
             durations: &duration_cache,
         },
         pinned,
@@ -1354,21 +1366,22 @@ fn resolve_incremental(
 /// demoted outcomes consistently. Inert under passthrough (no aggregate Run).
 fn apply_quarantine(
     cli: &Cli,
-    matcher: Option<&regex::RegexSet>,
+    quarantine: Option<&gates::Quarantine>,
     outcome: &mut pool::PoolOutcome,
     passthrough: bool,
     sink: &mut Sink,
 ) -> Result<()> {
-    if cli.quarantine.is_none() {
-        return Ok(());
-    }
     if passthrough {
-        warn_quarantine_passthrough(sink.err());
+        // Only the explicit flag warns: a [tool.rstest] key would nag every -s run.
+        if cli.quarantine.is_some() {
+            warn_quarantine_passthrough(sink.err());
+        }
         return Ok(());
     }
-    let Some(matcher) = matcher else {
+    let Some(q) = quarantine else {
         return Ok(());
     };
+    let matcher = q.demotion_matcher(&outcome.run, sink);
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
     // green by policy. Exit codes 2+ (usage/internal errors) are never touched.

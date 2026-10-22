@@ -67,7 +67,7 @@ Per-test fields (absent when not applicable):
 | `wasxfail` | `true` | the test was an expected failure (xfail/xpass) |
 | `skip_reason` | string | pytest's skip message, first 200 chars; it keeps pytest's `Skipped: ` prefix (`@pytest.mark.skip(reason="needs postgres")` gives `"Skipped: needs postgres"`) |
 | `flaky` | `true` | passed only after [`--reruns`](cli.md#-reruns-n) or `@pytest.mark.flaky` retries. Counted in `meta.counts.flaky`, not also in `passed` |
-| `quarantined` | `true` | failed, but matched the [`--quarantine`](cli.md#-quarantine-file) list: non-fatal |
+| `quarantined` | `true` | failed, but matched the [`--quarantine`](cli.md#-quarantine-file) list or the [auto-quarantine](cli.md#-auto-quarantinen) set: non-fatal |
 | `longrepr` | string | failure text (assertion repr / traceback) as pytest prints it in the `--tb` style in effect (under `--tb=line` its last line is the `path:line: message` crash line), failures only, capped at 20,000 bytes (cut on a UTF-8 character boundary) |
 | `crashed` | `true` | the failure was fabricated by the orchestrator: worker crash, `--worker-timeout` kill, or the test that was running when SIGINT/SIGTERM stopped the run; pytest never reported it. `longrepr` says which |
 | `worker` | `"gw2"` | worker that produced the final outcome (pool runs only) |
