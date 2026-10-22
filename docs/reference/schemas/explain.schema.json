@@ -16,7 +16,7 @@
       ]
     },
     "duration_seconds": {
-      "description": "Last recorded call-phase duration in seconds (latest value only; local\ncaches keep no history).",
+      "description": "Last recorded call-phase duration in seconds (see `history` for the\nspread).",
       "type": [
         "number",
         "null"
@@ -37,6 +37,17 @@
     "found": {
       "description": "Whether the node id appears in any cache.",
       "type": "boolean"
+    },
+    "history": {
+      "description": "Recent runs, if the per-test history has any.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HistorySummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "last_outcome": {
       "description": "`\"passed\"` if the test was green on the last incremental run; `null`\notherwise (absence is not proof of failure; see `flakes` for fail\nhistory).",
@@ -75,7 +86,8 @@
     "last_outcome",
     "source_line",
     "flakes",
-    "coverage"
+    "coverage",
+    "history"
   ],
   "definitions": {
     "Coverage": {
@@ -145,6 +157,72 @@
         "failed",
         "last_epoch",
         "last_failed_epoch"
+      ]
+    },
+    "HistorySummary": {
+      "description": "The test's recent runs from the per-test history (oldest first).",
+      "type": "object",
+      "properties": {
+        "call_median": {
+          "description": "Median call-phase seconds over passing runs.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "call_p95": {
+          "description": "95th percentile (nearest rank) call-phase seconds over passing runs.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "first_fail_commit": {
+          "description": "When the latest non-skipped run failed: commit of the first run in that\nfailing streak (skips inside the streak are ignored). Suffixed `-dirty`\nlike `last_pass_commit`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_pass_commit": {
+          "description": "Commit of the most recent passing run; suffixed `-dirty` when that run\nhad uncommitted changes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcomes": {
+          "description": "Outcome per run, oldest first: `passed`, `failed`, `errors`, `skipped`,\n`xfailed`, `xpassed`, `quarantined`, `flaky` or `crashed`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "runs": {
+          "description": "Number of recorded runs.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "setup_median": {
+          "description": "Median setup-phase seconds over passing runs.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "runs",
+        "outcomes",
+        "call_median",
+        "call_p95",
+        "setup_median",
+        "last_pass_commit",
+        "first_fail_commit"
       ]
     },
     "Meta": {

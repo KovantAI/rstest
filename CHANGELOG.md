@@ -5,6 +5,19 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+### Features
+
+- **Per-test run history, shown by `rstest explain`.** rstest now keeps each
+  test's last 50 runs in `.rstest_cache/history.msgpack` (outcome, call and
+  setup time, commit). `rstest explain`
+  shows the outcome strip (`✓✓✗✗`), call-time median and p95, the commit the
+  test last passed at and the commit it started failing at; `explain --json`
+  adds the same under `history`. Set the window with `RSTEST_HISTORY_RUNS`;
+  runs older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped. A run on a tree
+  with uncommitted changes records its commit as `<sha>-dirty`. Every run now
+  reads the commit and checks for uncommitted changes (a few git calls), not
+  only `--since-green` runs.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind

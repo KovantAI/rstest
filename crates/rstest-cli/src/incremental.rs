@@ -79,12 +79,18 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
 /// checked is the project rootdir found from `scope`, the same one `--changed`
 /// diffs.
 pub fn record_green_if_clean(scope: &Path, head: &str, fingerprint: &str) -> bool {
-    let rootdir = crate::config::discover(scope, &mut std::io::sink()).rootdir;
-    let clean = crate::select::changed_files_from_git(&rootdir, None).is_ok_and(|f| f.is_empty());
+    let clean = !tree_dirty(scope);
     if clean {
         record_green(scope, head, fingerprint);
     }
     clean
+}
+
+/// Whether the project's tree has uncommitted (or untracked) changes, runner
+/// artifacts aside. A git failure reads as dirty: never claim a clean commit.
+pub fn tree_dirty(scope: &Path) -> bool {
+    let rootdir = crate::config::discover(scope, &mut std::io::sink()).rootdir;
+    crate::select::changed_files_from_git(&rootdir, None).map_or(true, |f| !f.is_empty())
 }
 
 /// The one-line notice for a green run that could not advance the baseline.

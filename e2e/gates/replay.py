@@ -268,14 +268,16 @@ def gate_replay_side_effects(g, args, binary):
     # failed counts piled into flakes.json, no durations rewritten.
     flakes = d / ".rstest_cache" / "flakes.json"
     durations = d / ".rstest_cache" / "durations.json"
-    snap = lambda p: p.read_text(encoding="utf-8") if p.exists() else None  # noqa: E731
-    f0, d0 = snap(flakes), snap(durations)
+    history = d / ".rstest_cache" / "history.msgpack"
+    snap = lambda p: p.read_bytes() if p.exists() else None  # noqa: E731
+    f0, d0, h0 = snap(flakes), snap(durations), snap(history)
     t = "test_order.py::test_"
     _journal(d, "fail.json", [[t + "polluter", t + "victim"], [t + "other"]])
     codes = [_replay(g, d, "fail.json", log)[0].returncode for _ in range(3)]
     check("replay: failing journal fails each time", codes == [1, 1, 1], str(codes))
     check("replay: flakes.json untouched", snap(flakes) == f0, str(snap(flakes)))
     check("replay: durations.json untouched", snap(durations) == d0)
+    check("replay: history.msgpack untouched", h0 is not None and snap(history) == h0)
 
     # RSTEST_NO_REPLAY_JOURNAL=0 reads as "don't disable": still journals.
     shutil.rmtree(replay_dir, ignore_errors=True)

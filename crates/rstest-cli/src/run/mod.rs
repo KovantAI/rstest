@@ -240,6 +240,7 @@ struct PostRun<'a> {
     since_green: bool,
     head: &'a Option<String>,
     env_fp: &'a str,
+    history_commit: Option<&'a str>,
     incremental_active: bool,
     config: &'a coverage_skip::ConfigState,
     /// Coverage index snapshotted BEFORE the run (drives carry-forward after).
@@ -626,9 +627,23 @@ pub(crate) fn execute_inner(
     // last green run's commit. An explicit --changed always wins. `head` is
     // captured up front (it can't change mid-run) so a green run can record it.
     let since_green = cli.since_green && cli.changed.is_none();
-    // Only shell out to git / hash the env when --since-green is actually
-    // active, so the default run path pays nothing.
-    let head = since_green.then(incremental::head_sha).flatten();
+    // `head` on every run (one git call): the per-test history stamps each
+    // run with its commit.
+    let head = incremental::head_sha();
+    // The commit the history stamps on this run, `-dirty` like `git describe
+    // --dirty` when the tree has uncommitted changes (a config lookup plus two
+    // git calls). Checked before the run, so its own report files (--junitxml,
+    // --html) don't count as changes. Skipped under `replay`, which records no
+    // history.
+    let history_commit = head.as_ref().filter(|_| pinned.is_none()).map(|h| {
+        if std::env::current_dir().map_or(true, |d| incremental::tree_dirty(&d)) {
+            format!("{h}-dirty")
+        } else {
+            h.clone()
+        }
+    });
+    // The env hash only when --since-green is active, so the default run path
+    // skips the site-packages walk.
     let env_fp = if since_green {
         incremental::env_fingerprint(&scope, &python)
     } else {
@@ -743,6 +758,7 @@ pub(crate) fn execute_inner(
         since_green,
         head: &head,
         env_fp: &env_fp,
+        history_commit: history_commit.as_deref(),
         incremental_active: inc.active,
         config: &inc.config,
         prev_index: &inc.prev_index,

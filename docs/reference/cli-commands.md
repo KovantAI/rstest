@@ -590,7 +590,7 @@ error, never a silent fold-all.
 
 Print one test's dossier from the caches without running anything. rstest
 accretes rich per-test data across runs (the duration cache, the flake/fail log,
-the last-green outcome set, the coverage index), but every other surface renders
+the last-green outcome set, the coverage index, the per-test run history), but every other surface renders
 it suite-wide. `explain` answers "tell me everything about this test" by merging
 those caches for a single nodeid.
 
@@ -601,13 +601,17 @@ test: tests/test_api.py::test_login
   duration   1.8241s (last recorded)
   outcome    passed last incremental run
   flakes     flaked 3x, failed 1x (last 2d ago)
+  history    ✓✓~✓✓✗✗ (7 runs, oldest first)
+             call median 1.7930s, p95 2.1004s
+             last passed at 3f9c2a1b7e
+             failing since 8d04e6c2aa
   coverage   covers 2 file(s), 47 line(s):
                src/api/auth.py
                src/api/session.py
 ```
 
 Add `--json` for a schema-stamped object on stdout (`{meta, nodeid, found,
-duration_seconds, last_outcome, source_line, flakes, coverage}`), suitable for an
+duration_seconds, last_outcome, source_line, flakes, coverage, history}`), suitable for an
 editor or CI step. Absent fields are `null`: a never-flaked test has no `flakes`,
 a cold coverage index yields `null` coverage. `source_line` is **1-based**, as
 an editor counts, while report-json's `lineno` is 0-based as pytest reports it:
@@ -618,14 +622,19 @@ It reads only cache files, needs no interpreter, and runs no tests. The data
 comes from `.rstest_cache/`: `durations.json` (last recorded call time),
 `flakes.json` (flake/fail counts and last-event age), `incremental_outcomes.json`
 (last-green outcome and source line), and `coverage_index.json` (the coverage
-footprint, populated by a prior `--cov-context=test` run). Fields whose cache is
+footprint, populated by a prior `--cov-context=test` run), and `history.msgpack`
+(the last runs of the test: `✓` passed, `~` flaky, `✗` failed or errored, `-`
+skipped or xfail; call-time median and p95 over passing runs; the commit of the
+last pass and, when the test is failing now, the commit its failing streak
+started at, skips ignored; a commit reads `<sha>-dirty` when that run had
+uncommitted changes). Fields whose cache is
 cold are shown as unavailable rather than omitted. In human mode an unknown
 nodeid exits `1` and prints substring suggestions; with `--json` it exits `0`
 with `"found": false` so tooling can probe nodeids cheaply.
 
-Note the local caches keep only the *latest* duration per test, not a history
-series, so variance and an ordered last-N-outcomes list are not reported yet;
-`explain` grows richer as more per-test data is persisted.
+The range between "last passed at" and "failing since" often names the commit
+that broke the test; `git log <last>..<first>` (without any `-dirty`
+suffix) lists the candidates.
 
 ### `verify-vendor`
 

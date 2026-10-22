@@ -15,7 +15,7 @@ use crate::reporting::ci::{
     buildkite_flaky_annotate, print_azure_annotations, print_github_annotations,
 };
 use crate::reporting::sink::Sink;
-use crate::reporting::{color, flakes, html, junit, progress, report, status};
+use crate::reporting::{color, flakes, history, html, junit, progress, report, status};
 use crate::scheduling::{durations, pool, proto, worker};
 use crate::{cache, coverage_skip, doctor, incremental, remote, select};
 
@@ -456,6 +456,7 @@ pub(super) fn run_post_gates(
         since_green,
         head,
         env_fp,
+        history_commit,
         incremental_active,
         config,
         prev_index,
@@ -706,6 +707,7 @@ pub(super) fn run_post_gates(
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);
+        history::record(&outcome.run, started_epoch, history_commit);
         // --cache-push: publish THIS run's contribution as one immutable
         // segment (from the in-memory Run, not the merged local cache). A push
         // failure warns but never fails an otherwise-green run.
