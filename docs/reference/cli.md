@@ -474,8 +474,9 @@ fixing. Workflow and CI surfaces: [Flaky tests](../guides/flaky-tests.md).
 
 On by default. Quarantine, for this run, every test whose recent history
 flipped at least `N` times (default 3; `--auto-quarantine=0` turns it off). A
-flip is a run where the test failed right after a passing run, or passed only
-on a rerun (`flaky`). The history is the per-test run store in
+flip is a run where the test failed right after a passing run on the same
+commit with no uncommitted edits, or passed only on a rerun (`flaky`). Outside
+a git checkout only reruns count. The history is the per-test run store in
 `.rstest_cache/history.msgpack` (the last `RSTEST_HISTORY_RUNS` runs, aged by
 `RSTEST_FLAKE_RETENTION_DAYS`), so a fresh checkout or CI runner with no cached
 history quarantines nothing.

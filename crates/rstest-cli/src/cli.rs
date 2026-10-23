@@ -2,7 +2,7 @@
 //! rstest-owned flags from pytest session args (clap can't mirror pytest's
 //! plugin-extensible flag surface), and the session-arg parsers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -309,7 +309,8 @@ pub struct Cli {
 
     /// Quarantine tests whose recent history (`.rstest_cache/
     /// history.msgpack`) flipped at least N times: a failure right after a
-    /// pass, or a pass only on rerun. On by default (N=3); =0 turns it off.
+    /// pass on the same clean commit, or a pass only on rerun. On by default
+    /// (N=3); =0 turns it off.
     /// A test that broke and stays broken flips once and still fails the
     /// run. Unions with --quarantine; a test is released once its flips age
     /// out.
@@ -495,6 +496,25 @@ pub struct Cli {
     /// (fifo). Works in every run mode; human output is unaffected.
     #[arg(long = "stream-json", value_name = "FILE")]
     pub(crate) stream_json: Option<PathBuf>,
+}
+
+impl Cli {
+    /// The files a run writes itself. The clean-tree checks skip them, or a
+    /// report left untracked in the checkout would mark every later run dirty.
+    pub(crate) fn run_outputs(&self) -> Vec<&Path> {
+        [
+            &self.report_json,
+            &self.doctor_json,
+            &self.doctor_md,
+            &self.junitxml,
+            &self.html,
+            &self.cov_diff_json,
+            &self.stream_json,
+        ]
+        .into_iter()
+        .filter_map(|p| p.as_deref())
+        .collect()
+    }
 }
 
 /// pytest short options that take a value. In a cluster (`-rA`, `-ksmoke`,

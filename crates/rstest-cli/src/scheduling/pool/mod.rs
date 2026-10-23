@@ -146,10 +146,11 @@ pub struct PoolConfig<'a> {
     /// only; ignored elsewhere / on the crash-respawn path). Pays the vendored
     /// pytest import once per run instead of once per worker.
     pub fork_prewarm: bool,
-    /// `--quarantine` matcher. Fail-fast ordering drops matching ids from the
-    /// suspect set: a quarantined test fails every run by design, so leading
-    /// with it would trip `-x`/`--maxfail` and then be forgiven post-run.
-    pub quarantine: Option<&'a regex::RegexSet>,
+    /// The run's quarantine. Fail-fast ordering drops its ids from the suspect
+    /// set: a quarantined test fails every run by design, so leading with it
+    /// would trip `-x`/`--maxfail` and then be forgiven post-run. The `-x` /
+    /// `--maxfail` count skips its failures (see [`orchestrator::MaxfailCount`]).
+    pub quarantine: Option<&'a orchestrator::Quarantine>,
 }
 
 /// Everything the orchestrator loop produces from one pool run, handed back to
@@ -355,7 +356,7 @@ pub fn run_pool(
     // Flake history feeds fail-fast ordering; empty (and untouched) under the
     // throughput default so a cold cache costs nothing.
     let flake_history = if order == Order::FailFast {
-        without_quarantined(crate::reporting::flakes::load(), quarantine)
+        without_quarantined(crate::reporting::flakes::load(), quarantine.map(|q| &q.all))
     } else {
         std::collections::HashMap::new()
     };
@@ -396,7 +397,7 @@ pub fn run_pool(
     let budget_of = |flaky: &std::collections::HashMap<u64, u32>, i: u64| -> u32 {
         flaky.get(&i).copied().unwrap_or(reruns)
     };
-    let mut fail_count = 0u64;
+    let mut fail_count = orchestrator::MaxfailCount::new(quarantine);
     // --incremental: nodeids collected but skipped (unchanged since last green),
     // injected as cached passes once the run finishes.
     let mut cached_ids: Vec<String> = Vec::new();
@@ -540,15 +541,13 @@ pub fn run_pool(
                         continue;
                     }
                 }
-                if orchestrator::counts_toward_maxfail(quarantine, &r) {
-                    fail_count += 1;
-                }
+                fail_count.record(&r);
                 prog.on_report(sink, Some(idx), &r);
                 sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
-                if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
+                if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
                     stopping = true;
-                    run.stopped_after = Some(fail_count);
+                    run.stopped_after = Some(fail_count.n);
                     orchestrator::stop_all(&mut states);
                 }
             }
@@ -670,6 +669,9 @@ pub fn run_pool(
                     }
                 }
                 if let Some(ids) = ids {
+                    // The auto-quarantine cap is a share of the tests this run
+                    // reports: the collected suite, or a shard's bucket below.
+                    fail_count.set_total(ids.len());
                     if pinned.is_some() {
                         pin_serial.extend(serial.iter().flatten().copied());
                     }
@@ -731,6 +733,7 @@ pub fn run_pool(
                                 idx.len(),
                                 ids.len()
                             ));
+                            fail_count.set_total(idx.len());
                             idx.into_iter().collect::<HashSet<u64>>()
                         });
                         // --incremental: fold the skip set into `keep` — an index
@@ -863,7 +866,6 @@ pub fn run_pool(
                             &mut run,
                             &mut prog,
                             &mut fail_count,
-                            quarantine,
                             idx,
                             orchestrator::FinishedAttempt {
                                 attempts_used: attempts,
@@ -872,9 +874,9 @@ pub fn run_pool(
                                 flaky_key,
                             },
                         );
-                        if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
+                        if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
                             stopping = true;
-                            run.stopped_after = Some(fail_count);
+                            run.stopped_after = Some(fail_count.n);
                             orchestrator::stop_all(&mut states);
                         }
                     }

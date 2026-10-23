@@ -774,7 +774,12 @@ pub(super) fn run_post_gates(
     // tree says nothing about HEAD itself.
     if since_green && exitstatus == 0 {
         if let Some(h) = head {
-            if !incremental::record_green_if_clean(&std::env::current_dir()?, h, env_fp) {
+            if !incremental::record_green_if_clean(
+                &std::env::current_dir()?,
+                &cli.run_outputs(),
+                h,
+                env_fp,
+            ) {
                 sink.warn(incremental::DIRTY_TREE_NOTICE);
             }
         }
@@ -1080,16 +1085,7 @@ fn print_warnings_summary(
     );
 }
 
-/// The run's quarantine policy: the `--quarantine` file plus every test the
-/// history shows flipping at least `auto` times (`0` = off).
-pub(super) struct Quarantine {
-    /// File patterns and auto ids together: what dispatch ordering and the
-    /// workers' `-x` / `--maxfail` count treat as quarantined.
-    pub all: regex::RegexSet,
-    file: regex::RegexSet,
-    auto: std::collections::HashSet<String>,
-    max_pct: u32,
-}
+pub(super) use crate::scheduling::orchestrator::Quarantine;
 
 impl Quarantine {
     /// Matcher for the post-run demotion. When more auto-set tests failed
@@ -1105,7 +1101,7 @@ impl Quarantine {
             })
             .count();
         let total = run.tests().len();
-        let cap = (total * self.max_pct as usize).div_ceil(100).max(1);
+        let cap = crate::scheduling::orchestrator::auto_quarantine_cap(total, self.max_pct);
         if failed <= cap {
             return &self.all;
         }
@@ -1465,7 +1461,8 @@ mod tests {
             h.runs.push(RunMeta {
                 seq,
                 epoch: 0,
-                commit: None,
+                // One clean commit: pass->fail flips only count within one.
+                commit: Some("c".into()),
             });
         }
         for (id, outcomes) in tests {

@@ -77,9 +77,14 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
 /// old baseline, so the next run re-diffs from it (edits included). Returns
 /// whether the baseline was recorded; a git failure counts as dirty. The tree
 /// checked is the project rootdir found from `scope`, the same one `--changed`
-/// diffs.
-pub fn record_green_if_clean(scope: &Path, head: &str, fingerprint: &str) -> bool {
-    let clean = !tree_dirty(scope);
+/// diffs; `outputs` are this run's own report files (see [`tree_dirty`]).
+pub fn record_green_if_clean(
+    scope: &Path,
+    outputs: &[&Path],
+    head: &str,
+    fingerprint: &str,
+) -> bool {
+    let clean = !tree_dirty(scope, outputs);
     if clean {
         record_green(scope, head, fingerprint);
     }
@@ -87,10 +92,26 @@ pub fn record_green_if_clean(scope: &Path, head: &str, fingerprint: &str) -> boo
 }
 
 /// Whether the project's tree has uncommitted (or untracked) changes, runner
-/// artifacts aside. A git failure reads as dirty: never claim a clean commit.
-pub fn tree_dirty(scope: &Path) -> bool {
+/// artifacts aside. `outputs` (relative to `scope`, or absolute) are the files
+/// the run writes itself (--junitxml, --html, ...): left untracked in the
+/// checkout they'd otherwise mark every later run dirty. A git failure reads as
+/// dirty: never claim a clean commit.
+pub fn tree_dirty(scope: &Path, outputs: &[&Path]) -> bool {
     let rootdir = crate::config::discover(scope, &mut std::io::sink()).rootdir;
-    crate::select::changed_files_from_git(&rootdir, None).map_or(true, |f| !f.is_empty())
+    // Canonical on both sides: `scope` may be a symlinked path (macOS /var vs
+    // /private/var) the rootdir isn't. An output not on disk can't be listed.
+    let outputs: Vec<PathBuf> = outputs
+        .iter()
+        .filter_map(|o| scope.join(o).canonicalize().ok())
+        .collect();
+    crate::select::changed_files_from_git(&rootdir, None).map_or(true, |f| {
+        f.iter().any(|f| {
+            rootdir
+                .join(f)
+                .canonicalize()
+                .map_or(true, |p| !outputs.contains(&p))
+        })
+    })
 }
 
 /// The one-line notice for a green run that could not advance the baseline.

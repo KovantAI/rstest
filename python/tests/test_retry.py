@@ -46,14 +46,22 @@ def test_flaky_reruns_reads_the_mark_like_rerunfailures(args, kwargs, expected):
     assert flaky_reruns(_item(*args, **kwargs)) == expected
 
 
-def _session(tmp_path, monkeypatch, source, *args, plugins, quarantine=None):
+def _session(tmp_path, monkeypatch, source, *args, plugins, quarantine=None, auto=None):
     """Run a real in-process session over one test file; returns
-    (exit status, outcomes by (nodeid, when))."""
+    (exit status, outcomes by (nodeid, when)). `auto`: (test function names,
+    cap percent) for the auto-quarantine set."""
     if quarantine is not None:
         monkeypatch.setenv("RSTEST_QUARANTINE", quarantine)
     else:
         monkeypatch.delenv("RSTEST_QUARANTINE", raising=False)
     name = f"test_retry_{uuid.uuid4().hex[:8]}.py"
+    if auto is not None:
+        funcs, max_pct = auto
+        monkeypatch.setenv("RSTEST_AUTO_QUARANTINE", "\n".join(f"{name}::{f}" for f in funcs))
+        monkeypatch.setenv("RSTEST_AUTO_QUARANTINE_MAX", str(max_pct))
+    else:
+        monkeypatch.delenv("RSTEST_AUTO_QUARANTINE", raising=False)
+        monkeypatch.delenv("RSTEST_AUTO_QUARANTINE_MAX", raising=False)
     (tmp_path / name).write_text(source)
     seen: list[tuple[str, str, str]] = []
 
@@ -168,6 +176,77 @@ def test_quarantine_exemption_keeps_maxfail_exact(tmp_path, monkeypatch):
     calls = [n for n, w, _ in seen if w == "call"]
     assert calls[-1] == "test_e_real"
     assert status == 1
+
+
+AUTO_SRC = (
+    "def test_a_flap():\n    assert False\n"
+    "def test_b_ok():\n    pass\n"
+    "def test_c_flap():\n    assert False\n"
+    "def test_d_ok():\n    pass\n"
+)
+
+
+def test_auto_quarantined_failures_under_the_cap_do_not_trip_x(tmp_path, monkeypatch):
+    # 50% of 4 tests: a cap of 2, both auto failures stay quarantined.
+    _, seen = _session(
+        tmp_path,
+        monkeypatch,
+        AUTO_SRC,
+        "-x",
+        plugins=lambda: [MaxfailExemptions(pool=False)],
+        auto=(["test_a_flap", "test_c_flap"], 50),
+    )
+    calls = [n for n, w, _ in seen if w == "call"]
+    assert calls == ["test_a_flap", "test_b_ok", "test_c_flap", "test_d_ok"]
+
+
+def test_auto_quarantined_failures_over_the_cap_trip_x(tmp_path, monkeypatch):
+    # 10% of 4 tests: a cap of 1. The second auto failure is over it, so the
+    # post-run demotion quarantines neither and -x stops right there.
+    status, seen = _session(
+        tmp_path,
+        monkeypatch,
+        AUTO_SRC,
+        "-x",
+        plugins=lambda: [MaxfailExemptions(pool=False)],
+        auto=(["test_a_flap", "test_c_flap"], 10),
+    )
+    calls = [n for n, w, _ in seen if w == "call"]
+    assert calls == ["test_a_flap", "test_b_ok", "test_c_flap"]
+    assert status == 1
+
+
+def test_held_auto_failures_count_toward_maxfail_past_the_cap(tmp_path, monkeypatch):
+    # --maxfail=2, cap 1: crossing the cap puts the held failure back, so the
+    # count is 2 at test_c and the run stops there, not at a later failure.
+    src = AUTO_SRC + "def test_e_real():\n    assert False\n"
+    status, seen = _session(
+        tmp_path,
+        monkeypatch,
+        src,
+        "--maxfail=2",
+        plugins=lambda: [MaxfailExemptions(pool=False)],
+        auto=(["test_a_flap", "test_c_flap"], 10),
+    )
+    calls = [n for n, w, _ in seen if w == "call"]
+    assert calls[-1] == "test_c_flap"
+    assert status == 1
+
+
+def test_pool_never_counts_auto_quarantined_failures(tmp_path, monkeypatch):
+    # Cap 1 of 4 tests, two auto failures: a single session would stop, but a
+    # pool worker leaves the cap to the orchestrator and runs on.
+    monkeypatch.delenv("RSTEST_RERUNS", raising=False)
+    _, seen = _session(
+        tmp_path,
+        monkeypatch,
+        AUTO_SRC,
+        "-x",
+        plugins=lambda: [MaxfailExemptions(pool=True)],
+        auto=(["test_a_flap", "test_c_flap"], 10),
+    )
+    calls = [n for n, w, _ in seen if w == "call"]
+    assert calls == ["test_a_flap", "test_b_ok", "test_c_flap", "test_d_ok"]
 
 
 def test_without_maxfail_the_count_is_untouched(tmp_path, monkeypatch):

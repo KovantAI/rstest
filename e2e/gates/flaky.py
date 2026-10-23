@@ -3,7 +3,7 @@
 import json
 import time
 
-from _harness import CRASHFLAKY, FLAKY, MARKS, check
+from _harness import CRASHFLAKY, FLAKY, MARKS, check, git, git_commit, git_init_commit
 
 
 def gate_flaky_reruns(g, args, binary):
@@ -427,6 +427,7 @@ def gate_quarantine(g, args, binary):
     # --auto-quarantine: `test_flap` alternates pass/fail run to run (a counter
     # file), `test_broke` passes once then fails for good. After 6 runs flap has
     # flipped 3x and gets quarantined; broke flipped once and still fails.
+    # Committed: a pass->fail flip only counts on one clean commit.
     g.write(
         "autoq/test_a.py",
         "import os, pathlib\n"
@@ -435,6 +436,7 @@ def gate_quarantine(g, args, binary):
         "def test_broke(): assert int(N.read_text()) == 0\n",
     )
     adir = g.tmp / "autoq"
+    git_init_commit(adir, "init")
     cnt = g.tmp / "autoq_count"
     for i in range(6):
         cnt.write_text(str(i))
@@ -461,6 +463,31 @@ def gate_quarantine(g, args, binary):
             r.returncode == 1 and "2 failed" in r.stdout and "quarantined" not in r.stdout,
             f"rc={r.returncode} " + r.stdout[-300:],
         )
+    # The same flapping, but each run on a new commit: every fail follows a
+    # code change, so nothing flips and nothing is quarantined.
+    g.write(
+        "autoq_edit/test_e.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_flap(): assert int(N.read_text()) % 2 == 0\n",
+    )
+    edir = g.tmp / "autoq_edit"
+    git_init_commit(edir, "init")
+    for i in range(1, 8):  # fail, pass, ... fail: 3 pass->fail steps
+        cnt.write_text(str(i))
+        (edir / "rev.txt").write_text(str(i))
+        git(edir, "add", "rev.txt")
+        git_commit(edir, f"edit {i}")
+        r = g.run(".", "-n", "2", cwd=edir, env_extra={"AQ_COUNT": str(cnt)})
+    check(
+        "auto-quarantine: pass/fail across commits is not a flip",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "quarantined" not in r.stdout
+        and "--auto-quarantine:" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    cnt.write_text("1")
     # [tool.rstest]: the file path resolves against the pyproject's dir (run
     # from a subdir), and auto-quarantine = 0 turns the auto set off.
     g.write(
@@ -488,6 +515,7 @@ def gate_quarantine(g, args, binary):
         "def test_b(): assert int(N.read_text()) % 2 == 0\n",
     )
     cdir = g.tmp / "autoq_cap"
+    git_init_commit(cdir, "init")
     for i in range(6):
         cnt.write_text(str(i))
         g.run(".", "-n", "2", "--auto-quarantine=0", cwd=cdir, env_extra={"AQ_COUNT": str(cnt)})
@@ -501,6 +529,39 @@ def gate_quarantine(g, args, binary):
         and "2 failed" in r.stdout
         and "quarantined" not in r.stdout
         and "over the cap of 1 (10% of 2 tests in this run)" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Over the cap under -x: the post-run demotion quarantines none of the
+    # auto set, so the session's -x must count them too and stop, not run the
+    # rest of the suite into a red result anyway. 2 flappers of 10 tests at
+    # 10% (cap 1): the second auto failure stops the run.
+    g.write(
+        "autoq_x/test_x.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n\n"
+        + "".join(f"def test_ok{i}(): pass\n\n" for i in range(8)),
+    )
+    xdir = g.tmp / "autoq_x"
+    git_init_commit(xdir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "0", "--auto-quarantine=0", cwd=xdir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".",
+        "-n",
+        "0",
+        "-x",
+        "--auto-quarantine-max",
+        "10",
+        cwd=xdir,
+        env_extra={"AQ_COUNT": str(cnt)},
+    )
+    check(
+        "auto-quarantine: over the cap, -x stops on the auto failures",
+        r.returncode == 1 and "2 failed" in r.stdout and "passed" not in r.stdout,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
     )
 

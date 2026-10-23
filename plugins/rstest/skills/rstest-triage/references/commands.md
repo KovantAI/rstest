@@ -218,7 +218,8 @@ $ rstest --shuffle=1234 -n 2 --dist loadfile   # reproduce a failing order
   still exit `1`.
 - `--auto-quarantine[=N]`: on by default, N=3. Quarantines tests whose
   `.rstest_cache/history.msgpack` series has N+ flips (a failure right after
-  a pass, or a `flaky` pass); the set is printed on stderr at run start.
+  a pass on the same commit with no uncommitted edits, or a `flaky` pass); the
+  set is printed on stderr at run start.
   Steadily failing tests flip once and are never caught. `=0` turns it off.
   Attach N with `=` (`--auto-quarantine 5` makes `5` a test path).
   `--auto-quarantine-max PCT` (default 5): if more auto-quarantined tests
