@@ -103,7 +103,9 @@ impl History {
     /// a pass on the same clean commit (non-pass/non-fail outcomes like
     /// `skipped` are stepped over). A test that broke and stays broken flips
     /// once, so a real regression is never auto-quarantined at the default
-    /// `min`; one broken and fixed across edits doesn't flip at all.
+    /// `min`; one broken and fixed across edits doesn't flip at all. A test
+    /// [`failing_now`] is left out whatever its past flips: a flapper that
+    /// then broke for real must fail the run again.
     pub fn flippers(&self, min: u32) -> Vec<String> {
         let commits: HashMap<u64, Option<&str>> = self
             .runs
@@ -114,10 +116,11 @@ impl History {
             .tests
             .iter()
             .filter(|(_, s)| {
-                flips(
-                    s.iter()
-                        .filter_map(|e| commits.get(&e.run).map(|c| (*c, e))),
-                ) >= min
+                !failing_now(s.iter().map(Entry::outcome_name))
+                    && flips(
+                        s.iter()
+                            .filter_map(|e| commits.get(&e.run).map(|c| (*c, e))),
+                    ) >= min
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -167,6 +170,22 @@ impl History {
         let live: HashSet<u64> = self.tests.values().flatten().map(|e| e.run).collect();
         self.runs.retain(|r| live.contains(&r.seq));
     }
+}
+
+/// A failing outcome, as flips and [`failing_now`] read it.
+pub fn is_fail(outcome: &str) -> bool {
+    matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
+}
+
+/// The latest 3 pass/fail results (oldest-first `outcomes`) all failed: it
+/// broke and isn't flapping now.
+pub fn failing_now<'a>(outcomes: impl DoubleEndedIterator<Item = &'a str>) -> bool {
+    let tail: Vec<&str> = outcomes
+        .rev()
+        .filter(|o| is_fail(o) || matches!(*o, "passed" | "flaky"))
+        .take(3)
+        .collect();
+    tail.len() == 3 && tail.iter().all(|o| is_fail(o))
 }
 
 fn flips<'a>(series: impl IntoIterator<Item = (Option<&'a str>, &'a Entry)>) -> u32 {
@@ -491,7 +510,36 @@ mod tests {
         }
         assert_eq!(h.flippers(3), ["flap", "quar", "rescued"]);
         assert_eq!(h.flippers(2), ["flap", "quar", "rescued", "skips"]);
-        assert_eq!(h.flippers(1).len(), 5);
+        // `broke` flipped once but is failing now: released even at 1.
+        assert_eq!(h.flippers(1), ["flap", "quar", "rescued", "skips"]);
+    }
+
+    #[test]
+    fn flipper_that_broke_for_real_is_released() {
+        let mut h = History::default();
+        // Flapped 3 times, then 3 straight fails (skips stepped over).
+        for (i, o) in "pfpfpffsff".chars().enumerate() {
+            let o = if o == 'p' {
+                "passed"
+            } else if o == 's' {
+                "skipped"
+            } else {
+                "failed"
+            };
+            let m = RunMeta {
+                commit: Some("c".into()),
+                ..meta(i as u64)
+            };
+            h.append(m, vec![("t".into(), entry(o))], 50);
+        }
+        assert!(h.flippers(3).is_empty());
+        // Passing again: flapping, caught again.
+        let m = RunMeta {
+            commit: Some("c".into()),
+            ..meta(10)
+        };
+        h.append(m, vec![("t".into(), entry("passed"))], 50);
+        assert_eq!(h.flippers(3), ["t"]);
     }
 
     #[test]

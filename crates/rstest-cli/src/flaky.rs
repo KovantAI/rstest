@@ -7,7 +7,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::reporting::history::{flip_positions, History};
+use crate::reporting::history::{failing_now, flip_positions, is_fail, History};
 use crate::reporting::sink::Sink;
 
 const SCHEMA: u32 = 1;
@@ -73,22 +73,12 @@ pub(crate) struct FlakyReport {
     tests: Vec<FlakyTest>,
 }
 
-fn is_fail(outcome: &str) -> bool {
-    matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
-}
-
 /// `failing` when the last 3 pass/fail results all failed (it broke, it
 /// isn't flapping now). Otherwise compares flips in the newer and older half
 /// of the series; a difference under 2 is noise (a flip can't land on the
 /// first run, so a steady flapper's older half always trails by one).
 fn trend(outcomes: &[String], flips: &[usize]) -> &'static str {
-    let tail: Vec<&String> = outcomes
-        .iter()
-        .rev()
-        .filter(|o| is_fail(o) || matches!(o.as_str(), "passed" | "flaky"))
-        .take(3)
-        .collect();
-    if tail.len() == 3 && tail.iter().all(|o| is_fail(o)) {
+    if failing_now(outcomes.iter().map(String::as_str)) {
         return "failing";
     }
     let half = outcomes.len() / 2;
@@ -115,15 +105,17 @@ fn gather(h: &History, auto: u32, top: usize) -> FlakyReport {
                 .iter()
                 .map(|(_, e)| e.outcome_name().to_string())
                 .collect();
+            let trend = trend(&outcomes, &pos);
             Some(FlakyTest {
                 nodeid: id.clone(),
                 flips: pos.len(),
-                trend: trend(&outcomes, &pos),
+                trend,
                 flaky: outcomes.iter().filter(|o| *o == "flaky").count(),
                 failed: outcomes.iter().filter(|o| is_fail(o)).count(),
                 runs: series.len(),
                 last_flip_epoch: series[last].0.epoch,
-                auto_quarantined: auto > 0 && pos.len() >= auto as usize,
+                // As `History::flippers`: a test failing now is released.
+                auto_quarantined: auto > 0 && pos.len() >= auto as usize && trend != "failing",
                 outcomes,
             })
         })
@@ -319,6 +311,14 @@ mod tests {
         assert_eq!(t("ppppffff"), "failing"); // broke, not flapping
         assert_eq!(t("pfpfpfsfsff"), "failing"); // skips stepped over
         assert_eq!(t("pfpfpff"), "steady"); // only 2 trailing fails
+                                            // A flapper that broke for real is failing, and released.
+        let h = history(&[("x", "pfpfpffff")]);
+        let r = gather(&h, 3, 0);
+        assert_eq!(
+            (r.tests[0].trend, r.tests[0].auto_quarantined),
+            ("failing", false)
+        );
+        assert!(h.flippers(3).is_empty());
     }
 
     #[test]

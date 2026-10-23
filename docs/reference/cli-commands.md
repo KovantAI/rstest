@@ -2,7 +2,8 @@
 
 These commands don't run your suite as a normal test run. Each is given as
 the first argument (`rstest try`); a path literally named after one is
-disambiguated with `rstest ./try` or `rstest -- try`. rstest's own options
+disambiguated with `rstest ./try` or `rstest -- try` (when such a path exists,
+a bare `rstest try` still runs the subcommand and warns). rstest's own options
 and value-less pytest switches may also come before it (`rstest -q try`,
 `rstest --python 3.12 migrate-check`). A subcommand name after a test path
 or a pytest option's value (`rstest -k foo try`) is a usage error that says
@@ -392,7 +393,10 @@ failure, the culprit's own included, can't stop a run before the victim.
 refuses them (exit `2`) and says how to drop them for the bisect. rstest's own
 `[tool.rstest] reruns` config is off in the child runs too: a passing rerun
 would hide the failure, and a rerun run goes through the pool, which orders
-tests by duration. A `--confcutdir` of your own is kept as pytest applied it.
+tests by duration. The printed command also passes `--auto-quarantine=0`: an
+order-dependent victim is exactly what auto-quarantine demotes, which would
+turn the reproduced failure into a green run. A `--confcutdir` of your own is
+kept as pytest applied it.
 
 Bounded to ~80 child runs; if it hits that ceiling it stops and reports the
 smallest reproducing set found (may not be fully minimal). Large suites are

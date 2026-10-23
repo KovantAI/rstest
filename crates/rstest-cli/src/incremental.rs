@@ -98,13 +98,26 @@ pub fn record_green_if_clean(
 /// dirty: never claim a clean commit.
 pub fn tree_dirty(scope: &Path, outputs: &[&Path]) -> bool {
     let rootdir = crate::config::discover(scope, &mut std::io::sink()).rootdir;
+    dirty_under(&rootdir, scope, outputs)
+}
+
+/// [`tree_dirty`] over the whole git checkout, for the flip history's `-dirty`
+/// stamp: an uncommitted edit outside the rootdir (`../src` next to a
+/// `tests/` config, a sibling monorepo package) changes what the tests run
+/// too, and missing it turns edit-and-rerun cycles into flips on a "clean"
+/// commit. Outside git it reads as dirty.
+pub fn checkout_dirty(scope: &Path, outputs: &[&Path]) -> bool {
+    crate::select::git_toplevel(scope).is_none_or(|top| dirty_under(&top, scope, outputs))
+}
+
+fn dirty_under(rootdir: &Path, scope: &Path, outputs: &[&Path]) -> bool {
     // Canonical on both sides: `scope` may be a symlinked path (macOS /var vs
     // /private/var) the rootdir isn't. An output not on disk can't be listed.
     let outputs: Vec<PathBuf> = outputs
         .iter()
         .filter_map(|o| scope.join(o).canonicalize().ok())
         .collect();
-    crate::select::changed_files_from_git(&rootdir, None).map_or(true, |f| {
+    crate::select::changed_files_from_git(rootdir, None).map_or(true, |f| {
         f.iter().any(|f| {
             rootdir
                 .join(f)
@@ -345,6 +358,36 @@ mod tests {
     }
 
     const FP: &str = "fp-A";
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn checkout_dirty_sees_edits_outside_the_rootdir() {
+        // Config in tests/, code in src/: the rootdir is tests/.
+        let repo = tmp("checkout-dirty");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("tests").join("pytest.ini"), "[pytest]\n").unwrap();
+        std::fs::write(repo.join("src").join("m.py"), "x = 1\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let tests = repo.join("tests");
+        assert!(!checkout_dirty(&tests, &[]));
+        std::fs::write(repo.join("src").join("m.py"), "x = 2\n").unwrap();
+        assert!(!tree_dirty(&tests, &[]), "rootdir-scoped, by design");
+        assert!(checkout_dirty(&tests, &[]));
+        std::fs::remove_dir_all(&repo).ok();
+    }
 
     #[test]
     fn hex_encode_pads_and_orders() {

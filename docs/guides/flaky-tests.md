@@ -217,6 +217,7 @@ auto-quarantined:
 | `✓✓✓✗✗✗` (broke and stays broken) | 1 | no: a real regression still fails the run |
 | `✓✗✓✗✓✗`, a new commit or edit before each run | 0 | no: each failure follows a code change |
 | `✗✗✗✗` (never passed) | 0 | no |
+| `✓✗✓✗✓✗✗✗` (flapped, then broke) | 3 | no: its last 3 results all failed, so it is failing, not flapping |
 
 Everything else matches `--quarantine`: a failure of an auto-quarantined test
 is demoted to `quarantined` (same section, counts, JUnit property and exit
@@ -224,8 +225,10 @@ code), a pass is a plain pass, `--reruns` still retries it first, and under
 the cap below it doesn't count toward `-x` / `--maxfail`. Check one test's strip with
 `rstest explain <nodeid>`.
 
-**Release is automatic.** The set is recomputed every run, so a fixed test
-drops out once enough of its flips leave the history window (the last
+**Release is automatic.** The set is recomputed every run. A test whose last
+3 pass/fail results all failed drops out right away (`rstest flaky` shows it
+as `failing`), so a real break of a flaky test is hidden for 3 runs at most and
+fails every run after that. A fixed test drops out once enough of its flips leave the history window (the last
 `RSTEST_HISTORY_RUNS` runs, default 50, and no older than
 `RSTEST_FLAKE_RETENTION_DAYS`). Nothing to edit or remove.
 

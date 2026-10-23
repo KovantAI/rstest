@@ -632,13 +632,14 @@ pub(crate) fn execute_inner(
     // run with its commit.
     let head = incremental::head_sha();
     // The commit the history stamps on this run, `-dirty` like `git describe
-    // --dirty` when the tree has uncommitted changes (a config lookup plus two
+    // --dirty` when the checkout (not just the rootdir) has uncommitted changes (a config lookup plus two
     // git calls). The run's own report files (--junitxml, --html), left over
     // from an earlier run, don't count as changes. Skipped under `replay`,
     // which records no history.
     let history_commit = head.as_ref().filter(|_| pinned.is_none()).map(|h| {
-        if std::env::current_dir().map_or(true, |d| incremental::tree_dirty(&d, &cli.run_outputs()))
-        {
+        if std::env::current_dir().map_or(true, |d| {
+            incremental::checkout_dirty(&d, &cli.run_outputs())
+        }) {
             format!("{h}-dirty")
         } else {
             h.clone()
@@ -700,15 +701,21 @@ pub(crate) fn execute_inner(
     )?;
     // Load the --quarantine list once, before dispatch: fail-fast ordering needs
     // it (a quarantined test must not lead the queue and trip -x), and the
-    // post-run demotion reuses it. Inert under passthrough.
+    // post-run demotion reuses it. Inert under passthrough. Replay never
+    // auto-quarantines: the flip history would hide the very failure it
+    // re-runs to reproduce.
     let quarantine = if passthrough {
         None
     } else {
         gates::quarantine_set(
             cli.quarantine.as_deref().or(settings.quarantine.as_deref()),
-            cli.auto_quarantine
-                .or(settings.auto_quarantine)
-                .unwrap_or(crate::cli::AUTO_QUARANTINE),
+            if pinned.is_some() {
+                0
+            } else {
+                cli.auto_quarantine
+                    .or(settings.auto_quarantine)
+                    .unwrap_or(crate::cli::AUTO_QUARANTINE)
+            },
             cli.auto_quarantine_max
                 .or(settings.auto_quarantine_max)
                 .unwrap_or(crate::cli::AUTO_QUARANTINE_MAX),
