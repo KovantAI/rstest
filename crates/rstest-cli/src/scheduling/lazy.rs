@@ -155,8 +155,8 @@ pub fn run_lazy_pool(
         known_flaky,
         worker_env,
         fork_prewarm,
-        // Lazy never reorders by flake history; quarantine only keeps its
-        // failures out of the -x / --maxfail count.
+        // Lazy never reorders by flake history; quarantine only shapes the
+        // -x / --maxfail count.
         quarantine,
     } = cfg;
     // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
@@ -211,7 +211,7 @@ pub fn run_lazy_pool(
     let budget_of = |flaky: &HashMap<String, u32>, id: &str| -> u32 {
         flaky.get(id).copied().unwrap_or(reruns)
     };
-    let mut fail_count = 0u64;
+    let mut fail_count = orchestrator::MaxfailCount::new(quarantine);
     let mut stopping = false;
     let mut collect_aborted = false;
     let mut done_workers = 0usize;
@@ -271,16 +271,14 @@ pub fn run_lazy_pool(
                         continue;
                     }
                 }
-                if orchestrator::counts_toward_maxfail(quarantine, &r) {
-                    fail_count += 1;
-                }
+                fail_count.record(&r);
                 prog.on_report(sink, Some(idx), &r);
                 sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
                 if let Some(limit) = maxfail {
-                    if !stopping && fail_count >= limit {
+                    if !stopping && fail_count.n >= limit {
                         stopping = true;
-                        run.stopped_after = Some(fail_count);
+                        run.stopped_after = Some(fail_count.n);
                         orchestrator::stop_all(&mut states);
                     }
                 }
@@ -367,6 +365,16 @@ pub fn run_lazy_pool(
                     .extend(ids.iter().filter(|i| !ser_set.contains(i)).cloned());
                 serial.extend(ser);
                 flaky_budget.extend(flaky);
+                // Every file collected: the run's test count is final, so the
+                // auto-quarantine cap can settle the held failures.
+                if file_queue.is_empty() && states.iter().all(|s| s.uncollected_files.is_empty()) {
+                    fail_count.set_total(total_items);
+                    if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
+                        stopping = true;
+                        run.stopped_after = Some(fail_count.n);
+                        orchestrator::stop_all(&mut states);
+                    }
+                }
             }
             Ok(Event::ItemStartId { id, timeout }) => {
                 states[idx].running = Some(id.clone());
@@ -408,7 +416,6 @@ pub fn run_lazy_pool(
                             &mut run,
                             &mut prog,
                             &mut fail_count,
-                            quarantine,
                             idx,
                             orchestrator::FinishedAttempt {
                                 attempts_used: attempts,
@@ -417,9 +424,9 @@ pub fn run_lazy_pool(
                                 flaky_key: Some(id),
                             },
                         );
-                        if maxfail.is_some_and(|limit| fail_count >= limit) && !stopping {
+                        if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
                             stopping = true;
-                            run.stopped_after = Some(fail_count);
+                            run.stopped_after = Some(fail_count.n);
                             orchestrator::stop_all(&mut states);
                         }
                     }

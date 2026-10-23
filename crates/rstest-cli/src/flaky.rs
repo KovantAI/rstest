@@ -109,9 +109,12 @@ fn gather(h: &History, auto: u32, top: usize) -> FlakyReport {
         .keys()
         .filter_map(|id| {
             let series = h.series(id);
-            let pos = flip_positions(series.iter().map(|(_, e)| *e));
+            let pos = flip_positions(series.iter().map(|(r, e)| (r.commit.as_deref(), *e)));
             let last = *pos.last()?;
-            let outcomes: Vec<String> = series.iter().map(|(_, e)| e.outcome.clone()).collect();
+            let outcomes: Vec<String> = series
+                .iter()
+                .map(|(_, e)| e.outcome_name().to_string())
+                .collect();
             Some(FlakyTest {
                 nodeid: id.clone(),
                 flips: pos.len(),
@@ -238,21 +241,18 @@ fn render(sink: &mut Sink, r: &FlakyReport, now: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reporting::history::{Entry, RunMeta};
+    use crate::reporting::history::{outcome_code, Entry, RunMeta};
 
     /// History with one run per strip character (`p` pass, `f` fail, `~`
-    /// flaky, `s` skipped); run `i` has epoch `i`.
+    /// flaky, `s` skipped); run `i` has epoch `i`, all on one clean commit.
     fn history(tests: &[(&str, &str)]) -> History {
         let mut h = History::default();
         let runs = tests.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
-        for seq in 0..runs as u32 {
+        for seq in 0..runs as u64 {
             h.runs.push(RunMeta {
                 seq,
-                id: format!("r{seq}"),
-                epoch: u64::from(seq),
-                commit: None,
-                env: String::new(),
-                workers: 1,
+                epoch: seq,
+                commit: Some("abc".into()),
             });
         }
         for (id, strip) in tests {
@@ -260,14 +260,14 @@ mod tests {
                 .chars()
                 .enumerate()
                 .map(|(i, c)| Entry {
-                    run: i as u32,
-                    outcome: match c {
+                    run: i as u64,
+                    outcome: outcome_code(match c {
                         'p' => "passed",
                         'f' => "failed",
                         '~' => "flaky",
                         _ => "skipped",
-                    }
-                    .into(),
+                    })
+                    .unwrap(),
                     call: None,
                     setup: 0.0,
                 })

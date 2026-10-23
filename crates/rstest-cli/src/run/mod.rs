@@ -173,7 +173,8 @@ fn apply_selection(
                 // diffs as "nothing changed" against the old baseline).
                 if since_green {
                     if let Some(h) = &head {
-                        if !incremental::record_green_if_clean(&cwd, h, env_fp) {
+                        if !incremental::record_green_if_clean(&cwd, &cli.run_outputs(), h, env_fp)
+                        {
                             sink.warn(incremental::DIRTY_TREE_NOTICE);
                         }
                     }
@@ -632,11 +633,12 @@ pub(crate) fn execute_inner(
     let head = incremental::head_sha();
     // The commit the history stamps on this run, `-dirty` like `git describe
     // --dirty` when the tree has uncommitted changes (a config lookup plus two
-    // git calls). Checked before the run, so its own report files (--junitxml,
-    // --html) don't count as changes. Skipped under `replay`, which records no
-    // history.
+    // git calls). The run's own report files (--junitxml, --html), left over
+    // from an earlier run, don't count as changes. Skipped under `replay`,
+    // which records no history.
     let history_commit = head.as_ref().filter(|_| pinned.is_none()).map(|h| {
-        if std::env::current_dir().map_or(true, |d| incremental::tree_dirty(&d)) {
+        if std::env::current_dir().map_or(true, |d| incremental::tree_dirty(&d, &cli.run_outputs()))
+        {
             format!("{h}-dirty")
         } else {
             h.clone()
@@ -715,12 +717,22 @@ pub(crate) fn execute_inner(
         )?
     };
     // Sessions keep quarantined failures out of their own -x / --maxfail count
-    // (the pool's count skips them too), so a quarantined test can't stop the run.
-    cfg.worker_env.quarantine = quarantine
-        .as_ref()
-        .map(|q| &q.all)
-        .filter(|q| !q.is_empty())
-        .map(|q| q.patterns().join("\n"));
+    // (the pool's count skips them too), so a quarantined test can't stop the
+    // run; auto-quarantined ones count again past the cap, as post-run.
+    cfg.worker_env.quarantine =
+        quarantine
+            .as_ref()
+            .filter(|q| !q.all.is_empty())
+            .map(|q| worker::WorkerQuarantine {
+                file: q.file.patterns().join("\n"),
+                auto: q
+                    .auto
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                max_pct: q.max_pct,
+            });
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -731,7 +743,7 @@ pub(crate) fn execute_inner(
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
             lazy: inc.lazy,
-            quarantine: quarantine.as_ref().map(|q| &q.all),
+            quarantine: quarantine.as_ref(),
             durations: &duration_cache,
         },
         pinned,
@@ -1405,18 +1417,32 @@ fn apply_quarantine(
     };
     let matcher = q.demotion_matcher(&outcome.run, sink);
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
+    outcome.exitstatus = quarantined_exit(
+        outcome.exitstatus,
+        !demoted.is_empty(),
+        outcome.run.all_passed(),
+        outcome.run.stopped_after.is_some(),
+    );
+    Ok(())
+}
+
+/// The exit status once quarantined failures are demoted.
+fn quarantined_exit(status: i32, demoted: bool, all_passed: bool, stopped: bool) -> i32 {
+    // A session's own count skips quarantined failures, so the single-session
+    // path can report 0 over failures the demotion then keeps (the auto set
+    // over its cap): those still fail the run.
+    if status == 0 && !all_passed {
+        return 1;
+    }
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
     // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
-    // A run -x / --maxfail cut short stays failed: quarantined failures never
-    // count toward the limit, so a real failure tripped it.
-    if !demoted.is_empty()
-        && outcome.exitstatus == 1
-        && outcome.run.all_passed()
-        && outcome.run.stopped_after.is_none()
-    {
-        outcome.exitstatus = 0;
+    // A run -x / --maxfail cut short stays failed: demoted failures never
+    // count toward the limit (auto ones count only past the cap, when none is
+    // demoted), so a real failure tripped it.
+    if demoted && status == 1 && all_passed && !stopped {
+        return 0;
     }
-    Ok(())
+    status
 }
 
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
@@ -1427,7 +1453,7 @@ struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
     lazy: bool,
-    quarantine: Option<&'a regex::RegexSet>,
+    quarantine: Option<&'a gates::Quarantine>,
     durations: &'a DurationCache,
 }
 
@@ -2708,11 +2734,12 @@ mod tests {
         check_order_shuffle, check_require_baseline, collect_lazy, dispatch_command,
         fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
         mark_session_flaky, names_a_selection, names_existing_path, order_ignored_warning,
-        parse_duration_secs, parse_numprocesses, print_run_banner, reject_looponfail,
-        requests_doctests, resolve_changed_base, resolve_order, resolve_retention_policy,
-        resolve_shard, resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
-        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
-        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
+        parse_duration_secs, parse_numprocesses, print_run_banner, quarantined_exit,
+        reject_looponfail, requests_doctests, resolve_changed_base, resolve_order,
+        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
+        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
+        warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
+        AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -3754,6 +3781,20 @@ mod tests {
         // Active + no conflict => silent; --incremental off => silent.
         assert!(note(true, false, false, true).is_empty());
         assert!(note(false, true, true, false).is_empty());
+    }
+
+    #[test]
+    fn quarantined_exit_never_passes_kept_failures() {
+        // Session said 0 but a failure survived the demotion: red.
+        assert_eq!(quarantined_exit(0, false, false, false), 1);
+        assert_eq!(quarantined_exit(0, true, false, false), 1);
+        // Every failure demoted: green, unless -x / --maxfail stopped it.
+        assert_eq!(quarantined_exit(1, true, true, false), 0);
+        assert_eq!(quarantined_exit(1, true, true, true), 1);
+        // Nothing demoted, or a severe code: untouched.
+        assert_eq!(quarantined_exit(1, false, false, false), 1);
+        assert_eq!(quarantined_exit(2, true, true, false), 2);
+        assert_eq!(quarantined_exit(0, false, true, false), 0);
     }
 
     #[test]
