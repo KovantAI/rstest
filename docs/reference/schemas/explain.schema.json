@@ -170,7 +170,7 @@
           "minimum": 0
         },
         "auto_quarantined_next_run": {
-          "description": "Whether the next run auto-quarantines this test (`flips` reached\n`auto_quarantine_at`), unless the `--auto-quarantine-max` cap trips.",
+          "description": "Whether the next run auto-quarantines this test (`flips` reached\n`auto_quarantine_at` and its last 3 pass/fail runs did not all fail),\nunless the `--auto-quarantine-max` cap trips.",
           "type": "boolean"
         },
         "call_median": {
@@ -238,7 +238,7 @@
           "format": "double"
         },
         "suspect_commits": {
-          "description": "When the latest run failed: the commits after `last_pass_commit` up to\n`first_fail_commit` (`git log last..first`), newest first. Empty when\nboth are the same commit; null when git can't resolve them here.",
+          "description": "When the latest run failed: the commits after `last_pass_commit` up to\n`first_fail_commit` (`git log last..first`), newest first. Empty when\nboth are the same commit, or the failing one is an ancestor of the\npassing one; null when git can't resolve them here.",
           "type": [
             "array",
             "null"

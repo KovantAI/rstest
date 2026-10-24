@@ -133,8 +133,11 @@ $ rstest explain "tests/test_api.py::test_login" --json
   commit it last passed at, the commit its current failing streak began at,
   the commits in between (`history.suspect_commits`, from `git log`; `null`
   when this clone lacks them, so `git fetch` and retry), and whether the
-  environment changed across the break (`history.env_changed`: no commits
-  and a changed environment means a dependency bump), and its flip count
+  environment changed across the break (`history.env_changed`: a changed
+  environment means a dependency bump only when `last_pass_commit` and
+  `first_fail_commit` are the same commit and neither ends in `-dirty`; an
+  empty `suspect_commits` also covers uncommitted edits and an older
+  checkout), and its flip count
   with whether the next run auto-quarantines it
   (`history.auto_quarantined_next_run`).
 - Unknown nodeid: human mode exits `1` with substring suggestions; `--json`

@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::reporting::color::Palette;
 use crate::reporting::flakes::FlakeStats;
-use crate::reporting::history::{Entry, RunMeta};
+use crate::reporting::history::{failing_now, Entry, RunMeta};
 use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
@@ -95,7 +95,8 @@ struct HistorySummary {
     env_changed: Option<bool>,
     /// When the latest run failed: the commits after `last_pass_commit` up to
     /// `first_fail_commit` (`git log last..first`), newest first. Empty when
-    /// both are the same commit; null when git can't resolve them here.
+    /// both are the same commit, or the failing one is an ancestor of the
+    /// passing one; null when git can't resolve them here.
     suspect_commits: Option<Vec<SuspectCommit>>,
     /// Flips in the recorded runs: a pass only on rerun, or a failure right
     /// after a pass (the `--auto-quarantine` rule).
@@ -104,7 +105,8 @@ struct HistorySummary {
     /// auto-quarantine` or the default; `0` = off).
     auto_quarantine_at: u32,
     /// Whether the next run auto-quarantines this test (`flips` reached
-    /// `auto_quarantine_at`), unless the `--auto-quarantine-max` cap trips.
+    /// `auto_quarantine_at` and its last 3 pass/fail runs did not all fail),
+    /// unless the `--auto-quarantine-max` cap trips.
     auto_quarantined_next_run: bool,
 }
 
@@ -223,6 +225,19 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
     })
 }
 
+/// Whether the next run auto-quarantines this test: the same rule as
+/// `History::flippers`.
+fn quarantines_next_run(h: &HistorySummary) -> bool {
+    h.auto_quarantine_at > 0
+        && h.flips >= h.auto_quarantine_at as usize
+        && !failing_now(h.outcomes.iter().map(String::as_str))
+}
+
+/// A history commit without its `-dirty` marker: the sha git knows.
+fn bare_sha(c: &str) -> &str {
+    c.strip_suffix("-dirty").unwrap_or(c)
+}
+
 /// The commits that could have broken the test: `git log last..first`.
 /// `None` when git fails (not a checkout, or a commit this clone lacks).
 /// A `-dirty` marker is dropped: git only knows the bare sha.
@@ -231,8 +246,7 @@ fn suspects(
     first: &str,
     git: impl Fn(&[&str]) -> Result<String>,
 ) -> Option<Vec<SuspectCommit>> {
-    let bare = |c: &str| c.strip_suffix("-dirty").unwrap_or(c).to_string();
-    let range = format!("{}..{}", bare(last), bare(first));
+    let range = format!("{}..{}", bare_sha(last), bare_sha(first));
     let out = git(&["log", "--format=%h%x1f%an%x1f%s", &range]).ok()?;
     Some(
         out.lines()
@@ -317,8 +331,7 @@ fn gather(nodeid: &str) -> ExplainReport {
         h.auto_quarantine_at = crate::config::rstest_settings(&scope, &mut std::io::sink())
             .auto_quarantine
             .unwrap_or(crate::cli::AUTO_QUARANTINE);
-        h.auto_quarantined_next_run =
-            h.auto_quarantine_at > 0 && h.flips >= h.auto_quarantine_at as usize;
+        h.auto_quarantined_next_run = quarantines_next_run(h);
     }
 
     let found = duration_seconds.is_some()
@@ -474,7 +487,24 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
                     short(c)
                 ));
             }
+            let (last, first) = (
+                h.last_pass_commit.as_deref().unwrap_or_default(),
+                h.first_fail_commit.as_deref().unwrap_or_default(),
+            );
+            let dirty = last.ends_with("-dirty") || first.ends_with("-dirty");
             match &h.suspect_commits {
+                // An empty `git log last..first` with different commits: the
+                // failing one is an ancestor of the passing one.
+                Some(cs) if cs.is_empty() && bare_sha(last) != bare_sha(first) => {
+                    sink.out_line(&format!(
+                        "             {}",
+                        pal.dim("failing commit is older than the last pass: a code change")
+                    ))
+                }
+                Some(cs) if cs.is_empty() && dirty => sink.out_line(&format!(
+                    "             {}",
+                    pal.dim("same commit as the last pass, but with uncommitted edits")
+                )),
                 Some(cs) if cs.is_empty() => sink.out_line(&format!(
                     "             {}",
                     pal.dim("same commit as the last pass: not a code change")
@@ -512,8 +542,14 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
                     ))
                 ));
             } else if h.flips > 0 && h.auto_quarantine_at > 0 {
+                // At the threshold but not quarantined: `failing_now` released it.
+                let why = if h.flips >= h.auto_quarantine_at as usize {
+                    ": failing steadily now, so not quarantined"
+                } else {
+                    ""
+                };
                 sink.out_line(&format!(
-                    "             flipped {}x (auto-quarantine at {})",
+                    "             flipped {}x (auto-quarantine at {}){why}",
                     h.flips, h.auto_quarantine_at
                 ));
             }
@@ -972,6 +1008,33 @@ mod tests {
         // Never flipped, or auto-quarantine off: no line at all.
         assert!(!with(0, 3, false).contains("flipped"));
         assert!(!with(5, 0, false).contains("flipped"));
+        // Over the threshold but not quarantined: failing steadily now.
+        assert!(with(4, 3, false).contains(
+            "             flipped 4x (auto-quarantine at 3): failing steadily now, so not quarantined"
+        ));
+        // Under the threshold: no reason needed.
+        let under = with(2, 3, false);
+        assert!(under.contains("             flipped 2x (auto-quarantine at 3)\n"));
+        assert!(!under.contains("failing steadily"));
+    }
+
+    #[test]
+    fn steadily_failing_flipper_is_not_quarantined_next_run() {
+        // `pfpfpffff` on one clean commit: 3 flips, but the last 3 runs all
+        // failed, so `History::flippers` releases it and the run fails on it.
+        let runs: Vec<RunMeta> = (0..9).map(|i| run(i, Some("c"))).collect();
+        let es: Vec<Entry> = "pfpfpffff"
+            .chars()
+            .map(|c| ent(if c == 'p' { "passed" } else { "failed" }, None))
+            .collect();
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        let mut h = summarize(&series).unwrap();
+        h.auto_quarantine_at = 3;
+        assert_eq!(h.flips, 3);
+        assert!(!quarantines_next_run(&h));
+        // Still flapping (last run passed): quarantined.
+        h.outcomes.push("passed".into());
+        assert!(quarantines_next_run(&h));
     }
 
     #[test]
@@ -998,7 +1061,34 @@ mod tests {
             h.env_changed = Some(false);
             rendered(&r).0
         };
-        assert!(with(Some(vec![])).contains("same commit as the last pass: not a code change"));
+        let mut r = full_report();
+        let h = r.history.as_mut().unwrap();
+        h.first_fail_commit = h.last_pass_commit.clone();
+        h.suspect_commits = Some(vec![]);
+        assert!(rendered(&r)
+            .0
+            .contains("same commit as the last pass: not a code change"));
+        // Uncommitted edits on either side are a code change git can't list.
+        for (last, first) in [("abc", "abc-dirty"), ("abc-dirty", "abc")] {
+            let mut r = full_report();
+            let h = r.history.as_mut().unwrap();
+            h.last_pass_commit = Some(last.into());
+            h.first_fail_commit = Some(first.into());
+            h.suspect_commits = Some(vec![]);
+            let out = rendered(&r).0;
+            assert!(!out.contains("not a code change"), "{last}..{first}: {out}");
+            assert!(out.contains("uncommitted edits"), "{last}..{first}: {out}");
+        }
+        // Failing commit is an ancestor of the passing one: `git log` is empty,
+        // but the code differs (an older checkout).
+        let mut r = full_report();
+        let h = r.history.as_mut().unwrap();
+        h.last_pass_commit = Some("bbb".into());
+        h.first_fail_commit = Some("aaa".into());
+        h.suspect_commits = Some(vec![]);
+        let out = rendered(&r).0;
+        assert!(!out.contains("not a code change"), "{out}");
+        assert!(out.contains("older than the last pass"), "{out}");
         assert!(with(None)
             .contains("commits in between: unknown here (not a git checkout, or not fetched)"));
         let many: Vec<SuspectCommit> = (0..12)

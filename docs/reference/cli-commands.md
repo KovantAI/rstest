@@ -656,9 +656,12 @@ dropped, newest first, up to 10; `--json` has all of them under
 `history.suspect_commits`). That range often names the commit that broke the
 test without running [`bisect`](#bisect-nodeid). It also says whether the
 environment fingerprint (interpreter, lockfiles, installed packages) changed
-between those two runs (`history.env_changed`): a red test with no commits in
-between and a changed environment points at a dependency bump, not a code
-change. When git can't resolve the commits (not a checkout, a shallow clone,
+between those two runs (`history.env_changed`): a red test whose last pass
+and first failure are the same clean commit (no `-dirty` on either), with a
+changed environment, points at a dependency bump, not a code change. An empty
+`suspect_commits` alone is not enough: it is also empty when either run had
+uncommitted edits, or when the failing commit is older than the passing one
+(an earlier checkout). When git can't resolve the commits (not a checkout, a shallow clone,
 or a CI commit this clone hasn't fetched), it says so and `suspect_commits` is
 `null`.
 
