@@ -46,12 +46,12 @@ fn write_history(dir: &Path, doc: &Value) {
 
 /// Three runs of `ID`: pass at c0, fail at c1 and c2. A neighbour's entries
 /// must not leak into `ID`'s strip. Layouts: `History` = [schema, runs, tests],
-/// `RunMeta` = [seq, id, epoch, commit], `Entry` = [run, outcome, call, setup] with
+/// `RunMeta` = [seq, id, epoch, commit, env], `Entry` = [run, outcome, call, setup] with
 /// outcome 0 = passed, 1 = failed.
 fn history_doc(epoch: u64) -> Value {
     const PASSED: u8 = 0;
     const FAILED: u8 = 1;
-    let run = |seq: u64, c: &str| json!([seq, format!("r{seq}"), epoch, c]);
+    let run = |seq: u64, c: &str| json!([seq, format!("r{seq}"), epoch, c, "fp"]);
     let e = |seq: u64, outcome: u8, call: f64| json!([seq, outcome, call, 0.0]);
     json!([
         1,
@@ -158,11 +158,105 @@ fn human_report_merges_every_cache() {
          history    ✓✗✗ (3 runs, oldest first)\n             \
          call median 0.2500s, p95 0.2500s\n             \
          last passed at c0aaaaaaaa\n             \
-         failing since c1bbbbbbbb\n  \
+         failing since c1bbbbbbbb\n             \
+         commits in between: unknown here (not a git checkout, or not fetched)\n  \
          coverage   covers 2 file(s), 3 line(s):\n               src/a.py\n               src/b.py\n"
     );
     assert_eq!(o.stdout, expected);
     assert!(o.stderr.is_empty(), "stderr={}", o.stderr);
+}
+
+/// The real binary resolves the commits between the last pass and the
+/// first failure with `git log`, and notes an environment change.
+#[test]
+fn history_lists_suspect_commits_from_git() {
+    let dir = fresh_dir("suspects");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=Ada",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q"]);
+    let mut shas = Vec::new();
+    for msg in ["green", "refactor io", "bump timeout"] {
+        git(&["commit", "-q", "--allow-empty", "-m", msg]);
+        shas.push(git(&["rev-parse", "HEAD"]));
+    }
+    let run = |seq: u64, c: &str, env: &str| json!([seq, format!("r{seq}"), now(), c, env]);
+    let e = |seq: u64, outcome: u8| json!([seq, outcome, 0.1, 0.0]);
+    write_history(
+        &dir,
+        &json!([
+            1,
+            [run(0, &shas[0], "a"), run(1, &shas[2], "b")],
+            { ID: [e(0, 0), e(1, 1)] },
+        ]),
+    );
+    let path = std::env::var("PATH").unwrap();
+    let o = run_env(&dir, &[ID], &[("PATH", &path)]);
+    assert_eq!(o.code, 0, "stderr={}", o.stderr);
+    let short = |s: &str| s[..7].to_string();
+    assert!(
+        o.stdout.contains(&format!(
+            "             2 commit(s) in between:\n               {} bump timeout (Ada)\n               {} refactor io (Ada)\n",
+            git(&["rev-parse", "--short", &shas[2]]),
+            git(&["rev-parse", "--short", &shas[1]]),
+        )),
+        "{}",
+        o.stdout
+    );
+    assert!(o.stdout.contains("environment changed too"), "{}", o.stdout);
+    let o = run_env(&dir, &[ID, "--json"], &[("PATH", &path)]);
+    let v: Value = serde_json::from_str(&o.stdout).unwrap();
+    assert_eq!(v["history"]["env_changed"], true);
+    assert_eq!(v["history"]["suspect_commits"][1]["subject"], "refactor io");
+    assert!(v["history"]["suspect_commits"][0]["sha"]
+        .as_str()
+        .unwrap()
+        .starts_with(&short(&shas[2])));
+}
+
+/// `explain` reads the auto-quarantine threshold from `[tool.rstest]`.
+#[test]
+fn auto_quarantine_threshold_comes_from_config() {
+    let dir = fresh_dir("autoq");
+    // One clean commit throughout, so the pass -> fail is 1 flip.
+    let mut doc = history_doc(now());
+    for run in doc[1].as_array_mut().unwrap() {
+        run[3] = "c".into();
+    }
+    write_history(&dir, &doc);
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        "[tool.rstest]\nauto-quarantine = 1\n",
+    )
+    .unwrap();
+    let o = run(&dir, &[ID]);
+    assert!(
+        o.stdout
+            .contains("flipped 1x: auto-quarantined on the next run (at 1+ flips)"),
+        "{}",
+        o.stdout
+    );
+    let v = run_json(&dir, ID);
+    assert_eq!(v["history"]["auto_quarantine_at"], 1);
+    assert_eq!(v["history"]["auto_quarantined_next_run"], true);
 }
 
 #[test]
@@ -192,6 +286,9 @@ fn json_report_merges_every_cache() {
     assert_eq!(v["history"]["call_median"], 0.25);
     assert_eq!(v["history"]["last_pass_commit"], "c0aaaaaaaaaaaa");
     assert_eq!(v["history"]["first_fail_commit"], "c1bbbbbbbbbbbb");
+    // Pass at c0, fail at c1: a commit in between, so not a flip.
+    assert_eq!(v["history"]["flips"], 0);
+    assert_eq!(v["history"]["auto_quarantined_next_run"], false);
 }
 
 #[test]

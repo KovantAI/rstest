@@ -246,6 +246,7 @@ mod tests {
                 id: format!("r{seq}"),
                 epoch: seq,
                 commit: Some("abc".into()),
+                env: String::new(),
             });
         }
         for (id, strip) in tests {
