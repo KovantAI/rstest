@@ -598,6 +598,42 @@ def gate_quarantine(g, args, binary):
         r.returncode == 1 and "2 failed" in r.stdout and "passed" not in r.stdout,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
     )
+    # Under the cap, -x stopped by a real failure: the post-run demotion must
+    # take the cap from the collected count like the in-run hold did, not from
+    # the 3 tests that reported. 2 flappers of 40 tests at 5% (cap 2) are held,
+    # test_c stops the run; a cap of 1 (5% of 3) would quarantine neither.
+    g.write(
+        "autoq_xcap/test_x.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_c(): assert False\n\n"
+        + "".join(f"def test_ok{i}(): pass\n\n" for i in range(37)),
+    )
+    xcdir = g.tmp / "autoq_xcap"
+    git_init_commit(xcdir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "0", "--auto-quarantine=0", cwd=xcdir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".",
+        "-n",
+        "0",
+        "-x",
+        "--auto-quarantine-max",
+        "5",
+        cwd=xcdir,
+        env_extra={"AQ_COUNT": str(cnt)},
+    )
+    check(
+        "auto-quarantine: -x early stop keeps the collected-count cap",
+        r.returncode == 1
+        and "2 failures above are quarantined" in r.stdout
+        and "over the cap" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
     # Same under --collect lazy, where the test count is only final once every
     # file is collected. test_0.py sorts first, so one worker is stuck
     # importing it (AQ_SLOW) and the other collects test_flap.py and runs its

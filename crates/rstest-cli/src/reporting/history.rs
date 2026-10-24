@@ -338,8 +338,11 @@ pub fn load_from(path: &std::path::Path) -> History {
     h
 }
 
-/// This run's slice, or `None` when no test produced a real result.
-pub fn slice(run: &Run, id: &str, epoch: u64, commit: Option<&str>) -> Option<RunSlice> {
+/// This run's slice, or `None` when no test produced a real result. Its id is
+/// fresh per process, never `RSTEST_RUN_UID`: CI shards, monorepo projects and
+/// an exported uid all share that one, and [`History::merged`] would keep only
+/// the first of them.
+pub fn slice(run: &Run, epoch: u64, commit: Option<&str>) -> Option<RunSlice> {
     let tests: HashMap<String, Entry> = run
         .tests()
         .iter()
@@ -351,7 +354,7 @@ pub fn slice(run: &Run, id: &str, epoch: u64, commit: Option<&str>) -> Option<Ru
     Some(RunSlice {
         run: RunMeta {
             seq: 0,
-            id: id.to_string(),
+            id: crate::run::new_run_uid(),
             epoch,
             commit: commit.map(str::to_string),
         },
@@ -705,19 +708,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let now = crate::time::now_epoch_secs();
         // A run with no real results writes nothing.
-        assert!(super::slice(&Run::default(), "r0", now, Some("c1")).is_none());
+        assert!(super::slice(&Run::default(), now, Some("c1")).is_none());
 
-        let rec = |run: &Run, id: &str, at: u64, commit: Option<&str>| {
-            record_in(&dir, super::slice(run, id, at, commit).unwrap(), 2);
+        let rec = |run: &Run, at: u64, commit: Option<&str>| {
+            record_in(&dir, super::slice(run, at, commit).unwrap(), 2);
         };
-        rec(&run_of(&[("a", "passed")]), "r1", now, Some("c1"));
-        rec(
-            &run_of(&[("a", "failed"), ("b", "passed")]),
-            "r2",
-            now + 1,
-            None,
-        );
-        rec(&run_of(&[("a", "passed")]), "r3", now + 2, Some("c3"));
+        rec(&run_of(&[("a", "passed")]), now, Some("c1"));
+        rec(&run_of(&[("a", "failed"), ("b", "passed")]), now + 1, None);
+        rec(&run_of(&[("a", "passed")]), now + 2, Some("c3"));
         let h = load_from(&dir.join(FILE));
         let a = h.series("a");
         let got: Vec<_> = a
@@ -731,6 +729,21 @@ mod tests {
         assert_eq!(a[1].1.call, Some(0.5));
         assert_eq!(h.series("b").len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CI shards (and monorepo projects, and runs under an exported
+    /// `RSTEST_RUN_UID`) share one run uid; each one's slice must still
+    /// survive the dedupe in `merged`, or all but one lose their history.
+    #[test]
+    fn slices_of_runs_sharing_a_run_uid_all_survive_merge() {
+        let now = crate::time::now_epoch_secs();
+        let shard1 = super::slice(&run_of(&[("a", "passed")]), now, Some("c1")).unwrap();
+        let shard2 = super::slice(&run_of(&[("b", "failed")]), now, Some("c1")).unwrap();
+        assert_ne!(shard1.run.id, shard2.run.id);
+        let h = History::merged([shard1, shard2], 50);
+        assert_eq!(h.runs.len(), 2);
+        assert_eq!(outcomes(&h, "a"), ["passed"]);
+        assert_eq!(outcomes(&h, "b"), ["failed"]);
     }
 
     fn slice(id: &str, epoch: u64, tests: &[(&str, &str)]) -> RunSlice {

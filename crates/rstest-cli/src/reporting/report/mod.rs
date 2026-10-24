@@ -360,6 +360,11 @@ pub struct Run {
     /// `-x`/`--maxfail` stopped the pool after this many failures: the
     /// closing summary prints pytest's `stopping after N failures` banner.
     pub stopped_after: Option<u64>,
+    /// The test count the in-run `--auto-quarantine-max` cap was a share of
+    /// (the collected suite or a shard's bucket), so the post-run demotion
+    /// uses the same cap even when `-x` stopped the run early. `None` when
+    /// never known; the demotion then counts the tests that reported.
+    pub cap_total: Option<usize>,
     /// Set when SIGINT/SIGTERM stopped the run.
     pub interruption: Option<Interruption>,
     /// Set when a test called `pytest.exit()`, which stops the whole run.

@@ -777,6 +777,7 @@ pub fn run_lazy_pool(
         collect_aborted,
         run.stopped_after.is_some(),
     );
+    run.cap_total = fail_count.total;
     // pytest.exit(): its returncode is the run's exit code, as under pytest.
     let exitstatus = run
         .session_exit

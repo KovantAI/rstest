@@ -476,7 +476,7 @@ fn resolve_run_config(
 /// lowercase hex digits with the uuid4 version and variant bits set, so
 /// `uuid.UUID(testrun_uid)` parses. The 122 random bits come from std's
 /// OS-seeded `RandomState` keys, mixed with the clock and pid (no crate).
-fn new_run_uid() -> String {
+pub(crate) fn new_run_uid() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     let nanos = crate::time::now_epoch_nanos();
@@ -2701,6 +2701,7 @@ fn fold_run_event(
             // The single session reports its collected count so the dots and
             // -v renderers print pytest's `[ NN%]` column.
             prog.set_total(count as usize);
+            run.cap_total = Some(count as usize);
             run.deselected = deselected;
             None
         }
