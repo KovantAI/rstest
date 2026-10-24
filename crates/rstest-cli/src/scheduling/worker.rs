@@ -90,9 +90,22 @@ pub struct WorkerEnv {
     /// `--maxfail` count skips every failed attempt (the orchestrator may
     /// retry it and counts the final outcome).
     pub reruns: bool,
-    /// `--quarantine` patterns (anchored regexes, one per line): failures of
-    /// matching tests never count toward a session's `-x` / `--maxfail`.
-    pub quarantine: Option<String>,
+    /// The run's quarantine, for a session's own `-x` / `--maxfail` count.
+    pub quarantine: Option<WorkerQuarantine>,
+}
+
+/// [`WorkerEnv::quarantine`]: a session never counts a `--quarantine` file
+/// failure. A single session (`-n 0`) counts auto-quarantined failures only
+/// once more auto tests failed than `max_pct` percent of its tests (the
+/// post-run cap); a pool worker never does, the orchestrator holds them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkerQuarantine {
+    /// File patterns, anchored regexes one per line (`RSTEST_QUARANTINE`).
+    pub file: String,
+    /// Auto-quarantined nodeids, one per line (`RSTEST_AUTO_QUARANTINE`).
+    pub auto: String,
+    /// `--auto-quarantine-max` (`RSTEST_AUTO_QUARANTINE_MAX`).
+    pub max_pct: u32,
 }
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
@@ -1028,6 +1041,8 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_JUNITXML",
     "RSTEST_RERUNS",
     "RSTEST_QUARANTINE",
+    "RSTEST_AUTO_QUARANTINE",
+    "RSTEST_AUTO_QUARANTINE_MAX",
 ];
 
 /// Credentials rstest itself consumes and test code never needs. Stripped from
@@ -1409,8 +1424,14 @@ fn apply_maxfail_env(command: &mut Command, env: &WorkerEnv) {
         command.env_remove("RSTEST_RERUNS");
     }
     match &env.quarantine {
-        Some(patterns) => command.env("RSTEST_QUARANTINE", patterns),
-        None => command.env_remove("RSTEST_QUARANTINE"),
+        Some(q) => command
+            .env("RSTEST_QUARANTINE", &q.file)
+            .env("RSTEST_AUTO_QUARANTINE", &q.auto)
+            .env("RSTEST_AUTO_QUARANTINE_MAX", q.max_pct.to_string()),
+        None => command
+            .env_remove("RSTEST_QUARANTINE")
+            .env_remove("RSTEST_AUTO_QUARANTINE")
+            .env_remove("RSTEST_AUTO_QUARANTINE_MAX"),
     };
 }
 
@@ -1963,11 +1984,17 @@ mod tests {
         assert!(!envs.contains_key("RSTEST_QUARANTINE"));
         let mut env = base_env();
         env.reruns = true;
-        env.quarantine = Some("^a\\.py::t$\n^b\\.py::.*$".into());
+        env.quarantine = Some(super::WorkerQuarantine {
+            file: "^a\\.py::t$\n^b\\.py::.*$".into(),
+            auto: "c.py::flap".into(),
+            max_pct: 5,
+        });
         let cmd = build_worker_command(Path::new("python3"), Some((0, 2)), Stdio::Null, &env, 3, 4);
         let envs = envs_of(&cmd);
         assert_eq!(envs["RSTEST_RERUNS"], "1");
         assert_eq!(envs["RSTEST_QUARANTINE"], "^a\\.py::t$\n^b\\.py::.*$");
+        assert_eq!(envs["RSTEST_AUTO_QUARANTINE"], "c.py::flap");
+        assert_eq!(envs["RSTEST_AUTO_QUARANTINE_MAX"], "5");
     }
 
     #[test]

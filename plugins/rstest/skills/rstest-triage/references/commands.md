@@ -12,7 +12,7 @@ triaging.
 - explain
 - --shuffle
 - Hangs: --timeout and --worker-timeout
-- Flaky controls: --reruns, --reruns-only-known-flaky, --quarantine
+- Flaky controls: --reruns, --reruns-only-known-flaky, --quarantine, --auto-quarantine
 - Manual discriminator runs
 
 ---
@@ -197,7 +197,7 @@ $ rstest --shuffle=1234 -n 2 --dist loadfile   # reproduce a failing order
   `flaky(only_rerun=["ConnectionError"])` test still retries an
   `AssertionError`. Use the `--only-rerun` flag instead.
 - `-x` / `--maxfail` count a test only once its reruns are used up, and never
-  count a `--quarantine` match.
+  count a quarantined test (file or auto set).
 - The marker works without a global `--reruns`: a marked test that recovers
   on retry counts as `flaky` and the run exits 0.
 - History: every run (except `--dist each` and `replay`) merges into
@@ -209,11 +209,24 @@ $ rstest --shuffle=1234 -n 2 --dist loadfile   # reproduce a failing order
   (or an explicit `@pytest.mark.flaky`). A hard-failure-only record doesn't
   qualify. It never learns new flakes; pair it with a learning run.
 - `--quarantine FILE`: one nodeid or `*` glob per line, `#` comments on
-  their own line only (a trailing `# ...` after a nodeid makes the entry
-  silently never match). It is a CLI flag only, not a `[tool.rstest]` key. A
-  matching **failure** becomes `quarantined` (traceback still printed, JUnit
-  has no `<failure>`); a run whose only failures are quarantined exits `0`;
-  failures outside the list still exit `1`.
+  their own line or trailing after whitespace (`test_a  # JIRA-1`; a `#`
+  glued to the nodeid, as in `test_b[#1]`, stays part of it). Also a
+  `[tool.rstest] quarantine = "path"` key, resolved against the
+  pyproject's dir; the flag wins. A matching **failure** becomes
+  `quarantined` (traceback still printed, JUnit has no `<failure>`); a run
+  whose only failures are quarantined exits `0`; failures outside the list
+  still exit `1`.
+- `--auto-quarantine[=N]`: on by default, N=3. Quarantines tests whose
+  `.rstest_cache/history.msgpack` series has N+ flips (a failure right after
+  a pass on the same commit with no uncommitted edits, or a `flaky` pass); the
+  set is printed on stderr at run start.
+  Steadily failing tests flip once and are never caught. `=0` turns it off.
+  Attach N with `=` (`--auto-quarantine 5` makes `5` a test path).
+  `--auto-quarantine-max PCT` (default 5): if more auto-quarantined tests
+  fail than PCT% of the run's tests (at least one), none of them is
+  quarantined and the run warns about a broken environment. `[tool.rstest]`
+  keys: `auto-quarantine`, `auto-quarantine-max`. The set releases itself as
+  flips age out of the last `RSTEST_HISTORY_RUNS` runs (default 50).
 
 ## Manual discriminator runs
 

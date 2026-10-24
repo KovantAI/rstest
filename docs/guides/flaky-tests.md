@@ -1,11 +1,13 @@
 # Flaky tests
 
-Three tools, one lifecycle: [`--reruns`](../reference/cli.md#-reruns-n)
-rescues a flake *within* a run, the **flake history** remembers it
-*across* runs, and [`--quarantine`](../reference/cli.md#-quarantine-file)
-ring-fences the tests a team has explicitly decided to tolerate while
-they get fixed, without hiding them and without letting new failures
-sneak through.
+Four tools, one lifecycle: [`--reruns`](../reference/cli.md#-reruns-n)
+rescues a flake *within* a run, the **flake history** and the **run
+history** remember it *across* runs,
+[`--auto-quarantine`](../reference/cli.md#-auto-quarantinen) (on by default)
+ring-fences the tests that history shows flipping between pass and fail, and
+[`--quarantine`](../reference/cli.md#-quarantine-file) ring-fences the tests a
+team has explicitly decided to tolerate while they get fixed. Neither kind of
+quarantine hides a test, and neither lets a new failure sneak through.
 
 ## Detect: `--reruns`
 
@@ -96,6 +98,12 @@ Everything that reads the history applies the same window:
 - [`rstest explain`](../reference/cli-commands.md#explain),
   which reports a test's flake and failure counts.
 
+The per-test run history behind
+[`--auto-quarantine`](#let-the-history-decide-auto-quarantine) (below) is a
+separate file, `.rstest_cache/history.msgpack`, that keeps each test's last
+50 runs whether they passed or not. It drops runs older than the same
+retention window.
+
 The flaky and quarantined sections annotate each test from this file:
 
 ```text
@@ -180,10 +188,87 @@ The exact semantics:
 - `--lf` still reruns quarantined failures: locally they behave like
   the failures they are.
 
+## Let the history decide: `--auto-quarantine`
+
+You don't have to curate the list by hand. Every run reads the per-test run
+history (`.rstest_cache/history.msgpack`, the last 50 runs of each test; see
+[`rstest explain`](../reference/cli-commands.md#explain)) and quarantines the
+tests that keep flipping between pass and fail. It is on by default, and the
+run says which tests it caught before any test starts:
+
+```console
+$ rstest -n auto --reruns 2
+rstest: --auto-quarantine: 2 test(s) flipped pass/fail 3+ times in recent history:
+  tests/test_ws.py::test_reconnect
+  tests/test_poll.py::test_eventually
+```
+
+A **flip** is a failure right after a passing run on the same commit, or a
+run that passed only on a rerun. A failure after the code changed is the
+change, not flakiness, so it only counts when both runs were on one commit
+with no uncommitted edits (outside a git checkout, only reruns count). Skipped
+runs are stepped over. A test with 3 or more flips in its stored history is
+auto-quarantined:
+
+| History (oldest first) | Flips | Auto-quarantined at the default 3 |
+|---|---|---|
+| `✓✗✓✗✓✗` | 3 | yes |
+| `✓~✓~✓~` (`~` = passed on rerun) | 3 | yes |
+| `✓✓✓✗✗✗` (broke and stays broken) | 1 | no: a real regression still fails the run |
+| `✓✗✓✗✓✗`, a new commit or edit before each run | 0 | no: each failure follows a code change |
+| `✗✗✗✗` (never passed) | 0 | no |
+
+Everything else matches `--quarantine`: a failure of an auto-quarantined test
+is demoted to `quarantined` (same section, counts, JUnit property and exit
+code), a pass is a plain pass, `--reruns` still retries it first, and under
+the cap below it doesn't count toward `-x` / `--maxfail`. Check one test's strip with
+`rstest explain <nodeid>`.
+
+**Release is automatic.** The set is recomputed every run, so a fixed test
+drops out once enough of its flips leave the history window (the last
+`RSTEST_HISTORY_RUNS` runs, default 50, and no older than
+`RSTEST_FLAKE_RETENTION_DAYS`). Nothing to edit or remove.
+
+**Cap.** When more auto-quarantined tests fail in one run than 5% of the
+tests in that run (rounded up, at least one), rstest quarantines none of them
+for that run and warns:
+
+```text
+rstest: --auto-quarantine: 14 auto-quarantined test(s) failed, over the cap of 10 (5% of 200 tests in this run); quarantining none of them, the environment looks broken (raise the cap with --auto-quarantine-max=PCT)
+```
+
+Many flappers failing at once points to a broken environment (a database
+down, a network outage), and that run should be red. Tests from the
+`--quarantine` file are still quarantined and don't count toward the cap.
+Past the cap, auto-quarantined failures count toward `-x` / `--maxfail`
+again, so `-x` stops a broken-environment run instead of running it to the
+end.
+
+**Tuning.** `--auto-quarantine=5` raises the threshold, `--auto-quarantine=0`
+turns it off, and `--auto-quarantine-max=PCT` moves the cap. Attach values
+with `=`. Commit the policy in `pyproject.toml` instead of repeating flags:
+
+```toml
+[tool.rstest]
+quarantine = "quarantine.txt"   # relative to this pyproject.toml
+auto-quarantine = 3
+auto-quarantine-max = 5
+```
+
+**Composing with the file.** The run quarantines both sets. Use the file for
+tests the team has decided to tolerate (with an owner and a tracking issue),
+and the auto set as the safety net for flakes nobody has triaged yet.
+
+**On CI**, persist `.rstest_cache` between runs (see
+[CI quickstart](ci-quickstart.md)). A runner that starts with no history has
+an empty auto set, so auto-quarantine does nothing there.
+
 ## What CI consumers see
 
 - **Terminal / summary line**: a separate `N quarantined` count; the
-  run summary is green when nothing outside the list failed.
+  run summary is green when nothing outside the quarantine set failed.
+  The auto set and any cap warning go to stderr, so the CI log records
+  what was quarantined and why.
 - **JUnit** (`--junitxml`): the testcase carries a
   `quarantined="true"` property and **no `<failure>` element**, so
   JUnit-gating CI (and dashboards that count failures) stays green
@@ -194,38 +279,49 @@ The exact semantics:
 - **Monorepos**: pass one file at the root; it's forwarded to every
   project as an absolute path. Patterns match each project's
   **project-relative** nodeids (the same nodeids the child prints).
+  `--auto-quarantine` and `--auto-quarantine-max` are forwarded too, and
+  each project reads its own history.
 
 ## Quarantine vs `--reruns`
 
-| | `--reruns` | `--quarantine` |
-|---|---|---|
-| Scope | one run | policy across runs |
-| Covers | intermittent failures that pass on retry | tests failing consistently or too often to retry away |
-| Cost | retries burn suite time every run | none, no retries, just accounting |
-| Visibility | flaky section + property | own count, section, property; committed list |
-| New failures | still fail | still fail |
+| | `--reruns` | `--auto-quarantine` | `--quarantine` |
+|---|---|---|---|
+| Scope | one run | policy across runs, from history | policy across runs, from a file |
+| Covers | intermittent failures that pass on retry | tests that keep flipping, triaged or not | tests the team decided to tolerate, flipping or failing |
+| Cost | retries burn suite time every run | none, just accounting | none, just accounting |
+| Who decides | nobody | the history (threshold and cap) | the team, in review |
+| Visibility | flaky section + property | quarantined section + property; set printed on stderr | quarantined section + property; committed list |
+| Release | n/a | automatic, as flips age out | remove the line |
+| New failures | still fail | still fail | still fail |
 
 They compose: `--reruns 2 --quarantine quarantine.txt` retries
-everything, and only quarantined tests may fail without reddening the
-run.
+everything, and only quarantined tests (from the file or the history) may
+fail without reddening the run.
 
 ## Lifecycle
 
-1. `--reruns` keeps the suite green; the history records who needed it.
-2. When a test's history shows a pattern, add it to `quarantine.txt`
-   with a comment linking the tracking issue.
-3. Fix the test; remove the entry. If it was really fixed, the history
-   stops accruing and ages out of `flakes.json` after the retention
-   window: if the entry comes back in review, it wasn't.
+1. `--reruns` keeps the suite green; both histories record who needed it.
+2. A test that keeps flipping is auto-quarantined. Its failures stop
+   reddening the run but still print, so it shows up in every run log.
+3. When a test needs an owner, add it to `quarantine.txt` with a comment
+   linking the tracking issue. This also keeps it quarantined if it starts
+   failing every run, which the auto set deliberately does not.
+4. Fix the test; remove the entry. The auto set releases it on its own. If
+   it was really fixed, the history stops accruing and ages out after the
+   retention window: if it comes back to the auto set, it wasn't.
 
 Before quarantining a test that fails only in some orders or only in
 parallel, check whether it is flaky at all or order-dependent: an order
 dependency has a fix, and quarantine is for real nondeterminism. See
 [Diagnosing a parallel-only failure](parallel-safety.md#diagnosing-a-parallel-only-failure).
+The auto set can't tell the two apart, so an order-dependent test that flips
+gets auto-quarantined too; `rstest bisect` finds the polluter.
 
 The failure mode to avoid is a quarantine list that only ever grows.
-`flakes.json` self-ages (see [aging](#remember-the-flake-history)
-above), but `quarantine.txt` is committed and hand-curated on purpose.
-Treat an addition like a TODO with an owner, and audit the list periodically.
-An entry whose test no longer appears in the flake history is either
-fixed (remove it) or abandoned (fix the test).
+`flakes.json` and the run history self-age (see
+[aging](#remember-the-flake-history) above), but `quarantine.txt` is
+committed and hand-curated on purpose. Treat an addition like a TODO with an
+owner, and audit the list periodically. An entry whose test no longer
+appears in the flake history is either fixed (remove it) or abandoned (fix
+the test). The auto set is printed every run: a test that stays on it for
+weeks needs an owner too.

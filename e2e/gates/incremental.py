@@ -824,8 +824,16 @@ def gate_explain(g, args, binary):
         f"{got} != {sha}",
     )
 
-    # Drop run 1's untracked report so only the tracked edit can dirty the tree.
-    (gp / "report.xml").unlink()
+    # Run 1's report is still untracked in the checkout; rerunning with the
+    # same --junitxml must not read it as a change.
+    g.run("test_g.py", "--junitxml=report.xml", cwd=gp, env_extra={"PYTHONPATH": str(gp)})
+    got = last_pass_commit()
+    check(
+        "explain: leftover own junit report does not mark the next run dirty",
+        got == sha,
+        f"{got} != {sha}",
+    )
+
     g.write("explaingit/test_g.py", "def test_g():\n    assert True\n")
     g.run("test_g.py", cwd=gp, env_extra={"PYTHONPATH": str(gp)})
     got = last_pass_commit()

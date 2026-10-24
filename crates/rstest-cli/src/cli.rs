@@ -2,7 +2,7 @@
 //! rstest-owned flags from pytest session args (clap can't mirror pytest's
 //! plugin-extensible flag surface), and the session-arg parsers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -307,6 +307,23 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub(crate) quarantine: Option<PathBuf>,
 
+    /// Quarantine tests whose recent history (`.rstest_cache/
+    /// history.msgpack`) flipped at least N times: a failure right after a
+    /// pass on the same clean commit, or a pass only on rerun. On by default
+    /// (N=3); =0 turns it off.
+    /// A test that broke and stays broken flips once and still fails the
+    /// run. Unions with --quarantine; a test is released once its flips age
+    /// out.
+    #[arg(long, num_args = 0..=1, default_missing_value = "3", value_name = "N")]
+    pub(crate) auto_quarantine: Option<u32>,
+
+    /// Ceiling for --auto-quarantine: when more auto-quarantined tests fail
+    /// than PCT percent of this run's tests (default 5, at least one test),
+    /// none of them is quarantined and the run warns: that many flappers
+    /// failing at once points at a broken environment, not flaky tests.
+    #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u32).range(0..=100))]
+    pub(crate) auto_quarantine_max: Option<u32>,
+
     /// With reruns active, retry only failures whose error text matches
     /// this regex (repeatable). pytest-rerunfailures' --only-rerun.
     #[arg(long = "only-rerun", value_name = "REGEX")]
@@ -479,6 +496,25 @@ pub struct Cli {
     /// (fifo). Works in every run mode; human output is unaffected.
     #[arg(long = "stream-json", value_name = "FILE")]
     pub(crate) stream_json: Option<PathBuf>,
+}
+
+impl Cli {
+    /// The files a run writes itself. The clean-tree checks skip them, or a
+    /// report left untracked in the checkout would mark every later run dirty.
+    pub(crate) fn run_outputs(&self) -> Vec<&Path> {
+        [
+            &self.report_json,
+            &self.doctor_json,
+            &self.doctor_md,
+            &self.junitxml,
+            &self.html,
+            &self.cov_diff_json,
+            &self.stream_json,
+        ]
+        .into_iter()
+        .filter_map(|p| p.as_deref())
+        .collect()
+    }
 }
 
 /// pytest short options that take a value. In a cluster (`-rA`, `-ksmoke`,
@@ -851,10 +887,14 @@ fn numprocesses_arg(s: &str) -> Result<String, String> {
     }
 }
 
+/// `--auto-quarantine` / `--auto-quarantine-max` defaults.
+pub(crate) const AUTO_QUARANTINE: u32 = 3;
+pub(crate) const AUTO_QUARANTINE_MAX: u32 = 5;
+
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
 /// the following argv item (that item is a path / pytest flag).
-const OPT_FLAGS: &[&str] = &["--changed", "--shuffle", "--debug"];
+const OPT_FLAGS: &[&str] = &["--changed", "--shuffle", "--debug", "--auto-quarantine"];
 
 /// Flags that take a value: either the following argv item (`--dist load`) or
 /// `=`-joined (`--dist=load`). `-n` also accepts the attached short forms
@@ -881,6 +921,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--reruns",
     "--doctor-json",
     "--quarantine",
+    "--auto-quarantine-max",
     "--doctor-md",
     "--doctor-fail-on",
     "--junitxml",

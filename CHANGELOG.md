@@ -18,6 +18,19 @@ between 0.x releases and are listed here.
   reads the commit and checks for uncommitted changes (a few git calls), not
   only `--since-green` runs.
 
+- **Tests that keep flipping are auto-quarantined (on by default).** rstest
+  reads the per-test run history and quarantines every test that flipped
+  between pass and fail at least 3 times: a failure right after a pass on the
+  same clean commit, or a pass only on rerun. A test that broke and stays broken flips once, so a real
+  regression still fails the run. The set is printed at the start of the run,
+  unions with `--quarantine FILE`, and shrinks on its own as flips age out of
+  the history. `--auto-quarantine=N` sets the threshold, `--auto-quarantine=0`
+  turns it off. `--auto-quarantine-max PCT` (default 5) is a safety cap:
+  when more auto-quarantined tests fail than that share of the run's tests,
+  none of them is quarantined and the run warns, since a broken environment
+  is the likelier cause. `[tool.rstest]` takes `quarantine`, `auto-quarantine` and
+  `auto-quarantine-max`.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind
