@@ -7,7 +7,8 @@ single session (`-n 0` / `-n 1`), where no orchestrator loop exists.
 
 `MaxfailExemptions` keeps pytest's own `-x` / `--maxfail` count from
 reacting to failures that do not fail the run in the end: a quarantined
-test's failure (`--quarantine`, demoted after the run), and in a pool worker
+test's failure (`--quarantine`, demoted after the run; an auto-quarantined
+one only while the run stays under `--auto-quarantine-max`), and in a pool worker
 any attempt the orchestrator may still retry (`--reruns`, a flaky mark). In a
 pool the orchestrator counts final failures and stops every worker itself.
 """
@@ -83,6 +84,18 @@ def _quarantine_patterns() -> list[re.Pattern]:
     return out
 
 
+def _auto_quarantine() -> tuple[set[str], int]:
+    """The auto-quarantined nodeids (RSTEST_AUTO_QUARANTINE, one per line)
+    and their cap, a percent of the session's tests
+    (RSTEST_AUTO_QUARANTINE_MAX)."""
+    ids = {line for line in os.environ.get("RSTEST_AUTO_QUARANTINE", "").splitlines() if line}
+    try:
+        max_pct = int(os.environ.get("RSTEST_AUTO_QUARANTINE_MAX", ""))
+    except ValueError:
+        max_pct = 0
+    return ids, max_pct
+
+
 class MaxfailExemptions:
     """Undo pytest's maxfail bookkeeping for failures that must not count.
 
@@ -97,10 +110,13 @@ class MaxfailExemptions:
         self._pool = pool
         self._reruns = pool and os.environ.get("RSTEST_RERUNS") == "1"
         self._quarantine = _quarantine_patterns()
+        self._auto, self._auto_max = _auto_quarantine()
+        self._auto_failed: set[str] = set()
+        self._held = 0
         self._item = None
 
     def active(self) -> bool:
-        return self._pool or bool(self._quarantine)
+        return self._pool or bool(self._quarantine) or bool(self._auto)
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_protocol(self, item, nextitem):
@@ -110,16 +126,37 @@ class MaxfailExemptions:
         finally:
             self._item = None
 
-    def _exempt(self, report) -> bool:
+    def _exempt(self, report, session) -> bool:
         nodeid = report.nodeid
         if any(p.match(nodeid) for p in self._quarantine):
             return True
-        if not self._pool:
+        if self._pool:
+            if self._reruns:
+                return True
+            item = self._item
+            if item is not None and item.nodeid == nodeid and flaky_reruns(item) > 0:
+                return True
+        if nodeid not in self._auto:
             return False
-        if self._reruns:
+        # A pool worker sees only its share of the failures (and a lazy one
+        # not even the run's total): the orchestrator holds auto failures
+        # against the cap and stops every worker itself.
+        return self._pool or self._hold(nodeid, session)
+
+    def _hold(self, nodeid, session) -> bool:
+        """An auto-quarantined failure: held back while the auto tests failed
+        so far fit the cap (the post-run demotion still quarantines them).
+        Past it none of them is quarantined, so this one counts and every
+        held one is put back into pytest's count."""
+        self._auto_failed.add(nodeid)
+        total = getattr(session, "testscollected", 0)
+        cap = max(1, -(-total * self._auto_max // 100))
+        if len(self._auto_failed) <= cap:
+            self._held += 1
             return True
-        item = self._item
-        return item is not None and item.nodeid == nodeid and flaky_reruns(item) > 0
+        session.testsfailed += self._held
+        self._held = 0
+        return False
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_logreport(self, report):
@@ -130,7 +167,7 @@ class MaxfailExemptions:
             or option is None
             or not getattr(option, "maxfail", 0)
             or not report.failed
-            or not self._exempt(report)
+            or not self._exempt(report, session)
         ):
             return (yield)
         # pytest refuses to unset `shouldfail`, so keep it from being set:

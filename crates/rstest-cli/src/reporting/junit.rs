@@ -535,6 +535,9 @@ mod tests {
                     sections: Vec::new(),
                     lineno: None,
                     subtest: false,
+                    crash: None,
+                    xfail_reason: None,
+                    skip_location: None,
                 },
             );
         }
@@ -573,6 +576,9 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 

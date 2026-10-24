@@ -10,8 +10,9 @@ What differs between the last green run and now.
 |---|---|---|---|
 | `commit` | string or null | yes | Current `HEAD`. |
 | `commits` | array of SuspectCommit or null | yes | Commits after the green commit up to `HEAD` (`git log green..HEAD`), newest first. Null when there is no commit on either side or git can't resolve the range here. |
+| `dirty` | boolean | yes | The checkout has uncommitted changes now. |
 | `env` | array of Change | yes | Watched environment variables set, unset or changed. |
-| `found` | boolean | yes | Whether a green run was ever recorded here; every other field is empty or null when it wasn't. |
+| `found` | boolean | yes | Whether a green run was ever recorded here. When it wasn't, only `meta`, `commit` and `dirty` are filled; the rest are empty or null. |
 | `green_commit` | string or null | yes | Commit of the last green run. |
 | `green_epoch` | integer or null | yes | Epoch seconds of the last green run. |
 | `meta` | Meta | yes | Envelope metadata. |

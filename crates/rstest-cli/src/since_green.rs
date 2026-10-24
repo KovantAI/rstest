@@ -1,5 +1,5 @@
-//! "What changed since green?": every run that exits 0 snapshots what git
-//! can't see about it (interpreter version, installed packages, a few
+//! "What changed since green?": every full run that exits 0 on a clean tree
+//! snapshots what git can't see about it (interpreter version, installed packages, a few
 //! environment variables) plus its commit, in `.rstest_cache/green_env.json`.
 //! A red run diffs the current state against that snapshot, so a CI break
 //! caused by a transitive dependency bump or an interpreter change names
@@ -38,6 +38,10 @@ pub struct Snapshot {
     schema: u32,
     /// `HEAD` when the snapshot was taken; `None` outside a git checkout.
     pub commit: Option<String>,
+    /// The checkout had uncommitted changes. Never set on a recorded green
+    /// snapshot: a green dirty tree proves nothing about `commit`.
+    #[serde(default)]
+    pub dirty: bool,
     pub epoch: u64,
     /// Interpreter version from the venv's `pyvenv.cfg`.
     pub python: Option<String>,
@@ -48,10 +52,17 @@ pub struct Snapshot {
 }
 
 /// The current state, for `scope`'s interpreter `python`.
-pub fn capture(scope: &Path, python: &Path, commit: Option<&str>, epoch: u64) -> Snapshot {
+pub fn capture(
+    scope: &Path,
+    python: &Path,
+    commit: Option<&str>,
+    dirty: bool,
+    epoch: u64,
+) -> Snapshot {
     Snapshot {
         schema: SCHEMA,
         commit: commit.map(str::to_string),
+        dirty,
         epoch,
         python: crate::incremental::python_version(python),
         packages: crate::incremental::installed_packages(scope, python),
@@ -110,8 +121,8 @@ struct Meta {
 pub(crate) struct SinceGreen {
     /// Envelope metadata.
     meta: Meta,
-    /// Whether a green run was ever recorded here; every other field is
-    /// empty or null when it wasn't.
+    /// Whether a green run was ever recorded here. When it wasn't, only
+    /// `meta`, `commit` and `dirty` are filled; the rest are empty or null.
     found: bool,
     /// Commit of the last green run.
     green_commit: Option<String>,
@@ -119,6 +130,8 @@ pub(crate) struct SinceGreen {
     green_epoch: Option<u64>,
     /// Current `HEAD`.
     commit: Option<String>,
+    /// The checkout has uncommitted changes now.
+    dirty: bool,
     /// Commits after the green commit up to `HEAD` (`git log green..HEAD`),
     /// newest first. Null when there is no commit on either side or git
     /// can't resolve the range here.
@@ -132,14 +145,14 @@ pub(crate) struct SinceGreen {
 }
 
 impl SinceGreen {
+    /// Nothing but (maybe) uncommitted edits differs. The commit counts as
+    /// unchanged only when it is the same sha: an empty `green..HEAD` range
+    /// also means HEAD moved back behind the green commit.
     fn is_empty(&self) -> bool {
-        // Unknown commits (git couldn't resolve the range) only count as "no
-        // commits" when both sides are the same commit.
-        let no_commits = match &self.commits {
-            Some(cs) => cs.is_empty(),
-            None => self.green_commit == self.commit,
-        };
-        no_commits && self.python.is_none() && self.packages.is_empty() && self.env.is_empty()
+        self.green_commit == self.commit
+            && self.python.is_none()
+            && self.packages.is_empty()
+            && self.env.is_empty()
     }
 }
 
@@ -178,6 +191,7 @@ fn compare(
             green_commit: None,
             green_epoch: None,
             commit: now.commit.clone(),
+            dirty: now.dirty,
             commits: None,
             python: None,
             packages: Vec::new(),
@@ -194,6 +208,7 @@ fn compare(
         green_commit: g.commit.clone(),
         green_epoch: Some(g.epoch),
         commit: now.commit.clone(),
+        dirty: now.dirty,
         commits,
         python: (g.python != now.python).then(|| Change {
             name: "python".into(),
@@ -226,7 +241,7 @@ fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
     if !d.found {
         out(
             sink,
-            "rstest: since green: no green run recorded here yet (every run that exits 0 records one)",
+            "rstest: since green: no green run recorded here yet (a whole-suite run that exits 0 on a clean tree records one)",
         );
         return;
     }
@@ -242,12 +257,20 @@ fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
             crate::explain::ago(d.green_epoch.unwrap_or(0), now_epoch)
         ),
     );
-    if d.is_empty() {
+    if d.dirty {
         out(
             sink,
-            "  nothing: same commit, interpreter, packages and environment. \
-             Suspect the tests themselves (`rstest flaky`, `rstest explain <nodeid>`).",
+            "  uncommitted changes in the working tree (`git diff`)",
         );
+    }
+    if d.is_empty() {
+        if !d.dirty {
+            out(
+                sink,
+                "  nothing: same commit, interpreter, packages and environment. \
+                 Suspect the tests themselves (`rstest flaky`, `rstest explain <nodeid>`).",
+            );
+        }
         return;
     }
     match &d.commits {
@@ -260,6 +283,16 @@ fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
                 out(sink, &format!("    ... {} more", cs.len() - COMMITS_SHOWN));
             }
         }
+        // Empty range but another sha: HEAD is behind the green commit.
+        Some(_) if d.green_commit != d.commit => out(
+            sink,
+            &format!(
+                "  HEAD {} is behind the green commit (checked out or reset back; \
+                 `git log HEAD..{}` lists what it lacks)",
+                short(&d.commit),
+                short(&d.green_commit)
+            ),
+        ),
         Some(_) => {}
         None if d.green_commit.is_some() && d.commit.is_some() => out(
             sink,
@@ -284,17 +317,18 @@ fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
     }
 }
 
-/// After a run: a green run (exit 0) records the snapshot; a run with failed
-/// tests (exit 1) prints what changed since the last green one, when anything
-/// did.
-pub fn after_run(sink: &mut Sink, exitstatus: i32, now: &Snapshot) {
+/// After a run: a green run (exit 0) over the whole suite (`full_suite`) on
+/// a clean tree records the snapshot; a subset (`-k`, `--co`, a shard, ...)
+/// passing says nothing about the suite. A run with failed tests (exit 1)
+/// prints what changed since the last green one, when anything did.
+pub fn after_run(sink: &mut Sink, exitstatus: i32, full_suite: bool, now: &Snapshot) {
     match exitstatus {
-        0 => record(now),
+        0 if full_suite && !now.dirty => record(now),
         1 => {
             if let Some(g) = load() {
                 let d = compare(Some(&g), now, crate::select::git_stdout);
-                // Silent when nothing differs: a red cycle in a local edit
-                // loop (or `--watch`) shouldn't repeat "nothing changed".
+                // Silent when nothing but local edits differs: a red cycle in
+                // a local edit loop (or `--watch`) shouldn't repeat itself.
                 if !d.is_empty() {
                     render(sink, &d, now.epoch, true);
                 }
@@ -304,17 +338,57 @@ pub fn after_run(sink: &mut Sink, exitstatus: i32, now: &Snapshot) {
     }
 }
 
+/// Does this run select part of the suite, from its argv or
+/// `PYTEST_ADDOPTS`? See [`narrows_suite`].
+pub(crate) fn run_narrows_suite(args: &[String]) -> bool {
+    narrows_suite(args)
+        || std::env::var("PYTEST_ADDOPTS")
+            .is_ok_and(|v| narrows_suite(&crate::config::shell_split(&v)))
+}
+
+/// Does the session argv select part of the suite? Positional nodeids,
+/// `-k`/`-m`, `--deselect`, last-failed/stepwise, `--co`. A plain path
+/// selection counts as the suite: CI commonly runs `rstest tests/`. Only
+/// positionals are nodeids: `-W error::DeprecationWarning` is no selection.
+fn narrows_suite(args: &[String]) -> bool {
+    const FLAGS: [&str; 7] = [
+        "--deselect",
+        "--lf",
+        "--last-failed",
+        "--sw",
+        "--stepwise",
+        "--co",
+        "--collect-only",
+    ];
+    args.iter()
+        .zip(crate::cli::positional_mask(args))
+        .any(|(a, pos)| {
+            (pos && a.contains("::"))
+                || FLAGS
+                    .iter()
+                    .any(|f| a == f || a.strip_prefix(f).is_some_and(|r| r.starts_with('=')))
+                || crate::cli::has_short(a, 'k')
+                || crate::cli::has_short(a, 'm')
+        })
+}
+
+/// Uncommitted edits to tracked files anywhere in the checkout. Untracked
+/// files don't count: this command can't know which report files
+/// (`--junitxml`, ...) the runs here write, and a leftover one would read as
+/// a local edit. A git failure reads as dirty.
+fn tracked_dirty(dir: &Path) -> bool {
+    crate::select::git_stdout_in(dir, &["status", "--porcelain", "--untracked-files=no"])
+        .map_or(true, |o| !o.trim().is_empty())
+}
+
 /// `rstest since-green [--json]`: the diff against the last green run, no
 /// tests run.
 pub fn run_since_green(sink: &mut Sink, python: &Path, json: bool) -> Result<i32> {
     let scope = std::env::current_dir()?;
     let epoch = crate::time::now_epoch_secs();
-    let now = capture(
-        &scope,
-        python,
-        crate::incremental::head_sha().as_deref(),
-        epoch,
-    );
+    let head = crate::incremental::head_sha();
+    let dirty = head.is_some() && tracked_dirty(Path::new("."));
+    let now = capture(&scope, python, head.as_deref(), dirty, epoch);
     let d = compare(load().as_ref(), &now, crate::select::git_stdout);
     if json {
         let mut bytes = serde_json::to_vec_pretty(&d)?;
@@ -334,6 +408,7 @@ mod tests {
         Snapshot {
             schema: SCHEMA,
             commit: Some(commit.into()),
+            dirty: false,
             epoch: 1000,
             python: Some(python.into()),
             packages: pkgs
@@ -445,5 +520,145 @@ mod tests {
         assert!(v["python"].is_null());
         let v = serde_json::to_value(compare(None, &now, no_git)).unwrap();
         assert_eq!(v["found"], false);
+    }
+
+    #[test]
+    fn only_a_full_clean_green_run_records() {
+        let held = crate::test_env::lock();
+        let base = std::env::temp_dir().join(format!(
+            "rstest-since-green-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        {
+            let _cache = crate::test_env::set_var(&held, "RSTEST_CACHE", &base);
+            let (mut sink, _cap) = Sink::captured();
+            let green = snap("aaa", "3.12.1", &[("httpx", "0.27.0")], &[]);
+            after_run(&mut sink, 0, true, &green);
+            assert_eq!(load(), Some(green.clone()));
+            // A passing subset (`--co`, `-k`, a shard) keeps the old baseline.
+            let bumped = snap("aaa", "3.12.1", &[("httpx", "0.28.1")], &[]);
+            after_run(&mut sink, 0, false, &bumped);
+            assert_eq!(load(), Some(green.clone()));
+            // So does a green dirty tree.
+            after_run(
+                &mut sink,
+                0,
+                true,
+                &Snapshot {
+                    dirty: true,
+                    ..bumped
+                },
+            );
+            assert_eq!(load(), Some(green));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn narrows_suite_spots_subsets() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for a in [
+            &["-k", "smoke"][..],
+            &["-ksmoke"],
+            &["-m", "not slow"],
+            &["--co"],
+            &["--collect-only"],
+            &["--lf"],
+            &["--deselect=t.py::x"],
+            &["tests/test_a.py::test_one"],
+            &["--deselect", "t.py::x"],
+        ] {
+            assert!(narrows_suite(&v(a)), "{a:?}");
+        }
+        for a in [
+            &[][..],
+            &["tests/"],
+            &["-v", "-x"],
+            &["--maxfail=2"],
+            &["-W", "error::DeprecationWarning"],
+            &["-Wignore::UserWarning"],
+            &["-o", "filterwarnings=error::DeprecationWarning"],
+        ] {
+            assert!(!narrows_suite(&v(a)), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn uncommitted_edits_are_named() {
+        let green = snap("aaa", "3.12.1", &[], &[]);
+        let now = Snapshot {
+            dirty: true,
+            ..green.clone()
+        };
+        let d = compare(Some(&green), &now, no_git);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &d, 1000, false);
+        assert!(cap.out().contains("uncommitted changes"), "{}", cap.out());
+        assert!(!cap.out().contains("nothing: same commit"), "{}", cap.out());
+    }
+
+    #[test]
+    fn head_behind_green_is_a_change() {
+        // `git log green..HEAD` is empty when HEAD is an ancestor of green.
+        let green = snap("bbb", "3.12.1", &[], &[]);
+        let now = snap("aaa", "3.12.1", &[], &[]);
+        let d = compare(Some(&green), &now, no_git);
+        assert!(!d.is_empty());
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &d, 1000, false);
+        assert!(
+            cap.out().contains("HEAD aaa is behind the green commit"),
+            "{}",
+            cap.out()
+        );
+    }
+
+    #[test]
+    fn pytest_addopts_selection_narrows_the_run() {
+        let held = crate::test_env::lock();
+        let args: Vec<String> = Vec::new();
+        {
+            let _v = crate::test_env::set_var(&held, "PYTEST_ADDOPTS", "-k 'smoke or api'");
+            assert!(run_narrows_suite(&args));
+        }
+        {
+            let _v = crate::test_env::set_var(&held, "PYTEST_ADDOPTS", "-W error::UserWarning");
+            assert!(!run_narrows_suite(&args));
+        }
+        let _v = crate::test_env::remove_var(&held, "PYTEST_ADDOPTS");
+        assert!(!run_narrows_suite(&args));
+    }
+
+    #[test]
+    fn tracked_dirty_ignores_untracked_report_files() {
+        let repo = std::env::temp_dir().join(format!(
+            "rstest-since-green-git-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::write(repo.join("m.py"), "x = 1\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        assert!(!tracked_dirty(&repo));
+        // A leftover `--junitxml` report is no local edit.
+        std::fs::write(repo.join("report.xml"), "<testsuites/>").unwrap();
+        assert!(!tracked_dirty(&repo));
+        std::fs::write(repo.join("m.py"), "x = 2\n").unwrap();
+        assert!(tracked_dirty(&repo));
+        std::fs::remove_dir_all(&repo).ok();
     }
 }
