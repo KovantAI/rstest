@@ -82,9 +82,12 @@ struct HistorySummary {
     call_p95: Option<f64>,
     /// Median setup-phase seconds over passing runs.
     setup_median: Option<f64>,
-    /// Commit of the most recent passing run.
+    /// Commit of the most recent passing run; suffixed `-dirty` when that run
+    /// had uncommitted changes.
     last_pass_commit: Option<String>,
-    /// When the latest run failed: commit of the first run in that failing streak.
+    /// When the latest non-skipped run failed: commit of the first run in that
+    /// failing streak (skips inside the streak are ignored). Suffixed `-dirty`
+    /// like `last_pass_commit`.
     first_fail_commit: Option<String>,
     /// When the latest run failed: whether the environment fingerprint
     /// (interpreter, lockfiles, installed packages) differs between the last
@@ -142,6 +145,10 @@ fn is_fail(outcome: &str) -> bool {
     matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
 }
 
+fn is_neutral(outcome: &str) -> bool {
+    !is_pass(outcome) && !is_fail(outcome)
+}
+
 /// Middle value (mean of the two middles for an even count). `v` sorted.
 pub(crate) fn median(v: &[f64]) -> Option<f64> {
     let n = v.len();
@@ -170,7 +177,7 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
     let passing: Vec<&Entry> = series
         .iter()
         .map(|(_, e)| *e)
-        .filter(|e| is_pass(&e.outcome))
+        .filter(|e| is_pass(e.outcome_name()))
         .collect();
     let mut call: Vec<f64> = passing.iter().filter_map(|e| e.call.map(round4)).collect();
     let mut setup: Vec<f64> = passing.iter().map(|e| round4(e.setup)).collect();
@@ -179,13 +186,15 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
     let last_pass_commit = series
         .iter()
         .rev()
-        .find(|(_, e)| is_pass(&e.outcome))
+        .find(|(_, e)| is_pass(e.outcome_name()))
         .and_then(|(r, _)| r.commit.clone());
-    let last_pass = series.iter().rev().find(|(_, e)| is_pass(&e.outcome));
+    let last_pass = series.iter().rev().find(|(_, e)| is_pass(e.outcome_name()));
+    // Skips and other neutral outcomes neither break nor start the streak.
     let first_fail = series
         .iter()
         .rev()
-        .take_while(|(_, e)| is_fail(&e.outcome))
+        .filter(|(_, e)| !is_neutral(e.outcome_name()))
+        .take_while(|(_, e)| is_fail(e.outcome_name()))
         .last();
     let first_fail_commit = first_fail.and_then(|(r, _)| r.commit.clone());
     let env_changed = match (last_pass, first_fail) {
@@ -194,7 +203,10 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
     };
     Some(HistorySummary {
         runs: series.len(),
-        outcomes: series.iter().map(|(_, e)| e.outcome.clone()).collect(),
+        outcomes: series
+            .iter()
+            .map(|(_, e)| e.outcome_name().to_string())
+            .collect(),
         call_median: median(&call),
         call_p95: p95(&call),
         setup_median: median(&setup),
@@ -202,7 +214,10 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
         first_fail_commit,
         env_changed,
         suspect_commits: None,
-        flips: crate::reporting::history::flip_positions(series.iter().map(|(_, e)| *e)).len(),
+        flips: crate::reporting::history::flip_positions(
+            series.iter().map(|(r, e)| (r.commit.as_deref(), *e)),
+        )
+        .len(),
         auto_quarantine_at: 0,
         auto_quarantined_next_run: false,
     })
@@ -210,12 +225,14 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
 
 /// The commits that could have broken the test: `git log last..first`.
 /// `None` when git fails (not a checkout, or a commit this clone lacks).
+/// A `-dirty` marker is dropped: git only knows the bare sha.
 fn suspects(
     last: &str,
     first: &str,
     git: impl Fn(&[&str]) -> Result<String>,
 ) -> Option<Vec<SuspectCommit>> {
-    let range = format!("{last}..{first}");
+    let bare = |c: &str| c.strip_suffix("-dirty").unwrap_or(c).to_string();
+    let range = format!("{}..{}", bare(last), bare(first));
     let out = git(&["log", "--format=%h%x1f%an%x1f%s", &range]).ok()?;
     Some(
         out.lines()
@@ -442,7 +459,11 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
             if let (Some(m), Some(p)) = (h.call_median, h.call_p95) {
                 sink.out_line(&format!("             call median {m:.4}s, p95 {p:.4}s"));
             }
-            let short = |c: &str| c.chars().take(10).collect::<String>();
+            // 10-char sha, keeping a `-dirty` marker.
+            let short = |c: &str| {
+                let (sha, dirty) = c.strip_suffix("-dirty").map_or((c, ""), |s| (s, "-dirty"));
+                format!("{}{dirty}", sha.chars().take(10).collect::<String>())
+            };
             if let Some(c) = &h.last_pass_commit {
                 sink.out_line(&format!("             last passed at {}", short(c)));
             }
@@ -886,14 +907,13 @@ mod tests {
         assert_eq!(v["found"], false);
     }
 
-    fn run(seq: u32, commit: Option<&str>) -> RunMeta {
+    fn run(seq: u64, commit: Option<&str>) -> RunMeta {
         RunMeta {
             seq,
             id: format!("r{seq}"),
             epoch: 0,
             commit: commit.map(String::from),
             env: String::new(),
-            workers: 1,
         }
     }
 
@@ -926,6 +946,8 @@ mod tests {
         };
         let cs = suspects("aaa", "bbb", git).unwrap();
         assert_eq!(cs.len(), 2);
+        // A dirty run's commit still resolves.
+        assert_eq!(suspects("aaa-dirty", "bbb-dirty", git).unwrap().len(), 2);
         assert_eq!((cs[0].sha.as_str(), cs[0].author.as_str()), ("bbb", "Ada"));
         assert_eq!(cs[0].subject, "fix: a \x1f in subject");
         assert_eq!(cs[1].subject, "init");
@@ -954,7 +976,8 @@ mod tests {
 
     #[test]
     fn summarize_counts_flips() {
-        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, None)).collect();
+        // One clean commit: pass->fail flips only count within one.
+        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, Some("c"))).collect();
         let es = [
             ent("passed", None),
             ent("failed", None),
@@ -996,7 +1019,7 @@ mod tests {
     fn ent(outcome: &str, call: Option<f32>) -> Entry {
         Entry {
             run: 0,
-            outcome: outcome.into(),
+            outcome: crate::reporting::history::outcome_code(outcome).unwrap(),
             call,
             setup: 0.01,
         }
@@ -1053,6 +1076,68 @@ mod tests {
         assert_eq!(h.call_p95, None);
         assert_eq!(h.last_pass_commit, None);
         assert_eq!(h.first_fail_commit.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn skip_does_not_break_or_end_failure_streak() {
+        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, Some(&format!("c{i}")))).collect();
+        let es = [
+            ent("passed", Some(0.1)),
+            ent("failed", None),
+            ent("skipped", None),
+            ent("failed", None),
+            ent("skipped", None),
+        ];
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        let h = summarize(&series).unwrap();
+        assert_eq!(h.first_fail_commit.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn render_keeps_dirty_marker_on_short_commit() {
+        let mut r = report("t");
+        r.found = true;
+        r.history = Some(HistorySummary {
+            runs: 2,
+            outcomes: ["passed", "failed"].map(String::from).to_vec(),
+            call_median: None,
+            call_p95: None,
+            setup_median: None,
+            last_pass_commit: Some("0123456789abcdef-dirty".into()),
+            first_fail_commit: Some("fedcba9876543210".into()),
+            env_changed: None,
+            suspect_commits: None,
+            flips: 0,
+            auto_quarantine_at: 0,
+            auto_quarantined_next_run: false,
+        });
+        let (out, _) = rendered(&r);
+        assert!(out.contains("last passed at 0123456789-dirty\n"), "{out}");
+        assert!(out.contains("failing since fedcba9876\n"), "{out}");
+    }
+
+    /// A corrupt or hand-edited cache must not panic `explain`: the short
+    /// commit cuts on chars, not bytes.
+    #[test]
+    fn render_survives_non_ascii_commit() {
+        let mut r = report("t");
+        r.found = true;
+        r.history = Some(HistorySummary {
+            runs: 1,
+            outcomes: vec!["passed".into()],
+            call_median: None,
+            call_p95: None,
+            setup_median: None,
+            last_pass_commit: Some("€€€€€€€€€€€-dirty".into()),
+            first_fail_commit: None,
+            env_changed: None,
+            suspect_commits: None,
+            flips: 0,
+            auto_quarantine_at: 0,
+            auto_quarantined_next_run: false,
+        });
+        let (out, _) = rendered(&r);
+        assert!(out.contains("last passed at €€€€€€€€€€-dirty\n"), "{out}");
     }
 
     #[test]

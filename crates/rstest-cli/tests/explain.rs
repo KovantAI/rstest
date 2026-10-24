@@ -34,28 +34,33 @@ fn write_cache(dir: &Path, name: &str, doc: &Value) {
     .unwrap();
 }
 
-/// `history.msgpack` from a JSON-shaped doc (structs read back from maps).
+/// `history.msgpack` in the positional (array) encoding `rmp_serde::to_vec`
+/// writes in production, so a field reorder or type change breaks this test.
 fn write_history(dir: &Path, doc: &Value) {
     std::fs::write(
         dir.join(".rstest_cache").join("history.msgpack"),
-        rmp_serde::to_vec_named(doc).unwrap(),
+        rmp_serde::to_vec(doc).unwrap(),
     )
     .unwrap();
 }
 
 /// Three runs of `ID`: pass at c0, fail at c1 and c2. A neighbour's entries
-/// must not leak into `ID`'s strip.
+/// must not leak into `ID`'s strip. Layouts: `History` = [schema, runs, tests],
+/// `RunMeta` = [seq, id, epoch, commit, env], `Entry` = [run, outcome, call, setup] with
+/// outcome 0 = passed, 1 = failed.
 fn history_doc(epoch: u64) -> Value {
-    let run = |seq: u32, c: &str| json!({ "seq": seq, "id": format!("r{seq}"), "epoch": epoch, "commit": c, "env": "fp", "workers": 2 });
-    let e = |seq: u32, outcome: &str, call: f64| json!({ "run": seq, "outcome": outcome, "call": call, "setup": 0.0 });
-    json!({
-        "schema": 1,
-        "runs": [run(0, "c0aaaaaaaaaaaa"), run(1, "c1bbbbbbbbbbbb"), run(2, "c2cccccccccccc")],
-        "tests": {
-            ID: [e(0, "passed", 0.25), e(1, "failed", 0.0), e(2, "failed", 0.0)],
-            "tests/test_x.py::test_other": [e(2, "passed", 9.0)],
+    const PASSED: u8 = 0;
+    const FAILED: u8 = 1;
+    let run = |seq: u64, c: &str| json!([seq, format!("r{seq}"), epoch, c, "fp"]);
+    let e = |seq: u64, outcome: u8, call: f64| json!([seq, outcome, call, 0.0]);
+    json!([
+        1,
+        [run(0, "c0aaaaaaaaaaaa"), run(1, "c1bbbbbbbbbbbb"), run(2, "c2cccccccccccc")],
+        {
+            ID: [e(0, PASSED, 0.25), e(1, FAILED, 0.0), e(2, FAILED, 0.0)],
+            "tests/test_x.py::test_other": [e(2, PASSED, 9.0)],
         },
-    })
+    ])
 }
 
 fn write_raw(dir: &Path, name: &str, bytes: &str) {
@@ -154,8 +159,7 @@ fn human_report_merges_every_cache() {
          call median 0.2500s, p95 0.2500s\n             \
          last passed at c0aaaaaaaa\n             \
          failing since c1bbbbbbbb\n             \
-         commits in between: unknown here (not a git checkout, or not fetched)\n             \
-         flipped 1x (auto-quarantine at 3)\n  \
+         commits in between: unknown here (not a git checkout, or not fetched)\n  \
          coverage   covers 2 file(s), 3 line(s):\n               src/a.py\n               src/b.py\n"
     );
     assert_eq!(o.stdout, expected);
@@ -194,15 +198,15 @@ fn history_lists_suspect_commits_from_git() {
         git(&["commit", "-q", "--allow-empty", "-m", msg]);
         shas.push(git(&["rev-parse", "HEAD"]));
     }
-    let run = |seq: u32, c: &str, env: &str| json!({ "seq": seq, "id": format!("r{seq}"), "epoch": now(), "commit": c, "env": env, "workers": 2 });
-    let e = |seq: u32, outcome: &str| json!({ "run": seq, "outcome": outcome, "call": 0.1, "setup": 0.0 });
+    let run = |seq: u64, c: &str, env: &str| json!([seq, format!("r{seq}"), now(), c, env]);
+    let e = |seq: u64, outcome: u8| json!([seq, outcome, 0.1, 0.0]);
     write_history(
         &dir,
-        &json!({
-            "schema": 1,
-            "runs": [run(0, &shas[0], "a"), run(1, &shas[2], "b")],
-            "tests": { ID: [e(0, "passed"), e(1, "failed")] },
-        }),
+        &json!([
+            1,
+            [run(0, &shas[0], "a"), run(1, &shas[2], "b")],
+            { ID: [e(0, 0), e(1, 1)] },
+        ]),
     );
     let path = std::env::var("PATH").unwrap();
     let o = run_env(&dir, &[ID], &[("PATH", &path)]);
@@ -232,7 +236,12 @@ fn history_lists_suspect_commits_from_git() {
 #[test]
 fn auto_quarantine_threshold_comes_from_config() {
     let dir = fresh_dir("autoq");
-    write_history(&dir, &history_doc(now())); // 1 flip
+    // One clean commit throughout, so the pass -> fail is 1 flip.
+    let mut doc = history_doc(now());
+    for run in doc[1].as_array_mut().unwrap() {
+        run[3] = "c".into();
+    }
+    write_history(&dir, &doc);
     std::fs::write(
         dir.join("pyproject.toml"),
         "[tool.rstest]\nauto-quarantine = 1\n",
@@ -277,7 +286,8 @@ fn json_report_merges_every_cache() {
     assert_eq!(v["history"]["call_median"], 0.25);
     assert_eq!(v["history"]["last_pass_commit"], "c0aaaaaaaaaaaa");
     assert_eq!(v["history"]["first_fail_commit"], "c1bbbbbbbbbbbb");
-    assert_eq!(v["history"]["flips"], 1);
+    // Pass at c0, fail at c1: a commit in between, so not a flip.
+    assert_eq!(v["history"]["flips"], 0);
     assert_eq!(v["history"]["auto_quarantined_next_run"], false);
 }
 

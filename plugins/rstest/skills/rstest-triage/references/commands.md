@@ -99,13 +99,13 @@ $ rstest audit --audit-repeat 5 --audit-json audit.json
 - Runs the suite in parallel on at least two workers (N times with
   `--audit-repeat`), diffs against the `-n 0` oracle, and classifies each
   parallel-only failure: ISOLATION / CO-LOCATION, WALL-CLOCK /
-  LOAD-SENSITIVE, ORDER DEPENDENT, INTRINSIC FLAKE, or pre-existing.
+  LOAD-SENSITIVE, ORDER DEPENDENCY, INTRINSIC FLAKE, or pre-existing.
 - Emits a paste-ready `conftest.py` block marking the ISOLATION /
   CO-LOCATION and WALL-CLOCK / LOAD-SENSITIVE tests `@pytest.mark.serial`. If
   `conftest.py` already defines `pytest_collection_modifyitems`, paste only
   the `_RSTEST_SERIAL` set and add the loop to the existing hook; a second
   definition silently replaces the first.
-- ORDER DEPENDENT tests are listed separately with a `--dist loadfile`
+- ORDER DEPENDENCY tests are listed separately with a `--dist loadfile`
   recommendation, because serial would run them apart from the tests they
   depend on. Intrinsic flakes and inconclusive tests are also separate.
 - A test flaky in every mode can still pass all serial runs by chance and be
@@ -245,7 +245,8 @@ $ rstest --shuffle=1234 -n 2 --dist loadfile   # reproduce a failing order
   still exit `1`.
 - `--auto-quarantine[=N]`: on by default, N=3. Quarantines tests whose
   `.rstest_cache/history.msgpack` series has N+ flips (a failure right after
-  a pass, or a `flaky` pass); the set is printed on stderr at run start.
+  a pass on the same commit with no uncommitted edits, or a `flaky` pass); the
+  set is printed on stderr at run start.
   Steadily failing tests flip once and are never caught. `=0` turns it off.
   Attach N with `=` (`--auto-quarantine 5` makes `5` a test path).
   `--auto-quarantine-max PCT` (default 5): if more auto-quarantined tests

@@ -48,9 +48,9 @@ The test's recent runs from the per-test history (oldest first).
 | `call_median` | number or null | yes | Median call-phase seconds over passing runs. |
 | `call_p95` | number or null | yes | 95th percentile (nearest rank) call-phase seconds over passing runs. |
 | `env_changed` | boolean or null | yes | When the latest run failed: whether the environment fingerprint (interpreter, lockfiles, installed packages) differs between the last passing run and the first failing one. |
-| `first_fail_commit` | string or null | yes | When the latest run failed: commit of the first run in that failing streak. |
+| `first_fail_commit` | string or null | yes | When the latest non-skipped run failed: commit of the first run in that failing streak (skips inside the streak are ignored). Suffixed `-dirty` like `last_pass_commit`. |
 | `flips` | integer | yes | Flips in the recorded runs: a pass only on rerun, or a failure right after a pass (the `--auto-quarantine` rule). |
-| `last_pass_commit` | string or null | yes | Commit of the most recent passing run. |
+| `last_pass_commit` | string or null | yes | Commit of the most recent passing run; suffixed `-dirty` when that run had uncommitted changes. |
 | `outcomes` | array of string | yes | Outcome per run, oldest first: `passed`, `failed`, `errors`, `skipped`, `xfailed`, `xpassed`, `quarantined`, `flaky` or `crashed`. |
 | `runs` | integer | yes | Number of recorded runs. |
 | `setup_median` | number or null | yes | Median setup-phase seconds over passing runs. |

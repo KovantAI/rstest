@@ -133,8 +133,8 @@ save. Pair it with `-x`/`--maxfail=1` to stop at that first red; pass
 `--order throughput` (or set `[tool.rstest] order`) to opt back into packing.
 Ordering only applies with two or more workers.
 
-Without `-n`, rstest uses `-n auto`, which caps the pool by test-file count
-and by cached suite time (about one worker per 2s of tests), and sizes it
+Without `-n`, rstest uses `-n auto`, which caps the pool by the selected work (test files on a
+cold cache, tests once timings are cached) and by cached suite time (about one worker per 2s of tests), and sizes it
 again on every cycle. A small, fast suite with a warm cache therefore often
 runs a single worker locally:
 [single-worker mode](../concepts/glossary.md#single-worker-mode), no worker

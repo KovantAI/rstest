@@ -728,6 +728,9 @@ pub(crate) mod testutil {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -755,6 +758,9 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -800,6 +806,9 @@ mod tests {
                     sections: Vec::new(),
                     lineno: None,
                     subtest: false,
+                    crash: None,
+                    xfail_reason: None,
+                    skip_location: None,
                 },
             );
         }
@@ -1164,6 +1173,9 @@ mod tests {
                     sections: Vec::new(),
                     lineno: None,
                     subtest: false,
+                    crash: None,
+                    xfail_reason: None,
+                    skip_location: None,
                 },
             );
         }

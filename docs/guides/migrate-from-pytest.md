@@ -224,7 +224,7 @@ tests whose recent history flipped between pass and fail 3 or more times:
 their failures still print, in a `quarantined` section, but the run can exit
 `0`. History starts empty when you adopt rstest, so nothing is quarantined
 until a test has flipped 3 times. A test that breaks and stays broken is
-never caught, and the run lists the auto set on stderr. If your CI gate must
+never caught (or is released after 3 failing runs in a row), and the run lists the auto set on stderr. If your CI gate must
 fail on every failure, set `auto-quarantine = 0` under `[tool.rstest]`.
 
 **Some files land elsewhere.** Each worker gets a disjoint `tmp_path` root
