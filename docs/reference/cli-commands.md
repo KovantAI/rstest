@@ -2,7 +2,8 @@
 
 These commands don't run your suite as a normal test run. Each is given as
 the first argument (`rstest try`); a path literally named after one is
-disambiguated with `rstest ./try` or `rstest -- try`. rstest's own options
+disambiguated with `rstest ./try` or `rstest -- try` (when such a path exists,
+a bare `rstest try` still runs the subcommand and warns). rstest's own options
 and value-less pytest switches may also come before it (`rstest -q try`,
 `rstest --python 3.12 migrate-check`). A subcommand name after a test path
 or a pytest option's value (`rstest -k foo try`) is a usage error that says
@@ -392,7 +393,10 @@ failure, the culprit's own included, can't stop a run before the victim.
 refuses them (exit `2`) and says how to drop them for the bisect. rstest's own
 `[tool.rstest] reruns` config is off in the child runs too: a passing rerun
 would hide the failure, and a rerun run goes through the pool, which orders
-tests by duration. A `--confcutdir` of your own is kept as pytest applied it.
+tests by duration. The printed command also passes `--auto-quarantine=0`: an
+order-dependent victim is exactly what auto-quarantine demotes, which would
+turn the reproduced failure into a green run. A `--confcutdir` of your own is
+kept as pytest applied it.
 
 Bounded to ~80 child runs; if it hits that ceiling it stops and reports the
 smallest reproducing set found (may not be fully minimal). Large suites are
@@ -631,7 +635,8 @@ footprint, populated by a prior `--cov-context=test` run), and `history.msgpack`
 (the last runs of the test: `✓` passed, `~` flaky, `✗` failed or errored, `-`
 skipped or xfail; call-time median and p95 over passing runs; the commit of the
 last pass and, when the test is failing now, the commit its failing streak
-started at). Fields whose cache is
+started at, skips ignored; a commit reads `<sha>-dirty` when that run had
+uncommitted changes). Fields whose cache is
 cold are shown as unavailable rather than omitted. In human mode an unknown
 nodeid exits `1` and prints substring suggestions; with `--json` it exits `0`
 with `"found": false` so tooling can probe nodeids cheaply.
@@ -646,15 +651,19 @@ too many of its tests fail at once
 ([`--auto-quarantine-max`](cli.md#-auto-quarantine-max-pct)).
 
 When the test is failing now, `explain` lists the commits between the last
-pass and the first failure (`git log <last>..<first>`, newest first, up to 10;
-`--json` has all of them under `history.suspect_commits`). That range often
-names the commit that broke the test without running
-[`bisect`](#bisect-nodeid). It also says whether the environment fingerprint
-(interpreter, lockfiles, installed packages) changed between those two runs
-(`history.env_changed`): a red test with no commits in between and a changed
-environment points at a dependency bump, not a code change. When git can't
-resolve the commits (not a checkout, a shallow clone, or a CI commit this
-clone hasn't fetched), it says so and `suspect_commits` is `null`.
+pass and the first failure (`git log <last>..<first>`, any `-dirty` suffix
+dropped, newest first, up to 10; `--json` has all of them under
+`history.suspect_commits`). That range often names the commit that broke the
+test without running [`bisect`](#bisect-nodeid). It also says whether the
+environment fingerprint (interpreter, lockfiles, installed packages) changed
+between those two runs (`history.env_changed`): a red test whose last pass
+and first failure are the same clean commit (no `-dirty` on either), with a
+changed environment, points at a dependency bump, not a code change. An empty
+`suspect_commits` alone is not enough: it is also empty when either run had
+uncommitted edits, or when the failing commit is older than the passing one
+(an earlier checkout). When git can't resolve the commits (not a checkout, a shallow clone,
+or a CI commit this clone hasn't fetched), it says so and `suspect_commits` is
+`null`.
 
 ### `flaky`
 
