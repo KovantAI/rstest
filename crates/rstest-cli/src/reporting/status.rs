@@ -290,7 +290,7 @@ fn last_row(line: &str, width: usize) -> &str {
 
 /// Columns of the terminal on stdout: the tty's own size, else `COLUMNS`,
 /// else 80. Re-read on every repaint so a resize takes effect.
-fn terminal_width() -> usize {
+pub(crate) fn terminal_width() -> usize {
     #[cfg(unix)]
     {
         let mut ws = libc::winsize {
